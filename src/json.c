@@ -1,0 +1,229 @@
+// Minimal recursive-descent JSON parser and string escaper.
+#include "json.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct { const char *p, *end; int depth; } jcur;
+
+static void skip_ws(jcur *c) {
+    while (c->p < c->end && (*c->p == ' ' || *c->p == '\t' ||
+                             *c->p == '\n' || *c->p == '\r')) c->p++;
+}
+
+static jv *jv_new(jtype t) {
+    jv *v = calloc(1, sizeof(jv));
+    v->type = t;
+    return v;
+}
+
+void jv_free(jv *v) {
+    if (!v) return;
+    free(v->str);
+    for (int i = 0; i < v->n; i++) {
+        jv_free(v->items[i]);
+        if (v->keys) free(v->keys[i]);
+    }
+    free(v->items);
+    free(v->keys);
+    free(v);
+}
+
+static int u8_emit(unsigned cp, char *out) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+static int hex4(const char *p) {
+    int v = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = p[i];
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= c - '0';
+        else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
+        else return -1;
+    }
+    return v;
+}
+
+// parse a string (cursor at opening quote); returns malloc'd decoded string
+static char *parse_string(jcur *c) {
+    if (c->p >= c->end || *c->p != '"') return NULL;
+    c->p++;
+    size_t cap = 32, m = 0;
+    char *out = malloc(cap);
+    while (c->p < c->end) {
+        if (m + 8 > cap) { cap *= 2; out = realloc(out, cap); }
+        unsigned char ch = (unsigned char)*c->p;
+        if (ch == '"') { c->p++; out[m] = 0; return out; }
+        if (ch == '\\') {
+            c->p++;
+            if (c->p >= c->end) break;
+            char e = *c->p++;
+            switch (e) {
+                case '"': out[m++] = '"'; break;
+                case '\\': out[m++] = '\\'; break;
+                case '/': out[m++] = '/'; break;
+                case 'b': out[m++] = '\b'; break;
+                case 'f': out[m++] = '\f'; break;
+                case 'n': out[m++] = '\n'; break;
+                case 'r': out[m++] = '\r'; break;
+                case 't': out[m++] = '\t'; break;
+                case 'u': {
+                    if (c->p + 4 > c->end) goto fail;
+                    int cp = hex4(c->p);
+                    if (cp < 0) goto fail;
+                    c->p += 4;
+                    if (cp >= 0xD800 && cp <= 0xDBFF && c->p + 6 <= c->end &&
+                        c->p[0] == '\\' && c->p[1] == 'u') {
+                        int lo = hex4(c->p + 2);
+                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                            c->p += 6;
+                        }
+                    }
+                    m += u8_emit((unsigned)cp, out + m);
+                    break;
+                }
+                default: goto fail;
+            }
+        } else if (ch < 0x20) {
+            goto fail;
+        } else {
+            out[m++] = (char)ch;
+            c->p++;
+        }
+    }
+fail:
+    free(out);
+    return NULL;
+}
+
+static jv *parse_value(jcur *c);
+
+static jv *parse_container(jcur *c, char open) {
+    char close = open == '{' ? '}' : ']';
+    jv *v = jv_new(open == '{' ? J_OBJ : J_ARR);
+    c->p++; // consume open
+    skip_ws(c);
+    if (c->p < c->end && *c->p == close) { c->p++; return v; }
+    for (;;) {
+        char *key = NULL;
+        if (v->type == J_OBJ) {
+            skip_ws(c);
+            key = parse_string(c);
+            if (!key) goto fail;
+            skip_ws(c);
+            if (c->p >= c->end || *c->p != ':') { free(key); goto fail; }
+            c->p++;
+        }
+        jv *item = parse_value(c);
+        if (!item) { free(key); goto fail; }
+        v->items = realloc(v->items, sizeof(jv *) * (v->n + 1));
+        if (v->type == J_OBJ)
+            v->keys = realloc(v->keys, sizeof(char *) * (v->n + 1));
+        v->items[v->n] = item;
+        if (v->type == J_OBJ) v->keys[v->n] = key;
+        v->n++;
+        skip_ws(c);
+        if (c->p < c->end && *c->p == ',') { c->p++; continue; }
+        if (c->p < c->end && *c->p == close) { c->p++; return v; }
+        goto fail;
+    }
+fail:
+    jv_free(v);
+    return NULL;
+}
+
+static jv *parse_value(jcur *c) {
+    if (++c->depth > 128) { c->depth--; return NULL; }
+    skip_ws(c);
+    jv *r = NULL;
+    if (c->p < c->end) {
+        char ch = *c->p;
+        if (ch == '{' || ch == '[') {
+            r = parse_container(c, ch);
+        } else if (ch == '"') {
+            char *s = parse_string(c);
+            if (s) { r = jv_new(J_STR); r->str = s; }
+        } else if (ch == 't' && c->end - c->p >= 4 && !memcmp(c->p, "true", 4)) {
+            r = jv_new(J_BOOL); r->b = true; c->p += 4;
+        } else if (ch == 'f' && c->end - c->p >= 5 && !memcmp(c->p, "false", 5)) {
+            r = jv_new(J_BOOL); r->b = false; c->p += 5;
+        } else if (ch == 'n' && c->end - c->p >= 4 && !memcmp(c->p, "null", 4)) {
+            r = jv_new(J_NULL); c->p += 4;
+        } else if (ch == '-' || (ch >= '0' && ch <= '9')) {
+            char *endp = NULL;
+            double d = strtod(c->p, &endp);
+            if (endp && endp > c->p && endp <= c->end) {
+                r = jv_new(J_NUM); r->num = d; c->p = endp;
+            }
+        }
+    }
+    c->depth--;
+    return r;
+}
+
+jv *json_parse(const char *s, size_t n) {
+    jcur c = { s, s + n, 0 };
+    jv *v = parse_value(&c);
+    if (!v) return NULL;
+    skip_ws(&c);
+    if (c.p != c.end) { jv_free(v); return NULL; } // trailing garbage
+    return v;
+}
+
+jv *jv_get(jv *obj, const char *key) {
+    if (!obj || obj->type != J_OBJ) return NULL;
+    for (int i = 0; i < obj->n; i++)
+        if (strcmp(obj->keys[i], key) == 0) return obj->items[i];
+    return NULL;
+}
+
+const char *jv_str(jv *v, const char *dflt) {
+    return (v && v->type == J_STR) ? v->str : dflt;
+}
+double jv_num(jv *v, double dflt) {
+    return (v && v->type == J_NUM) ? v->num : dflt;
+}
+bool jv_bool(jv *v, bool dflt) {
+    return (v && v->type == J_BOOL) ? v->b : dflt;
+}
+
+size_t json_escape(const char *s, size_t n, char *out, size_t cap) {
+    size_t m = 0;
+    for (size_t i = 0; i < n && m + 8 < cap; i++) {
+        unsigned char c = (unsigned char)s[i];
+        switch (c) {
+            case '"':  out[m++] = '\\'; out[m++] = '"';  break;
+            case '\\': out[m++] = '\\'; out[m++] = '\\'; break;
+            case '\n': out[m++] = '\\'; out[m++] = 'n';  break;
+            case '\r': out[m++] = '\\'; out[m++] = 'r';  break;
+            case '\t': out[m++] = '\\'; out[m++] = 't';  break;
+            case '\b': out[m++] = '\\'; out[m++] = 'b';  break;
+            case '\f': out[m++] = '\\'; out[m++] = 'f';  break;
+            default:
+                if (c < 0x20) m += snprintf(out + m, cap - m, "\\u%04x", c);
+                else out[m++] = (char)c;
+        }
+    }
+    out[m] = 0;
+    return m;
+}
