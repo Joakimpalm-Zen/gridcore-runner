@@ -31,6 +31,22 @@ jobs:
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
           kill %1
+      - name: smoke test (json schema)
+        run: |
+          echo '{"type":"object","properties":{"a":{"type":"string","enum":["x","y"]},"b":{"type":"integer"}},"required":["a","b"]}' > ts.json
+          ./runner -m test.gguf --json-schema ts.json -p "hi" -n 30 --temp 0 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['a'] in ('x','y') and isinstance(d['b'], int); print('schema ok')"
+      - name: smoke test (quantize)
+        run: |
+          ./runner -m test.gguf --quantize test-q8.gguf --quant q8_0
+          ./runner -m test-q8.gguf -p "hi" -n 4 --temp 0
+      - name: smoke test (model swap)
+        run: |
+          ./runner -m "a=test.gguf,b=test-q8.gguf" --serve --port 8124 --ttl 0 &
+          sleep 2
+          curl -sf -d '{"model":"a","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
+          curl -sf -d '{"model":"b","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
+          curl -sf http://127.0.0.1:8124/v1/models | python3 -c "import json,sys; assert len(json.load(sys.stdin)['data']) == 2; print('swap ok')"
+          kill %1
       - name: sanitizer build + run
         # model weights/vocab live for the whole process and are freed by
         # exit; leak detection would flag them, so keep only error detection
@@ -63,6 +79,10 @@ jobs:
         run: ./runner.exe -m test.gguf -p "hello" -n 8 --temp 0
       - name: smoke test (json mode)
         run: ./runner.exe -m test.gguf -p "hi" -n 24 --temp 0 --json 2>/dev/null | python3 -c "import json,sys; json.load(sys.stdin); print('valid json')"
+      - name: smoke test (quantize)
+        run: |
+          ./runner.exe -m test.gguf --quantize test-q8.gguf --quant q8_0
+          ./runner.exe -m test-q8.gguf -p "hi" -n 4 --temp 0
       - name: smoke test (server)
         run: |
           ./runner.exe -m test.gguf --serve --port 8123 --parallel 2 &
