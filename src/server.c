@@ -485,7 +485,16 @@ static void handle_conn(slot_t *s, int fd) {
         body[content_length] = 0;
     }
 
-    if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
+    if (!strcmp(method, "GET") && !strcmp(path, "/unload")) {
+        // llama-swap-compatible: free the resident model's memory now
+        if (SV.n_reg > 0) {
+            pthread_mutex_lock(&SV.swap_mu);
+            unload_resident();
+            pthread_mutex_unlock(&SV.swap_mu);
+        }
+        const char *b = "{\"status\":\"ok\"}";
+        send_response(fd, 200, "application/json", b, strlen(b));
+    } else if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
         char b[256];
         int n;
         if (SV.n_reg > 0)
