@@ -199,9 +199,18 @@ typedef struct {
     float *x, *xb, *xb2, *q, *hb, *hb2;   // [n_batch][dim] activations
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
     float *att, *logits;
+    void  *gpu;              // GPU backend context (NULL = CPU only)
 } model_t;
 
+// ---------------------------------------------------------------- gpu
+
+enum { GPU_AUTO = 0, GPU_OFF = 1 };
+bool   gpu_available(char *name, int name_cap);
+bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
+float *gpu_forward(model_t *m, int token, int pos); // NULL = failed, use CPU
+
 typedef struct {
+    int   gpu_mode;    // GPU_AUTO | GPU_OFF
     int   n_threads;   // worker threads for this instance (0 = 1)
     int   n_ctx;       // 0 = default (min(train ctx, 4096))
     int   n_batch;     // prompt batch size, 0 = default 64

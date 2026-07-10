@@ -35,6 +35,12 @@ int plat_cpu_count(void) {
     return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
 }
 
+uint64_t plat_ram_bytes(void) {
+    MEMORYSTATUSEX ms = { .dwLength = sizeof(ms) };
+    GlobalMemoryStatusEx(&ms);
+    return ms.ullTotalPhys;
+}
+
 bool plat_file_readable(const char *path) {
     return _access(path, 4) == 0;
 }
@@ -82,6 +88,12 @@ void plat_munmap(void *p, size_t size) {
 int plat_cpu_count(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
+}
+
+uint64_t plat_ram_bytes(void) {
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long psz   = sysconf(_SC_PAGE_SIZE);
+    return pages > 0 && psz > 0 ? (uint64_t)pages * (uint64_t)psz : 0;
 }
 
 bool plat_file_readable(const char *path) {
