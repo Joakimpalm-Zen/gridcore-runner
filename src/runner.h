@@ -131,9 +131,9 @@ float vec_dot(int type, const void *row, const float *x, int n);
 // ---------------------------------------------------------------- threadpool
 
 typedef void (*tp_fn)(void *ctx, int i0, int i1); // process items [i0, i1)
-void tpool_init(int n_threads);
-int  tpool_n(void);
-void tpool_run(tp_fn fn, void *ctx, int n_items);
+typedef struct tpool tpool;
+tpool *tpool_create(int n_threads);
+void   tpool_run(tpool *tp, tp_fn fn, void *ctx, int n_items);
 
 // ---------------------------------------------------------------- tokenizer
 
@@ -194,6 +194,7 @@ typedef struct {
     layer_t     *layers;
     float       *rope_inv_freq; // [rope_dim/2], scaling factors folded in
     // runtime state
+    tpool *tp;               // worker pool used by this instance
     int    n_ctx, n_batch;
     f16_t *kcache, *vcache;  // [n_layer][n_ctx][kv_dim], fp16 to halve memory
     float *x, *xb, *xb2, *q, *hb, *hb2;   // [n_batch][dim] activations
@@ -202,6 +203,7 @@ typedef struct {
 } model_t;
 
 typedef struct {
+    int   n_threads;   // worker threads for this instance (0 = 1)
     int   n_ctx;       // 0 = default (min(train ctx, 4096))
     int   n_batch;     // prompt batch size, 0 = default 64
     float rope_base;   // >0 overrides model rope theta

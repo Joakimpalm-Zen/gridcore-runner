@@ -227,6 +227,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         return false;
     }
 
+    m->tp = tpool_create(p->n_threads > 0 ? p->n_threads : 1);
     rope_setup(m, g, arch, p->rope_base, p->rope_scale);
 
     if (p->verbose) {
@@ -304,12 +305,12 @@ static void mv_rows(void *ctx, int i0, int i1) {
 }
 
 // Y[b] = W X[b] (+ bias) for b in [0, n_batch)
-static void matvec_b(float *y, int y_stride, const gguf_tensor *w,
+static void matvec_b(tpool *tp, float *y, int y_stride, const gguf_tensor *w,
                      const float *x, int x_stride, int n_in, int n_out,
                      const float *bias, int n_batch) {
     mv_job j = { w, x, bias, y, n_in, n_batch, x_stride, y_stride,
                  ggml_row_size(w->type, n_in) };
-    tpool_run(mv_rows, &j, n_out);
+    tpool_run(tp, mv_rows, &j, n_out);
 }
 
 static void rope_apply(model_t *m, float *v, int n_heads, int pos) {
@@ -390,9 +391,9 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         for (int b = 0; b < n; b++)
             rmsnorm(m->xb + (size_t)b * xdim, m->x + (size_t)b * n_embd,
                     ly->attn_norm_w, n_embd, m->rms_eps);
-        matvec_b(m->q,     q_dim,  ly->wq, m->xb, xdim, n_embd, q_dim,  ly->bq, n);
-        matvec_b(m->k_tmp, kv_dim, ly->wk, m->xb, xdim, n_embd, kv_dim, ly->bk, n);
-        matvec_b(m->v_tmp, kv_dim, ly->wv, m->xb, xdim, n_embd, kv_dim, ly->bv, n);
+        matvec_b(m->tp, m->q,     q_dim,  ly->wq, m->xb, xdim, n_embd, q_dim,  ly->bq, n);
+        matvec_b(m->tp, m->k_tmp, kv_dim, ly->wk, m->xb, xdim, n_embd, kv_dim, ly->bk, n);
+        matvec_b(m->tp, m->v_tmp, kv_dim, ly->wv, m->xb, xdim, n_embd, kv_dim, ly->bv, n);
         for (int b = 0; b < n; b++) {
             rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b);
             rope_apply(m, m->k_tmp + (size_t)b * kv_dim, m->n_head_kv, pos + b);
@@ -406,9 +407,9 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         for (int b = 0; b < n; b++) {
             attn_job aj = { m, kc_l, vc_l, m->q + (size_t)b * q_dim,
                             m->xb2 + (size_t)b * xdim, pos + b };
-            tpool_run(attn_heads, &aj, m->n_head);
+            tpool_run(m->tp, attn_heads, &aj, m->n_head);
         }
-        matvec_b(m->xb, xdim, ly->wo, m->xb2, xdim, q_dim, n_embd, ly->bo, n);
+        matvec_b(m->tp, m->xb, xdim, ly->wo, m->xb2, xdim, q_dim, n_embd, ly->bo, n);
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
@@ -417,13 +418,13 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         for (int b = 0; b < n; b++)
             rmsnorm(m->xb + (size_t)b * xdim, m->x + (size_t)b * n_embd,
                     ly->ffn_norm_w, n_embd, m->rms_eps);
-        matvec_b(m->hb,  m->n_ff, ly->w_gate, m->xb, xdim, n_embd, m->n_ff, NULL, n);
-        matvec_b(m->hb2, m->n_ff, ly->w_up,   m->xb, xdim, n_embd, m->n_ff, NULL, n);
+        matvec_b(m->tp, m->hb,  m->n_ff, ly->w_gate, m->xb, xdim, n_embd, m->n_ff, NULL, n);
+        matvec_b(m->tp, m->hb2, m->n_ff, ly->w_up,   m->xb, xdim, n_embd, m->n_ff, NULL, n);
         for (size_t i = 0; i < (size_t)n * m->n_ff; i++) {
             float g = m->hb[i];
             m->hb[i] = (g / (1.0f + expf(-g))) * m->hb2[i]; // silu(g) * up
         }
-        matvec_b(m->xb, xdim, ly->w_down, m->hb, m->n_ff, m->n_ff, n_embd, NULL, n);
+        matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, m->n_ff, m->n_ff, n_embd, NULL, n);
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
@@ -431,7 +432,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
 
     if (!want_logits) return NULL;
     rmsnorm(m->xb, m->x + (size_t)(n - 1) * n_embd, m->out_norm_w, n_embd, m->rms_eps);
-    matvec_b(m->logits, m->n_vocab, m->output, m->xb, xdim, n_embd, m->n_vocab, NULL, 1);
+    matvec_b(m->tp, m->logits, m->n_vocab, m->output, m->xb, xdim, n_embd, m->n_vocab, NULL, 1);
     return m->logits;
 }
 
