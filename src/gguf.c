@@ -149,8 +149,19 @@ bool gguf_open(gguf_file *g, const char *path) {
 }
 
 void gguf_close(gguf_file *g) {
+    for (uint64_t i = 0; i < g->n_kv; i++) {
+        gguf_kv *kv = &g->kv[i];
+        free(kv->key);
+        free(kv->str.s);
+        if (kv->arr_str) {
+            for (uint64_t j = 0; j < kv->arr_n; j++) free(kv->arr_str[j].s);
+            free(kv->arr_str);
+        }
+    }
+    free(g->kv);
+    free(g->tensors);
     plat_munmap(g->map, g->map_size);
-    g->map = NULL;
+    memset(g, 0, sizeof(*g));
 }
 
 gguf_kv *gguf_get(gguf_file *g, const char *key) {

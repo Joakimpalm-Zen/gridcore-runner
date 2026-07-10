@@ -520,6 +520,19 @@ tpool *tpool_create(int n_threads) {
     return tp;
 }
 
+void tpool_destroy(tpool *tp) {
+    if (!tp) return;
+    pthread_mutex_lock(&tp->mu);
+    tp->stop = true;
+    pthread_cond_broadcast(&tp->cv_work);
+    pthread_mutex_unlock(&tp->mu);
+    for (int i = 1; i < tp->n_threads; i++) pthread_join(tp->th[i], NULL);
+    pthread_mutex_destroy(&tp->mu);
+    pthread_cond_destroy(&tp->cv_work);
+    pthread_cond_destroy(&tp->cv_done);
+    free(tp);
+}
+
 void tpool_run(tpool *tp, tp_fn fn, void *ctx, int n_items) {
     if (n_items <= 0) return;
     if (!tp || tp->n_threads <= 1 || n_items < 2) {

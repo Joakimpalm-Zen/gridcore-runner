@@ -10,6 +10,7 @@
 // weights are shared between slots through the page cache (mmap).
 #include "runner.h"
 #include "json.h"
+#include "compat.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -143,6 +144,15 @@ typedef struct {
     pthread_cond_t cv;
 } fdqueue;
 
+// model registry for swap mode (-m "name=path,name2=path2"): one model
+// resident at a time (llama-swap semantics), loaded on demand, unloaded
+// after --ttl idle seconds
+typedef struct {
+    char name[64];
+    char path[1024];
+    int  tmpl;
+} reg_entry;
+
 static struct {
     slot_t    *slots;
     int        n_slots;
@@ -150,7 +160,84 @@ static struct {
     const char *model_name;
     int        n_predict_cap;
     atomic_int req_counter;
+    // swap mode
+    reg_entry   reg[16];
+    int         n_reg;
+    int         resident;      // index into reg, -1 = none
+    double      last_used;
+    int         ttl;
+    model_params mp;
+    pthread_mutex_t swap_mu;
+    atomic_bool busy;
 } SV;
+
+static void unload_resident(void) {
+    if (SV.resident < 0) return;
+    slot_t *s = &SV.slots[0];
+    fprintf(stderr, "swap: unloading %s\n", SV.reg[SV.resident].name);
+    tokenizer_free(s->tok);
+    model_free(s->m);
+    free(s->tok);
+    free(s->m);
+    s->m = NULL;
+    s->tok = NULL;
+    SV.resident = -1;
+}
+
+// resolve + load the requested model; returns entry index or -1
+static int swap_to(const char *want) {
+    int idx = 0; // default: first entry
+    if (want && *want) {
+        idx = -1;
+        for (int i = 0; i < SV.n_reg; i++)
+            if (!strcmp(SV.reg[i].name, want)) { idx = i; break; }
+        // OpenAI clients often send a placeholder model name; accept it
+        if (idx < 0 && (!strcmp(want, "runner") || !strcmp(want, "default")))
+            idx = 0;
+        if (idx < 0) return -1;
+    }
+    pthread_mutex_lock(&SV.swap_mu);
+    if (SV.resident != idx) {
+        unload_resident();
+        slot_t *s = &SV.slots[0];
+        fprintf(stderr, "swap: loading %s (%s)\n",
+                SV.reg[idx].name, SV.reg[idx].path);
+        s->m = malloc(sizeof(model_t));
+        s->tok = malloc(sizeof(tokenizer));
+        if (!model_load(s->m, SV.reg[idx].path, &SV.mp) ||
+            !tokenizer_init(s->tok, &s->m->gf)) {
+            fprintf(stderr, "swap: failed to load %s\n", SV.reg[idx].name);
+            free(s->m); free(s->tok);
+            s->m = NULL; s->tok = NULL;
+            pthread_mutex_unlock(&SV.swap_mu);
+            return -1;
+        }
+        s->tmpl = SV.reg[idx].tmpl =
+            template_detect(gguf_get_str(&s->m->gf, "tokenizer.chat_template", NULL),
+                            s->tok);
+        engine_init(&s->e, s->m, s->tok, &s->smp);
+        SV.resident = idx;
+    }
+    SV.last_used = now_s();
+    SV.model_name = SV.reg[idx].name;
+    pthread_mutex_unlock(&SV.swap_mu);
+    return idx;
+}
+
+static void *ttl_reaper(void *arg) {
+    (void)arg;
+    for (;;) {
+        struct timespec ts = { 5, 0 };
+        nanosleep(&ts, NULL);
+        if (SV.ttl <= 0 || SV.resident < 0 || atomic_load(&SV.busy)) continue;
+        if (pthread_mutex_trylock(&SV.swap_mu) != 0) continue;
+        if (SV.resident >= 0 && !atomic_load(&SV.busy) &&
+            now_s() - SV.last_used > SV.ttl)
+            unload_resident();
+        pthread_mutex_unlock(&SV.swap_mu);
+    }
+    return NULL;
+}
 
 static void q_push(int fd) {
     pthread_mutex_lock(&SV.q.mu);
@@ -399,15 +486,31 @@ static void handle_conn(slot_t *s, int fd) {
     }
 
     if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
-        const char *b = "{\"status\":\"ok\"}";
-        send_response(fd, 200, "application/json", b, strlen(b));
-    } else if (!strcmp(method, "GET") && !strcmp(path, "/v1/models")) {
-        char b[512], esc[256];
-        json_escape(SV.model_name, strlen(SV.model_name), esc, sizeof(esc));
-        int n = snprintf(b, sizeof(b),
-            "{\"object\":\"list\",\"data\":[{\"id\":\"%s\",\"object\":\"model\","
-            "\"owned_by\":\"runner\"}]}", esc);
+        char b[256];
+        int n;
+        if (SV.n_reg > 0)
+            n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":%s%s%s}",
+                         SV.resident >= 0 ? "\"" : "",
+                         SV.resident >= 0 ? SV.reg[SV.resident].name : "null",
+                         SV.resident >= 0 ? "\"" : "");
+        else
+            n = snprintf(b, sizeof(b), "{\"status\":\"ok\"}");
         send_response(fd, 200, "application/json", b, n);
+    } else if (!strcmp(method, "GET") && !strcmp(path, "/v1/models")) {
+        sbuf r = {0};
+        sb_lit(&r, "{\"object\":\"list\",\"data\":[");
+        if (SV.n_reg > 0) {
+            for (int i = 0; i < SV.n_reg; i++)
+                sb_fmt(&r, "%s{\"id\":\"%s\",\"object\":\"model\","
+                           "\"owned_by\":\"runner\"}", i ? "," : "", SV.reg[i].name);
+        } else {
+            char esc[256];
+            json_escape(SV.model_name, strlen(SV.model_name), esc, sizeof(esc));
+            sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"model\",\"owned_by\":\"runner\"}", esc);
+        }
+        sb_lit(&r, "]}");
+        send_response(fd, 200, "application/json", r.s, r.n);
+        free(r.s);
     } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/v1/chat/completions") ||
                 !strcmp(path, "/v1/completions"))) {
@@ -415,8 +518,18 @@ static void handle_conn(slot_t *s, int fd) {
         if (!req) {
             send_error(fd, 400, "invalid JSON body");
         } else {
-            if (strcmp(path, "/v1/chat/completions") == 0) handle_chat(s, fd, req);
-            else handle_completion(s, fd, req);
+            atomic_store(&SV.busy, true);
+            bool ok = true;
+            if (SV.n_reg > 0 &&
+                swap_to(jv_str(jv_get(req, "model"), NULL)) < 0) {
+                send_error(fd, 400, "unknown model (see /v1/models)");
+                ok = false;
+            }
+            if (ok) {
+                if (strcmp(path, "/v1/chat/completions") == 0) handle_chat(s, fd, req);
+                else handle_completion(s, fd, req);
+            }
+            atomic_store(&SV.busy, false);
             jv_free(req);
         }
     } else {
@@ -439,45 +552,86 @@ static void *slot_worker(void *arg) {
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
-               int n_threads) {
+               int n_threads, int ttl) {
     sock_init();
     if (parallel < 1) parallel = 1;
     if (parallel > 16) parallel = 16;
+
+    // "name=path,name2=path2" enables swap mode: one resident model,
+    // loaded per request's "model" field, unloaded after ttl idle seconds
+    if (strchr(model_path, '=')) {
+        char tmp[4096];
+        snprintf(tmp, sizeof(tmp), "%s", model_path);
+        for (char *tk = strtok(tmp, ","); tk && SV.n_reg < 16;
+             tk = strtok(NULL, ",")) {
+            char *eq = strchr(tk, '=');
+            if (!eq) { fprintf(stderr, "error: bad registry entry '%s'\n", tk); return 1; }
+            *eq = 0;
+            snprintf(SV.reg[SV.n_reg].name, sizeof(SV.reg[0].name), "%s", tk);
+            snprintf(SV.reg[SV.n_reg].path, sizeof(SV.reg[0].path), "%s", eq + 1);
+            if (!plat_file_readable(SV.reg[SV.n_reg].path)) {
+                fprintf(stderr, "error: cannot read %s\n", SV.reg[SV.n_reg].path);
+                return 1;
+            }
+            SV.n_reg++;
+        }
+        if (parallel > 1) {
+            fprintf(stderr, "note: model swapping uses a single inference slot; "
+                    "ignoring --parallel %d\n", parallel);
+        }
+        parallel = SV.n_reg > 0 ? 1 : parallel;
+        SV.resident = -1;
+        SV.ttl = ttl;
+        SV.mp = *mp;
+        SV.mp.verbose = false;
+        SV.mp.n_threads = n_threads;
+        pthread_mutex_init(&SV.swap_mu, NULL);
+    }
+
     int threads_per_slot = n_threads / parallel;
     if (threads_per_slot < 1) threads_per_slot = 1;
 
     const char *name = strrchr(model_path, '/');
-    SV.model_name = name ? name + 1 : model_path;
+    SV.model_name = SV.n_reg > 0 ? SV.reg[0].name : (name ? name + 1 : model_path);
     SV.n_predict_cap = 1024;
     SV.n_slots = parallel;
     SV.slots = calloc(parallel, sizeof(slot_t));
     pthread_mutex_init(&SV.q.mu, NULL);
     pthread_cond_init(&SV.q.cv, NULL);
 
-    int tmpl = template_detect(gguf_get_str(&base->gf, "tokenizer.chat_template", NULL),
-                               tok);
-    model_params slot_mp = *mp;
-    slot_mp.verbose = false;
-    slot_mp.n_threads = threads_per_slot;
-
-    for (int i = 0; i < parallel; i++) {
-        slot_t *s = &SV.slots[i];
-        s->id = i;
-        s->tok = tok;
-        s->tmpl = tmpl;
+    if (SV.n_reg > 0) {
+        // swap mode: models are loaded on demand
+        slot_t *s = &SV.slots[0];
+        s->id = 0;
         s->smp = defaults;
-        s->smp.rng = defaults.rng ^ (0x9E3779B97F4A7C15ull * (unsigned)(i + 1));
-        if (i == 0) {
-            s->m = base;
-            base->tp = tpool_create(threads_per_slot);
-        } else {
-            s->m = malloc(sizeof(model_t));
-            if (!model_load(s->m, model_path, &slot_mp)) {
-                fprintf(stderr, "error: failed to load slot %d\n", i);
-                return 1;
+        pthread_t rt;
+        pthread_create(&rt, NULL, ttl_reaper, NULL);
+    } else {
+        int tmpl = template_detect(gguf_get_str(&base->gf, "tokenizer.chat_template", NULL),
+                                   tok);
+        model_params slot_mp = *mp;
+        slot_mp.verbose = false;
+        slot_mp.n_threads = threads_per_slot;
+
+        for (int i = 0; i < parallel; i++) {
+            slot_t *s = &SV.slots[i];
+            s->id = i;
+            s->tok = tok;
+            s->tmpl = tmpl;
+            s->smp = defaults;
+            s->smp.rng = defaults.rng ^ (0x9E3779B97F4A7C15ull * (unsigned)(i + 1));
+            if (i == 0) {
+                s->m = base;
+                base->tp = tpool_create(threads_per_slot);
+            } else {
+                s->m = malloc(sizeof(model_t));
+                if (!model_load(s->m, model_path, &slot_mp)) {
+                    fprintf(stderr, "error: failed to load slot %d\n", i);
+                    return 1;
+                }
             }
+            engine_init(&s->e, s->m, s->tok, &s->smp);
         }
-        engine_init(&s->e, s->m, s->tok, &s->smp);
     }
 
     int lfd = (int)socket(AF_INET, SOCK_STREAM, 0);
@@ -496,10 +650,17 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     for (int i = 0; i < parallel; i++)
         pthread_create(&SV.slots[i].th, NULL, slot_worker, &SV.slots[i]);
 
-    fprintf(stderr,
-            "server listening on http://127.0.0.1:%d — %d slot%s x %d threads\n"
-            "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /health\n",
-            port, parallel, parallel > 1 ? "s" : "", threads_per_slot);
+    if (SV.n_reg > 0)
+        fprintf(stderr,
+                "server listening on http://127.0.0.1:%d — %d models, swap on demand"
+                " (ttl %ds)\n"
+                "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /health\n",
+                port, SV.n_reg, SV.ttl);
+    else
+        fprintf(stderr,
+                "server listening on http://127.0.0.1:%d — %d slot%s x %d threads\n"
+                "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /health\n",
+                port, parallel, parallel > 1 ? "s" : "", threads_per_slot);
 
     for (;;) {
         int cfd = (int)accept(lfd, NULL, NULL);

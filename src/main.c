@@ -11,7 +11,7 @@
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
-               int n_threads);
+               int n_threads, int ttl);
 int quantize_gguf(const char *in_path, const char *out_path, int target);
 
 // ---------------------------------------------------------------- misc
@@ -102,6 +102,10 @@ static void usage(const char *prog) {
         "  --serve        HTTP server mode (OpenAI-compatible API)\n"
         "  --port N       server port (default 8080)\n"
         "  --parallel N   parallel inference slots in server mode (default 1)\n"
+        "                 -m \"name=path,name2=path2\" serves multiple models,\n"
+        "                 loading the requested one on demand (swap mode)\n"
+        "  --ttl N        swap mode: unload an idle model after N seconds\n"
+        "                 (default 300, 0 = never)\n"
         "  --json         constrain output to a single valid JSON object\n"
         "  --json-schema F constrain output to the JSON Schema in file F\n"
         "  --quantize OUT rewrite the model to OUT.gguf (see --quant) and exit\n"
@@ -141,7 +145,7 @@ int main(int argc, char **argv) {
     const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
     const char *quant_out = NULL, *quant_type = "q4_0";
     int n_predict = 256, n_threads = 0, tmpl = -1;
-    int port = 8080, parallel = 1;
+    int port = 8080, parallel = 1, ttl = 300;
     bool interactive = false, verbose = false, no_bos = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
     model_params mp = {0};
@@ -164,6 +168,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--serve")) serve = true;
         else if (!strcmp(a, "--port")) port = atoi(NEXT);
         else if (!strcmp(a, "--parallel")) parallel = atoi(NEXT);
+        else if (!strcmp(a, "--ttl")) ttl = atoi(NEXT);
         else if (!strcmp(a, "--json")) json_mode = true;
         else if (!strcmp(a, "--json-schema")) schema_file = NEXT;
         else if (!strcmp(a, "--quantize")) quant_out = NEXT;
@@ -245,8 +250,11 @@ int main(int argc, char **argv) {
 
     f16_init();
 
-    char *resolved = ollama_resolve(model_path);
-    if (resolved) model_path = resolved;
+    bool registry = serve && strchr(model_path, '=') != NULL;
+    if (!registry) {
+        char *resolved = ollama_resolve(model_path);
+        if (resolved) model_path = resolved;
+    }
 
     if (quant_out) {
         int tt = !strcmp(quant_type, "q8_0") ? T_Q8_0 :
@@ -260,16 +268,18 @@ int main(int argc, char **argv) {
     }
 
     model_t m;
-    double t0 = now_s();
-    if (!model_load(&m, model_path, &mp)) return 1;
-
     tokenizer tok;
-    if (!tokenizer_init(&tok, &m.gf)) return 1;
-    fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
-            model_path, m.arch, m.n_layer, m.n_ctx, n_threads, now_s() - t0);
+    if (!registry) {
+        double t1 = now_s();
+        if (!model_load(&m, model_path, &mp)) return 1;
+        if (!tokenizer_init(&tok, &m.gf)) return 1;
+        fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
+                model_path, m.arch, m.n_layer, m.n_ctx, n_threads, now_s() - t1);
+    }
 
     if (serve)
-        return server_run(&m, &tok, model_path, &mp, smp, port, parallel, n_threads);
+        return server_run(registry ? NULL : &m, registry ? NULL : &tok,
+                          model_path, &mp, smp, port, parallel, n_threads, ttl);
 
     engine e;
     engine_init(&e, &m, &tok, &smp);
@@ -297,7 +307,7 @@ int main(int argc, char **argv) {
 
     size_t tok_cap = (prompt ? strlen(prompt) : 0) + m.n_ctx + 32;
     int32_t *toks = malloc(sizeof(int32_t) * tok_cap);
-    double ptime, gtime;
+    double ptime, gtime, t0;
     int n_prompt, n_gen;
 
     if (!interactive) {

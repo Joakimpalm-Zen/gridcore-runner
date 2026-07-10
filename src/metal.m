@@ -243,6 +243,32 @@ static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
+void gpu_free(model_t *m) {
+    gpu_t *g = m->gpu;
+    if (!g) return;
+    // the kv cache pointers alias GPU buffer contents; detach them first
+    m->kcache = NULL;
+    m->vcache = NULL;
+    for (int l = 0; l < m->n_layer; l++) {
+        [g->attn_norm[l] release]; [g->ffn_norm[l] release];
+        [g->bq[l] release]; [g->bk[l] release];
+        [g->bv[l] release]; [g->bo[l] release];
+    }
+    free(g->attn_norm); free(g->ffn_norm);
+    free(g->bq); free(g->bk); free(g->bv); free(g->bo);
+    id<MTLBuffer> bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
+                             g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
+                             g->logits, g->inv_freq, g->out_norm, g->dummy };
+    for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
+    for (int i = 0; i < 32; i++) [g->p_mv[i] release];
+    [g->p_rmsnorm release]; [g->p_rope release]; [g->p_store release];
+    [g->p_attn release]; [g->p_silu release]; [g->p_add release];
+    [g->queue release];
+    [g->dev release];
+    free(g);
+    m->gpu = NULL;
+}
+
 float *gpu_forward(model_t *m, int token, int pos) {
     gpu_t *g = m->gpu;
     int n_embd = m->n_embd;

@@ -253,6 +253,25 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     return true;
 }
 
+void model_free(model_t *m) {
+    gpu_free(m); // nulls kcache/vcache if the GPU owned them
+    for (int i = 0; i < m->n_layer; i++) {
+        layer_t *l = &m->layers[i];
+        free(l->attn_norm_w); free(l->ffn_norm_w);
+        free(l->bq); free(l->bk); free(l->bv); free(l->bo);
+    }
+    free(m->layers);
+    free(m->out_norm_w);
+    free(m->rope_inv_freq);
+    free(m->kcache); free(m->vcache);
+    free(m->x); free(m->xb); free(m->xb2); free(m->q);
+    free(m->k_tmp); free(m->v_tmp);
+    free(m->hb); free(m->hb2); free(m->att); free(m->logits);
+    tpool_destroy(m->tp);
+    gguf_close(&m->gf);
+    memset(m, 0, sizeof(*m));
+}
+
 // ---------------------------------------------------------------- math ops
 
 static void rmsnorm(float *o, const float *x, const float *w, int n, float eps) {
