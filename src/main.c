@@ -371,9 +371,9 @@ int main(int argc, char **argv) {
         n_threads = nc > 8 ? 8 : (int)nc;
     }
     mp.verbose = verbose;
+    mp.n_threads = n_threads;
 
     f16_init();
-    tpool_init(n_threads);
 
     char *resolved = ollama_resolve(model_path);
     if (resolved) model_path = resolved;

@@ -456,9 +456,9 @@ float vec_dot(int type, const void *row, const float *x, int n) {
 
 #define TP_MAX 64
 
-typedef struct {
+struct tpool {
     pthread_t th[TP_MAX];
-    int n_threads;          // total workers incl. main thread
+    int n_threads;          // total workers incl. calling thread
     pthread_mutex_t mu;
     pthread_cond_t cv_work, cv_done;
     tp_fn fn;
@@ -467,9 +467,9 @@ typedef struct {
     uint64_t gen;
     int n_done;
     bool stop;
-} tpool_t;
+};
 
-static tpool_t TP;
+typedef struct { tpool *tp; int idx; } tp_arg;
 
 static void tp_slice(int idx, int n_threads, int n_items, int *i0, int *i1) {
     int per = (n_items + n_threads - 1) / n_threads;
@@ -479,59 +479,65 @@ static void tp_slice(int idx, int n_threads, int n_items, int *i0, int *i1) {
     if (*i1 > n_items) *i1 = n_items;
 }
 
-static void *tp_worker(void *arg) {
-    int idx = (int)(intptr_t)arg; // 1..n_threads-1 (0 is main thread)
+static void *tp_worker(void *argp) {
+    tp_arg *a = argp;
+    tpool *tp = a->tp;
+    int idx = a->idx; // 1..n_threads-1 (0 is the calling thread)
+    free(a);
     uint64_t seen = 0;
     for (;;) {
-        pthread_mutex_lock(&TP.mu);
-        while (TP.gen == seen && !TP.stop) pthread_cond_wait(&TP.cv_work, &TP.mu);
-        if (TP.stop) { pthread_mutex_unlock(&TP.mu); return NULL; }
-        seen = TP.gen;
-        tp_fn fn = TP.fn; void *ctx = TP.ctx; int n = TP.n_items;
-        pthread_mutex_unlock(&TP.mu);
+        pthread_mutex_lock(&tp->mu);
+        while (tp->gen == seen && !tp->stop) pthread_cond_wait(&tp->cv_work, &tp->mu);
+        if (tp->stop) { pthread_mutex_unlock(&tp->mu); return NULL; }
+        seen = tp->gen;
+        tp_fn fn = tp->fn; void *ctx = tp->ctx; int n = tp->n_items;
+        pthread_mutex_unlock(&tp->mu);
 
         int i0, i1;
-        tp_slice(idx, TP.n_threads, n, &i0, &i1);
+        tp_slice(idx, tp->n_threads, n, &i0, &i1);
         if (i0 < i1) fn(ctx, i0, i1);
 
-        pthread_mutex_lock(&TP.mu);
-        TP.n_done++;
-        if (TP.n_done == TP.n_threads - 1) pthread_cond_signal(&TP.cv_done);
-        pthread_mutex_unlock(&TP.mu);
+        pthread_mutex_lock(&tp->mu);
+        tp->n_done++;
+        if (tp->n_done == tp->n_threads - 1) pthread_cond_signal(&tp->cv_done);
+        pthread_mutex_unlock(&tp->mu);
     }
 }
 
-void tpool_init(int n_threads) {
+tpool *tpool_create(int n_threads) {
     if (n_threads < 1) n_threads = 1;
     if (n_threads > TP_MAX) n_threads = TP_MAX;
-    TP.n_threads = n_threads;
-    pthread_mutex_init(&TP.mu, NULL);
-    pthread_cond_init(&TP.cv_work, NULL);
-    pthread_cond_init(&TP.cv_done, NULL);
-    for (int i = 1; i < n_threads; i++)
-        pthread_create(&TP.th[i], NULL, tp_worker, (void *)(intptr_t)i);
+    tpool *tp = calloc(1, sizeof(tpool));
+    tp->n_threads = n_threads;
+    pthread_mutex_init(&tp->mu, NULL);
+    pthread_cond_init(&tp->cv_work, NULL);
+    pthread_cond_init(&tp->cv_done, NULL);
+    for (int i = 1; i < n_threads; i++) {
+        tp_arg *a = malloc(sizeof(tp_arg));
+        a->tp = tp; a->idx = i;
+        pthread_create(&tp->th[i], NULL, tp_worker, a);
+    }
+    return tp;
 }
 
-int tpool_n(void) { return TP.n_threads > 0 ? TP.n_threads : 1; }
-
-void tpool_run(tp_fn fn, void *ctx, int n_items) {
+void tpool_run(tpool *tp, tp_fn fn, void *ctx, int n_items) {
     if (n_items <= 0) return;
-    if (TP.n_threads <= 1 || n_items < 2) {
+    if (!tp || tp->n_threads <= 1 || n_items < 2) {
         fn(ctx, 0, n_items);
         return;
     }
-    pthread_mutex_lock(&TP.mu);
-    TP.fn = fn; TP.ctx = ctx; TP.n_items = n_items;
-    TP.n_done = 0;
-    TP.gen++;
-    pthread_cond_broadcast(&TP.cv_work);
-    pthread_mutex_unlock(&TP.mu);
+    pthread_mutex_lock(&tp->mu);
+    tp->fn = fn; tp->ctx = ctx; tp->n_items = n_items;
+    tp->n_done = 0;
+    tp->gen++;
+    pthread_cond_broadcast(&tp->cv_work);
+    pthread_mutex_unlock(&tp->mu);
 
     int i0, i1;
-    tp_slice(0, TP.n_threads, n_items, &i0, &i1);
-    if (i0 < i1) fn(ctx, i0, i1);
+    tp_slice(0, tp->n_threads, n_items, &i0, &i1);
+    if (i0 < i1) fn(ctx, 0 < 1 ? i0 : i0, i1);
 
-    pthread_mutex_lock(&TP.mu);
-    while (TP.n_done < TP.n_threads - 1) pthread_cond_wait(&TP.cv_done, &TP.mu);
-    pthread_mutex_unlock(&TP.mu);
+    pthread_mutex_lock(&tp->mu);
+    while (tp->n_done < tp->n_threads - 1) pthread_cond_wait(&tp->cv_done, &tp->mu);
+    pthread_mutex_unlock(&tp->mu);
 }
