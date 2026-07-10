@@ -133,6 +133,7 @@ typedef void (*tp_fn)(void *ctx, int i0, int i1); // process items [i0, i1)
 typedef struct tpool tpool;
 tpool *tpool_create(int n_threads);
 void   tpool_run(tpool *tp, tp_fn fn, void *ctx, int n_items);
+void   tpool_destroy(tpool *tp);
 
 // ---------------------------------------------------------------- tokenizer
 
@@ -160,6 +161,7 @@ typedef struct {
 } tokenizer;
 
 bool tokenizer_init(tokenizer *t, gguf_file *g);
+void tokenizer_free(tokenizer *t);
 // returns number of tokens written to out (capacity cap); add_bos per call
 int  tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
                 bool add_bos, bool parse_special);
@@ -208,6 +210,7 @@ enum { GPU_AUTO = 0, GPU_OFF = 1 };
 bool   gpu_available(char *name, int name_cap);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 float *gpu_forward(model_t *m, int token, int pos); // NULL = failed, use CPU
+void   gpu_free(model_t *m); // releases GPU buffers; KV pointers become invalid
 
 typedef struct {
     int   gpu_mode;    // GPU_AUTO | GPU_OFF
@@ -220,6 +223,7 @@ typedef struct {
 } model_params;
 
 bool   model_load(model_t *m, const char *path, const model_params *p);
+void   model_free(model_t *m); // frees everything incl. GPU context and mmap
 // process n tokens starting at position pos; returns logits of the last
 // token if want_logits, else NULL
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,

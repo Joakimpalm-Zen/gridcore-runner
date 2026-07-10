@@ -55,6 +55,33 @@ processing currently stays on the CPU. Other backends (CUDA, Vulkan)
 implement the same three-function interface (`src/gpu_none.c` documents it)
 but are not written yet — NVIDIA/AMD machines run the CPU path today.
 
+## Fitting models to machines (requantizer)
+
+```
+./runner -m model-f16.gguf --quantize model-q4.gguf --quant q4_0
+```
+
+Rewrites a GGUF with its weight matrices converted to `q8_0`, `q4_0`, or
+`f16` — one downloaded model can be re-packed to fit each node's RAM/VRAM
+(258 MB f16 → 138 MB q8_0 → 74 MB q4_0 for a 135M model). Norms, biases and
+rope factors stay f32; tensors already smaller than the target are kept;
+metadata is copied verbatim. Output verified against reference quantizations
+of the same model.
+
+## Serving multiple models (swap mode)
+
+```
+./runner -m "clu=qwen3-14b.gguf,bit=qwen3-4b.gguf" --serve --ttl 300
+```
+
+llama-swap semantics built in: the server advertises every registered model
+on `/v1/models`, keeps **one** resident at a time, loads the one named in
+each request's `"model"` field on demand, and unloads after `--ttl` idle
+seconds (0 = never) to free RAM/VRAM for whatever runs next. `/health`
+reports the resident model. Swap mode uses a single inference slot
+(matching one-model-per-GPU scheduling); use `--parallel` with a single
+model when you want concurrent slots instead.
+
 ## Machine capability report
 
 `runner --caps` prints what a scheduler needs to place work on a node:
@@ -130,16 +157,29 @@ to 127.0.0.1 only. Streaming clients that disconnect stop generation
 immediately. Multiple *processes* also share weights the same way — running
 several `runner` instances against one GGUF costs the file size once.
 
-## Structured output (JSON)
+## Structured output (JSON and JSON Schema)
 
-`--json` on the CLI, or `"response_format": {"type": "json_object"}` over the
-API, constrains sampling with an incremental JSON validator: every candidate
-token is checked against the grammar state and rejected unless the output
-remains a valid prefix of a single JSON object. If the token budget runs out
-mid-object, runner closes strings and containers minimally so the result
-still parses (and reports `finish_reason: "length"` so you know it was cut).
-The syntax is guaranteed; key names and semantics are still up to the model,
-so keep prompts explicit about the schema you want.
+Two levels of guarantee:
+
+- **Any-JSON**: `--json` on the CLI or `"response_format": {"type":
+  "json_object"}` over the API — output is always exactly one syntactically
+  valid JSON object.
+- **Schema-conformant**: `--json-schema file.json` on the CLI, or OpenAI-style
+  `"response_format": {"type": "json_schema", "json_schema": {"schema":
+  {...}}}` (an Ollama-style top-level `"format": {...}` schema object is also
+  accepted). The schema is compiled into a streaming validator that drives
+  sampling, so output *conforms*: object properties are emitted **in declared
+  order** (required ones always present, optional ones skippable, no unknown
+  keys), enums and `const` are enforced literally, type unions like
+  `["string","null"]` resolve correctly, arrays honor `items` and
+  `min/maxItems`, and open `{}` values accept any JSON. Supported subset:
+  object/array/string/number/integer/boolean/null, enum, const, type unions;
+  unsupported constructs are rejected at request time with a clear error.
+
+Both modes: if the token budget expires mid-document, runner completes it
+minimally (per the schema when there is one) so the result always parses, and
+reports `finish_reason: "length"`. Syntax and structure are guaranteed;
+semantic quality is still the model's job.
 
 ## Getting reliable answers out of small models
 
@@ -185,6 +225,10 @@ runner -m model [options]
   --port N       server port (default 8080)
   --parallel N   parallel inference slots in server mode (default 1)
   --json         constrain output to a single valid JSON object
+  --json-schema F constrain output to the JSON Schema in file F
+  --quantize OUT rewrite the model to OUT.gguf (see --quant) and exit
+  --quant T      quantize target: q8_0 | q4_0 | f16 (default q4_0)
+  --ttl N        swap mode: unload an idle model after N seconds (default 300)
   -n N           max new tokens (default 256, -1 = until EOS)
   -c N           context length (default: min(model max, 4096));
                  beyond the training context, YaRN is applied automatically
@@ -220,8 +264,8 @@ metadata and vocabulary.
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
 | Tokenizers | SentencePiece (llama) with byte fallback; byte-level BPE (gpt2) with merges, special-token parsing |
 | Transformer | RMSNorm, RoPE (adjacent-pair and NeoX), grouped-query attention, SwiGLU, tied embeddings |
-| Sampling | temperature, top-k, top-p, repeat penalty, greedy; JSON-constrained decoding |
-| Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots |
+| Sampling | temperature, top-k, top-p, repeat penalty, greedy; JSON and JSON-Schema constrained decoding |
+| Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots, multi-model swap with idle TTL |
 | GPU | Metal (Apple Silicon): full forward pass, zero-copy weights, CPU-identical output |
 | Threading | persistent pthread pool; matmul rows and attention heads run in parallel |
 
@@ -251,6 +295,8 @@ src/model.c      weight wiring by tensor name, rope scaling setup, and the
 src/sample.c     temperature/top-k/top-p sampling with optional validity
                  constraint
 src/jsonmode.c   incremental JSON-prefix validator + auto-close
+src/schema.c     JSON-Schema compiler + streaming conformance validator
+src/quantize.c   GGUF requantizer (q8_0 / q4_0 / f16)
 src/template.c   chat template detection/rendering
 src/engine.c     prompt feeding + generation loop shared by CLI and server
 src/json.c       minimal JSON parser/escaper for the HTTP API

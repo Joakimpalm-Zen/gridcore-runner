@@ -182,6 +182,16 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     return true;
 }
 
+void tokenizer_free(tokenizer *t) {
+    free(t->scores);
+    free(t->ttype);
+    free(t->vocab.e);
+    free(t->merges.e);
+    free(t->merges_buf);
+    free(t->special_ids);
+    memset(t, 0, sizeof(*t));
+}
+
 // ---------------------------------------------------------------- SPM encode
 
 // greedy highest-score bigram merging over a doubly linked symbol list
