@@ -179,6 +179,7 @@ typedef struct {
     float       *bq, *bk, *bv, *bo;      // optional biases (f32, converted)
     gguf_tensor *ffn_norm, *w_gate, *w_up, *w_down;
     float       *attn_norm_w, *ffn_norm_w; // norm weights as f32
+    float       *qnorm_w, *knorm_w;      // qwen3 per-head Q/K norms (f32[head_dim])
 } layer_t;
 
 typedef struct {

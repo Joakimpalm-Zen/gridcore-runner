@@ -25,6 +25,28 @@ kernel void k_rmsnorm(device const float *x   [[buffer(0)]],
     for (int i = tid; i < n; i += tpg) y[i] = x[i] * r * w[i];
 }
 
+// per-head RMSNorm (qwen3 Q/K norm): one threadgroup per head
+kernel void k_qknorm(device float       *v   [[buffer(0)]],
+                     device const float *w   [[buffer(1)]],
+                     constant int       &hd  [[buffer(2)]],
+                     constant float     &eps [[buffer(3)]],
+                     uint h   [[threadgroup_position_in_grid]],
+                     uint tid [[thread_position_in_threadgroup]],
+                     uint tpg [[threads_per_threadgroup]]) {
+    threadgroup float red[128];
+    device float *x = v + h * hd;
+    float s = 0;
+    for (int i = tid; i < hd; i += tpg) s += x[i] * x[i];
+    red[tid] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint off = tpg / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] += red[tid + off];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float r = rsqrt(red[0] / hd + eps);
+    for (int i = tid; i < hd; i += tpg) x[i] = x[i] * r * w[i];
+}
+
 // ---------------------------------------------------------------- matvec
 // One simdgroup (32 lanes) per output row; lanes stride over blocks.
 

@@ -129,8 +129,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     const char *arch = gguf_get_str(g, "general.architecture", "?");
     snprintf(m->arch, sizeof(m->arch), "%s", arch);
     if (strcmp(arch, "llama") != 0 && strcmp(arch, "qwen2") != 0 &&
-        strcmp(arch, "mistral") != 0 && strcmp(arch, "smollm") != 0 &&
-        strcmp(arch, "stablelm") != 0) {
+        strcmp(arch, "qwen3") != 0 && strcmp(arch, "mistral") != 0 &&
+        strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0) {
         fprintf(stderr, "warning: architecture '%s' untested, attempting llama-style load\n", arch);
     }
     char key[128];
@@ -199,6 +199,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         l->bk = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k.bias", i));
         l->bv = tensor_to_f32(opt_tensor(g, "blk.%d.attn_v.bias", i));
         l->bo = tensor_to_f32(opt_tensor(g, "blk.%d.attn_output.bias", i));
+        l->qnorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q_norm.weight", i));
+        l->knorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k_norm.weight", i));
     }
 
     // runtime buffers
@@ -259,6 +261,7 @@ void model_free(model_t *m) {
         layer_t *l = &m->layers[i];
         free(l->attn_norm_w); free(l->ffn_norm_w);
         free(l->bq); free(l->bk); free(l->bv); free(l->bo);
+        free(l->qnorm_w); free(l->knorm_w);
     }
     free(m->layers);
     free(m->out_norm_w);
@@ -337,6 +340,12 @@ static void matvec_b(tpool *tp, float *y, int y_stride, const gguf_tensor *w,
     mv_job j = { w, x, bias, y, n_in, n_batch, x_stride, y_stride,
                  ggml_row_size(w->type, n_in) };
     tpool_run(tp, mv_rows, &j, n_out);
+}
+
+// qwen3-style per-head RMSNorm on Q or K (weight is one head_dim vector)
+static void qk_norm(float *v, const float *w, int n_heads, int head_dim, float eps) {
+    for (int h = 0; h < n_heads; h++)
+        rmsnorm(v + h * head_dim, v + h * head_dim, w, head_dim, eps);
 }
 
 static void rope_apply(model_t *m, float *v, int n_heads, int pos) {
@@ -426,6 +435,12 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         matvec_b(m->tp, m->k_tmp, kv_dim, ly->wk, m->xb, xdim, n_embd, kv_dim, ly->bk, n);
         matvec_b(m->tp, m->v_tmp, kv_dim, ly->wv, m->xb, xdim, n_embd, kv_dim, ly->bv, n);
         for (int b = 0; b < n; b++) {
+            if (ly->qnorm_w)
+                qk_norm(m->q + (size_t)b * q_dim, ly->qnorm_w, m->n_head,
+                        m->head_dim, m->rms_eps);
+            if (ly->knorm_w)
+                qk_norm(m->k_tmp + (size_t)b * kv_dim, ly->knorm_w, m->n_head_kv,
+                        m->head_dim, m->rms_eps);
             rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b);
             rope_apply(m, m->k_tmp + (size_t)b * kv_dim, m->n_head_kv, pos + b);
             f16_t *kc = kc_l + (size_t)(pos + b) * kv_dim;
