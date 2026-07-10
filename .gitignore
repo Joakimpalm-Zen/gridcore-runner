@@ -1,0 +1,4 @@
+runner
+runner-debug
+runner-debug.dSYM/
+models/*.gguf
