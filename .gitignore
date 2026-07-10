@@ -1,4 +1,5 @@
 runner
+runner.exe
 runner-debug
-runner-debug.dSYM/
-models/*.gguf
+runner-debug.exe
+*.gguf
