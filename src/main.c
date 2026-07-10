@@ -209,8 +209,13 @@ int main(int argc, char **argv) {
 #endif
                plat_cpu_count(), (unsigned long long)plat_ram_bytes());
         if (has_gpu)
+#ifdef __APPLE__
             printf("{\"backend\":\"metal\",\"name\":\"%s\",\"unified_memory\":true}",
                    gname);
+#else
+            printf("{\"backend\":\"cuda\",\"name\":\"%s\",\"unified_memory\":false}",
+                   gname);
+#endif
         else
             printf("null");
         printf(",\"quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
