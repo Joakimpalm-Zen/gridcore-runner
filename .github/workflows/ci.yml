@@ -13,7 +13,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: build
         run: make
       - name: make test model
@@ -32,6 +32,10 @@ jobs:
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
           kill %1
       - name: sanitizer build + run
+        # model weights/vocab live for the whole process and are freed by
+        # exit; leak detection would flag them, so keep only error detection
+        env:
+          ASAN_OPTIONS: detect_leaks=0
         run: |
           make debug
           ./runner-debug -m test.gguf -p "hello" -n 8 --temp 0
@@ -42,7 +46,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
