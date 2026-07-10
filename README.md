@@ -1,7 +1,7 @@
 # runner
 
 A tiny llama.cpp-style local LLM inference engine, written from scratch in plain C
-(~3,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
+(~4,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
 model files — the same files llama.cpp and Ollama use — and runs them on the CPU,
 with a particular focus on squeezing **large contexts out of small models**.
 
@@ -9,6 +9,8 @@ with a particular focus on squeezing **large contexts out of small models**.
 ./runner -m models/SmolLM2-135M-Instruct-Q8_0.gguf -i          # interactive chat
 ./runner -m llama3.2:1b -p "Hello"                             # straight from your Ollama store
 ./runner -m tinyllama.gguf -f big-document.txt -c 8192 -n 200  # 4x the training context
+./runner -m model.gguf --serve --parallel 2                    # OpenAI-compatible API server
+./runner -m model.gguf -p "..." --json                         # guaranteed-valid JSON output
 ```
 
 ## Build
@@ -57,6 +59,45 @@ This is runner's specialty. Three pieces work together:
   ~8x faster prompt ingestion than token-at-a-time (TinyLlama Q4_K_M:
   5 → 40 tok/s; Qwen2.5-0.5B: ~97 tok/s), with live progress on stderr.
 
+## HTTP server (OpenAI-compatible)
+
+```
+./runner -m model.gguf --serve --port 8080 --parallel 2
+```
+
+Endpoints: `POST /v1/chat/completions`, `POST /v1/completions`,
+`GET /v1/models`, `GET /health`. Works with any OpenAI client:
+
+```python
+import openai
+client = openai.OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="none")
+r = client.chat.completions.create(
+    model="runner",
+    messages=[{"role": "user", "content": "Hello!"}],
+    response_format={"type": "json_object"},   # optional: forced-valid JSON
+    stream=True,                                # optional: SSE streaming
+)
+```
+
+`--parallel N` creates N independent inference slots (each with its own KV
+cache and thread pool, splitting `-t` threads between them); requests are
+served concurrently, and model weights are shared between slots through the
+mmap page cache, so memory grows only by KV cache per slot. The server binds
+to 127.0.0.1 only. Streaming clients that disconnect stop generation
+immediately. Multiple *processes* also share weights the same way — running
+several `runner` instances against one GGUF costs the file size once.
+
+## Structured output (JSON)
+
+`--json` on the CLI, or `"response_format": {"type": "json_object"}` over the
+API, constrains sampling with an incremental JSON validator: every candidate
+token is checked against the grammar state and rejected unless the output
+remains a valid prefix of a single JSON object. If the token budget runs out
+mid-object, runner closes strings and containers minimally so the result
+still parses (and reports `finish_reason: "length"` so you know it was cut).
+The syntax is guaranteed; key names and semantics are still up to the model,
+so keep prompts explicit about the schema you want.
+
 ## Usage
 
 ```
@@ -66,6 +107,10 @@ runner -m model [options]
   -p TEXT        prompt (one-shot completion; \n etc. are unescaped)
   -f FILE        read prompt from file (appended after -p text)
   -i             interactive chat mode
+  --serve        HTTP server mode (OpenAI-compatible API)
+  --port N       server port (default 8080)
+  --parallel N   parallel inference slots in server mode (default 1)
+  --json         constrain output to a single valid JSON object
   -n N           max new tokens (default 256, -1 = until EOS)
   -c N           context length (default: min(model max, 4096));
                  beyond the training context, YaRN is applied automatically
@@ -99,7 +144,8 @@ metadata and vocabulary.
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
 | Tokenizers | SentencePiece (llama) with byte fallback; byte-level BPE (gpt2) with merges, special-token parsing |
 | Transformer | RMSNorm, RoPE (adjacent-pair and NeoX), grouped-query attention, SwiGLU, tied embeddings |
-| Sampling | temperature, top-k, top-p, repeat penalty, greedy |
+| Sampling | temperature, top-k, top-p, repeat penalty, greedy; JSON-constrained decoding |
+| Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots |
 | Threading | persistent pthread pool; matmul rows and attention heads run in parallel |
 
 Verified end-to-end with: SmolLM2-135M (Q8_0, Q4_K_M, Q3_K_M/IQ4_NL),
@@ -108,8 +154,9 @@ needle-retrieval test at 2x and 4x training context and a 3,600-token
 needle test on Qwen2.5.
 
 Not implemented (by design, to stay small): GPU offload, MoE and hybrid-SSM
-architectures (Mamba/Jamba/Qwen3.5-style), IQ2/IQ3 codebook quants, grammar
-sampling, server mode.
+architectures (Mamba/Jamba/Qwen3.5-style), IQ2/IQ3 codebook quants, full GBNF
+grammar sampling (JSON mode only), TLS/auth on the server (bind it behind a
+reverse proxy if you need those).
 
 ## How it works
 
@@ -122,8 +169,14 @@ src/tokenizer.c  SPM (score-based bigram merging) and BPE (rank-based merging,
                  GPT-2 byte↔unicode mapping), hash maps for vocab/merges
 src/model.c      weight wiring by tensor name, rope scaling setup, and the
                  batched forward pass; fp16 KV cache
-src/main.c       CLI, Ollama store resolution, sampler, chat templates,
-                 generation loop
+src/sample.c     temperature/top-k/top-p sampling with optional validity
+                 constraint
+src/jsonmode.c   incremental JSON-prefix validator + auto-close
+src/template.c   chat template detection/rendering
+src/engine.c     prompt feeding + generation loop shared by CLI and server
+src/json.c       minimal JSON parser/escaper for the HTTP API
+src/server.c     HTTP server, OpenAI-compatible routes, parallel slots
+src/main.c       CLI and Ollama store resolution
 ```
 
 Weights stay quantized in the mmap'd file; matmuls dequantize on the fly, so
