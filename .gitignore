@@ -4,3 +4,4 @@ runner-debug
 runner-debug.exe
 *.gguf
 src/kernels.ptx
+src/kernels-*.ptx.tmp
