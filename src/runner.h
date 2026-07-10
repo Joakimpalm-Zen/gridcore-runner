@@ -250,6 +250,8 @@ typedef struct {
 
 void jsonv_init(jsonv *v);
 bool jsonv_feed(jsonv *v, const char *s, int n);
+// force-complete the object (token budget ran out); returns bytes written
+int  jsonv_close(jsonv *v, char *out, int cap);
 
 // ---------------------------------------------------------------- templates
 

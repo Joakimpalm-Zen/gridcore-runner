@@ -173,6 +173,58 @@ static bool feed_byte(jsonv *v, uint8_t c, bool *reconsume) {
     }
 }
 
+// forcibly complete the JSON from the current state (used when the token
+// budget runs out): close strings/escapes, complete literals and numbers
+// with minimal filler, then close all open containers. Returns bytes
+// written, or 0 if generation never started an object.
+int jsonv_close(jsonv *v, char *out, int cap) {
+    int m = 0;
+    if (v->st == S_START || v->done) return 0;
+    #define EMIT(c) do { if (m < cap - 1) out[m++] = (c); } while (0)
+    // unfinished string escapes
+    if (v->st == S_KEY || v->st == S_STRING) {
+        if (v->sub == 1) { EMIT('n'); v->sub = 0; }        // dangling backslash
+        while (v->sub >= 2) {                              // partial \uXXXX
+            EMIT('0');
+            v->sub = v->sub == 5 ? 0 : v->sub + 1;
+        }
+        EMIT('"');
+        if (v->st == S_KEY) v->st = S_COLON;
+        else value_done(v);
+    }
+    if (v->st == S_COLON)      { EMIT(':'); v->st = S_VALUE; }
+    if (v->st == S_KEY_EXPECT) { EMIT('"'); EMIT('_'); EMIT('"'); EMIT(':'); v->st = S_VALUE; }
+    if (v->st == S_LIT) {
+        const char *lit = LITS[v->lit];
+        while (lit[v->sub]) EMIT(lit[v->sub++]);
+        value_done(v);
+    }
+    if (v->st == S_NUM_MINUS || v->st == S_NUM_FRAC0 ||
+        v->st == S_NUM_EXP0 || v->st == S_NUM_EXP1) {
+        EMIT('0');
+        value_done(v);
+    }
+    if (v->st == S_NUM_ZERO || v->st == S_NUM_INT ||
+        v->st == S_NUM_FRAC || v->st == S_NUM_EXP) {
+        value_done(v); // number already complete as-is
+    }
+    if (v->st == S_VALUE || v->st == S_ARR_FIRST) {
+        EMIT('n'); EMIT('u'); EMIT('l'); EMIT('l');
+        value_done(v);
+    }
+    // close remaining containers
+    while (!v->done && v->depth > 0 &&
+           (v->st == S_AFTER || v->st == S_KEY_OR_END)) {
+        uint8_t top = v->stack[v->depth - 1];
+        EMIT(top == 'O' ? '}' : ']');
+        v->depth--;
+        value_done(v);
+    }
+    #undef EMIT
+    out[m] = 0;
+    return m;
+}
+
 bool jsonv_feed(jsonv *v, const char *s, int n) {
     for (int i = 0; i < n; i++) {
         bool re;
