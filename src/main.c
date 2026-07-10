@@ -2,6 +2,7 @@
 #include "runner.h"
 
 #include "compat.h"
+#include "json.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,6 +102,7 @@ static void usage(const char *prog) {
         "  --port N       server port (default 8080)\n"
         "  --parallel N   parallel inference slots in server mode (default 1)\n"
         "  --json         constrain output to a single valid JSON object\n"
+        "  --json-schema F constrain output to the JSON Schema in file F\n"
         "  -n N           max tokens to generate (default 256, -1 = until EOS)\n"
         "  -c N           context length (default: min(model max, 4096));\n"
         "                 beyond the training context, YaRN rope scaling is\n"
@@ -133,7 +135,7 @@ static int stdout_cb(void *ud, const char *bytes, int n) {
 
 int main(int argc, char **argv) {
     const char *model_path = NULL, *prompt = NULL, *system_prompt = NULL;
-    const char *tmpl_arg = NULL, *prompt_file = NULL;
+    const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
     int n_predict = 256, n_threads = 0, tmpl = -1;
     int port = 8080, parallel = 1;
     bool interactive = false, verbose = false, no_bos = false;
@@ -159,6 +161,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--port")) port = atoi(NEXT);
         else if (!strcmp(a, "--parallel")) parallel = atoi(NEXT);
         else if (!strcmp(a, "--json")) json_mode = true;
+        else if (!strcmp(a, "--json-schema")) schema_file = NEXT;
         else if (!strcmp(a, "--temp")) smp.temp = atof(NEXT);
         else if (!strcmp(a, "--top-k")) smp.top_k = atoi(NEXT);
         else if (!strcmp(a, "--top-p")) smp.top_p = atof(NEXT);
@@ -256,6 +259,24 @@ int main(int argc, char **argv) {
     e.ignore_eos = ignore_eos;
     e.json_mode = json_mode;
     e.progress = true;
+    if (schema_file) {
+        FILE *sf = fopen(schema_file, "rb");
+        if (!sf) { fprintf(stderr, "error: cannot open %s\n", schema_file); return 1; }
+        fseek(sf, 0, SEEK_END);
+        long ssz = ftell(sf);
+        fseek(sf, 0, SEEK_SET);
+        char *sbuf = malloc(ssz + 1);
+        ssz = (long)fread(sbuf, 1, ssz, sf);
+        fclose(sf);
+        struct jv *sj = json_parse(sbuf, ssz);
+        free(sbuf);
+        if (!sj) { fprintf(stderr, "error: %s is not valid JSON\n", schema_file); return 1; }
+        char serr[128];
+        e.schema = schema_compile(sj, serr, sizeof(serr));
+        jv_free(sj);
+        if (!e.schema) { fprintf(stderr, "error: unsupported schema: %s\n", serr); return 1; }
+        sval_init(&e.sv, e.schema);
+    }
 
     size_t tok_cap = (prompt ? strlen(prompt) : 0) + m.n_ctx + 32;
     int32_t *toks = malloc(sizeof(int32_t) * tok_cap);
@@ -283,7 +304,8 @@ int main(int argc, char **argv) {
         ptime = now_s() - t0;
         if (!logits) { fprintf(stderr, "error: prompt exceeds context\n"); return 1; }
 
-        if (!prompt_file && !json_mode) printf("%s", p); // don't echo file/json prompts
+        if (!prompt_file && !json_mode && !schema_file)
+            printf("%s", p); // don't echo file/json/schema prompts
         free(p);
         fflush(stdout);
         n_gen = engine_generate(&e, logits, n_predict, stdout_cb, NULL, &gtime);

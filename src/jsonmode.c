@@ -35,6 +35,17 @@ void jsonv_init(jsonv *v) {
     v->done = false;
 }
 
+void jsonv_init_any(jsonv *v) {
+    jsonv_init(v);
+    v->st = S_VALUE;
+}
+
+bool jsonv_value_end(const jsonv *v) {
+    if (v->done) return true;
+    return v->depth == 0 && (v->st == S_NUM_ZERO || v->st == S_NUM_INT ||
+                             v->st == S_NUM_FRAC || v->st == S_NUM_EXP);
+}
+
 static bool is_ws(uint8_t c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
