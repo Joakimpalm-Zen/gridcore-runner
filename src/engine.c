@@ -92,6 +92,12 @@ int engine_generate(engine *e, float *logits, int max_new,
         if (e->json_mode && e->jv.done) { e->hit_stop = true; break; }
         logits = model_forward(e->m, tok, e->pos++);
     }
+    if (e->json_mode && !e->jv.done) {
+        // budget expired mid-object: emit a minimal valid completion
+        char cbuf[600];
+        int cn = jsonv_close(&e->jv, cbuf, sizeof(cbuf));
+        if (cn > 0 && cb) cb(ud, cbuf, cn); // finish_reason stays "length"
+    }
     if (gen_time) *gen_time = now_s() - t0;
     return n_gen;
 }

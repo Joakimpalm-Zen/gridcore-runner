@@ -40,6 +40,8 @@ static void sb_put(sbuf *b, const char *s, size_t n) {
     b->s[b->n] = 0;
 }
 
+#define sb_lit(b, lit) sb_put(b, lit, strlen(lit))
+
 static void sb_fmt(sbuf *b, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 static void sb_fmt(sbuf *b, const char *fmt, ...) {
@@ -164,11 +166,11 @@ static int gen_collect(void *ud, const char *bytes, int n) {
     sbuf chunk = {0};
     sb_fmt(&chunk, "{\"id\":\"%s\",\"object\":\"%s\",\"choices\":[{\"index\":0,",
            g->id, g->chat ? "chat.completion.chunk" : "text_completion");
-    if (g->chat) sb_put(&chunk, "\"delta\":{\"content\":\"", 21);
-    else         sb_put(&chunk, "\"text\":\"", 8);
+    if (g->chat) sb_lit(&chunk, "\"delta\":{\"content\":\"");
+    else         sb_lit(&chunk, "\"text\":\"");
     sb_esc(&chunk, bytes, n);
-    if (g->chat) sb_put(&chunk, "\"},\"finish_reason\":null}]}", 26);
-    else         sb_put(&chunk, "\",\"finish_reason\":null}]}", 25);
+    if (g->chat) sb_lit(&chunk, "\"},\"finish_reason\":null}]}");
+    else         sb_lit(&chunk, "\",\"finish_reason\":null}]}");
     sbuf sse = {0};
     sb_fmt(&sse, "data: %s\n\n", chunk.s);
     if (!send_all(g->fd, sse.s, sse.n)) g->dead = true;
@@ -240,11 +242,11 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
                    "\"choices\":[{\"index\":0,", g.id,
                chat ? "chat.completion" : "text_completion",
                (long)time(NULL), SV.model_name);
-        if (chat) sb_put(&r, "\"message\":{\"role\":\"assistant\",\"content\":\"", 42);
-        else      sb_put(&r, "\"text\":\"", 8);
+        if (chat) sb_lit(&r, "\"message\":{\"role\":\"assistant\",\"content\":\"");
+        else      sb_lit(&r, "\"text\":\"");
         sb_esc(&r, g.out.s ? g.out.s : "", g.out.n);
-        if (chat) sb_put(&r, "\"},", 3);
-        else      sb_put(&r, "\",", 2);
+        if (chat) sb_lit(&r, "\"},");
+        else      sb_lit(&r, "\",");
         sb_fmt(&r, "\"finish_reason\":\"%s\"}],"
                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
                    "\"total_tokens\":%d}}",
