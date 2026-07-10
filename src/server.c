@@ -382,10 +382,11 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         }
     } else {
         sbuf r = {0};
-        sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"%s\","
-                   "\"choices\":[{\"index\":0,", g.id,
+        sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"", g.id,
                chat ? "chat.completion" : "text_completion",
-               (long)time(NULL), SV.model_name);
+               (long)time(NULL));
+        sb_esc(&r, SV.model_name, strlen(SV.model_name));
+        sb_lit(&r, "\",\"choices\":[{\"index\":0,");
         if (chat) sb_lit(&r, "\"message\":{\"role\":\"assistant\",\"content\":\"");
         else      sb_lit(&r, "\"text\":\"");
         sb_esc(&r, g.out.s ? g.out.s : "", g.out.n);
@@ -601,6 +602,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     if (threads_per_slot < 1) threads_per_slot = 1;
 
     const char *name = strrchr(model_path, '/');
+    const char *bsname = strrchr(model_path, '\\'); // Windows path separator
+    if (bsname && (!name || bsname > name)) name = bsname;
     SV.model_name = SV.n_reg > 0 ? SV.reg[0].name : (name ? name + 1 : model_path);
     SV.n_predict_cap = 1024;
     SV.n_slots = parallel;

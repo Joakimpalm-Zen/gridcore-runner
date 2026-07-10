@@ -91,3 +91,12 @@ jobs:
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
           kill %1
+      - name: smoke test (server, backslash model path)
+        # regression: a C:\...\model.gguf -m path used to land unescaped in the
+        # response's "model" field, making every completion body invalid JSON
+        run: |
+          ./runner.exe -m "$(cygpath -w "$PWD")\\test.gguf" --serve --port 8125 &
+          sleep 3
+          curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
+            http://127.0.0.1:8125/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['model'] == 'test.gguf', d['model']; print('windows path model field ok')"
+          kill %1
