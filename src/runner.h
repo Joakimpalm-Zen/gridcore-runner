@@ -219,4 +219,78 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
 // single-token convenience wrapper
 float *model_forward(model_t *m, int token, int pos);
 
+// ---------------------------------------------------------------- sampler
+
+typedef struct {
+    float temp, top_p, repeat_penalty;
+    int top_k;
+    uint64_t rng;
+    int32_t recent[256];
+    int n_recent, recent_head;
+} sampler;
+
+// validity filter for constrained sampling; return true if token is allowed
+typedef bool (*sample_ok_fn)(void *ud, int token);
+
+void sampler_reset(sampler *s);
+void sampler_accept(sampler *s, int tok);
+// pick next token; ok==NULL means unconstrained; returns -1 if no token allowed
+int  sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *ud);
+
+// ---------------------------------------------------------------- json mode
+
+// incremental validator: accepts byte strings only while they remain a valid
+// prefix of a single JSON object; small and memcpy-copyable for lookahead
+typedef struct {
+    uint8_t stack[200];     // container nesting: 'O' object, 'A' array
+    int16_t depth;
+    uint8_t st, sub, lit;   // micro-state, escape/digit progress, literal id
+    bool    done;           // a complete top-level object has been parsed
+} jsonv;
+
+void jsonv_init(jsonv *v);
+bool jsonv_feed(jsonv *v, const char *s, int n);
+
+// ---------------------------------------------------------------- templates
+
+enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_RAW };
+
+typedef struct { const char *role, *content; } chat_msg;
+
+int         template_detect(const char *meta_tmpl, tokenizer *tok);
+int         template_from_name(const char *name); // -1 if unknown
+const char *template_name(int tmpl);
+// render messages; add_assistant appends the assistant generation prefix.
+// returns bytes written (excl. NUL)
+size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
+                       bool add_assistant, char *out, size_t cap);
+
+// ---------------------------------------------------------------- engine
+
+// return nonzero to abort generation (e.g. client disconnected)
+typedef int (*gen_cb)(void *ud, const char *bytes, int n);
+
+typedef struct {
+    model_t   *m;
+    tokenizer *tok;
+    sampler   *smp;
+    int  pos;              // next free KV slot
+    int  stop_ids[8];
+    int  n_stop;
+    bool ignore_eos;
+    bool hit_stop;         // last generate ended on a stop token / json done
+    bool json_mode;        // constrain output to a single JSON object
+    jsonv jv;
+    bool progress;         // print prompt progress to stderr
+} engine;
+
+void   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
+void   engine_reset(engine *e); // clear KV position + sampler + json state
+// feed tokens (batched); returns last-token logits or NULL on ctx overflow
+float *engine_feed(engine *e, const int32_t *toks, int n);
+// sample until stop/limit, streaming decoded bytes to cb; returns token count
+int    engine_generate(engine *e, float *logits, int max_new,
+                       gen_cb cb, void *ud, double *gen_time);
+double now_s(void);
+
 #endif // RUNNER_H
