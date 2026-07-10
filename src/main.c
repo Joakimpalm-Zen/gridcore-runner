@@ -12,6 +12,7 @@
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
                int n_threads);
+int quantize_gguf(const char *in_path, const char *out_path, int target);
 
 // ---------------------------------------------------------------- misc
 
@@ -103,6 +104,8 @@ static void usage(const char *prog) {
         "  --parallel N   parallel inference slots in server mode (default 1)\n"
         "  --json         constrain output to a single valid JSON object\n"
         "  --json-schema F constrain output to the JSON Schema in file F\n"
+        "  --quantize OUT rewrite the model to OUT.gguf (see --quant) and exit\n"
+        "  --quant T      quantize target: q8_0 | q4_0 | f16 (default q4_0)\n"
         "  -n N           max tokens to generate (default 256, -1 = until EOS)\n"
         "  -c N           context length (default: min(model max, 4096));\n"
         "                 beyond the training context, YaRN rope scaling is\n"
@@ -136,6 +139,7 @@ static int stdout_cb(void *ud, const char *bytes, int n) {
 int main(int argc, char **argv) {
     const char *model_path = NULL, *prompt = NULL, *system_prompt = NULL;
     const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
+    const char *quant_out = NULL, *quant_type = "q4_0";
     int n_predict = 256, n_threads = 0, tmpl = -1;
     int port = 8080, parallel = 1;
     bool interactive = false, verbose = false, no_bos = false;
@@ -162,6 +166,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--parallel")) parallel = atoi(NEXT);
         else if (!strcmp(a, "--json")) json_mode = true;
         else if (!strcmp(a, "--json-schema")) schema_file = NEXT;
+        else if (!strcmp(a, "--quantize")) quant_out = NEXT;
+        else if (!strcmp(a, "--quant")) quant_type = NEXT;
         else if (!strcmp(a, "--temp")) smp.temp = atof(NEXT);
         else if (!strcmp(a, "--top-k")) smp.top_k = atoi(NEXT);
         else if (!strcmp(a, "--top-p")) smp.top_p = atof(NEXT);
@@ -223,7 +229,7 @@ int main(int argc, char **argv) {
         fclose(pf);
         prompt = fbuf;
     }
-    if (!prompt && !interactive && !serve) {
+    if (!prompt && !interactive && !serve && !quant_out) {
         fprintf(stderr, "error: need -p PROMPT, -i, or --serve\n");
         usage(argv[0]);
         return 1;
@@ -241,6 +247,17 @@ int main(int argc, char **argv) {
 
     char *resolved = ollama_resolve(model_path);
     if (resolved) model_path = resolved;
+
+    if (quant_out) {
+        int tt = !strcmp(quant_type, "q8_0") ? T_Q8_0 :
+                 !strcmp(quant_type, "q4_0") ? T_Q4_0 :
+                 !strcmp(quant_type, "f16")  ? T_F16 : -1;
+        if (tt < 0) {
+            fprintf(stderr, "error: --quant must be q8_0, q4_0, or f16\n");
+            return 1;
+        }
+        return quantize_gguf(model_path, quant_out, tt);
+    }
 
     model_t m;
     double t0 = now_s();
