@@ -3,6 +3,12 @@
 // top-level JSON object; sets `done` once that object closes.
 #include "runner.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+#define FALLTHROUGH __attribute__((fallthrough))
+#else
+#define FALLTHROUGH
+#endif
+
 enum {
     S_START,        // expecting '{' (whitespace ok)
     S_VALUE,        // expecting any value
@@ -61,7 +67,7 @@ static bool feed_byte(jsonv *v, uint8_t c, bool *reconsume) {
     case S_ARR_FIRST:
         if (c == ']' && !is_ws(c)) { v->depth--; value_done(v); return true; }
         // fall through: anything else must start a value
-        __attribute__((fallthrough));
+        FALLTHROUGH;
     case S_VALUE:
         if (is_ws(c)) return true;
         if (c == '{') { v->st = S_KEY_OR_END; return push(v, 'O'); }

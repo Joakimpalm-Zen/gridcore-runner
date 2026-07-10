@@ -2,15 +2,12 @@
 // stop-token handling, optional JSON-constrained sampling.
 #include "runner.h"
 
+#include "compat.h"
+
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
-double now_s(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
-}
+double now_s(void) { return plat_now(); }
 
 void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     memset(e, 0, sizeof(*e));

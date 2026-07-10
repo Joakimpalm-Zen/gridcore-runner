@@ -14,17 +14,46 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#include <stdatomic.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+static void sock_init(void) {
+    WSADATA w;
+    WSAStartup(MAKEWORD(2, 2), &w);
+}
+static int  sock_recv(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n, 0); }
+static int  sock_send(int fd, const char *buf, size_t n) { return send(fd, buf, (int)n, 0); }
+static void sock_close(int fd) { closesocket(fd); }
+#else
+#include <signal.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+static void sock_init(void) { signal(SIGPIPE, SIG_IGN); }
+static int  sock_recv(int fd, char *buf, size_t n) { return (int)read(fd, buf, n); }
+static int  sock_send(int fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
+static void sock_close(int fd) { close(fd); }
+#endif
 
-#include <stdatomic.h>
+// case-insensitive prefix compare (strncasecmp is not universal)
+static int ci_ncmp(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        int ca = a[i] >= 'A' && a[i] <= 'Z' ? a[i] + 32 : (unsigned char)a[i];
+        int cb = b[i] >= 'A' && b[i] <= 'Z' ? b[i] + 32 : (unsigned char)b[i];
+        if (ca != cb) return ca - cb;
+        if (ca == 0) return 0;
+    }
+    return 0;
+}
 
 // ---------------------------------------------------------------- helpers
 
@@ -42,8 +71,10 @@ static void sb_put(sbuf *b, const char *s, size_t n) {
 
 #define sb_lit(b, lit) sb_put(b, lit, strlen(lit))
 
+#if defined(__GNUC__) || defined(__clang__)
 static void sb_fmt(sbuf *b, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
+#endif
 static void sb_fmt(sbuf *b, const char *fmt, ...) {
     char tmp[4096];
     va_list ap;
@@ -63,7 +94,7 @@ static void sb_esc(sbuf *b, const char *s, size_t n) {
 
 static bool send_all(int fd, const char *s, size_t n) {
     while (n > 0) {
-        ssize_t w = write(fd, s, n);
+        int w = sock_send(fd, s, n);
         if (w <= 0) return false;
         s += w;
         n -= (size_t)w;
@@ -129,7 +160,7 @@ static void q_push(int fd) {
         SV.q.count++;
         pthread_cond_signal(&SV.q.cv);
     } else {
-        close(fd); // overloaded
+        sock_close(fd); // overloaded
     }
     pthread_mutex_unlock(&SV.q.mu);
 }
@@ -300,7 +331,7 @@ static void handle_conn(slot_t *s, int fd) {
     size_t got = 0;
     char *body_start = NULL;
     while (got < sizeof(hdr) - 1) {
-        ssize_t r = read(fd, hdr + got, sizeof(hdr) - 1 - got);
+        int r = sock_recv(fd, hdr + got, sizeof(hdr) - 1 - got);
         if (r <= 0) return;
         got += (size_t)r;
         hdr[got] = 0;
@@ -314,7 +345,7 @@ static void handle_conn(slot_t *s, int fd) {
 
     size_t content_length = 0;
     for (char *p = hdr; p < body_start; p++) {
-        if (strncasecmp(p, "Content-Length:", 15) == 0) {
+        if (ci_ncmp(p, "Content-Length:", 15) == 0) {
             content_length = (size_t)strtoull(p + 15, NULL, 10);
             break;
         }
@@ -331,7 +362,7 @@ static void handle_conn(slot_t *s, int fd) {
         if (have > content_length) have = content_length;
         memcpy(body, body_start, have);
         while (have < content_length) {
-            ssize_t r = read(fd, body + have, content_length - have);
+            int r = sock_recv(fd, body + have, content_length - have);
             if (r <= 0) { free(body); return; }
             have += (size_t)r;
         }
@@ -371,7 +402,7 @@ static void *slot_worker(void *arg) {
         int fd = q_pop();
         if (fd < 0) return NULL;
         handle_conn(s, fd);
-        close(fd);
+        sock_close(fd);
     }
 }
 
@@ -380,7 +411,7 @@ static void *slot_worker(void *arg) {
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
                int n_threads) {
-    signal(SIGPIPE, SIG_IGN);
+    sock_init();
     if (parallel < 1) parallel = 1;
     if (parallel > 16) parallel = 16;
     int threads_per_slot = n_threads / parallel;
@@ -420,9 +451,9 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         engine_init(&s->e, s->m, s->tok, &s->smp);
     }
 
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    int lfd = (int)socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -442,7 +473,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             port, parallel, parallel > 1 ? "s" : "", threads_per_slot);
 
     for (;;) {
-        int cfd = accept(lfd, NULL, NULL);
+        int cfd = (int)accept(lfd, NULL, NULL);
         if (cfd < 0) {
             if (errno == EINTR) continue;
             break;

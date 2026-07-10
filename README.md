@@ -20,7 +20,20 @@ make          # produces ./runner
 make debug    # ASan/UBSan build for development
 ```
 
-Requires only a C11 compiler (tested with Apple clang on arm64 macOS).
+## Platform support
+
+Plain C with a small platform layer (`src/compat.c`) — no dependencies beyond
+libc and pthreads. CI builds and smoke-tests every push on:
+
+| Platform | Toolchain |
+|---|---|
+| Linux (x86_64) | gcc |
+| macOS (arm64) | Apple clang |
+| Windows (x86_64) | MinGW-w64 via MSYS2 (`pacman -S make mingw-w64-ucrt-x86_64-gcc`, then `make`) |
+
+The fp16 kernels use ARM hardware half-floats when available and fall back to
+portable table lookups elsewhere. Little-endian hosts only (GGUF is
+little-endian; every mainstream x86/ARM/RISC-V system qualifies).
 
 ## Get a model
 
@@ -97,6 +110,37 @@ mid-object, runner closes strings and containers minimally so the result
 still parses (and reports `finish_reason: "length"` so you know it was cut).
 The syntax is guaranteed; key names and semantics are still up to the model,
 so keep prompts explicit about the schema you want.
+
+## Getting reliable answers out of small models
+
+Small models fail in ways that look like model stupidity but are often
+configuration. The classic: `-p "One plus one is"` on a 135M instruct model
+answers "10" — the same model answers "two" when asked properly. Measured on
+the same model, same question:
+
+| Setup | Answer |
+|---|---|
+| raw completion (`-p`), default sampling | "10" ✗ |
+| chat mode (`-i`), default sampling | "two, but…" (rambles) |
+| chat mode + `--temp 0 --repeat-penalty 1.0` | "One plus one equals two." ✓ |
+
+Rules of thumb, in order of impact:
+
+1. **Model size is the ceiling.** 135M is a toy; 0.5B handles simple
+   extraction; 1.5B–3B is the reliability sweet spot on 8 GB machines. No
+   decoding trick substitutes for parameters.
+2. **Always use the chat format** (`-i` or the HTTP API) for questions —
+   instruct models are only calibrated inside their template. Raw `-p` is for
+   text continuation.
+3. **For anything with a right answer**: `--temp 0 --repeat-penalty 1.0`.
+   The repeat penalty distorts short factual answers (it punishes reusing
+   tokens from the question); keep 1.1 only for long free-form generation.
+4. **Use `--json` / `response_format`** when output feeds a program — it
+   eliminates format failures so only content errors remain.
+5. **Extended context ≠ extended reasoning.** YaRN retrieval works at 2–4x,
+   but a small model can't *reason over* thousands of tokens at once. Past
+   that, chunk the work (map-reduce) or retrieve only relevant passages
+   instead of stuffing the window.
 
 ## Usage
 

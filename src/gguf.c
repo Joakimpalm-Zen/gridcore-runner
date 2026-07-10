@@ -1,13 +1,10 @@
 // GGUF v2/v3 file parser (mmap based).
 #include "runner.h"
+#include "compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 
 typedef struct {
     const uint8_t *p, *end;
@@ -80,17 +77,11 @@ static bool rd_kv_value(cursor *c, gguf_kv *kv, uint32_t type) {
 
 bool gguf_open(gguf_file *g, const char *path) {
     memset(g, 0, sizeof(*g));
-    g->fd = open(path, O_RDONLY);
-    if (g->fd < 0) { fprintf(stderr, "error: cannot open %s\n", path); return false; }
-    struct stat st;
-    fstat(g->fd, &st);
-    if (!S_ISREG(st.st_mode) || st.st_size < 24) {
-        fprintf(stderr, "error: %s is not a GGUF file\n", path);
+    g->map = plat_mmap_ro(path, &g->map_size);
+    if (!g->map || g->map_size < 24) {
+        fprintf(stderr, "error: cannot open %s as a GGUF file\n", path);
         return false;
     }
-    g->map_size = (size_t)st.st_size;
-    g->map = mmap(NULL, g->map_size, PROT_READ, MAP_PRIVATE, g->fd, 0);
-    if (g->map == MAP_FAILED) { fprintf(stderr, "error: cannot mmap %s\n", path); return false; }
 
     cursor c = { g->map, (const uint8_t *)g->map + g->map_size, true };
     if (rd_u32(&c) != 0x46554747) { // "GGUF"
@@ -158,8 +149,8 @@ bool gguf_open(gguf_file *g, const char *path) {
 }
 
 void gguf_close(gguf_file *g) {
-    if (g->map && g->map != MAP_FAILED) munmap(g->map, g->map_size);
-    if (g->fd >= 0) close(g->fd);
+    plat_munmap(g->map, g->map_size);
+    g->map = NULL;
 }
 
 gguf_kv *gguf_get(gguf_file *g, const char *key) {

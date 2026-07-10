@@ -95,7 +95,6 @@ typedef struct {
 } gguf_tensor;
 
 typedef struct {
-    int         fd;
     void       *map;
     size_t      map_size;
     uint32_t    version;
