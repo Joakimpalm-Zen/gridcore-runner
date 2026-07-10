@@ -32,6 +32,7 @@ void engine_reset(engine *e) {
     e->hit_stop = false;
     sampler_reset(e->smp);
     jsonv_init(&e->jv);
+    if (e->schema) sval_init(&e->sv, e->schema);
 }
 
 static bool is_stop(engine *e, int id) {
@@ -58,6 +59,16 @@ float *engine_feed(engine *e, const int32_t *toks, int n) {
 
 // validity filter for JSON mode: token must keep output a valid JSON prefix;
 // stop/control tokens are allowed only once the object is complete
+static bool schema_ok(void *ud, int id) {
+    engine *e = ud;
+    if (is_stop(e, id) || tok_is_control(e->tok, id)) return e->sv.done;
+    char buf[512];
+    int n = tok_decode(e->tok, id, buf, sizeof(buf));
+    if (n == 0) return e->sv.done;
+    sval tmp = e->sv;
+    return sval_feed(&tmp, buf, n);
+}
+
 static bool json_ok(void *ud, int id) {
     engine *e = ud;
     if (is_stop(e, id) || tok_is_control(e->tok, id)) return e->jv.done;
@@ -76,20 +87,28 @@ int engine_generate(engine *e, float *logits, int max_new,
     double t0 = now_s();
     while ((max_new < 0 || n_gen < max_new) && e->pos < e->m->n_ctx) {
         int tok = sample_pick(e->smp, logits, e->m->n_vocab,
+                              e->schema ? schema_ok :
                               e->json_mode ? json_ok : NULL, e);
         if (tok < 0) { e->hit_stop = true; break; } // no valid continuation
         sampler_accept(e->smp, tok);
         if (is_stop(e, tok) && !e->ignore_eos) { e->hit_stop = true; break; }
         int n = tok_decode(e->tok, tok, buf, sizeof(buf));
-        if (e->json_mode && n > 0) {
-            jsonv_feed(&e->jv, buf, n);
-        }
+        if (e->schema && n > 0) sval_feed(&e->sv, buf, n);
+        else if (e->json_mode && n > 0) jsonv_feed(&e->jv, buf, n);
         if (cb && n > 0 && cb(ud, buf, n) != 0) { n_gen++; break; }
         n_gen++;
-        if (e->json_mode && e->jv.done) { e->hit_stop = true; break; }
+        if ((e->schema && e->sv.done) || (!e->schema && e->json_mode && e->jv.done)) {
+            e->hit_stop = true;
+            break;
+        }
         logits = model_forward(e->m, tok, e->pos++);
     }
-    if (e->json_mode && !e->jv.done) {
+    if (e->schema && !e->sv.done) {
+        // budget expired mid-document: complete it per the schema
+        char cbuf[4096];
+        int cn = sval_close(&e->sv, cbuf, sizeof(cbuf));
+        if (cn > 0 && cb) cb(ud, cbuf, cn); // finish_reason stays "length"
+    } else if (!e->schema && e->json_mode && !e->jv.done) {
         // budget expired mid-object: emit a minimal valid completion
         char cbuf[600];
         int cn = jsonv_close(&e->jv, cbuf, sizeof(cbuf));

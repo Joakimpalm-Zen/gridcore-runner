@@ -227,6 +227,27 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     bool stream = jv_bool(jv_get(req, "stream"), false);
     jv *rf = jv_get(req, "response_format");
     e->json_mode = rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_object") == 0;
+    // schema-constrained decoding: OpenAI response_format {type:"json_schema",
+    // json_schema:{schema:{...}}} or an Ollama-style "format" schema object
+    snode *schema = NULL;
+    jv *sch = NULL;
+    if (rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_schema") == 0) {
+        jv *js = jv_get(rf, "json_schema");
+        sch = js ? (jv_get(js, "schema") ? jv_get(js, "schema") : js) : NULL;
+    }
+    jv *fmt = jv_get(req, "format");
+    if (!sch && fmt && fmt->type == J_OBJ) sch = fmt;
+    if (sch) {
+        char serr[128];
+        schema = schema_compile(sch, serr, sizeof(serr));
+        if (!schema) {
+            char msg[192];
+            snprintf(msg, sizeof(msg), "unsupported json schema: %s", serr);
+            send_error(fd, 400, msg);
+            return;
+        }
+    }
+    e->schema = schema;
 
     size_t cap = strlen(prompt) + 16;
     int32_t *toks = malloc(sizeof(int32_t) * cap);
@@ -241,7 +262,12 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     engine_reset(e);
     float *logits = engine_feed(e, toks, n_prompt);
     free(toks);
-    if (!logits) { send_error(fd, 500, "context overflow"); return; }
+    if (!logits) {
+        e->schema = NULL;
+        schema_free(schema);
+        send_error(fd, 500, "context overflow");
+        return;
+    }
 
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .chat = chat };
     snprintf(g.id, sizeof(g.id), "%s-%d", chat ? "chatcmpl" : "cmpl",
@@ -288,7 +314,10 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     fprintf(stderr, "[slot %d] %s: %d prompt + %d gen tok (%.1f tok/s)%s%s\n",
             s->id, g.id, n_prompt, n_gen,
             n_gen / (gtime > 0 ? gtime : 1e-9),
-            e->json_mode ? " [json]" : "", g.dead ? " [client gone]" : "");
+            schema ? " [schema]" : e->json_mode ? " [json]" : "",
+            g.dead ? " [client gone]" : "");
+    e->schema = NULL;
+    schema_free(schema);
     free(g.out.s);
 }
 

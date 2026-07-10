@@ -13,7 +13,7 @@ GPU_SRC  = src/gpu_none.c
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
-      src/template.c src/jsonmode.c src/engine.c src/json.c src/server.c \
+      src/template.c src/jsonmode.c src/schema.c src/engine.c src/json.c src/server.c \
       src/main.c $(GPU_SRC)
 
 runner: $(SRC) src/runner.h

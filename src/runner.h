@@ -256,10 +256,51 @@ typedef struct {
     bool    done;           // a complete top-level object has been parsed
 } jsonv;
 
-void jsonv_init(jsonv *v);
+void jsonv_init(jsonv *v);      // accept exactly one JSON object
+void jsonv_init_any(jsonv *v);  // accept exactly one JSON value of any kind
 bool jsonv_feed(jsonv *v, const char *s, int n);
+// true if the machine stopped at a self-terminated value boundary (numbers)
+bool jsonv_value_end(const jsonv *v);
 // force-complete the object (token budget ran out); returns bytes written
 int  jsonv_close(jsonv *v, char *out, int cap);
+
+// ------------------------------------------------- schema-constrained output
+
+enum sn_kind { SN_ANY, SN_NULL, SN_BOOL, SN_NUM, SN_INT, SN_STR, SN_ENUM,
+               SN_OBJ, SN_ARR, SN_UNION };
+
+typedef struct snode snode;
+struct snode {
+    int     kind;
+    char  **lits; int n_lits;                       // enum literals (JSON text)
+    char  **keys; int *key_len; snode **props;      // object properties
+    bool   *req;  int n_props;                      //   (declared order)
+    snode  *items; int min_items, max_items;        // array
+    snode **alts; int n_alts;                       // type unions
+};
+
+struct jv;
+snode *schema_compile(struct jv *schema, char *err, int errcap);
+void   schema_free(snode *n);
+
+// streaming validator state (memcpy-copyable for token lookahead)
+typedef struct {
+    const snode *node;
+    uint8_t  phase, sub;
+    int16_t  idx, lit_pos;
+    uint64_t alive;
+} sframe;
+
+typedef struct {
+    sframe stack[48];
+    int    depth;
+    bool   done;
+    jsonv  any;      // generic submachine for open {} schema nodes
+} sval;
+
+void sval_init (sval *v, const snode *root);
+bool sval_feed (sval *v, const char *s, int n);
+int  sval_close(sval *v, char *out, int cap);
 
 // ---------------------------------------------------------------- templates
 
@@ -290,6 +331,8 @@ typedef struct {
     bool ignore_eos;
     bool hit_stop;         // last generate ended on a stop token / json done
     bool json_mode;        // constrain output to a single JSON object
+    const snode *schema;   // constrain output to a JSON schema (overrides json_mode)
+    sval  sv;
     jsonv jv;
     bool progress;         // print prompt progress to stderr
 } engine;
