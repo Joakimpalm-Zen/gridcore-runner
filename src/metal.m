@@ -12,7 +12,7 @@
 typedef struct {
     id<MTLDevice>       dev;
     id<MTLCommandQueue> queue;
-    id<MTLComputePipelineState> p_rmsnorm, p_rope, p_store, p_attn, p_silu, p_add;
+    id<MTLComputePipelineState> p_rmsnorm, p_qknorm, p_rope, p_store, p_attn, p_silu, p_add;
     id<MTLComputePipelineState> p_mv[32];       // indexed by ggml type
     id<MTLBuffer> weights;                      // wraps the model mmap (zero copy)
     bool          weights_copied;
@@ -21,6 +21,7 @@ typedef struct {
     id<MTLBuffer> inv_freq, out_norm, dummy;
     id<MTLBuffer> *attn_norm, *ffn_norm;        // per layer
     id<MTLBuffer> *bq, *bk, *bv, *bo;           // per layer, may be nil
+    id<MTLBuffer> *qn, *kn;                     // qwen3 per-head q/k norms
 } gpu_t;
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
@@ -93,6 +94,7 @@ bool gpu_init(model_t *m) {
     g->dev = dev;
     g->queue = [dev newCommandQueue];
     g->p_rmsnorm      = mk_pipeline(dev, lib, @"k_rmsnorm");
+    g->p_qknorm       = mk_pipeline(dev, lib, @"k_qknorm");
     g->p_rope         = mk_pipeline(dev, lib, @"k_rope");
     g->p_store        = mk_pipeline(dev, lib, @"k_store_kv");
     g->p_attn         = mk_pipeline(dev, lib, @"k_attn");
@@ -168,6 +170,8 @@ bool gpu_init(model_t *m) {
     g->bk = calloc(m->n_layer, sizeof(id));
     g->bv = calloc(m->n_layer, sizeof(id));
     g->bo = calloc(m->n_layer, sizeof(id));
+    g->qn = calloc(m->n_layer, sizeof(id));
+    g->kn = calloc(m->n_layer, sizeof(id));
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
         g->attn_norm[l] = f32_buf(dev, ly->attn_norm_w, m->n_embd);
@@ -176,6 +180,8 @@ bool gpu_init(model_t *m) {
         g->bk[l] = f32_buf(dev, ly->bk, kv_dim);
         g->bv[l] = f32_buf(dev, ly->bv, kv_dim);
         g->bo[l] = f32_buf(dev, ly->bo, m->n_embd);
+        g->qn[l] = f32_buf(dev, ly->qnorm_w, m->head_dim);
+        g->kn[l] = f32_buf(dev, ly->knorm_w, m->head_dim);
     }
 
     m->gpu = g;
@@ -220,6 +226,19 @@ static void enc_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
       threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 }
 
+static void enc_qknorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                       id<MTLBuffer> v, id<MTLBuffer> w, int n_heads) {
+    float eps = m->rms_eps;
+    int hd = m->head_dim;
+    [e setComputePipelineState:g->p_qknorm];
+    [e setBuffer:v offset:0 atIndex:0];
+    [e setBuffer:w offset:0 atIndex:1];
+    [e setBytes:&hd length:4 atIndex:2];
+    [e setBytes:&eps length:4 atIndex:3];
+    [e dispatchThreadgroups:MTLSizeMake(n_heads, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+}
+
 static void enc_rope(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
                      id<MTLBuffer> v, int n_heads, int pos) {
     rope_args a = { m->head_dim, n_heads, m->rope_dim / 2, pos,
@@ -253,15 +272,17 @@ void gpu_free(model_t *m) {
         [g->attn_norm[l] release]; [g->ffn_norm[l] release];
         [g->bq[l] release]; [g->bk[l] release];
         [g->bv[l] release]; [g->bo[l] release];
+        [g->qn[l] release]; [g->kn[l] release];
     }
     free(g->attn_norm); free(g->ffn_norm);
     free(g->bq); free(g->bk); free(g->bv); free(g->bo);
+    free(g->qn); free(g->kn);
     id<MTLBuffer> bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
                              g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                              g->logits, g->inv_freq, g->out_norm, g->dummy };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
     for (int i = 0; i < 32; i++) [g->p_mv[i] release];
-    [g->p_rmsnorm release]; [g->p_rope release]; [g->p_store release];
+    [g->p_rmsnorm release]; [g->p_qknorm release]; [g->p_rope release]; [g->p_store release];
     [g->p_attn release]; [g->p_silu release]; [g->p_add release];
     [g->queue release];
     [g->dev release];
@@ -292,6 +313,8 @@ float *gpu_forward(model_t *m, int token, int pos) {
         enc_mv(g, e, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->bq[l]);
         enc_mv(g, e, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->bk[l]);
         enc_mv(g, e, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->bv[l]);
+        if (g->qn[l]) enc_qknorm(g, e, m, g->q,  g->qn[l], m->n_head);
+        if (g->kn[l]) enc_qknorm(g, e, m, g->kt, g->kn[l], m->n_head_kv);
         enc_rope(g, e, m, g->q,  m->n_head,    pos);
         enc_rope(g, e, m, g->kt, m->n_head_kv, pos);
 
