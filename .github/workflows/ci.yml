@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: make
+      - name: make test model
+        run: python3 scripts/make-test-model.py test.gguf
+      - name: smoke test (completion)
+        run: ./runner -m test.gguf -p "hello" -n 8 --temp 0
+      - name: smoke test (json mode)
+        run: ./runner -m test.gguf -p "hi" -n 24 --temp 0 --json 2>/dev/null | python3 -c "import json,sys; json.load(sys.stdin); print('valid json')"
+      - name: smoke test (server)
+        run: |
+          ./runner -m test.gguf --serve --port 8123 --parallel 2 &
+          sleep 2
+          curl -sf http://127.0.0.1:8123/health
+          curl -sf http://127.0.0.1:8123/v1/models
+          curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
+            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
+          kill %1
+      - name: sanitizer build + run
+        run: |
+          make debug
+          ./runner-debug -m test.gguf -p "hello" -n 8 --temp 0
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+      - name: build
+        run: make
+      - name: make test model
+        run: python3 scripts/make-test-model.py test.gguf
+      - name: smoke test (completion)
+        run: ./runner.exe -m test.gguf -p "hello" -n 8 --temp 0
+      - name: smoke test (json mode)
+        run: ./runner.exe -m test.gguf -p "hi" -n 24 --temp 0 --json 2>/dev/null | python3 -c "import json,sys; json.load(sys.stdin); print('valid json')"
+      - name: smoke test (server)
+        run: |
+          ./runner.exe -m test.gguf --serve --port 8123 --parallel 2 &
+          sleep 3
+          curl -sf http://127.0.0.1:8123/health
+          curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
+            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
+          kill %1

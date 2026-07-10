@@ -1,11 +1,12 @@
 // runner — CLI: one-shot completion, interactive chat, and server launcher.
 #include "runner.h"
 
+#include "compat.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
@@ -16,13 +17,14 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 // resolve "-m name[:tag]" through the local Ollama model store
 // (~/.ollama/models or $OLLAMA_MODELS): manifests point at GGUF blobs
 static char *ollama_resolve(const char *arg) {
-    if (strstr(arg, ".gguf") || arg[0] == '/' || arg[0] == '.' || arg[0] == '~')
+    if (strstr(arg, ".gguf") || arg[0] == '/' || arg[0] == '.' || arg[0] == '~' ||
+        strchr(arg, '\\'))
         return NULL; // clearly a file path
     char base[1024];
     const char *env = getenv("OLLAMA_MODELS");
     if (env) snprintf(base, sizeof(base), "%s", env);
     else {
-        const char *home = getenv("HOME");
+        const char *home = plat_home();
         if (!home) return NULL;
         snprintf(base, sizeof(base), "%s/.ollama/models", home);
     }
@@ -59,7 +61,7 @@ static char *ollama_resolve(const char *arg) {
             return NULL;
     char *blob = malloc(2048);
     snprintf(blob, 2048, "%s/blobs/sha256-%s", base, hex);
-    if (access(blob, R_OK) == 0) {
+    if (plat_file_readable(blob)) {
         fprintf(stderr, "resolved ollama model %s -> %s\n", arg, blob);
         return blob;
     }
@@ -191,8 +193,8 @@ int main(int argc, char **argv) {
     if (smp.rng == 0) smp.rng = (uint64_t)time(NULL) ^ 0x9E3779B97F4A7C15ull;
 
     if (n_threads <= 0) {
-        long nc = sysconf(_SC_NPROCESSORS_ONLN);
-        n_threads = nc > 8 ? 8 : (int)nc;
+        int nc = plat_cpu_count();
+        n_threads = nc > 8 ? 8 : nc;
     }
     mp.verbose = verbose;
     mp.n_threads = serve ? 1 : n_threads; // server slots create their own pools

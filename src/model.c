@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 // ---------------------------------------------------------------- helpers
 
 static float *tensor_to_f32(gguf_tensor *t) {
@@ -285,7 +289,7 @@ static void mv_rows(void *ctx, int i0, int i1) {
         return;
     }
     // batched: dequantize each weight row once, reuse for every token
-    float buf[n_in]; // VLA; n_in <= n_ff
+    float *buf = type == T_F32 ? NULL : malloc(sizeof(float) * n_in);
     for (int r = i0; r < i1; r++) {
         const float *wrow;
         if (type == T_F32) {
@@ -302,6 +306,7 @@ static void mv_rows(void *ctx, int i0, int i1) {
             j->y[(size_t)b * j->y_stride + r] = s + b0;
         }
     }
+    free(buf);
 }
 
 // Y[b] = W X[b] (+ bias) for b in [0, n_batch)
