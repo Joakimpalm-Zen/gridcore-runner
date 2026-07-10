@@ -1,14 +1,14 @@
 # runner
 
-A tiny llama.cpp-style local LLM inference engine, written from scratch in plain C
+A compact local LLM inference engine, written from scratch in plain C
 (~4,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
-model files — the same files llama.cpp and Ollama use — and runs them on the CPU,
+model files — the de-facto format for local models — and runs them on the CPU,
 with a particular focus on squeezing **large contexts out of small models**.
 
 ```
 ./runner -m models/SmolLM2-135M-Instruct-Q8_0.gguf -i          # interactive chat
-./runner -m llama3.2:1b -p "Hello"                             # straight from your Ollama store
-./runner -m tinyllama.gguf -f big-document.txt -c 8192 -n 200  # 4x the training context
+./runner -m qwen2.5:0.5b -p "Hello"                            # straight from your Ollama store
+./runner -m model.gguf -f big-document.txt -c 8192 -n 200      # 4x the training context
 ./runner -m model.gguf --serve --parallel 2                    # OpenAI-compatible API server
 ./runner -m model.gguf -p "..." --json                         # guaranteed-valid JSON output
 ```
@@ -49,8 +49,8 @@ Three ways:
    curl -L -O "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf"
    ```
 
-Note: safetensors checkpoints must be converted to GGUF first (Ollama and
-llama.cpp both convert on import) — runner runs the converted GGUF.
+Note: safetensors checkpoints must be converted to GGUF first (tools like
+Ollama convert on import) — runner runs the converted GGUF.
 
 ## Large contexts on small models
 
@@ -208,7 +208,8 @@ reverse proxy if you need those).
 src/runner.h     shared types
 src/gguf.c       GGUF parser — mmaps the file, reads metadata KVs and tensor table
 src/quants.c     dequantization + fused dot-product kernels per quant format
-                 (bit-exact with ggml's block layouts), fp16 LUT, threadpool
+                 (bit-exact with the reference GGUF block layouts), fp16 LUT,
+                 threadpool
 src/tokenizer.c  SPM (score-based bigram merging) and BPE (rank-based merging,
                  GPT-2 byte↔unicode mapping), hash maps for vocab/merges
 src/model.c      weight wiring by tensor name, rope scaling setup, and the

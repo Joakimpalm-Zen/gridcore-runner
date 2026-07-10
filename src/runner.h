@@ -1,4 +1,4 @@
-// runner — a tiny llama.cpp-style GGUF inference engine (CPU only).
+// runner — a compact GGUF inference engine (CPU only).
 #ifndef RUNNER_H
 #define RUNNER_H
 
