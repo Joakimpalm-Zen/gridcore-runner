@@ -6,12 +6,13 @@ ifeq ($(OS),Windows_NT)
 # -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
 # shell (otherwise it dies at load with STATUS_DLL_NOT_FOUND on libwinpthread-1.dll)
 LDFLAGS += -lws2_32 -static
-GPU_SRC  = src/gpu_none.c
+GPU_SRC  = src/cuda.c
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
 else
-GPU_SRC  = src/gpu_none.c
+GPU_SRC  = src/cuda.c
+LDFLAGS += -ldl
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -27,4 +28,11 @@ debug: $(SRC) src/runner.h
 clean:
 	rm -f runner runner-debug
 
-.PHONY: clean debug
+# regenerate the committed PTX header (dev machines only: needs nvcc + a host
+# compiler). Normal builds and CI use the committed src/kernels_ptx.h.
+NVCC ?= nvcc
+ptx: src/kernels.cu
+	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
+	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
+
+.PHONY: clean debug ptx
