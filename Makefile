@@ -3,7 +3,9 @@ CC      ?= cc
 CFLAGS  ?= -O3 -ffast-math -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS  = -lm -lpthread
 ifeq ($(OS),Windows_NT)
-LDFLAGS += -lws2_32
+# -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
+# shell (otherwise it dies at load with STATUS_DLL_NOT_FOUND on libwinpthread-1.dll)
+LDFLAGS += -lws2_32 -static
 GPU_SRC  = src/gpu_none.c
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
