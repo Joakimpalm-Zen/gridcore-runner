@@ -1,9 +1,10 @@
 # runner
 
 A compact local LLM inference engine, written from scratch in plain C
-(~4,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
-model files — the de-facto format for local models — and runs them on the CPU,
-with a particular focus on squeezing **large contexts out of small models**.
+(~5,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
+model files — the de-facto format for local models — and runs them on CPU or
+GPU, with a particular focus on squeezing **large contexts out of small
+models**.
 
 ```
 ./runner -m models/SmolLM2-135M-Instruct-Q8_0.gguf -i          # interactive chat
@@ -25,15 +26,44 @@ make debug    # ASan/UBSan build for development
 Plain C with a small platform layer (`src/compat.c`) — no dependencies beyond
 libc and pthreads. CI builds and smoke-tests every push on:
 
-| Platform | Toolchain |
-|---|---|
-| Linux (x86_64) | gcc |
-| macOS (arm64) | Apple clang |
-| Windows (x86_64) | MinGW-w64 via MSYS2 (`pacman -S make mingw-w64-ucrt-x86_64-gcc`, then `make`) |
+| Platform | Toolchain | GPU |
+|---|---|---|
+| Linux (x86_64) | gcc | CPU only (CUDA/Vulkan planned) |
+| macOS (arm64) | Apple clang | Metal |
+| Windows (x86_64) | MinGW-w64 via MSYS2 (`pacman -S make mingw-w64-ucrt-x86_64-gcc`, then `make`) | CPU only (CUDA/Vulkan planned) |
 
 The fp16 kernels use ARM hardware half-floats when available and fall back to
 portable table lookups elsewhere. Little-endian hosts only (GGUF is
 little-endian; every mainstream x86/ARM/RISC-V system qualifies).
+
+## GPU
+
+On Apple Silicon the entire forward pass runs on the GPU through a Metal
+backend: model weights are wrapped **zero-copy** from the mmap (no extra
+RAM), the KV cache lives in unified memory shared with the CPU, and each
+generated token is a single GPU command buffer. `--gpu auto` (the default)
+uses it whenever the model's quant formats have kernels (F32, F16, Q8_0,
+Q4_0/1, Q5_0/1, Q4_K, Q5_K, Q6_K); anything else falls back to CPU with a
+message, as does any GPU runtime failure. GPU output is verified
+token-identical to the CPU path across every supported quant.
+
+Honest performance note: on unified-memory Macs, single-token generation is
+memory-bandwidth-bound, so the GPU gives modest speedups (~15–20% on a 1.1B)
+rather than multiples — its real value is freeing the CPU cores (useful with
+`--parallel` serving) and growing headroom on bigger GPUs. Batched prompt
+processing currently stays on the CPU. Other backends (CUDA, Vulkan)
+implement the same three-function interface (`src/gpu_none.c` documents it)
+but are not written yet — NVIDIA/AMD machines run the CPU path today.
+
+## Machine capability report
+
+`runner --caps` prints what a scheduler needs to place work on a node:
+
+```json
+{"os":"macos","arch":"arm64","cpu_cores":8,"ram_bytes":8589934592,
+ "gpu":{"backend":"metal","name":"Apple M1","unified_memory":true},
+ "quants":[...],"gpu_quants":[...]}
+```
 
 ## Get a model
 
@@ -171,6 +201,8 @@ runner -m model [options]
   --chat-template chatml|llama2|llama3|zephyr|raw   (default: auto-detect)
   --no-bos       don't prepend BOS
   --ignore-eos   keep generating past end-of-text tokens
+  --gpu auto|off GPU offload if a backend is available (default auto)
+  --caps         print machine capabilities as JSON and exit
   -v             print model hyperparameters and memory use
 ```
 
@@ -190,6 +222,7 @@ metadata and vocabulary.
 | Transformer | RMSNorm, RoPE (adjacent-pair and NeoX), grouped-query attention, SwiGLU, tied embeddings |
 | Sampling | temperature, top-k, top-p, repeat penalty, greedy; JSON-constrained decoding |
 | Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots |
+| GPU | Metal (Apple Silicon): full forward pass, zero-copy weights, CPU-identical output |
 | Threading | persistent pthread pool; matmul rows and attention heads run in parallel |
 
 Verified end-to-end with: SmolLM2-135M (Q8_0, Q4_K_M, Q3_K_M/IQ4_NL),
@@ -197,7 +230,8 @@ TinyLlama-1.1B (Q4_K_M, Q2_K), Qwen2.5-0.5B-Instruct (Q4_K_M), including a
 needle-retrieval test at 2x and 4x training context and a 3,600-token
 needle test on Qwen2.5.
 
-Not implemented (by design, to stay small): GPU offload, MoE and hybrid-SSM
+Not implemented (by design, to stay small): CUDA/Vulkan backends (Metal
+only so far), MoE and hybrid-SSM
 architectures (Mamba/Jamba/Qwen3.5-style), IQ2/IQ3 codebook quants, full GBNF
 grammar sampling (JSON mode only), TLS/auth on the server (bind it behind a
 reverse proxy if you need those).
@@ -221,7 +255,9 @@ src/template.c   chat template detection/rendering
 src/engine.c     prompt feeding + generation loop shared by CLI and server
 src/json.c       minimal JSON parser/escaper for the HTTP API
 src/server.c     HTTP server, OpenAI-compatible routes, parallel slots
-src/main.c       CLI and Ollama store resolution
+src/metal.m      Metal GPU backend (kernels.metal: the forward pass in MSL)
+src/compat.c     platform layer (mmap, clocks, cpu/ram detection)
+src/main.c       CLI, Ollama store resolution, --caps
 ```
 
 Weights stay quantized in the mmap'd file; matmuls dequantize on the fly, so

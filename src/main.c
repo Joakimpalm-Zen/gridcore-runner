@@ -118,6 +118,8 @@ static void usage(const char *prog) {
         "  --chat-template chatml|llama2|llama3|zephyr|raw  (default: auto)\n"
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
+        "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
+        "  --caps         print machine capabilities as JSON and exit\n"
         "  -v             verbose model info\n",
         prog);
 }
@@ -135,7 +137,7 @@ int main(int argc, char **argv) {
     int n_predict = 256, n_threads = 0, tmpl = -1;
     int port = 8080, parallel = 1;
     bool interactive = false, verbose = false, no_bos = false;
-    bool ignore_eos = false, json_mode = false, serve = false;
+    bool ignore_eos = false, json_mode = false, serve = false, caps = false;
     model_params mp = {0};
     sampler smp = { .temp = 0.8f, .top_p = 0.95f, .repeat_penalty = 1.1f,
                     .top_k = 40, .rng = 0 };
@@ -167,8 +169,41 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--chat-template")) tmpl_arg = NEXT;
         else if (!strcmp(a, "--no-bos")) no_bos = true;
         else if (!strcmp(a, "--ignore-eos")) ignore_eos = true;
+        else if (!strcmp(a, "--gpu")) mp.gpu_mode = strcmp(NEXT, "off") ? GPU_AUTO : GPU_OFF;
+        else if (!strcmp(a, "--caps")) caps = true;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(argv[0]); return 1; }
+    }
+    if (caps) {
+        char gname[128];
+        bool has_gpu = gpu_available(gname, sizeof(gname));
+        printf("{\"os\":\"%s\",\"arch\":\"%s\",\"cpu_cores\":%d,"
+               "\"ram_bytes\":%llu,\"gpu\":",
+#if defined(_WIN32)
+               "windows",
+#elif defined(__APPLE__)
+               "macos",
+#else
+               "linux",
+#endif
+#if defined(__aarch64__) || defined(__arm64__)
+               "arm64",
+#elif defined(__x86_64__) || defined(_M_X64)
+               "x86_64",
+#else
+               "other",
+#endif
+               plat_cpu_count(), (unsigned long long)plat_ram_bytes());
+        if (has_gpu)
+            printf("{\"backend\":\"metal\",\"name\":\"%s\",\"unified_memory\":true}",
+                   gname);
+        else
+            printf("null");
+        printf(",\"quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
+               "\"Q5_0\",\"Q5_1\",\"Q2_K\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
+               "\"IQ4_NL\",\"IQ4_XS\"],"
+               "\"gpu_quants\":[\"F32\",\"F16\",\"Q8_0\",\"Q4_0\",\"Q4_1\",\"Q5_0\",\"Q5_1\",\"Q4_K\",\"Q5_K\",\"Q6_K\"]}\n");
+        return 0;
     }
     if (!model_path) { usage(argv[0]); return 1; }
     if (prompt_file) {

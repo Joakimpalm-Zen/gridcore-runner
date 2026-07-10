@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 // map a regular file read-only; returns NULL on failure (missing, empty,
 // directory, ...). The mapping outlives any internal handles.
@@ -12,6 +13,7 @@ void  *plat_mmap_ro(const char *path, size_t *size);
 void   plat_munmap(void *p, size_t size);
 
 int         plat_cpu_count(void);
+uint64_t    plat_ram_bytes(void);
 bool        plat_file_readable(const char *path);
 const char *plat_home(void);       // $HOME or %USERPROFILE%
 double      plat_now(void);        // monotonic seconds

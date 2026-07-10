@@ -234,6 +234,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->tp = tpool_create(p->n_threads > 0 ? p->n_threads : 1);
     rope_setup(m, g, arch, p->rope_base, p->rope_scale);
 
+    if (p->gpu_mode == GPU_AUTO) gpu_init(m); // sets m->gpu on success
+
     if (p->verbose) {
         fprintf(stderr, "%-24s %s\n", "architecture", m->arch);
         fprintf(stderr, "%-24s %d\n", "layers", m->n_layer);
@@ -376,6 +378,11 @@ static void attn_heads(void *ctx, int h0, int h1) {
 
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
+    if (m->gpu && n == 1 && want_logits) {
+        float *lg = gpu_forward(m, tokens[0], pos);
+        if (lg) return lg;
+        m->gpu = NULL; // GPU failed at runtime: fall back to CPU permanently
+    }
     int n_embd = m->n_embd;
     int q_dim  = m->n_head * m->head_dim;
     int kv_dim = m->n_head_kv * m->head_dim;
