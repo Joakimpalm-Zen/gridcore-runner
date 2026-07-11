@@ -126,8 +126,9 @@ typedef struct {
     CUdeviceptr weights;
     CUdeviceptr kc, vc;
     CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
-    CUdeviceptr inv_freq, out_norm, dummy;
+    CUdeviceptr inv_freq, inv_freq_local, out_norm, dummy;
     CUdeviceptr *attn_norm, *ffn_norm;  // per layer
+    CUdeviceptr *pan, *pfn;             // gemma3 sandwich norms, may be 0
     CUdeviceptr *bq, *bk, *bv, *bo;     // per layer, may be 0
     CUdeviceptr *qn, *kn;               // qwen3 per-head q/k norms
     float       *h_x, *h_logits;        // host staging
@@ -140,7 +141,7 @@ typedef struct {
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int qs, os; } attn_args;
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int qs, os, window; } attn_args;
 
 bool gpu_available(char *name, int cap) {
     if (!cu_load()) return false;
@@ -194,11 +195,6 @@ static CUdeviceptr f32_dbuf(const float *src, size_t n) {
 }
 
 bool gpu_init(model_t *m) {
-    if (m->swa_window > 0 || m->embd_scale != 1.0f) {
-        fprintf(stderr, "gpu: '%s' (sliding-window attention) is not on the cuda backend yet — using CPU\n",
-                m->arch);
-        return false;
-    }
     // every weight matmul must have a kernel for its quant type
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
@@ -282,6 +278,7 @@ bool gpu_init(model_t *m) {
         CK(cu.MemAlloc(&g->dummy,  4));
 
         g->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
+        g->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim / 2);
         g->out_norm = f32_dbuf(m->out_norm_w, m->n_embd);
         g->attn_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
         g->ffn_norm  = calloc(m->n_layer, sizeof(CUdeviceptr));
@@ -291,6 +288,8 @@ bool gpu_init(model_t *m) {
         g->bo = calloc(m->n_layer, sizeof(CUdeviceptr));
         g->qn = calloc(m->n_layer, sizeof(CUdeviceptr));
         g->kn = calloc(m->n_layer, sizeof(CUdeviceptr));
+        g->pan = calloc(m->n_layer, sizeof(CUdeviceptr));
+        g->pfn = calloc(m->n_layer, sizeof(CUdeviceptr));
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
             g->attn_norm[l] = f32_dbuf(ly->attn_norm_w, m->n_embd);
@@ -301,6 +300,8 @@ bool gpu_init(model_t *m) {
             g->bo[l] = f32_dbuf(ly->bo, m->n_embd);
             g->qn[l] = f32_dbuf(ly->qnorm_w, m->head_dim);
             g->kn[l] = f32_dbuf(ly->knorm_w, m->head_dim);
+            g->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
+            g->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
         }
 
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
@@ -364,10 +365,12 @@ static bool enc_qknorm(gpu_t *g, model_t *m, CUdeviceptr v, CUdeviceptr w,
 }
 
 static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads, int pos,
-                     int batch, int vs) {
+                     int batch, int vs, bool local) {
+    // sliding-window layers rope at their own base with no YaRN scale
     rope_args a = { m->head_dim, n_heads, m->rope_dim / 2, pos,
-                    m->rope_neox, m->rope_mscale };
-    void *p[] = { &v, &g->inv_freq, &a, &vs };
+                    m->rope_neox, local ? 1.0f : m->rope_mscale };
+    CUdeviceptr fr = local ? g->inv_freq_local : g->inv_freq;
+    void *p[] = { &v, &fr, &a, &vs };
     return launch(g->f_rope, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
 }
 
@@ -388,16 +391,19 @@ void gpu_free(model_t *m) {
     cu.CtxSetCurrent(g->ctx);
     for (int l = 0; l < m->n_layer; l++) {
         CUdeviceptr bufs[] = { g->attn_norm[l], g->ffn_norm[l], g->bq[l],
-                               g->bk[l], g->bv[l], g->bo[l], g->qn[l], g->kn[l] };
+                               g->bk[l], g->bv[l], g->bo[l], g->qn[l], g->kn[l],
+                               g->pan[l], g->pfn[l] };
         for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
             if (bufs[i]) cu.MemFree(bufs[i]);
     }
     free(g->attn_norm); free(g->ffn_norm);
     free(g->bq); free(g->bk); free(g->bv); free(g->bo);
     free(g->qn); free(g->kn);
+    free(g->pan); free(g->pfn);
     CUdeviceptr bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
                            g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
-                           g->logits, g->inv_freq, g->out_norm, g->dummy };
+                           g->logits, g->inv_freq, g->inv_freq_local,
+                           g->out_norm, g->dummy };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
     if (g->mod) cu.ModuleUnload(g->mod);
@@ -452,15 +458,20 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
 
     // token embeddings on CPU (one row each), then a single HtoD
     size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
-    for (int b = 0; b < tn; b++)
+    for (int b = 0; b < tn; b++) {
+        float *hx = g->h_x + (size_t)b * n_embd;
         dequant_row(m->tok_embd->type,
                     (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
-                    g->h_x + (size_t)b * n_embd, n_embd);
+                    hx, n_embd);
+        if (m->embd_scale != 1.0f)
+            for (int i = 0; i < n_embd; i++) hx[i] *= m->embd_scale;
+    }
     if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * n_embd) != 0) return false;
 
     bool ok = true;
     for (int l = 0; l < m->n_layer && ok; l++) {
         layer_t *ly = &m->layers[l];
+        bool local = model_layer_is_local(l, m->swa_window, m->swa_pattern);
 
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->attn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
@@ -469,8 +480,8 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->bv[l], tn, xdim, kv_dim);
         if (g->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->qn[l], m->n_head,    tn, q_dim);
         if (g->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->kn[l], m->n_head_kv, tn, kv_dim);
-        ok = ok && enc_rope(g, m, g->q,  m->n_head,    pos, tn, q_dim);
-        ok = ok && enc_rope(g, m, g->kt, m->n_head_kv, pos, tn, kv_dim);
+        ok = ok && enc_rope(g, m, g->q,  m->n_head,    pos, tn, q_dim, local);
+        ok = ok && enc_rope(g, m, g->kt, m->n_head_kv, pos, tn, kv_dim, local);
 
         {
             // cache rows for consecutive positions are contiguous, so the
@@ -483,12 +494,16 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         {
             attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, pos,
                              (uint64_t)l * m->n_ctx * kv_dim,
-                             1.0f / sqrtf((float)m->head_dim), q_dim, xdim };
+                             1.0f / sqrtf((float)m->head_dim), q_dim, xdim,
+                             local ? m->swa_window : 0 };
             void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa };
             ok = ok && launch(g->f_attn, m->n_head, tn, 1, 128, pa);
         }
 
         ok = ok && enc_mv(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->bo[l], tn, xdim, xdim);
+        if (g->pan[l])
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->pan[l], n_embd, m->rms_eps,
+                                   tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
 
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->ffn_norm[l], n_embd, m->rms_eps,
@@ -497,6 +512,9 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         ok = ok && enc_mv(g, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
         ok = ok && enc_silu(g, g->hb, g->hb2, tn * m->n_ff);
         ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
+        if (g->pfn[l])
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->pfn[l], n_embd, m->rms_eps,
+                                   tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
     }
 
