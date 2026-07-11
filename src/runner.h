@@ -127,6 +127,8 @@ static inline size_t ggml_row_size(int type, int64_t n) {
 void  dequant_row(int type, const void *src, float *dst, int n);
 // dot(row, x) over n elements
 float vec_dot(int type, const void *row, const float *x, int n);
+void  q8_quant_row(const float *x, void *dst, int n); // n % 32 == 0
+void  q8_accum_row(const void *src, float a, float *out, int n);
 
 // ---------------------------------------------------------------- threadpool
 
@@ -219,7 +221,9 @@ typedef struct {
     // runtime state
     tpool *tp;               // worker pool used by this instance
     int    n_ctx, n_batch;
-    f16_t *kcache, *vcache;  // [n_layer][n_ctx][kv_dim], fp16 to halve memory
+    f16_t *kcache, *vcache;  // [n_layer][n_ctx][kv_dim], fp16 (or q8_0 blocks
+                             // when kv_q8 — treated as raw bytes then)
+    bool   kv_q8;            // KV rows stored as q8_0 blocks (CPU path only)
     float *x, *xb, *xb2, *q, *hb, *hb2;   // [n_batch][dim] activations
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
     float *att, *logits;
@@ -260,6 +264,7 @@ typedef struct {
     // grow their context into the reserved room, capped at the train ctx.
     int   reserve_vram_pct;
     int   reserve_ram_pct;
+    bool  kv_q8;       // store the KV cache as q8_0 (CPU only, needs --gpu off)
 } model_params;
 
 bool   model_load(model_t *m, const char *path, const model_params *p);
@@ -378,6 +383,16 @@ static inline bool model_is_swa(const model_t *m, int l) {
 static inline float model_attn_scale(const model_t *m, int l) {
     return m->attn_scale > 0 ? m->attn_scale
                              : 1.0f / sqrtf((float)model_head_dim(m, l));
+}
+// bytes per cached KV row / per layer start, honoring the storage format.
+// q8_0 packs each 32 values into a 34-byte block; kv_dim is always a
+// multiple of 32 when kv_q8 is enabled (checked at load)
+static inline size_t model_kv_row_bytes(const model_t *m, int l) {
+    int d = model_kv_dim(m, l);
+    return m->kv_q8 ? (size_t)(d / 32) * 34 : (size_t)d * sizeof(f16_t);
+}
+static inline size_t model_kv_byte_off(const model_t *m, int l) {
+    return m->kv_q8 ? m->kv_off[l] / 32 * 34 : m->kv_off[l] * sizeof(f16_t);
 }
 
 typedef struct { const char *role, *content; } chat_msg;

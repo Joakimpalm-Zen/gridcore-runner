@@ -74,6 +74,7 @@ static void usage(const char *prog) {
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
+        "  --kv f16|q8    KV cache storage; q8 halves it again (needs --gpu off)\n"
         "  --caps         print machine capabilities as JSON and exit\n"
         "  -v             verbose model info\n",
         prog);
@@ -152,6 +153,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-bos")) no_bos = true;
         else if (!strcmp(a, "--ignore-eos")) ignore_eos = true;
         else if (!strcmp(a, "--gpu")) mp.gpu_mode = strcmp(NEXT, "off") ? GPU_AUTO : GPU_OFF;
+        else if (!strcmp(a, "--kv"))  mp.kv_q8 = strcmp(NEXT, "q8") == 0;
         else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = atoi(NEXT);
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = atoi(NEXT);
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = atoi(NEXT);

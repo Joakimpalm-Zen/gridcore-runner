@@ -1,6 +1,7 @@
 // Quantization block formats (ggml-compatible), dot kernels, threadpool.
 #include "runner.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -329,6 +330,33 @@ void dequant_row(int type, const void *src, float *dst, int n) {
     size_t ts = ggml_type_size(type);
     const uint8_t *p = src;
     for (int i = 0; i < n; i += bs, p += ts) dequant_block(type, p, dst + i);
+}
+
+// ------------------------------------------------------------- q8 KV cache
+
+// quantize a row of floats into q8_0 blocks (n must be a multiple of 32)
+void q8_quant_row(const float *x, void *dst, int n) {
+    block_q8_0 *b = dst;
+    for (int i = 0; i < n / QK; i++, b++, x += QK) {
+        float amax = 0;
+        for (int j = 0; j < QK; j++) {
+            float a = fabsf(x[j]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 127.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        b->d = f32_to_f16(d);
+        for (int j = 0; j < QK; j++) b->qs[j] = (int8_t)roundf(x[j] * id);
+    }
+}
+
+// out[i] += a * dequant(row)[i] — the V accumulation in q8 attention
+void q8_accum_row(const void *src, float a, float *out, int n) {
+    const block_q8_0 *b = src;
+    for (int i = 0; i < n / QK; i++, b++, out += QK) {
+        float ad = a * f16_to_f32(b->d);
+        for (int j = 0; j < QK; j++) out[j] += ad * b->qs[j];
+    }
 }
 
 // ---------------------------------------------------------------- vec_dot
