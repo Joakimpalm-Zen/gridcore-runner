@@ -406,9 +406,10 @@ static void attn_heads(void *ctx, int h0, int h1) {
 
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
-    if (m->gpu && n == 1 && want_logits) {
-        float *lg = gpu_forward(m, tokens[0], pos);
-        if (lg) return lg;
+    if (m->gpu) {
+        float *lg = NULL;
+        if (gpu_forward_batch(m, tokens, n, pos, want_logits, &lg))
+            return lg;
         m->gpu = NULL; // GPU failed at runtime: fall back to CPU permanently
     }
     int n_embd = m->n_embd;

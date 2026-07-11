@@ -290,6 +290,19 @@ void gpu_free(model_t *m) {
     m->gpu = NULL;
 }
 
+bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
+                       bool want_logits, float **logits) {
+    // Unified memory makes the per-token loop cheap here; a natively batched
+    // encoder (one command buffer for the whole batch) is a later optimization.
+    float *lg = NULL;
+    for (int b = 0; b < n; b++) {
+        lg = gpu_forward(m, tokens[b], pos + b);
+        if (!lg) return false;
+    }
+    if (logits) *logits = want_logits ? lg : NULL;
+    return true;
+}
+
 float *gpu_forward(model_t *m, int token, int pos) {
     gpu_t *g = m->gpu;
     int n_embd = m->n_embd;
