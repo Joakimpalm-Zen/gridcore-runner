@@ -189,7 +189,7 @@ Two levels of guarantee:
   valid JSON object.
 - **Schema-conformant**: `--json-schema file.json` on the CLI, or OpenAI-style
   `"response_format": {"type": "json_schema", "json_schema": {"schema":
-  {...}}}` (an Ollama-style top-level `"format": {...}` schema object is also
+  {...}}}` (a top-level `"format": {...}` schema object is also
   accepted). The schema is compiled into a streaming validator that drives
   sampling, so output *conforms*: object properties are emitted **in declared
   order** (required ones always present, optional ones skippable, no unknown
@@ -240,7 +240,7 @@ Rules of thumb, in order of impact:
 ```
 runner -m model [options]
 
-  -m PATH|NAME   GGUF file, or an Ollama model name (e.g. llama3.2:1b)
+  -m PATH        GGUF model file
   -p TEXT        prompt (one-shot completion; \n etc. are unescaped)
   -f FILE        read prompt from file (appended after -p text)
   -i             interactive chat mode
@@ -281,9 +281,9 @@ metadata and vocabulary.
 
 | Area | Support |
 |---|---|
-| File format | GGUF v2/v3, memory-mapped (weights are never copied); Ollama store resolution |
+| File format | GGUF v2/v3, memory-mapped (weights are never copied) |
 | Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases) |
-| Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every quant Ollama's library commonly serves |
+| Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
 | Tokenizers | SentencePiece (llama) with byte fallback; byte-level BPE (gpt2) with merges, special-token parsing |
 | Transformer | RMSNorm, RoPE (adjacent-pair and NeoX), grouped-query attention, SwiGLU, tied embeddings |
@@ -326,7 +326,7 @@ src/json.c       minimal JSON parser/escaper for the HTTP API
 src/server.c     HTTP server, OpenAI-compatible routes, parallel slots
 src/metal.m      Metal GPU backend (kernels.metal: the forward pass in MSL)
 src/compat.c     platform layer (mmap, clocks, cpu/ram detection)
-src/main.c       CLI, Ollama store resolution, --caps
+src/main.c       CLI, --caps
 ```
 
 Weights stay quantized in the mmap'd file; matmuls dequantize on the fly, so
