@@ -361,8 +361,10 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         return;
     }
 
-    engine_reset(e);
-    float *logits = engine_feed(e, toks, n_prompt);
+    // reuse the KV for whatever prefix this prompt shares with the last one —
+    // pipeline callers repeat long system/template prefixes verbatim
+    int keep = engine_rewind(e, toks, n_prompt);
+    float *logits = engine_feed(e, toks + keep, n_prompt - keep);
     free(toks);
     if (!logits) {
         e->schema = NULL;
@@ -423,8 +425,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         send_response(fd, 200, "application/json", r.s, r.n);
         free(r.s);
     }
-    fprintf(stderr, "[slot %d] %s: %d prompt + %d gen tok (%.1f tok/s)%s%s\n",
-            s->id, g.id, n_prompt, n_gen,
+    fprintf(stderr, "[slot %d] %s: %d prompt (%d cached) + %d gen tok (%.1f tok/s)%s%s\n",
+            s->id, g.id, n_prompt, keep, n_gen,
             n_gen / (gtime > 0 ? gtime : 1e-9),
             schema ? " [schema]" : e->json_mode ? " [json]" : "",
             g.dead ? " [client gone]" : "");
