@@ -422,6 +422,72 @@ void dequant_row(int type, const void *src, float *dst, int n) {
     for (int i = 0; i < n; i += bs, p += ts) dequant_block(type, p, dst + i);
 }
 
+// ------------------------------------------------------------- batched dots
+
+// out[b] = dot(w, x + b*x_stride) for nb activation columns sharing one
+// dequantized weight row — the inner loop of batched prompt eval. Register
+// blocking (4 columns per pass) reuses each weight load four times.
+void vec_dot_f32_multi(const float *w, const float *x, int x_stride,
+                       int nb, int n, float *out) {
+#if defined(__AVX2__) && defined(__FMA__) && defined(__F16C__)
+    int b = 0;
+    for (; b + 4 <= nb; b += 4) {
+        const float *x0 = x + (size_t)b * x_stride;
+        const float *x1 = x0 + x_stride, *x2 = x1 + x_stride, *x3 = x2 + x_stride;
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m256 wv = _mm256_loadu_ps(w + i);
+            a0 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x0 + i), a0);
+            a1 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x1 + i), a1);
+            a2 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x2 + i), a2);
+            a3 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x3 + i), a3);
+        }
+        float s0, s1, s2, s3;
+        {
+            __m128 l0 = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0, 1));
+            __m128 l1 = _mm_add_ps(_mm256_castps256_ps128(a1), _mm256_extractf128_ps(a1, 1));
+            __m128 l2 = _mm_add_ps(_mm256_castps256_ps128(a2), _mm256_extractf128_ps(a2, 1));
+            __m128 l3 = _mm_add_ps(_mm256_castps256_ps128(a3), _mm256_extractf128_ps(a3, 1));
+            l0 = _mm_add_ps(l0, _mm_movehl_ps(l0, l0)); l0 = _mm_add_ss(l0, _mm_shuffle_ps(l0, l0, 1));
+            l1 = _mm_add_ps(l1, _mm_movehl_ps(l1, l1)); l1 = _mm_add_ss(l1, _mm_shuffle_ps(l1, l1, 1));
+            l2 = _mm_add_ps(l2, _mm_movehl_ps(l2, l2)); l2 = _mm_add_ss(l2, _mm_shuffle_ps(l2, l2, 1));
+            l3 = _mm_add_ps(l3, _mm_movehl_ps(l3, l3)); l3 = _mm_add_ss(l3, _mm_shuffle_ps(l3, l3, 1));
+            s0 = _mm_cvtss_f32(l0); s1 = _mm_cvtss_f32(l1);
+            s2 = _mm_cvtss_f32(l2); s3 = _mm_cvtss_f32(l3);
+        }
+        for (; i < n; i++) {
+            float wv = w[i];
+            s0 += wv * x0[i]; s1 += wv * x1[i];
+            s2 += wv * x2[i]; s3 += wv * x3[i];
+        }
+        out[b] = s0; out[b + 1] = s1; out[b + 2] = s2; out[b + 3] = s3;
+    }
+    for (; b < nb; b++) {
+        const float *xb = x + (size_t)b * x_stride;
+        __m256 acc = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 8 <= n; i += 8)
+            acc = _mm256_fmadd_ps(_mm256_loadu_ps(w + i),
+                                  _mm256_loadu_ps(xb + i), acc);
+        __m128 l = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+        l = _mm_add_ps(l, _mm_movehl_ps(l, l));
+        l = _mm_add_ss(l, _mm_shuffle_ps(l, l, 1));
+        float s = _mm_cvtss_f32(l);
+        for (; i < n; i++) s += w[i] * xb[i];
+        out[b] = s;
+    }
+#else
+    for (int b = 0; b < nb; b++) {
+        const float *xb = x + (size_t)b * x_stride;
+        float s = 0;
+        for (int i = 0; i < n; i++) s += w[i] * xb[i];
+        out[b] = s;
+    }
+#endif
+}
+
 // ------------------------------------------------------------- q8 KV cache
 
 // quantize a row of floats into q8_0 blocks (n must be a multiple of 32)
