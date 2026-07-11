@@ -646,6 +646,15 @@ extern "C" __global__ void k_silu_mul(float *g, const float *u, int n) {
     }
 }
 
+extern "C" __global__ void k_gelu_mul(float *g, const float *u, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float x = g[i];
+        float t = tanhf(0.7978845608f * (x + 0.044715f * x * x * x));
+        g[i] = 0.5f * x * (1.0f + t) * u[i];
+    }
+}
+
 extern "C" __global__ void k_add(float *x, const float *d, int n, int xs, int ds) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[(ulong64)blockIdx.y * xs + i] += d[(ulong64)blockIdx.y * ds + i];

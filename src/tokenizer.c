@@ -113,6 +113,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     const char *model = gguf_get_str(g, "tokenizer.ggml.model", "llama");
     if (strcmp(model, "llama") == 0) t->model = TOK_SPM;
     else if (strcmp(model, "gpt2") == 0) t->model = TOK_BPE;
+    else if (strcmp(model, "gemma4") == 0) t->model = TOK_BPE_SPM;
     else {
         fprintf(stderr, "error: unsupported tokenizer model '%s'\n", model);
         return false;
@@ -158,8 +159,8 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     }
     sort_specials(t);
 
-    if (t->model == TOK_BPE) {
-        // GPT-2 byte <-> unicode mapping
+    if (t->model == TOK_BPE || t->model == TOK_BPE_SPM) {
+        // GPT-2 byte <-> unicode mapping (unused by BPE_SPM, harmless)
         for (int i = 0; i < 512; i++) t->u2b[i] = -1;
         int n = 0;
         for (int b = 0; b < 256; b++) {
@@ -387,6 +388,30 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
     return n_out;
 }
 
+// gemma4: SPM-style BPE — the normalizer replaces spaces with U+2581 and BPE
+// merges run over raw UTF-8 with no byte-encoding; only newline runs split
+// pre-tokens (merge keys never contain newlines)
+static int bpe_spm_encode_text(tokenizer *t, const char *text, size_t n,
+                               int32_t *out, int cap, int n_out) {
+    if (n == 0) return n_out;
+    char *buf = malloc(n * 3 + 4);
+    size_t m = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (text[i] == ' ') { memcpy(buf + m, "\xE2\x96\x81", 3); m += 3; }
+        else buf[m++] = text[i];
+    }
+    size_t i = 0;
+    while (i < m) {
+        bool nl = buf[i] == '\n';
+        size_t j = i;
+        while (j < m && (buf[j] == '\n') == nl) j++;
+        n_out = bpe_word(t, buf + i, (int)(j - i), out, cap, n_out);
+        i = j;
+    }
+    free(buf);
+    return n_out;
+}
+
 // ---------------------------------------------------------------- public api
 
 int tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
@@ -413,6 +438,8 @@ int tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
             if (i > seg) {
                 n_out = t->model == TOK_SPM
                     ? spm_encode_text(t, text + seg, i - seg, out, cap, n_out, first)
+                    : t->model == TOK_BPE_SPM
+                    ? bpe_spm_encode_text(t, text + seg, i - seg, out, cap, n_out)
                     : bpe_encode_text(t, text + seg, i - seg, out, cap, n_out);
                 first = false;
             }
@@ -427,6 +454,8 @@ int tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
     if (n > seg) {
         n_out = t->model == TOK_SPM
             ? spm_encode_text(t, text + seg, n - seg, out, cap, n_out, first)
+            : t->model == TOK_BPE_SPM
+            ? bpe_spm_encode_text(t, text + seg, n - seg, out, cap, n_out)
             : bpe_encode_text(t, text + seg, n - seg, out, cap, n_out);
     }
     return n_out;
@@ -453,7 +482,7 @@ int tok_decode(tokenizer *t, int id, char *buf, int cap) {
     if (tt == TT_CONTROL || tt == TT_UNUSED) return 0;
     gg_str *tok = &t->tokens[id];
 
-    if (t->model == TOK_SPM) {
+    if (t->model == TOK_SPM || t->model == TOK_BPE_SPM) {
         if (tt == TT_BYTE) {
             // "<0xXX>"
             if (tok->n == 6 && cap >= 1) {

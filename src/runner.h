@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <math.h>
 
 // ---------------------------------------------------------------- fp16/bf16
 
@@ -137,7 +138,7 @@ void   tpool_destroy(tpool *tp);
 
 // ---------------------------------------------------------------- tokenizer
 
-enum { TOK_SPM, TOK_BPE };
+enum { TOK_SPM, TOK_BPE, TOK_BPE_SPM }; // BPE_SPM: gemma4 (spaces to U+2581, raw-UTF-8 BPE)
 
 typedef struct { const char *key; uint32_t klen; int32_t val; } hmap_ent;
 typedef struct { hmap_ent *e; size_t cap; } hmap;
@@ -179,8 +180,9 @@ typedef struct {
     float       *bq, *bk, *bv, *bo;      // optional biases (f32, converted)
     gguf_tensor *ffn_norm, *w_gate, *w_up, *w_down;
     float       *attn_norm_w, *ffn_norm_w; // norm weights as f32
-    float       *qnorm_w, *knorm_w;      // per-head Q/K norms (qwen3, gemma3)
-    float       *post_attn_norm_w, *post_ffn_norm_w; // gemma3 sandwich norms
+    float       *qnorm_w, *knorm_w;      // per-head Q/K norms (qwen3, gemma3/4)
+    float       *post_attn_norm_w, *post_ffn_norm_w; // gemma sandwich norms
+    float        out_scale;              // whole-layer output scalar (gemma4; 1.0 = off)
 } layer_t;
 
 typedef struct {
@@ -193,13 +195,24 @@ typedef struct {
     float     rope_mscale;   // YaRN attention magnitude scale (1.0 = off)
     float     embd_scale;    // token embedding multiplier (gemma: sqrt(n_embd))
     int       swa_window;    // sliding-window size for local layers (0 = none)
-    int       swa_pattern;   // every Nth layer is global (gemma3: 6)
+    // per-layer geometry overrides (NULL = uniform, use the scalars above);
+    // heterogeneous archs (gemma4) vary kv heads / head dim / rope dim per layer
+    int      *l_head_kv;     // [n_layer] kv heads per layer
+    int      *l_head_dim;    // [n_layer] head dim per layer (K == V required)
+    int      *l_rope_dim;    // [n_layer] rotated dims per layer
+    bool     *l_is_swa;      // [n_layer] sliding-window layer flags
+    size_t   *kv_off;        // [n_layer+1] element offsets into kcache/vcache
+    float     attn_scale;    // 0 = default 1/sqrt(head_dim(l)), else fixed
+    int       ffn_act;       // ACT_SILU (default) or ACT_GELU (gemma)
+    bool      v_rmsnorm;     // weightless per-head RMS norm on V (gemma4)
+    float     logit_softcap; // final logits = c*tanh(x/c) when > 0
     gguf_tensor *tok_embd;
     gguf_tensor *output;     // may equal tok_embd (tied)
     float       *out_norm_w;
     layer_t     *layers;
     float       *rope_inv_freq; // [rope_dim/2], scaling factors folded in
-    float       *rope_inv_freq_local; // sliding-window layers (gemma3), unscaled
+    float       *rope_inv_freq_local; // sliding-window layers, own base, unscaled
+    int          rope_dim_local;      // rotated dims on sliding layers
     // runtime state
     tpool *tp;               // worker pool used by this instance
     int    n_ctx, n_batch;
@@ -332,9 +345,31 @@ int  sval_close(sval *v, char *out, int cap);
 
 enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA, TMPL_RAW };
 
-// sliding-window layout: local layers attend a window, every Nth is global
-static inline bool model_layer_is_local(int l, int swa_window, int swa_pattern) {
-    return swa_window > 0 && swa_pattern > 0 && ((l + 1) % swa_pattern) != 0;
+enum { ACT_SILU = 0, ACT_GELU = 1 };
+
+// per-layer geometry accessors: uniform models keep the scalars, heterogeneous
+// archs (gemma4) override per layer
+static inline int model_head_dim(const model_t *m, int l) {
+    return m->l_head_dim ? m->l_head_dim[l] : m->head_dim;
+}
+static inline int model_n_head_kv(const model_t *m, int l) {
+    return m->l_head_kv ? m->l_head_kv[l] : m->n_head_kv;
+}
+static inline int model_kv_dim(const model_t *m, int l) {
+    return model_n_head_kv(m, l) * model_head_dim(m, l);
+}
+static inline int model_q_dim(const model_t *m, int l) {
+    return m->n_head * model_head_dim(m, l);
+}
+static inline int model_rope_dim(const model_t *m, int l) {
+    return m->l_rope_dim ? m->l_rope_dim[l] : m->rope_dim;
+}
+static inline bool model_is_swa(const model_t *m, int l) {
+    return m->l_is_swa != NULL && m->l_is_swa[l];
+}
+static inline float model_attn_scale(const model_t *m, int l) {
+    return m->attn_scale > 0 ? m->attn_scale
+                             : 1.0f / sqrtf((float)model_head_dim(m, l));
 }
 
 typedef struct { const char *role, *content; } chat_msg;
