@@ -68,5 +68,5 @@ exactly like `gpu_none.c`.
    output CPU vs GPU on a fixed prompt; tok/s recorded both ways.
 3. `--gpu off` still forces CPU; over-VRAM model (14B) falls back to CPU with a
    clear stderr message.
-4. runner CI green on all three platforms; gridcore-engine tracer bullet +
+4. runner CI green on all three platforms; gridcore-interpreter tracer bullet +
    `--caps` reports the GPU.
