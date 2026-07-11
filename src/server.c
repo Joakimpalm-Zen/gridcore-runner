@@ -134,6 +134,7 @@ typedef struct {
     model_t   *m;         // slot 0 borrows the preloaded model
     tokenizer *tok;       // shared (read-only)
     sampler    smp;
+    sampler    smp_base;  // pristine server defaults (per-request resets)
     engine     e;
     int        id;
     int        tmpl;
@@ -415,7 +416,12 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     model_t *m = s->m;
     engine *e = &s->e;
 
-    // per-request sampling params
+    // per-request sampling params start from the server defaults every time —
+    // one request's overrides must not leak into the next on this slot; only
+    // the rng STATE carries across so sampling sequences stay diverse
+    uint64_t rng_state = s->smp.rng;
+    s->smp = s->smp_base;
+    s->smp.rng = rng_state;
     s->smp.temp = (float)jv_num(jv_get(req, "temperature"), s->smp.temp);
     s->smp.top_p = (float)jv_num(jv_get(req, "top_p"), s->smp.top_p);
     s->smp.min_p = (float)jv_num(jv_get(req, "min_p"), s->smp.min_p);
@@ -457,10 +463,12 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     size_t cap = strlen(prompt) + 16;
     int32_t *toks = malloc(sizeof(int32_t) * cap);
     int n_prompt = tok_encode(s->tok, prompt, toks, (int)cap, true, true);
-    if (n_prompt == 0) { free(toks); send_error(fd, 400, "empty prompt"); return; }
-    if (n_prompt >= m->n_ctx) {
+    if (n_prompt == 0 || n_prompt >= m->n_ctx) {
         free(toks);
-        send_error(fd, 400, "prompt exceeds context window");
+        e->schema = NULL;
+        schema_free(schema); // compiled schema must not outlive the request
+        send_error(fd, 400, n_prompt == 0 ? "empty prompt"
+                                          : "prompt exceeds context window");
         return;
     }
 
@@ -877,6 +885,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         slot_t *s = &SV.slots[0];
         s->id = 0;
         s->smp = defaults;
+        s->smp_base = defaults;
         pthread_t rt;
         pthread_create(&rt, NULL, ttl_reaper, NULL);
     } else {
@@ -894,6 +903,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             s->tmpl = tmpl;
             s->smp = defaults;
             s->smp.rng = defaults.rng ^ (0x9E3779B97F4A7C15ull * (unsigned)(i + 1));
+            s->smp_base = s->smp;
             if (i == 0) {
                 s->m = base;
                 base->tp = tpool_create(threads_per_slot);

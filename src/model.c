@@ -376,11 +376,13 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         // host<->device KV copies speak f16), and rows must be block-aligned
         bool aligned = true;
         for (int l = 0; l < m->n_layer; l++)
-            if (model_kv_dim(m, l) % 32 != 0) aligned = false;
+            // per-HEAD alignment, not just per-row: attention slices the row
+            // at kvh*head_dim, which must land on a q8 block boundary
+            if (model_head_dim(m, l) % 32 != 0) aligned = false;
         if (p->gpu_mode != GPU_OFF)
             fprintf(stderr, "kv: q8_0 cache needs --gpu off — keeping f16\n");
         else if (!aligned)
-            fprintf(stderr, "kv: kv_dim not a multiple of 32 — keeping f16\n");
+            fprintf(stderr, "kv: head_dim not a multiple of 32 — keeping f16\n");
         else
             m->kv_q8 = true;
     }
