@@ -65,6 +65,7 @@ static void usage(const char *prog) {
         "  --temp F       temperature (default 0.8, 0 = greedy)\n"
         "  --top-k N      top-k (default 40)\n"
         "  --top-p F      top-p (default 0.95)\n"
+        "  --min-p F      min-p vs the top candidate (default 0.05, 0 = off)\n"
         "  --repeat-penalty F  (default 1.1)\n"
         "  --rope-scale F force linear rope position scaling by F\n"
         "  --rope-base F  override rope frequency base\n"
@@ -115,8 +116,8 @@ int main(int argc, char **argv) {
     bool interactive = false, verbose = false, no_bos = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
     model_params mp = {0};
-    sampler smp = { .temp = 0.8f, .top_p = 0.95f, .repeat_penalty = 1.1f,
-                    .top_k = 40, .rng = 0 };
+    sampler smp = { .temp = 0.8f, .top_p = 0.95f, .min_p = 0.05f,
+                    .repeat_penalty = 1.1f, .top_k = 40, .rng = 0 };
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -142,6 +143,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--temp")) smp.temp = atof(NEXT);
         else if (!strcmp(a, "--top-k")) smp.top_k = atoi(NEXT);
         else if (!strcmp(a, "--top-p")) smp.top_p = atof(NEXT);
+        else if (!strcmp(a, "--min-p")) smp.min_p = atof(NEXT);
         else if (!strcmp(a, "--repeat-penalty")) smp.repeat_penalty = atof(NEXT);
         else if (!strcmp(a, "--rope-scale")) mp.rope_scale = atof(NEXT);
         else if (!strcmp(a, "--rope-base")) mp.rope_base = atof(NEXT);

@@ -93,6 +93,19 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
         for (int i = 0; i < k; i++) cum += c[i].p;
         for (int i = 0; i < k; i++) c[i].p /= cum;
     }
+    // min-p: drop candidates far less likely than the best one
+    if (s->min_p > 0.0f) {
+        float floor_p = s->min_p * c[0].p;
+        int cut = k;
+        for (int i = 1; i < k; i++)
+            if (c[i].p < floor_p) { cut = i; break; }
+        if (cut < k) {
+            k = cut;
+            float cum = 0;
+            for (int i = 0; i < k; i++) cum += c[i].p;
+            for (int i = 0; i < k; i++) c[i].p /= cum;
+        }
+    }
     float r = rng_f32(&s->rng), cum = 0;
     int pick = c[k - 1].id;
     for (int i = 0; i < k; i++) {

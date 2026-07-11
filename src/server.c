@@ -321,12 +321,18 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     // per-request sampling params
     s->smp.temp = (float)jv_num(jv_get(req, "temperature"), s->smp.temp);
     s->smp.top_p = (float)jv_num(jv_get(req, "top_p"), s->smp.top_p);
+    s->smp.min_p = (float)jv_num(jv_get(req, "min_p"), s->smp.min_p);
     s->smp.top_k = (int)jv_num(jv_get(req, "top_k"), s->smp.top_k);
     double seed = jv_num(jv_get(req, "seed"), 0);
     if (seed > 0) s->smp.rng = (uint64_t)seed;
     int max_tokens = (int)jv_num(jv_get(req, "max_tokens"),
                      jv_num(jv_get(req, "max_completion_tokens"), SV.n_predict_cap));
     bool stream = jv_bool(jv_get(req, "stream"), false);
+    // OpenAI logprobs (chat, buffered responses only)
+    bool want_lp = chat && !stream && jv_bool(jv_get(req, "logprobs"), false);
+    int lp_n = want_lp ? (int)jv_num(jv_get(req, "top_logprobs"), 0) : 0;
+    if (lp_n < 0) lp_n = 0;
+    if (lp_n > 20) lp_n = 20;
     jv *rf = jv_get(req, "response_format");
     e->json_mode = rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_object") == 0;
     // schema-constrained decoding: OpenAI response_format {type:"json_schema",
@@ -361,6 +367,14 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         return;
     }
 
+    if (want_lp && max_tokens > 0) {
+        e->lp_cap    = max_tokens;
+        e->lp_n      = lp_n;
+        e->lp_chosen = malloc(sizeof(float) * max_tokens);
+        e->lp_ids    = malloc(sizeof(int32_t) * max_tokens);
+        e->lp_top    = lp_n ? malloc(sizeof(lp_alt) * (size_t)max_tokens * lp_n) : NULL;
+    }
+
     // reuse the KV for whatever prefix this prompt shares with the last one —
     // pipeline callers repeat long system/template prefixes verbatim
     int keep = engine_rewind(e, toks, n_prompt);
@@ -369,6 +383,9 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     if (!logits) {
         e->schema = NULL;
         schema_free(schema);
+        free(e->lp_chosen); free(e->lp_ids); free(e->lp_top);
+        e->lp_chosen = NULL; e->lp_ids = NULL; e->lp_top = NULL;
+        e->lp_cap = e->lp_n = e->lp_count = 0;
         send_error(fd, 500, "context overflow");
         return;
     }
@@ -418,6 +435,28 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         }
         if (chat) sb_lit(&r, "},");
         else      sb_lit(&r, ",");
+        if (chat && e->lp_count > 0) {
+            char tb[512];
+            sb_lit(&r, "\"logprobs\":{\"content\":[");
+            for (int i = 0; i < e->lp_count; i++) {
+                if (i) sb_lit(&r, ",");
+                int tn = tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
+                sb_lit(&r, "{\"token\":\"");
+                sb_esc(&r, tb, tn);
+                sb_fmt(&r, "\",\"logprob\":%.6f,\"top_logprobs\":[", e->lp_chosen[i]);
+                for (int j = 0; j < e->lp_n; j++) {
+                    const lp_alt *a = &e->lp_top[(size_t)i * e->lp_n + j];
+                    if (a->id < 0) break;
+                    if (j) sb_lit(&r, ",");
+                    tn = tok_decode(s->tok, a->id, tb, sizeof(tb));
+                    sb_lit(&r, "{\"token\":\"");
+                    sb_esc(&r, tb, tn);
+                    sb_fmt(&r, "\",\"logprob\":%.6f}", a->lp);
+                }
+                sb_lit(&r, "]}");
+            }
+            sb_lit(&r, "]},");
+        }
         sb_fmt(&r, "\"finish_reason\":\"%s\"}],"
                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
                    "\"total_tokens\":%d}}",
@@ -435,6 +474,9 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     think_free(&g.ts);
     free(g.reason.s);
     free(g.out.s);
+    free(e->lp_chosen); free(e->lp_ids); free(e->lp_top);
+    e->lp_chosen = NULL; e->lp_ids = NULL; e->lp_top = NULL;
+    e->lp_cap = e->lp_n = e->lp_count = 0;
 }
 
 // ---------------------------------------------------------------- routes
