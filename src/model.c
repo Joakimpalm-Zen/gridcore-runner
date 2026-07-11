@@ -138,6 +138,15 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 
     const char *arch = gguf_get_str(g, "general.architecture", "?");
     snprintf(m->arch, sizeof(m->arch), "%s", arch);
+    // architectures whose weights load fine llama-style but whose math is
+    // silently wrong without arch-specific handling (scalar multipliers,
+    // logit softcapping): refuse instead of generating plausible gibberish
+    if (strcmp(arch, "granite") == 0 || strcmp(arch, "gemma2") == 0 ||
+        strcmp(arch, "gemma") == 0) {
+        fprintf(stderr, "error: unsupported architecture '%s' — it would load "
+                "but produce incorrect output without its scaling/softcapping\n", arch);
+        return false;
+    }
     if (strcmp(arch, "llama") != 0 && strcmp(arch, "qwen2") != 0 &&
         strcmp(arch, "qwen3") != 0 && strcmp(arch, "mistral") != 0 &&
         strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0 &&
