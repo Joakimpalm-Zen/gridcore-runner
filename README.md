@@ -104,7 +104,7 @@ of the same model.
 ./runner -m "clu=qwen3-14b.gguf,bit=qwen3-4b.gguf" --serve --ttl 300
 ```
 
-llama-swap semantics built in: the server advertises every registered model
+Swap semantics built in: the server advertises every registered model
 on `/v1/models`, keeps **one** resident at a time, loads the one named in
 each request's `"model"` field on demand, and unloads after `--ttl` idle
 seconds (0 = never) to free RAM/VRAM for whatever runs next. `/health`
