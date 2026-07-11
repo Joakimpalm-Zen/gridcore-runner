@@ -16,61 +16,6 @@ int quantize_gguf(const char *in_path, const char *out_path, int target);
 
 // ---------------------------------------------------------------- misc
 
-// resolve "-m name[:tag]" through the local Ollama model store
-// (~/.ollama/models or $OLLAMA_MODELS): manifests point at GGUF blobs
-static char *ollama_resolve(const char *arg) {
-    if (strstr(arg, ".gguf") || arg[0] == '/' || arg[0] == '.' || arg[0] == '~' ||
-        strchr(arg, '\\'))
-        return NULL; // clearly a file path
-    char base[1024];
-    const char *env = getenv("OLLAMA_MODELS");
-    if (env) snprintf(base, sizeof(base), "%s", env);
-    else {
-        const char *home = plat_home();
-        if (!home) return NULL;
-        snprintf(base, sizeof(base), "%s/.ollama/models", home);
-    }
-
-    char name[256];
-    snprintf(name, sizeof(name), "%s", arg);
-    char *tag = strchr(name, ':');
-    if (tag) *tag++ = 0;
-    else tag = "latest";
-    const char *ns = "library", *mdl = name;
-    char *slash = strchr(name, '/');
-    if (slash) { *slash = 0; ns = name; mdl = slash + 1; }
-
-    char mpath[1400];
-    snprintf(mpath, sizeof(mpath), "%s/manifests/registry.ollama.ai/%s/%s/%s",
-             base, ns, mdl, tag);
-    FILE *f = fopen(mpath, "rb");
-    if (!f) return NULL;
-    char manifest[65536];
-    size_t n = fread(manifest, 1, sizeof(manifest) - 1, f);
-    fclose(f);
-    manifest[n] = 0;
-
-    // the model layer's mediaType precedes its digest within the layer object
-    char *p = strstr(manifest, "vnd.ollama.image.model");
-    if (!p) return NULL;
-    p = strstr(p, "sha256:");
-    if (!p || (size_t)(p - manifest) + 7 + 64 > n) return NULL;
-    char hex[65];
-    memcpy(hex, p + 7, 64);
-    hex[64] = 0;
-    for (int i = 0; i < 64; i++)
-        if (!((hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f')))
-            return NULL;
-    char *blob = malloc(2048);
-    snprintf(blob, 2048, "%s/blobs/sha256-%s", base, hex);
-    if (plat_file_readable(blob)) {
-        fprintf(stderr, "resolved ollama model %s -> %s\n", arg, blob);
-        return blob;
-    }
-    free(blob);
-    return NULL;
-}
-
 static char *unescape(const char *s) {
     char *out = malloc(strlen(s) + 1);
     size_t m = 0;
@@ -144,8 +89,8 @@ int main(int argc, char **argv) {
     const char *model_path = NULL, *prompt = NULL, *system_prompt = NULL;
     const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
     const char *quant_out = NULL, *quant_type = "q4_0";
-    int n_predict = 256, n_threads = 0, tmpl = -1;
-    int port = 8080, parallel = 1, ttl = 300;
+    int n_predict = 256, n_threads = 0, tmpl = -1, reserve_cpu_pct = 0;
+    int port = 8080, parallel = 1, ttl = -1; // -1: 300 for swap mode, never for single
     bool interactive = false, verbose = false, no_bos = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
     model_params mp = {0};
@@ -184,9 +129,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--no-bos")) no_bos = true;
         else if (!strcmp(a, "--ignore-eos")) ignore_eos = true;
         else if (!strcmp(a, "--gpu")) mp.gpu_mode = strcmp(NEXT, "off") ? GPU_AUTO : GPU_OFF;
+        else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = atoi(NEXT);
+        else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = atoi(NEXT);
+        else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = atoi(NEXT);
+        else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = atoi(NEXT);
         else if (!strcmp(a, "--caps")) caps = true;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(argv[0]); return 1; }
+    }
+    if (n_threads <= 0 && reserve_cpu_pct > 0) {
+        n_threads = plat_cpu_count() * reserve_cpu_pct / 100;
+        if (n_threads < 1) n_threads = 1;
     }
     if (caps) {
         char gname[128];
@@ -208,15 +161,21 @@ int main(int argc, char **argv) {
                "other",
 #endif
                plat_cpu_count(), (unsigned long long)plat_ram_bytes());
-        if (has_gpu)
+        if (has_gpu) {
+            size_t vfree = 0, vtotal = 0;
+            bool vm = gpu_mem_info(&vfree, &vtotal);
 #ifdef __APPLE__
-            printf("{\"backend\":\"metal\",\"name\":\"%s\",\"unified_memory\":true}",
+            printf("{\"backend\":\"metal\",\"name\":\"%s\",\"unified_memory\":true",
                    gname);
 #else
-            printf("{\"backend\":\"cuda\",\"name\":\"%s\",\"unified_memory\":false}",
+            printf("{\"backend\":\"cuda\",\"name\":\"%s\",\"unified_memory\":false",
                    gname);
 #endif
-        else
+            if (vm)
+                printf(",\"vram_bytes\":%llu,\"vram_free_bytes\":%llu",
+                       (unsigned long long)vtotal, (unsigned long long)vfree);
+            printf("}");
+        } else
             printf("null");
         printf(",\"quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
                "\"Q5_0\",\"Q5_1\",\"Q2_K\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
@@ -256,10 +215,6 @@ int main(int argc, char **argv) {
     f16_init();
 
     bool registry = serve && strchr(model_path, '=') != NULL;
-    if (!registry) {
-        char *resolved = ollama_resolve(model_path);
-        if (resolved) model_path = resolved;
-    }
 
     if (quant_out) {
         int tt = !strcmp(quant_type, "q8_0") ? T_Q8_0 :

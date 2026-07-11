@@ -202,6 +202,7 @@ typedef struct {
     float *x, *xb, *xb2, *q, *hb, *hb2;   // [n_batch][dim] activations
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
     float *att, *logits;
+    int    reserve_vram_pct; // VRAM cap for the GPU backend (0 = free VRAM)
     void  *gpu;              // GPU backend context (NULL = CPU only)
 } model_t;
 
@@ -209,6 +210,9 @@ typedef struct {
 
 enum { GPU_AUTO = 0, GPU_OFF = 1 };
 bool   gpu_available(char *name, int name_cap);
+// dedicated GPU memory in bytes; false when there is no discrete GPU
+// (Metal's unified memory is governed by the RAM reservation instead)
+bool   gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 float *gpu_forward(model_t *m, int token, int pos); // NULL = failed, use CPU
 // process n tokens starting at pos (prompt batches); on success returns true
@@ -221,11 +225,18 @@ void   gpu_free(model_t *m); // releases GPU buffers; KV pointers become invalid
 typedef struct {
     int   gpu_mode;    // GPU_AUTO | GPU_OFF
     int   n_threads;   // worker threads for this instance (0 = 1)
-    int   n_ctx;       // 0 = default (min(train ctx, 4096))
+    int   n_ctx;       // 0 = default (min(train ctx, 4096)), or reservation
+                       // auto-fit when a reservation is set
     int   n_batch;     // prompt batch size, 0 = default 64
     float rope_base;   // >0 overrides model rope theta
     float rope_scale;  // >0 forces linear rope scaling by this factor
     bool  verbose;
+    // resource reservation: percentage of *total* VRAM / RAM this instance
+    // may use (0 = unmanaged). With -c 0, the context window is sized to
+    // fill whatever the reservation leaves after the weights — small models
+    // grow their context into the reserved room, capped at the train ctx.
+    int   reserve_vram_pct;
+    int   reserve_ram_pct;
 } model_params;
 
 bool   model_load(model_t *m, const char *path, const model_params *p);

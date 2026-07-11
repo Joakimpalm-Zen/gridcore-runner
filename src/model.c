@@ -1,5 +1,6 @@
 // Llama-family transformer: weight wiring + batched forward pass.
 #include "runner.h"
+#include "compat.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -204,7 +205,40 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     }
 
     // runtime buffers
+    m->reserve_vram_pct = p->reserve_vram_pct;
     int n_ctx = p->n_ctx;
+    if (n_ctx <= 0 && (p->reserve_vram_pct > 0 || p->reserve_ram_pct > 0)) {
+        // reservation auto-fit: size the context to fill whatever the
+        // reservation leaves after the weights, so small models grow their
+        // window into the reserved room instead of idling at the default
+        int kv_dim_fit = m->n_head_kv * m->head_dim;
+        size_t kv_per_tok = 2ull * m->n_layer * kv_dim_fit * sizeof(f16_t);
+        size_t head = 256u << 20;                 // activations + slack
+        long long best = -1;
+        if (p->reserve_ram_pct > 0) {
+            // host budget covers the mmap'd weights plus the host KV copy
+            size_t budget = plat_ram_bytes() / 100 * p->reserve_ram_pct;
+            long long room = (long long)budget - (long long)m->gf.map_size - (long long)head;
+            long long fit = room > 0 ? room / (long long)kv_per_tok : 0;
+            best = fit;
+        }
+        if (p->reserve_vram_pct > 0 && p->gpu_mode == GPU_AUTO) {
+            size_t vfree = 0, vtotal = 0;
+            if (gpu_mem_info(&vfree, &vtotal)) {
+                // device budget covers a weights copy plus the device KV
+                size_t budget = vtotal / 100 * p->reserve_vram_pct;
+                long long room = (long long)budget - (long long)m->gf.map_size - (long long)head;
+                long long fit = room > 0 ? room / (long long)kv_per_tok : 0;
+                if (best < 0 || fit < best) best = fit;
+            }
+        }
+        if (best > 0) {
+            n_ctx = best > m->n_ctx_train ? m->n_ctx_train : (int)best;
+            if (n_ctx < 512) n_ctx = 512;
+            fprintf(stderr, "reservation: auto-fit context %d (train %d)\n",
+                    n_ctx, m->n_ctx_train);
+        }
+    }
     if (n_ctx <= 0) n_ctx = m->n_ctx_train < 4096 ? m->n_ctx_train : 4096;
     m->n_ctx = n_ctx;
     m->n_batch = p->n_batch > 0 ? p->n_batch : 64;

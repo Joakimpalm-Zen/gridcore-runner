@@ -36,6 +36,12 @@ bool gpu_available(char *name, int cap) {
     return true;
 }
 
+bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
+    // unified memory: the RAM reservation governs; no separate VRAM pool
+    (void)free_bytes; (void)total_bytes;
+    return false;
+}
+
 static bool gpu_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:

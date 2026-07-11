@@ -7,6 +7,11 @@ bool gpu_available(char *name, int cap) {
     return false;
 }
 
+bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
+    (void)free_bytes; (void)total_bytes;
+    return false;
+}
+
 bool gpu_init(model_t *m) {
     (void)m;
     return false;

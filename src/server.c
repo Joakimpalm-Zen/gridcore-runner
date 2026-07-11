@@ -163,6 +163,8 @@ static struct {
     // swap mode
     reg_entry   reg[16];
     int         n_reg;
+    bool        single;        // single-model serve wrapped as a 1-entry registry
+    bool        borrowed;      // slot 0's model/tok containers owned by the caller
     int         resident;      // index into reg, -1 = none
     double      last_used;
     int         ttl;
@@ -177,8 +179,10 @@ static void unload_resident(void) {
     fprintf(stderr, "swap: unloading %s\n", SV.reg[SV.resident].name);
     tokenizer_free(s->tok);
     model_free(s->m);
-    free(s->tok);
-    free(s->m);
+    // single-model serve borrows main()'s stack containers for the first
+    // residency; only heap containers from a swap_to() reload are freed
+    if (!SV.borrowed) { free(s->tok); free(s->m); }
+    SV.borrowed = false;
     s->m = NULL;
     s->tok = NULL;
     SV.resident = -1;
@@ -187,6 +191,7 @@ static void unload_resident(void) {
 // resolve + load the requested model; returns entry index or -1
 static int swap_to(const char *want) {
     int idx = 0; // default: first entry
+    if (SV.single) want = NULL; // single-model serve answers as any name
     if (want && *want) {
         idx = -1;
         for (int i = 0; i < SV.n_reg; i++)
@@ -566,6 +571,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     sock_init();
     if (parallel < 1) parallel = 1;
     if (parallel > 16) parallel = 16;
+    bool swap_mode = strchr(model_path, '=') != NULL;
+    if (ttl < 0) ttl = swap_mode ? 300 : 0; // single-model default: never unload
 
     // "name=path,name2=path2" enables swap mode: one resident model,
     // loaded per request's "model" field, unloaded after ttl idle seconds
@@ -600,6 +607,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 
     int threads_per_slot = n_threads / parallel;
     if (threads_per_slot < 1) threads_per_slot = 1;
+    bool single_setup = false;
 
     const char *name = strrchr(model_path, '/');
     const char *bsname = strrchr(model_path, '\\'); // Windows path separator
@@ -619,6 +627,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         pthread_t rt;
         pthread_create(&rt, NULL, ttl_reaper, NULL);
     } else {
+        single_setup = parallel == 1;
         int tmpl = template_detect(gguf_get_str(&base->gf, "tokenizer.chat_template", NULL),
                                    tok);
         model_params slot_mp = *mp;
@@ -644,6 +653,29 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             }
             engine_init(&s->e, s->m, s->tok, &s->smp);
         }
+
+        if (single_setup) {
+            // join the registry machinery so GET /unload frees the resident
+            // model (the next request lazily reloads it) and --ttl works.
+            // slot 0's containers are the caller's; borrowed avoids freeing
+            // them on the first unload
+            snprintf(SV.reg[0].name, sizeof(SV.reg[0].name), "%s", SV.model_name);
+            snprintf(SV.reg[0].path, sizeof(SV.reg[0].path), "%s", model_path);
+            SV.reg[0].tmpl = tmpl;
+            SV.model_name = SV.reg[0].name;
+            SV.n_reg = 1;
+            SV.single = true;
+            SV.borrowed = true;
+            SV.resident = 0;
+            SV.last_used = now_s();
+            SV.ttl = ttl;
+            SV.mp = *mp;
+            SV.mp.verbose = false;
+            SV.mp.n_threads = threads_per_slot;
+            pthread_mutex_init(&SV.swap_mu, NULL);
+            pthread_t rt;
+            pthread_create(&rt, NULL, ttl_reaper, NULL);
+        }
     }
 
     int lfd = (int)socket(AF_INET, SOCK_STREAM, 0);
@@ -662,7 +694,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     for (int i = 0; i < parallel; i++)
         pthread_create(&SV.slots[i].th, NULL, slot_worker, &SV.slots[i]);
 
-    if (SV.n_reg > 0)
+    if (SV.n_reg > 0 && !SV.single)
         fprintf(stderr,
                 "server listening on http://127.0.0.1:%d — %d models, swap on demand"
                 " (ttl %ds)\n"
