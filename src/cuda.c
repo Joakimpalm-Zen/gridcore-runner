@@ -194,6 +194,11 @@ static CUdeviceptr f32_dbuf(const float *src, size_t n) {
 }
 
 bool gpu_init(model_t *m) {
+    if (m->swa_window > 0 || m->embd_scale != 1.0f) {
+        fprintf(stderr, "gpu: '%s' (sliding-window attention) is not on the cuda backend yet — using CPU\n",
+                m->arch);
+        return false;
+    }
     // every weight matmul must have a kernel for its quant type
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
