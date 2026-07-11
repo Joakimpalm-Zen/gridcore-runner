@@ -3,8 +3,12 @@
 //   POST /v1/chat/completions   messages, sampling params, stream (SSE),
 //                               response_format {"type":"json_object"}
 //   POST /v1/completions        raw prompt completion
+//   POST /v1/embeddings         mean-pooled L2-normed embeddings
 //   GET  /v1/models             the loaded model
 //   GET  /health                liveness
+//
+// Swap-mode request bodies may carry "keep_alive" (seconds of idle before
+// the model unloads; 0 = unload now, negative = keep forever).
 //
 // Each slot owns a full inference context (KV cache + thread pool); model
 // weights are shared between slots through the page cache (mmap).
@@ -658,6 +662,16 @@ static void handle_conn(slot_t *s, int fd) {
                 if (strcmp(path, "/v1/chat/completions") == 0) handle_chat(s, fd, req);
                 else if (strcmp(path, "/v1/embeddings") == 0) handle_embeddings(s, fd, req);
                 else handle_completion(s, fd, req);
+                // Ollama-style keep_alive: seconds of idle before the model
+                // unloads (swap mode) — 0 unloads now, negative pins forever
+                jv *ka = jv_get(req, "keep_alive");
+                if (ka && SV.n_reg > 0) {
+                    double v = jv_num(ka, (double)SV.ttl);
+                    pthread_mutex_lock(&SV.swap_mu);
+                    if (v == 0) unload_resident();
+                    else SV.ttl = v < 0 ? 0 : (int)v;
+                    pthread_mutex_unlock(&SV.swap_mu);
+                }
             }
             atomic_store(&SV.busy, false);
             jv_free(req);
