@@ -1,16 +1,17 @@
 # runner
 
 A compact local LLM inference engine, written from scratch in plain C
-(~5,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
-model files — the de-facto format for local models — and runs them on CPU or
-GPU, with a particular focus on squeezing **large contexts out of small
-models**.
+(~8,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
+model files — the de-facto format for local models — and runs them on CPU
+(AVX2-accelerated) or GPU (CUDA, Metal), with a particular focus on squeezing
+**large contexts out of small models**.
 
 ```
 ./runner -m models/SmolLM2-135M-Instruct-Q8_0.gguf -i          # interactive chat
 ./runner -m model.gguf -f big-document.txt -c 8192 -n 200      # 4x the training context
 ./runner -m model.gguf --serve --parallel 2                    # OpenAI-compatible API server
 ./runner -m model.gguf -p "..." --json                         # guaranteed-valid JSON output
+./runner -m big.gguf --draft small.gguf -p "..."               # speculative decoding
 ```
 
 ## Build
@@ -39,7 +40,8 @@ little-endian; every mainstream x86/ARM/RISC-V system qualifies).
 
 Two backends implement the same small interface (`src/gpu_none.c` documents
 it); `--gpu auto` (the default) uses one whenever the model's quant formats
-have kernels (F32, F16, Q8_0, Q4_0/1, Q5_0/1, Q4_K, Q5_K, Q6_K); anything
+have kernels (F32, F16, Q8_0, Q4_0/1, Q5_0/1, Q4_K, Q5_K, Q6_K, IQ4_NL,
+IQ4_XS); anything
 else falls back to CPU with a message, as does any GPU runtime failure or a
 model that does not fit. GPU output is verified token-identical to the CPU
 path across every supported quant on both backends.
@@ -162,7 +164,12 @@ This is runner's specialty. Three pieces work together:
 ```
 
 Endpoints: `POST /v1/chat/completions`, `POST /v1/completions`,
-`GET /v1/models`, `GET /health`. Works with any OpenAI client:
+`POST /v1/embeddings` (mean-pooled, L2-normalized), `GET /v1/models`,
+`GET /health`, `GET /unload`. Chat completions understand `logprobs` /
+`top_logprobs`, `min_p`, OpenAI `tools` (declared in the prompt, parsed back
+into `tool_calls`), and swap-mode `keep_alive`. Thinking-tuned models
+(gemma4) get their reasoning channels split into `reasoning_content` instead
+of leaking channel tags into content. Works with any OpenAI client:
 
 ```python
 import openai
@@ -264,35 +271,43 @@ runner -m model [options]
   --temp F       temperature (default 0.8, 0 = greedy)
   --top-k N      top-k sampling (default 40)
   --top-p F      nucleus sampling (default 0.95)
+  --min-p F      min-p vs the top candidate (default 0.05, 0 = off)
   --repeat-penalty F   (default 1.1)
   --rope-scale F force linear rope position scaling
   --rope-base F  override rope frequency base
   --system TEXT  system prompt for chat mode
-  --chat-template chatml|llama2|llama3|zephyr|raw   (default: auto-detect)
+  --chat-template chatml|llama2|llama3|zephyr|gemma|gemma4|raw  (default: auto)
   --no-bos       don't prepend BOS
   --ignore-eos   keep generating past end-of-text tokens
   --gpu auto|off GPU offload if a backend is available (default auto)
+  --kv f16|q8    KV cache storage; q8 halves it again (needs --gpu off)
+  --draft PATH   small same-vocab GGUF for speculative decoding
+  --draft-k N    draft tokens per round (default 4)
   --caps         print machine capabilities as JSON and exit
   -v             print model hyperparameters and memory use
 ```
 
 Chat mode keeps the KV cache across turns (no re-processing of history) and
-auto-detects the chat template (ChatML, Llama-2/3, Zephyr) from the model's
-metadata and vocabulary.
+auto-detects the chat template (ChatML, Llama-2/3, Zephyr, Gemma, Gemma-4)
+from the model's metadata and vocabulary. Thinking-tuned models show their
+reasoning between `[thinking]` markers. The server additionally reuses the
+KV cache for the longest shared prompt prefix across requests, so repeated
+system/template prefixes skip prompt evaluation entirely.
 
 ## What's implemented
 
 | Area | Support |
 |---|---|
 | File format | GGUF v2/v3, memory-mapped (weights are never copied) |
-| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings; CPU + CUDA) |
+| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp) — all CPU + CUDA |
 | Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
 | Tokenizers | SentencePiece (llama) with byte fallback; byte-level BPE (gpt2) with merges, special-token parsing |
 | Transformer | RMSNorm, RoPE (adjacent-pair and NeoX), grouped-query attention, SwiGLU, tied embeddings |
-| Sampling | temperature, top-k, top-p, repeat penalty, greedy; JSON and JSON-Schema constrained decoding |
-| Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots, multi-model swap with idle TTL |
-| GPU | Metal (Apple Silicon): full forward pass, zero-copy weights, CPU-identical output |
+| Sampling | temperature, top-k, top-p, min-p, repeat penalty, greedy; suppress-token bias; JSON and JSON-Schema constrained decoding; speculative decoding with a draft model |
+| Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots, multi-model swap with idle TTL + keep_alive, prompt-prefix KV reuse, embeddings, logprobs, tool calls |
+| GPU | CUDA (NVIDIA): full + partial (layer-split) offload; Metal (Apple Silicon): full forward pass, zero-copy weights — both CPU-identical output |
+| CPU | AVX2/FMA dot kernels for every hot quant format (~3x scalar generation) |
 | Threading | persistent pthread pool; matmul rows and attention heads run in parallel |
 
 Verified end-to-end with: SmolLM2-135M (Q8_0, Q4_K_M, Q3_K_M/IQ4_NL),
@@ -300,11 +315,11 @@ TinyLlama-1.1B (Q4_K_M, Q2_K), Qwen2.5-0.5B-Instruct (Q4_K_M), including a
 needle-retrieval test at 2x and 4x training context and a 3,600-token
 needle test on Qwen2.5.
 
-Not implemented (by design, to stay small): CUDA/Vulkan backends (Metal
-only so far), MoE and hybrid-SSM
-architectures (Mamba/Jamba/Qwen3.5-style), IQ2/IQ3 codebook quants, full GBNF
-grammar sampling (JSON mode only), TLS/auth on the server (bind it behind a
-reverse proxy if you need those).
+Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
+MoE and hybrid-SSM architectures (Mamba/Jamba/Qwen3.5-style), gemma4's
+shared-KV E2B/E4B variants and MTP draft head, IQ2/IQ3 codebook quants, full
+GBNF grammar sampling (JSON mode only), TLS/auth on the server (bind it
+behind a reverse proxy if you need those).
 
 ## How it works
 
@@ -323,11 +338,14 @@ src/sample.c     temperature/top-k/top-p sampling with optional validity
 src/jsonmode.c   incremental JSON-prefix validator + auto-close
 src/schema.c     JSON-Schema compiler + streaming conformance validator
 src/quantize.c   GGUF requantizer (q8_0 / q4_0 / f16)
-src/template.c   chat template detection/rendering
-src/engine.c     prompt feeding + generation loop shared by CLI and server
-src/json.c       minimal JSON parser/escaper for the HTTP API
-src/server.c     HTTP server, OpenAI-compatible routes, parallel slots
+src/template.c   chat templates, thinking-channel splitter, tool-call syntax
+src/engine.c     prompt feeding + generation loop (incl. speculative decoding)
+                 shared by CLI and server, prompt-prefix KV reuse
+src/json.c       JSON parser/escaper/serializer + string builder for the API
+src/server.c     HTTP server, OpenAI-compatible routes, parallel slots, swap
 src/metal.m      Metal GPU backend (kernels.metal: the forward pass in MSL)
+src/cuda.c       CUDA GPU backend via the driver API (kernels.cu -> embedded
+                 PTX; full and partial layer-split offload)
 src/compat.c     platform layer (mmap, clocks, cpu/ram detection)
 src/main.c       CLI, --caps
 ```
