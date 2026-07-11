@@ -180,6 +180,7 @@ static bool gpu_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:
         case T_Q5_0: case T_Q5_1: case T_Q4_K: case T_Q5_K: case T_Q6_K:
+        case T_IQ4_NL: case T_IQ4_XS:
             return true;
         default:
             return false;
@@ -307,11 +308,13 @@ bool gpu_init(model_t *m) {
             { &g->f_mv[T_Q4_1], "k_mv_q4_1" },   { &g->f_mv[T_Q5_0], "k_mv_q5_0" },
             { &g->f_mv[T_Q5_1], "k_mv_q5_1" },   { &g->f_mv[T_Q4_K], "k_mv_q4_K" },
             { &g->f_mv[T_Q5_K], "k_mv_q5_K" },   { &g->f_mv[T_Q6_K], "k_mv_q6_K" },
+            { &g->f_mv[T_IQ4_NL], "k_mv_iq4_nl" }, { &g->f_mv[T_IQ4_XS], "k_mv_iq4_xs" },
             { &g->f_mvb[T_F32],  "k_mv_f32_b" },  { &g->f_mvb[T_F16],  "k_mv_f16_b" },
             { &g->f_mvb[T_Q8_0], "k_mv_q8_0_b" }, { &g->f_mvb[T_Q4_0], "k_mv_q4_0_b" },
             { &g->f_mvb[T_Q4_1], "k_mv_q4_1_b" }, { &g->f_mvb[T_Q5_0], "k_mv_q5_0_b" },
             { &g->f_mvb[T_Q5_1], "k_mv_q5_1_b" }, { &g->f_mvb[T_Q4_K], "k_mv_q4_K_b" },
             { &g->f_mvb[T_Q5_K], "k_mv_q5_K_b" }, { &g->f_mvb[T_Q6_K], "k_mv_q6_K_b" },
+            { &g->f_mvb[T_IQ4_NL], "k_mv_iq4_nl_b" }, { &g->f_mvb[T_IQ4_XS], "k_mv_iq4_xs_b" },
         };
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
             CK(cu.ModuleGetFunction(fns[i].f, g->mod, fns[i].name));
