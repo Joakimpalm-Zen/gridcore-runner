@@ -550,28 +550,41 @@ static void attn_heads(void *ctx, int h0, int h1) {
 
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
+    // GPU handles the leading gpu_layers. A full split (gpu_layers == n_layer)
+    // returns logits directly; a partial split runs [0, gpu_layers) on the GPU,
+    // leaves the boundary activation in the host x buffer + the offloaded
+    // layers' KV in the host cache, and the CPU loop below finishes the rest.
+    int start = 0;
     if (m->gpu) {
-        float *lg = NULL;
-        if (gpu_forward_batch(m, tokens, n, pos, want_logits, &lg))
-            return lg;
-        m->gpu = NULL; // GPU failed at runtime: fall back to CPU permanently
+        if (m->gpu_layers >= m->n_layer) {
+            float *lg = NULL;
+            if (gpu_forward_batch(m, tokens, n, pos, want_logits, &lg))
+                return lg;
+            m->gpu = NULL; // GPU failed at runtime: fall back to CPU permanently
+        } else if (gpu_forward_batch(m, tokens, n, pos, false, NULL)) {
+            start = m->gpu_layers;
+        } else {
+            m->gpu = NULL;
+        }
     }
     int n_embd = m->n_embd;
     int xdim = n_embd;
     for (int l = 0; l < m->n_layer; l++)
         if (model_q_dim(m, l) > xdim) xdim = model_q_dim(m, l);
 
-    size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
-    for (int b = 0; b < n; b++) {
-        dequant_row(m->tok_embd->type,
-                    (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
-                    m->x + (size_t)b * n_embd, n_embd);
-        if (m->embd_scale != 1.0f)
-            for (int i = 0; i < n_embd; i++)
-                m->x[(size_t)b * n_embd + i] *= m->embd_scale;
+    if (start == 0) {
+        size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
+        for (int b = 0; b < n; b++) {
+            dequant_row(m->tok_embd->type,
+                        (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
+                        m->x + (size_t)b * n_embd, n_embd);
+            if (m->embd_scale != 1.0f)
+                for (int i = 0; i < n_embd; i++)
+                    m->x[(size_t)b * n_embd + i] *= m->embd_scale;
+        }
     }
 
-    for (int l = 0; l < m->n_layer; l++) {
+    for (int l = start; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
         bool local   = model_is_swa(m, l);
         int hd       = model_head_dim(m, l);
