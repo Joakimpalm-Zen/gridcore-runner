@@ -101,13 +101,53 @@ static bool json_ok(void *ud, int id) {
     return jsonv_feed(&tmp, buf, n);
 }
 
+// logprob capture: raw-logit log-softmax stats taken BEFORE sample_pick
+// mutates the recent tokens' logits with the repeat penalty
+typedef struct {
+    float lse;                 // log sum exp of the raw logits
+    float snap[256];           // raw values of the penalty-window tokens
+    int   snap_ids[256], n_snap;
+} lp_pre;
+
+static void lp_capture_pre(engine *e, const float *logits, lp_pre *p) {
+    int V = e->m->n_vocab;
+    float mx = logits[0];
+    for (int i = 1; i < V; i++) if (logits[i] > mx) mx = logits[i];
+    double sum = 0;
+    for (int i = 0; i < V; i++) sum += expf(logits[i] - mx);
+    p->lse = mx + logf((float)sum);
+    p->n_snap = 0;
+    sampler *s = e->smp;
+    for (int i = 0; i < s->n_recent; i++) {
+        p->snap_ids[p->n_snap] = s->recent[i];
+        p->snap[p->n_snap++]   = logits[s->recent[i]];
+    }
+    // top-N alternatives for this position (insertion into a small list)
+    if (e->lp_n <= 0) return;
+    lp_alt *top = e->lp_top + (size_t)e->lp_count * e->lp_n;
+    int filled = 0;
+    for (int i = 0; i < V; i++) {
+        float lp = logits[i] - p->lse;
+        if (filled == e->lp_n && lp <= top[filled - 1].lp) continue;
+        int j = filled < e->lp_n ? filled++ : e->lp_n - 1;
+        while (j > 0 && top[j - 1].lp < lp) { top[j] = top[j - 1]; j--; }
+        top[j].id = i; top[j].lp = lp;
+    }
+    for (int j = filled; j < e->lp_n; j++) { top[j].id = -1; top[j].lp = 0; }
+}
+
 int engine_generate(engine *e, float *logits, int max_new,
                     gen_cb cb, void *ud, double *gen_time) {
     char buf[512];
     int n_gen = 0;
     e->hit_stop = false;
+    e->lp_count = 0;
     double t0 = now_s();
     while ((max_new < 0 || n_gen < max_new) && e->pos < e->m->n_ctx) {
+        lp_pre pre;
+        pre.lse = 0; pre.n_snap = 0;
+        bool want_lp = e->lp_cap && e->lp_count < e->lp_cap;
+        if (want_lp) lp_capture_pre(e, logits, &pre);
         int tok = sample_pick(e->smp, logits, e->m->n_vocab,
                               e->schema ? schema_ok :
                               e->json_mode ? json_ok : NULL, e);
@@ -115,6 +155,14 @@ int engine_generate(engine *e, float *logits, int max_new,
         sampler_accept(e->smp, tok);
         if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
         if (is_stop(e, tok) && !e->ignore_eos) { e->hit_stop = true; break; }
+        if (want_lp) {
+            float raw = logits[tok]; // unmutated unless in the penalty window
+            for (int i = 0; i < pre.n_snap; i++)
+                if (pre.snap_ids[i] == tok) { raw = pre.snap[i]; break; }
+            e->lp_ids[e->lp_count]    = tok;
+            e->lp_chosen[e->lp_count] = raw - pre.lse;
+            e->lp_count++;
+        }
         int n = tok_decode(e->tok, tok, buf, sizeof(buf));
         if (e->schema && n > 0) sval_feed(&e->sv, buf, n);
         else if (e->json_mode && n > 0) jsonv_feed(&e->jv, buf, n);

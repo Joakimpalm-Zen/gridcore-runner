@@ -274,7 +274,7 @@ float *model_forward(model_t *m, int token, int pos);
 // ---------------------------------------------------------------- sampler
 
 typedef struct {
-    float temp, top_p, repeat_penalty;
+    float temp, top_p, min_p, repeat_penalty;
     int top_k;
     uint64_t rng;
     int32_t recent[256];
@@ -410,6 +410,8 @@ void think_free(think_split *t);
 // return nonzero to abort generation (e.g. client disconnected)
 typedef int (*gen_cb)(void *ud, const char *bytes, int n);
 
+typedef struct { int32_t id; float lp; } lp_alt; // logprob alternative
+
 typedef struct {
     model_t   *m;
     tokenizer *tok;
@@ -425,6 +427,12 @@ typedef struct {
     jsonv jv;
     bool progress;         // print prompt progress to stderr
     int32_t *hist;         // tokens whose KV occupies slots [0, pos)
+    // optional per-token logprob capture (server "logprobs"): caller points
+    // these at buffers sized [lp_cap] / [lp_cap * lp_n] before generating
+    float   *lp_chosen;    // chosen-token logprob per emitted token
+    int32_t *lp_ids;       // chosen token id per emitted token
+    lp_alt  *lp_top;       // top-N alternatives per token
+    int      lp_n, lp_cap, lp_count;
 } engine;
 
 void   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
