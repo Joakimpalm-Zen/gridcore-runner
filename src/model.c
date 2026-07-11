@@ -322,8 +322,12 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         // reservation leaves after the weights, so small models grow their
         // window into the reserved room instead of idling at the default
         size_t kv_per_tok = 0;
-        for (int l = 0; l < m->n_layer; l++)
-            kv_per_tok += 2ull * model_kv_dim(m, l) * sizeof(f16_t);
+        bool q8 = p->kv_q8 && p->gpu_mode == GPU_OFF;
+        for (int l = 0; l < m->n_layer; l++) {
+            int d = model_kv_dim(m, l);
+            kv_per_tok += 2ull * (q8 && d % 32 == 0 ? (size_t)(d / 32) * 34
+                                                    : (size_t)d * sizeof(f16_t));
+        }
         size_t head = 256u << 20;                 // activations + slack
         long long best = -1;
         if (p->reserve_ram_pct > 0) {
@@ -367,7 +371,21 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->kv_off[0] = 0;
     for (int l = 0; l < m->n_layer; l++)
         m->kv_off[l + 1] = m->kv_off[l] + (size_t)n_ctx * model_kv_dim(m, l);
-    size_t kv_bytes = m->kv_off[m->n_layer] * sizeof(f16_t);
+    if (p->kv_q8) {
+        // q8_0 KV halves cache memory again; CPU-only (the GPU kernels and
+        // host<->device KV copies speak f16), and rows must be block-aligned
+        bool aligned = true;
+        for (int l = 0; l < m->n_layer; l++)
+            if (model_kv_dim(m, l) % 32 != 0) aligned = false;
+        if (p->gpu_mode != GPU_OFF)
+            fprintf(stderr, "kv: q8_0 cache needs --gpu off — keeping f16\n");
+        else if (!aligned)
+            fprintf(stderr, "kv: kv_dim not a multiple of 32 — keeping f16\n");
+        else
+            m->kv_q8 = true;
+    }
+    size_t kv_bytes = m->kv_q8 ? m->kv_off[m->n_layer] / 32 * 34
+                               : m->kv_off[m->n_layer] * sizeof(f16_t);
     m->kcache = calloc(1, kv_bytes);
     m->vcache = calloc(1, kv_bytes);
     m->x      = malloc(sizeof(float) * (size_t)B * m->n_embd);
@@ -400,7 +418,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         fprintf(stderr, "%-24s %d\n", "ffn dim", m->n_ff);
         fprintf(stderr, "%-24s %d\n", "vocab", m->n_vocab);
         fprintf(stderr, "%-24s %d (train %d)\n", "context", m->n_ctx, m->n_ctx_train);
-        fprintf(stderr, "%-24s %.1f MB (fp16)\n", "kv cache", 2.0 * kv_bytes / 1e6);
+        fprintf(stderr, "%-24s %.1f MB (%s)\n", "kv cache", 2.0 * kv_bytes / 1e6,
+                m->kv_q8 ? "q8_0" : "fp16");
         fprintf(stderr, "%-24s %d\n", "batch", m->n_batch);
         fprintf(stderr, "%-24s %s\n", "weight type", ggml_type_name(m->layers[0].wq->type));
         fprintf(stderr, "%-24s %.1f\n", "rope base", m->rope_base);
@@ -528,12 +547,14 @@ static void rope_apply(model_t *m, float *v, int n_heads, int pos, int layer) {
 
 typedef struct {
     model_t *m;
-    const f16_t *kc, *vc;   // this layer's cache
+    const uint8_t *kc, *vc; // this layer's cache (f16 rows or q8_0 blocks)
     const float *q;         // this token's query [q_dim]
     float *out;             // attention output [q_dim]
     int pos;
     int t0;                 // first attended position (sliding window)
     int hd, kv_dim;         // this layer's head dim / kv row width
+    size_t row_b;           // bytes per cached row
+    bool q8;                // rows are q8_0 blocks
     float scale;
 } attn_job;
 
@@ -549,19 +570,32 @@ static void attn_heads(void *ctx, int h0, int h1) {
         const float *qh = j->q + h * hd;
         float *att = m->att + (size_t)h * m->n_ctx;
         int kvh = h / kv_mul;
+        size_t hoff = j->q8 ? (size_t)(kvh * hd / 32) * 34
+                            : (size_t)kvh * hd * sizeof(f16_t);
         for (int t = j->t0; t <= j->pos; t++) {
-            const f16_t *kt = j->kc + (size_t)t * kv_dim + kvh * hd;
-            float s = 0;
-            for (int i = 0; i < hd; i++) s += qh[i] * f16_load(kt + i);
+            const uint8_t *kt = j->kc + (size_t)t * j->row_b + hoff;
+            float s;
+            if (j->q8) {
+                s = vec_dot(T_Q8_0, kt, qh, hd);
+            } else {
+                const f16_t *kh = (const f16_t *)kt;
+                s = 0;
+                for (int i = 0; i < hd; i++) s += qh[i] * f16_load(kh + i);
+            }
             att[t] = s * scale;
         }
         softmax(att + j->t0, j->pos + 1 - j->t0);
         float *out = j->out + h * hd;
         memset(out, 0, sizeof(float) * hd);
         for (int t = j->t0; t <= j->pos; t++) {
-            const f16_t *vt = j->vc + (size_t)t * kv_dim + kvh * hd;
+            const uint8_t *vt = j->vc + (size_t)t * j->row_b + hoff;
             float a = att[t];
-            for (int i = 0; i < hd; i++) out[i] += a * f16_load(vt + i);
+            if (j->q8) {
+                q8_accum_row(vt, a, out, hd);
+            } else {
+                const f16_t *vh = (const f16_t *)vt;
+                for (int i = 0; i < hd; i++) out[i] += a * f16_load(vh + i);
+            }
         }
     }
 }
@@ -621,8 +655,9 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         int q_dim    = model_q_dim(m, l);
         int kv_dim   = model_kv_dim(m, l);
         float scale  = model_attn_scale(m, l);
-        f16_t *kc_l = m->kcache + m->kv_off[l];
-        f16_t *vc_l = m->vcache + m->kv_off[l];
+        uint8_t *kc_l = (uint8_t *)m->kcache + model_kv_byte_off(m, l);
+        uint8_t *vc_l = (uint8_t *)m->vcache + model_kv_byte_off(m, l);
+        size_t row_b = model_kv_row_bytes(m, l);
 
         // attention
         for (int b = 0; b < n; b++)
@@ -647,18 +682,25 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                         hd, m->rms_eps);
             rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b, l);
             rope_apply(m, m->k_tmp + (size_t)b * kv_dim, n_kv, pos + b, l);
-            f16_t *kc = kc_l + (size_t)(pos + b) * kv_dim;
-            f16_t *vc = vc_l + (size_t)(pos + b) * kv_dim;
-            for (int i = 0; i < kv_dim; i++) {
-                kc[i] = f32_to_f16(m->k_tmp[(size_t)b * kv_dim + i]);
-                vc[i] = f32_to_f16(m->v_tmp[(size_t)b * kv_dim + i]);
+            uint8_t *kc = kc_l + (size_t)(pos + b) * row_b;
+            uint8_t *vc = vc_l + (size_t)(pos + b) * row_b;
+            if (m->kv_q8) {
+                q8_quant_row(m->k_tmp + (size_t)b * kv_dim, kc, kv_dim);
+                q8_quant_row(m->v_tmp + (size_t)b * kv_dim, vc, kv_dim);
+            } else {
+                f16_t *kh = (f16_t *)kc, *vh = (f16_t *)vc;
+                for (int i = 0; i < kv_dim; i++) {
+                    kh[i] = f32_to_f16(m->k_tmp[(size_t)b * kv_dim + i]);
+                    vh[i] = f32_to_f16(m->v_tmp[(size_t)b * kv_dim + i]);
+                }
             }
         }
         for (int b = 0; b < n; b++) {
             int p = pos + b;
             int t0 = local && p - m->swa_window + 1 > 0 ? p - m->swa_window + 1 : 0;
             attn_job aj = { m, kc_l, vc_l, m->q + (size_t)b * q_dim,
-                            m->xb2 + (size_t)b * xdim, p, t0, hd, kv_dim, scale };
+                            m->xb2 + (size_t)b * xdim, p, t0, hd, kv_dim,
+                            row_b, m->kv_q8, scale };
             tpool_run(m->tp, attn_heads, &aj, m->n_head);
         }
         matvec_b(m->tp, m->xb, xdim, ly->wo, m->xb2, xdim, q_dim, n_embd, ly->bo, n);
