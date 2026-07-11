@@ -44,6 +44,8 @@ jobs:
           C1=$(echo "$R1" | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
           C2=$(echo "$R2" | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
           [ "$C1" = "$C2" ] && echo "prefix cache ok"
+          curl -sf -d '{"input":["a","b"]}' http://127.0.0.1:8123/v1/embeddings \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d['data'])==2 and len(d['data'][0]['embedding'])==64; print('embeddings ok')"
           kill %1
       - name: smoke test (json schema)
         run: |

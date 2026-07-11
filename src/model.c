@@ -718,3 +718,33 @@ float *model_forward(model_t *m, int token, int pos) {
     int32_t t = token;
     return model_forward_batch(m, &t, 1, pos, true);
 }
+
+// mean-pooled, L2-normalized embedding of toks (final layer, output-normed).
+// Clobbers KV slots [0, n) — the caller owns resetting its engine state.
+bool model_embed(model_t *m, const int32_t *toks, int n, float *out) {
+    if (n <= 0 || n > m->n_ctx) return false;
+    void *save_gpu = m->gpu;
+    if (m->gpu && m->gpu_layers >= m->n_layer)
+        m->gpu = NULL; // full offload keeps hidden states on-device; go CPU
+    memset(out, 0, sizeof(float) * m->n_embd);
+    float *tmp = malloc(sizeof(float) * m->n_embd);
+    for (int i = 0; i < n; ) {
+        int chunk = n - i < m->n_batch ? n - i : m->n_batch;
+        model_forward_batch(m, toks + i, chunk, i, false);
+        for (int b = 0; b < chunk; b++) {
+            rmsnorm(tmp, m->x + (size_t)b * m->n_embd, m->out_norm_w,
+                    m->n_embd, m->rms_eps);
+            for (int j = 0; j < m->n_embd; j++) out[j] += tmp[j];
+        }
+        i += chunk;
+    }
+    free(tmp);
+    m->gpu = save_gpu;
+    float ss = 0;
+    for (int j = 0; j < m->n_embd; j++) { out[j] /= n; ss += out[j] * out[j]; }
+    if (ss > 0) {
+        float inv = 1.0f / sqrtf(ss);
+        for (int j = 0; j < m->n_embd; j++) out[j] *= inv;
+    }
+    return true;
+}
