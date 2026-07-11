@@ -659,3 +659,9 @@ extern "C" __global__ void k_add(float *x, const float *d, int n, int xs, int ds
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[(ulong64)blockIdx.y * xs + i] += d[(ulong64)blockIdx.y * ds + i];
 }
+
+// whole-layer output scalar (gemma4): x *= s, grid.y = token column
+extern "C" __global__ void k_scale(float *x, float s, int n, int xs) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[(ulong64)blockIdx.y * xs + i] *= s;
+}
