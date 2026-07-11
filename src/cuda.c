@@ -155,6 +155,23 @@ bool gpu_available(char *name, int cap) {
     return true;
 }
 
+bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
+    if (!cu_load() || cu.Init(0) != 0) return false;
+    int n = 0;
+    if (cu.DeviceGetCount(&n) != 0 || n < 1) return false;
+    CUdevice dev;
+    CUcontext ctx;
+    if (cu.DeviceGet(&dev, 0) != 0) return false;
+    if (cu.PrimaryCtxRetain(&ctx, dev) != 0) return false;
+    size_t f = 0, t = 0;
+    bool ok = cu.CtxSetCurrent(ctx) == 0 && cu.MemGetInfo(&f, &t) == 0;
+    cu.PrimaryCtxRelease(dev);
+    if (!ok) return false;
+    if (free_bytes) *free_bytes = f;
+    if (total_bytes) *total_bytes = t;
+    return true;
+}
+
 static bool gpu_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:

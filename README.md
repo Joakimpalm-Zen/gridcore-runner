@@ -65,6 +65,24 @@ prompt evaluation. Regenerate the PTX header after kernel changes with
 
 Vulkan (AMD/Intel) is not written yet — those machines run the CPU path.
 
+## Resource reservations
+
+```
+./runner --serve -m model.gguf -c 0 --reserve 50
+```
+
+`--reserve P` caps runner at P% of **total** VRAM and RAM (override each with
+`--reserve-vram` / `--reserve-ram`; `--reserve-cpu P` sizes the thread count
+as P% of cores). With `-c 0`, the context window is auto-fit to whatever the
+reservation leaves after the weights — a small model grows its window into
+the reserved room (capped at its training context), a big one gets what fits,
+and one that cannot fit at all falls back per the normal rules.
+
+`GET /unload` frees the resident model's memory (single-model serve included)
+so the machine can be reclaimed without stopping the server; the next request
+reloads it transparently. `--ttl N` unloads automatically after N idle
+seconds (default: 300 in swap mode, never in single-model mode).
+
 ## Fitting models to machines (requantizer)
 
 ```
