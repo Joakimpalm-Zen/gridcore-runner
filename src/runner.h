@@ -206,6 +206,8 @@ typedef struct {
     int       ffn_act;       // ACT_SILU (default) or ACT_GELU (gemma)
     bool      v_rmsnorm;     // weightless per-head RMS norm on V (gemma4)
     float     logit_softcap; // final logits = c*tanh(x/c) when > 0
+    int32_t  *suppress;      // token ids forced to -inf in the logits
+    int       n_suppress;    // (tokenizer.ggml.suppress_tokens)
     gguf_tensor *tok_embd;
     gguf_tensor *output;     // may equal tok_embd (tied)
     float       *out_norm_w;

@@ -8,7 +8,13 @@ and JSON-constrained decoding all execute the same code paths as a real model.
 import struct
 import sys
 
-OUT = sys.argv[1] if len(sys.argv) > 1 else "test.gguf"
+OUT = "test.gguf"
+SUPPRESS_ALL_BUT_EOS = False
+for a in sys.argv[1:]:
+    if a == "--suppress-all-but-eos":
+        SUPPRESS_ALL_BUT_EOS = True
+    else:
+        OUT = a
 
 N_EMBD, N_HEAD, N_KV, N_FF, N_LAYER = 64, 4, 2, 128, 2
 VOCAB = ["<unk>", "<s>", "</s>"] + [f"<0x{i:02X}>" for i in range(256)]
@@ -80,7 +86,7 @@ for i in range(N_LAYER):
         (f"blk.{i}.ffn_down.weight", [N_FF, N_EMBD], tensor_data(N_FF * N_EMBD)),
     ]
 
-meta = b"".join([
+meta_kvs = [
     kv_str("general.architecture", "llama"),
     kv_u32("llama.block_count", N_LAYER),
     kv_u32("llama.context_length", 256),
@@ -97,9 +103,15 @@ meta = b"".join([
     kv_u32("tokenizer.ggml.bos_token_id", 1),
     kv_u32("tokenizer.ggml.eos_token_id", 2),
     kv_bool("tokenizer.ggml.add_bos_token", True),
-])
+]
+if SUPPRESS_ALL_BUT_EOS:
+    # every token except </s> is suppressed: greedy generation must emit EOS
+    # immediately, so a completion prints only the echoed prompt
+    meta_kvs.append(kv_arr_i32("tokenizer.ggml.suppress_tokens",
+                               [i for i in range(N_VOCAB) if i != 2]))
+meta = b"".join(meta_kvs)
 
-header = struct.pack("<IIQQ", 0x46554747, 3, len(tensors), 16)
+header = struct.pack("<IIQQ", 0x46554747, 3, len(tensors), len(meta_kvs))
 
 info = b""
 offset = 0
