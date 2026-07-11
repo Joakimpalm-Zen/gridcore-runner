@@ -45,11 +45,6 @@ bool plat_file_readable(const char *path) {
     return _access(path, 4) == 0;
 }
 
-const char *plat_home(void) {
-    const char *h = getenv("USERPROFILE");
-    return h ? h : getenv("HOME");
-}
-
 double plat_now(void) {
     static LARGE_INTEGER freq;
     if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
@@ -98,10 +93,6 @@ uint64_t plat_ram_bytes(void) {
 
 bool plat_file_readable(const char *path) {
     return access(path, R_OK) == 0;
-}
-
-const char *plat_home(void) {
-    return getenv("HOME");
 }
 
 double plat_now(void) {

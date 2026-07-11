@@ -1,4 +1,4 @@
-// runner — a compact GGUF inference engine (CPU only).
+// runner — a compact GGUF inference engine (CPU, CUDA, Metal).
 #ifndef RUNNER_H
 #define RUNNER_H
 
@@ -246,7 +246,6 @@ bool   gpu_available(char *name, int name_cap);
 // (Metal's unified memory is governed by the RAM reservation instead)
 bool   gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
-float *gpu_forward(model_t *m, int token, int pos); // NULL = failed, use CPU
 // process n tokens starting at pos (prompt batches); on success returns true
 // and sets *logits to the last token's logits when want_logits (else NULL).
 // false = failed, use CPU.

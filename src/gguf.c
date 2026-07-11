@@ -172,14 +172,16 @@ gguf_kv *gguf_get(gguf_file *g, const char *key) {
 
 uint32_t gguf_get_u32(gguf_file *g, const char *key, uint32_t dflt) {
     gguf_kv *kv = gguf_get(g, key);
-    if (!kv) return dflt;
+    // array/string-typed keys (gemma4 stores head_count_kv per layer) never
+    // fill v.u64 — treat them as absent instead of silently returning 0
+    if (!kv || kv->type == GGUF_T_ARR || kv->type == GGUF_T_STR) return dflt;
     if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) return (uint32_t)kv->v.f64;
     return (uint32_t)kv->v.u64;
 }
 
 float gguf_get_f32(gguf_file *g, const char *key, float dflt) {
     gguf_kv *kv = gguf_get(g, key);
-    if (!kv) return dflt;
+    if (!kv || kv->type == GGUF_T_ARR || kv->type == GGUF_T_STR) return dflt;
     if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) return (float)kv->v.f64;
     return (float)kv->v.u64;
 }

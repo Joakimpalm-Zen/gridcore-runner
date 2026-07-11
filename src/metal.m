@@ -318,7 +318,7 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     return true;
 }
 
-float *gpu_forward(model_t *m, int token, int pos) {
+static float *gpu_forward(model_t *m, int token, int pos) {
     gpu_t *g = m->gpu;
     int n_embd = m->n_embd;
     int q_dim  = m->n_head * m->head_dim;

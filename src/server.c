@@ -750,23 +750,29 @@ static void handle_conn(slot_t *s, int fd) {
         const char *b = "{\"status\":\"ok\"}";
         send_response(fd, 200, "application/json", b, strlen(b));
     } else if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
-        char b[256];
+        char b[384];
         int n;
-        if (SV.n_reg > 0)
-            n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":%s%s%s}",
-                         SV.resident >= 0 ? "\"" : "",
-                         SV.resident >= 0 ? SV.reg[SV.resident].name : "null",
-                         SV.resident >= 0 ? "\"" : "");
-        else
+        if (SV.n_reg > 0 && SV.resident >= 0) {
+            char esc[192];
+            json_escape(SV.reg[SV.resident].name,
+                        strlen(SV.reg[SV.resident].name), esc, sizeof(esc));
+            n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":\"%s\"}", esc);
+        } else if (SV.n_reg > 0) {
+            n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":null}");
+        } else {
             n = snprintf(b, sizeof(b), "{\"status\":\"ok\"}");
+        }
         send_response(fd, 200, "application/json", b, n);
     } else if (!strcmp(method, "GET") && !strcmp(path, "/v1/models")) {
         sbuf r = {0};
         sb_lit(&r, "{\"object\":\"list\",\"data\":[");
         if (SV.n_reg > 0) {
-            for (int i = 0; i < SV.n_reg; i++)
+            for (int i = 0; i < SV.n_reg; i++) {
+                char esc[192];
+                json_escape(SV.reg[i].name, strlen(SV.reg[i].name), esc, sizeof(esc));
                 sb_fmt(&r, "%s{\"id\":\"%s\",\"object\":\"model\","
-                           "\"owned_by\":\"runner\"}", i ? "," : "", SV.reg[i].name);
+                           "\"owned_by\":\"runner\"}", i ? "," : "", esc);
+            }
         } else {
             char esc[256];
             json_escape(SV.model_name, strlen(SV.model_name), esc, sizeof(esc));
@@ -906,6 +912,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             s->smp_base = s->smp;
             if (i == 0) {
                 s->m = base;
+                tpool_destroy(base->tp); // replace the single-thread load pool
                 base->tp = tpool_create(threads_per_slot);
             } else {
                 s->m = malloc(sizeof(model_t));

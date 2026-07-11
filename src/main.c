@@ -39,8 +39,7 @@ static void usage(const char *prog) {
     fprintf(stderr,
         "usage: %s -m model.gguf [options]\n\n"
         "options:\n"
-        "  -m PATH|NAME   GGUF file, or an Ollama model name (e.g. llama3.2:1b)\n"
-        "                 resolved from the local Ollama store\n"
+        "  -m PATH        GGUF model file\n"
         "  -p TEXT        prompt (one-shot completion; \\n etc. are unescaped)\n"
         "  -f FILE        read prompt from file (appended after -p text)\n"
         "  -i             interactive chat mode\n"
@@ -70,7 +69,7 @@ static void usage(const char *prog) {
         "  --rope-scale F force linear rope position scaling by F\n"
         "  --rope-base F  override rope frequency base\n"
         "  --system TEXT  system prompt for chat mode\n"
-        "  --chat-template chatml|llama2|llama3|zephyr|raw  (default: auto)\n"
+        "  --chat-template chatml|llama2|llama3|zephyr|gemma|gemma4|raw  (default: auto)\n"
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"

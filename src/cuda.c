@@ -623,13 +623,6 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
     return ok;
 }
 
-float *gpu_forward(model_t *m, int token, int pos) {
-    float *logits = NULL;
-    int32_t t = token;
-    if (!gpu_forward_batch(m, &t, 1, pos, true, &logits)) return NULL;
-    return logits;
-}
-
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                        bool want_logits, float **logits) {
     gpu_t *g = m->gpu;
