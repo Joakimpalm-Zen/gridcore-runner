@@ -1,6 +1,8 @@
 CC      ?= cc
 # gnu11 (not c11): strict ISO mode hides M_PI and POSIX symbols on glibc/MinGW
-CFLAGS  ?= -O3 -ffast-math -std=gnu11 -Wall -Wextra -Wno-unused-parameter
+# -march=native unlocks the AVX2/FMA/F16C dot kernels in quants.c on x86;
+# other ISAs (ARM macs) compile the scalar fallbacks
+CFLAGS  ?= -O3 -ffast-math -std=gnu11 -Wall -Wextra -Wno-unused-parameter -march=native
 LDFLAGS  = -lm -lpthread
 ifeq ($(OS),Windows_NT)
 # -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
