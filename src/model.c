@@ -624,6 +624,9 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         if (m->gpu_layers >= m->n_layer) {
             float *lg = NULL;
             if (gpu_forward_batch(m, tokens, n, pos, want_logits, &lg)) {
+                if (lg && m->logit_softcap > 0)
+                    for (int i = 0; i < m->n_vocab; i++)
+                        lg[i] = m->logit_softcap * tanhf(lg[i] / m->logit_softcap);
                 if (lg && m->n_suppress) suppress_logits(m, lg);
                 return lg;
             }

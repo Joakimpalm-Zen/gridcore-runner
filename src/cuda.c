@@ -121,13 +121,15 @@ typedef struct {
     CUcontext   ctx;
     CUdevice    dev;
     CUmodule    mod;
-    CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu, f_add;
+    CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu,
+                f_add, f_scale;
     CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
     CUdeviceptr weights;
     size_t      weights_len;
     CUdeviceptr kc, vc;
     CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
     CUdeviceptr inv_freq, inv_freq_local, out_norm, dummy;
+    CUdeviceptr ones;                   // weightless V RMS norm (gemma4)
     CUdeviceptr *attn_norm, *ffn_norm;  // per layer
     CUdeviceptr *pan, *pfn;             // gemma3 sandwich norms, may be 0
     CUdeviceptr *bq, *bk, *bv, *bo;     // per layer, may be 0
@@ -196,19 +198,15 @@ static CUdeviceptr f32_dbuf(const float *src, size_t n) {
 }
 
 bool gpu_init(model_t *m) {
-    if (m->l_head_kv || m->v_rmsnorm || m->logit_softcap > 0) {
-        fprintf(stderr, "gpu: '%s' (heterogeneous per-layer KV) is not on the "
-                "cuda backend yet — using CPU\n", m->arch);
-        return false;
-    }
-    // every weight matmul must have a kernel for its quant type
+    // every weight matmul must have a kernel for its quant type (wv may be
+    // absent: gemma4 global layers reuse the raw K projection as V)
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
         gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
                               ly->w_gate, ly->w_up, ly->w_down };
         for (int i = 0; i < 7; i++)
-            if (!gpu_type_ok(ws[i]->type)) goto unsupported;
+            if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
     }
 
     if (!cu_load() || cu.Init(0) != 0) return false;
@@ -223,9 +221,15 @@ bool gpu_init(model_t *m) {
     CK(cu.CtxSetCurrent(g->ctx));
 
     {
-        int q_dim  = m->n_head * m->head_dim;
-        int kv_dim = m->n_head_kv * m->head_dim;
-        int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
+        // heterogeneous archs (gemma4) vary q/kv widths per layer: size the
+        // shared activation buffers to the maxima
+        int q_dim = 0, kv_dim = 0, max_hd = 0;
+        for (int l = 0; l < m->n_layer; l++) {
+            if (model_q_dim(m, l)    > q_dim)  q_dim  = model_q_dim(m, l);
+            if (model_kv_dim(m, l)   > kv_dim) kv_dim = model_kv_dim(m, l);
+            if (model_head_dim(m, l) > max_hd) max_hd = model_head_dim(m, l);
+        }
+        int xdim = q_dim > m->n_embd ? q_dim : m->n_embd;
         size_t kv_bytes = m->kv_off[m->n_layer] * sizeof(f16_t);
         size_t act_bytes = sizeof(float) * (MVB * ((size_t)m->n_embd + 3 * xdim +
                            q_dim + 2 * kv_dim + 2 * m->n_ff +
@@ -297,6 +301,7 @@ bool gpu_init(model_t *m) {
             { &g->f_rope,       "k_rope" },      { &g->f_store,  "k_store_kv" },
             { &g->f_attn,       "k_attn" },      { &g->f_silu,   "k_silu_mul" },
             { &g->f_gelu,       "k_gelu_mul" },  { &g->f_add,    "k_add" },
+            { &g->f_scale,      "k_scale" },
             { &g->f_mv[T_F32],  "k_mv_f32" },    { &g->f_mv[T_F16],  "k_mv_f16" },
             { &g->f_mv[T_Q8_0], "k_mv_q8_0" },   { &g->f_mv[T_Q4_0], "k_mv_q4_0" },
             { &g->f_mv[T_Q4_1], "k_mv_q4_1" },   { &g->f_mv[T_Q5_0], "k_mv_q5_0" },
@@ -334,8 +339,14 @@ bool gpu_init(model_t *m) {
         CK(cu.MemAlloc(&g->dummy,  4));
 
         g->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
-        g->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim / 2);
+        g->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim_local / 2);
         g->out_norm = f32_dbuf(m->out_norm_w, m->n_embd);
+        if (m->v_rmsnorm) { // weightless per-head V norm: weight of ones
+            float *ones = malloc(sizeof(float) * max_hd);
+            for (int i = 0; i < max_hd; i++) ones[i] = 1.0f;
+            g->ones = f32_dbuf(ones, max_hd);
+            free(ones);
+        }
         g->attn_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
         g->ffn_norm  = calloc(m->n_layer, sizeof(CUdeviceptr));
         g->bq = calloc(m->n_layer, sizeof(CUdeviceptr));
@@ -350,12 +361,12 @@ bool gpu_init(model_t *m) {
             layer_t *ly = &m->layers[l];
             g->attn_norm[l] = f32_dbuf(ly->attn_norm_w, m->n_embd);
             g->ffn_norm[l]  = f32_dbuf(ly->ffn_norm_w, m->n_embd);
-            g->bq[l] = f32_dbuf(ly->bq, q_dim);
-            g->bk[l] = f32_dbuf(ly->bk, kv_dim);
-            g->bv[l] = f32_dbuf(ly->bv, kv_dim);
+            g->bq[l] = f32_dbuf(ly->bq, model_q_dim(m, l));
+            g->bk[l] = f32_dbuf(ly->bk, model_kv_dim(m, l));
+            g->bv[l] = f32_dbuf(ly->bv, model_kv_dim(m, l));
             g->bo[l] = f32_dbuf(ly->bo, m->n_embd);
-            g->qn[l] = f32_dbuf(ly->qnorm_w, m->head_dim);
-            g->kn[l] = f32_dbuf(ly->knorm_w, m->head_dim);
+            g->qn[l] = f32_dbuf(ly->qnorm_w, model_head_dim(m, l));
+            g->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l));
             g->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
             g->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
         }
@@ -418,21 +429,27 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
 }
 
 static bool enc_qknorm(gpu_t *g, model_t *m, CUdeviceptr v, CUdeviceptr w,
-                       int n_heads, int batch, int vs) {
+                       int n_heads, int hd, int batch, int vs) {
     float eps = m->rms_eps;
-    int hd = m->head_dim;
     void *p[] = { &v, &w, &hd, &eps, &vs };
     return launch(g->f_qknorm, n_heads, batch, 1, 64, p);
 }
 
 static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads, int pos,
-                     int batch, int vs, bool local) {
-    // sliding-window layers rope at their own base with no YaRN scale
-    rope_args a = { m->head_dim, n_heads, m->rope_dim / 2, pos,
-                    m->rope_neox, local ? 1.0f : m->rope_mscale };
+                     int batch, int vs, int l) {
+    // sliding-window layers rope at their own base with no YaRN scale;
+    // heterogeneous archs (gemma4) also rotate fewer dims on local layers
+    bool local = model_is_swa(m, l);
+    rope_args a = { model_head_dim(m, l), n_heads, model_rope_dim(m, l) / 2,
+                    pos, m->rope_neox, local ? 1.0f : m->rope_mscale };
     CUdeviceptr fr = local ? g->inv_freq_local : g->inv_freq;
     void *p[] = { &v, &fr, &a, &vs };
     return launch(g->f_rope, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
+}
+
+static bool enc_scale(gpu_t *g, CUdeviceptr x, float s, int n, int batch, int xs) {
+    void *p[] = { &x, &s, &n, &xs };
+    return launch(g->f_scale, (n + 255) / 256, batch, 1, 256, p);
 }
 
 static bool enc_add(gpu_t *g, CUdeviceptr x, CUdeviceptr d, int n,
@@ -465,7 +482,7 @@ void gpu_free(model_t *m) {
     CUdeviceptr bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
                            g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                            g->logits, g->inv_freq, g->inv_freq_local,
-                           g->out_norm, g->dummy };
+                           g->out_norm, g->dummy, g->ones };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
     if (g->mod) cu.ModuleUnload(g->mod);
@@ -512,9 +529,9 @@ static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
 static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                      int pos, bool want_logits, int l0, int l1) {
     int n_embd = m->n_embd;
-    int q_dim  = m->n_head * m->head_dim;
-    int kv_dim = m->n_head_kv * m->head_dim;
-    int xdim   = q_dim > n_embd ? q_dim : n_embd;
+    int xdim = n_embd;
+    for (int l = 0; l < m->n_layer; l++)
+        if (model_q_dim(m, l) > xdim) xdim = model_q_dim(m, l);
 
     // when starting past the embedding (a partial split's device prefix runs
     // [0, l1); this always starts at l0=0), the caller has already staged x
@@ -533,17 +550,31 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
     bool ok = true;
     for (int l = l0; l < l1 && ok; l++) {
         layer_t *ly = &m->layers[l];
-        bool local = model_is_swa(m, l);
+        bool local  = model_is_swa(m, l);
+        int hd      = model_head_dim(m, l);
+        int n_kv    = model_n_head_kv(m, l);
+        int q_dim   = model_q_dim(m, l);
+        int kv_dim  = model_kv_dim(m, l);
 
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->attn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
         ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->bq[l], tn, xdim, q_dim);
         ok = ok && enc_mv(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->bk[l], tn, xdim, kv_dim);
-        ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->bv[l], tn, xdim, kv_dim);
-        if (g->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->qn[l], m->n_head,    tn, q_dim);
-        if (g->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->kn[l], m->n_head_kv, tn, kv_dim);
-        ok = ok && enc_rope(g, m, g->q,  m->n_head,    pos, tn, q_dim, local);
-        ok = ok && enc_rope(g, m, g->kt, m->n_head_kv, pos, tn, kv_dim, local);
+        if (ly->wv) {
+            ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->bv[l], tn, xdim, kv_dim);
+        } else {
+            // gemma4 global layers have no V projection: V is the raw K
+            // (zero + add = device-side copy with the kernels we have)
+            ok = ok && cu.MemsetD8(g->vt, 0, sizeof(float) * (size_t)tn * kv_dim) == 0;
+            ok = ok && enc_add(g, g->vt, g->kt, kv_dim, tn, kv_dim, kv_dim);
+        }
+        if (g->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->qn[l], m->n_head, hd, tn, q_dim);
+        if (m->v_rmsnorm)
+            // weightless per-head RMS norm on V (pre-K-norm values)
+            ok = ok && enc_qknorm(g, m, g->vt, g->ones, n_kv, hd, tn, kv_dim);
+        if (g->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->kn[l], n_kv, hd, tn, kv_dim);
+        ok = ok && enc_rope(g, m, g->q,  m->n_head, pos, tn, q_dim, l);
+        ok = ok && enc_rope(g, m, g->kt, n_kv,      pos, tn, kv_dim, l);
 
         {
             // cache rows for consecutive positions are contiguous, so the
@@ -554,7 +585,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         }
 
         {
-            attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, pos,
+            attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
                              (uint64_t)m->kv_off[l],
                              model_attn_scale(m, l), q_dim, xdim,
                              local ? m->swa_window : 0 };
@@ -578,6 +609,9 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->pfn[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
+        if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
+            // gemma4: whole-layer output scalar, applied after both residuals
+            ok = ok && enc_scale(g, g->x, ly->out_scale, n_embd, tn, n_embd);
     }
 
     if (want_logits) {
