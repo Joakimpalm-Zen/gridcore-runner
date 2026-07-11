@@ -490,8 +490,10 @@ static void mv_rows(void *ctx, int i0, int i1) {
         }
         return;
     }
-    // batched: dequantize each weight row once, reuse for every token
+    // batched: dequantize each weight row once, reuse for every token; the
+    // multi-column dot shares each weight load across 4 activation columns
     float *buf = type == T_F32 ? NULL : malloc(sizeof(float) * n_in);
+    float outs[64];
     for (int r = i0; r < i1; r++) {
         const float *wrow;
         if (type == T_F32) {
@@ -501,11 +503,12 @@ static void mv_rows(void *ctx, int i0, int i1) {
             wrow = buf;
         }
         float b0 = j->bias ? j->bias[r] : 0.0f;
-        for (int b = 0; b < j->n_batch; b++) {
-            const float *xb = j->x + (size_t)b * j->x_stride;
-            float s = 0;
-            for (int i = 0; i < n_in; i++) s += wrow[i] * xb[i];
-            j->y[(size_t)b * j->y_stride + r] = s + b0;
+        for (int c = 0; c < j->n_batch; c += 64) {
+            int nb = j->n_batch - c < 64 ? j->n_batch - c : 64;
+            vec_dot_f32_multi(wrow, j->x + (size_t)c * j->x_stride,
+                              j->x_stride, nb, n_in, outs);
+            for (int b = 0; b < nb; b++)
+                j->y[(size_t)(c + b) * j->y_stride + r] = outs[b] + b0;
         }
     }
     free(buf);

@@ -127,6 +127,9 @@ static inline size_t ggml_row_size(int type, int64_t n) {
 void  dequant_row(int type, const void *src, float *dst, int n);
 // dot(row, x) over n elements
 float vec_dot(int type, const void *row, const float *x, int n);
+// out[b] = dot(w, x + b*x_stride) for nb columns sharing one weight row
+void  vec_dot_f32_multi(const float *w, const float *x, int x_stride,
+                        int nb, int n, float *out);
 void  q8_quant_row(const float *x, void *dst, int n); // n % 32 == 0
 void  q8_accum_row(const void *src, float a, float *out, int n);
 
