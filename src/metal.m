@@ -196,6 +196,10 @@ bool gpu_init(model_t *m) {
     }
 
     m->gpu = g;
+    // Metal always runs the whole model; without this the dispatcher takes the
+    // partial-offload branch (gpu_layers == 0) and re-runs every layer on the
+    // CPU, silently discarding the GPU's work
+    m->gpu_layers = m->n_layer;
     fprintf(stderr, "gpu: Metal backend on %s%s\n", dev.name.UTF8String,
             g->weights_copied ? " (weights copied)" : " (zero-copy weights)");
     return true;
