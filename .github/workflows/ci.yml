@@ -20,6 +20,13 @@ jobs:
         run: python3 scripts/make-test-model.py test.gguf
       - name: smoke test (completion)
         run: ./runner -m test.gguf -p "hello" -n 8 --temp 0
+      - name: smoke test (suppress tokens)
+        # all ids but EOS suppressed: generation must stop before emitting
+        # anything, so stdout is exactly the echoed prompt
+        run: |
+          python3 scripts/make-test-model.py test-sup.gguf --suppress-all-but-eos
+          OUT=$(./runner -m test-sup.gguf -p "hello" -n 8 --temp 0 2>/dev/null)
+          [ "$OUT" = "hello" ] && echo "suppress ok"
       - name: smoke test (json mode)
         run: ./runner -m test.gguf -p "hi" -n 24 --temp 0 --json 2>/dev/null | python3 -c "import json,sys; json.load(sys.stdin); print('valid json')"
       - name: smoke test (server)
@@ -77,6 +84,11 @@ jobs:
         run: python3 scripts/make-test-model.py test.gguf
       - name: smoke test (completion)
         run: ./runner.exe -m test.gguf -p "hello" -n 8 --temp 0
+      - name: smoke test (suppress tokens)
+        run: |
+          python3 scripts/make-test-model.py test-sup.gguf --suppress-all-but-eos
+          OUT=$(./runner.exe -m test-sup.gguf -p "hello" -n 8 --temp 0 2>/dev/null)
+          [ "$OUT" = "hello" ] && echo "suppress ok"
       - name: smoke test (json mode)
         run: ./runner.exe -m test.gguf -p "hi" -n 24 --temp 0 --json 2>/dev/null | python3 -c "import json,sys; json.load(sys.stdin); print('valid json')"
       - name: smoke test (quantize)

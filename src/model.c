@@ -299,6 +299,17 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     // gemma4 dropped the plus-one norm convention (unlike gemma1-3): its
     // RMSNorm is the standard x_normed * weight, so norm weights are used raw.
 
+    // checkpoint workaround (gemma4 ships one): ids the model must never emit;
+    // their logits are forced to -inf after every forward pass
+    gguf_kv *sup = gguf_get(g, "tokenizer.ggml.suppress_tokens");
+    if (sup && sup->arr_raw && sup->arr_type == GGUF_T_I32 && sup->arr_n > 0) {
+        const int32_t *ids = (const int32_t *)sup->arr_raw;
+        m->suppress = malloc(sizeof(int32_t) * sup->arr_n);
+        for (uint64_t i = 0; i < sup->arr_n; i++)
+            if (ids[i] >= 0 && ids[i] < m->n_vocab)
+                m->suppress[m->n_suppress++] = ids[i];
+    }
+
     // runtime buffers
     m->reserve_vram_pct = p->reserve_vram_pct;
     int n_ctx = p->n_ctx;
@@ -403,7 +414,7 @@ void model_free(model_t *m) {
         free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
     }
     free(m->l_head_kv); free(m->l_head_dim); free(m->l_rope_dim);
-    free(m->l_is_swa); free(m->kv_off);
+    free(m->l_is_swa); free(m->kv_off); free(m->suppress);
     free(m->layers);
     free(m->out_norm_w);
     free(m->rope_inv_freq);
@@ -553,6 +564,13 @@ static void attn_heads(void *ctx, int h0, int h1) {
 
 // ---------------------------------------------------------------- forward
 
+// suppress_tokens checkpoint workaround: a large finite constant instead of
+// -INFINITY because the binary is built with -ffast-math (finite-math-only)
+static void suppress_logits(const model_t *m, float *logits) {
+    for (int i = 0; i < m->n_suppress; i++)
+        logits[m->suppress[i]] = -1e30f;
+}
+
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
     // GPU handles the leading gpu_layers. A full split (gpu_layers == n_layer)
@@ -563,8 +581,10 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     if (m->gpu) {
         if (m->gpu_layers >= m->n_layer) {
             float *lg = NULL;
-            if (gpu_forward_batch(m, tokens, n, pos, want_logits, &lg))
+            if (gpu_forward_batch(m, tokens, n, pos, want_logits, &lg)) {
+                if (lg && m->n_suppress) suppress_logits(m, lg);
                 return lg;
+            }
             m->gpu = NULL; // GPU failed at runtime: fall back to CPU permanently
         } else if (gpu_forward_batch(m, tokens, n, pos, false, NULL)) {
             start = m->gpu_layers;
@@ -686,6 +706,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     if (m->logit_softcap > 0)
         for (int i = 0; i < m->n_vocab; i++)
             m->logits[i] = m->logit_softcap * tanhf(m->logits[i] / m->logit_softcap);
+    if (m->n_suppress) suppress_logits(m, m->logits);
     return m->logits;
 }
 
