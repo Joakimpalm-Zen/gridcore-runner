@@ -231,6 +231,13 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         m->l_rope_dim = calloc(m->n_layer, sizeof(int));
         gguf_kv *swa_arr = gguf_get(g, AK("attention.sliding_window_pattern"));
         gguf_kv *kv_arr  = gguf_get(g, AK("attention.head_count_kv"));
+        // per-layer arrays must have the element width we index with — a
+        // converter that writes e.g. I32 booleans would misparse every layer
+        if (swa_arr && swa_arr->arr_type != GGUF_T_BOOL &&
+            swa_arr->arr_type != GGUF_T_U8 && swa_arr->arr_type != GGUF_T_I8)
+            swa_arr = NULL;
+        if (kv_arr && kv_arr->arr_type != GGUF_T_U32 && kv_arr->arr_type != GGUF_T_I32)
+            kv_arr = NULL;
         for (int i = 0; i < m->n_layer; i++) {
             bool swa = swa_arr && swa_arr->arr_raw && (uint64_t)i < swa_arr->arr_n
                        ? ((const uint8_t *)swa_arr->arr_raw)[i] != 0 : false;

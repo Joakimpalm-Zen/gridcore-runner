@@ -163,11 +163,9 @@ void think_free(think_split *t) {
 }
 
 static void ts_keep(think_split *t, const char *b, int n) {
-    if (n > t->cap) {
-        t->cap = n + 64;
-        t->buf = realloc(t->buf, t->cap);
-    }
-    memmove(t->buf, b, n); // b points into t->buf
+    // b always points into t->buf and n <= what feed() already grew cap to,
+    // so no realloc may happen here — it would free the memory b points into
+    memmove(t->buf, b, n);
     t->n = n;
 }
 

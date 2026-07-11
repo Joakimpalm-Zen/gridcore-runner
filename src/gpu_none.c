@@ -17,11 +17,6 @@ bool gpu_init(model_t *m) {
     return false;
 }
 
-float *gpu_forward(model_t *m, int token, int pos) {
-    (void)m; (void)token; (void)pos;
-    return 0;
-}
-
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                        bool want_logits, float **logits) {
     (void)m; (void)tokens; (void)n; (void)pos; (void)want_logits; (void)logits;
