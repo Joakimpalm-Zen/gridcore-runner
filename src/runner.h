@@ -413,6 +413,15 @@ const char *template_name(int tmpl);
 size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
                        bool add_assistant, char *out, size_t cap);
 
+// chat tool-call convention (template.c; sbuf/jv live in json.h)
+struct sbuf;
+struct jv;
+// render OpenAI "tools" declarations as a system turn (no-op when absent)
+void tools_render(const struct jv *tools, struct sbuf *out);
+// parse tool-call blocks out of content into OpenAI tool_calls items;
+// returns the call count, content is compacted in place
+int  tool_calls_parse(struct sbuf *content, struct sbuf *tc);
+
 // streaming splitter for thinking-tag models (gemma4 channels): bytes between
 // open and close tags — anywhere in the stream, gemma4 interleaves them with
 // plain text — reach the callback as reasoning (reasoning=1), the rest as
