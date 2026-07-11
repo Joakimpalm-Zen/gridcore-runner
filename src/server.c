@@ -511,6 +511,54 @@ static void handle_completion(slot_t *s, int fd, jv *req) {
     run_completion(s, fd, prompt, false, req);
 }
 
+static void handle_embeddings(slot_t *s, int fd, jv *req) {
+    jv *input = jv_get(req, "input");
+    const char *one = jv_str(input, NULL);
+    int n_in = one ? 1 : (input && input->type == J_ARR ? input->n : 0);
+    if (n_in == 0) { send_error(fd, 400, "missing input"); return; }
+
+    model_t *m = s->m;
+    float *emb = malloc(sizeof(float) * m->n_embd);
+    sbuf r = {0};
+    sb_lit(&r, "{\"object\":\"list\",\"data\":[");
+    int total = 0;
+    bool ok = true;
+    for (int k = 0; k < n_in && ok; k++) {
+        const char *txt = one ? one : jv_str(input->items[k], NULL);
+        if (!txt) { send_error(fd, 400, "input must be strings"); ok = false; break; }
+        size_t cap = strlen(txt) + 16;
+        int32_t *toks = malloc(sizeof(int32_t) * cap);
+        int n = tok_encode(s->tok, txt, toks, (int)cap, true, true);
+        if (n == 0 || !model_embed(m, toks, n, emb)) {
+            free(toks);
+            send_error(fd, 400, n == 0 ? "empty input" : "input exceeds context window");
+            ok = false;
+            break;
+        }
+        free(toks);
+        total += n;
+        sb_fmt(&r, "%s{\"object\":\"embedding\",\"index\":%d,\"embedding\":[",
+               k ? "," : "", k);
+        for (int j = 0; j < m->n_embd; j++)
+            sb_fmt(&r, "%s%.7g", j ? "," : "", emb[j]);
+        sb_lit(&r, "]}");
+    }
+    // model_embed overwrote this slot's KV cache — invalidate the prefix cache
+    engine_reset(&s->e);
+    s->e.pos = 0;
+    if (ok) {
+        sb_lit(&r, "],\"model\":\"");
+        sb_esc(&r, SV.model_name, strlen(SV.model_name));
+        sb_fmt(&r, "\",\"usage\":{\"prompt_tokens\":%d,\"total_tokens\":%d}}",
+               total, total);
+        send_response(fd, 200, "application/json", r.s, r.n);
+        fprintf(stderr, "[slot %d] embeddings: %d input(s), %d tok\n",
+                s->id, n_in, total);
+    }
+    free(r.s);
+    free(emb);
+}
+
 // ---------------------------------------------------------------- http
 
 static void handle_conn(slot_t *s, int fd) {
@@ -593,7 +641,8 @@ static void handle_conn(slot_t *s, int fd) {
         free(r.s);
     } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/v1/chat/completions") ||
-                !strcmp(path, "/v1/completions"))) {
+                !strcmp(path, "/v1/completions") ||
+                !strcmp(path, "/v1/embeddings"))) {
         jv *req = body ? json_parse(body, content_length) : NULL;
         if (!req) {
             send_error(fd, 400, "invalid JSON body");
@@ -607,6 +656,7 @@ static void handle_conn(slot_t *s, int fd) {
             }
             if (ok) {
                 if (strcmp(path, "/v1/chat/completions") == 0) handle_chat(s, fd, req);
+                else if (strcmp(path, "/v1/embeddings") == 0) handle_embeddings(s, fd, req);
                 else handle_completion(s, fd, req);
             }
             atomic_store(&SV.busy, false);

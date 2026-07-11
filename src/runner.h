@@ -270,6 +270,8 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits);
 // single-token convenience wrapper
 float *model_forward(model_t *m, int token, int pos);
+// mean-pooled L2-normalized embedding of toks; clobbers KV slots [0, n)
+bool   model_embed(model_t *m, const int32_t *toks, int n, float *out);
 
 // ---------------------------------------------------------------- sampler
 
