@@ -424,10 +424,14 @@ typedef struct {
     sval  sv;
     jsonv jv;
     bool progress;         // print prompt progress to stderr
+    int32_t *hist;         // tokens whose KV occupies slots [0, pos)
 } engine;
 
 void   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
 void   engine_reset(engine *e); // clear KV position + sampler + json state
+// keep the KV for the longest common prefix of hist and toks, reset the rest
+// of the engine state; returns how many prompt tokens can be skipped
+int    engine_rewind(engine *e, const int32_t *toks, int n);
 // feed tokens (batched); returns last-token logits or NULL on ctx overflow
 float *engine_feed(engine *e, const int32_t *toks, int n);
 // sample until stop/limit, streaming decoded bytes to cb; returns token count

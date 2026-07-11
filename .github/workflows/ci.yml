@@ -37,6 +37,13 @@ jobs:
           curl -sf http://127.0.0.1:8123/v1/models
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
+          # prefix-cache regression: an identical greedy request must reuse the
+          # cached KV and still return the identical completion
+          R1=$(curl -sf -d '{"messages":[{"role":"user","content":"again"}],"max_tokens":8,"temperature":0}' http://127.0.0.1:8123/v1/chat/completions)
+          R2=$(curl -sf -d '{"messages":[{"role":"user","content":"again"}],"max_tokens":8,"temperature":0}' http://127.0.0.1:8123/v1/chat/completions)
+          C1=$(echo "$R1" | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
+          C2=$(echo "$R2" | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
+          [ "$C1" = "$C2" ] && echo "prefix cache ok"
           kill %1
       - name: smoke test (json schema)
         run: |

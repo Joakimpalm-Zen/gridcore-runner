@@ -262,8 +262,8 @@ int main(int argc, char **argv) {
         return server_run(registry ? NULL : &m, registry ? NULL : &tok,
                           model_path, &mp, smp, port, parallel, n_threads, ttl);
 
-    engine e;
-    engine_init(&e, &m, &tok, &smp);
+    engine e = {0};
+    engine_init(&e, &m, &tok, &smp); // e zero-initialized at declaration
     e.ignore_eos = ignore_eos;
     e.json_mode = json_mode;
     e.progress = true;

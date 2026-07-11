@@ -11,6 +11,7 @@
 double now_s(void) { return plat_now(); }
 
 void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
+    free(e->hist); // slot engines are re-inited on model swap; e must be zeroed
     memset(e, 0, sizeof(*e));
     e->m = m;
     e->tok = tok;
@@ -28,6 +29,7 @@ void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
         if (!dup) e->stop_ids[e->n_stop++] = id;
     }
     jsonv_init(&e->jv);
+    e->hist = malloc(sizeof(int32_t) * m->n_ctx);
 }
 
 void engine_reset(engine *e) {
@@ -38,6 +40,21 @@ void engine_reset(engine *e) {
     if (e->schema) sval_init(&e->sv, e->schema);
 }
 
+int engine_rewind(engine *e, const int32_t *toks, int n) {
+    int keep = 0;
+    if (e->hist)
+        while (keep < e->pos && keep < n - 1 && e->hist[keep] == toks[keep])
+            keep++; // n - 1: always feed at least one token to get logits
+    e->pos = keep;
+    e->hit_stop = false;
+    sampler_reset(e->smp);
+    // the kept prefix still counts toward the repeat-penalty window
+    for (int i = 0; i < keep; i++) sampler_accept(e->smp, toks[i]);
+    jsonv_init(&e->jv);
+    if (e->schema) sval_init(&e->sv, e->schema);
+    return keep;
+}
+
 static bool is_stop(engine *e, int id) {
     for (int i = 0; i < e->n_stop; i++) if (e->stop_ids[i] == id) return true;
     return false;
@@ -46,6 +63,8 @@ static bool is_stop(engine *e, int id) {
 float *engine_feed(engine *e, const int32_t *toks, int n) {
     float *logits = NULL;
     model_t *m = e->m;
+    if (e->hist && e->pos + n <= m->n_ctx)
+        memcpy(e->hist + e->pos, toks, sizeof(int32_t) * n);
     for (int i = 0; i < n; ) {
         int chunk = n - i < m->n_batch ? n - i : m->n_batch;
         if (e->pos + chunk > m->n_ctx) return NULL;
@@ -105,6 +124,7 @@ int engine_generate(engine *e, float *logits, int max_new,
             e->hit_stop = true;
             break;
         }
+        if (e->hist && e->pos < e->m->n_ctx) e->hist[e->pos] = tok;
         logits = model_forward(e->m, tok, e->pos++);
     }
     if (e->schema && !e->sv.done) {
