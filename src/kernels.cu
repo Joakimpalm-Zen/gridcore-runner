@@ -526,6 +526,99 @@ extern "C" __global__ void k_mv_q6_K_b(MV_PARAMS) {
     MV_TAIL_B;
 }
 
+// IQ4: the nibble indexes a fixed 16-entry codebook
+static __device__ const signed char kv_iq4[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+};
+
+extern "C" __global__ void k_mv_iq4_nl(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 32;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 18;
+    float s = 0;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 18;
+        float d = f16f(blk);
+        const uchar *q = blk + 2;
+        const float *xp = x + b * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++) {
+            t += (float)kv_iq4[q[j] & 0xF] * xp[j];
+            t += (float)kv_iq4[q[j] >> 4]  * xp[j + 16];
+        }
+        s += d * t;
+    }
+    MV_TAIL;
+}
+
+extern "C" __global__ void k_mv_iq4_nl_b(MV_PARAMS) {
+    MV_HEAD_B;
+    int nb = a.n_in / 32;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 18;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 18;
+        float d = f16f(blk);
+        const uchar *q = blk + 2;
+        ulong64 base = (ulong64)b * 32;
+        for (int j = 0; j < 16; j++) {
+            MV_FMA(d * (float)kv_iq4[q[j] & 0xF], base + j);
+            MV_FMA(d * (float)kv_iq4[q[j] >> 4],  base + j + 16);
+        }
+    }
+    MV_TAIL_B;
+}
+
+extern "C" __global__ void k_mv_iq4_xs(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 136;
+    float s = 0;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 136;
+        float d = f16f(blk);
+        unsigned sh = (unsigned)blk[2] | ((unsigned)blk[3] << 8);
+        const uchar *sl = blk + 4;
+        const uchar *q  = blk + 8;
+        const float *xp = x + b * 256;
+        for (int ib = 0; ib < 8; ib++) {
+            int ls = ((sl[ib / 2] >> 4 * (ib % 2)) & 0xF) | (((sh >> 2 * ib) & 3) << 4);
+            float dl = d * (ls - 32);
+            float t = 0;
+            for (int j = 0; j < 16; j++) {
+                t += (float)kv_iq4[q[j] & 0xF] * xp[j];
+                t += (float)kv_iq4[q[j] >> 4]  * xp[j + 16];
+            }
+            s += dl * t;
+            q += 16; xp += 32;
+        }
+    }
+    MV_TAIL;
+}
+
+extern "C" __global__ void k_mv_iq4_xs_b(MV_PARAMS) {
+    MV_HEAD_B;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 136;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 136;
+        float d = f16f(blk);
+        unsigned sh = (unsigned)blk[2] | ((unsigned)blk[3] << 8);
+        const uchar *sl = blk + 4;
+        const uchar *q  = blk + 8;
+        ulong64 base = (ulong64)b * 256;
+        for (int ib = 0; ib < 8; ib++) {
+            int ls = ((sl[ib / 2] >> 4 * (ib % 2)) & 0xF) | (((sh >> 2 * ib) & 3) << 4);
+            float dl = d * (ls - 32);
+            for (int j = 0; j < 16; j++) {
+                MV_FMA(dl * (float)kv_iq4[q[j] & 0xF], base + ib * 32 + j);
+                MV_FMA(dl * (float)kv_iq4[q[j] >> 4],  base + ib * 32 + j + 16);
+            }
+            q += 16;
+        }
+    }
+    MV_TAIL_B;
+}
+
 // ---------------------------------------------------------------- rope
 // grid: (ceil(half_dim/32), n_heads, batch); vs = element stride per column
 
