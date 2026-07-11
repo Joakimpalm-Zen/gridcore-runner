@@ -316,6 +316,59 @@ static int gen_collect(void *ud, const char *bytes, int n) {
     return think_feed(&g->ts, bytes, n, gen_emit, g);
 }
 
+// parse gemma4 tool-call blocks — <|tool_call>call:NAME{json}<tool_call|> —
+// out of the content, appending OpenAI tool_calls items to tc. Returns the
+// number of calls; content is compacted in place.
+static int parse_tool_calls(sbuf *content, sbuf *tc) {
+    if (!content->s) return 0;
+    static const char OPEN[] = "<|tool_call>call:";
+    static const char CLOSE[] = "<tool_call|>";
+    int n_calls = 0;
+    char *w = content->s; // write cursor for the compacted content
+    const char *p = content->s, *end = content->s + content->n;
+    while (p < end) {
+        const char *o = strstr(p, OPEN);
+        if (!o) {
+            memmove(w, p, end - p);
+            w += end - p;
+            break;
+        }
+        memmove(w, p, o - p);
+        w += o - p;
+        const char *name = o + sizeof(OPEN) - 1;
+        const char *brace = name;
+        while (brace < end && *brace != '{' && *brace != '<' && brace - name < 128)
+            brace++;
+        if (brace >= end || *brace != '{') { p = name; continue; } // not a call
+        // brace-match the args object (string- and escape-aware)
+        const char *q = brace;
+        int depth = 0;
+        bool in_str = false;
+        for (; q < end; q++) {
+            if (in_str) {
+                if (*q == '\\') q++;
+                else if (*q == '"') in_str = false;
+            } else if (*q == '"') in_str = true;
+            else if (*q == '{') depth++;
+            else if (*q == '}' && --depth == 0) { q++; break; }
+        }
+        if (depth != 0) { p = name; continue; } // truncated: leave as content
+        sb_fmt(tc, "%s{\"id\":\"call_%d\",\"type\":\"function\",\"function\":"
+                   "{\"name\":\"", n_calls ? "," : "", n_calls);
+        sb_esc(tc, name, (int)(brace - name));
+        sb_lit(tc, "\",\"arguments\":\"");
+        sb_esc(tc, brace, (int)(q - brace));
+        sb_lit(tc, "\"}}");
+        n_calls++;
+        p = q;
+        if (end - p >= (int)sizeof(CLOSE) - 1 &&
+            memcmp(p, CLOSE, sizeof(CLOSE) - 1) == 0)
+            p += sizeof(CLOSE) - 1;
+    }
+    if (n_calls) content->n = (int)(w - content->s);
+    return n_calls;
+}
+
 // run one completion on a slot and write the HTTP response
 static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
                            jv *req) {
@@ -422,6 +475,9 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
             send_all(fd, fin, fn);
         }
     } else {
+        sbuf tc = {0};
+        int n_tc = chat ? parse_tool_calls(&g.out, &tc) : 0;
+        if (n_tc) finish = "tool_calls";
         sbuf r = {0};
         sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"", g.id,
                chat ? "chat.completion" : "text_completion",
@@ -432,6 +488,12 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         else      sb_lit(&r, "\"text\":\"");
         sb_esc(&r, g.out.s ? g.out.s : "", g.out.n);
         sb_lit(&r, "\"");
+        if (n_tc) {
+            sb_lit(&r, ",\"tool_calls\":[");
+            sb_put(&r, tc.s, tc.n);
+            sb_lit(&r, "]");
+        }
+        free(tc.s);
         if (chat && g.reason.n > 0) {
             sb_lit(&r, ",\"reasoning_content\":\"");
             sb_esc(&r, g.reason.s, g.reason.n);
