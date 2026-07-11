@@ -573,6 +573,7 @@ struct attn_args {
     ulong64 l_off;    // this layer's element offset into the kv cache
     float   scale;
     int     qs, os;   // q / out element stride per token column
+    int     window;   // sliding-window size for this layer (0 = full)
 };
 
 extern "C" __global__ void k_attn(const float *q, const __half *kc,
@@ -585,10 +586,12 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
     int hd = a.head_dim;
     int kvh = h / (a.n_head / a.n_head_kv);
     int kv_dim = a.n_head_kv * hd;
+    int t0 = 0;                          // sliding-window start
+    if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1;
     const float *qh = q + (ulong64)tk * a.qs + h * hd;
     float *ah = att + ((ulong64)tk * a.n_head + h) * a.n_ctx;
 
-    for (int t = tid; t <= pos; t += tpg) {
+    for (int t = t0 + tid; t <= pos; t += tpg) {
         const __half *kt = kc + a.l_off + (ulong64)t * kv_dim + kvh * hd;
         float s = 0;
         for (int i = 0; i < hd; i++) s += qh[i] * __half2float(kt[i]);
@@ -598,7 +601,7 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
 
     // max
     float mx = -1e30f;
-    for (int t = tid; t <= pos; t += tpg) mx = fmaxf(mx, ah[t]);
+    for (int t = t0 + tid; t <= pos; t += tpg) mx = fmaxf(mx, ah[t]);
     red[tid] = mx;
     __syncthreads();
     for (int off = tpg / 2; off > 0; off >>= 1) {
@@ -609,7 +612,7 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
     __syncthreads();
     // exp + sum
     float sum = 0;
-    for (int t = tid; t <= pos; t += tpg) {
+    for (int t = t0 + tid; t <= pos; t += tpg) {
         float e = expf(ah[t] - mx);
         ah[t] = e;
         sum += e;
@@ -625,7 +628,7 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
 
     for (int i = tid; i < hd; i += tpg) {
         float o = 0;
-        for (int t = 0; t <= pos; t++)
+        for (int t = t0; t <= pos; t++)
             o += ah[t] * __half2float(vc[a.l_off + (ulong64)t * kv_dim + kvh * hd + i]);
         out[(ulong64)tk * a.os + h * hd + i] = o / sum;
     }
