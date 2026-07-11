@@ -316,6 +316,46 @@ static int gen_collect(void *ud, const char *bytes, int n) {
     return think_feed(&g->ts, bytes, n, gen_emit, g);
 }
 
+// re-serialize a parsed JSON value (tools declarations rendered into the
+// system turn)
+static void jv_dump(const jv *v, sbuf *o) {
+    if (!v) { sb_lit(o, "null"); return; }
+    switch (v->type) {
+    case J_NULL: sb_lit(o, "null"); break;
+    case J_BOOL: sb_lit(o, v->b ? "true" : "false"); break;
+    case J_NUM:
+        if (v->num == (double)(long long)v->num)
+            sb_fmt(o, "%lld", (long long)v->num);
+        else
+            sb_fmt(o, "%.10g", v->num);
+        break;
+    case J_STR:
+        sb_lit(o, "\"");
+        sb_esc(o, v->str, strlen(v->str));
+        sb_lit(o, "\"");
+        break;
+    case J_ARR:
+        sb_lit(o, "[");
+        for (int i = 0; i < v->n; i++) {
+            if (i) sb_lit(o, ",");
+            jv_dump(v->items[i], o);
+        }
+        sb_lit(o, "]");
+        break;
+    case J_OBJ:
+        sb_lit(o, "{");
+        for (int i = 0; i < v->n; i++) {
+            if (i) sb_lit(o, ",");
+            sb_lit(o, "\"");
+            sb_esc(o, v->keys[i], strlen(v->keys[i]));
+            sb_lit(o, "\":");
+            jv_dump(v->items[i], o);
+        }
+        sb_lit(o, "}");
+        break;
+    }
+}
+
 // parse gemma4 tool-call blocks — <|tool_call>call:NAME{json}<tool_call|> —
 // out of the content, appending OpenAI tool_calls items to tc. Returns the
 // number of calls; content is compacted in place.
@@ -477,7 +517,11 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     } else {
         sbuf tc = {0};
         int n_tc = chat ? parse_tool_calls(&g.out, &tc) : 0;
-        if (n_tc) finish = "tool_calls";
+        if (n_tc) {
+            finish = "tool_calls";
+            g.out.n = 0; // OpenAI convention: no content alongside tool_calls
+                         // (whatever followed was the model faking a result)
+        }
         sbuf r = {0};
         sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"", g.id,
                chat ? "chat.completion" : "text_completion",
@@ -553,9 +597,21 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
         send_error(fd, 400, "missing messages");
         return;
     }
-    chat_msg *cm = malloc(sizeof(chat_msg) * msgs->n);
-    size_t total = 0;
+    // OpenAI "tools": declare them in a leading system turn with the call
+    // syntax the response parser understands (the trained template's native
+    // declaration macros are more elaborate; this works in practice)
+    jv *tools = jv_get(req, "tools");
+    sbuf ts = {0};
+    if (tools && tools->type == J_ARR && tools->n > 0) {
+        sb_lit(&ts, "You have these tools available. To call one, reply with "
+                    "exactly <|tool_call>call:NAME{json arguments}<tool_call|> "
+                    "and nothing else. Tools:\n");
+        jv_dump(tools, &ts);
+    }
+    chat_msg *cm = malloc(sizeof(chat_msg) * (msgs->n + 1));
+    size_t total = ts.n + 64;
     int n_cm = 0;
+    if (ts.n) cm[n_cm++] = (chat_msg){ "system", ts.s };
     for (int i = 0; i < msgs->n; i++) {
         const char *role = jv_str(jv_get(msgs->items[i], "role"), "user");
         const char *content = jv_str(jv_get(msgs->items[i], "content"), NULL);
@@ -563,12 +619,18 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
         cm[n_cm++] = (chat_msg){ role, content };
         total += strlen(role) + strlen(content) + 64;
     }
-    if (n_cm == 0) { free(cm); send_error(fd, 400, "no message content"); return; }
+    if (n_cm == 0) {
+        free(cm);
+        free(ts.s);
+        send_error(fd, 400, "no message content");
+        return;
+    }
     char *prompt = malloc(total + 256);
     render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
     run_completion(s, fd, prompt, true, req);
     free(prompt);
     free(cm);
+    free(ts.s);
 }
 
 static void handle_completion(slot_t *s, int fd, jv *req) {
