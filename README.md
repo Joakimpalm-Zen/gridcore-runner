@@ -28,9 +28,9 @@ libc and pthreads. CI builds and smoke-tests every push on:
 
 | Platform | Toolchain | GPU |
 |---|---|---|
-| Linux (x86_64) | gcc | CPU only (CUDA/Vulkan planned) |
+| Linux (x86_64) | gcc | CUDA (NVIDIA driver only, no toolkit needed) |
 | macOS (arm64) | Apple clang | Metal |
-| Windows (x86_64) | MinGW-w64 via MSYS2 (`pacman -S make mingw-w64-ucrt-x86_64-gcc`, then `make`) | CPU only (CUDA/Vulkan planned) |
+| Windows (x86_64) | MinGW-w64 via MSYS2 (`pacman -S make mingw-w64-ucrt-x86_64-gcc`, then `make`) | CUDA (NVIDIA driver only, no toolkit needed) |
 
 The fp16 kernels use ARM hardware half-floats when available and fall back to
 portable table lookups elsewhere. Little-endian hosts only (GGUF is
@@ -38,22 +38,32 @@ little-endian; every mainstream x86/ARM/RISC-V system qualifies).
 
 ## GPU
 
-On Apple Silicon the entire forward pass runs on the GPU through a Metal
-backend: model weights are wrapped **zero-copy** from the mmap (no extra
-RAM), the KV cache lives in unified memory shared with the CPU, and each
-generated token is a single GPU command buffer. `--gpu auto` (the default)
-uses it whenever the model's quant formats have kernels (F32, F16, Q8_0,
-Q4_0/1, Q5_0/1, Q4_K, Q5_K, Q6_K); anything else falls back to CPU with a
-message, as does any GPU runtime failure. GPU output is verified
-token-identical to the CPU path across every supported quant.
+Two backends implement the same small interface (`src/gpu_none.c` documents
+it); `--gpu auto` (the default) uses one whenever the model's quant formats
+have kernels (F32, F16, Q8_0, Q4_0/1, Q5_0/1, Q4_K, Q5_K, Q6_K); anything
+else falls back to CPU with a message, as does any GPU runtime failure or a
+model that does not fit. GPU output is verified token-identical to the CPU
+path across every supported quant on both backends.
 
-Honest performance note: on unified-memory Macs, single-token generation is
-memory-bandwidth-bound, so the GPU gives modest speedups (~15–20% on a 1.1B)
-rather than multiples — its real value is freeing the CPU cores (useful with
-`--parallel` serving) and growing headroom on bigger GPUs. Batched prompt
-processing currently stays on the CPU. Other backends (CUDA, Vulkan)
-implement the same three-function interface (`src/gpu_none.c` documents it)
-but are not written yet — NVIDIA/AMD machines run the CPU path today.
+**Metal (Apple Silicon):** model weights are wrapped **zero-copy** from the
+mmap (no extra RAM), the KV cache lives in unified memory shared with the
+CPU, and each generated token is a single GPU command buffer. On
+unified-memory Macs single-token generation is memory-bandwidth-bound, so
+the GPU gives modest speedups (~15–20% on a 1.1B) — its real value is
+freeing the CPU cores and growing headroom on bigger GPUs.
+
+**CUDA (NVIDIA, Linux/Windows):** the driver API is loaded dynamically
+(`nvcuda.dll` / `libcuda.so.1`) and kernels ship as embedded PTX, so neither
+building nor running needs the CUDA toolkit — a machine without an NVIDIA
+driver just uses the CPU. Weights are copied to VRAM once (with a free-VRAM
+fit check), the fp16 KV cache lives in VRAM with the host copy kept
+authoritative, and prompt batches run as 8-token tiles that decode each
+weight once for all tokens. Measured on an RTX 3070: 6–36 tok/s generation
+across 1.5B–8B quantized models (5–8× the same box's CPU) and 2–3× CPU
+prompt evaluation. Regenerate the PTX header after kernel changes with
+`make ptx` (needs a CUDA toolkit at development time only).
+
+Vulkan (AMD/Intel) is not written yet — those machines run the CPU path.
 
 ## Fitting models to machines (requantizer)
 
