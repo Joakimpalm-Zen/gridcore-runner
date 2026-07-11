@@ -227,6 +227,8 @@ typedef struct {
     float *x, *xb, *xb2, *q, *hb, *hb2;   // [n_batch][dim] activations
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
     float *att, *logits;
+    float *all_logits;       // lazy [spec_batch][n_vocab] (speculative verify)
+    int    spec_batch;       // rows all_logits can hold
     int    reserve_vram_pct; // VRAM cap for the GPU backend (0 = free VRAM)
     int    gpu_layers;       // leading layers run on GPU (n_layer = full,
                              // <n_layer = partial offload, CPU finishes the rest)
@@ -275,6 +277,10 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits);
 // single-token convenience wrapper
 float *model_forward(model_t *m, int token, int pos);
+// speculative verify: forward a small batch keeping hidden states, then pull
+// each row's logits lazily (false/NULL on full GPU offload or n > spec_batch)
+bool   model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos);
+float *model_spec_row_logits(model_t *m, int b);
 // mean-pooled L2-normalized embedding of toks; clobbers KV slots [0, n)
 bool   model_embed(model_t *m, const int32_t *toks, int n, float *out);
 
@@ -450,6 +456,11 @@ typedef struct {
     int32_t *lp_ids;       // chosen token id per emitted token
     lp_alt  *lp_top;       // top-N alternatives per token
     int      lp_n, lp_cap, lp_count;
+    // speculative decoding: a small draft model proposes draft_k tokens per
+    // round, the target verifies them in one batched forward
+    model_t *dm;           // draft model (NULL = off)
+    int      dpos;         // draft KV position (may trail pos)
+    int      draft_k;      // drafts per round
 } engine;
 
 void   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
