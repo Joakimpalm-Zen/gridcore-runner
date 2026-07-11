@@ -8,7 +8,6 @@ models**.
 
 ```
 ./runner -m models/SmolLM2-135M-Instruct-Q8_0.gguf -i          # interactive chat
-./runner -m qwen2.5:0.5b -p "Hello"                            # straight from your Ollama store
 ./runner -m model.gguf -f big-document.txt -c 8192 -n 200      # 4x the training context
 ./runner -m model.gguf --serve --parallel 2                    # OpenAI-compatible API server
 ./runner -m model.gguf -p "..." --json                         # guaranteed-valid JSON output
@@ -122,20 +121,16 @@ model when you want concurrent slots instead.
 
 ## Get a model
 
-Three ways:
+Two ways:
 
-1. **Use your Ollama models directly.** Pass an Ollama model name (`-m llama3.2:1b`,
-   `-m qwen2.5:0.5b`) and runner resolves it through the local Ollama store
-   (`~/.ollama/models`, or `$OLLAMA_MODELS`) to the underlying GGUF blob. No copy,
-   no conversion. (Cloud-only tags have no local weights and can't be run.)
-2. **`./download-model.sh`** fetches a small test model.
-3. **Any GGUF from Hugging Face**, e.g.:
+1. **`./download-model.sh`** fetches a small test model.
+2. **Any GGUF from Hugging Face**, e.g.:
    ```
    curl -L -O "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf"
    ```
 
-Note: safetensors checkpoints must be converted to GGUF first (tools like
-Ollama convert on import) — runner runs the converted GGUF.
+Note: safetensors checkpoints must be converted to GGUF first — runner runs
+the converted GGUF.
 
 ## Large contexts on small models
 
