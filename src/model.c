@@ -101,6 +101,15 @@ static void rope_setup(model_t *m, gguf_file *g, const char *arch,
                 m->n_ctx, m->n_ctx_train, factor);
     }
 
+    if (m->swa_window > 0) {
+        // sliding-window layers rope at their own (short-context) base with
+        // no scaling — gemma3 locals use 10k while globals run 1M + scaling
+        float local_base = gguf_get_f32(g, RK("rope.local.freq_base"), 10000.0f);
+        m->rope_inv_freq_local = malloc(sizeof(float) * half);
+        for (int j = 0; j < half; j++)
+            m->rope_inv_freq_local[j] = powf(local_base, -2.0f * j / m->rope_dim);
+    }
+
     if (mode == RS_LINEAR) {
         for (int j = 0; j < half; j++) m->rope_inv_freq[j] /= factor;
     } else if (mode == RS_YARN) {
@@ -131,7 +140,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     snprintf(m->arch, sizeof(m->arch), "%s", arch);
     if (strcmp(arch, "llama") != 0 && strcmp(arch, "qwen2") != 0 &&
         strcmp(arch, "qwen3") != 0 && strcmp(arch, "mistral") != 0 &&
-        strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0) {
+        strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0 &&
+        strcmp(arch, "gemma3") != 0) {
         fprintf(stderr, "warning: architecture '%s' untested, attempting llama-style load\n", arch);
     }
     char key[128];
@@ -151,6 +161,17 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     // llama-arch GGUFs have Q/K permuted at conversion for adjacent-pair rope;
     // qwen2 (and other HF-layout archs) need NeoX-style half-split rotation
     m->rope_neox   = strcmp(arch, "llama") != 0 && strcmp(arch, "mistral") != 0;
+    m->embd_scale  = 1.0f;
+    if (strcmp(arch, "gemma3") == 0) {
+        // gemma3: scaled embeddings, sliding-window attention on 5 of every
+        // 6 layers (the 6th is global), local layers rope at their own base
+        m->embd_scale  = sqrtf((float)m->n_embd);
+        m->swa_window  = (int)gguf_get_u32(g, AK("attention.sliding_window"), 0);
+        m->swa_pattern = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 6);
+        m->rms_eps     = gguf_get_f32(g, AK("attention.layer_norm_rms_epsilon"), 1e-6f);
+        // gemma3 ropes global layers at 1M; some exports omit the key
+        m->rope_base   = gguf_get_f32(g, AK("rope.freq_base"), 1000000.0f);
+    }
     if (gguf_get_u32(g, AK("expert_count"), 0) > 0) {
         fprintf(stderr, "error: MoE models are not supported\n");
         return false;
@@ -202,7 +223,12 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         l->bo = tensor_to_f32(opt_tensor(g, "blk.%d.attn_output.bias", i));
         l->qnorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q_norm.weight", i));
         l->knorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k_norm.weight", i));
+        l->post_attn_norm_w = tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i));
+        l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i));
     }
+
+    // NOTE: gemma norm weights are stored with the (1+w) offset already
+    // folded in by the GGUF conversion — no runtime adjustment needed.
 
     // runtime buffers
     m->reserve_vram_pct = p->reserve_vram_pct;
@@ -296,10 +322,12 @@ void model_free(model_t *m) {
         free(l->attn_norm_w); free(l->ffn_norm_w);
         free(l->bq); free(l->bk); free(l->bv); free(l->bo);
         free(l->qnorm_w); free(l->knorm_w);
+        free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
     }
     free(m->layers);
     free(m->out_norm_w);
     free(m->rope_inv_freq);
+    free(m->rope_inv_freq_local);
     free(m->kcache); free(m->vcache);
     free(m->x); free(m->xb); free(m->xb2); free(m->q);
     free(m->k_tmp); free(m->v_tmp);
@@ -382,11 +410,12 @@ static void qk_norm(float *v, const float *w, int n_heads, int head_dim, float e
         rmsnorm(v + h * head_dim, v + h * head_dim, w, head_dim, eps);
 }
 
-static void rope_apply(model_t *m, float *v, int n_heads, int pos) {
+static void rope_apply(model_t *m, float *v, int n_heads, int pos, bool local) {
     int half = m->rope_dim / 2;
-    float ms = m->rope_mscale;
+    const float *fr = local ? m->rope_inv_freq_local : m->rope_inv_freq;
+    float ms = local ? 1.0f : m->rope_mscale;
     for (int j = 0; j < half; j++) {
-        float a = pos * m->rope_inv_freq[j];
+        float a = pos * fr[j];
         float c = cosf(a) * ms, s = sinf(a) * ms;
         for (int h = 0; h < n_heads; h++) {
             float *p = v + h * m->head_dim;
@@ -405,6 +434,7 @@ typedef struct {
     const float *q;         // this token's query [q_dim]
     float *out;             // attention output [q_dim]
     int pos;
+    int t0;                 // first attended position (sliding window)
 } attn_job;
 
 static void attn_heads(void *ctx, int h0, int h1) {
@@ -419,16 +449,16 @@ static void attn_heads(void *ctx, int h0, int h1) {
         const float *qh = j->q + h * hd;
         float *att = m->att + (size_t)h * m->n_ctx;
         int kvh = h / kv_mul;
-        for (int t = 0; t <= j->pos; t++) {
+        for (int t = j->t0; t <= j->pos; t++) {
             const f16_t *kt = j->kc + (size_t)t * kv_dim + kvh * hd;
             float s = 0;
             for (int i = 0; i < hd; i++) s += qh[i] * f16_load(kt + i);
             att[t] = s * scale;
         }
-        softmax(att, j->pos + 1);
+        softmax(att + j->t0, j->pos + 1 - j->t0);
         float *out = j->out + h * hd;
         memset(out, 0, sizeof(float) * hd);
-        for (int t = 0; t <= j->pos; t++) {
+        for (int t = j->t0; t <= j->pos; t++) {
             const f16_t *vt = j->vc + (size_t)t * kv_dim + kvh * hd;
             float a = att[t];
             for (int i = 0; i < hd; i++) out[i] += a * f16_load(vt + i);
@@ -452,13 +482,18 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     int xdim   = q_dim > n_embd ? q_dim : n_embd;
 
     size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
-    for (int b = 0; b < n; b++)
+    for (int b = 0; b < n; b++) {
         dequant_row(m->tok_embd->type,
                     (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
                     m->x + (size_t)b * n_embd, n_embd);
+        if (m->embd_scale != 1.0f)
+            for (int i = 0; i < n_embd; i++)
+                m->x[(size_t)b * n_embd + i] *= m->embd_scale;
+    }
 
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
+        bool local = model_layer_is_local(l, m->swa_window, m->swa_pattern);
         f16_t *kc_l = m->kcache + (size_t)l * m->n_ctx * kv_dim;
         f16_t *vc_l = m->vcache + (size_t)l * m->n_ctx * kv_dim;
 
@@ -476,8 +511,8 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             if (ly->knorm_w)
                 qk_norm(m->k_tmp + (size_t)b * kv_dim, ly->knorm_w, m->n_head_kv,
                         m->head_dim, m->rms_eps);
-            rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b);
-            rope_apply(m, m->k_tmp + (size_t)b * kv_dim, m->n_head_kv, pos + b);
+            rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b, local);
+            rope_apply(m, m->k_tmp + (size_t)b * kv_dim, m->n_head_kv, pos + b, local);
             f16_t *kc = kc_l + (size_t)(pos + b) * kv_dim;
             f16_t *vc = vc_l + (size_t)(pos + b) * kv_dim;
             for (int i = 0; i < kv_dim; i++) {
@@ -486,11 +521,17 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             }
         }
         for (int b = 0; b < n; b++) {
+            int p = pos + b;
+            int t0 = local && p - m->swa_window + 1 > 0 ? p - m->swa_window + 1 : 0;
             attn_job aj = { m, kc_l, vc_l, m->q + (size_t)b * q_dim,
-                            m->xb2 + (size_t)b * xdim, pos + b };
+                            m->xb2 + (size_t)b * xdim, p, t0 };
             tpool_run(m->tp, attn_heads, &aj, m->n_head);
         }
         matvec_b(m->tp, m->xb, xdim, ly->wo, m->xb2, xdim, q_dim, n_embd, ly->bo, n);
+        if (ly->post_attn_norm_w)
+            for (int b = 0; b < n; b++)
+                rmsnorm(m->xb + (size_t)b * xdim, m->xb + (size_t)b * xdim,
+                        ly->post_attn_norm_w, n_embd, m->rms_eps);
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
@@ -506,6 +547,10 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             m->hb[i] = (g / (1.0f + expf(-g))) * m->hb2[i]; // silu(g) * up
         }
         matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, m->n_ff, m->n_ff, n_embd, NULL, n);
+        if (ly->post_ffn_norm_w)
+            for (int b = 0; b < n; b++)
+                rmsnorm(m->xb + (size_t)b * xdim, m->xb + (size_t)b * xdim,
+                        ly->post_ffn_norm_w, n_embd, m->rms_eps);
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];

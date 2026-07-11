@@ -179,7 +179,8 @@ typedef struct {
     float       *bq, *bk, *bv, *bo;      // optional biases (f32, converted)
     gguf_tensor *ffn_norm, *w_gate, *w_up, *w_down;
     float       *attn_norm_w, *ffn_norm_w; // norm weights as f32
-    float       *qnorm_w, *knorm_w;      // qwen3 per-head Q/K norms (f32[head_dim])
+    float       *qnorm_w, *knorm_w;      // per-head Q/K norms (qwen3, gemma3)
+    float       *post_attn_norm_w, *post_ffn_norm_w; // gemma3 sandwich norms
 } layer_t;
 
 typedef struct {
@@ -190,11 +191,15 @@ typedef struct {
     bool      rope_neox;     // NeoX-style rotation (qwen2) vs adjacent pairs (llama)
     float     rms_eps, rope_base;
     float     rope_mscale;   // YaRN attention magnitude scale (1.0 = off)
+    float     embd_scale;    // token embedding multiplier (gemma: sqrt(n_embd))
+    int       swa_window;    // sliding-window size for local layers (0 = none)
+    int       swa_pattern;   // every Nth layer is global (gemma3: 6)
     gguf_tensor *tok_embd;
     gguf_tensor *output;     // may equal tok_embd (tied)
     float       *out_norm_w;
     layer_t     *layers;
     float       *rope_inv_freq; // [rope_dim/2], scaling factors folded in
+    float       *rope_inv_freq_local; // sliding-window layers (gemma3), unscaled
     // runtime state
     tpool *tp;               // worker pool used by this instance
     int    n_ctx, n_batch;
@@ -325,7 +330,12 @@ int  sval_close(sval *v, char *out, int cap);
 
 // ---------------------------------------------------------------- templates
 
-enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_RAW };
+enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA, TMPL_RAW };
+
+// sliding-window layout: local layers attend a window, every Nth is global
+static inline bool model_layer_is_local(int l, int swa_window, int swa_pattern) {
+    return swa_window > 0 && swa_pattern > 0 && ((l + 1) % swa_pattern) != 0;
+}
 
 typedef struct { const char *role, *content; } chat_msg;
 
