@@ -122,7 +122,7 @@ typedef struct {
     CUdevice    dev;
     CUmodule    mod;
     CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_add;
-    CUfunction  f_mv[32];               // indexed by ggml type
+    CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
     CUdeviceptr weights;
     CUdeviceptr kc, vc;
     CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
@@ -134,9 +134,13 @@ typedef struct {
     int          last_pos;              // -2 = nothing synced yet
 } gpu_t;
 
-typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
+// max tokens per matvec tile — must match MVB in kernels.cu; every activation
+// buffer is allocated this many columns wide
+#define MVB 8
+
+typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; } attn_args;
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int qs, os; } attn_args;
 
 bool gpu_available(char *name, int cap) {
     if (!cu_load()) return false;
@@ -199,9 +203,9 @@ bool gpu_init(model_t *m) {
         int kv_dim = m->n_head_kv * m->head_dim;
         int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
         size_t kv_bytes = (size_t)m->n_layer * m->n_ctx * kv_dim * sizeof(f16_t);
-        size_t act_bytes = sizeof(float) * ((size_t)m->n_embd + 3 * xdim +
+        size_t act_bytes = sizeof(float) * (MVB * ((size_t)m->n_embd + 3 * xdim +
                            q_dim + 2 * kv_dim + 2 * m->n_ff +
-                           (size_t)m->n_head * m->n_ctx + m->n_vocab);
+                           (size_t)m->n_head * m->n_ctx) + m->n_vocab);
 
         size_t vram_free = 0, vram_total = 0;
         CK(cu.MemGetInfo(&vram_free, &vram_total));
@@ -224,6 +228,11 @@ bool gpu_init(model_t *m) {
             { &g->f_mv[T_Q4_1], "k_mv_q4_1" },   { &g->f_mv[T_Q5_0], "k_mv_q5_0" },
             { &g->f_mv[T_Q5_1], "k_mv_q5_1" },   { &g->f_mv[T_Q4_K], "k_mv_q4_K" },
             { &g->f_mv[T_Q5_K], "k_mv_q5_K" },   { &g->f_mv[T_Q6_K], "k_mv_q6_K" },
+            { &g->f_mvb[T_F32],  "k_mv_f32_b" },  { &g->f_mvb[T_F16],  "k_mv_f16_b" },
+            { &g->f_mvb[T_Q8_0], "k_mv_q8_0_b" }, { &g->f_mvb[T_Q4_0], "k_mv_q4_0_b" },
+            { &g->f_mvb[T_Q4_1], "k_mv_q4_1_b" }, { &g->f_mvb[T_Q5_0], "k_mv_q5_0_b" },
+            { &g->f_mvb[T_Q5_1], "k_mv_q5_1_b" }, { &g->f_mvb[T_Q4_K], "k_mv_q4_K_b" },
+            { &g->f_mvb[T_Q5_K], "k_mv_q5_K_b" }, { &g->f_mvb[T_Q6_K], "k_mv_q6_K_b" },
         };
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
             CK(cu.ModuleGetFunction(fns[i].f, g->mod, fns[i].name));
@@ -238,15 +247,15 @@ bool gpu_init(model_t *m) {
         CK(cu.MemsetD8(g->kc, 0, kv_bytes));
         CK(cu.MemsetD8(g->vc, 0, kv_bytes));
 
-        CK(cu.MemAlloc(&g->x,      sizeof(float) * m->n_embd));
-        CK(cu.MemAlloc(&g->xb,     sizeof(float) * xdim));
-        CK(cu.MemAlloc(&g->xb2,    sizeof(float) * xdim));
-        CK(cu.MemAlloc(&g->q,      sizeof(float) * q_dim));
-        CK(cu.MemAlloc(&g->kt,     sizeof(float) * kv_dim));
-        CK(cu.MemAlloc(&g->vt,     sizeof(float) * kv_dim));
-        CK(cu.MemAlloc(&g->hb,     sizeof(float) * m->n_ff));
-        CK(cu.MemAlloc(&g->hb2,    sizeof(float) * m->n_ff));
-        CK(cu.MemAlloc(&g->att,    sizeof(float) * (size_t)m->n_head * m->n_ctx));
+        CK(cu.MemAlloc(&g->x,      sizeof(float) * MVB * m->n_embd));
+        CK(cu.MemAlloc(&g->xb,     sizeof(float) * MVB * xdim));
+        CK(cu.MemAlloc(&g->xb2,    sizeof(float) * MVB * xdim));
+        CK(cu.MemAlloc(&g->q,      sizeof(float) * MVB * q_dim));
+        CK(cu.MemAlloc(&g->kt,     sizeof(float) * MVB * kv_dim));
+        CK(cu.MemAlloc(&g->vt,     sizeof(float) * MVB * kv_dim));
+        CK(cu.MemAlloc(&g->hb,     sizeof(float) * MVB * m->n_ff));
+        CK(cu.MemAlloc(&g->hb2,    sizeof(float) * MVB * m->n_ff));
+        CK(cu.MemAlloc(&g->att,    sizeof(float) * MVB * (size_t)m->n_head * m->n_ctx));
         CK(cu.MemAlloc(&g->logits, sizeof(float) * m->n_vocab));
         CK(cu.MemAlloc(&g->dummy,  4));
 
@@ -272,7 +281,7 @@ bool gpu_init(model_t *m) {
             g->kn[l] = f32_dbuf(ly->knorm_w, m->head_dim);
         }
 
-        g->h_x      = malloc(sizeof(float) * m->n_embd);
+        g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
 
 
@@ -299,46 +308,56 @@ unsupported:
 
 // ----------------------------------------------------------------- launches
 
-static bool launch(CUfunction f, unsigned gx, unsigned gy, unsigned bx,
-                   void **params) {
-    return cu.LaunchKernel(f, gx, gy, 1, bx, 1, 1, 0, NULL, params, NULL) == 0;
+static bool launch(CUfunction f, unsigned gx, unsigned gy, unsigned gz,
+                   unsigned bx, void **params) {
+    return cu.LaunchKernel(f, gx, gy, gz, bx, 1, 1, 0, NULL, params, NULL) == 0;
 }
 
 static bool enc_rmsnorm(gpu_t *g, CUdeviceptr x, CUdeviceptr y, CUdeviceptr w,
-                        int n, float eps) {
-    void *p[] = { &x, &y, &w, &n, &eps };
-    return launch(g->f_rmsnorm, 1, 1, 256, p);
+                        int n, float eps, int batch, int xs, int ys) {
+    void *p[] = { &x, &y, &w, &n, &eps, &xs, &ys };
+    return launch(g->f_rmsnorm, 1, batch, 1, 256, p);
 }
 
 static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
-                   CUdeviceptr y, int n_in, int n_out, CUdeviceptr bias) {
+                   CUdeviceptr y, int n_in, int n_out, CUdeviceptr bias,
+                   int batch, int xs, int ys) {
     mv_args a = { n_in, n_out,
                   (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
-                  bias != 0 };
+                  bias != 0, batch, xs, ys };
     CUdeviceptr b = bias ? bias : g->dummy;
     void *p[] = { &g->weights, &x, &y, &a, &b };
-    // 128 threads = 4 warps = 4 rows per block
-    return launch(g->f_mv[w->type], (n_out + 3) / 4, 1, 128, p);
+    // 128 threads = 4 warps = 4 rows per block; the tile variant applies each
+    // decoded weight to all columns, the single variant is faster at batch 1
+    CUfunction f = batch > 1 ? g->f_mvb[w->type] : g->f_mv[w->type];
+    return launch(f, (n_out + 3) / 4, 1, 1, 128, p);
 }
 
 static bool enc_qknorm(gpu_t *g, model_t *m, CUdeviceptr v, CUdeviceptr w,
-                       int n_heads) {
+                       int n_heads, int batch, int vs) {
     float eps = m->rms_eps;
     int hd = m->head_dim;
-    void *p[] = { &v, &w, &hd, &eps };
-    return launch(g->f_qknorm, n_heads, 1, 64, p);
+    void *p[] = { &v, &w, &hd, &eps, &vs };
+    return launch(g->f_qknorm, n_heads, batch, 1, 64, p);
 }
 
-static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads, int pos) {
+static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads, int pos,
+                     int batch, int vs) {
     rope_args a = { m->head_dim, n_heads, m->rope_dim / 2, pos,
                     m->rope_neox, m->rope_mscale };
-    void *p[] = { &v, &g->inv_freq, &a };
-    return launch(g->f_rope, (a.half_dim + 31) / 32, n_heads, 32, p);
+    void *p[] = { &v, &g->inv_freq, &a, &vs };
+    return launch(g->f_rope, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
 }
 
-static bool enc_elem(gpu_t *g, CUfunction f, CUdeviceptr a, CUdeviceptr b, int n) {
+static bool enc_add(gpu_t *g, CUdeviceptr x, CUdeviceptr d, int n,
+                    int batch, int xs, int ds) {
+    void *p[] = { &x, &d, &n, &xs, &ds };
+    return launch(g->f_add, (n + 255) / 256, batch, 1, 256, p);
+}
+
+static bool enc_silu(gpu_t *g, CUdeviceptr a, CUdeviceptr b, int n) {
     void *p[] = { &a, &b, &n };
-    return launch(f, (n + 255) / 256, 1, 256, p);
+    return launch(g->f_silu, (n + 255) / 256, 1, 1, 256, p);
 }
 
 void gpu_free(model_t *m) {
@@ -396,61 +415,74 @@ static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
     return true;
 }
 
-// encode one token's forward pass; the vocab-logits matvec (the single most
-// expensive launch) only when the caller actually wants logits
-static bool fwd_token(gpu_t *g, model_t *m, int token, int pos, bool want_logits) {
+// encode a tile of up to MVB tokens: matvecs read each weight once for the
+// whole tile, and every other kernel takes the token column from the launch
+// grid — a tile costs the same number of launches as a single token, which
+// matters because WDDM launch overhead dominates small-kernel dispatch. The
+// vocab-logits matvec (the single most expensive launch) runs only when the
+// caller wants logits, and only for the tile's last token.
+static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
+                     int pos, bool want_logits) {
     int n_embd = m->n_embd;
     int q_dim  = m->n_head * m->head_dim;
     int kv_dim = m->n_head_kv * m->head_dim;
+    int xdim   = q_dim > n_embd ? q_dim : n_embd;
 
-    // token embedding on CPU (one row), then a tiny HtoD
+    // token embeddings on CPU (one row each), then a single HtoD
     size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
-    dequant_row(m->tok_embd->type,
-                (uint8_t *)m->tok_embd->data + (size_t)token * ers,
-                g->h_x, n_embd);
-    if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * n_embd) != 0) return false;
+    for (int b = 0; b < tn; b++)
+        dequant_row(m->tok_embd->type,
+                    (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
+                    g->h_x + (size_t)b * n_embd, n_embd);
+    if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * n_embd) != 0) return false;
 
     bool ok = true;
     for (int l = 0; l < m->n_layer && ok; l++) {
         layer_t *ly = &m->layers[l];
-        uint64_t kv_off = ((uint64_t)l * m->n_ctx + pos) * kv_dim;
 
-        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->attn_norm[l], n_embd, m->rms_eps);
-        ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->bq[l]);
-        ok = ok && enc_mv(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->bk[l]);
-        ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->bv[l]);
-        if (g->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->qn[l], m->n_head);
-        if (g->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->kn[l], m->n_head_kv);
-        ok = ok && enc_rope(g, m, g->q,  m->n_head,    pos);
-        ok = ok && enc_rope(g, m, g->kt, m->n_head_kv, pos);
+        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->attn_norm[l], n_embd, m->rms_eps,
+                               tn, n_embd, xdim);
+        ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->bq[l], tn, xdim, q_dim);
+        ok = ok && enc_mv(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->bk[l], tn, xdim, kv_dim);
+        ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->bv[l], tn, xdim, kv_dim);
+        if (g->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->qn[l], m->n_head,    tn, q_dim);
+        if (g->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->kn[l], m->n_head_kv, tn, kv_dim);
+        ok = ok && enc_rope(g, m, g->q,  m->n_head,    pos, tn, q_dim);
+        ok = ok && enc_rope(g, m, g->kt, m->n_head_kv, pos, tn, kv_dim);
 
         {
-            void *p[] = { &g->kt, &g->vt, &g->kc, &g->vc, &kv_dim, &kv_off };
-            ok = ok && launch(g->f_store, (kv_dim + 63) / 64, 1, 64, p);
+            // cache rows for consecutive positions are contiguous, so the
+            // kernel indexes both source column and destination row by grid.y
+            uint64_t kv_off = ((uint64_t)l * m->n_ctx + pos) * kv_dim;
+            void *ps[] = { &g->kt, &g->vt, &g->kc, &g->vc, &kv_dim, &kv_off };
+            ok = ok && launch(g->f_store, (kv_dim + 63) / 64, tn, 1, 64, ps);
         }
 
         {
             attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, pos,
                              (uint64_t)l * m->n_ctx * kv_dim,
-                             1.0f / sqrtf((float)m->head_dim) };
-            void *p[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa };
-            ok = ok && launch(g->f_attn, m->n_head, 1, 128, p);
+                             1.0f / sqrtf((float)m->head_dim), q_dim, xdim };
+            void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa };
+            ok = ok && launch(g->f_attn, m->n_head, tn, 1, 128, pa);
         }
 
-        ok = ok && enc_mv(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->bo[l]);
-        ok = ok && enc_elem(g, g->f_add, g->x, g->xb, n_embd);
+        ok = ok && enc_mv(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->bo[l], tn, xdim, xdim);
+        ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
 
-        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->ffn_norm[l], n_embd, m->rms_eps);
-        ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, 0);
-        ok = ok && enc_mv(g, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, 0);
-        ok = ok && enc_elem(g, g->f_silu, g->hb, g->hb2, m->n_ff);
-        ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0);
-        ok = ok && enc_elem(g, g->f_add, g->x, g->xb, n_embd);
+        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->ffn_norm[l], n_embd, m->rms_eps,
+                               tn, n_embd, xdim);
+        ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
+        ok = ok && enc_mv(g, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
+        ok = ok && enc_silu(g, g->hb, g->hb2, tn * m->n_ff);
+        ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
+        ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
     }
 
     if (want_logits) {
-        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->out_norm, n_embd, m->rms_eps);
-        ok = ok && enc_mv(g, m, m->output, g->xb, g->logits, n_embd, m->n_vocab, 0);
+        CUdeviceptr xlast = g->x + (size_t)(tn - 1) * n_embd * sizeof(float);
+        ok = ok && enc_rmsnorm(g, xlast, g->xb, g->out_norm, n_embd, m->rms_eps,
+                               1, 0, 0);
+        ok = ok && enc_mv(g, m, m->output, g->xb, g->logits, n_embd, m->n_vocab, 0, 1, 0, 0);
     }
     return ok;
 }
@@ -476,9 +508,10 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         if (!kv_upload(g, m, 0, pos)) return false;
     }
 
-    for (int b = 0; b < n; b++) {
-        bool last = b == n - 1;
-        if (!fwd_token(g, m, tokens[b], pos + b, want_logits && last)) {
+    for (int i = 0; i < n; i += MVB) {
+        int tn = n - i < MVB ? n - i : MVB;
+        bool last = i + tn == n;
+        if (!fwd_tile(g, m, tokens + i, tn, pos + i, want_logits && last)) {
             fprintf(stderr, "gpu: kernel launch failed — falling back to CPU\n");
             return false;
         }
