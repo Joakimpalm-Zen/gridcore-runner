@@ -29,4 +29,18 @@ bool        jv_bool(jv *v, bool dflt);
 // returns bytes written, always NUL-terminates within cap
 size_t json_escape(const char *s, size_t n, char *out, size_t cap);
 
+// growable string builder for assembling JSON/HTTP bodies
+typedef struct sbuf { char *s; size_t n, cap; } sbuf;
+void sb_put(sbuf *b, const char *s, size_t n);
+#define sb_lit(b, lit) sb_put(b, lit, strlen(lit))
+#if defined(__GNUC__) || defined(__clang__)
+void sb_fmt(sbuf *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+#else
+void sb_fmt(sbuf *b, const char *fmt, ...);
+#endif
+void sb_esc(sbuf *b, const char *s, size_t n); // appends as JSON string content
+
+// re-serialize a parsed value (inverse of json_parse, minus formatting)
+void jv_dump(const jv *v, sbuf *o);
+
 #endif

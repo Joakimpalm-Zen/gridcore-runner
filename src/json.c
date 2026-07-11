@@ -1,6 +1,8 @@
-// Minimal recursive-descent JSON parser and string escaper.
+// Minimal recursive-descent JSON parser, string escaper, string builder,
+// and value re-serializer.
 #include "json.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -226,4 +228,70 @@ size_t json_escape(const char *s, size_t n, char *out, size_t cap) {
     }
     out[m] = 0;
     return m;
+}
+
+// -------------------------------------------------------- string builder
+
+void sb_put(sbuf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        b->cap = (b->n + n + 1) * 2 + 256;
+        b->s = realloc(b->s, b->cap);
+    }
+    memcpy(b->s + b->n, s, n);
+    b->n += n;
+    b->s[b->n] = 0;
+}
+
+void sb_fmt(sbuf *b, const char *fmt, ...) {
+    char tmp[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    if (n > 0) sb_put(b, tmp, n < (int)sizeof(tmp) ? (size_t)n : sizeof(tmp) - 1);
+}
+
+void sb_esc(sbuf *b, const char *s, size_t n) {
+    char *tmp = malloc(n * 6 + 8);
+    size_t m = json_escape(s, n, tmp, n * 6 + 8);
+    sb_put(b, tmp, m);
+    free(tmp);
+}
+
+void jv_dump(const jv *v, sbuf *o) {
+    if (!v) { sb_lit(o, "null"); return; }
+    switch (v->type) {
+    case J_NULL: sb_lit(o, "null"); break;
+    case J_BOOL: sb_lit(o, v->b ? "true" : "false"); break;
+    case J_NUM:
+        if (v->num == (double)(long long)v->num)
+            sb_fmt(o, "%lld", (long long)v->num);
+        else
+            sb_fmt(o, "%.10g", v->num);
+        break;
+    case J_STR:
+        sb_lit(o, "\"");
+        sb_esc(o, v->str, strlen(v->str));
+        sb_lit(o, "\"");
+        break;
+    case J_ARR:
+        sb_lit(o, "[");
+        for (int i = 0; i < v->n; i++) {
+            if (i) sb_lit(o, ",");
+            jv_dump(v->items[i], o);
+        }
+        sb_lit(o, "]");
+        break;
+    case J_OBJ:
+        sb_lit(o, "{");
+        for (int i = 0; i < v->n; i++) {
+            if (i) sb_lit(o, ",");
+            sb_lit(o, "\"");
+            sb_esc(o, v->keys[i], strlen(v->keys[i]));
+            sb_lit(o, "\":");
+            jv_dump(v->items[i], o);
+        }
+        sb_lit(o, "}");
+        break;
+    }
 }
