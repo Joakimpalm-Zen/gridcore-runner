@@ -54,10 +54,13 @@ freeing the CPU cores and growing headroom on bigger GPUs.
 **CUDA (NVIDIA, Linux/Windows):** the driver API is loaded dynamically
 (`nvcuda.dll` / `libcuda.so.1`) and kernels ship as embedded PTX, so neither
 building nor running needs the CUDA toolkit — a machine without an NVIDIA
-driver just uses the CPU. Weights are copied to VRAM once (with a free-VRAM
-fit check), the fp16 KV cache lives in VRAM with the host copy kept
-authoritative, and prompt batches run as 8-token tiles that decode each
-weight once for all tokens. Measured on an RTX 3070: 6–36 tok/s generation
+driver just uses the CPU. Weights are copied to VRAM once, the fp16 KV cache lives in VRAM with the
+host copy kept authoritative, and prompt batches run as 8-token tiles that
+decode each weight once for all tokens. A model too large for VRAM is
+**partially offloaded** — as many leading layers as fit run on the GPU and
+the CPU finishes the rest, so oversized models still get a speedup instead
+of falling all the way back to CPU (the `--reserve-vram` cap sets how deep
+the split goes). Measured on an RTX 3070: 6–36 tok/s generation
 across 1.5B–8B quantized models (5–8× the same box's CPU) and 2–3× CPU
 prompt evaluation. Regenerate the PTX header after kernel changes with
 `make ptx` (needs a CUDA toolkit at development time only).

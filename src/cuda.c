@@ -124,6 +124,7 @@ typedef struct {
     CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu, f_add;
     CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
     CUdeviceptr weights;
+    size_t      weights_len;
     CUdeviceptr kc, vc;
     CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
     CUdeviceptr inv_freq, inv_freq_local, out_norm, dummy;
@@ -232,13 +233,63 @@ bool gpu_init(model_t *m) {
 
         size_t vram_free = 0, vram_total = 0;
         CK(cu.MemGetInfo(&vram_free, &vram_total));
-        size_t need = m->gf.map_size + 2 * kv_bytes + act_bytes + (256u << 20);
-        if (need > vram_free) {
+        size_t vram_budget = vram_free;
+        if (m->reserve_vram_pct > 0) {
+            size_t cap = vram_total / 100 * m->reserve_vram_pct;
+            if (cap < vram_budget) vram_budget = cap;
+        }
+        // fixed device overhead regardless of split: activation scratch, the
+        // token-embedding weights (always uploaded), and a margin covering the
+        // CUDA context + PTX JIT + WDDM reserve
+        size_t fixed = act_bytes + m->tok_embd->nbytes + (512u << 20);
+        // decide how many *leading* layers fit — accumulate each layer's weight
+        // bytes plus its KV bytes until the budget runs out; the CPU runs the
+        // rest (partial offload)
+        int G = 0;
+        size_t used = fixed;
+        for (int l = 0; l < m->n_layer; l++) {
+            layer_t *ly = &m->layers[l];
+            gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
+                                  ly->w_gate, ly->w_up, ly->w_down };
+            size_t w = 0;
+            for (int i = 0; i < 7; i++) if (ws[i]) w += ws[i]->nbytes;
+            size_t kv = 2 * (size_t)m->n_ctx * model_kv_dim(m, l) * sizeof(f16_t);
+            if (used + w + kv > vram_budget) break;
+            used += w + kv;
+            G = l + 1;
+        }
+        // a full split also needs token_embd + output weights resident
+        bool full = G == m->n_layer &&
+                    used + m->tok_embd->nbytes + m->output->nbytes <= vram_budget;
+        if (G == 0) {
             fprintf(stderr,
-                    "gpu: model needs %.1f GB VRAM, %.1f GB free — using CPU\n",
-                    need / 1e9, vram_free / 1e9);
+                    "gpu: not even one layer fits %.1f GB %s VRAM — using CPU\n",
+                    vram_budget / 1e9, m->reserve_vram_pct > 0 ? "reserved" : "free");
             goto fail_quiet;
         }
+        fprintf(stderr, "gpu-split: budget=%.2fGB fixed=%.2fGB G=%d/%d full=%d used=%.2fGB\n", vram_budget/1e9, fixed/1e9, G, m->n_layer, (int)full, used/1e9);
+        m->gpu_layers = full ? m->n_layer : G;
+        // weight bytes to upload: whole file for a full split (output/embedding
+        // offsets stay valid), else the prefix covering token_embd + [0, G)
+        size_t upload_len = m->gf.map_size;
+        if (!full) {
+            upload_len = (size_t)((uint8_t *)m->tok_embd->data - (uint8_t *)m->gf.map)
+                       + m->tok_embd->nbytes;
+            for (int l = 0; l < G; l++) {
+                layer_t *ly = &m->layers[l];
+                gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
+                                      ly->w_gate, ly->w_up, ly->w_down };
+                for (int i = 0; i < 7; i++) {
+                    if (!ws[i]) continue;
+                    size_t end = (size_t)((uint8_t *)ws[i]->data - (uint8_t *)m->gf.map)
+                               + ws[i]->nbytes;
+                    if (end > upload_len) upload_len = end;
+                }
+            }
+        }
+        g->weights_len = upload_len;
+        // device KV holds only the offloaded layers [0, gpu_layers)
+        kv_bytes = m->kv_off[m->gpu_layers] * sizeof(f16_t);
 
         CK(cu.ModuleLoadData(&g->mod, k_ptx_src));
         struct { CUfunction *f; const char *name; } fns[] = {
@@ -260,10 +311,10 @@ bool gpu_init(model_t *m) {
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
             CK(cu.ModuleGetFunction(fns[i].f, g->mod, fns[i].name));
 
-        // weights: one copy of the whole mapped file so tensor byte offsets
-        // stay valid on the device
-        CK(cu.MemAlloc(&g->weights, m->gf.map_size));
-        CK(cu.MemcpyHtoD(g->weights, m->gf.map, m->gf.map_size));
+        // weights: the file bytes the offloaded layers reference (whole file
+        // for a full split, a prefix for partial) so byte offsets stay valid
+        CK(cu.MemAlloc(&g->weights, g->weights_len));
+        CK(cu.MemcpyHtoD(g->weights, m->gf.map, g->weights_len));
 
         CK(cu.MemAlloc(&g->kc, kv_bytes));
         CK(cu.MemAlloc(&g->vc, kv_bytes));
@@ -315,8 +366,13 @@ bool gpu_init(model_t *m) {
 
         char name[128] = "CUDA GPU";
         cu.DeviceGetName(name, sizeof(name), g->dev);
-        fprintf(stderr, "gpu: CUDA backend on %s (%.1f GB weights in VRAM)\n",
-                name, m->gf.map_size / 1e9);
+        if (m->gpu_layers < m->n_layer)
+            fprintf(stderr, "gpu: CUDA backend on %s (%d/%d layers, %.1f GB in "
+                    "VRAM; CPU runs the rest)\n", name, m->gpu_layers, m->n_layer,
+                    g->weights_len / 1e9);
+        else
+            fprintf(stderr, "gpu: CUDA backend on %s (%.1f GB weights in VRAM)\n",
+                    name, g->weights_len / 1e9);
     }
 
     m->gpu = g;
@@ -422,7 +478,7 @@ void gpu_free(model_t *m) {
 // upload host KV rows [lo, hi) for every layer (CPU prompt processing wrote them)
 static bool kv_upload(gpu_t *g, model_t *m, int lo, int hi) {
     if (lo >= hi) return true;
-    for (int l = 0; l < m->n_layer; l++) {
+    for (int l = 0; l < m->gpu_layers; l++) {
         size_t row = (size_t)model_kv_dim(m, l) * sizeof(f16_t);
         size_t off = m->kv_off[l] * sizeof(f16_t) + (size_t)lo * row;
         size_t len = (size_t)(hi - lo) * row;
@@ -436,7 +492,7 @@ static bool kv_upload(gpu_t *g, model_t *m, int lo, int hi) {
 // copy device KV rows [lo, hi) back to the (authoritative) host cache
 static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
     if (lo >= hi) return true;
-    for (int l = 0; l < m->n_layer; l++) {
+    for (int l = 0; l < m->gpu_layers; l++) {
         size_t row = (size_t)model_kv_dim(m, l) * sizeof(f16_t);
         size_t off = m->kv_off[l] * sizeof(f16_t) + (size_t)lo * row;
         size_t len = (size_t)(hi - lo) * row;
@@ -454,15 +510,16 @@ static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
 // vocab-logits matvec (the single most expensive launch) runs only when the
 // caller wants logits, and only for the tile's last token.
 static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
-                     int pos, bool want_logits) {
+                     int pos, bool want_logits, int l0, int l1) {
     int n_embd = m->n_embd;
     int q_dim  = m->n_head * m->head_dim;
     int kv_dim = m->n_head_kv * m->head_dim;
     int xdim   = q_dim > n_embd ? q_dim : n_embd;
 
-    // token embeddings on CPU (one row each), then a single HtoD
+    // when starting past the embedding (a partial split's device prefix runs
+    // [0, l1); this always starts at l0=0), the caller has already staged x
     size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
-    for (int b = 0; b < tn; b++) {
+    if (l0 == 0) for (int b = 0; b < tn; b++) {
         float *hx = g->h_x + (size_t)b * n_embd;
         dequant_row(m->tok_embd->type,
                     (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
@@ -470,10 +527,11 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         if (m->embd_scale != 1.0f)
             for (int i = 0; i < n_embd; i++) hx[i] *= m->embd_scale;
     }
-    if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * n_embd) != 0) return false;
+    if (l0 == 0 && cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * n_embd) != 0)
+        return false;
 
     bool ok = true;
-    for (int l = 0; l < m->n_layer && ok; l++) {
+    for (int l = l0; l < l1 && ok; l++) {
         layer_t *ly = &m->layers[l];
         bool local = model_is_swa(m, l);
 
@@ -552,25 +610,35 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         if (!kv_upload(g, m, 0, pos)) return false;
     }
 
+    bool partial = m->gpu_layers < m->n_layer;
     for (int i = 0; i < n; i += MVB) {
         int tn = n - i < MVB ? n - i : MVB;
         bool last = i + tn == n;
-        if (!fwd_tile(g, m, tokens + i, tn, pos + i, want_logits && last)) {
+        // device runs layers [0, gpu_layers); logits only when it owns the whole
+        // model (partial hands the boundary activation back to the CPU)
+        if (!fwd_tile(g, m, tokens + i, tn, pos + i,
+                      want_logits && last && !partial, 0, m->gpu_layers)) {
             fprintf(stderr, "gpu: kernel launch failed — falling back to CPU\n");
             return false;
         }
+        // partial: copy this tile's post-boundary activation to the host x
+        // buffer so the CPU layer loop can continue from gpu_layers
+        if (partial &&
+            cu.MemcpyDtoH((uint8_t *)m->x + (size_t)i * m->n_embd * sizeof(float),
+                          g->x, sizeof(float) * tn * m->n_embd) != 0)
+            return false;
     }
     if (cu.CtxSynchronize() != 0) {
         fprintf(stderr, "gpu: forward failed — falling back to CPU\n");
         return false;
     }
 
-    // keep the host KV cache authoritative: copy this batch's rows back so
-    // the CPU path can take over at any point
+    // keep the host KV cache authoritative: copy the offloaded layers' rows
+    // back so the CPU path can take over at any point
     if (!kv_copyback(g, m, pos, pos + n)) return false;
     g->last_pos = pos + n - 1;
 
-    if (want_logits) {
+    if (want_logits && !partial) {
         if (cu.MemcpyDtoH(g->h_logits, g->logits, sizeof(float) * m->n_vocab) != 0)
             return false;
         if (logits) *logits = g->h_logits;

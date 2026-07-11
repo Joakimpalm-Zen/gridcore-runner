@@ -221,6 +221,8 @@ typedef struct {
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
     float *att, *logits;
     int    reserve_vram_pct; // VRAM cap for the GPU backend (0 = free VRAM)
+    int    gpu_layers;       // leading layers run on GPU (n_layer = full,
+                             // <n_layer = partial offload, CPU finishes the rest)
     void  *gpu;              // GPU backend context (NULL = CPU only)
 } model_t;
 
