@@ -195,7 +195,12 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         // 256), global layers may have no V projection (V reuses the raw K
         // projection), every V gets a weightless per-head RMS norm, attention
         // scale is fixed 1.0, each layer's output is scaled by a per-layer
-        // scalar, and final logits are softcapped.
+        // scalar, and final logits are softcapped. Verified against llama.cpp
+        // b9964: greedy raw completions are token-identical on the official
+        // ggml-org gemma-4-12B-it Q4_K_M, and chat-formatted prompts answer
+        // correctly. Note the model is thinking-tuned: raw untemplated
+        // completions are legitimately degenerate, and llama.cpp additionally
+        // biases tokenizer.ggml.suppress_tokens to -inf (not done here).
         if (gguf_get_u32(g, AK("attention.shared_kv_layers"), 0) > 0 ||
             gguf_get_u32(g, AK("embedding_length_per_layer_input"), 0) > 0) {
             fprintf(stderr, "error: unsupported architecture variant '%s' — "
@@ -203,7 +208,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
                     "are not supported yet\n", arch);
             return false;
         }
-        fprintf(stderr, "warning: gemma4 support is experimental — the forward pass matches the llama.cpp reference but has not been verified against a known-good GGUF; output from unofficial conversions may be incorrect\n");
+        fprintf(stderr, "gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files\n");
         m->embd_scale    = sqrtf((float)m->n_embd);
         m->ffn_act       = ACT_GELU;
         m->v_rmsnorm     = true;
