@@ -1,5 +1,5 @@
-// GPU backend stub for platforms without one (Linux/Windows for now).
-// CUDA and Vulkan backends would implement this same interface.
+// GPU backend stub for platforms without one.
+// CUDA (cuda.c) and Metal (metal.m) implement this same interface.
 #include "runner.h"
 
 bool gpu_available(char *name, int cap) {
@@ -15,6 +15,12 @@ bool gpu_init(model_t *m) {
 float *gpu_forward(model_t *m, int token, int pos) {
     (void)m; (void)token; (void)pos;
     return 0;
+}
+
+bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
+                       bool want_logits, float **logits) {
+    (void)m; (void)tokens; (void)n; (void)pos; (void)want_logits; (void)logits;
+    return false;
 }
 
 void gpu_free(model_t *m) {

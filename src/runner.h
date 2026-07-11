@@ -211,6 +211,11 @@ enum { GPU_AUTO = 0, GPU_OFF = 1 };
 bool   gpu_available(char *name, int name_cap);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 float *gpu_forward(model_t *m, int token, int pos); // NULL = failed, use CPU
+// process n tokens starting at pos (prompt batches); on success returns true
+// and sets *logits to the last token's logits when want_logits (else NULL).
+// false = failed, use CPU.
+bool   gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
+                         bool want_logits, float **logits);
 void   gpu_free(model_t *m); // releases GPU buffers; KV pointers become invalid
 
 typedef struct {

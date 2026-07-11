@@ -381,26 +381,34 @@ static bool kv_upload(gpu_t *g, model_t *m, int lo, int hi) {
     return true;
 }
 
-float *gpu_forward(model_t *m, int token, int pos) {
-    gpu_t *g = m->gpu;
+// copy device KV rows [lo, hi) back to the (authoritative) host cache
+static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
+    if (lo >= hi) return true;
+    int kv_dim = m->n_head_kv * m->head_dim;
+    size_t row = (size_t)kv_dim * sizeof(f16_t);
+    for (int l = 0; l < m->n_layer; l++) {
+        size_t off = ((size_t)l * m->n_ctx + lo) * row;
+        size_t len = (size_t)(hi - lo) * row;
+        if (cu.MemcpyDtoH((uint8_t *)m->kcache + off, g->kc + off, len) != 0 ||
+            cu.MemcpyDtoH((uint8_t *)m->vcache + off, g->vc + off, len) != 0)
+            return false;
+    }
+    return true;
+}
+
+// encode one token's forward pass; the vocab-logits matvec (the single most
+// expensive launch) only when the caller actually wants logits
+static bool fwd_token(gpu_t *g, model_t *m, int token, int pos, bool want_logits) {
     int n_embd = m->n_embd;
     int q_dim  = m->n_head * m->head_dim;
     int kv_dim = m->n_head_kv * m->head_dim;
-
-    if (cu.CtxSetCurrent(g->ctx) != 0) return NULL;
-
-    // a non-contiguous position step means the CPU wrote KV rows we haven't
-    // seen (prompt batch, or a reset + new prompt): resync [0, pos)
-    if (pos != g->last_pos + 1) {
-        if (!kv_upload(g, m, 0, pos)) return NULL;
-    }
 
     // token embedding on CPU (one row), then a tiny HtoD
     size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
     dequant_row(m->tok_embd->type,
                 (uint8_t *)m->tok_embd->data + (size_t)token * ers,
                 g->h_x, n_embd);
-    if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * n_embd) != 0) return NULL;
+    if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * n_embd) != 0) return false;
 
     bool ok = true;
     for (int l = 0; l < m->n_layer && ok; l++) {
@@ -440,26 +448,55 @@ float *gpu_forward(model_t *m, int token, int pos) {
         ok = ok && enc_elem(g, g->f_add, g->x, g->xb, n_embd);
     }
 
-    ok = ok && enc_rmsnorm(g, g->x, g->xb, g->out_norm, n_embd, m->rms_eps);
-    ok = ok && enc_mv(g, m, m->output, g->xb, g->logits, n_embd, m->n_vocab, 0);
+    if (want_logits) {
+        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->out_norm, n_embd, m->rms_eps);
+        ok = ok && enc_mv(g, m, m->output, g->xb, g->logits, n_embd, m->n_vocab, 0);
+    }
+    return ok;
+}
 
-    if (!ok || cu.CtxSynchronize() != 0) {
-        fprintf(stderr, "gpu: kernel launch failed — falling back to CPU\n");
-        return NULL;
+float *gpu_forward(model_t *m, int token, int pos) {
+    float *logits = NULL;
+    int32_t t = token;
+    if (!gpu_forward_batch(m, &t, 1, pos, true, &logits)) return NULL;
+    return logits;
+}
+
+bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
+                       bool want_logits, float **logits) {
+    gpu_t *g = m->gpu;
+    if (logits) *logits = NULL;
+    if (n < 1) return true;
+
+    if (cu.CtxSetCurrent(g->ctx) != 0) return false;
+
+    // a non-contiguous position step means the host KV holds rows the device
+    // hasn't seen (a CPU-run batch, or a reset + new prompt): resync [0, pos)
+    if (pos != g->last_pos + 1) {
+        if (!kv_upload(g, m, 0, pos)) return false;
     }
 
-    // keep the host KV cache authoritative: copy this token's row back so the
-    // CPU path can take over at any point
-    size_t row = (size_t)kv_dim * sizeof(f16_t);
-    for (int l = 0; l < m->n_layer; l++) {
-        size_t off = ((size_t)l * m->n_ctx + pos) * row;
-        if (cu.MemcpyDtoH((uint8_t *)m->kcache + off, g->kc + off, row) != 0 ||
-            cu.MemcpyDtoH((uint8_t *)m->vcache + off, g->vc + off, row) != 0)
-            return NULL;
+    for (int b = 0; b < n; b++) {
+        bool last = b == n - 1;
+        if (!fwd_token(g, m, tokens[b], pos + b, want_logits && last)) {
+            fprintf(stderr, "gpu: kernel launch failed — falling back to CPU\n");
+            return false;
+        }
+    }
+    if (cu.CtxSynchronize() != 0) {
+        fprintf(stderr, "gpu: forward failed — falling back to CPU\n");
+        return false;
     }
 
-    if (cu.MemcpyDtoH(g->h_logits, g->logits, sizeof(float) * m->n_vocab) != 0)
-        return NULL;
-    g->last_pos = pos;
-    return g->h_logits;
+    // keep the host KV cache authoritative: copy this batch's rows back so
+    // the CPU path can take over at any point
+    if (!kv_copyback(g, m, pos, pos + n)) return false;
+    g->last_pos = pos + n - 1;
+
+    if (want_logits) {
+        if (cu.MemcpyDtoH(g->h_logits, g->logits, sizeof(float) * m->n_vocab) != 0)
+            return false;
+        if (logits) *logits = g->h_logits;
+    }
+    return true;
 }
