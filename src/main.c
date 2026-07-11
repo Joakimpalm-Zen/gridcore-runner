@@ -85,6 +85,27 @@ static int stdout_cb(void *ud, const char *bytes, int n) {
     return 0;
 }
 
+// chat-mode display: thinking channels are shown between [thinking] markers
+// instead of leaking the raw <|channel> tags
+typedef struct {
+    think_split ts;
+    bool in_think;
+} chat_out;
+
+static int chat_emit(void *ud, int reasoning, const char *bytes, int n) {
+    chat_out *c = ud;
+    if (reasoning && !c->in_think)  { fputs("[thinking]\n", stdout);   c->in_think = true; }
+    if (!reasoning && c->in_think)  { fputs("\n[/thinking]\n", stdout); c->in_think = false; }
+    fwrite(bytes, 1, n, stdout);
+    fflush(stdout);
+    return 0;
+}
+
+static int chat_cb(void *ud, const char *bytes, int n) {
+    chat_out *c = ud;
+    return think_feed(&c->ts, bytes, n, chat_emit, c);
+}
+
 int main(int argc, char **argv) {
     const char *model_path = NULL, *prompt = NULL, *system_prompt = NULL;
     const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
@@ -339,7 +360,12 @@ int main(int argc, char **argv) {
         if (!logits) { fprintf(stderr, "[context full]\n"); break; }
 
         jsonv_init(&e.jv); // fresh JSON constraint per turn
-        n_gen = engine_generate(&e, logits, n_predict, stdout_cb, NULL, &gtime);
+        chat_out co = { .in_think = false };
+        think_init(&co.ts, m.think_open, m.think_close);
+        n_gen = engine_generate(&e, logits, n_predict, chat_cb, &co, &gtime);
+        think_finish(&co.ts, chat_emit, &co);
+        if (co.in_think) fputs("\n[/thinking]", stdout);
+        think_free(&co.ts);
         printf("\n");
         fprintf(stderr, "[%d tok, %.1f tok/s]\n",
                 n_gen, n_gen / (gtime > 0 ? gtime : 1e-9));

@@ -5,6 +5,7 @@
 #include "compat.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 double now_s(void) { return plat_now(); }
@@ -16,7 +17,9 @@ void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     e->smp = smp;
     e->stop_ids[e->n_stop++] = tok->eos_id;
     static const char *stops[] = { "<|im_end|>", "<|eot_id|>", "<|end_of_text|>",
-                                   "<|endoftext|>", "</s>" };
+                                   "<|endoftext|>", "</s>",
+                                   // gemma turn terminators (gemma1-3 / gemma4)
+                                   "<end_of_turn>", "<turn|>" };
     for (size_t i = 0; i < sizeof(stops) / sizeof(*stops); i++) {
         int id = tok_find(tok, stops[i]);
         if (id < 0 || e->n_stop >= 8) continue;
@@ -91,6 +94,7 @@ int engine_generate(engine *e, float *logits, int max_new,
                               e->json_mode ? json_ok : NULL, e);
         if (tok < 0) { e->hit_stop = true; break; } // no valid continuation
         sampler_accept(e->smp, tok);
+        if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
         if (is_stop(e, tok) && !e->ignore_eos) { e->hit_stop = true; break; }
         int n = tok_decode(e->tok, tok, buf, sizeof(buf));
         if (e->schema && n > 0) sval_feed(&e->sv, buf, n);
