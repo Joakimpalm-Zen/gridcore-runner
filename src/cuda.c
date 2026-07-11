@@ -121,7 +121,7 @@ typedef struct {
     CUcontext   ctx;
     CUdevice    dev;
     CUmodule    mod;
-    CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_add;
+    CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu, f_add;
     CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
     CUdeviceptr weights;
     CUdeviceptr kc, vc;
@@ -195,6 +195,11 @@ static CUdeviceptr f32_dbuf(const float *src, size_t n) {
 }
 
 bool gpu_init(model_t *m) {
+    if (m->l_head_kv || m->v_rmsnorm || m->logit_softcap > 0) {
+        fprintf(stderr, "gpu: '%s' (heterogeneous per-layer KV) is not on the "
+                "cuda backend yet — using CPU\n", m->arch);
+        return false;
+    }
     // every weight matmul must have a kernel for its quant type
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
@@ -220,7 +225,7 @@ bool gpu_init(model_t *m) {
         int q_dim  = m->n_head * m->head_dim;
         int kv_dim = m->n_head_kv * m->head_dim;
         int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
-        size_t kv_bytes = (size_t)m->n_layer * m->n_ctx * kv_dim * sizeof(f16_t);
+        size_t kv_bytes = m->kv_off[m->n_layer] * sizeof(f16_t);
         size_t act_bytes = sizeof(float) * (MVB * ((size_t)m->n_embd + 3 * xdim +
                            q_dim + 2 * kv_dim + 2 * m->n_ff +
                            (size_t)m->n_head * m->n_ctx) + m->n_vocab);
@@ -240,7 +245,7 @@ bool gpu_init(model_t *m) {
             { &g->f_rmsnorm,    "k_rmsnorm" },   { &g->f_qknorm, "k_qknorm" },
             { &g->f_rope,       "k_rope" },      { &g->f_store,  "k_store_kv" },
             { &g->f_attn,       "k_attn" },      { &g->f_silu,   "k_silu_mul" },
-            { &g->f_add,        "k_add" },
+            { &g->f_gelu,       "k_gelu_mul" },  { &g->f_add,    "k_add" },
             { &g->f_mv[T_F32],  "k_mv_f32" },    { &g->f_mv[T_F16],  "k_mv_f16" },
             { &g->f_mv[T_Q8_0], "k_mv_q8_0" },   { &g->f_mv[T_Q4_0], "k_mv_q4_0" },
             { &g->f_mv[T_Q4_1], "k_mv_q4_1" },   { &g->f_mv[T_Q5_0], "k_mv_q5_0" },
@@ -380,9 +385,10 @@ static bool enc_add(gpu_t *g, CUdeviceptr x, CUdeviceptr d, int n,
     return launch(g->f_add, (n + 255) / 256, batch, 1, 256, p);
 }
 
-static bool enc_silu(gpu_t *g, CUdeviceptr a, CUdeviceptr b, int n) {
+static bool enc_actmul(gpu_t *g, model_t *m, CUdeviceptr a, CUdeviceptr b, int n) {
     void *p[] = { &a, &b, &n };
-    return launch(g->f_silu, (n + 255) / 256, 1, 1, 256, p);
+    CUfunction f = m->ffn_act == ACT_GELU ? g->f_gelu : g->f_silu;
+    return launch(f, (n + 255) / 256, 1, 1, 256, p);
 }
 
 void gpu_free(model_t *m) {
@@ -416,10 +422,9 @@ void gpu_free(model_t *m) {
 // upload host KV rows [lo, hi) for every layer (CPU prompt processing wrote them)
 static bool kv_upload(gpu_t *g, model_t *m, int lo, int hi) {
     if (lo >= hi) return true;
-    int kv_dim = m->n_head_kv * m->head_dim;
-    size_t row = (size_t)kv_dim * sizeof(f16_t);
     for (int l = 0; l < m->n_layer; l++) {
-        size_t off = ((size_t)l * m->n_ctx + lo) * row;
+        size_t row = (size_t)model_kv_dim(m, l) * sizeof(f16_t);
+        size_t off = m->kv_off[l] * sizeof(f16_t) + (size_t)lo * row;
         size_t len = (size_t)(hi - lo) * row;
         if (cu.MemcpyHtoD(g->kc + off, (uint8_t *)m->kcache + off, len) != 0 ||
             cu.MemcpyHtoD(g->vc + off, (uint8_t *)m->vcache + off, len) != 0)
@@ -431,10 +436,9 @@ static bool kv_upload(gpu_t *g, model_t *m, int lo, int hi) {
 // copy device KV rows [lo, hi) back to the (authoritative) host cache
 static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
     if (lo >= hi) return true;
-    int kv_dim = m->n_head_kv * m->head_dim;
-    size_t row = (size_t)kv_dim * sizeof(f16_t);
     for (int l = 0; l < m->n_layer; l++) {
-        size_t off = ((size_t)l * m->n_ctx + lo) * row;
+        size_t row = (size_t)model_kv_dim(m, l) * sizeof(f16_t);
+        size_t off = m->kv_off[l] * sizeof(f16_t) + (size_t)lo * row;
         size_t len = (size_t)(hi - lo) * row;
         if (cu.MemcpyDtoH((uint8_t *)m->kcache + off, g->kc + off, len) != 0 ||
             cu.MemcpyDtoH((uint8_t *)m->vcache + off, g->vc + off, len) != 0)
@@ -471,7 +475,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
     bool ok = true;
     for (int l = 0; l < m->n_layer && ok; l++) {
         layer_t *ly = &m->layers[l];
-        bool local = model_layer_is_local(l, m->swa_window, m->swa_pattern);
+        bool local = model_is_swa(m, l);
 
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->attn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
@@ -486,15 +490,15 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         {
             // cache rows for consecutive positions are contiguous, so the
             // kernel indexes both source column and destination row by grid.y
-            uint64_t kv_off = ((uint64_t)l * m->n_ctx + pos) * kv_dim;
+            uint64_t kv_off = (uint64_t)m->kv_off[l] + (uint64_t)pos * kv_dim;
             void *ps[] = { &g->kt, &g->vt, &g->kc, &g->vc, &kv_dim, &kv_off };
             ok = ok && launch(g->f_store, (kv_dim + 63) / 64, tn, 1, 64, ps);
         }
 
         {
             attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, pos,
-                             (uint64_t)l * m->n_ctx * kv_dim,
-                             1.0f / sqrtf((float)m->head_dim), q_dim, xdim,
+                             (uint64_t)m->kv_off[l],
+                             model_attn_scale(m, l), q_dim, xdim,
                              local ? m->swa_window : 0 };
             void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa };
             ok = ok && launch(g->f_attn, m->n_head, tn, 1, 128, pa);
@@ -510,7 +514,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                                tn, n_embd, xdim);
         ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
         ok = ok && enc_mv(g, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
-        ok = ok && enc_silu(g, g->hb, g->hb2, tn * m->n_ff);
+        ok = ok && enc_actmul(g, m, g->hb, g->hb2, tn * m->n_ff);
         ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
         if (g->pfn[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->pfn[l], n_embd, m->rms_eps,
