@@ -208,6 +208,7 @@ typedef struct {
     float     logit_softcap; // final logits = c*tanh(x/c) when > 0
     int32_t  *suppress;      // token ids forced to -inf in the logits
     int       n_suppress;    // (tokenizer.ggml.suppress_tokens)
+    const char *think_open, *think_close; // thinking-tag pair (gemma4), or NULL
     gguf_tensor *tok_embd;
     gguf_tensor *output;     // may equal tok_embd (tied)
     float       *out_norm_w;
@@ -347,7 +348,8 @@ int  sval_close(sval *v, char *out, int cap);
 
 // ---------------------------------------------------------------- templates
 
-enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA, TMPL_RAW };
+enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
+       TMPL_GEMMA4, TMPL_RAW };
 
 enum { ACT_SILU = 0, ACT_GELU = 1 };
 
@@ -385,6 +387,23 @@ const char *template_name(int tmpl);
 // returns bytes written (excl. NUL)
 size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
                        bool add_assistant, char *out, size_t cap);
+
+// streaming splitter for thinking-tag models (gemma4 channels): bytes between
+// open and close tags — anywhere in the stream, gemma4 interleaves them with
+// plain text — reach the callback as reasoning (reasoning=1), the rest as
+// content (reasoning=0). Partial tags at chunk boundaries are held back until
+// they resolve. With open == NULL every byte passes straight through.
+typedef int (*think_cb)(void *ud, int reasoning, const char *bytes, int n);
+typedef struct {
+    const char *open, *close;
+    int   state;
+    char *buf;
+    int   n, cap;
+} think_split;
+void think_init(think_split *t, const char *open, const char *close);
+int  think_feed(think_split *t, const char *bytes, int n, think_cb cb, void *ud);
+int  think_finish(think_split *t, think_cb cb, void *ud); // flush held bytes
+void think_free(think_split *t);
 
 // ---------------------------------------------------------------- engine
 

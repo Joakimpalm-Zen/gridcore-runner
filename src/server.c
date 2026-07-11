@@ -275,21 +275,26 @@ static int q_pop(void) {
 
 typedef struct {
     sbuf  out;          // accumulated completion text
+    sbuf  reason;       // accumulated reasoning text (thinking-tag models)
     int   fd;
     bool  stream;       // SSE mode
     bool  dead;         // client went away
     char  id[48];
     bool  chat;         // chat.completion vs text_completion chunk shape
+    think_split ts;     // thinking-tag splitter (pass-through when untagged)
 } gen_ctx;
 
-static int gen_collect(void *ud, const char *bytes, int n) {
+// emit one section of split output: reasoning goes to the OpenAI-style
+// reasoning_content field, everything else to content
+static int gen_emit(void *ud, int reasoning, const char *bytes, int n) {
     gen_ctx *g = ud;
-    sb_put(&g->out, bytes, n);
+    sb_put(reasoning ? &g->reason : &g->out, bytes, n);
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
     sbuf chunk = {0};
     sb_fmt(&chunk, "{\"id\":\"%s\",\"object\":\"%s\",\"choices\":[{\"index\":0,",
            g->id, g->chat ? "chat.completion.chunk" : "text_completion");
-    if (g->chat) sb_lit(&chunk, "\"delta\":{\"content\":\"");
+    if (g->chat) sb_fmt(&chunk, "\"delta\":{\"%s\":\"",
+                        reasoning ? "reasoning_content" : "content");
     else         sb_lit(&chunk, "\"text\":\"");
     sb_esc(&chunk, bytes, n);
     if (g->chat) sb_lit(&chunk, "\"},\"finish_reason\":null}]}");
@@ -300,6 +305,11 @@ static int gen_collect(void *ud, const char *bytes, int n) {
     free(chunk.s);
     free(sse.s);
     return g->dead ? 1 : 0;
+}
+
+static int gen_collect(void *ud, const char *bytes, int n) {
+    gen_ctx *g = ud;
+    return think_feed(&g->ts, bytes, n, gen_emit, g);
 }
 
 // run one completion on a slot and write the HTTP response
@@ -364,6 +374,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .chat = chat };
     snprintf(g.id, sizeof(g.id), "%s-%d", chat ? "chatcmpl" : "cmpl",
              atomic_fetch_add(&SV.req_counter, 1));
+    // split thinking channels out of chat responses; raw completions stay raw
+    think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);
 
     if (stream) {
         const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -373,6 +385,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
 
     double gtime;
     int n_gen = engine_generate(e, logits, max_tokens, gen_collect, &g, &gtime);
+    think_finish(&g.ts, gen_emit, &g);
     const char *finish = e->hit_stop ? "stop" : "length";
 
     if (stream) {
@@ -395,8 +408,14 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         if (chat) sb_lit(&r, "\"message\":{\"role\":\"assistant\",\"content\":\"");
         else      sb_lit(&r, "\"text\":\"");
         sb_esc(&r, g.out.s ? g.out.s : "", g.out.n);
-        if (chat) sb_lit(&r, "\"},");
-        else      sb_lit(&r, "\",");
+        sb_lit(&r, "\"");
+        if (chat && g.reason.n > 0) {
+            sb_lit(&r, ",\"reasoning_content\":\"");
+            sb_esc(&r, g.reason.s, g.reason.n);
+            sb_lit(&r, "\"");
+        }
+        if (chat) sb_lit(&r, "},");
+        else      sb_lit(&r, ",");
         sb_fmt(&r, "\"finish_reason\":\"%s\"}],"
                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
                    "\"total_tokens\":%d}}",
@@ -411,6 +430,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
             g.dead ? " [client gone]" : "");
     e->schema = NULL;
     schema_free(schema);
+    think_free(&g.ts);
+    free(g.reason.s);
     free(g.out.s);
 }
 

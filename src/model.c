@@ -213,6 +213,10 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         m->ffn_act       = ACT_GELU;
         m->v_rmsnorm     = true;
         m->attn_scale    = 1.0f;
+        // thinking-tuned: responses interleave <|channel>thought ... <channel|>
+        // reasoning blocks with the answer text (split out by think_feed)
+        m->think_open    = "<|channel>thought";
+        m->think_close   = "<channel|>";
         m->logit_softcap = gguf_get_f32(g, AK("final_logit_softcapping"), 0.0f);
         m->swa_window    = (int)gguf_get_u32(g, AK("attention.sliding_window"), 0);
         m->rms_eps       = gguf_get_f32(g, AK("attention.layer_norm_rms_epsilon"), 1e-6f);
