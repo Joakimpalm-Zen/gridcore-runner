@@ -398,6 +398,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->hb2    = malloc(sizeof(float) * (size_t)B * m->n_ff);
     m->att    = malloc(sizeof(float) * (size_t)m->n_head * n_ctx);
     m->logits = malloc(sizeof(float) * m->n_vocab);
+    m->spec_batch = 16; // all_logits rows, allocated lazily on first use
     if (!m->kcache || !m->vcache || !m->hb2 || !m->att) {
         fprintf(stderr, "error: cannot allocate buffers (ctx %d needs %.1f MB KV cache)\n",
                 n_ctx, 2.0 * kv_bytes / 1e6);
@@ -445,7 +446,7 @@ void model_free(model_t *m) {
     free(m->kcache); free(m->vcache);
     free(m->x); free(m->xb); free(m->xb2); free(m->q);
     free(m->k_tmp); free(m->v_tmp);
-    free(m->hb); free(m->hb2); free(m->att); free(m->logits);
+    free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
     tpool_destroy(m->tp);
     gguf_close(&m->gf);
     memset(m, 0, sizeof(*m));
@@ -754,6 +755,36 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             m->logits[i] = m->logit_softcap * tanhf(m->logits[i] / m->logit_softcap);
     if (m->n_suppress) suppress_logits(m, m->logits);
     return m->logits;
+}
+
+// forward a small batch keeping every row's hidden state in x (speculative
+// verify). CPU path only: full GPU offload keeps hidden states on-device.
+bool model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos) {
+    if (m->gpu && m->gpu_layers >= m->n_layer) return false;
+    if (!m->all_logits)
+        m->all_logits = malloc(sizeof(float) * (size_t)m->spec_batch * m->n_vocab);
+    if (n > m->spec_batch || !m->all_logits) return false;
+    model_forward_batch(m, tokens, n, pos, false); // leaves hidden states in x
+    return true;
+}
+
+// logits for one row of the last model_forward_batch_keep — computed lazily
+// so an early draft rejection skips the remaining output projections (the
+// lm_head is the single most expensive matvec in the model). Valid until
+// the next forward.
+float *model_spec_row_logits(model_t *m, int b) {
+    int n_embd = m->n_embd, xdim = n_embd;
+    for (int l = 0; l < m->n_layer; l++)
+        if (model_q_dim(m, l) > xdim) xdim = model_q_dim(m, l);
+    float *lg = m->all_logits + (size_t)b * m->n_vocab;
+    rmsnorm(m->xb, m->x + (size_t)b * n_embd, m->out_norm_w, n_embd, m->rms_eps);
+    matvec_b(m->tp, lg, m->n_vocab, m->output, m->xb, xdim, n_embd,
+             m->n_vocab, NULL, 1);
+    if (m->logit_softcap > 0)
+        for (int i = 0; i < m->n_vocab; i++)
+            lg[i] = m->logit_softcap * tanhf(lg[i] / m->logit_softcap);
+    if (m->n_suppress) suppress_logits(m, lg);
+    return lg;
 }
 
 float *model_forward(model_t *m, int token, int pos) {

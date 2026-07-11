@@ -136,10 +136,118 @@ static void lp_capture_pre(engine *e, const float *logits, lp_pre *p) {
     for (int j = filled; j < e->lp_n; j++) { top[j].id = -1; top[j].lp = 0; }
 }
 
+// speculative decoding: sampler-equality verification (llama.cpp-style) —
+// sample each position from the TARGET's logits with the full sampler chain;
+// a draft is accepted when the sampled token equals it, so output follows
+// exactly the same distribution as the non-speculative path
+static int engine_generate_spec(engine *e, float *logits, int max_new,
+                                gen_cb cb, void *ud, double *gen_time) {
+    char buf[512];
+    int n_gen = 0;
+    e->hit_stop = false;
+    e->lp_count = 0;
+    double t0 = now_s();
+    model_t *m = e->m, *dm = e->dm;
+    int K = e->draft_k;
+    if (K < 1) K = 1;
+    if (K > m->spec_batch - 1) K = m->spec_batch - 1;
+    int32_t d[16];
+    float *dl = NULL; // draft logits for position dpos
+    int st_rounds = 0, st_drafted = 0, st_accepted = 0;
+    #define SPEC_STATS() fprintf(stderr, \
+        "spec: %d rounds, %d drafted, %d accepted (%.2f tok/round)\n", \
+        st_rounds, st_drafted, st_accepted, \
+        st_rounds ? (double)n_gen / st_rounds : 0)
+
+    while ((max_new < 0 || n_gen < max_new) && e->pos < m->n_ctx) {
+        st_rounds++;
+        // catch the draft up on tokens accepted since its last position
+        while (e->dpos < e->pos) {
+            int chunk = e->pos - e->dpos < dm->n_batch ? e->pos - e->dpos
+                                                       : dm->n_batch;
+            if (e->dpos + chunk > dm->n_ctx) { dl = NULL; break; }
+            dl = model_forward_batch(dm, e->hist + e->dpos, chunk, e->dpos,
+                                     e->dpos + chunk == e->pos);
+            e->dpos += chunk;
+        }
+        // draft up to K tokens greedily (nd == 0 degrades to plain decoding)
+        int nd = 0;
+        while (dl && nd < K && e->pos + nd + 1 < m->n_ctx &&
+               e->dpos + 1 < dm->n_ctx) {
+            int best = 0;
+            for (int i = 1; i < dm->n_vocab; i++)
+                if (dl[i] > dl[best]) best = i;
+            if (best >= m->n_vocab) break; // padding id the target can't embed
+            d[nd++] = best;
+            st_drafted++;
+            dl = model_forward(dm, best, e->dpos++);
+        }
+        // one batched target forward computes every draft position's hidden
+        // state; row logits are pulled lazily as the walk reaches them
+        if (nd && !model_forward_batch_keep(m, d, nd, e->pos))
+            nd = 0; // verify unavailable: plain decoding
+
+        // walk the drafts (i < nd) plus one bonus position (i == nd)
+        int i = 0;
+        for (; i <= nd; i++) {
+            if (max_new >= 0 && n_gen >= max_new) goto rewind;
+            float *ti = i == 0 ? logits : model_spec_row_logits(m, i - 1);
+            int tok = sample_pick(e->smp, ti, m->n_vocab, NULL, e);
+            sampler_accept(e->smp, tok);
+            if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
+            if (is_stop(e, tok) && !e->ignore_eos) {
+                e->hit_stop = true;
+                e->pos += i; // keep the accepted drafts' KV
+                if (e->dpos > e->pos) e->dpos = e->pos;
+                if (gen_time) *gen_time = now_s() - t0;
+                SPEC_STATS();
+                return n_gen;
+            }
+            int n = tok_decode(e->tok, tok, buf, sizeof(buf));
+            int rc = cb && n > 0 ? cb(ud, buf, n) : 0;
+            n_gen++;
+            if (i < nd && tok == d[i] && rc == 0) {
+                e->hist[e->pos + i] = tok; // accepted: its KV is already right
+                st_accepted++;
+                continue;
+            }
+            // mismatch, bonus position, or aborted: forward the real token
+            e->pos += i;
+            if (e->hist && e->pos < m->n_ctx) e->hist[e->pos] = tok;
+            logits = model_forward(m, tok, e->pos);
+            e->pos++;
+            // rewind the draft to just before this token: the next catch-up
+            // refeeds it, fixing the draft's KV for the rejected position AND
+            // refreshing dl (clamping to pos left dl stale from the abandoned
+            // round — acceptance collapsed to ~zero)
+            if (e->dpos > e->pos - 1) e->dpos = e->pos - 1;
+            if (rc) {
+                if (gen_time) *gen_time = now_s() - t0;
+                SPEC_STATS();
+                return n_gen;
+            }
+            i = -1; // signal: already advanced
+            break;
+        }
+        if (i >= 0) {
+rewind:
+            e->pos += i > nd ? nd : i; // budget hit mid-walk: keep accepted
+            if (e->dpos > e->pos) e->dpos = e->pos;
+            if (max_new >= 0 && n_gen >= max_new) break;
+        }
+    }
+    if (gen_time) *gen_time = now_s() - t0;
+    SPEC_STATS();
+    #undef SPEC_STATS
+    return n_gen;
+}
+
 int engine_generate(engine *e, float *logits, int max_new,
                     gen_cb cb, void *ud, double *gen_time) {
     char buf[512];
     int n_gen = 0;
+    if (e->dm && !e->schema && !e->json_mode && e->lp_cap == 0)
+        return engine_generate_spec(e, logits, max_new, cb, ud, gen_time);
     e->hit_stop = false;
     e->lp_count = 0;
     double t0 = now_s();
