@@ -209,22 +209,52 @@ bool jv_bool(jv *v, bool dflt) {
     return (v && v->type == J_BOOL) ? v->b : dflt;
 }
 
+// length of the valid UTF-8 sequence starting at s[i] (bounded by n), or 0
+// when the bytes there are not well-formed UTF-8
+static size_t utf8_seq(const char *s, size_t i, size_t n) {
+    unsigned char c = (unsigned char)s[i];
+    size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 :
+                 (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+    if (len == 0 || i + len > n) return 0;
+    for (size_t k = 1; k < len; k++)
+        if (((unsigned char)s[i + k] & 0xC0) != 0x80) return 0;
+    return len;
+}
+
 size_t json_escape(const char *s, size_t n, char *out, size_t cap) {
     size_t m = 0;
-    for (size_t i = 0; i < n && m + 8 < cap; i++) {
+    for (size_t i = 0; i < n && m + 8 < cap; ) {
         unsigned char c = (unsigned char)s[i];
         switch (c) {
-            case '"':  out[m++] = '\\'; out[m++] = '"';  break;
-            case '\\': out[m++] = '\\'; out[m++] = '\\'; break;
-            case '\n': out[m++] = '\\'; out[m++] = 'n';  break;
-            case '\r': out[m++] = '\\'; out[m++] = 'r';  break;
-            case '\t': out[m++] = '\\'; out[m++] = 't';  break;
-            case '\b': out[m++] = '\\'; out[m++] = 'b';  break;
-            case '\f': out[m++] = '\\'; out[m++] = 'f';  break;
-            default:
-                if (c < 0x20) m += snprintf(out + m, cap - m, "\\u%04x", c);
-                else out[m++] = (char)c;
+            case '"':  out[m++] = '\\'; out[m++] = '"';  i++; continue;
+            case '\\': out[m++] = '\\'; out[m++] = '\\'; i++; continue;
+            case '\n': out[m++] = '\\'; out[m++] = 'n';  i++; continue;
+            case '\r': out[m++] = '\\'; out[m++] = 'r';  i++; continue;
+            case '\t': out[m++] = '\\'; out[m++] = 't';  i++; continue;
+            case '\b': out[m++] = '\\'; out[m++] = 'b';  i++; continue;
+            case '\f': out[m++] = '\\'; out[m++] = 'f';  i++; continue;
         }
+        if (c < 0x20) {
+            m += snprintf(out + m, cap - m, "\\u%04x", c);
+            i++;
+            continue;
+        }
+        if (c < 0x80) {
+            out[m++] = (char)c;
+            i++;
+            continue;
+        }
+        // multi-byte: pass through only well-formed UTF-8 — a model's raw
+        // byte-fallback tokens can emit stray 0x80..0xFF bytes, and one of
+        // those in a response body breaks every strict JSON client
+        size_t len = utf8_seq(s, i, n);
+        if (len == 0) {
+            out[m++] = '\xEF'; out[m++] = '\xBF'; out[m++] = '\xBD'; // U+FFFD
+            i++;
+            continue;
+        }
+        for (size_t k = 0; k < len && m < cap - 1; k++) out[m++] = s[i + k];
+        i += len;
     }
     out[m] = 0;
     return m;
