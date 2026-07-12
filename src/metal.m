@@ -71,6 +71,8 @@ static id<MTLBuffer> f32_buf(id<MTLDevice> dev, const float *src, size_t n) {
                            options:MTLResourceStorageModeShared];
 }
 
+static float *gpu_forward(model_t *m, int token, int pos);
+
 bool gpu_init(model_t *m) {
     if (m->swa_window > 0 || m->embd_scale != 1.0f) {
         fprintf(stderr, "gpu: '%s' (sliding-window attention) is not on the metal backend yet — using CPU\n",
