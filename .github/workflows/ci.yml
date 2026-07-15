@@ -53,6 +53,7 @@ jobs:
           sleep 2
           curl -sf http://127.0.0.1:8123/health
           curl -sf http://127.0.0.1:8123/v1/models
+          curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['features']['json_schema'] and d['models'][0]['id']; print('capabilities ok')"
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
           # prefix-cache regression: an identical greedy request must reuse the
@@ -126,6 +127,7 @@ jobs:
           curl -sf -d '{"model":"a","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
           curl -sf -d '{"model":"b","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
           curl -sf http://127.0.0.1:8124/v1/models | python3 -c "import json,sys; assert len(json.load(sys.stdin)['data']) == 2; print('swap ok')"
+          curl -sf http://127.0.0.1:8124/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['swap'] and len(d['models']) == 2; print('swap capabilities ok')"
           kill "$SWAP_PID" 2>/dev/null || true
           wait "$SWAP_PID" 2>/dev/null || true
           ./runner -m "good=test.gguf,bad=bad.gguf" --serve --port 8124 --ttl 0 &
@@ -227,6 +229,7 @@ jobs:
           ./runner.exe -m test.gguf --serve --port 8123 --parallel 2 &
           sleep 3
           curl -sf http://127.0.0.1:8123/health
+          curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['features']['json_schema']; print('capabilities ok')"
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
           kill %1

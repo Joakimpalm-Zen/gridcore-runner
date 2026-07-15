@@ -5,6 +5,7 @@
 //   POST /v1/completions        raw prompt completion
 //   POST /v1/embeddings         mean-pooled L2-normed embeddings
 //   GET  /v1/models             the loaded model
+//   GET  /v1/capabilities       registry + feature discovery
 //   GET  /health                liveness
 //
 // Swap-mode request bodies may carry "keep_alive" (seconds of idle before
@@ -133,6 +134,7 @@ static struct {
     fdqueue    q;
     const char *model_name;
     int        n_predict_cap;
+    int        ctx_size;
     atomic_int req_counter;
     // swap mode
     reg_entry   reg[16];
@@ -631,6 +633,42 @@ static void send_models(int fd) {
     free(r.s);
 }
 
+static void send_capabilities(int fd) {
+    sbuf r = {0};
+    int res = resident_load();
+    sb_lit(&r, "{\"object\":\"runner.capabilities\",\"swap\":");
+    sb_lit(&r, SV.n_reg > 0 && !SV.single ? "true" : "false");
+    sb_lit(&r, ",\"resident\":");
+    if (SV.n_reg > 0 && res >= 0) {
+        sb_lit(&r, "\"");
+        sb_esc(&r, SV.reg[res].name, strlen(SV.reg[res].name));
+        sb_lit(&r, "\"");
+    } else {
+        sb_lit(&r, "null");
+    }
+    sb_fmt(&r, ",\"context\":%d,\"models\":[", SV.ctx_size);
+    if (SV.n_reg > 0) {
+        for (int i = 0; i < SV.n_reg; i++) {
+            if (i) sb_lit(&r, ",");
+            sb_lit(&r, "{\"id\":\"");
+            sb_esc(&r, SV.reg[i].name, strlen(SV.reg[i].name));
+            sb_fmt(&r, "\",\"resident\":%s}", i == res ? "true" : "false");
+        }
+    } else {
+        sb_lit(&r, "{\"id\":\"");
+        sb_esc(&r, SV.model_name, strlen(SV.model_name));
+        sb_lit(&r, "\",\"resident\":true}");
+    }
+    sb_lit(&r, "],\"features\":{"
+               "\"json_object\":true,"
+               "\"json_schema\":true,"
+               "\"schema_conditionals\":false,"
+               "\"request_telemetry\":false,"
+               "\"prefix_cache\":true}}");
+    send_response(fd, 200, "application/json", r.s, r.n);
+    free(r.s);
+}
+
 static void handle_conn(slot_t *s, int fd) {
     char hdr[16384];
     size_t got = 0;
@@ -687,6 +725,8 @@ static void handle_conn(slot_t *s, int fd) {
         send_health(fd);
     } else if (!strcmp(method, "GET") && !strcmp(path, "/v1/models")) {
         send_models(fd);
+    } else if (!strcmp(method, "GET") && !strcmp(path, "/v1/capabilities")) {
+        send_capabilities(fd);
     } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/v1/chat/completions") ||
                 !strcmp(path, "/v1/completions") ||
@@ -764,7 +804,8 @@ static bool accept_fastpath(int fd) {
     // not worth the extra branch.
     bool health = !strncmp(hdr, "GET /health ", 12);
     bool models = !strncmp(hdr, "GET /v1/models ", 15);
-    if (!health && !models) return false;
+    bool caps = !strncmp(hdr, "GET /v1/capabilities ", 21);
+    if (!health && !models && !caps) return false;
     // Drain the request before replying: closing with unread bytes can RST
     // the connection and discard our response. But the accept thread must
     // never block indefinitely on a single connection — it's the only thing
@@ -792,7 +833,8 @@ static bool accept_fastpath(int fd) {
         hdr[got] = 0;
     }
     if (health) send_health(fd);
-    else        send_models(fd);
+    else if (models) send_models(fd);
+    else        send_capabilities(fd);
     sock_close(fd);
     return true;
 }
@@ -853,6 +895,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     if (bsname && (!name || bsname > name)) name = bsname;
     SV.model_name = SV.n_reg > 0 ? SV.reg[0].name : (name ? name + 1 : model_path);
     SV.n_predict_cap = 1024;
+    SV.ctx_size = mp->n_ctx;
     SV.n_slots = parallel;
     SV.slots = calloc(parallel, sizeof(slot_t));
     pthread_mutex_init(&SV.q.mu, NULL);
@@ -948,12 +991,12 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         fprintf(stderr,
                 "server listening on http://127.0.0.1:%d — %d models, swap on demand"
                 " (ttl %ds)\n"
-                "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /health\n",
+                "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /v1/capabilities | GET /health\n",
                 port, SV.n_reg, SV.ttl);
     else
         fprintf(stderr,
                 "server listening on http://127.0.0.1:%d — %d slot%s x %d threads\n"
-                "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /health\n",
+                "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /v1/capabilities | GET /health\n",
                 port, parallel, parallel > 1 ? "s" : "", threads_per_slot);
 
     for (;;) {

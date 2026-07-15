@@ -218,7 +218,7 @@ This is runner's specialty. Three pieces work together:
 
 Endpoints: `POST /v1/chat/completions`, `POST /v1/completions`,
 `POST /v1/embeddings` (mean-pooled, L2-normalized), `GET /v1/models`,
-`GET /health`, `GET /unload`. Chat completions understand `logprobs` /
+`GET /v1/capabilities`, `GET /health`, `GET /unload`. Chat completions understand `logprobs` /
 `top_logprobs`, `min_p`, OpenAI `tools` (declared in the prompt, parsed back
 into `tool_calls`), and swap-mode `keep_alive`. Thinking-tuned models
 (gemma4) get their reasoning channels split into `reasoning_content` instead
