@@ -484,6 +484,10 @@ float *engine_feed(engine *e, const int32_t *toks, int n);
 // sample until stop/limit, streaming decoded bytes to cb; returns token count
 int    engine_generate(engine *e, float *logits, int max_new,
                        gen_cb cb, void *ud, double *gen_time);
+// load a draft model for speculative decoding (shared by CLI and server);
+// see engine.c for the gates. NULL = speculation could not be enabled.
+model_t *spec_draft_load(const char *path, const model_t *target,
+                         const model_params *mp);
 double now_s(void);
 
 #endif // RUNNER_H

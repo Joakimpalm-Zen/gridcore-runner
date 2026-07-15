@@ -98,6 +98,25 @@ jobs:
           curl -sf -d '{"model":"b","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
           curl -sf http://127.0.0.1:8124/v1/models | python3 -c "import json,sys; assert len(json.load(sys.stdin)['data']) == 2; print('swap ok')"
           kill %1
+      - name: smoke test (server speculative decoding)
+        # a self-draft server at temp 0 must match the plain server's output
+        # byte-for-byte, and a json-constrained request must still succeed
+        # (speculation self-disables under constraints, exactly as the CLI)
+        run: |
+          REQ='{"messages":[{"role":"user","content":"hi"}],"max_tokens":12,"temperature":0}'
+          ./runner -m test.gguf --serve --port 8128 --gpu off &
+          sleep 2
+          P=$(curl -sf -d "$REQ" http://127.0.0.1:8128/v1/chat/completions | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
+          kill %1; wait %1 2>/dev/null || true
+          ./runner -m test.gguf --draft test.gguf --serve --port 8128 --gpu off &
+          sleep 2
+          S=$(curl -sf -d "$REQ" http://127.0.0.1:8128/v1/chat/completions | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
+          [ -n "$P" ] || exit 1
+          [ "$P" = "$S" ] || { echo "spec output diverged: '$P' vs '$S'"; exit 1; }
+          curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":24,"temperature":0,"response_format":{"type":"json_object"}}' \
+            http://127.0.0.1:8128/v1/chat/completions | python3 -c "import json,sys; json.loads(json.load(sys.stdin)['choices'][0]['message']['content'])"
+          kill %1
+          echo "server spec ok"
       - name: sanitizer build + run
         # model weights/vocab live for the whole process and are freed by
         # exit; leak detection would flag them, so keep only error detection
