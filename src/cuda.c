@@ -698,7 +698,14 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             // capture records the launch sequence without executing it; the
             // recorded graph is position-invariant because pos lives in
             // device memory, so one capture serves every decode token
-            if (cu.StreamBeginCapture(g->stream, 0) != 0 ||
+            //
+            // THREAD_LOCAL (1), not GLOBAL (0): GLOBAL capture forbids
+            // synchronous CUDA calls from every other thread for the whole
+            // capture window, so another slot's plain-path forward or a
+            // second gpu_t warming up on its own thread would fail and
+            // permanently downgrade that slot to CPU (model.c sees the
+            // failed forward and clears m->gpu)
+            if (cu.StreamBeginCapture(g->stream, 1) != 0 ||
                 !fwd_tile(g, m, tokens, 1, pos, true, 0, m->gpu_layers) ||
                 cu.StreamEndCapture(g->stream, &g->graph) != 0 ||
                 cu.GraphInstantiateWithFlags(&g->gexec, g->graph, 0) != 0) {

@@ -721,6 +721,12 @@ static void *slot_worker(void *arg) {
 // frees the resident model and must stay serialized with generation) are
 // handed to a slot untouched.
 static bool accept_fastpath(int fd) {
+#ifndef _WIN32
+    // POSIX fd_set is a fixed-size bitmask indexed by fd value; FD_SET on an
+    // fd >= FD_SETSIZE is undefined behavior (out-of-bounds write). Windows
+    // fd_set is a count-based array instead, so it isn't affected.
+    if (fd >= FD_SETSIZE) return false;
+#endif
     fd_set rs;
     struct timeval tv = { 0, 250000 }; // loopback data lands in <1ms
     FD_ZERO(&rs);

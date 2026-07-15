@@ -57,7 +57,12 @@ double plat_now(void) {
 static DWORD WINAPI parent_wait(LPVOID h) {
     WaitForSingleObject((HANDLE)h, INFINITE);
     fprintf(stderr, "parent process exited — shutting down\n");
-    _exit(0);
+    // _exit(0) maps to ExitProcess, which runs DLL_PROCESS_DETACH after
+    // killing peer threads at arbitrary points; if a slot thread died
+    // mid-CUDA-call, nvcuda's DllMain can deadlock on it, leaving a zombie
+    // process holding VRAM. TerminateProcess skips DLL rundown entirely.
+    TerminateProcess(GetCurrentProcess(), 0);
+    return 0; // unreachable: the process is gone by the time we'd get here
 }
 
 void plat_parent_watch(long pid) {
@@ -65,12 +70,22 @@ void plat_parent_watch(long pid) {
     HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
     if (!h) {
         // unobservable parent == already-dead parent: refusing to run
-        // unwatched is the whole point of the flag
+        // unwatched is the whole point of the flag. This runs before model
+        // load (no CUDA threads exist yet), so a plain _exit is fine here.
         fprintf(stderr, "error: --parent-pid %ld is not observable — exiting\n", pid);
         _exit(0);
     }
     HANDLE th = CreateThread(NULL, 0, parent_wait, h, 0, NULL);
-    if (th) CloseHandle(th);
+    if (th) {
+        CloseHandle(th);
+    } else {
+        // same rationale as the unobservable-pid branch above: this also
+        // runs pre-model-load, so no CUDA threads exist yet and a plain
+        // _exit is fine — but continuing unwatched would silently break
+        // the flag's contract, so fail hard instead
+        fprintf(stderr, "error: --parent-pid watcher thread failed to start — exiting\n");
+        _exit(0);
+    }
 }
 
 #else // POSIX
@@ -152,7 +167,14 @@ void plat_parent_watch(long pid) {
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    pthread_create(&th, &at, parent_poll, (void *)(intptr_t)pid);
+    if (pthread_create(&th, &at, parent_poll, (void *)(intptr_t)pid) != 0) {
+        // this runs pre-model-load (no CUDA threads exist yet), so a plain
+        // _exit is fine — but continuing unwatched would silently break
+        // the flag's contract, so fail hard instead
+        fprintf(stderr, "error: --parent-pid watcher thread failed to start — exiting\n");
+        pthread_attr_destroy(&at);
+        _exit(0);
+    }
     pthread_attr_destroy(&at);
 }
 
