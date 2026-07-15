@@ -53,6 +53,18 @@ jobs:
           curl -sf -d '{"input":["a","b"]}' http://127.0.0.1:8123/v1/embeddings \
             | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d['data'])==2 and len(d['data'][0]['embedding'])==64; print('embeddings ok')"
           kill %1
+      - name: smoke test (health bypasses a busy slot)
+        # a stalled request pins the only slot; /health and /v1/models must
+        # still answer from the accept loop (gridcore watchdog regression)
+        run: |
+          ./runner -m test.gguf --serve --port 8126 --parallel 1 &
+          sleep 2
+          python3 -c "import socket,time; s=socket.create_connection(('127.0.0.1',8126)); s.sendall(b'POST /v1/chat/completions HTTP/1.1\r\n'); time.sleep(20)" &
+          sleep 1
+          curl -sf -m 3 http://127.0.0.1:8126/health
+          curl -sf -m 3 http://127.0.0.1:8126/v1/models
+          kill %1 %2 2>/dev/null || true
+          echo "health bypass ok"
       - name: smoke test (json schema)
         run: |
           echo '{"type":"object","properties":{"a":{"type":"string","enum":["x","y"]},"b":{"type":"integer"}},"required":["a","b"]}' > ts.json

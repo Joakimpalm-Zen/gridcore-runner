@@ -45,10 +45,6 @@ penalty-less draft and kills acceptance).
 
 ## Server
 
-- **/health should bypass the slot queue.** Single-slot serving means a
-  long in-flight generation blocks /health (observed: gridcore's watchdog
-  calling a busy runner "unhealthy: timed out"). Answer /health (and
-  /v1/models) from the accept loop before queueing to a slot.
 - **Job-object / process-group cleanup story** for supervisors that die
   (gridcore-clu leaves orphaned runners on SIGKILL).
 
