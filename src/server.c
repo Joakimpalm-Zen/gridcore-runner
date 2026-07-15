@@ -144,6 +144,8 @@ static struct {
     model_params mp;
     pthread_mutex_t swap_mu;
     atomic_bool busy;
+    model_t    *draft;        // per-slot draft would be plural; single-model
+    int         draft_k;      // serve has exactly one slot (see swap_to)
 } SV;
 
 static void unload_resident(void) {
@@ -194,6 +196,12 @@ static int swap_to(const char *want) {
             template_detect(gguf_get_str(&s->m->gf, "tokenizer.chat_template", NULL),
                             s->tok);
         engine_init(&s->e, s->m, s->tok, &s->smp);
+        if (SV.single && SV.draft) {
+            // engine_init memsets the engine; the draft (own KV, own pool)
+            // survives target unload/reload and is re-attached here
+            s->e.dm = SV.draft;
+            s->e.draft_k = SV.draft_k;
+        }
         SV.resident = idx;
     }
     SV.last_used = now_s();
@@ -460,7 +468,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     fprintf(stderr, "[slot %d] %s: %d prompt (%d cached) + %d gen tok (%.1f tok/s)%s%s\n",
             s->id, g.id, n_prompt, keep, n_gen,
             n_gen / (gtime > 0 ? gtime : 1e-9),
-            schema ? " [schema]" : e->json_mode ? " [json]" : "",
+            schema ? " [schema]" : e->json_mode ? " [json]" : e->dm ? " [spec]" : "",
             g.dead ? " [client gone]" : "");
     e->schema = NULL;
     schema_free(schema);
@@ -766,12 +774,17 @@ static bool accept_fastpath(int fd) {
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
-               int n_threads, int ttl) {
+               int n_threads, int ttl, const char *draft_path, int draft_k) {
     sock_init();
     if (parallel < 1) parallel = 1;
     if (parallel > 16) parallel = 16;
     bool swap_mode = strchr(model_path, '=') != NULL;
     if (ttl < 0) ttl = swap_mode ? 300 : 0; // single-model default: never unload
+    if (draft_path && swap_mode) {
+        fprintf(stderr, "note: --draft needs a single served model — "
+                "ignoring it in swap mode\n");
+        draft_path = NULL;
+    }
 
     // "name=path,name2=path2" enables swap mode: one resident model,
     // loaded per request's "model" field, unloaded after ttl idle seconds
@@ -854,6 +867,12 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                 }
             }
             engine_init(&s->e, s->m, s->tok, &s->smp);
+            if (draft_path) {
+                // per-slot draft context: each slot owns a full draft KV;
+                // weights dedupe through the page cache like slot models
+                s->e.dm = spec_draft_load(draft_path, s->m, &slot_mp);
+                if (s->e.dm) s->e.draft_k = draft_k;
+            }
         }
 
         if (single_setup) {
@@ -874,6 +893,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             SV.mp = *mp;
             SV.mp.verbose = false;
             SV.mp.n_threads = threads_per_slot;
+            SV.draft = SV.slots[0].e.dm;
+            SV.draft_k = draft_k;
             pthread_mutex_init(&SV.swap_mu, NULL);
             pthread_t rt;
             pthread_create(&rt, NULL, ttl_reaper, NULL);

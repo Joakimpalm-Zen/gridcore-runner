@@ -38,6 +38,7 @@ void engine_reset(engine *e) {
     sampler_reset(e->smp);
     jsonv_init(&e->jv);
     if (e->schema) sval_init(&e->sv, e->schema);
+    e->dpos = 0;
 }
 
 int engine_rewind(engine *e, const int32_t *toks, int n) {
@@ -46,6 +47,9 @@ int engine_rewind(engine *e, const int32_t *toks, int n) {
         while (keep < e->pos && keep < n - 1 && e->hist[keep] == toks[keep])
             keep++; // n - 1: always feed at least one token to get logits
     e->pos = keep;
+    // the draft's KV beyond the kept prefix was computed from the previous
+    // request's tokens; the catch-up loop re-feeds hist[dpos..pos)
+    if (e->dpos > keep) e->dpos = keep;
     e->hit_stop = false;
     sampler_reset(e->smp);
     // the kept prefix still counts toward the repeat-penalty window
@@ -53,6 +57,37 @@ int engine_rewind(engine *e, const int32_t *toks, int n) {
     jsonv_init(&e->jv);
     if (e->schema) sval_init(&e->sv, e->schema);
     return keep;
+}
+
+// load a draft model for speculative decoding, with the same gates in CLI
+// and server mode: the target must keep a CPU verify path, and the vocabs
+// must match modulo family padding. NULL (with a stderr note) = run plain.
+model_t *spec_draft_load(const char *path, const model_t *target,
+                         const model_params *mp) {
+    if (target->gpu && target->gpu_layers >= target->n_layer) {
+        fprintf(stderr, "draft: target is fully GPU-offloaded — speculative "
+                "decoding needs the CPU verify path, ignoring --draft\n");
+        return NULL;
+    }
+    model_params dmp = *mp;
+    dmp.n_ctx = target->n_ctx; // draft must cover the target's positions
+    dmp.kv_q8 = false;
+    dmp.gpu_mode = GPU_AUTO;   // a small draft usually fits VRAM whole
+    model_t *dm = malloc(sizeof(model_t));
+    if (!model_load(dm, path, &dmp)) {
+        free(dm);
+        return NULL;
+    }
+    if (abs(dm->n_vocab - target->n_vocab) > 512) {
+        // model families pad the vocab differently per size; small
+        // differences are padding ids the draft never emits
+        fprintf(stderr, "draft: vocab mismatch (%d vs %d) — ignoring --draft\n",
+                dm->n_vocab, target->n_vocab);
+        model_free(dm);
+        free(dm);
+        return NULL;
+    }
+    return dm;
 }
 
 static bool is_stop(engine *e, int id) {

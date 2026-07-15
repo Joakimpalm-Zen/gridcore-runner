@@ -37,11 +37,15 @@ penalty-less draft and kills acceptance).
   llama.cpp's implementation (they expose `t_h_nextn` for it). All
   prerequisites landed: spec engine, lazy verify logits
   (`model_spec_row_logits`), gemma4 on CUDA.
-- **Server-side speculation** — currently CLI-only because slots would
-  share one draft KV cache; per-slot draft contexts would enable it for
-  gridcore-clu's server calls (which are schema-constrained though — spec
-  currently disables itself under schema/JSON constraints; lifting THAT
-  needs constraint-state rewind per rejected draft).
+- **Server-side speculation** — landed: single-model `--serve` gives each
+  slot its own draft `model_t` (weights dedupe through the page cache,
+  same as slot targets), re-attached across `/unload` + lazy reload.
+  Multi-model swap mode still refuses `--draft` (a registry entry can't
+  guarantee a shared vocab). Unconstrained requests only — schema/JSON
+  requests still disable speculation and run plain, exactly as the CLI
+  (gridcore-clu's server calls are schema-constrained though, so they
+  don't benefit yet; lifting THAT needs constraint-state rewind per
+  rejected draft, which remains open).
 
 ## Quants / kernels
 
