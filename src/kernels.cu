@@ -709,9 +709,13 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
     float *ah = att + ((ulong64)tk * a.n_head + h) * a.n_ctx;
 
     for (int t = t0 + tid; t <= pos; t += tpg) {
-        const __half *kt = kc + a.l_off + (ulong64)t * kv_dim + kvh * hd;
+        const __half2 *kt2 = (const __half2 *)(kc + a.l_off +
+                             (ulong64)t * kv_dim + kvh * hd);
         float s = 0;
-        for (int i = 0; i < hd; i++) s += qh[i] * __half2float(kt[i]);
+        for (int i = 0; i < hd / 2; i++) {
+            float2 kf = __half22float2(kt2[i]);
+            s += qh[2 * i] * kf.x + qh[2 * i + 1] * kf.y;
+        }
         ah[t] = s * a.scale;
     }
     __syncthreads();
@@ -743,11 +747,17 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
     sum = red[0];
     __syncthreads();
 
-    for (int i = tid; i < hd; i += tpg) {
-        float o = 0;
-        for (int t = t0; t <= pos; t++)
-            o += ah[t] * __half2float(vc[a.l_off + (ulong64)t * kv_dim + kvh * hd + i]);
-        out[(ulong64)tk * a.os + h * hd + i] = o / sum;
+    for (int i2 = tid; i2 < hd / 2; i2 += tpg) {
+        float o0 = 0, o1 = 0;
+        for (int t = t0; t <= pos; t++) {
+            const __half2 *vt2 = (const __half2 *)(vc + a.l_off +
+                                 (ulong64)t * kv_dim + kvh * hd);
+            float2 vf = __half22float2(vt2[i2]);
+            o0 += ah[t] * vf.x;
+            o1 += ah[t] * vf.y;
+        }
+        out[(ulong64)tk * a.os + h * hd + 2 * i2]     = o0 / sum;
+        out[(ulong64)tk * a.os + h * hd + 2 * i2 + 1] = o1 / sum;
     }
 }
 
