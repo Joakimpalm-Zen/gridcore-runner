@@ -191,6 +191,9 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
     if (K > m->spec_batch - 1) K = m->spec_batch - 1;
     int32_t d[16];
     float *dl = NULL; // draft logits for position dpos
+    // Even under JSON/schema constraints, speculation stays target-exact:
+    // the draft proposes, but only target-sampled tokens feed the validator.
+    sample_ok_fn ok = e->schema ? schema_ok : e->json_mode ? json_ok : NULL;
     int st_rounds = 0, st_drafted = 0, st_accepted = 0;
     #define SPEC_STATS() fprintf(stderr, \
         "spec: %d rounds, %d drafted, %d accepted (%.2f tok/round)\n", \
@@ -230,7 +233,13 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
         for (; i <= nd; i++) {
             if (max_new >= 0 && n_gen >= max_new) goto rewind;
             float *ti = i == 0 ? logits : model_spec_row_logits(m, i - 1);
-            int tok = sample_pick(e->smp, ti, m->n_vocab, NULL, e);
+            int tok = sample_pick(e->smp, ti, m->n_vocab, ok, e);
+            if (tok < 0) {
+                e->hit_stop = true;
+                e->pos += i; // keep the accepted drafts' KV
+                if (e->dpos > e->pos) e->dpos = e->pos;
+                goto done;
+            }
             sampler_accept(e->smp, tok);
             if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
             if (is_stop(e, tok) && !e->ignore_eos) {
@@ -242,15 +251,34 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                 return n_gen;
             }
             int n = tok_decode(e->tok, tok, buf, sizeof(buf));
+            if (e->schema && n > 0) sval_feed(&e->sv, buf, n);
+            else if (e->json_mode && n > 0) jsonv_feed(&e->jv, buf, n);
             int rc = cb && n > 0 ? cb(ud, buf, n) : 0;
             n_gen++;
+            bool constraint_done = (e->schema && e->sv.done) ||
+                                   (!e->schema && e->json_mode && e->jv.done);
             if (i < nd && tok == d[i] && rc == 0) {
                 e->hist[e->pos + i] = tok; // accepted: its KV is already right
                 st_accepted++;
+                if (constraint_done) {
+                    e->hit_stop = true;
+                    e->pos += i + 1;
+                    if (e->dpos > e->pos) e->dpos = e->pos;
+                    if (gen_time) *gen_time = now_s() - t0;
+                    SPEC_STATS();
+                    return n_gen;
+                }
                 continue;
             }
             // mismatch, bonus position, or aborted: forward the real token
             e->pos += i;
+            if (constraint_done) {
+                e->hit_stop = true;
+                if (e->dpos > e->pos) e->dpos = e->pos;
+                if (gen_time) *gen_time = now_s() - t0;
+                SPEC_STATS();
+                return n_gen;
+            }
             if (e->hist && e->pos < m->n_ctx) e->hist[e->pos] = tok;
             logits = model_forward(m, tok, e->pos);
             e->pos++;
@@ -274,6 +302,16 @@ rewind:
             if (max_new >= 0 && n_gen >= max_new) break;
         }
     }
+done:
+    if (e->schema && !e->sv.done) {
+        char cbuf[4096];
+        int cn = sval_close(&e->sv, cbuf, sizeof(cbuf));
+        if (cn > 0 && cb) cb(ud, cbuf, cn);
+    } else if (!e->schema && e->json_mode && !e->jv.done) {
+        char cbuf[600];
+        int cn = jsonv_close(&e->jv, cbuf, sizeof(cbuf));
+        if (cn > 0 && cb) cb(ud, cbuf, cn);
+    }
     if (gen_time) *gen_time = now_s() - t0;
     SPEC_STATS();
     #undef SPEC_STATS
@@ -284,7 +322,7 @@ int engine_generate(engine *e, float *logits, int max_new,
                     gen_cb cb, void *ud, double *gen_time) {
     char buf[512];
     int n_gen = 0;
-    if (e->dm && !e->schema && !e->json_mode && e->lp_cap == 0)
+    if (e->dm && e->lp_cap == 0)
         return engine_generate_spec(e, logits, max_new, cb, ud, gen_time);
     e->hit_stop = false;
     e->lp_count = 0;

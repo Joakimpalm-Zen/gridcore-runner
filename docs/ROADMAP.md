@@ -41,11 +41,10 @@ penalty-less draft and kills acceptance).
   slot its own draft `model_t` (weights dedupe through the page cache,
   same as slot targets), re-attached across `/unload` + lazy reload.
   Multi-model swap mode still refuses `--draft` (a registry entry can't
-  guarantee a shared vocab). Unconstrained requests only — schema/JSON
-  requests still disable speculation and run plain, exactly as the CLI
-  (gridcore-clu's server calls are schema-constrained though, so they
-  don't benefit yet; lifting THAT needs constraint-state rewind per
-  rejected draft, which remains open).
+  guarantee a shared vocab). JSON/schema-constrained requests now use the
+  same target-sampler equality verifier as unconstrained requests: the draft
+  proposes tokens, but the target sampler plus the live constraint validator
+  still decide every emitted token.
 
 ## Quants / kernels
 

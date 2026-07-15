@@ -42,6 +42,9 @@ jobs:
           A=$(./runner -m test.gguf -p "hello" -n 12 --temp 0 --gpu off 2>/dev/null)
           B=$(./runner -m test.gguf --draft test.gguf -p "hello" -n 12 --temp 0 --gpu off 2>/dev/null)
           [ "$A" = "$B" ] && [ -n "$A" ] && echo "speculative ok"
+          ./runner -m test.gguf --draft test.gguf -p "hi" -n 24 --temp 0 --json --gpu off > spec-json.out 2> spec-json.err
+          python3 -c "import json; json.load(open('spec-json.out')); print('spec json valid')"
+          grep -q 'spec:' spec-json.err
       - name: smoke test (json mode)
         run: ./runner -m test.gguf -p "hi" -n 24 --temp 0 --json 2>/dev/null | python3 -c "import json,sys; json.load(sys.stdin); print('valid json')"
       - name: smoke test (server)
@@ -134,7 +137,7 @@ jobs:
       - name: smoke test (server speculative decoding)
         # a self-draft server at temp 0 must match the plain server's output
         # byte-for-byte, and a json-constrained request must still succeed
-        # (speculation self-disables under constraints, exactly as the CLI)
+        # through the constrained speculative path.
         run: |
           REQ='{"messages":[{"role":"user","content":"hi"}],"max_tokens":12,"temperature":0}'
           ./runner -m test.gguf --serve --port 8128 --gpu off &
