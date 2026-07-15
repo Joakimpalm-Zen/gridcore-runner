@@ -722,13 +722,35 @@ static bool accept_fastpath(int fd) {
     int n = sock_peek(fd, hdr, 16);
     if (n <= 0) { sock_close(fd); return true; } // died before speaking
     hdr[n] = 0;
-    bool health = !strncmp(hdr, "GET /health", 11);
-    bool models = !strncmp(hdr, "GET /v1/models", 14);
+    // match the path plus the space HTTP/1.x always puts before the version,
+    // so "GET /healthzzz" falls through to the slot path instead of being
+    // misrouted here. Bare HTTP/0.9 "GET /health\r\n" (no version) won't
+    // match, but neither curl nor the gridcore watchdog send that, so it's
+    // not worth the extra branch.
+    bool health = !strncmp(hdr, "GET /health ", 12);
+    bool models = !strncmp(hdr, "GET /v1/models ", 15);
     if (!health && !models) return false;
-    // drain the request before replying: closing with unread bytes can RST
-    // the connection and discard our response
+    // Drain the request before replying: closing with unread bytes can RST
+    // the connection and discard our response. But the accept thread must
+    // never block indefinitely on a single connection — it's the only thing
+    // calling accept(), so a stalled client here would queue every later
+    // connection behind it, reproducing the watchdog-timeout bug this
+    // fastpath exists to fix. Re-select before each recv with a short
+    // timeout and cap the total drain time; if a client dribbles bytes too
+    // slowly to finish the header in the budget, answer anyway (these GETs
+    // are tiny and read-only, so a reply is always correct) and move on.
+    double deadline = now_s() + 0.5;
     size_t got = 0;
     while (got < sizeof(hdr) - 1 && !strstr(hdr, "\r\n\r\n")) {
+        double remaining = deadline - now_s();
+        if (remaining <= 0) break;
+        struct timeval dtv;
+        dtv.tv_sec = 0;
+        dtv.tv_usec = (long)(remaining * 1e6);
+        if (dtv.tv_usec > 100000) dtv.tv_usec = 100000; // poll in <=100ms steps
+        FD_ZERO(&rs);
+        FD_SET(fd, &rs);
+        if (select(fd + 1, &rs, NULL, NULL, &dtv) != 1) break;
         int r = sock_recv(fd, hdr + got, sizeof(hdr) - 1 - got);
         if (r <= 0) break;
         got += (size_t)r;
