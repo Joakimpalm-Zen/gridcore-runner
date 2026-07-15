@@ -40,7 +40,19 @@ static bool plain_key(const char *s) {
 }
 
 static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int depth) {
-    if (!strcmp(type, "string"))  return sn_new(SN_STR);
+    if (!strcmp(type, "string")) {
+        snode *n = sn_new(SN_STR);
+        jv *mn = jv_get(s, "minLength"), *mx = jv_get(s, "maxLength");
+        n->min_items = mn ? (int)jv_num(mn, 0) : 0;
+        n->max_items = mx ? (int)jv_num(mx, -1) : -1;
+        if (n->min_items < 0 || n->max_items < -1 ||
+            (n->max_items >= 0 && n->min_items > n->max_items)) {
+            snprintf(err, errcap, "invalid string length bounds");
+            schema_free(n);
+            return NULL;
+        }
+        return n;
+    }
     if (!strcmp(type, "number"))  return sn_new(SN_NUM);
     if (!strcmp(type, "integer")) return sn_new(SN_INT);
     if (!strcmp(type, "boolean")) return sn_new(SN_BOOL);
@@ -407,7 +419,7 @@ static int feed_byte(sval *v, uint8_t c) {
         }
         case SN_STR:
             if (c != '"') return -1;
-            f->phase = P_STR; f->sub = 0;
+            f->phase = P_STR; f->sub = 0; f->lit_pos = 0;
             return 0;
         case SN_ENUM:
         case SN_BOOL:
@@ -439,7 +451,16 @@ static int feed_byte(sval *v, uint8_t c) {
     case P_STR: {
         int r = str_byte(c, &f->sub);
         if (r < 0) return -1;
-        if (r == 1) frame_done(v);
+        if (r == 1) {
+            if (f->lit_pos < n->min_items ||
+                (n->max_items >= 0 && f->lit_pos > n->max_items))
+                return -1;
+            frame_done(v);
+        } else if (f->sub == 0) {
+            f->lit_pos++;
+            if (n->max_items >= 0 && f->lit_pos > n->max_items)
+                return -1;
+        }
         return 0;
     }
 
@@ -676,6 +697,10 @@ int sval_close(sval *v, char *out, int cap) {
             if (f->sub == 1) eq_putc(&q, 'n');           // dangling backslash
             while (f->sub >= 2) { eq_putc(&q, '0');       // partial \uXXXX
                                   f->sub = f->sub == 5 ? 0 : f->sub + 1; }
+            while (f->lit_pos < n->min_items) {
+                eq_putc(&q, ' ');
+                f->lit_pos++;
+            }
             eq_putc(&q, '"');
             break;
         case P_LIT: {

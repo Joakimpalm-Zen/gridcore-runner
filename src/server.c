@@ -663,6 +663,7 @@ static void send_capabilities(int fd) {
                "\"json_object\":true,"
                "\"json_schema\":true,"
                "\"schema_conditionals\":true,"
+               "\"schema_string_bounds\":true,"
                "\"request_telemetry\":false,"
                "\"prefix_cache\":true}}");
     send_response(fd, 200, "application/json", r.s, r.n);

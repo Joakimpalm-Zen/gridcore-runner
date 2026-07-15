@@ -93,12 +93,41 @@ static void test_schema_oneof_const_scalars(void) {
     jv_free(schema_json);
 }
 
+static void test_schema_string_length_bounds_close_and_reject(void) {
+    const char *src = "{\"type\":\"string\",\"minLength\":5,\"maxLength\":8}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "\"abc", 4));
+    char out[64];
+    int n = sval_close(&v, out, sizeof(out));
+    assert(n > 0);
+    char full[128];
+    snprintf(full, sizeof(full), "\"abc%s", out);
+    jv *parsed = json_parse(full, strlen(full));
+    assert(parsed != NULL);
+    assert(strlen(jv_str(parsed, "")) >= 5);
+    jv_free(parsed);
+
+    sval_init(&v, schema);
+    assert(!sval_feed(&v, "\"123456789\"", 11));
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 int main(void) {
     test_json_close_partial_string();
     test_schema_required_close();
     test_schema_rejects_bad_bounds();
     test_schema_rejects_escaped_keys();
     test_schema_oneof_const_scalars();
+    test_schema_string_length_bounds_close_and_reject();
     puts("json/schema tests ok");
     return 0;
 }
