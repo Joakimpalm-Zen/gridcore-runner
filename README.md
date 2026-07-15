@@ -263,10 +263,17 @@ Two levels of guarantee:
   sampling, so output *conforms*: object properties are emitted **in declared
   order** (required ones always present, optional ones skippable, no unknown
   keys), enums and `const` are enforced literally, type unions like
-  `["string","null"]` resolve correctly, arrays honor `items` and
-  `min/maxItems`, and open `{}` values accept any JSON. Supported subset:
-  object/array/string/number/integer/boolean/null, enum, const, type unions;
-  unsupported constructs are rejected at request time with a clear error.
+  `["string","null"]` resolve correctly, `oneOf`/`anyOf` scalar `const`
+  alternatives become enum constraints, strings honor `minLength` /
+  `maxLength`, arrays honor `items` and `min/maxItems`, and open `{}` values
+  accept any JSON. Runner also supports the discriminated action-object shape
+  used by Clu: a top-level `oneOf` of same-ordered objects where a `tool`
+  `const` selects that branch's `args` object schema, so cross-tool argument
+  keys can be rejected during sampling. Supported subset:
+  object/array/string/number/integer/boolean/null, enum, const, type unions,
+  scalar-const `oneOf`/`anyOf`, and same-shape `tool`-discriminated object
+  alternatives; unsupported constructs are rejected at request time with a
+  clear error.
 
 Both modes: if the token budget expires mid-document, runner completes it
 minimally (per the schema when there is one) so the result always parses, and
