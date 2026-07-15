@@ -224,6 +224,10 @@ into `tool_calls`), and swap-mode `keep_alive`. Thinking-tuned models
 (gemma4) get their reasoning channels split into `reasoning_content` instead
 of leaking channel tags into content. Works with any OpenAI client:
 
+Buffered completion responses include `runner_telemetry` with cached prompt
+tokens, prompt tokens evaluated this request, generation timing, and whether
+JSON/schema/speculative decoding was active.
+
 ```python
 import openai
 client = openai.OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="none")

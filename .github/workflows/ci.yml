@@ -55,7 +55,7 @@ jobs:
           curl -sf http://127.0.0.1:8123/v1/models
           curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['features']['json_schema'] and d['models'][0]['id']; print('capabilities ok')"
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
-            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
+            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'runner_telemetry' in d and 'prompt_cached_tokens' in d['runner_telemetry']; print('server valid json')"
           # prefix-cache regression: an identical greedy request must reuse the
           # cached KV and still return the identical completion
           R1=$(curl -sf -d '{"messages":[{"role":"user","content":"again"}],"max_tokens":8,"temperature":0}' http://127.0.0.1:8123/v1/chat/completions)
@@ -231,7 +231,7 @@ jobs:
           curl -sf http://127.0.0.1:8123/health
           curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['features']['json_schema']; print('capabilities ok')"
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
-            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin); print('server valid json')"
+            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'runner_telemetry' in d; print('server valid json')"
           kill %1
       - name: smoke test (server, backslash model path)
         # regression: a C:\...\model.gguf -m path used to land unescaped in the

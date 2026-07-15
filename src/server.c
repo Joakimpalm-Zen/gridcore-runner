@@ -484,8 +484,17 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         }
         sb_fmt(&r, "\"finish_reason\":\"%s\"}],"
                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
-                   "\"total_tokens\":%d}}",
-               finish, n_prompt, n_gen, n_prompt + n_gen);
+                   "\"total_tokens\":%d},"
+                   "\"runner_telemetry\":{\"prompt_cached_tokens\":%d,"
+                   "\"prompt_eval_tokens\":%d,\"generation_seconds\":%.6f,"
+                   "\"generation_tok_s\":%.3f,\"json_mode\":%s,"
+                   "\"schema\":%s,\"speculative\":%s}}",
+               finish, n_prompt, n_gen, n_prompt + n_gen,
+               keep, n_prompt - keep, gtime,
+               n_gen / (gtime > 0 ? gtime : 1e-9),
+               e->json_mode ? "true" : "false",
+               schema ? "true" : "false",
+               e->dm ? "true" : "false");
         send_response(fd, 200, "application/json", r.s, r.n);
         free(r.s);
     }
@@ -664,7 +673,7 @@ static void send_capabilities(int fd) {
                "\"json_schema\":true,"
                "\"schema_conditionals\":true,"
                "\"schema_string_bounds\":true,"
-               "\"request_telemetry\":false,"
+               "\"request_telemetry\":true,"
                "\"prefix_cache\":true}}");
     send_response(fd, 200, "application/json", r.s, r.n);
     free(r.s);
