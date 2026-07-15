@@ -65,10 +65,12 @@ penalty-less draft and kills acceptance).
   Qwen3-4B-Q8_0 n=512 decode 18.04 → 18.09 tok/s (+0.3%) — a smaller but
   real, reproducible gain, kept. Both partial-offload models (Llama-8B
   Q5_K_M, gemma-4-12B) were unaffected by A (graph path requires full
-  offload) and B/C didn't regress them. Remaining headroom is smaller
-  now that launch overhead and the hottest matvec/attention loads are
-  addressed; further gains would need profiling to find the next
-  bottleneck rather than obvious per-kernel wins.
+  offload); B improved gemma-4 (3.77 → 3.90, its decision target) without
+  regressing Llama-8B, and C didn't regress either partial-offload model.
+  Remaining headroom is smaller now that launch overhead and the hottest
+  matvec/attention loads are addressed; further gains would need
+  profiling to find the next bottleneck rather than obvious per-kernel
+  wins.
 
 ## Architectures
 
