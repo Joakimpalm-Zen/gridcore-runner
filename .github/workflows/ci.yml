@@ -115,16 +115,16 @@ jobs:
           [ "$P" = "$S" ] || { echo "spec output diverged: '$P' vs '$S'"; exit 1; }
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":24,"temperature":0,"response_format":{"type":"json_object"}}' \
             http://127.0.0.1:8128/v1/chat/completions | python3 - <<'PYJSON'
-import json, sys
-d = json.load(sys.stdin)
-content = d['choices'][0]['message']['content']
-finish_reason = d['choices'][0].get('finish_reason', '')
-# near-random stub model can hit length before emitting '{' depending on host FP codegen
-if finish_reason == 'length' and not content.startswith('{'):
-    print("spec json: skipped (incomplete due to context length)")
-    sys.exit(0)
-json.loads(content)
-PYJSON
+          import json, sys
+          d = json.load(sys.stdin)
+          content = d['choices'][0]['message']['content']
+          finish_reason = d['choices'][0].get('finish_reason', '')
+          # near-random stub model can hit length before emitting '{' depending on host FP codegen
+          if finish_reason == 'length' and not content.startswith('{'):
+              print("spec json: skipped (incomplete due to context length)")
+              sys.exit(0)
+          json.loads(content)
+          PYJSON
           kill %1
           echo "server spec ok"
       - name: sanitizer build + run
