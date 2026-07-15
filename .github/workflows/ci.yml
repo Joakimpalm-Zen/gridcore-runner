@@ -18,6 +18,11 @@ jobs:
         run: make
       - name: make test model
         run: python3 scripts/make-test-model.py test.gguf
+      - name: focused json/schema tests
+        run: |
+          cc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
+            src/json.c src/jsonmode.c src/schema.c -o test-json-schema -lm
+          ./test-json-schema
       - name: smoke test (completion)
         run: ./runner -m test.gguf -p "hello" -n 8 --temp 0
       - name: smoke test (suppress tokens)
@@ -184,6 +189,11 @@ jobs:
         run: make
       - name: make test model
         run: python3 scripts/make-test-model.py test.gguf
+      - name: focused json/schema tests
+        run: |
+          gcc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
+            src/json.c src/jsonmode.c src/schema.c -o test-json-schema.exe -lm
+          ./test-json-schema.exe
       - name: smoke test (completion)
         run: ./runner.exe -m test.gguf -p "hello" -n 8 --temp 0
       - name: smoke test (suppress tokens)
