@@ -25,6 +25,10 @@ jobs:
           ./test-json-schema
       - name: smoke test (completion)
         run: ./runner -m test.gguf -p "hello" -n 8 --temp 0
+      - name: smoke test (bench json)
+        run: |
+          ./runner -m test.gguf --bench-json -n 8 --temp 0 2>/dev/null \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['generated_tokens'] <= 8 and d['gen_tok_s'] >= 0; print('bench json ok')"
       - name: smoke test (suppress tokens)
         # all ids but EOS suppressed: generation must stop before emitting
         # anything, so stdout is exactly the echoed prompt
@@ -196,6 +200,10 @@ jobs:
           ./test-json-schema.exe
       - name: smoke test (completion)
         run: ./runner.exe -m test.gguf -p "hello" -n 8 --temp 0
+      - name: smoke test (bench json)
+        run: |
+          ./runner.exe -m test.gguf --bench-json -n 8 --temp 0 2>/dev/null \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['generated_tokens'] <= 8 and d['gen_tok_s'] >= 0; print('bench json ok')"
       - name: smoke test (suppress tokens)
         run: |
           python3 scripts/make-test-model.py test-sup.gguf --suppress-all-but-eos

@@ -336,6 +336,7 @@ runner -m model [options]
   --kv f16|q8    KV cache storage; q8 halves it again (needs --gpu off)
   --draft PATH   small same-vocab GGUF for speculative decoding
   --draft-k N    draft tokens per round (default 4)
+  --bench-json   run a small decode benchmark and print JSON metrics
   --caps         print machine capabilities as JSON and exit
   -v             print model hyperparameters and memory use
 ```

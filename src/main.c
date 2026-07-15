@@ -77,6 +77,7 @@ static void usage(const char *prog) {
         "  --draft PATH   small same-vocab GGUF for speculative decoding\n"
         "                 (one-shot, chat, and single-model --serve)\n"
         "  --draft-k N    draft tokens per round (default 4)\n"
+        "  --bench-json   run a small decode benchmark and print JSON metrics\n"
         "  --caps         print machine capabilities as JSON and exit\n"
         "  --parent-pid N exit when process N dies (supervisor cleanup)\n"
         "  -v             verbose model info\n",
@@ -87,6 +88,11 @@ static int stdout_cb(void *ud, const char *bytes, int n) {
     (void)ud;
     fwrite(bytes, 1, n, stdout);
     fflush(stdout);
+    return 0;
+}
+
+static int discard_cb(void *ud, const char *bytes, int n) {
+    (void)ud; (void)bytes; (void)n;
     return 0;
 }
 
@@ -122,6 +128,7 @@ int main(int argc, char **argv) {
     int draft_k = 4;
     bool interactive = false, verbose = false, no_bos = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
+    bool bench_json = false;
     model_params mp = {0};
     sampler smp = { .temp = 0.8f, .top_p = 0.95f, .min_p = 0.05f,
                     .repeat_penalty = 1.1f, .top_k = 40, .rng = 0 };
@@ -162,6 +169,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--kv"))  mp.kv_q8 = strcmp(NEXT, "q8") == 0;
         else if (!strcmp(a, "--draft"))   draft_path = NEXT;
         else if (!strcmp(a, "--draft-k")) draft_k = atoi(NEXT);
+        else if (!strcmp(a, "--bench-json")) bench_json = true;
         else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = atoi(NEXT);
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = atoi(NEXT);
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = atoi(NEXT);
@@ -234,7 +242,7 @@ int main(int argc, char **argv) {
         fclose(pf);
         prompt = fbuf;
     }
-    if (!prompt && !interactive && !serve && !quant_out) {
+    if (!prompt && !interactive && !serve && !quant_out && !bench_json) {
         fprintf(stderr, "error: need -p PROMPT, -i, or --serve\n");
         usage(argv[0]);
         return 1;
@@ -313,6 +321,39 @@ int main(int argc, char **argv) {
     int32_t *toks = malloc(sizeof(int32_t) * tok_cap);
     double ptime, gtime, t0;
     int n_prompt, n_gen;
+
+    if (bench_json) {
+        const char *bench_prompt = prompt ? prompt :
+            "Write a short story about a lighthouse keeper.";
+        char *p = unescape(bench_prompt);
+        n_prompt = tok_encode(&tok, p, toks, (int)tok_cap, !no_bos, true);
+        if (n_prompt == 0 || n_prompt >= m.n_ctx) {
+            fprintf(stderr, "error: benchmark prompt does not fit context\n");
+            free(p);
+            return 1;
+        }
+        t0 = now_s();
+        float *logits = engine_feed(&e, toks, n_prompt);
+        ptime = now_s() - t0;
+        if (!logits) {
+            fprintf(stderr, "error: benchmark prompt exceeds context\n");
+            free(p);
+            return 1;
+        }
+        n_gen = engine_generate(&e, logits, n_predict, discard_cb, NULL, &gtime);
+        char esc_model[1024];
+        json_escape(model_path, strlen(model_path), esc_model, sizeof(esc_model));
+        printf("{\"model\":\"%s\",\"arch\":\"%s\",\"context\":%d,"
+               "\"gpu_layers\":%d,\"layers\":%d,\"prompt_tokens\":%d,"
+               "\"generated_tokens\":%d,\"prompt_tok_s\":%.3f,"
+               "\"gen_tok_s\":%.3f}\n",
+               esc_model, m.arch, m.n_ctx, m.gpu_layers, m.n_layer,
+               n_prompt, n_gen,
+               n_prompt / (ptime > 0 ? ptime : 1e-9),
+               n_gen / (gtime > 0 ? gtime : 1e-9));
+        free(p);
+        return 0;
+    }
 
     if (!interactive) {
         // one-shot completion
