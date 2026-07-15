@@ -408,13 +408,21 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->att    = malloc(sizeof(float) * (size_t)m->n_head * n_ctx);
     m->logits = malloc(sizeof(float) * m->n_vocab);
     m->spec_batch = 16; // all_logits rows, allocated lazily on first use
-    if (!m->kcache || !m->vcache || !m->hb2 || !m->att) {
+    if (!m->kv_off || !m->kcache || !m->vcache || !m->x || !m->xb ||
+        !m->xb2 || !m->q || !m->k_tmp || !m->v_tmp || !m->hb ||
+        !m->hb2 || !m->att || !m->logits) {
         fprintf(stderr, "error: cannot allocate buffers (ctx %d needs %.1f MB KV cache)\n",
                 n_ctx, 2.0 * kv_bytes / 1e6);
+        model_free(m);
         return false;
     }
 
     m->tp = tpool_create(p->n_threads > 0 ? p->n_threads : 1);
+    if (!m->tp) {
+        fprintf(stderr, "error: cannot create thread pool\n");
+        model_free(m);
+        return false;
+    }
     rope_setup(m, g, arch, p->rope_base, p->rope_scale);
 
     if (p->gpu_mode == GPU_AUTO) gpu_init(m); // sets m->gpu on success
