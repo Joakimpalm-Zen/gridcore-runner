@@ -14,6 +14,59 @@ model files — the de-facto format for local models — and runs them on CPU
 ./runner -m big.gguf --draft small.gguf -p "..."               # speculative decoding
 ```
 
+## Why not llama.cpp?
+
+llama.cpp is the reference implementation — broader architecture coverage,
+more quant formats, faster kernels, a huge community. runner exists because
+this stack needs something llama.cpp structurally cannot be: an engine small
+enough to own outright, whose serving contracts the projects above it
+([clu](https://github.com/ZenZombie117/gridcore-clu),
+[gridcore-interpreter](https://github.com/ZenZombie117/gridcore-interpreter))
+can build against *exactly*.
+
+**The whole engine bends in an afternoon.** ~8,000 lines of plain C, one
+`make`, no ggml split, no CMake, no submodules — one person holds all of it
+in their head. When the grid's watchdog kept declaring busy-but-healthy
+runners dead, `/health` moved into the accept loop the same day. When
+SIGKILLed supervisors leaked orphaned runners holding VRAM, `--parent-pid`
+landed the same day. Speculative decoding under `--serve`, CUDA graphs on
+the decode loop: hours each. Against a 300k-line upstream that moves daily,
+every one of those is a feature request and a wait — or a fork you now
+maintain anyway, without the small-codebase payoff.
+
+**Schema conformance is the product, not a plugin.** runner compiles a JSON
+Schema into a streaming validator that *drives sampling*: properties emit in
+declared order, unknown keys are impossible, and when the token budget dies
+mid-document the output is minimally completed so it still parses. Those
+exact semantics are load-bearing upstream — clu streams its `thinking` field
+live *because* declared-order emission is guaranteed, and the interpreter's
+planner/worker handoffs assume every call returns conformant JSON, so a weak
+model's format failures are structurally impossible and only content quality
+remains. llama.cpp's GBNF grammars can express JSON, but this contract —
+declared order, always-parses-on-length, OpenAI `response_format` wiring —
+would then live in someone else's engine, free to drift under two projects
+that depend on its details.
+
+**Deployment is one static file.** CUDA goes through the driver API with
+embedded PTX: no CUDA toolkit at build or run time, no cuBLAS, no DLLs.
+Copy the binary to any node with an NVIDIA driver and it offloads; without
+one, it runs CPU. Fleet nodes don't get a build matrix.
+
+**Fleet primitives are built in, not bolted on.** Multi-model swap with
+per-request selection and idle TTL, `--caps` machine reports for the
+scheduler, `--reserve` budgeting with auto-fit context, `/unload`,
+`--parent-pid` supervisor lifetime. The equivalent llama.cpp deployment is
+llama-server + llama-swap + supervision scripts; this grid schedules whole
+machines, so the whole story lives in the one binary it already ships.
+
+The trade is explicit and deliberate: llama.cpp wins on raw speed, exotic
+quants, and new-architecture coverage (runner deliberately skips MoE/SSM
+architectures, IQ2/IQ3 quants, and Vulkan). runner wins when the engine is a
+load-bearing component of a larger system that has to trust it, extend it,
+and debug it to the last line. Correctness is held to the reference: GPU
+output is verified token-identical to the CPU path, and gemma4 is verified
+token-identical to llama.cpp itself.
+
 ## Build
 
 ```
