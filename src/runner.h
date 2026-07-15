@@ -326,7 +326,7 @@ int  jsonv_close(jsonv *v, char *out, int cap);
 // ------------------------------------------------- schema-constrained output
 
 enum sn_kind { SN_ANY, SN_NULL, SN_BOOL, SN_NUM, SN_INT, SN_STR, SN_ENUM,
-               SN_OBJ, SN_ARR, SN_UNION };
+               SN_OBJ, SN_ARR, SN_UNION, SN_COND };
 
 typedef struct snode snode;
 struct snode {
@@ -354,6 +354,8 @@ typedef struct {
     sframe stack[48];
     int    depth;
     bool   done;
+    int    disc_choice; // selected discriminator alternative, or -1
+    int    last_enum;   // enum literal completed by the most recent child
     jsonv  any;      // generic submachine for open {} schema nodes
 } sval;
 

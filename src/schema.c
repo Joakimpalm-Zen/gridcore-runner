@@ -39,6 +39,117 @@ static bool plain_key(const char *s) {
     return true;
 }
 
+static int prop_index(jv *props, const char *key) {
+    if (!props || props->type != J_OBJ) return -1;
+    for (int i = 0; i < props->n; i++)
+        if (!strcmp(props->keys[i], key)) return i;
+    return -1;
+}
+
+static bool same_prop_order(jv *a, jv *b) {
+    if (!a || !b || a->type != J_OBJ || b->type != J_OBJ || a->n != b->n)
+        return false;
+    for (int i = 0; i < a->n; i++)
+        if (strcmp(a->keys[i], b->keys[i]) != 0) return false;
+    return true;
+}
+
+static snode *compile_discriminated_action(jv *alts, char *err, int errcap,
+                                           int depth, bool *matched) {
+    *matched = false;
+    if (alts->n > 60) return NULL;
+
+    jv *first_props = jv_get(alts->items[0], "properties");
+    if (!first_props || first_props->type != J_OBJ) return NULL;
+    int tool_i = prop_index(first_props, "tool");
+    int args_i = prop_index(first_props, "args");
+    if (tool_i < 0 || args_i < 0) return NULL;
+
+    for (int a = 0; a < alts->n; a++) {
+        jv *props = jv_get(alts->items[a], "properties");
+        if (!same_prop_order(first_props, props)) return NULL;
+        jv *cn = jv_get(props->items[tool_i], "const");
+        if (!cn || (cn->type != J_STR && cn->type != J_NUM &&
+                    cn->type != J_BOOL && cn->type != J_NULL))
+            return NULL;
+    }
+
+    *matched = true;
+    snode *n = sn_new(SN_OBJ);
+    n->n_props = first_props->n;
+    n->keys    = calloc(first_props->n, sizeof(char *));
+    n->key_len = calloc(first_props->n, sizeof(int));
+    n->props   = calloc(first_props->n, sizeof(snode *));
+    n->req     = calloc(first_props->n, sizeof(bool));
+
+    for (int i = 0; i < first_props->n; i++) {
+        if (!plain_key(first_props->keys[i])) {
+            snprintf(err, errcap, "property keys needing JSON escapes are unsupported");
+            schema_free(n);
+            return NULL;
+        }
+        n->keys[i] = strdup(first_props->keys[i]);
+        n->key_len[i] = (int)strlen(first_props->keys[i]);
+    }
+
+    snode *tool = sn_new(SN_ENUM);
+    tool->lits = calloc(alts->n, sizeof(char *));
+    for (int a = 0; a < alts->n; a++) {
+        jv *props = jv_get(alts->items[a], "properties");
+        sbuf lit = {0};
+        jv_dump(jv_get(props->items[tool_i], "const"), &lit);
+        for (int prev = 0; prev < a; prev++) {
+            if (!strcmp(tool->lits[prev], lit.s)) {
+                free(lit.s);
+                snprintf(err, errcap, "duplicate discriminator const");
+                schema_free(tool);
+                schema_free(n);
+                return NULL;
+            }
+        }
+        tool->lits[tool->n_lits++] = lit.s;
+    }
+    n->props[tool_i] = tool;
+
+    snode *args = sn_new(SN_COND);
+    args->alts = calloc(alts->n, sizeof(snode *));
+    for (int a = 0; a < alts->n; a++) {
+        jv *props = jv_get(alts->items[a], "properties");
+        args->alts[args->n_alts] = compile_node(props->items[args_i], err, errcap,
+                                                depth + 1);
+        if (!args->alts[args->n_alts]) {
+            schema_free(args);
+            schema_free(n);
+            return NULL;
+        }
+        args->n_alts++;
+    }
+    n->props[args_i] = args;
+
+    for (int i = 0; i < first_props->n; i++) {
+        if (i == tool_i || i == args_i) continue;
+        n->props[i] = compile_node(first_props->items[i], err, errcap, depth + 1);
+        if (!n->props[i]) { schema_free(n); return NULL; }
+    }
+
+    jv *req = jv_get(alts->items[0], "required");
+    if (req && req->type == J_ARR) {
+        for (int r = 0; r < req->n; r++) {
+            const char *k = jv_str(req->items[r], NULL);
+            bool found = false;
+            for (int i = 0; i < first_props->n && k; i++)
+                if (!strcmp(n->keys[i], k)) { n->req[i] = true; found = true; }
+            if (!found) {
+                snprintf(err, errcap, "required key '%s' not in properties",
+                         k ? k : "?");
+                schema_free(n);
+                return NULL;
+            }
+        }
+    }
+    return n;
+}
+
 static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int depth) {
     if (!strcmp(type, "string")) {
         snode *n = sn_new(SN_STR);
@@ -148,6 +259,10 @@ static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
         }
         return n;
     }
+
+    bool matched = false;
+    snode *disc = compile_discriminated_action(alts, err, errcap, depth, &matched);
+    if (matched) return disc;
 
     snode *n = sn_new(SN_UNION);
     n->alts = calloc(alts->n, sizeof(snode *));
@@ -259,6 +374,8 @@ void sval_init(sval *v, const snode *root) {
     memset(v, 0, sizeof(*v));
     v->stack[0] = (sframe){ .node = root, .phase = P_START };
     v->depth = 1;
+    v->disc_choice = -1;
+    v->last_enum = -1;
 }
 
 // key candidates from prop index `from`: every prop until (and including)
@@ -285,13 +402,20 @@ static void frame_done(sval *v) {
     v->depth--;
     if (v->depth == 0) { v->done = true; return; }
     sframe *f = &v->stack[v->depth - 1];
-    if (f->node->kind == SN_OBJ) f->phase = P_OBJ_NEXT;
-    else                         f->phase = P_ARR_NEXT; // SN_ARR
+    if (f->node->kind == SN_OBJ) {
+        if (f->sub >= 0 && f->sub < f->node->n_props &&
+            !strcmp(f->node->keys[f->sub], "tool"))
+            v->disc_choice = v->last_enum;
+        f->phase = P_OBJ_NEXT;
+    } else {
+        f->phase = P_ARR_NEXT; // SN_ARR
+    }
 }
 
 // begin a value of type `n` on top of the stack (replaces union in place)
 static bool push_value(sval *v, const snode *n) {
     if (v->depth >= (int)(sizeof(v->stack) / sizeof(v->stack[0]))) return false;
+    v->last_enum = -1;
     v->stack[v->depth++] = (sframe){ .node = n, .phase = P_START };
     return true;
 }
@@ -411,6 +535,10 @@ static int feed_byte(sval *v, uint8_t c) {
     case P_START:
         if (is_ws(c)) return 0;
         switch (n->kind) {
+        case SN_COND:
+            if (v->disc_choice < 0 || v->disc_choice >= n->n_alts) return -1;
+            v->stack[v->depth - 1].node = n->alts[v->disc_choice];
+            return feed_byte(v, c);
         case SN_UNION: {
             const snode *alt = pick_alt(n, c);
             if (!alt) return -1;
@@ -472,15 +600,19 @@ static int feed_byte(sval *v, uint8_t c) {
                                   n->kind == SN_BOOL ? bools : nulls;
         int cnt = n->kind == SN_ENUM ? n->n_lits : (n->kind == SN_BOOL ? 2 : 1);
         uint64_t next = 0;
-        bool completed = false;
+        int completed = -1;
         for (int i = 0; i < cnt; i++) {
             if (!(f->alive & (1ull << i))) continue;
             const char *L = lits[i];
             if (L[f->lit_pos] != (char)c) continue;
-            if (L[f->lit_pos + 1] == 0) completed = true;
+            if (L[f->lit_pos + 1] == 0) completed = i;
             else next |= 1ull << i;
         }
-        if (completed) { frame_done(v); return 0; }
+        if (completed >= 0) {
+            if (n->kind == SN_ENUM) v->last_enum = completed;
+            frame_done(v);
+            return 0;
+        }
         if (!next) return -1;
         f->alive = next;
         f->lit_pos++;
@@ -607,8 +739,14 @@ static void eq_putc(emitq *q, char c) {
 }
 
 // minimal complete value for a schema node
-static void emit_min(emitq *q, const snode *n, int depth) {
+static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
     if (depth > 24) { eq_put(q, "null"); return; }
+    if (n->kind == SN_COND) {
+        const snode *alt = (choice >= 0 && choice < n->n_alts) ?
+                           n->alts[choice] : n->alts[0];
+        emit_min_choice(q, alt, depth + 1, choice);
+        return;
+    }
     switch (n->kind) {
         case SN_ANY:  eq_put(q, n->min_items ? "{}" : "null"); break;
         case SN_NULL: eq_put(q, "null"); break;
@@ -619,14 +757,14 @@ static void emit_min(emitq *q, const snode *n, int depth) {
         case SN_UNION: {
             for (int i = 0; i < n->n_alts; i++)
                 if (n->alts[i]->kind == SN_NULL) { eq_put(q, "null"); return; }
-            emit_min(q, n->alts[0], depth + 1);
+            emit_min_choice(q, n->alts[0], depth + 1, choice);
             break;
         }
         case SN_ARR:
             eq_putc(q, '[');
             for (int i = 0; i < n->min_items; i++) {
                 if (i) eq_putc(q, ',');
-                emit_min(q, n->items, depth + 1);
+                emit_min_choice(q, n->items, depth + 1, choice);
             }
             eq_putc(q, ']');
             break;
@@ -638,11 +776,13 @@ static void emit_min(emitq *q, const snode *n, int depth) {
                 if (!first) eq_putc(q, ',');
                 first = false;
                 eq_putc(q, '"'); eq_put(q, n->keys[i]); eq_put(q, "\":");
-                emit_min(q, n->props[i], depth + 1);
+                emit_min_choice(q, n->props[i], depth + 1, choice);
             }
             eq_putc(q, '}');
             break;
         }
+        case SN_COND:
+            break;
     }
 }
 
@@ -651,7 +791,7 @@ static void emit_min(emitq *q, const snode *n, int depth) {
 // force_one: at least one property must be emitted (a ',' was already
 // consumed, so a bare '}' would be invalid JSON).
 static void close_obj(emitq *q, const snode *n, int from, bool need_comma,
-                      bool force_one) {
+                      bool force_one, int choice) {
     bool emitted = false;
     for (int i = from; i < n->n_props; i++) {
         if (!n->req[i]) continue;
@@ -659,11 +799,11 @@ static void close_obj(emitq *q, const snode *n, int from, bool need_comma,
         need_comma = true;
         emitted = true;
         eq_putc(q, '"'); eq_put(q, n->keys[i]); eq_put(q, "\":");
-        emit_min(q, n->props[i], 0);
+        emit_min_choice(q, n->props[i], 0, choice);
     }
     if (force_one && !emitted && from < n->n_props) {
         eq_putc(q, '"'); eq_put(q, n->keys[from]); eq_put(q, "\":");
-        emit_min(q, n->props[from], 0);
+        emit_min_choice(q, n->props[from], 0, choice);
     }
     eq_putc(q, '}');
 }
@@ -674,7 +814,7 @@ int sval_close(sval *v, char *out, int cap) {
     // nothing generated at all: emit a full minimal document
     if (v->depth == 1 && v->stack[0].phase == P_START &&
         v->stack[0].node->kind != SN_ANY) {
-        emit_min(&q, v->stack[0].node, 0);
+        emit_min_choice(&q, v->stack[0].node, 0, v->disc_choice);
         out[q.n] = 0;
         return q.n;
     }
@@ -683,7 +823,7 @@ int sval_close(sval *v, char *out, int cap) {
         const snode *n = f->node;
         switch (n->kind == SN_ANY ? P_STR + 100 : f->phase) {
         case P_STR + 100: { // any-subtree: let the generic machine close
-            if (f->phase == P_START) { emit_min(&q, n, 0); break; }
+            if (f->phase == P_START) { emit_min_choice(&q, n, 0, v->disc_choice); break; }
             char tmp[512];
             int cn = jsonv_close(&v->any, tmp, sizeof(tmp));
             if (cn > 0) eq_put(&q, tmp);
@@ -691,7 +831,7 @@ int sval_close(sval *v, char *out, int cap) {
             break;
         }
         case P_START:
-            emit_min(&q, n, 0);
+            emit_min_choice(&q, n, 0, v->disc_choice);
             break;
         case P_STR:
             if (f->sub == 1) eq_putc(&q, 'n');           // dangling backslash
@@ -717,10 +857,10 @@ int sval_close(sval *v, char *out, int cap) {
             if (!num_complete(f->sub)) eq_putc(&q, '0');
             break;
         case P_OBJ_KEY1:
-            close_obj(&q, n, f->idx, false, false);
+            close_obj(&q, n, f->idx, false, false, v->disc_choice);
             break;
         case P_OBJ_KEY: // a ',' was already consumed
-            close_obj(&q, n, f->idx, false, true);
+            close_obj(&q, n, f->idx, false, true, v->disc_choice);
             break;
         case P_OBJ_INKEY: {
             // finish the lowest still-alive candidate key, give it a value
@@ -728,26 +868,26 @@ int sval_close(sval *v, char *out, int cap) {
                 if (!(f->alive & (1ull << i))) continue;
                 eq_put(&q, n->keys[i] + f->lit_pos);
                 eq_put(&q, "\":");
-                emit_min(&q, n->props[i], 0);
+                emit_min_choice(&q, n->props[i], 0, v->disc_choice);
                 f->idx = i + 1;
                 break;
             }
-            close_obj(&q, n, f->idx, true, false);
+            close_obj(&q, n, f->idx, true, false, v->disc_choice);
             break;
         }
         case P_OBJ_COLON:
             eq_putc(&q, ':');
-            emit_min(&q, n->props[f->sub], 0);
-            close_obj(&q, n, f->idx, true, false);
+            emit_min_choice(&q, n->props[f->sub], 0, v->disc_choice);
+            close_obj(&q, n, f->idx, true, false, v->disc_choice);
             break;
         case P_OBJ_NEXT: // a value just completed, comma needed before more
-            close_obj(&q, n, f->idx, true, false);
+            close_obj(&q, n, f->idx, true, false, v->disc_choice);
             break;
         case P_ARR_FIRST:
         case P_ARR_NEXT:
             for (int i = f->idx; i < n->min_items; i++) {
                 if (i > 0 || f->phase == P_ARR_NEXT) eq_putc(&q, ',');
-                emit_min(&q, n->items, 0);
+                emit_min_choice(&q, n->items, 0, v->disc_choice);
             }
             eq_putc(&q, ']');
             break;
