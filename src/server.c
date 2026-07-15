@@ -280,6 +280,19 @@ typedef struct {
     think_split ts;     // thinking-tag splitter (pass-through when untagged)
 } gen_ctx;
 
+static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
+    e->schema = NULL;
+    schema_free(schema);
+    if (g) {
+        think_free(&g->ts);
+        free(g->reason.s);
+        free(g->out.s);
+    }
+    free(e->lp_chosen); free(e->lp_ids); free(e->lp_top);
+    e->lp_chosen = NULL; e->lp_ids = NULL; e->lp_top = NULL;
+    e->lp_cap = e->lp_n = e->lp_count = 0;
+}
+
 // emit one section of split output: reasoning goes to the OpenAI-style
 // reasoning_content field, everything else to content
 static int gen_emit(void *ud, int reasoning, const char *bytes, int n) {
@@ -370,8 +383,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     int n_prompt = tok_encode(s->tok, prompt, toks, (int)cap, true, true);
     if (n_prompt == 0 || n_prompt >= m->n_ctx) {
         free(toks);
-        e->schema = NULL;
-        schema_free(schema); // compiled schema must not outlive the request
+        completion_cleanup(e, schema, NULL);
         send_error(fd, 400, n_prompt == 0 ? "empty prompt"
                                           : "prompt exceeds context window");
         return;
@@ -398,11 +410,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     float *logits = engine_feed(e, toks + keep, n_prompt - keep);
     free(toks);
     if (!logits) {
-        e->schema = NULL;
-        schema_free(schema);
-        free(e->lp_chosen); free(e->lp_ids); free(e->lp_top);
-        e->lp_chosen = NULL; e->lp_ids = NULL; e->lp_top = NULL;
-        e->lp_cap = e->lp_n = e->lp_count = 0;
+        completion_cleanup(e, schema, NULL);
         send_error(fd, 500, "context overflow");
         return;
     }
@@ -416,7 +424,10 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     if (stream) {
         const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                           "Cache-Control: no-cache\r\nConnection: close\r\n\r\n";
-        if (!send_all(fd, hdr, strlen(hdr))) return;
+        if (!send_all(fd, hdr, strlen(hdr))) {
+            completion_cleanup(e, schema, &g);
+            return;
+        }
     }
 
     double gtime;
@@ -508,14 +519,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
             n_gen / (gtime > 0 ? gtime : 1e-9),
             schema ? " [schema]" : e->json_mode ? " [json]" : e->dm ? " [spec]" : "",
             g.dead ? " [client gone]" : "");
-    e->schema = NULL;
-    schema_free(schema);
-    think_free(&g.ts);
-    free(g.reason.s);
-    free(g.out.s);
-    free(e->lp_chosen); free(e->lp_ids); free(e->lp_top);
-    e->lp_chosen = NULL; e->lp_ids = NULL; e->lp_top = NULL;
-    e->lp_cap = e->lp_n = e->lp_count = 0;
+    completion_cleanup(e, schema, &g);
 }
 
 // ---------------------------------------------------------------- routes
@@ -810,7 +814,7 @@ static bool accept_fastpath(int fd) {
     FD_SET(fd, &rs);
     if (select(fd + 1, &rs, NULL, NULL, &tv) != 1) return false;
     char hdr[2048];
-    int n = sock_peek(fd, hdr, 16);
+    int n = sock_peek(fd, hdr, 64);
     if (n <= 0) { sock_close(fd); return true; } // died before speaking
     hdr[n] = 0;
     // match the path plus the space HTTP/1.x always puts before the version,

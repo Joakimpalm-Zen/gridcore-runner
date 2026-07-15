@@ -80,6 +80,7 @@ jobs:
           sleep 1
           curl -sf -m 3 http://127.0.0.1:8126/health
           curl -sf -m 3 http://127.0.0.1:8126/v1/models
+          curl -sf -m 3 http://127.0.0.1:8126/v1/capabilities | python3 -c "import json,sys; assert json.load(sys.stdin)['features']['json_schema']; print('capabilities bypass ok')"
           kill %1 %2 2>/dev/null || true
           echo "health bypass ok"
       - name: smoke test (parent-pid watch)
