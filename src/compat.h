@@ -17,4 +17,8 @@ uint64_t    plat_ram_bytes(void);
 bool        plat_file_readable(const char *path);
 double      plat_now(void);        // monotonic seconds
 
+// exit(0) this process when pid dies — supervisors pass their own pid so a
+// SIGKILLed gridcore-clu cannot leave an orphaned runner. pid <= 0 = no-op.
+void        plat_parent_watch(long pid);
+
 #endif

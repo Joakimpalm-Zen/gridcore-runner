@@ -44,6 +44,9 @@ typedef void     *CUcontext;
 typedef void     *CUmodule;
 typedef void     *CUfunction;
 typedef uint64_t  CUdeviceptr;
+typedef void     *CUstream;
+typedef void     *CUgraph;
+typedef void     *CUgraphExec;
 
 static struct {
     dl_t lib;
@@ -68,6 +71,17 @@ static struct {
                              unsigned, void *, void **, void **);
     CUresult (*CtxSynchronize)(void);
     CUresult (*GetErrorString)(CUresult, const char **);
+    // optional: CUDA graphs for the single-token decode path (Experiment A).
+    // Not required for the backend to function — see cu_graphs_ok().
+    CUresult (*StreamCreate)(CUstream *, unsigned);
+    CUresult (*StreamDestroy)(CUstream);
+    CUresult (*StreamSynchronize)(CUstream);
+    CUresult (*StreamBeginCapture)(CUstream, int);
+    CUresult (*StreamEndCapture)(CUstream, CUgraph *);
+    CUresult (*GraphInstantiateWithFlags)(CUgraphExec *, CUgraph, unsigned long long);
+    CUresult (*GraphLaunch)(CUgraphExec, CUstream);
+    CUresult (*GraphExecDestroy)(CUgraphExec);
+    CUresult (*GraphDestroy)(CUgraph);
 } cu;
 
 // newer drivers export the 64-bit entry points under _v2 names; the plain
@@ -102,11 +116,28 @@ static bool cu_load(void) {
     cu.LaunchKernel      = dl_sym(cu.lib, "cuLaunchKernel");
     cu.CtxSynchronize    = dl_sym(cu.lib, "cuCtxSynchronize");
     cu.GetErrorString    = dl_sym(cu.lib, "cuGetErrorString");
+    // optional graph entry points — absence just disables the graph path
+    cu.StreamCreate       = dl_sym(cu.lib, "cuStreamCreate");
+    cu.StreamDestroy      = sym2("cuStreamDestroy");
+    cu.StreamSynchronize  = dl_sym(cu.lib, "cuStreamSynchronize");
+    cu.StreamBeginCapture = sym2("cuStreamBeginCapture");
+    cu.StreamEndCapture   = sym2("cuStreamEndCapture");
+    cu.GraphInstantiateWithFlags = dl_sym(cu.lib, "cuGraphInstantiateWithFlags");
+    cu.GraphLaunch        = dl_sym(cu.lib, "cuGraphLaunch");
+    cu.GraphExecDestroy   = dl_sym(cu.lib, "cuGraphExecDestroy");
+    cu.GraphDestroy       = dl_sym(cu.lib, "cuGraphDestroy");
     return cu.Init && cu.DeviceGetCount && cu.DeviceGet && cu.DeviceGetName &&
            cu.PrimaryCtxRetain && cu.PrimaryCtxRelease && cu.CtxSetCurrent &&
            cu.MemGetInfo && cu.MemAlloc && cu.MemFree && cu.MemcpyHtoD &&
            cu.MemcpyDtoH && cu.MemsetD8 && cu.ModuleLoadData && cu.ModuleUnload &&
            cu.ModuleGetFunction && cu.LaunchKernel && cu.CtxSynchronize;
+}
+
+static bool cu_graphs_ok(void) {
+    return cu.StreamCreate && cu.StreamDestroy && cu.StreamSynchronize &&
+           cu.StreamBeginCapture && cu.StreamEndCapture &&
+           cu.GraphInstantiateWithFlags && cu.GraphLaunch &&
+           cu.GraphExecDestroy && cu.GraphDestroy;
 }
 
 static const char *cu_err(CUresult r) {
@@ -136,6 +167,12 @@ typedef struct {
     CUdeviceptr *qn, *kn;               // qwen3 per-head q/k norms
     float       *h_x, *h_logits;        // host staging
     int          last_pos;              // -2 = nothing synced yet
+    // CUDA graphs for the single-token decode path (Experiment A)
+    CUstream     stream;
+    CUgraph      graph;
+    CUgraphExec  gexec;
+    CUdeviceptr  pos_dev;
+    bool         graph_bad;
 } gpu_t;
 
 // max tokens per matvec tile — must match MVB in kernels.cu; every activation
@@ -143,8 +180,8 @@ typedef struct {
 #define MVB 8
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
-typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int qs, os, window; } attn_args;
+typedef struct { int head_dim, n_heads, half_dim, neox; float mscale; } rope_args;
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx; uint64_t l_off; float scale; int qs, os, window; } attn_args;
 
 bool gpu_available(char *name, int cap) {
     if (!cu_load()) return false;
@@ -340,6 +377,12 @@ bool gpu_init(model_t *m) {
         CK(cu.MemAlloc(&g->att,    sizeof(float) * MVB * (size_t)m->n_head * m->n_ctx));
         CK(cu.MemAlloc(&g->logits, sizeof(float) * m->n_vocab));
         CK(cu.MemAlloc(&g->dummy,  4));
+        CK(cu.MemAlloc(&g->pos_dev, sizeof(int)));
+        if (cu_graphs_ok()) cu.StreamCreate(&g->stream, 0);
+        // gemma4's V-copy path (ly->wv == NULL) uses a synchronous MemsetD8
+        // that cannot be captured into a CUDA graph
+        for (int l = 0; l < m->gpu_layers; l++)
+            if (!m->layers[l].wv) g->graph_bad = true;
 
         g->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
         g->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim_local / 2);
@@ -406,15 +449,15 @@ unsupported:
 
 // ----------------------------------------------------------------- launches
 
-static bool launch(CUfunction f, unsigned gx, unsigned gy, unsigned gz,
+static bool launch(gpu_t *g, CUfunction f, unsigned gx, unsigned gy, unsigned gz,
                    unsigned bx, void **params) {
-    return cu.LaunchKernel(f, gx, gy, gz, bx, 1, 1, 0, NULL, params, NULL) == 0;
+    return cu.LaunchKernel(f, gx, gy, gz, bx, 1, 1, 0, g->stream, params, NULL) == 0;
 }
 
 static bool enc_rmsnorm(gpu_t *g, CUdeviceptr x, CUdeviceptr y, CUdeviceptr w,
                         int n, float eps, int batch, int xs, int ys) {
     void *p[] = { &x, &y, &w, &n, &eps, &xs, &ys };
-    return launch(g->f_rmsnorm, 1, batch, 1, 256, p);
+    return launch(g, g->f_rmsnorm, 1, batch, 1, 256, p);
 }
 
 static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
@@ -428,43 +471,43 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
     // 128 threads = 4 warps = 4 rows per block; the tile variant applies each
     // decoded weight to all columns, the single variant is faster at batch 1
     CUfunction f = batch > 1 ? g->f_mvb[w->type] : g->f_mv[w->type];
-    return launch(f, (n_out + 3) / 4, 1, 1, 128, p);
+    return launch(g, f, (n_out + 3) / 4, 1, 1, 128, p);
 }
 
 static bool enc_qknorm(gpu_t *g, model_t *m, CUdeviceptr v, CUdeviceptr w,
                        int n_heads, int hd, int batch, int vs) {
     float eps = m->rms_eps;
     void *p[] = { &v, &w, &hd, &eps, &vs };
-    return launch(g->f_qknorm, n_heads, batch, 1, 64, p);
+    return launch(g, g->f_qknorm, n_heads, batch, 1, 64, p);
 }
 
-static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads, int pos,
+static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads,
                      int batch, int vs, int l) {
     // sliding-window layers rope at their own base with no YaRN scale;
     // heterogeneous archs (gemma4) also rotate fewer dims on local layers
     bool local = model_is_swa(m, l);
     rope_args a = { model_head_dim(m, l), n_heads, model_rope_dim(m, l) / 2,
-                    pos, m->rope_neox, local ? 1.0f : m->rope_mscale };
+                    m->rope_neox, local ? 1.0f : m->rope_mscale };
     CUdeviceptr fr = local ? g->inv_freq_local : g->inv_freq;
-    void *p[] = { &v, &fr, &a, &vs };
-    return launch(g->f_rope, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
+    void *p[] = { &v, &fr, &a, &g->pos_dev, &vs };
+    return launch(g, g->f_rope, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
 }
 
 static bool enc_scale(gpu_t *g, CUdeviceptr x, float s, int n, int batch, int xs) {
     void *p[] = { &x, &s, &n, &xs };
-    return launch(g->f_scale, (n + 255) / 256, batch, 1, 256, p);
+    return launch(g, g->f_scale, (n + 255) / 256, batch, 1, 256, p);
 }
 
 static bool enc_add(gpu_t *g, CUdeviceptr x, CUdeviceptr d, int n,
                     int batch, int xs, int ds) {
     void *p[] = { &x, &d, &n, &xs, &ds };
-    return launch(g->f_add, (n + 255) / 256, batch, 1, 256, p);
+    return launch(g, g->f_add, (n + 255) / 256, batch, 1, 256, p);
 }
 
 static bool enc_actmul(gpu_t *g, model_t *m, CUdeviceptr a, CUdeviceptr b, int n) {
     void *p[] = { &a, &b, &n };
     CUfunction f = m->ffn_act == ACT_GELU ? g->f_gelu : g->f_silu;
-    return launch(f, (n + 255) / 256, 1, 1, 256, p);
+    return launch(g, f, (n + 255) / 256, 1, 1, 256, p);
 }
 
 void gpu_free(model_t *m) {
@@ -485,9 +528,12 @@ void gpu_free(model_t *m) {
     CUdeviceptr bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
                            g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                            g->logits, g->inv_freq, g->inv_freq_local,
-                           g->out_norm, g->dummy, g->ones };
+                           g->out_norm, g->dummy, g->ones, g->pos_dev };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
+    if (g->gexec) cu.GraphExecDestroy(g->gexec);
+    if (g->graph) cu.GraphDestroy(g->graph);
+    if (g->stream) cu.StreamDestroy(g->stream);
     if (g->mod) cu.ModuleUnload(g->mod);
     cu.PrimaryCtxRelease(g->dev);
     free(g->h_x); free(g->h_logits);
@@ -523,32 +569,35 @@ static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
     return true;
 }
 
+// stage the tile's token embeddings into g->x (host dequant + one HtoD);
+// kept outside fwd_tile so graph capture records kernels only
+static bool stage_x(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
+    size_t ers = ggml_row_size(m->tok_embd->type, m->n_embd);
+    for (int b = 0; b < tn; b++) {
+        float *hx = g->h_x + (size_t)b * m->n_embd;
+        dequant_row(m->tok_embd->type,
+                    (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
+                    hx, m->n_embd);
+        if (m->embd_scale != 1.0f)
+            for (int i = 0; i < m->n_embd; i++) hx[i] *= m->embd_scale;
+    }
+    return cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * m->n_embd) == 0;
+}
+
 // encode a tile of up to MVB tokens: matvecs read each weight once for the
 // whole tile, and every other kernel takes the token column from the launch
 // grid — a tile costs the same number of launches as a single token, which
 // matters because WDDM launch overhead dominates small-kernel dispatch. The
 // vocab-logits matvec (the single most expensive launch) runs only when the
-// caller wants logits, and only for the tile's last token.
+// caller wants logits, and only for the tile's last token. The caller stages
+// x (and, for graph capture, uploads pos) before calling this.
 static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                      int pos, bool want_logits, int l0, int l1) {
+    (void)tokens; (void)pos;
     int n_embd = m->n_embd;
     int xdim = n_embd;
     for (int l = 0; l < m->n_layer; l++)
         if (model_q_dim(m, l) > xdim) xdim = model_q_dim(m, l);
-
-    // when starting past the embedding (a partial split's device prefix runs
-    // [0, l1); this always starts at l0=0), the caller has already staged x
-    size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
-    if (l0 == 0) for (int b = 0; b < tn; b++) {
-        float *hx = g->h_x + (size_t)b * n_embd;
-        dequant_row(m->tok_embd->type,
-                    (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
-                    hx, n_embd);
-        if (m->embd_scale != 1.0f)
-            for (int i = 0; i < n_embd; i++) hx[i] *= m->embd_scale;
-    }
-    if (l0 == 0 && cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * n_embd) != 0)
-        return false;
 
     bool ok = true;
     for (int l = l0; l < l1 && ok; l++) {
@@ -576,24 +625,24 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             // weightless per-head RMS norm on V (pre-K-norm values)
             ok = ok && enc_qknorm(g, m, g->vt, g->ones, n_kv, hd, tn, kv_dim);
         if (g->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->kn[l], n_kv, hd, tn, kv_dim);
-        ok = ok && enc_rope(g, m, g->q,  m->n_head, pos, tn, q_dim, l);
-        ok = ok && enc_rope(g, m, g->kt, n_kv,      pos, tn, kv_dim, l);
+        ok = ok && enc_rope(g, m, g->q,  m->n_head, tn, q_dim, l);
+        ok = ok && enc_rope(g, m, g->kt, n_kv,      tn, kv_dim, l);
 
         {
             // cache rows for consecutive positions are contiguous, so the
             // kernel indexes both source column and destination row by grid.y
-            uint64_t kv_off = (uint64_t)m->kv_off[l] + (uint64_t)pos * kv_dim;
-            void *ps[] = { &g->kt, &g->vt, &g->kc, &g->vc, &kv_dim, &kv_off };
-            ok = ok && launch(g->f_store, (kv_dim + 63) / 64, tn, 1, 64, ps);
+            uint64_t l_off = m->kv_off[l];
+            void *ps[] = { &g->kt, &g->vt, &g->kc, &g->vc, &kv_dim, &l_off, &g->pos_dev };
+            ok = ok && launch(g, g->f_store, (kv_dim + 63) / 64, tn, 1, 64, ps);
         }
 
         {
-            attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
+            attn_args aa = { hd, m->n_head, n_kv, m->n_ctx,
                              (uint64_t)m->kv_off[l],
                              model_attn_scale(m, l), q_dim, xdim,
                              local ? m->swa_window : 0 };
-            void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa };
-            ok = ok && launch(g->f_attn, m->n_head, tn, 1, 128, pa);
+            void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa, &g->pos_dev };
+            ok = ok && launch(g, g->f_attn, m->n_head, tn, 1, 128, pa);
         }
 
         ok = ok && enc_mv(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->bo[l], tn, xdim, xdim);
@@ -641,12 +690,54 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     }
 
     bool partial = m->gpu_layers < m->n_layer;
+    if (n == 1 && want_logits && !partial && !g->graph_bad && g->stream &&
+        !getenv("RUNNER_CUDA_GRAPH_OFF")) {
+        if (!stage_x(g, m, tokens, 1) ||
+            cu.MemcpyHtoD(g->pos_dev, &pos, sizeof(int)) != 0) return false;
+        if (!g->gexec) {
+            // capture records the launch sequence without executing it; the
+            // recorded graph is position-invariant because pos lives in
+            // device memory, so one capture serves every decode token
+            //
+            // THREAD_LOCAL (1), not GLOBAL (0): GLOBAL capture forbids
+            // synchronous CUDA calls from every other thread for the whole
+            // capture window, so another slot's plain-path forward or a
+            // second gpu_t warming up on its own thread would fail and
+            // permanently downgrade that slot to CPU (model.c sees the
+            // failed forward and clears m->gpu)
+            if (cu.StreamBeginCapture(g->stream, 1) != 0 ||
+                !fwd_tile(g, m, tokens, 1, pos, true, 0, m->gpu_layers) ||
+                cu.StreamEndCapture(g->stream, &g->graph) != 0 ||
+                cu.GraphInstantiateWithFlags(&g->gexec, g->graph, 0) != 0) {
+                CUgraph junk = NULL;
+                cu.StreamEndCapture(g->stream, &junk); // ensure capture ended
+                if (junk && junk != g->graph) cu.GraphDestroy(junk);
+                fprintf(stderr, "gpu: graph capture failed — plain launches\n");
+                g->graph_bad = true;
+            }
+        }
+        if (g->gexec && cu.GraphLaunch(g->gexec, g->stream) == 0 &&
+            cu.StreamSynchronize(g->stream) == 0) {
+            if (!kv_copyback(g, m, pos, pos + 1)) return false;
+            g->last_pos = pos;
+            if (cu.MemcpyDtoH(g->h_logits, g->logits, sizeof(float) * m->n_vocab) != 0)
+                return false;
+            if (logits) *logits = g->h_logits;
+            return true;
+        }
+        if (!g->graph_bad) { g->graph_bad = true;
+            fprintf(stderr, "gpu: graph launch failed — plain launches\n"); }
+    }
+
     for (int i = 0; i < n; i += MVB) {
         int tn = n - i < MVB ? n - i : MVB;
         bool last = i + tn == n;
+        int p = pos + i;
         // device runs layers [0, gpu_layers); logits only when it owns the whole
         // model (partial hands the boundary activation back to the CPU)
-        if (!fwd_tile(g, m, tokens + i, tn, pos + i,
+        if (!stage_x(g, m, tokens + i, tn) ||
+            cu.MemcpyHtoD(g->pos_dev, &p, sizeof(int)) != 0 ||
+            !fwd_tile(g, m, tokens + i, tn, p,
                       want_logits && last && !partial, 0, m->gpu_layers)) {
             fprintf(stderr, "gpu: kernel launch failed — falling back to CPU\n");
             return false;

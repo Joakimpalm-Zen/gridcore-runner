@@ -36,16 +36,19 @@ static void sock_init(void) {
 }
 static int  sock_recv(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n, 0); }
 static int  sock_send(int fd, const char *buf, size_t n) { return send(fd, buf, (int)n, 0); }
+static int  sock_peek(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n, MSG_PEEK); }
 static void sock_close(int fd) { closesocket(fd); }
 #else
 #include <signal.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 static void sock_init(void) { signal(SIGPIPE, SIG_IGN); }
 static int  sock_recv(int fd, char *buf, size_t n) { return (int)read(fd, buf, n); }
 static int  sock_send(int fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
+static int  sock_peek(int fd, char *buf, size_t n) { return (int)recv(fd, buf, n, MSG_PEEK); }
 static void sock_close(int fd) { close(fd); }
 #endif
 
@@ -141,6 +144,8 @@ static struct {
     model_params mp;
     pthread_mutex_t swap_mu;
     atomic_bool busy;
+    model_t    *draft;        // per-slot draft would be plural; single-model
+    int         draft_k;      // serve has exactly one slot (see swap_to)
 } SV;
 
 static void unload_resident(void) {
@@ -191,6 +196,12 @@ static int swap_to(const char *want) {
             template_detect(gguf_get_str(&s->m->gf, "tokenizer.chat_template", NULL),
                             s->tok);
         engine_init(&s->e, s->m, s->tok, &s->smp);
+        if (SV.single && SV.draft) {
+            // engine_init memsets the engine; the draft (own KV, own pool)
+            // survives target unload/reload and is re-attached here
+            s->e.dm = SV.draft;
+            s->e.draft_k = SV.draft_k;
+        }
         SV.resident = idx;
     }
     SV.last_used = now_s();
@@ -457,7 +468,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     fprintf(stderr, "[slot %d] %s: %d prompt (%d cached) + %d gen tok (%.1f tok/s)%s%s\n",
             s->id, g.id, n_prompt, keep, n_gen,
             n_gen / (gtime > 0 ? gtime : 1e-9),
-            schema ? " [schema]" : e->json_mode ? " [json]" : "",
+            schema ? " [schema]" : e->json_mode ? " [json]" : e->dm ? " [spec]" : "",
             g.dead ? " [client gone]" : "");
     e->schema = NULL;
     schema_free(schema);
@@ -561,6 +572,44 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
 
 // ---------------------------------------------------------------- http
 
+// /health and /v1/models read only startup-immutable strings plus the
+// SV.resident int (snapshot; a torn read is impossible for an aligned int),
+// so they are safe to answer from the accept thread with no lock
+static void send_health(int fd) {
+    char b[384];
+    int n, res = SV.resident;
+    if (SV.n_reg > 0 && res >= 0) {
+        char esc[192];
+        json_escape(SV.reg[res].name, strlen(SV.reg[res].name), esc, sizeof(esc));
+        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":\"%s\"}", esc);
+    } else if (SV.n_reg > 0) {
+        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":null}");
+    } else {
+        n = snprintf(b, sizeof(b), "{\"status\":\"ok\"}");
+    }
+    send_response(fd, 200, "application/json", b, n);
+}
+
+static void send_models(int fd) {
+    sbuf r = {0};
+    sb_lit(&r, "{\"object\":\"list\",\"data\":[");
+    if (SV.n_reg > 0) {
+        for (int i = 0; i < SV.n_reg; i++) {
+            char esc[192];
+            json_escape(SV.reg[i].name, strlen(SV.reg[i].name), esc, sizeof(esc));
+            sb_fmt(&r, "%s{\"id\":\"%s\",\"object\":\"model\","
+                       "\"owned_by\":\"runner\"}", i ? "," : "", esc);
+        }
+    } else {
+        char esc[256];
+        json_escape(SV.model_name, strlen(SV.model_name), esc, sizeof(esc));
+        sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"model\",\"owned_by\":\"runner\"}", esc);
+    }
+    sb_lit(&r, "]}");
+    send_response(fd, 200, "application/json", r.s, r.n);
+    free(r.s);
+}
+
 static void handle_conn(slot_t *s, int fd) {
     char hdr[16384];
     size_t got = 0;
@@ -614,37 +663,9 @@ static void handle_conn(slot_t *s, int fd) {
         const char *b = "{\"status\":\"ok\"}";
         send_response(fd, 200, "application/json", b, strlen(b));
     } else if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
-        char b[384];
-        int n;
-        if (SV.n_reg > 0 && SV.resident >= 0) {
-            char esc[192];
-            json_escape(SV.reg[SV.resident].name,
-                        strlen(SV.reg[SV.resident].name), esc, sizeof(esc));
-            n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":\"%s\"}", esc);
-        } else if (SV.n_reg > 0) {
-            n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":null}");
-        } else {
-            n = snprintf(b, sizeof(b), "{\"status\":\"ok\"}");
-        }
-        send_response(fd, 200, "application/json", b, n);
+        send_health(fd);
     } else if (!strcmp(method, "GET") && !strcmp(path, "/v1/models")) {
-        sbuf r = {0};
-        sb_lit(&r, "{\"object\":\"list\",\"data\":[");
-        if (SV.n_reg > 0) {
-            for (int i = 0; i < SV.n_reg; i++) {
-                char esc[192];
-                json_escape(SV.reg[i].name, strlen(SV.reg[i].name), esc, sizeof(esc));
-                sb_fmt(&r, "%s{\"id\":\"%s\",\"object\":\"model\","
-                           "\"owned_by\":\"runner\"}", i ? "," : "", esc);
-            }
-        } else {
-            char esc[256];
-            json_escape(SV.model_name, strlen(SV.model_name), esc, sizeof(esc));
-            sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"model\",\"owned_by\":\"runner\"}", esc);
-        }
-        sb_lit(&r, "]}");
-        send_response(fd, 200, "application/json", r.s, r.n);
-        free(r.s);
+        send_models(fd);
     } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/v1/chat/completions") ||
                 !strcmp(path, "/v1/completions") ||
@@ -694,16 +715,82 @@ static void *slot_worker(void *arg) {
     }
 }
 
+// answer tiny read-only GETs from the accept loop: single-slot serving means
+// one long generation used to block /health until the gridcore watchdog
+// declared a live runner "unhealthy: timed out". POSTs (and /unload, which
+// frees the resident model and must stay serialized with generation) are
+// handed to a slot untouched.
+static bool accept_fastpath(int fd) {
+#ifndef _WIN32
+    // POSIX fd_set is a fixed-size bitmask indexed by fd value; FD_SET on an
+    // fd >= FD_SETSIZE is undefined behavior (out-of-bounds write). Windows
+    // fd_set is a count-based array instead, so it isn't affected.
+    if (fd >= FD_SETSIZE) return false;
+#endif
+    fd_set rs;
+    struct timeval tv = { 0, 250000 }; // loopback data lands in <1ms
+    FD_ZERO(&rs);
+    FD_SET(fd, &rs);
+    if (select(fd + 1, &rs, NULL, NULL, &tv) != 1) return false;
+    char hdr[2048];
+    int n = sock_peek(fd, hdr, 16);
+    if (n <= 0) { sock_close(fd); return true; } // died before speaking
+    hdr[n] = 0;
+    // match the path plus the space HTTP/1.x always puts before the version,
+    // so "GET /healthzzz" falls through to the slot path instead of being
+    // misrouted here. Bare HTTP/0.9 "GET /health\r\n" (no version) won't
+    // match, but neither curl nor the gridcore watchdog send that, so it's
+    // not worth the extra branch.
+    bool health = !strncmp(hdr, "GET /health ", 12);
+    bool models = !strncmp(hdr, "GET /v1/models ", 15);
+    if (!health && !models) return false;
+    // Drain the request before replying: closing with unread bytes can RST
+    // the connection and discard our response. But the accept thread must
+    // never block indefinitely on a single connection — it's the only thing
+    // calling accept(), so a stalled client here would queue every later
+    // connection behind it, reproducing the watchdog-timeout bug this
+    // fastpath exists to fix. Re-select before each recv with a short
+    // timeout and cap the total drain time; if a client dribbles bytes too
+    // slowly to finish the header in the budget, answer anyway (these GETs
+    // are tiny and read-only, so a reply is always correct) and move on.
+    double deadline = now_s() + 0.5;
+    size_t got = 0;
+    while (got < sizeof(hdr) - 1 && !strstr(hdr, "\r\n\r\n")) {
+        double remaining = deadline - now_s();
+        if (remaining <= 0) break;
+        struct timeval dtv;
+        dtv.tv_sec = 0;
+        dtv.tv_usec = (long)(remaining * 1e6);
+        if (dtv.tv_usec > 100000) dtv.tv_usec = 100000; // poll in <=100ms steps
+        FD_ZERO(&rs);
+        FD_SET(fd, &rs);
+        if (select(fd + 1, &rs, NULL, NULL, &dtv) != 1) break;
+        int r = sock_recv(fd, hdr + got, sizeof(hdr) - 1 - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+        hdr[got] = 0;
+    }
+    if (health) send_health(fd);
+    else        send_models(fd);
+    sock_close(fd);
+    return true;
+}
+
 // ---------------------------------------------------------------- entry
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
-               int n_threads, int ttl) {
+               int n_threads, int ttl, const char *draft_path, int draft_k) {
     sock_init();
     if (parallel < 1) parallel = 1;
     if (parallel > 16) parallel = 16;
     bool swap_mode = strchr(model_path, '=') != NULL;
     if (ttl < 0) ttl = swap_mode ? 300 : 0; // single-model default: never unload
+    if (draft_path && swap_mode) {
+        fprintf(stderr, "note: --draft needs a single served model — "
+                "ignoring it in swap mode\n");
+        draft_path = NULL;
+    }
 
     // "name=path,name2=path2" enables swap mode: one resident model,
     // loaded per request's "model" field, unloaded after ttl idle seconds
@@ -786,6 +873,12 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                 }
             }
             engine_init(&s->e, s->m, s->tok, &s->smp);
+            if (draft_path) {
+                // per-slot draft context: each slot owns a full draft KV;
+                // weights dedupe through the page cache like slot models
+                s->e.dm = spec_draft_load(draft_path, s->m, &slot_mp);
+                if (s->e.dm) s->e.draft_k = draft_k;
+            }
         }
 
         if (single_setup) {
@@ -806,6 +899,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             SV.mp = *mp;
             SV.mp.verbose = false;
             SV.mp.n_threads = threads_per_slot;
+            SV.draft = SV.slots[0].e.dm;
+            SV.draft_k = draft_k;
             pthread_mutex_init(&SV.swap_mu, NULL);
             pthread_t rt;
             pthread_create(&rt, NULL, ttl_reaper, NULL);
@@ -846,7 +941,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             if (errno == EINTR) continue;
             break;
         }
-        q_push(cfd);
+        if (!accept_fastpath(cfd)) q_push(cfd);
     }
     return 0;
 }

@@ -364,9 +364,20 @@ extern "C" __global__ void k_mv_q4_K(MV_PARAMS) {
             float d1 = d * s1, mm1 = dmin * m1;
             float d2 = d * s2, mm2 = dmin * m2;
             float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
-            for (int l = 0; l < 32; l++) {
-                t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
-                t2 += (float)(q[l] >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
+            const uint4 *q16 = (const uint4 *)q;   // blk+16 is 16B-aligned
+            for (int v = 0; v < 2; v++) {
+                uint4 w = q16[v];
+                uint ws[4] = { w.x, w.y, w.z, w.w };
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    #pragma unroll
+                    for (int k = 0; k < 4; k++) {
+                        int l = v * 16 + c * 4 + k;
+                        uint b8 = (ws[c] >> (8 * k)) & 0xFFu;
+                        t1 += (float)(b8 & 0xF) * xp[l];      sx1 += xp[l];
+                        t2 += (float)(b8 >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
+                    }
+                }
             }
             s += d1 * t1 - mm1 * sx1 + d2 * t2 - mm2 * sx2;
             q += 32; is += 2; xp += 64;
@@ -393,9 +404,20 @@ extern "C" __global__ void k_mv_q4_K_b(MV_PARAMS) {
             get_scale_min_k4(is + 1, sc, &s2, &m2);
             float d1 = d * s1, mm1 = dmin * m1;
             float d2 = d * s2, mm2 = dmin * m2;
-            for (int l = 0; l < 32; l++) {
-                MV_FMA(d1 * (float)(q[l] & 0xF) - mm1, base + j + l);
-                MV_FMA(d2 * (float)(q[l] >> 4)  - mm2, base + j + l + 32);
+            const uint4 *q16 = (const uint4 *)q;   // blk+16 is 16B-aligned
+            for (int v = 0; v < 2; v++) {
+                uint4 w = q16[v];
+                uint ws[4] = { w.x, w.y, w.z, w.w };
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    #pragma unroll
+                    for (int k = 0; k < 4; k++) {
+                        int l = v * 16 + c * 4 + k;
+                        uint b8 = (ws[c] >> (8 * k)) & 0xFFu;
+                        MV_FMA(d1 * (float)(b8 & 0xF) - mm1, base + j + l);
+                        MV_FMA(d2 * (float)(b8 >> 4)  - mm2, base + j + l + 32);
+                    }
+                }
             }
             q += 32; is += 2;
         }
@@ -623,15 +645,16 @@ extern "C" __global__ void k_mv_iq4_xs_b(MV_PARAMS) {
 // grid: (ceil(half_dim/32), n_heads, batch); vs = element stride per column
 
 struct rope_args {
-    int   head_dim, n_heads, half_dim, pos, neox;
+    int   head_dim, n_heads, half_dim, neox;
     float mscale;
 };
 
-extern "C" __global__ void k_rope(float *v, const float *fr, rope_args a, int vs) {
+extern "C" __global__ void k_rope(float *v, const float *fr, rope_args a,
+                                  const int *posp, int vs) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int h = blockIdx.y;
     if (j >= a.half_dim || h >= a.n_heads) return;
-    int pos = a.pos + blockIdx.z;
+    int pos = *posp + blockIdx.z;
     float ang = pos * fr[j];
     float c = cosf(ang) * a.mscale, s = sinf(ang) * a.mscale;
     float *p = v + (ulong64)blockIdx.z * vs + h * a.head_dim;
@@ -647,11 +670,12 @@ extern "C" __global__ void k_rope(float *v, const float *fr, rope_args a, int vs
 
 extern "C" __global__ void k_store_kv(const float *k, const float *v,
                                       __half *kc, __half *vc,
-                                      int kv_dim, ulong64 off) {
+                                      int kv_dim, ulong64 l_off,
+                                      const int *posp) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < kv_dim) {
         ulong64 src = (ulong64)blockIdx.y * kv_dim + i;
-        ulong64 dst = off + (ulong64)blockIdx.y * kv_dim + i;
+        ulong64 dst = l_off + (ulong64)(*posp + blockIdx.y) * kv_dim + i;
         kc[dst] = __float2half(k[src]);
         vc[dst] = __float2half(v[src]);
     }
@@ -662,7 +686,7 @@ extern "C" __global__ void k_store_kv(const float *k, const float *v,
 // att scratch is MVB planes of [n_head][n_ctx].
 
 struct attn_args {
-    int     head_dim, n_head, n_head_kv, n_ctx, pos;
+    int     head_dim, n_head, n_head_kv, n_ctx;
     ulong64 l_off;    // this layer's element offset into the kv cache
     float   scale;
     int     qs, os;   // q / out element stride per token column
@@ -671,11 +695,11 @@ struct attn_args {
 
 extern "C" __global__ void k_attn(const float *q, const __half *kc,
                                   const __half *vc, float *att, float *out,
-                                  attn_args a) {
+                                  attn_args a, const int *posp) {
     __shared__ float red[256];
     int h = blockIdx.x, tid = threadIdx.x, tpg = blockDim.x;
     int tk = blockIdx.y;                 // token column in the tile
-    int pos = a.pos + tk;
+    int pos = *posp + tk;
     int hd = a.head_dim;
     int kvh = h / (a.n_head / a.n_head_kv);
     int kv_dim = a.n_head_kv * hd;
@@ -685,9 +709,15 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
     float *ah = att + ((ulong64)tk * a.n_head + h) * a.n_ctx;
 
     for (int t = t0 + tid; t <= pos; t += tpg) {
-        const __half *kt = kc + a.l_off + (ulong64)t * kv_dim + kvh * hd;
+        const __half2 *kt2 = (const __half2 *)(kc + a.l_off +
+                             (ulong64)t * kv_dim + kvh * hd);
         float s = 0;
-        for (int i = 0; i < hd; i++) s += qh[i] * __half2float(kt[i]);
+        for (int i = 0; i < hd / 2; i++) {
+            float2 kf = __half22float2(kt2[i]);
+            // paired add reassociates FP vs. the old sequential accumulation;
+            // temp-0 gate covered it on tested models
+            s += qh[2 * i] * kf.x + qh[2 * i + 1] * kf.y;
+        }
         ah[t] = s * a.scale;
     }
     __syncthreads();
@@ -719,11 +749,17 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
     sum = red[0];
     __syncthreads();
 
-    for (int i = tid; i < hd; i += tpg) {
-        float o = 0;
-        for (int t = t0; t <= pos; t++)
-            o += ah[t] * __half2float(vc[a.l_off + (ulong64)t * kv_dim + kvh * hd + i]);
-        out[(ulong64)tk * a.os + h * hd + i] = o / sum;
+    for (int i2 = tid; i2 < hd / 2; i2 += tpg) {
+        float o0 = 0, o1 = 0;
+        for (int t = t0; t <= pos; t++) {
+            const __half2 *vt2 = (const __half2 *)(vc + a.l_off +
+                                 (ulong64)t * kv_dim + kvh * hd);
+            float2 vf = __half22float2(vt2[i2]);
+            o0 += ah[t] * vf.x;
+            o1 += ah[t] * vf.y;
+        }
+        out[(ulong64)tk * a.os + h * hd + 2 * i2]     = o0 / sum;
+        out[(ulong64)tk * a.os + h * hd + 2 * i2 + 1] = o1 / sum;
     }
 }
 

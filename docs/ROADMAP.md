@@ -37,28 +37,40 @@ penalty-less draft and kills acceptance).
   llama.cpp's implementation (they expose `t_h_nextn` for it). All
   prerequisites landed: spec engine, lazy verify logits
   (`model_spec_row_logits`), gemma4 on CUDA.
-- **Server-side speculation** — currently CLI-only because slots would
-  share one draft KV cache; per-slot draft contexts would enable it for
-  gridcore-clu's server calls (which are schema-constrained though — spec
-  currently disables itself under schema/JSON constraints; lifting THAT
-  needs constraint-state rewind per rejected draft).
-
-## Server
-
-- **/health should bypass the slot queue.** Single-slot serving means a
-  long in-flight generation blocks /health (observed: gridcore's watchdog
-  calling a busy runner "unhealthy: timed out"). Answer /health (and
-  /v1/models) from the accept loop before queueing to a slot.
-- **Job-object / process-group cleanup story** for supervisors that die
-  (gridcore-clu leaves orphaned runners on SIGKILL).
+- **Server-side speculation** — landed: single-model `--serve` gives each
+  slot its own draft `model_t` (weights dedupe through the page cache,
+  same as slot targets), re-attached across `/unload` + lazy reload.
+  Multi-model swap mode still refuses `--draft` (a registry entry can't
+  guarantee a shared vocab). Unconstrained requests only — schema/JSON
+  requests still disable speculation and run plain, exactly as the CLI
+  (gridcore-clu's server calls are schema-constrained though, so they
+  don't benefit yet; lifting THAT needs constraint-state rewind per
+  rejected draft, which remains open).
 
 ## Quants / kernels
 
 - **IQ2/IQ3 codebook quants** — deliberately skipped so far; unlocks the
   smallest UD-quants for 8 GB nodes. Big kernel effort (grid codebooks).
-- **CUDA kernel tuning headroom** — kernels are correctness-first PTX;
-  CUDA graphs / coalesced loads were noted as "big headroom left" when the
-  backend landed.
+- **CUDA kernel tuning headroom** — measurement-driven pass landed three
+  experiments, each gated on median decode tok/s improving with
+  byte-identical temp-0 output (RTX 3070, gated via
+  `scripts/bench.sh`): (A) CUDA graphs for the single-token decode
+  loop — `pos` moved into a device int so one stream capture replays for
+  every decode token, RUNNER_CUDA_GRAPH_OFF=1 for A/B testing without a
+  rebuild; Qwen3-4B-Q8_0 (full offload) 18.12 → 18.47 tok/s n=256
+  (+1.9%). (B) 16-byte `uint4` vectorized quant loads in
+  `k_mv_q4_K`/`k_mv_q4_K_b`; gemma-4-12B Q4_K_M (partial offload) 3.77 →
+  3.90 tok/s n=256 (+3.4%). (C) `__half2` K/V loads in `k_attn`'s score
+  and value loops (aligned 4-byte reads, half the load instructions);
+  Qwen3-4B-Q8_0 n=512 decode 18.04 → 18.09 tok/s (+0.3%) — a smaller but
+  real, reproducible gain, kept. Both partial-offload models (Llama-8B
+  Q5_K_M, gemma-4-12B) were unaffected by A (graph path requires full
+  offload); B improved gemma-4 (3.77 → 3.90, its decision target) without
+  regressing Llama-8B, and C didn't regress either partial-offload model.
+  Remaining headroom is smaller now that launch overhead and the hottest
+  matvec/attention loads are addressed; further gains would need
+  profiling to find the next bottleneck rather than obvious per-kernel
+  wins.
 
 ## Architectures
 

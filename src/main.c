@@ -11,7 +11,7 @@
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
-               int n_threads, int ttl);
+               int n_threads, int ttl, const char *draft_path, int draft_k);
 int quantize_gguf(const char *in_path, const char *out_path, int target);
 
 // ---------------------------------------------------------------- misc
@@ -75,8 +75,10 @@ static void usage(const char *prog) {
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
         "  --kv f16|q8    KV cache storage; q8 halves it again (needs --gpu off)\n"
         "  --draft PATH   small same-vocab GGUF for speculative decoding\n"
+        "                 (one-shot, chat, and single-model --serve)\n"
         "  --draft-k N    draft tokens per round (default 4)\n"
         "  --caps         print machine capabilities as JSON and exit\n"
+        "  --parent-pid N exit when process N dies (supervisor cleanup)\n"
         "  -v             verbose model info\n",
         prog);
 }
@@ -115,6 +117,7 @@ int main(int argc, char **argv) {
     const char *quant_out = NULL, *quant_type = "q4_0";
     int n_predict = 256, n_threads = 0, tmpl = -1, reserve_cpu_pct = 0;
     int port = 8080, parallel = 1, ttl = -1; // -1: 300 for swap mode, never for single
+    long parent_pid = 0;
     const char *draft_path = NULL;
     int draft_k = 4;
     bool interactive = false, verbose = false, no_bos = false;
@@ -163,10 +166,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = atoi(NEXT);
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = atoi(NEXT);
         else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = atoi(NEXT);
+        else if (!strcmp(a, "--parent-pid")) parent_pid = strtol(NEXT, NULL, 10);
         else if (!strcmp(a, "--caps")) caps = true;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(argv[0]); return 1; }
     }
+    plat_parent_watch(parent_pid);
     if (n_threads <= 0 && reserve_cpu_pct > 0) {
         n_threads = plat_cpu_count() * reserve_cpu_pct / 100;
         if (n_threads < 1) n_threads = 1;
@@ -270,34 +275,18 @@ int main(int argc, char **argv) {
 
     if (serve)
         return server_run(registry ? NULL : &m, registry ? NULL : &tok,
-                          model_path, &mp, smp, port, parallel, n_threads, ttl);
+                          model_path, &mp, smp, port, parallel, n_threads, ttl,
+                          draft_path, draft_k);
 
     engine e = {0};
     engine_init(&e, &m, &tok, &smp); // e zero-initialized at declaration
     e.ignore_eos = ignore_eos;
     e.json_mode = json_mode;
     e.progress = true;
-    static model_t dmodel; // draft model for speculative decoding
     if (draft_path) {
-        model_params dmp = mp;
-        dmp.n_ctx = m.n_ctx; // draft must cover the target's positions
-        dmp.kv_q8 = false;
-        dmp.gpu_mode = GPU_AUTO; // only the TARGET needs the CPU verify path;
-                                 // a small draft usually fits VRAM whole
-        if (m.gpu && m.gpu_layers >= m.n_layer) {
-            fprintf(stderr, "draft: target is fully GPU-offloaded — "
-                    "speculative decoding needs the CPU verify path, ignoring --draft\n");
-        } else if (!model_load(&dmodel, draft_path, &dmp)) {
-            return 1;
-        } else if (abs(dmodel.n_vocab - m.n_vocab) > 512) {
-            // model families pad the vocab differently per size; small
-            // differences are padding ids the draft never emits
-            fprintf(stderr, "draft: vocab mismatch (%d vs %d) — ignoring --draft\n",
-                    dmodel.n_vocab, m.n_vocab);
-            model_free(&dmodel);
-        } else {
+        e.dm = spec_draft_load(draft_path, &m, &mp);
+        if (e.dm) {
             fprintf(stderr, "draft: %s (%d tokens per round)\n", draft_path, draft_k);
-            e.dm = &dmodel;
             e.draft_k = draft_k;
         }
     }
