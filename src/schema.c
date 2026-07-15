@@ -554,6 +554,7 @@ static int feed_byte(sval *v, uint8_t c) {
         case SN_NULL:
             f->phase = P_LIT;
             f->lit_pos = 0;
+            f->sub = 0;
             if (n->kind == SN_ENUM) {
                 f->alive = (n->n_lits >= 64 ? ~0ull : (1ull << n->n_lits) - 1);
             } else {
@@ -601,6 +602,7 @@ static int feed_byte(sval *v, uint8_t c) {
         int cnt = n->kind == SN_ENUM ? n->n_lits : (n->kind == SN_BOOL ? 2 : 1);
         uint64_t next = 0;
         int completed = -1;
+        int pending_completed = f->sub ? f->sub - 1 : -1;
         for (int i = 0; i < cnt; i++) {
             if (!(f->alive & (1ull << i))) continue;
             const char *L = lits[i];
@@ -608,13 +610,21 @@ static int feed_byte(sval *v, uint8_t c) {
             if (L[f->lit_pos + 1] == 0) completed = i;
             else next |= 1ull << i;
         }
-        if (completed >= 0) {
+        if (completed >= 0 && next == 0) {
             if (n->kind == SN_ENUM) v->last_enum = completed;
             frame_done(v);
             return 0;
         }
-        if (!next) return -1;
+        if (!next) {
+            if (pending_completed >= 0) {
+                if (n->kind == SN_ENUM) v->last_enum = pending_completed;
+                frame_done(v);
+                return 1;
+            }
+            return -1;
+        }
         f->alive = next;
+        f->sub = completed >= 0 ? (uint8_t)(completed + 1) : 0;
         f->lit_pos++;
         return 0;
     }
@@ -849,6 +859,10 @@ int sval_close(sval *v, char *out, int cap) {
             const char *const *lits = n->kind == SN_ENUM ? (const char *const *)n->lits :
                                       n->kind == SN_BOOL ? bools : nulls;
             int cnt = n->kind == SN_ENUM ? n->n_lits : (n->kind == SN_BOOL ? 2 : 1);
+            if (n->kind == SN_ENUM && f->sub) {
+                eq_put(&q, lits[f->sub - 1] + f->lit_pos);
+                break;
+            }
             for (int i = 0; i < cnt; i++)
                 if (f->alive & (1ull << i)) { eq_put(&q, lits[i] + f->lit_pos); break; }
             break;
