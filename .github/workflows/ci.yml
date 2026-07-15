@@ -88,6 +88,19 @@ jobs:
         run: |
           echo '{"type":"object","properties":{"a":{"type":"string","enum":["x","y"]},"b":{"type":"integer"}},"required":["a","b"]}' > ts.json
           ./runner -m test.gguf --json-schema ts.json -p "hi" -n 30 --temp 0 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['a'] in ('x','y') and isinstance(d['b'], int); print('schema ok')"
+          echo '{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":1}' > bad-array.json
+          if ./runner -m test.gguf --json-schema bad-array.json -p "hi" -n 4 --temp 0 >/dev/null 2>&1; then
+            echo "bad array bounds unexpectedly accepted"; exit 1
+          fi
+          python3 - <<'PYEOF'
+          import json
+          with open("bad-key.json", "w", encoding="utf-8") as f:
+              json.dump({"type":"object","properties":{'bad"key':{"type":"string"}}}, f)
+          PYEOF
+          if ./runner -m test.gguf --json-schema bad-key.json -p "hi" -n 4 --temp 0 >/dev/null 2>&1; then
+            echo "escaped property key unexpectedly accepted"; exit 1
+          fi
+          echo "schema rejects ok"
       - name: smoke test (quantize)
         run: |
           ./runner -m test.gguf --quantize test-q8.gguf --quant q8_0

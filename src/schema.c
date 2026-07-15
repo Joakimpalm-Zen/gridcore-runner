@@ -33,6 +33,12 @@ void schema_free(snode *n) {
 
 static snode *compile_node(jv *s, char *err, int errcap, int depth);
 
+static bool plain_key(const char *s) {
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+        if (*p < 0x20 || *p == '"' || *p == '\\') return false;
+    return true;
+}
+
 static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int depth) {
     if (!strcmp(type, "string"))  return sn_new(SN_STR);
     if (!strcmp(type, "number"))  return sn_new(SN_NUM);
@@ -46,6 +52,12 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
         jv *mi = jv_get(s, "minItems"), *ma = jv_get(s, "maxItems");
         n->min_items = mi ? (int)jv_num(mi, 0) : 0;
         n->max_items = ma ? (int)jv_num(ma, -1) : -1;
+        if (n->min_items < 0 || n->max_items < -1 ||
+            (n->max_items >= 0 && n->min_items > n->max_items)) {
+            snprintf(err, errcap, "invalid array item bounds");
+            schema_free(n);
+            return NULL;
+        }
         return n;
     }
     if (!strcmp(type, "object")) {
@@ -63,6 +75,11 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
         n->props   = calloc(props->n, sizeof(snode *));
         n->req     = calloc(props->n, sizeof(bool));
         for (int i = 0; i < props->n; i++) {
+            if (!plain_key(props->keys[i])) {
+                snprintf(err, errcap, "property keys needing JSON escapes are unsupported");
+                schema_free(n);
+                return NULL;
+            }
             n->keys[i] = strdup(props->keys[i]);
             n->key_len[i] = (int)strlen(props->keys[i]);
             n->props[i] = compile_node(props->items[i], err, errcap, depth + 1);
@@ -110,26 +127,15 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
         n->lits = calloc(cnt, sizeof(char *));
         for (int i = 0; i < cnt; i++) {
             jv *v = en ? en->items[i] : cn;
-            char buf[512];
-            if (v->type == J_STR) {
-                char esc[400];
-                json_escape(v->str, strlen(v->str), esc, sizeof(esc));
-                snprintf(buf, sizeof(buf), "\"%s\"", esc);
-            } else if (v->type == J_NUM) {
-                if (v->num == (long long)v->num)
-                    snprintf(buf, sizeof(buf), "%lld", (long long)v->num);
-                else
-                    snprintf(buf, sizeof(buf), "%g", v->num);
-            } else if (v->type == J_BOOL) {
-                snprintf(buf, sizeof(buf), v->b ? "true" : "false");
-            } else if (v->type == J_NULL) {
-                snprintf(buf, sizeof(buf), "null");
-            } else {
+            if (v->type != J_STR && v->type != J_NUM &&
+                v->type != J_BOOL && v->type != J_NULL) {
                 snprintf(err, errcap, "enum values must be scalars");
                 schema_free(n);
                 return NULL;
             }
-            n->lits[i] = strdup(buf);
+            sbuf lit = {0};
+            jv_dump(v, &lit);
+            n->lits[i] = lit.s;
             n->n_lits++;
         }
         if (n->n_lits == 0 || n->n_lits > 60) {
