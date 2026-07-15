@@ -439,7 +439,11 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 
 void model_free(model_t *m) {
     gpu_free(m); // nulls kcache/vcache if the GPU owned them
-    for (int i = 0; i < m->n_layer; i++) {
+    // partial load: n_layer is read from GGUF metadata long before m->layers
+    // is allocated, so a load that fails in between (unsupported tensor
+    // type, missing token_embd/output_norm, etc.) reaches here with
+    // m->layers still NULL — guard against dereferencing it.
+    for (int i = 0; m->layers && i < m->n_layer; i++) {
         layer_t *l = &m->layers[i];
         free(l->attn_norm_w); free(l->ffn_norm_w);
         free(l->bq); free(l->bk); free(l->bv); free(l->bo);
