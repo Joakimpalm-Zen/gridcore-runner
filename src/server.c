@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -305,6 +306,14 @@ static int gen_collect(void *ud, const char *bytes, int n) {
     return think_feed(&g->ts, bytes, n, gen_emit, g);
 }
 
+static int request_max_tokens(jv *req, int dflt) {
+    double v = jv_num(jv_get(req, "max_tokens"),
+               jv_num(jv_get(req, "max_completion_tokens"), dflt));
+    if (v < 0) return -1;
+    if (v > INT_MAX) return INT_MAX;
+    return (int)v;
+}
+
 // run one completion on a slot and write the HTTP response
 static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
                            jv *req) {
@@ -323,8 +332,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     s->smp.top_k = (int)jv_num(jv_get(req, "top_k"), s->smp.top_k);
     double seed = jv_num(jv_get(req, "seed"), 0);
     if (seed > 0) s->smp.rng = (uint64_t)seed;
-    int max_tokens = (int)jv_num(jv_get(req, "max_tokens"),
-                     jv_num(jv_get(req, "max_completion_tokens"), SV.n_predict_cap));
+    int max_tokens = request_max_tokens(req, SV.n_predict_cap);
     bool stream = jv_bool(jv_get(req, "stream"), false);
     // OpenAI logprobs (chat, buffered responses only)
     bool want_lp = chat && !stream && jv_bool(jv_get(req, "logprobs"), false);
@@ -366,6 +374,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
                                           : "prompt exceeds context window");
         return;
     }
+    int remaining_ctx = m->n_ctx - n_prompt;
+    if (max_tokens < 0 || max_tokens > remaining_ctx) max_tokens = remaining_ctx;
 
     if (want_lp && max_tokens > 0) {
         e->lp_cap    = max_tokens;

@@ -52,6 +52,8 @@ jobs:
           [ "$C1" = "$C2" ] && echo "prefix cache ok"
           curl -sf -d '{"input":["a","b"]}' http://127.0.0.1:8123/v1/embeddings \
             | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d['data'])==2 and len(d['data'][0]['embedding'])==64; print('embeddings ok')"
+          curl -sf -d '{"messages":[{"role":"user","content":"logprobs"}],"max_tokens":999999,"temperature":0,"logprobs":true,"top_logprobs":2}' \
+            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['usage']['completion_tokens'] < 256; print('max_tokens clamp ok')"
           kill %1
       - name: smoke test (health bypasses a busy slot)
         # a stalled request pins the only slot; /health and /v1/models must
