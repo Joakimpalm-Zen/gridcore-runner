@@ -75,6 +75,9 @@ model_t *spec_draft_load(const char *path, const model_t *target,
     dmp.gpu_mode = GPU_AUTO;   // a small draft usually fits VRAM whole
     model_t *dm = malloc(sizeof(model_t));
     if (!model_load(dm, path, &dmp)) {
+        // model_load memsets the struct on entry and may allocate before failing
+        // (late load failures must free partial buffers to avoid leaks)
+        model_free(dm);
         free(dm);
         return NULL;
     }
