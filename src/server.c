@@ -36,16 +36,19 @@ static void sock_init(void) {
 }
 static int  sock_recv(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n, 0); }
 static int  sock_send(int fd, const char *buf, size_t n) { return send(fd, buf, (int)n, 0); }
+static int  sock_peek(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n, MSG_PEEK); }
 static void sock_close(int fd) { closesocket(fd); }
 #else
 #include <signal.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 static void sock_init(void) { signal(SIGPIPE, SIG_IGN); }
 static int  sock_recv(int fd, char *buf, size_t n) { return (int)read(fd, buf, n); }
 static int  sock_send(int fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
+static int  sock_peek(int fd, char *buf, size_t n) { return (int)recv(fd, buf, n, MSG_PEEK); }
 static void sock_close(int fd) { close(fd); }
 #endif
 
@@ -561,6 +564,44 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
 
 // ---------------------------------------------------------------- http
 
+// /health and /v1/models read only startup-immutable strings plus the
+// SV.resident int (snapshot; a torn read is impossible for an aligned int),
+// so they are safe to answer from the accept thread with no lock
+static void send_health(int fd) {
+    char b[384];
+    int n, res = SV.resident;
+    if (SV.n_reg > 0 && res >= 0) {
+        char esc[192];
+        json_escape(SV.reg[res].name, strlen(SV.reg[res].name), esc, sizeof(esc));
+        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":\"%s\"}", esc);
+    } else if (SV.n_reg > 0) {
+        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":null}");
+    } else {
+        n = snprintf(b, sizeof(b), "{\"status\":\"ok\"}");
+    }
+    send_response(fd, 200, "application/json", b, n);
+}
+
+static void send_models(int fd) {
+    sbuf r = {0};
+    sb_lit(&r, "{\"object\":\"list\",\"data\":[");
+    if (SV.n_reg > 0) {
+        for (int i = 0; i < SV.n_reg; i++) {
+            char esc[192];
+            json_escape(SV.reg[i].name, strlen(SV.reg[i].name), esc, sizeof(esc));
+            sb_fmt(&r, "%s{\"id\":\"%s\",\"object\":\"model\","
+                       "\"owned_by\":\"runner\"}", i ? "," : "", esc);
+        }
+    } else {
+        char esc[256];
+        json_escape(SV.model_name, strlen(SV.model_name), esc, sizeof(esc));
+        sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"model\",\"owned_by\":\"runner\"}", esc);
+    }
+    sb_lit(&r, "]}");
+    send_response(fd, 200, "application/json", r.s, r.n);
+    free(r.s);
+}
+
 static void handle_conn(slot_t *s, int fd) {
     char hdr[16384];
     size_t got = 0;
@@ -614,37 +655,9 @@ static void handle_conn(slot_t *s, int fd) {
         const char *b = "{\"status\":\"ok\"}";
         send_response(fd, 200, "application/json", b, strlen(b));
     } else if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
-        char b[384];
-        int n;
-        if (SV.n_reg > 0 && SV.resident >= 0) {
-            char esc[192];
-            json_escape(SV.reg[SV.resident].name,
-                        strlen(SV.reg[SV.resident].name), esc, sizeof(esc));
-            n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":\"%s\"}", esc);
-        } else if (SV.n_reg > 0) {
-            n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":null}");
-        } else {
-            n = snprintf(b, sizeof(b), "{\"status\":\"ok\"}");
-        }
-        send_response(fd, 200, "application/json", b, n);
+        send_health(fd);
     } else if (!strcmp(method, "GET") && !strcmp(path, "/v1/models")) {
-        sbuf r = {0};
-        sb_lit(&r, "{\"object\":\"list\",\"data\":[");
-        if (SV.n_reg > 0) {
-            for (int i = 0; i < SV.n_reg; i++) {
-                char esc[192];
-                json_escape(SV.reg[i].name, strlen(SV.reg[i].name), esc, sizeof(esc));
-                sb_fmt(&r, "%s{\"id\":\"%s\",\"object\":\"model\","
-                           "\"owned_by\":\"runner\"}", i ? "," : "", esc);
-            }
-        } else {
-            char esc[256];
-            json_escape(SV.model_name, strlen(SV.model_name), esc, sizeof(esc));
-            sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"model\",\"owned_by\":\"runner\"}", esc);
-        }
-        sb_lit(&r, "]}");
-        send_response(fd, 200, "application/json", r.s, r.n);
-        free(r.s);
+        send_models(fd);
     } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/v1/chat/completions") ||
                 !strcmp(path, "/v1/completions") ||
@@ -692,6 +705,39 @@ static void *slot_worker(void *arg) {
         handle_conn(s, fd);
         sock_close(fd);
     }
+}
+
+// answer tiny read-only GETs from the accept loop: single-slot serving means
+// one long generation used to block /health until the gridcore watchdog
+// declared a live runner "unhealthy: timed out". POSTs (and /unload, which
+// frees the resident model and must stay serialized with generation) are
+// handed to a slot untouched.
+static bool accept_fastpath(int fd) {
+    fd_set rs;
+    struct timeval tv = { 0, 250000 }; // loopback data lands in <1ms
+    FD_ZERO(&rs);
+    FD_SET(fd, &rs);
+    if (select(fd + 1, &rs, NULL, NULL, &tv) != 1) return false;
+    char hdr[2048];
+    int n = sock_peek(fd, hdr, 16);
+    if (n <= 0) { sock_close(fd); return true; } // died before speaking
+    hdr[n] = 0;
+    bool health = !strncmp(hdr, "GET /health", 11);
+    bool models = !strncmp(hdr, "GET /v1/models", 14);
+    if (!health && !models) return false;
+    // drain the request before replying: closing with unread bytes can RST
+    // the connection and discard our response
+    size_t got = 0;
+    while (got < sizeof(hdr) - 1 && !strstr(hdr, "\r\n\r\n")) {
+        int r = sock_recv(fd, hdr + got, sizeof(hdr) - 1 - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+        hdr[got] = 0;
+    }
+    if (health) send_health(fd);
+    else        send_models(fd);
+    sock_close(fd);
+    return true;
 }
 
 // ---------------------------------------------------------------- entry
@@ -846,7 +892,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             if (errno == EINTR) continue;
             break;
         }
-        q_push(cfd);
+        if (!accept_fastpath(cfd)) q_push(cfd);
     }
     return 0;
 }
