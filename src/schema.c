@@ -64,6 +64,11 @@ static snode *compile_discriminated_action(jv *alts, char *err, int errcap,
     int tool_i = prop_index(first_props, "tool");
     int args_i = prop_index(first_props, "args");
     if (tool_i < 0 || args_i < 0) return NULL;
+    if (args_i < tool_i) {
+        *matched = true;
+        snprintf(err, errcap, "tool discriminator must precede args");
+        return NULL;
+    }
 
     for (int a = 0; a < alts->n; a++) {
         jv *props = jv_get(alts->items[a], "properties");
@@ -249,6 +254,10 @@ static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
         }
     }
     if (all_scalar_const) {
+        if (alts->n > 60) {
+            snprintf(err, errcap, "enum size must be 1..60");
+            return NULL;
+        }
         snode *n = sn_new(SN_ENUM);
         n->lits = calloc(alts->n, sizeof(char *));
         for (int i = 0; i < alts->n; i++) {
@@ -762,7 +771,11 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
         case SN_NULL: eq_put(q, "null"); break;
         case SN_BOOL: eq_put(q, "false"); break;
         case SN_NUM: case SN_INT: eq_putc(q, '0'); break;
-        case SN_STR:  eq_put(q, "\"\""); break;
+        case SN_STR:
+            eq_putc(q, '"');
+            for (int i = 0; i < n->min_items; i++) eq_putc(q, ' ');
+            eq_putc(q, '"');
+            break;
         case SN_ENUM: eq_put(q, n->lits[0]); break;
         case SN_UNION: {
             for (int i = 0; i < n->n_alts; i++)

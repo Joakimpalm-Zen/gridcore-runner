@@ -110,6 +110,22 @@ static void test_schema_oneof_const_numeric_prefixes(void) {
     jv_free(schema_json);
 }
 
+static void test_schema_rejects_oversized_oneof_const_scalars(void) {
+    char src[4096];
+    int n = snprintf(src, sizeof(src), "{\"oneOf\":[");
+    for (int i = 0; i < 65; i++)
+        n += snprintf(src + n, sizeof(src) - (size_t)n,
+                      "%s{\"const\":%d}", i ? "," : "", i);
+    snprintf(src + n, sizeof(src) - (size_t)n, "]}");
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema == NULL);
+    assert(strstr(err, "enum size") != NULL);
+    jv_free(schema_json);
+}
+
 static void test_schema_string_length_bounds_close_and_reject(void) {
     const char *src = "{\"type\":\"string\",\"minLength\":5,\"maxLength\":8}";
     jv *schema_json = json_parse(src, strlen(src));
@@ -134,6 +150,42 @@ static void test_schema_string_length_bounds_close_and_reject(void) {
     sval_init(&v, schema);
     assert(!sval_feed(&v, "\"123456789\"", 11));
 
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
+static void test_schema_string_minlength_full_close(void) {
+    const char *src =
+        "{\"type\":\"object\",\"properties\":{"
+        "\"name\":{\"type\":\"string\",\"minLength\":3}"
+        "},\"required\":[\"name\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    sval_init(&v, schema);
+    char out[128];
+    int n = sval_close(&v, out, sizeof(out));
+    assert(n > 0);
+    jv *parsed = json_parse(out, strlen(out));
+    assert(parsed != NULL);
+    assert(strlen(jv_str(jv_get(parsed, "name"), "")) >= 3);
+    jv_free(parsed);
+
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "{\"name\":", 8));
+    n = sval_close(&v, out, sizeof(out));
+    assert(n > 0);
+    char full[256];
+    snprintf(full, sizeof(full), "{\"name\":%s", out);
+    parsed = json_parse(full, strlen(full));
+    assert(parsed != NULL);
+    assert(strlen(jv_str(jv_get(parsed, "name"), "")) >= 3);
+
+    jv_free(parsed);
     schema_free(schema);
     jv_free(schema_json);
 }
@@ -191,6 +243,29 @@ static void test_schema_discriminated_action_args(void) {
     jv_free(schema_json);
 }
 
+static void test_schema_rejects_discriminator_after_conditional_args(void) {
+    const char *src =
+        "{\"oneOf\":["
+        "{\"type\":\"object\",\"properties\":{"
+        "\"thinking\":{\"type\":\"string\"},"
+        "\"args\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]},"
+        "\"tool\":{\"const\":\"read_file\"}"
+        "},\"required\":[\"thinking\",\"args\",\"tool\"]},"
+        "{\"type\":\"object\",\"properties\":{"
+        "\"thinking\":{\"type\":\"string\"},"
+        "\"args\":{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"}},\"required\":[\"summary\"]},"
+        "\"tool\":{\"const\":\"done\"}"
+        "},\"required\":[\"thinking\",\"args\",\"tool\"]}"
+        "]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema == NULL);
+    assert(strstr(err, "tool") != NULL);
+    jv_free(schema_json);
+}
+
 int main(void) {
     test_json_close_partial_string();
     test_schema_required_close();
@@ -198,8 +273,11 @@ int main(void) {
     test_schema_rejects_escaped_keys();
     test_schema_oneof_const_scalars();
     test_schema_oneof_const_numeric_prefixes();
+    test_schema_rejects_oversized_oneof_const_scalars();
     test_schema_string_length_bounds_close_and_reject();
+    test_schema_string_minlength_full_close();
     test_schema_discriminated_action_args();
+    test_schema_rejects_discriminator_after_conditional_args();
     puts("json/schema tests ok");
     return 0;
 }
