@@ -623,15 +623,16 @@ extern "C" __global__ void k_mv_iq4_xs_b(MV_PARAMS) {
 // grid: (ceil(half_dim/32), n_heads, batch); vs = element stride per column
 
 struct rope_args {
-    int   head_dim, n_heads, half_dim, pos, neox;
+    int   head_dim, n_heads, half_dim, neox;
     float mscale;
 };
 
-extern "C" __global__ void k_rope(float *v, const float *fr, rope_args a, int vs) {
+extern "C" __global__ void k_rope(float *v, const float *fr, rope_args a,
+                                  const int *posp, int vs) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     int h = blockIdx.y;
     if (j >= a.half_dim || h >= a.n_heads) return;
-    int pos = a.pos + blockIdx.z;
+    int pos = *posp + blockIdx.z;
     float ang = pos * fr[j];
     float c = cosf(ang) * a.mscale, s = sinf(ang) * a.mscale;
     float *p = v + (ulong64)blockIdx.z * vs + h * a.head_dim;
@@ -647,11 +648,12 @@ extern "C" __global__ void k_rope(float *v, const float *fr, rope_args a, int vs
 
 extern "C" __global__ void k_store_kv(const float *k, const float *v,
                                       __half *kc, __half *vc,
-                                      int kv_dim, ulong64 off) {
+                                      int kv_dim, ulong64 l_off,
+                                      const int *posp) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < kv_dim) {
         ulong64 src = (ulong64)blockIdx.y * kv_dim + i;
-        ulong64 dst = off + (ulong64)blockIdx.y * kv_dim + i;
+        ulong64 dst = l_off + (ulong64)(*posp + blockIdx.y) * kv_dim + i;
         kc[dst] = __float2half(k[src]);
         vc[dst] = __float2half(v[src]);
     }
@@ -662,7 +664,7 @@ extern "C" __global__ void k_store_kv(const float *k, const float *v,
 // att scratch is MVB planes of [n_head][n_ctx].
 
 struct attn_args {
-    int     head_dim, n_head, n_head_kv, n_ctx, pos;
+    int     head_dim, n_head, n_head_kv, n_ctx;
     ulong64 l_off;    // this layer's element offset into the kv cache
     float   scale;
     int     qs, os;   // q / out element stride per token column
@@ -671,11 +673,11 @@ struct attn_args {
 
 extern "C" __global__ void k_attn(const float *q, const __half *kc,
                                   const __half *vc, float *att, float *out,
-                                  attn_args a) {
+                                  attn_args a, const int *posp) {
     __shared__ float red[256];
     int h = blockIdx.x, tid = threadIdx.x, tpg = blockDim.x;
     int tk = blockIdx.y;                 // token column in the tile
-    int pos = a.pos + tk;
+    int pos = *posp + tk;
     int hd = a.head_dim;
     int kvh = h / (a.n_head / a.n_head_kv);
     int kv_dim = a.n_head_kv * hd;
