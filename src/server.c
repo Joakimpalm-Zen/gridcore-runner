@@ -388,8 +388,13 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     }
 
     // reuse the KV for whatever prefix this prompt shares with the last one —
-    // pipeline callers repeat long system/template prefixes verbatim
-    int keep = engine_rewind(e, toks, n_prompt);
+    // pipeline callers repeat long system/template prefixes verbatim. Callers
+    // can disable reuse per request when they need exact fresh-prompt telemetry
+    // or want to isolate a pathological prompt from the previous cache state.
+    bool cache_prompt = jv_bool(jv_get(req, "cache_prompt"), true);
+    int keep = 0;
+    if (cache_prompt) keep = engine_rewind(e, toks, n_prompt);
+    else              engine_reset(e);
     float *logits = engine_feed(e, toks + keep, n_prompt - keep);
     free(toks);
     if (!logits) {
@@ -674,7 +679,8 @@ static void send_capabilities(int fd) {
                "\"schema_conditionals\":true,"
                "\"schema_string_bounds\":true,"
                "\"request_telemetry\":true,"
-               "\"prefix_cache\":true}}");
+               "\"prefix_cache\":true,"
+               "\"prefix_cache_controls\":true}}");
     send_response(fd, 200, "application/json", r.s, r.n);
     free(r.s);
 }

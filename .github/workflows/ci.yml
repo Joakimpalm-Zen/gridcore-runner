@@ -63,6 +63,8 @@ jobs:
           C1=$(echo "$R1" | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
           C2=$(echo "$R2" | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
           [ "$C1" = "$C2" ] && echo "prefix cache ok"
+          curl -sf -d '{"messages":[{"role":"user","content":"again"}],"max_tokens":2,"temperature":0,"cache_prompt":false}' \
+            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['runner_telemetry']['prompt_cached_tokens'] == 0; print('cache bypass ok')"
           curl -sf -d '{"input":["a","b"]}' http://127.0.0.1:8123/v1/embeddings \
             | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d['data'])==2 and len(d['data'][0]['embedding'])==64; print('embeddings ok')"
           curl -sf -d '{"messages":[{"role":"user","content":"logprobs"}],"max_tokens":999999,"temperature":0,"logprobs":true,"top_logprobs":2}' \

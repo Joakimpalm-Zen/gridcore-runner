@@ -227,6 +227,8 @@ of leaking channel tags into content. Works with any OpenAI client:
 Buffered completion responses include `runner_telemetry` with cached prompt
 tokens, prompt tokens evaluated this request, generation timing, and whether
 JSON/schema/speculative decoding was active.
+Set `"cache_prompt": false` on a request to bypass prefix KV reuse and force
+the full prompt to be evaluated.
 
 ```python
 import openai
