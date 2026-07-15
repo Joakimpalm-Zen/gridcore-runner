@@ -76,11 +76,29 @@ static void test_schema_rejects_escaped_keys(void) {
     jv_free(schema_json);
 }
 
+static void test_schema_oneof_const_scalars(void) {
+    const char *src =
+        "{\"oneOf\":[{\"const\":\"read_file\"},{\"const\":\"done\"}]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "\"done\"", 6));
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 int main(void) {
     test_json_close_partial_string();
     test_schema_required_close();
     test_schema_rejects_bad_bounds();
     test_schema_rejects_escaped_keys();
+    test_schema_oneof_const_scalars();
     puts("json/schema tests ok");
     return 0;
 }

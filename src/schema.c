@@ -111,12 +111,52 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
     return NULL;
 }
 
+static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
+    if (!alts || alts->type != J_ARR || alts->n == 0) {
+        snprintf(err, errcap, "oneOf/anyOf must be a non-empty array");
+        return NULL;
+    }
+    bool all_scalar_const = true;
+    for (int i = 0; i < alts->n; i++) {
+        jv *cn = jv_get(alts->items[i], "const");
+        if (!cn || (cn->type != J_STR && cn->type != J_NUM &&
+                    cn->type != J_BOOL && cn->type != J_NULL)) {
+            all_scalar_const = false;
+            break;
+        }
+    }
+    if (all_scalar_const) {
+        snode *n = sn_new(SN_ENUM);
+        n->lits = calloc(alts->n, sizeof(char *));
+        for (int i = 0; i < alts->n; i++) {
+            sbuf lit = {0};
+            jv_dump(jv_get(alts->items[i], "const"), &lit);
+            n->lits[i] = lit.s;
+            n->n_lits++;
+        }
+        return n;
+    }
+
+    snode *n = sn_new(SN_UNION);
+    n->alts = calloc(alts->n, sizeof(snode *));
+    for (int i = 0; i < alts->n; i++) {
+        n->alts[n->n_alts] = compile_node(alts->items[i], err, errcap, depth + 1);
+        if (!n->alts[n->n_alts]) { schema_free(n); return NULL; }
+        n->n_alts++;
+    }
+    return n;
+}
+
 static snode *compile_node(jv *s, char *err, int errcap, int depth) {
     if (depth > 24) { snprintf(err, errcap, "schema too deep"); return NULL; }
     if (!s || s->type == J_NULL || (s->type == J_OBJ && s->n == 0) ||
         s->type == J_BOOL) // `true` / `{}` = anything
         return sn_new(SN_ANY);
     if (s->type != J_OBJ) { snprintf(err, errcap, "schema node must be an object"); return NULL; }
+
+    jv *one = jv_get(s, "oneOf");
+    jv *any = jv_get(s, "anyOf");
+    if (one || any) return compile_oneof(one ? one : any, err, errcap, depth);
 
     // enum / const dominate the type
     jv *en = jv_get(s, "enum");

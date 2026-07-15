@@ -662,7 +662,7 @@ static void send_capabilities(int fd) {
     sb_lit(&r, "],\"features\":{"
                "\"json_object\":true,"
                "\"json_schema\":true,"
-               "\"schema_conditionals\":false,"
+               "\"schema_conditionals\":true,"
                "\"request_telemetry\":false,"
                "\"prefix_cache\":true}}");
     send_response(fd, 200, "application/json", r.s, r.n);
