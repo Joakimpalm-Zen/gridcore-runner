@@ -184,9 +184,12 @@ static int swap_to(const char *want) {
                 SV.reg[idx].name, SV.reg[idx].path);
         s->m = malloc(sizeof(model_t));
         s->tok = malloc(sizeof(tokenizer));
-        if (!model_load(s->m, SV.reg[idx].path, &SV.mp) ||
-            !tokenizer_init(s->tok, &s->m->gf)) {
+        bool model_ok = s->m && model_load(s->m, SV.reg[idx].path, &SV.mp);
+        bool tok_ok = model_ok && s->tok && tokenizer_init(s->tok, &s->m->gf);
+        if (!model_ok || !tok_ok) {
             fprintf(stderr, "swap: failed to load %s\n", SV.reg[idx].name);
+            if (s->tok) tokenizer_free(s->tok);
+            if (s->m) model_free(s->m);
             free(s->m); free(s->tok);
             s->m = NULL; s->tok = NULL;
             pthread_mutex_unlock(&SV.swap_mu);

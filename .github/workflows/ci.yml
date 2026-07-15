@@ -92,12 +92,21 @@ jobs:
           ./runner -m test-q8.gguf -p "hi" -n 4 --temp 0
       - name: smoke test (model swap)
         run: |
+          printf 'not a gguf' > bad.gguf
           ./runner -m "a=test.gguf,b=test-q8.gguf" --serve --port 8124 --ttl 0 &
           sleep 2
           curl -sf -d '{"model":"a","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
           curl -sf -d '{"model":"b","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
           curl -sf http://127.0.0.1:8124/v1/models | python3 -c "import json,sys; assert len(json.load(sys.stdin)['data']) == 2; print('swap ok')"
           kill %1
+          ./runner -m "good=test.gguf,bad=bad.gguf" --serve --port 8124 --ttl 0 &
+          sleep 2
+          if curl -sf -d '{"model":"bad","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null; then
+            echo "bad swap unexpectedly loaded"; exit 1
+          fi
+          curl -sf -d '{"model":"good","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
+          kill %1
+          echo "bad swap cleanup ok"
       - name: smoke test (server speculative decoding)
         # a self-draft server at temp 0 must match the plain server's output
         # byte-for-byte, and a json-constrained request must still succeed
