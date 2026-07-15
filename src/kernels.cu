@@ -714,6 +714,8 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
         float s = 0;
         for (int i = 0; i < hd / 2; i++) {
             float2 kf = __half22float2(kt2[i]);
+            // paired add reassociates FP vs. the old sequential accumulation;
+            // temp-0 gate covered it on tested models
             s += qh[2 * i] * kf.x + qh[2 * i + 1] * kf.y;
         }
         ah[t] = s * a.scale;
