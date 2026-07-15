@@ -1,5 +1,6 @@
 #include "compat.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 
 #ifdef _WIN32
@@ -53,13 +54,39 @@ double plat_now(void) {
     return (double)t.QuadPart / (double)freq.QuadPart;
 }
 
+static DWORD WINAPI parent_wait(LPVOID h) {
+    WaitForSingleObject((HANDLE)h, INFINITE);
+    fprintf(stderr, "parent process exited — shutting down\n");
+    _exit(0);
+}
+
+void plat_parent_watch(long pid) {
+    if (pid <= 0) return;
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!h) {
+        // unobservable parent == already-dead parent: refusing to run
+        // unwatched is the whole point of the flag
+        fprintf(stderr, "error: --parent-pid %ld is not observable — exiting\n", pid);
+        _exit(0);
+    }
+    HANDLE th = CreateThread(NULL, 0, parent_wait, h, 0, NULL);
+    if (th) CloseHandle(th);
+}
+
 #else // POSIX
 
+#include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 void *plat_mmap_ro(const char *path, size_t *size) {
     int fd = open(path, O_RDONLY);
@@ -99,6 +126,34 @@ double plat_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+static void *parent_poll(void *arg) {
+    long pid = (long)(intptr_t)arg;
+    for (;;) {
+        struct timespec ts = { 2, 0 };
+        nanosleep(&ts, NULL);
+        if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) {
+            fprintf(stderr, "parent %ld exited — shutting down\n", pid);
+            _exit(0);
+        }
+    }
+    return NULL;
+}
+
+void plat_parent_watch(long pid) {
+    if (pid <= 0) return;
+#ifdef __linux__
+    // instant path when the watched pid is the direct parent; the poll
+    // below still covers grandparent supervisors and the pre-prctl race
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+#endif
+    pthread_t th;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    pthread_create(&th, &at, parent_poll, (void *)(intptr_t)pid);
+    pthread_attr_destroy(&at);
 }
 
 #endif

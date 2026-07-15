@@ -43,11 +43,6 @@ penalty-less draft and kills acceptance).
   currently disables itself under schema/JSON constraints; lifting THAT
   needs constraint-state rewind per rejected draft).
 
-## Server
-
-- **Job-object / process-group cleanup story** for supervisors that die
-  (gridcore-clu leaves orphaned runners on SIGKILL).
-
 ## Quants / kernels
 
 - **IQ2/IQ3 codebook quants** — deliberately skipped so far; unlocks the
