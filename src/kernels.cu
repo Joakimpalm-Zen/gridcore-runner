@@ -364,9 +364,20 @@ extern "C" __global__ void k_mv_q4_K(MV_PARAMS) {
             float d1 = d * s1, mm1 = dmin * m1;
             float d2 = d * s2, mm2 = dmin * m2;
             float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
-            for (int l = 0; l < 32; l++) {
-                t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
-                t2 += (float)(q[l] >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
+            const uint4 *q16 = (const uint4 *)q;   // blk+16 is 16B-aligned
+            for (int v = 0; v < 2; v++) {
+                uint4 w = q16[v];
+                uint ws[4] = { w.x, w.y, w.z, w.w };
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    #pragma unroll
+                    for (int k = 0; k < 4; k++) {
+                        int l = v * 16 + c * 4 + k;
+                        uint b8 = (ws[c] >> (8 * k)) & 0xFFu;
+                        t1 += (float)(b8 & 0xF) * xp[l];      sx1 += xp[l];
+                        t2 += (float)(b8 >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
+                    }
+                }
             }
             s += d1 * t1 - mm1 * sx1 + d2 * t2 - mm2 * sx2;
             q += 32; is += 2; xp += 64;
@@ -393,9 +404,20 @@ extern "C" __global__ void k_mv_q4_K_b(MV_PARAMS) {
             get_scale_min_k4(is + 1, sc, &s2, &m2);
             float d1 = d * s1, mm1 = dmin * m1;
             float d2 = d * s2, mm2 = dmin * m2;
-            for (int l = 0; l < 32; l++) {
-                MV_FMA(d1 * (float)(q[l] & 0xF) - mm1, base + j + l);
-                MV_FMA(d2 * (float)(q[l] >> 4)  - mm2, base + j + l + 32);
+            const uint4 *q16 = (const uint4 *)q;   // blk+16 is 16B-aligned
+            for (int v = 0; v < 2; v++) {
+                uint4 w = q16[v];
+                uint ws[4] = { w.x, w.y, w.z, w.w };
+                #pragma unroll
+                for (int c = 0; c < 4; c++) {
+                    #pragma unroll
+                    for (int k = 0; k < 4; k++) {
+                        int l = v * 16 + c * 4 + k;
+                        uint b8 = (ws[c] >> (8 * k)) & 0xFFu;
+                        MV_FMA(d1 * (float)(b8 & 0xF) - mm1, base + j + l);
+                        MV_FMA(d2 * (float)(b8 >> 4)  - mm2, base + j + l + 32);
+                    }
+                }
             }
             q += 32; is += 2;
         }
