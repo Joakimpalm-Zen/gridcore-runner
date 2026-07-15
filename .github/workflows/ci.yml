@@ -65,6 +65,23 @@ jobs:
           curl -sf -m 3 http://127.0.0.1:8126/v1/models
           kill %1 %2 2>/dev/null || true
           echo "health bypass ok"
+      - name: smoke test (parent-pid watch)
+        # the runner must exit when the process named by --parent-pid dies
+        run: |
+          python3 - <<'PYEOF'
+          import os, subprocess, sys, time
+          exe = "./runner.exe" if os.name == "nt" else "./runner"
+          p = subprocess.Popen([exe, "-m", "test.gguf", "--serve", "--port", "8127",
+                                "--parent-pid", str(os.getpid())])
+          time.sleep(2)
+          if p.poll() is not None: sys.exit("runner died early")
+          os._exit(0)  # abrupt parent death, no cleanup
+          PYEOF
+          sleep 6
+          if curl -s -m 2 http://127.0.0.1:8127/health > /dev/null; then
+            echo "runner survived parent death"; exit 1
+          fi
+          echo "parent-pid ok"
       - name: smoke test (json schema)
         run: |
           echo '{"type":"object","properties":{"a":{"type":"string","enum":["x","y"]},"b":{"type":"integer"}},"required":["a","b"]}' > ts.json
@@ -139,3 +156,20 @@ jobs:
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8125/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['model'] == 'test.gguf', d['model']; print('windows path model field ok')"
           kill %1
+      - name: smoke test (parent-pid watch)
+        # the runner must exit when the process named by --parent-pid dies
+        run: |
+          python3 - <<'PYEOF'
+          import os, subprocess, sys, time
+          exe = "./runner.exe" if os.name == "nt" else "./runner"
+          p = subprocess.Popen([exe, "-m", "test.gguf", "--serve", "--port", "8127",
+                                "--parent-pid", str(os.getpid())])
+          time.sleep(2)
+          if p.poll() is not None: sys.exit("runner died early")
+          os._exit(0)  # abrupt parent death, no cleanup
+          PYEOF
+          sleep 6
+          if curl -s -m 2 http://127.0.0.1:8127/health > /dev/null; then
+            echo "runner survived parent death"; exit 1
+          fi
+          echo "parent-pid ok"

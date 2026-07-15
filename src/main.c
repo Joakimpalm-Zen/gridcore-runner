@@ -77,6 +77,7 @@ static void usage(const char *prog) {
         "  --draft PATH   small same-vocab GGUF for speculative decoding\n"
         "  --draft-k N    draft tokens per round (default 4)\n"
         "  --caps         print machine capabilities as JSON and exit\n"
+        "  --parent-pid N exit when process N dies (supervisor cleanup)\n"
         "  -v             verbose model info\n",
         prog);
 }
@@ -115,6 +116,7 @@ int main(int argc, char **argv) {
     const char *quant_out = NULL, *quant_type = "q4_0";
     int n_predict = 256, n_threads = 0, tmpl = -1, reserve_cpu_pct = 0;
     int port = 8080, parallel = 1, ttl = -1; // -1: 300 for swap mode, never for single
+    long parent_pid = 0;
     const char *draft_path = NULL;
     int draft_k = 4;
     bool interactive = false, verbose = false, no_bos = false;
@@ -163,10 +165,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = atoi(NEXT);
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = atoi(NEXT);
         else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = atoi(NEXT);
+        else if (!strcmp(a, "--parent-pid")) parent_pid = strtol(NEXT, NULL, 10);
         else if (!strcmp(a, "--caps")) caps = true;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(argv[0]); return 1; }
     }
+    plat_parent_watch(parent_pid);
     if (n_threads <= 0 && reserve_cpu_pct > 0) {
         n_threads = plat_cpu_count() * reserve_cpu_pct / 100;
         if (n_threads < 1) n_threads = 1;
