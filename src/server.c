@@ -138,7 +138,7 @@ static struct {
     int         n_reg;
     bool        single;        // single-model serve wrapped as a 1-entry registry
     bool        borrowed;      // slot 0's model/tok containers owned by the caller
-    int         resident;      // index into reg, -1 = none
+    atomic_int  resident;      // index into reg, -1 = none
     double      last_used;
     int         ttl;
     model_params mp;
@@ -148,10 +148,19 @@ static struct {
     int         draft_k;      // serve has exactly one slot (see swap_to)
 } SV;
 
+static int resident_load(void) {
+    return atomic_load_explicit(&SV.resident, memory_order_relaxed);
+}
+
+static void resident_store(int v) {
+    atomic_store_explicit(&SV.resident, v, memory_order_relaxed);
+}
+
 static void unload_resident(void) {
-    if (SV.resident < 0) return;
+    int res = resident_load();
+    if (res < 0) return;
     slot_t *s = &SV.slots[0];
-    fprintf(stderr, "swap: unloading %s\n", SV.reg[SV.resident].name);
+    fprintf(stderr, "swap: unloading %s\n", SV.reg[res].name);
     tokenizer_free(s->tok);
     model_free(s->m);
     // single-model serve borrows main()'s stack containers for the first
@@ -160,7 +169,7 @@ static void unload_resident(void) {
     SV.borrowed = false;
     s->m = NULL;
     s->tok = NULL;
-    SV.resident = -1;
+    resident_store(-1);
 }
 
 // resolve + load the requested model; returns entry index or -1
@@ -177,7 +186,7 @@ static int swap_to(const char *want) {
         if (idx < 0) return -1;
     }
     pthread_mutex_lock(&SV.swap_mu);
-    if (SV.resident != idx) {
+    if (resident_load() != idx) {
         unload_resident();
         slot_t *s = &SV.slots[0];
         fprintf(stderr, "swap: loading %s (%s)\n",
@@ -205,7 +214,7 @@ static int swap_to(const char *want) {
             s->e.dm = SV.draft;
             s->e.draft_k = SV.draft_k;
         }
-        SV.resident = idx;
+        resident_store(idx);
     }
     SV.last_used = now_s();
     SV.model_name = SV.reg[idx].name;
@@ -218,9 +227,9 @@ static void *ttl_reaper(void *arg) {
     for (;;) {
         struct timespec ts = { 5, 0 };
         nanosleep(&ts, NULL);
-        if (SV.ttl <= 0 || SV.resident < 0 || atomic_load(&SV.busy)) continue;
+        if (SV.ttl <= 0 || resident_load() < 0 || atomic_load(&SV.busy)) continue;
         if (pthread_mutex_trylock(&SV.swap_mu) != 0) continue;
-        if (SV.resident >= 0 && !atomic_load(&SV.busy) &&
+        if (resident_load() >= 0 && !atomic_load(&SV.busy) &&
             now_s() - SV.last_used > SV.ttl)
             unload_resident();
         pthread_mutex_unlock(&SV.swap_mu);
@@ -575,12 +584,11 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
 
 // ---------------------------------------------------------------- http
 
-// /health and /v1/models read only startup-immutable strings plus the
-// SV.resident int (snapshot; a torn read is impossible for an aligned int),
-// so they are safe to answer from the accept thread with no lock
+// /health and /v1/models read only startup-immutable strings plus an atomic
+// resident snapshot, so they are safe to answer from the accept thread with no lock
 static void send_health(int fd) {
     char b[384];
-    int n, res = SV.resident;
+    int n, res = resident_load();
     if (SV.n_reg > 0 && res >= 0) {
         char esc[192];
         json_escape(SV.reg[res].name, strlen(SV.reg[res].name), esc, sizeof(esc));
@@ -818,7 +826,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                     "ignoring --parallel %d\n", parallel);
         }
         parallel = SV.n_reg > 0 ? 1 : parallel;
-        SV.resident = -1;
+        resident_store(-1);
         SV.ttl = ttl;
         SV.mp = *mp;
         SV.mp.verbose = false;
@@ -896,7 +904,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             SV.n_reg = 1;
             SV.single = true;
             SV.borrowed = true;
-            SV.resident = 0;
+            resident_store(0);
             SV.last_used = now_s();
             SV.ttl = ttl;
             SV.mp = *mp;
