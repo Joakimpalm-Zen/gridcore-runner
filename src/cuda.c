@@ -224,11 +224,14 @@ static bool gpu_type_ok(int type) {
     }
 }
 
+static void gpu_ctx_free(model_t *m, gpu_t *g);
+
 #define CK(call) do { CUresult _r = (call); if (_r != 0) { \
     fprintf(stderr, "gpu: %s failed: %s\n", #call, cu_err(_r)); goto fail; } } while (0)
 
 static CUdeviceptr f32_dbuf(const float *src, size_t n) {
     if (!src) return 0;
+    if (n > SIZE_MAX / sizeof(float)) return 0;
     CUdeviceptr d = 0;
     if (cu.MemAlloc(&d, n * sizeof(float)) != 0) return 0;
     if (cu.MemcpyHtoD(d, src, n * sizeof(float)) != 0) { cu.MemFree(d); return 0; }
@@ -252,6 +255,7 @@ bool gpu_init(model_t *m) {
     if (cu.DeviceGetCount(&ndev) != 0 || ndev < 1) return false;
 
     gpu_t *g = calloc(1, sizeof(gpu_t));
+    if (!g) return false;
     g->last_pos = -2;
 
     CK(cu.DeviceGet(&g->dev, 0));
@@ -378,7 +382,8 @@ bool gpu_init(model_t *m) {
         CK(cu.MemAlloc(&g->logits, sizeof(float) * m->n_vocab));
         CK(cu.MemAlloc(&g->dummy,  4));
         CK(cu.MemAlloc(&g->pos_dev, sizeof(int)));
-        if (cu_graphs_ok()) cu.StreamCreate(&g->stream, 0);
+        if (cu_graphs_ok() && cu.StreamCreate(&g->stream, 0) != 0)
+            g->stream = NULL;
         // gemma4's V-copy path (ly->wv == NULL) uses a synchronous MemsetD8
         // that cannot be captured into a CUDA graph
         for (int l = 0; l < m->gpu_layers; l++)
@@ -387,11 +392,14 @@ bool gpu_init(model_t *m) {
         g->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
         g->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim_local / 2);
         g->out_norm = f32_dbuf(m->out_norm_w, m->n_embd);
+        if (!g->inv_freq || !g->out_norm) goto fail;
         if (m->v_rmsnorm) { // weightless per-head V norm: weight of ones
             float *ones = malloc(sizeof(float) * max_hd);
+            if (!ones) goto fail;
             for (int i = 0; i < max_hd; i++) ones[i] = 1.0f;
             g->ones = f32_dbuf(ones, max_hd);
             free(ones);
+            if (!g->ones) goto fail;
         }
         g->attn_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
         g->ffn_norm  = calloc(m->n_layer, sizeof(CUdeviceptr));
@@ -403,6 +411,9 @@ bool gpu_init(model_t *m) {
         g->kn = calloc(m->n_layer, sizeof(CUdeviceptr));
         g->pan = calloc(m->n_layer, sizeof(CUdeviceptr));
         g->pfn = calloc(m->n_layer, sizeof(CUdeviceptr));
+        if (!g->attn_norm || !g->ffn_norm || !g->bq || !g->bk || !g->bv ||
+            !g->bo || !g->qn || !g->kn || !g->pan || !g->pfn)
+            goto fail;
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
             g->attn_norm[l] = f32_dbuf(ly->attn_norm_w, m->n_embd);
@@ -415,10 +426,18 @@ bool gpu_init(model_t *m) {
             g->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l));
             g->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
             g->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
+            if (!g->attn_norm[l] || !g->ffn_norm[l] ||
+                (ly->bq && !g->bq[l]) || (ly->bk && !g->bk[l]) ||
+                (ly->bv && !g->bv[l]) || (ly->bo && !g->bo[l]) ||
+                (ly->qnorm_w && !g->qn[l]) || (ly->knorm_w && !g->kn[l]) ||
+                (ly->post_attn_norm_w && !g->pan[l]) ||
+                (ly->post_ffn_norm_w && !g->pfn[l]))
+                goto fail;
         }
 
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
+        if (!g->h_x || !g->h_logits) goto fail;
 
 
         char name[128] = "CUDA GPU";
@@ -437,9 +456,7 @@ bool gpu_init(model_t *m) {
 
 fail:
 fail_quiet:
-    if (g->mod) cu.ModuleUnload(g->mod);
-    if (g->ctx) cu.PrimaryCtxRelease(g->dev);
-    free(g);
+    gpu_ctx_free(m, g);
     return false;
 
 unsupported:
@@ -510,14 +527,21 @@ static bool enc_actmul(gpu_t *g, model_t *m, CUdeviceptr a, CUdeviceptr b, int n
     return launch(g, f, (n + 255) / 256, 1, 1, 256, p);
 }
 
-void gpu_free(model_t *m) {
-    gpu_t *g = m->gpu;
+static void gpu_ctx_free(model_t *m, gpu_t *g) {
     if (!g) return;
-    cu.CtxSetCurrent(g->ctx);
+    if (g->ctx) cu.CtxSetCurrent(g->ctx);
+    if (g->gexec && cu.GraphExecDestroy) cu.GraphExecDestroy(g->gexec);
+    if (g->graph && cu.GraphDestroy) cu.GraphDestroy(g->graph);
+    if (g->stream && cu.StreamDestroy) cu.StreamDestroy(g->stream);
     for (int l = 0; l < m->n_layer; l++) {
-        CUdeviceptr bufs[] = { g->attn_norm[l], g->ffn_norm[l], g->bq[l],
-                               g->bk[l], g->bv[l], g->bo[l], g->qn[l], g->kn[l],
-                               g->pan[l], g->pfn[l] };
+        CUdeviceptr bufs[] = {
+            g->attn_norm ? g->attn_norm[l] : 0,
+            g->ffn_norm ? g->ffn_norm[l] : 0,
+            g->bq ? g->bq[l] : 0, g->bk ? g->bk[l] : 0,
+            g->bv ? g->bv[l] : 0, g->bo ? g->bo[l] : 0,
+            g->qn ? g->qn[l] : 0, g->kn ? g->kn[l] : 0,
+            g->pan ? g->pan[l] : 0, g->pfn ? g->pfn[l] : 0,
+        };
         for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
             if (bufs[i]) cu.MemFree(bufs[i]);
     }
@@ -531,14 +555,16 @@ void gpu_free(model_t *m) {
                            g->out_norm, g->dummy, g->ones, g->pos_dev };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
-    if (g->gexec) cu.GraphExecDestroy(g->gexec);
-    if (g->graph) cu.GraphDestroy(g->graph);
-    if (g->stream) cu.StreamDestroy(g->stream);
     if (g->mod) cu.ModuleUnload(g->mod);
-    cu.PrimaryCtxRelease(g->dev);
+    if (g->ctx) cu.PrimaryCtxRelease(g->dev);
     free(g->h_x); free(g->h_logits);
     free(g);
+}
+
+void gpu_free(model_t *m) {
+    gpu_t *g = m->gpu;
     m->gpu = NULL;
+    gpu_ctx_free(m, g);
 }
 
 // upload host KV rows [lo, hi) for every layer (CPU prompt processing wrote them)
