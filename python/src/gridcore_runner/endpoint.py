@@ -149,9 +149,15 @@ class RunnerEndpoint:
     ) -> dict[str, Any]:
         try:
             with self._open(request, timeout or self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                body = response.read()
         except urllib.error.HTTPError as error:
             raise self._http_error(error) from error
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except ValueError as error:
+            # a non-Runner service squatting on the port answers 200 with
+            # HTML; that must read as "not a runner", not crash healthy()
+            raise RunnerProtocolError("runner returned a non-JSON response") from error
         if not isinstance(data, dict):
             raise RunnerProtocolError("runner response must be a JSON object")
         return data

@@ -37,6 +37,16 @@ class StartupLease:
                         return False
                     stale = self._move_aside(self.path)
                     if stale is not None:
+                        # between judging the record stale and moving it, a
+                        # rival may have reclaimed and re-claimed: only delete
+                        # the exact record we judged; put a fresh one back
+                        moved = self._read_record(stale)
+                        if moved.get("token") != record.get("token"):
+                            try:
+                                stale.rename(self.path)
+                            except OSError:
+                                pass  # a third claim landed; leave theirs be
+                            continue
                         _remove_tree(stale)
             finally:
                 _remove_tree(claim)
@@ -95,6 +105,8 @@ def _process_alive(pid: int) -> bool:
         try:
             os.kill(pid, 0)
             return True
+        except PermissionError:
+            return True  # exists, owned by someone else
         except OSError:
             return False
 

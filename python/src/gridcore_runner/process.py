@@ -11,6 +11,22 @@ from typing import Any, Callable, Mapping
 from .endpoint import RunnerEndpoint
 
 
+def spawn_detached(args: list[str], *, cwd: str | Path | None = None):
+    """Popen a child isolated from the parent's console signals, so a Ctrl+C
+    aimed at the supervisor never tears down the server underneath it."""
+    kwargs: dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if cwd is not None:
+        kwargs["cwd"] = str(cwd)
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(args, **kwargs)
+
+
 def query_system_capabilities(
     executable: str | Path,
     *,
@@ -137,11 +153,4 @@ class ManagedRunner:
 
     @staticmethod
     def _default_spawn(args: list[str]):
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        return subprocess.Popen(
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=str(Path(args[0]).resolve().parent),
-            creationflags=flags,
-        )
+        return spawn_detached(args, cwd=Path(args[0]).resolve().parent)

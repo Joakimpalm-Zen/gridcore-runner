@@ -11,6 +11,7 @@ from .process import (
     build_server_args,
     model_registry_argument,
     query_system_capabilities,
+    spawn_detached,
 )
 from .lease import StartupLease
 
@@ -26,4 +27,5 @@ __all__ = [
     "build_server_args",
     "model_registry_argument",
     "query_system_capabilities",
+    "spawn_detached",
 ]
