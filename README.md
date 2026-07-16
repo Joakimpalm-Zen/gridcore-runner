@@ -415,6 +415,7 @@ src/cuda.c       CUDA GPU backend via the driver API (kernels.cu -> embedded
                  PTX; full and partial layer-split offload)
 src/compat.c     platform layer (mmap, clocks, cpu/ram detection)
 src/main.c       CLI, --caps
+python/          supported Python endpoint + child-process client for Runner consumers
 ```
 
 Weights stay quantized in the mmap'd file; matmuls dequantize on the fly, so
