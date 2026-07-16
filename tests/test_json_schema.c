@@ -81,6 +81,23 @@ static void test_schema_rejects_bad_bounds(void) {
     jv_free(schema_json);
 }
 
+static void test_schema_rejects_non_integer_or_huge_bounds(void) {
+    const char *bad[] = {
+        "{\"type\":\"array\",\"items\":{},\"minItems\":1.5}",
+        "{\"type\":\"array\",\"items\":{},\"maxItems\":1e100}",
+        "{\"type\":\"string\",\"minLength\":1e100}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        jv *schema_json = json_parse(bad[i], strlen(bad[i]));
+        assert(schema_json != NULL);
+        char err[128];
+        snode *schema = schema_compile(schema_json, err, sizeof(err));
+        assert(schema == NULL);
+        assert(strstr(err, "bounds") != NULL);
+        jv_free(schema_json);
+    }
+}
+
 static void test_schema_rejects_escaped_keys(void) {
     const char *src =
         "{\"type\":\"object\",\"properties\":{\"bad\\\"key\":{\"type\":\"string\"}}}";
@@ -288,6 +305,7 @@ int main(void) {
     test_json_close_partial_string();
     test_schema_required_close();
     test_schema_rejects_bad_bounds();
+    test_schema_rejects_non_integer_or_huge_bounds();
     test_schema_rejects_escaped_keys();
     test_schema_oneof_const_scalars();
     test_schema_oneof_const_numeric_prefixes();

@@ -254,6 +254,22 @@ static bool start_reaper(void) {
     return ok;
 }
 
+static bool init_swap_runtime(const model_params *mp, int n_threads, int ttl) {
+    SV.ttl = ttl;
+    SV.mp = *mp;
+    SV.mp.verbose = false;
+    SV.mp.n_threads = n_threads;
+    if (pthread_mutex_init(&SV.swap_mu, NULL) != 0) {
+        fprintf(stderr, "error: cannot initialize model swap mutex\n");
+        return false;
+    }
+    if (!start_reaper()) {
+        pthread_mutex_destroy(&SV.swap_mu);
+        return false;
+    }
+    return true;
+}
+
 static void q_push(int fd) {
     pthread_mutex_lock(&SV.q.mu);
     if (SV.q.count < (int)(sizeof(SV.q.fds) / sizeof(int))) {
@@ -955,16 +971,10 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         }
         parallel = SV.n_reg > 0 ? 1 : parallel;
         resident_store(-1);
-        SV.ttl = ttl;
-        SV.mp = *mp;
-        SV.mp.verbose = false;
-        SV.mp.n_threads = n_threads;
-        pthread_mutex_init(&SV.swap_mu, NULL);
     }
 
     int threads_per_slot = n_threads / parallel;
     if (threads_per_slot < 1) threads_per_slot = 1;
-    bool single_setup = false;
 
     const char *name = strrchr(model_path, '/');
     const char *bsname = strrchr(model_path, '\\'); // Windows path separator
@@ -974,8 +984,19 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     SV.ctx_size = mp->n_ctx;
     SV.n_slots = parallel;
     SV.slots = calloc(parallel, sizeof(slot_t));
-    pthread_mutex_init(&SV.q.mu, NULL);
-    pthread_cond_init(&SV.q.cv, NULL);
+    if (!SV.slots) {
+        fprintf(stderr, "error: cannot allocate server slots\n");
+        return 1;
+    }
+    if (pthread_mutex_init(&SV.q.mu, NULL) != 0) {
+        fprintf(stderr, "error: cannot initialize server queue mutex\n");
+        return 1;
+    }
+    if (pthread_cond_init(&SV.q.cv, NULL) != 0) {
+        fprintf(stderr, "error: cannot initialize server queue condition\n");
+        pthread_mutex_destroy(&SV.q.mu);
+        return 1;
+    }
 
     if (SV.n_reg > 0) {
         // swap mode: models are loaded on demand
@@ -983,9 +1004,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         s->id = 0;
         s->smp = defaults;
         s->smp_base = defaults;
-        if (!start_reaper()) return 1;
+        if (!init_swap_runtime(mp, n_threads, ttl)) return 1;
     } else {
-        single_setup = parallel == 1;
         int tmpl = template_detect(gguf_get_str(&base->gf, "tokenizer.chat_template", NULL),
                                    tok);
         model_params slot_mp = *mp;
@@ -1002,10 +1022,19 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             s->smp_base = s->smp;
             if (i == 0) {
                 s->m = base;
+                tpool *replacement = tpool_create(threads_per_slot);
+                if (!replacement) {
+                    fprintf(stderr, "error: cannot create pool for slot 0\n");
+                    return 1;
+                }
                 tpool_destroy(base->tp); // replace the single-thread load pool
-                base->tp = tpool_create(threads_per_slot);
+                base->tp = replacement;
             } else {
-                s->m = malloc(sizeof(model_t));
+                s->m = calloc(1, sizeof(model_t));
+                if (!s->m) {
+                    fprintf(stderr, "error: cannot allocate slot %d model\n", i);
+                    return 1;
+                }
                 if (!model_load(s->m, model_path, &slot_mp)) {
                     fprintf(stderr, "error: failed to load slot %d\n", i);
                     return 1;
@@ -1020,7 +1049,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             }
         }
 
-        if (single_setup) {
+        if (parallel == 1) {
             // join the registry machinery so GET /unload frees the resident
             // model (the next request lazily reloads it) and --ttl works.
             // slot 0's containers are the caller's; borrowed avoids freeing
@@ -1034,14 +1063,9 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             SV.borrowed = true;
             resident_store(0);
             SV.last_used = now_s();
-            SV.ttl = ttl;
-            SV.mp = *mp;
-            SV.mp.verbose = false;
-            SV.mp.n_threads = threads_per_slot;
             SV.draft = SV.slots[0].e.dm;
             SV.draft_k = draft_k;
-            pthread_mutex_init(&SV.swap_mu, NULL);
-            if (!start_reaper()) return 1;
+            if (!init_swap_runtime(mp, threads_per_slot, ttl)) return 1;
         }
     }
 

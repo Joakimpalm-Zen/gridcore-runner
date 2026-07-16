@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <math.h>
 
 // ---------------------------------------------------------------- compile
 
@@ -32,6 +34,15 @@ void schema_free(snode *n) {
 }
 
 static snode *compile_node(jv *s, char *err, int errcap, int depth);
+
+static bool compile_bound(jv *v, int dflt, int *out) {
+    if (!v) { *out = dflt; return true; }
+    if (v->type != J_NUM || v->num < 0 || v->num > INT_MAX ||
+        floor(v->num) != v->num)
+        return false;
+    *out = (int)v->num;
+    return true;
+}
 
 static bool plain_key(const char *s) {
     for (const unsigned char *p = (const unsigned char *)s; *p; p++)
@@ -57,10 +68,11 @@ static bool same_prop_order(jv *a, jv *b) {
 static snode *compile_discriminated_action(jv *alts, char *err, int errcap,
                                            int depth, bool *matched) {
     *matched = false;
-    if (alts->n > 60) return NULL;
+    if (alts->n <= 0 || alts->n > 60) return NULL;
 
     jv *first_props = jv_get(alts->items[0], "properties");
     if (!first_props || first_props->type != J_OBJ) return NULL;
+    if (first_props->n <= 0 || first_props->n > 60) return NULL;
     int tool_i = prop_index(first_props, "tool");
     int args_i = prop_index(first_props, "args");
     if (tool_i < 0 || args_i < 0) return NULL;
@@ -159,9 +171,8 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
     if (!strcmp(type, "string")) {
         snode *n = sn_new(SN_STR);
         jv *mn = jv_get(s, "minLength"), *mx = jv_get(s, "maxLength");
-        n->min_items = mn ? (int)jv_num(mn, 0) : 0;
-        n->max_items = mx ? (int)jv_num(mx, -1) : -1;
-        if (n->min_items < 0 || n->max_items < -1 ||
+        if (!compile_bound(mn, 0, &n->min_items) ||
+            !compile_bound(mx, -1, &n->max_items) ||
             (n->max_items >= 0 && n->min_items > n->max_items)) {
             snprintf(err, errcap, "invalid string length bounds");
             schema_free(n);
@@ -178,9 +189,8 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
         n->items = compile_node(jv_get(s, "items"), err, errcap, depth + 1);
         if (!n->items) { schema_free(n); return NULL; }
         jv *mi = jv_get(s, "minItems"), *ma = jv_get(s, "maxItems");
-        n->min_items = mi ? (int)jv_num(mi, 0) : 0;
-        n->max_items = ma ? (int)jv_num(ma, -1) : -1;
-        if (n->min_items < 0 || n->max_items < -1 ||
+        if (!compile_bound(mi, 0, &n->min_items) ||
+            !compile_bound(ma, -1, &n->max_items) ||
             (n->max_items >= 0 && n->min_items > n->max_items)) {
             snprintf(err, errcap, "invalid array item bounds");
             schema_free(n);
@@ -195,6 +205,10 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
             snode *n = sn_new(SN_ANY);
             n->min_items = 1; // flag: object-rooted generic value
             return n;
+        }
+        if (props->n > 60) {
+            snprintf(err, errcap, "too many properties (max 60)");
+            return NULL;
         }
         snode *n = sn_new(SN_OBJ);
         n->n_props = props->n;
@@ -228,11 +242,6 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
                 }
             }
         }
-        if (n->n_props > 60) {
-            snprintf(err, errcap, "too many properties (max 60)");
-            schema_free(n);
-            return NULL;
-        }
         return n;
     }
     snprintf(err, errcap, "unsupported type '%s'", type);
@@ -240,7 +249,7 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
 }
 
 static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
-    if (!alts || alts->type != J_ARR || alts->n == 0) {
+    if (!alts || alts->type != J_ARR || alts->n <= 0) {
         snprintf(err, errcap, "oneOf/anyOf must be a non-empty array");
         return NULL;
     }
@@ -254,7 +263,7 @@ static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
         }
     }
     if (all_scalar_const) {
-        if (alts->n > 60) {
+        if (alts->n <= 0 || alts->n > 60) {
             snprintf(err, errcap, "enum size must be 1..60");
             return NULL;
         }
@@ -300,6 +309,11 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
     if (en || cn) {
         snode *n = sn_new(SN_ENUM);
         int cnt = en ? en->n : 1;
+        if (cnt <= 0 || cnt > 60) {
+            snprintf(err, errcap, "enum size must be 1..60");
+            schema_free(n);
+            return NULL;
+        }
         n->lits = calloc(cnt, sizeof(char *));
         for (int i = 0; i < cnt; i++) {
             jv *v = en ? en->items[i] : cn;
@@ -313,11 +327,6 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
             jv_dump(v, &lit);
             n->lits[i] = lit.s;
             n->n_lits++;
-        }
-        if (n->n_lits == 0 || n->n_lits > 60) {
-            snprintf(err, errcap, "enum size must be 1..60");
-            schema_free(n);
-            return NULL;
         }
         return n;
     }
@@ -412,7 +421,7 @@ static void frame_done(sval *v) {
     if (v->depth == 0) { v->done = true; return; }
     sframe *f = &v->stack[v->depth - 1];
     if (f->node->kind == SN_OBJ) {
-        if (f->sub >= 0 && f->sub < f->node->n_props &&
+        if (f->sub < f->node->n_props &&
             !strcmp(f->node->keys[f->sub], "tool"))
             v->disc_choice = v->last_enum;
         f->phase = P_OBJ_NEXT;
