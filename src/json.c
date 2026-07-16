@@ -336,7 +336,9 @@ void jv_dump(const jv *v, sbuf *o) {
     case J_NULL: sb_lit(o, "null"); break;
     case J_BOOL: sb_lit(o, v->b ? "true" : "false"); break;
     case J_NUM:
-        if (v->num >= (double)LLONG_MIN && v->num <= (double)LLONG_MAX &&
+        // (double)LLONG_MAX rounds UP to 2^63, which is not representable as
+        // long long — the upper bound must exclude it (strict compare)
+        if (v->num >= (double)LLONG_MIN && v->num < 9223372036854775808.0 &&
             v->num == (double)(long long)v->num)
             sb_fmt(o, "%lld", (long long)v->num);
         else

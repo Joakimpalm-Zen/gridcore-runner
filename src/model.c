@@ -413,14 +413,12 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         !m->hb2 || !m->att || !m->logits) {
         fprintf(stderr, "error: cannot allocate buffers (ctx %d needs %.1f MB KV cache)\n",
                 n_ctx, 2.0 * kv_bytes / 1e6);
-        model_free(m);
-        return false;
+        return false; // caller owns cleanup: every load failure ends in model_free
     }
 
     m->tp = tpool_create(p->n_threads > 0 ? p->n_threads : 1);
     if (!m->tp) {
         fprintf(stderr, "error: cannot create thread pool\n");
-        model_free(m);
         return false;
     }
     rope_setup(m, g, arch, p->rope_base, p->rope_scale);

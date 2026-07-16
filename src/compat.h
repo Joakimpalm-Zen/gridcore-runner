@@ -20,12 +20,6 @@ static inline bool checked_u64_mul(uint64_t a, uint64_t b, uint64_t *out) {
     return true;
 }
 
-static inline bool checked_size_mul(size_t a, size_t b, size_t *out) {
-    if (a != 0 && b > SIZE_MAX / a) return false;
-    *out = a * b;
-    return true;
-}
-
 // map a regular file read-only; returns NULL on failure (missing, empty,
 // directory, ...). The mapping outlives any internal handles.
 void  *plat_mmap_ro(const char *path, size_t *size);

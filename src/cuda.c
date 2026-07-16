@@ -392,7 +392,8 @@ bool gpu_init(model_t *m) {
         g->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
         g->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim_local / 2);
         g->out_norm = f32_dbuf(m->out_norm_w, m->n_embd);
-        if (!g->inv_freq || !g->out_norm) goto fail;
+        if (!g->inv_freq || !g->out_norm ||
+            (m->rope_inv_freq_local && !g->inv_freq_local)) goto fail;
         if (m->v_rmsnorm) { // weightless per-head V norm: weight of ones
             float *ones = malloc(sizeof(float) * max_hd);
             if (!ones) goto fail;

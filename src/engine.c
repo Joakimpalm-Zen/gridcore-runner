@@ -178,6 +178,20 @@ static void lp_capture_pre(engine *e, const float *logits, lp_pre *p) {
 // sample each position from the TARGET's logits with the full sampler chain;
 // a draft is accepted when the sampled token equals it, so output follows
 // exactly the same distribution as the non-speculative path
+// budget expired mid-document: complete it so constrained output stays valid
+// JSON (the caller's finish_reason stays "length")
+static void constraint_close(engine *e, gen_cb cb, void *ud) {
+    if (e->schema && !e->sv.done) {
+        char cbuf[4096];
+        int cn = sval_close(&e->sv, cbuf, sizeof(cbuf));
+        if (cn > 0 && cb) cb(ud, cbuf, cn);
+    } else if (!e->schema && e->json_mode && !e->jv.done) {
+        char cbuf[600];
+        int cn = jsonv_close(&e->jv, cbuf, sizeof(cbuf));
+        if (cn > 0 && cb) cb(ud, cbuf, cn);
+    }
+}
+
 static int engine_generate_spec(engine *e, float *logits, int max_new,
                                 gen_cb cb, void *ud, double *gen_time) {
     char buf[512];
@@ -303,15 +317,7 @@ rewind:
         }
     }
 done:
-    if (e->schema && !e->sv.done) {
-        char cbuf[4096];
-        int cn = sval_close(&e->sv, cbuf, sizeof(cbuf));
-        if (cn > 0 && cb) cb(ud, cbuf, cn);
-    } else if (!e->schema && e->json_mode && !e->jv.done) {
-        char cbuf[600];
-        int cn = jsonv_close(&e->jv, cbuf, sizeof(cbuf));
-        if (cn > 0 && cb) cb(ud, cbuf, cn);
-    }
+    constraint_close(e, cb, ud);
     if (gen_time) *gen_time = now_s() - t0;
     SPEC_STATS();
     #undef SPEC_STATS
@@ -359,17 +365,7 @@ int engine_generate(engine *e, float *logits, int max_new,
         if (e->hist && e->pos < e->m->n_ctx) e->hist[e->pos] = tok;
         logits = model_forward(e->m, tok, e->pos++);
     }
-    if (e->schema && !e->sv.done) {
-        // budget expired mid-document: complete it per the schema
-        char cbuf[4096];
-        int cn = sval_close(&e->sv, cbuf, sizeof(cbuf));
-        if (cn > 0 && cb) cb(ud, cbuf, cn); // finish_reason stays "length"
-    } else if (!e->schema && e->json_mode && !e->jv.done) {
-        // budget expired mid-object: emit a minimal valid completion
-        char cbuf[600];
-        int cn = jsonv_close(&e->jv, cbuf, sizeof(cbuf));
-        if (cn > 0 && cb) cb(ud, cbuf, cn); // finish_reason stays "length"
-    }
+    constraint_close(e, cb, ud);
     if (gen_time) *gen_time = now_s() - t0;
     return n_gen;
 }
