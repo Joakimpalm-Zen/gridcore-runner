@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <math.h>
 
 typedef struct { const char *p, *end; int depth; } jcur;
 
@@ -120,6 +122,50 @@ fail:
 
 static jv *parse_value(jcur *c);
 
+static jv *parse_number(jcur *c) {
+    const char *start = c->p;
+    const char *p = start;
+    if (p < c->end && *p == '-') p++;
+    if (p >= c->end) return NULL;
+    if (*p == '0') {
+        p++;
+        if (p < c->end && *p >= '0' && *p <= '9') return NULL;
+    } else if (*p >= '1' && *p <= '9') {
+        do { p++; } while (p < c->end && *p >= '0' && *p <= '9');
+    } else {
+        return NULL;
+    }
+    if (p < c->end && *p == '.') {
+        p++;
+        if (p >= c->end || *p < '0' || *p > '9') return NULL;
+        do { p++; } while (p < c->end && *p >= '0' && *p <= '9');
+    }
+    if (p < c->end && (*p == 'e' || *p == 'E')) {
+        p++;
+        if (p < c->end && (*p == '+' || *p == '-')) p++;
+        if (p >= c->end || *p < '0' || *p > '9') return NULL;
+        do { p++; } while (p < c->end && *p >= '0' && *p <= '9');
+    }
+
+    size_t n = (size_t)(p - start);
+    char local[128];
+    char *tmp = n < sizeof(local) ? local : malloc(n + 1);
+    if (!tmp) return NULL;
+    memcpy(tmp, start, n);
+    tmp[n] = 0;
+    char *endp = NULL;
+    double d = strtod(tmp, &endp);
+    bool ok = endp == tmp + n && isfinite(d);
+    if (tmp != local) free(tmp);
+    if (!ok) return NULL;
+
+    jv *r = jv_new(J_NUM);
+    if (!r) return NULL;
+    r->num = d;
+    c->p = p;
+    return r;
+}
+
 static jv *parse_container(jcur *c, char open) {
     char close = open == '{' ? '}' : ']';
     jv *v = jv_new(open == '{' ? J_OBJ : J_ARR);
@@ -172,11 +218,7 @@ static jv *parse_value(jcur *c) {
         } else if (ch == 'n' && c->end - c->p >= 4 && !memcmp(c->p, "null", 4)) {
             r = jv_new(J_NULL); c->p += 4;
         } else if (ch == '-' || (ch >= '0' && ch <= '9')) {
-            char *endp = NULL;
-            double d = strtod(c->p, &endp);
-            if (endp && endp > c->p && endp <= c->end) {
-                r = jv_new(J_NUM); r->num = d; c->p = endp;
-            }
+            r = parse_number(c);
         }
     }
     c->depth--;
@@ -294,7 +336,8 @@ void jv_dump(const jv *v, sbuf *o) {
     case J_NULL: sb_lit(o, "null"); break;
     case J_BOOL: sb_lit(o, v->b ? "true" : "false"); break;
     case J_NUM:
-        if (v->num == (double)(long long)v->num)
+        if (v->num >= (double)LLONG_MIN && v->num <= (double)LLONG_MAX &&
+            v->num == (double)(long long)v->num)
             sb_fmt(o, "%lld", (long long)v->num);
         else
             sb_fmt(o, "%.10g", v->num);

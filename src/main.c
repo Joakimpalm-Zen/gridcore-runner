@@ -306,6 +306,7 @@ int main(int argc, char **argv) {
         fseek(sf, 0, SEEK_SET);
         char *sbuf = malloc(ssz + 1);
         ssz = (long)fread(sbuf, 1, ssz, sf);
+        sbuf[ssz] = 0;
         fclose(sf);
         struct jv *sj = json_parse(sbuf, ssz);
         free(sbuf);

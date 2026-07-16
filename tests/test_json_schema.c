@@ -5,6 +5,23 @@
 #include <stdio.h>
 #include <string.h>
 
+static void test_strict_bounded_numbers(void) {
+    const char *bad[] = { "01", "1.", "-.1", "1e", "-nan", "1e9999" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++)
+        assert(json_parse(bad[i], strlen(bad[i])) == NULL);
+
+    const char bounded[] = { '1', '2' }; // deliberately not NUL-terminated
+    jv *v = json_parse(bounded, 1);
+    assert(v != NULL);
+    assert(v->type == J_NUM && v->num == 1.0);
+    jv_free(v);
+
+    v = json_parse("-1.25e+3", 8);
+    assert(v != NULL);
+    assert(v->type == J_NUM && v->num == -1250.0);
+    jv_free(v);
+}
+
 static void test_json_close_partial_string(void) {
     jsonv v;
     jsonv_init(&v);
@@ -267,6 +284,7 @@ static void test_schema_rejects_discriminator_after_conditional_args(void) {
 }
 
 int main(void) {
+    test_strict_bounded_numbers();
     test_json_close_partial_string();
     test_schema_required_close();
     test_schema_rejects_bad_bounds();
