@@ -8,6 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
+#include <float.h>
+#include <limits.h>
+#include <math.h>
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults, int port, int parallel,
@@ -15,6 +19,42 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 int quantize_gguf(const char *in_path, const char *out_path, int target);
 
 // ---------------------------------------------------------------- misc
+
+static long long int_arg(const char *opt, const char *s, long long min,
+                         long long max) {
+    char *end = NULL;
+    errno = 0;
+    long long v = strtoll(s, &end, 10);
+    if (errno || end == s || *end || v < min || v > max) {
+        fprintf(stderr, "error: %s expects an integer in [%lld, %lld]\n",
+                opt, min, max);
+        exit(1);
+    }
+    return v;
+}
+
+static uint64_t u64_arg(const char *opt, const char *s) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (errno || end == s || *end || *s == '-') {
+        fprintf(stderr, "error: %s expects an unsigned integer\n", opt);
+        exit(1);
+    }
+    return (uint64_t)v;
+}
+
+static double float_arg(const char *opt, const char *s, double min, double max) {
+    char *end = NULL;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (errno || end == s || *end || !isfinite(v) || v < min || v > max) {
+        fprintf(stderr, "error: %s expects a finite number in [%g, %g]\n",
+                opt, min, max);
+        exit(1);
+    }
+    return v;
+}
 
 static char *unescape(const char *s) {
     char *out = malloc(strlen(s) + 1);
@@ -139,42 +179,52 @@ int main(int argc, char **argv) {
         if      (!strcmp(a, "-m")) model_path = NEXT;
         else if (!strcmp(a, "-p")) prompt = NEXT;
         else if (!strcmp(a, "-f")) prompt_file = NEXT;
-        else if (!strcmp(a, "-n")) n_predict = atoi(NEXT);
-        else if (!strcmp(a, "-c")) mp.n_ctx = atoi(NEXT);
-        else if (!strcmp(a, "-b")) mp.n_batch = atoi(NEXT);
-        else if (!strcmp(a, "-t")) n_threads = atoi(NEXT);
-        else if (!strcmp(a, "-s")) smp.rng = strtoull(NEXT, NULL, 10);
+        else if (!strcmp(a, "-n")) n_predict = (int)int_arg(a, NEXT, -1, INT_MAX);
+        else if (!strcmp(a, "-c")) mp.n_ctx = (int)int_arg(a, NEXT, 0, INT_MAX);
+        else if (!strcmp(a, "-b")) mp.n_batch = (int)int_arg(a, NEXT, 0, INT_MAX);
+        else if (!strcmp(a, "-t")) n_threads = (int)int_arg(a, NEXT, 0, INT_MAX);
+        else if (!strcmp(a, "-s")) smp.rng = u64_arg(a, NEXT);
         else if (!strcmp(a, "-i")) interactive = true;
         else if (!strcmp(a, "-v")) verbose = true;
         else if (!strcmp(a, "--serve")) serve = true;
-        else if (!strcmp(a, "--port")) port = atoi(NEXT);
-        else if (!strcmp(a, "--parallel")) parallel = atoi(NEXT);
-        else if (!strcmp(a, "--ttl")) ttl = atoi(NEXT);
+        else if (!strcmp(a, "--port")) port = (int)int_arg(a, NEXT, 1, 65535);
+        else if (!strcmp(a, "--parallel")) parallel = (int)int_arg(a, NEXT, 1, 16);
+        else if (!strcmp(a, "--ttl")) ttl = (int)int_arg(a, NEXT, -1, INT_MAX);
         else if (!strcmp(a, "--json")) json_mode = true;
         else if (!strcmp(a, "--json-schema")) schema_file = NEXT;
         else if (!strcmp(a, "--quantize")) quant_out = NEXT;
         else if (!strcmp(a, "--quant")) quant_type = NEXT;
-        else if (!strcmp(a, "--temp")) smp.temp = atof(NEXT);
-        else if (!strcmp(a, "--top-k")) smp.top_k = atoi(NEXT);
-        else if (!strcmp(a, "--top-p")) smp.top_p = atof(NEXT);
-        else if (!strcmp(a, "--min-p")) smp.min_p = atof(NEXT);
-        else if (!strcmp(a, "--repeat-penalty")) smp.repeat_penalty = atof(NEXT);
-        else if (!strcmp(a, "--rope-scale")) mp.rope_scale = atof(NEXT);
-        else if (!strcmp(a, "--rope-base")) mp.rope_base = atof(NEXT);
+        else if (!strcmp(a, "--temp")) smp.temp = (float)float_arg(a, NEXT, 0, FLT_MAX);
+        else if (!strcmp(a, "--top-k")) smp.top_k = (int)int_arg(a, NEXT, 0, INT_MAX);
+        else if (!strcmp(a, "--top-p")) smp.top_p = (float)float_arg(a, NEXT, 0, 1);
+        else if (!strcmp(a, "--min-p")) smp.min_p = (float)float_arg(a, NEXT, 0, 1);
+        else if (!strcmp(a, "--repeat-penalty")) smp.repeat_penalty = (float)float_arg(a, NEXT, FLT_MIN, FLT_MAX);
+        else if (!strcmp(a, "--rope-scale")) mp.rope_scale = (float)float_arg(a, NEXT, 0, FLT_MAX);
+        else if (!strcmp(a, "--rope-base")) mp.rope_base = (float)float_arg(a, NEXT, 0, FLT_MAX);
         else if (!strcmp(a, "--system")) system_prompt = NEXT;
         else if (!strcmp(a, "--chat-template")) tmpl_arg = NEXT;
         else if (!strcmp(a, "--no-bos")) no_bos = true;
         else if (!strcmp(a, "--ignore-eos")) ignore_eos = true;
-        else if (!strcmp(a, "--gpu")) mp.gpu_mode = strcmp(NEXT, "off") ? GPU_AUTO : GPU_OFF;
-        else if (!strcmp(a, "--kv"))  mp.kv_q8 = strcmp(NEXT, "q8") == 0;
+        else if (!strcmp(a, "--gpu")) {
+            const char *v = NEXT;
+            if (!strcmp(v, "auto")) mp.gpu_mode = GPU_AUTO;
+            else if (!strcmp(v, "off")) mp.gpu_mode = GPU_OFF;
+            else { fprintf(stderr, "error: --gpu expects auto or off\n"); return 1; }
+        }
+        else if (!strcmp(a, "--kv")) {
+            const char *v = NEXT;
+            if (!strcmp(v, "q8")) mp.kv_q8 = true;
+            else if (!strcmp(v, "f16")) mp.kv_q8 = false;
+            else { fprintf(stderr, "error: --kv expects f16 or q8\n"); return 1; }
+        }
         else if (!strcmp(a, "--draft"))   draft_path = NEXT;
-        else if (!strcmp(a, "--draft-k")) draft_k = atoi(NEXT);
+        else if (!strcmp(a, "--draft-k")) draft_k = (int)int_arg(a, NEXT, 1, 15);
         else if (!strcmp(a, "--bench-json")) bench_json = true;
-        else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = atoi(NEXT);
-        else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = atoi(NEXT);
-        else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = atoi(NEXT);
-        else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = atoi(NEXT);
-        else if (!strcmp(a, "--parent-pid")) parent_pid = strtol(NEXT, NULL, 10);
+        else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
+        else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = (int)int_arg(a, NEXT, 0, 100);
+        else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
+        else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = (int)int_arg(a, NEXT, 0, 100);
+        else if (!strcmp(a, "--parent-pid")) parent_pid = (long)int_arg(a, NEXT, 1, LONG_MAX);
         else if (!strcmp(a, "--caps")) caps = true;
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(argv[0]); return 1; }

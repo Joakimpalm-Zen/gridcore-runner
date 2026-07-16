@@ -16,6 +16,13 @@ jobs:
       - uses: actions/checkout@v5
       - name: build
         run: make
+      - name: reject invalid CLI values
+        run: |
+          for args in '--port 70000' '--gpu typo' '--kv typo' '--reserve 101'; do
+            if ./runner --caps $args > /dev/null 2>&1; then
+              echo "unexpectedly accepted $args"; exit 1
+            fi
+          done
       - name: make test model
         run: python3 scripts/make-test-model.py test.gguf
       - name: focused json/schema tests
@@ -81,6 +88,8 @@ jobs:
             | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d['data'])==2 and len(d['data'][0]['embedding'])==64; print('embeddings ok')"
           curl -sf -d '{"messages":[{"role":"user","content":"logprobs"}],"max_tokens":999999,"temperature":0,"logprobs":true,"top_logprobs":2}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['usage']['completion_tokens'] < 256; print('max_tokens clamp ok')"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -d '{"prompt":"x","top_k":1e300}' http://127.0.0.1:8123/v1/completions)" = 400 ]
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -d '{"prompt":"x","keep_alive":1e300}' http://127.0.0.1:8123/v1/completions)" = 400 ]
           kill %1
       - name: smoke test (health bypasses a busy slot)
         # a stalled request pins the only slot; /health and /v1/models must
@@ -215,6 +224,13 @@ jobs:
             mingw-w64-ucrt-x86_64-python
       - name: build
         run: make
+      - name: reject invalid CLI values
+        run: |
+          for args in '--port 70000' '--gpu typo' '--kv typo' '--reserve 101'; do
+            if ./runner.exe --caps $args > /dev/null 2>&1; then
+              echo "unexpectedly accepted $args"; exit 1
+            fi
+          done
       - name: make test model
         run: python3 scripts/make-test-model.py test.gguf
       - name: focused json/schema tests
@@ -259,6 +275,7 @@ jobs:
           curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['features']['json_schema']; print('capabilities ok')"
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'runner_telemetry' in d; print('server valid json')"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -d '{"prompt":"x","top_k":1e300}' http://127.0.0.1:8123/v1/completions)" = 400 ]
           kill %1
       - name: smoke test (server, backslash model path)
         # regression: a C:\...\model.gguf -m path used to land unescaped in the

@@ -21,6 +21,8 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <float.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -321,12 +323,31 @@ static int gen_collect(void *ud, const char *bytes, int n) {
     return think_feed(&g->ts, bytes, n, gen_emit, g);
 }
 
+static bool request_number(jv *req, const char *key, double dflt,
+                           double min, double max, double *out) {
+    jv *v = jv_get(req, key);
+    double n = v && v->type == J_NUM ? v->num : dflt;
+    if (!isfinite(n) || n < min || n > max) return false;
+    *out = n;
+    return true;
+}
+
 static int request_max_tokens(jv *req, int dflt) {
     double v = jv_num(jv_get(req, "max_tokens"),
                jv_num(jv_get(req, "max_completion_tokens"), dflt));
+    if (!isfinite(v)) return -2;
     if (v < 0) return -1;
     if (v > INT_MAX) return INT_MAX;
     return (int)v;
+}
+
+static bool request_keep_alive(jv *req, bool *present, int *seconds) {
+    jv *v = jv_get(req, "keep_alive");
+    *present = v && v->type == J_NUM;
+    if (!*present) return true;
+    if (!isfinite(v->num) || v->num > INT_MAX) return false;
+    *seconds = v->num < 0 ? -1 : (int)v->num;
+    return true;
 }
 
 // run one completion on a slot and write the HTTP response
@@ -338,20 +359,37 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     // per-request sampling params start from the server defaults every time —
     // one request's overrides must not leak into the next on this slot; only
     // the rng STATE carries across so sampling sequences stay diverse
+    double temp, top_p, min_p, top_k, seed;
+    if (!request_number(req, "temperature", s->smp_base.temp, 0, FLT_MAX, &temp) ||
+        !request_number(req, "top_p", s->smp_base.top_p, 0, 1, &top_p) ||
+        !request_number(req, "min_p", s->smp_base.min_p, 0, 1, &min_p) ||
+        !request_number(req, "top_k", s->smp_base.top_k, 0, INT_MAX, &top_k) ||
+        !request_number(req, "seed", 0, 0, 18446744073709549568.0, &seed)) {
+        send_error(fd, 400, "numeric sampling parameter out of range");
+        return;
+    }
     uint64_t rng_state = s->smp.rng;
     s->smp = s->smp_base;
     s->smp.rng = rng_state;
-    s->smp.temp = (float)jv_num(jv_get(req, "temperature"), s->smp.temp);
-    s->smp.top_p = (float)jv_num(jv_get(req, "top_p"), s->smp.top_p);
-    s->smp.min_p = (float)jv_num(jv_get(req, "min_p"), s->smp.min_p);
-    s->smp.top_k = (int)jv_num(jv_get(req, "top_k"), s->smp.top_k);
-    double seed = jv_num(jv_get(req, "seed"), 0);
+    s->smp.temp = (float)temp;
+    s->smp.top_p = (float)top_p;
+    s->smp.min_p = (float)min_p;
+    s->smp.top_k = (int)top_k;
     if (seed > 0) s->smp.rng = (uint64_t)seed;
     int max_tokens = request_max_tokens(req, SV.n_predict_cap);
+    if (max_tokens == -2) {
+        send_error(fd, 400, "max_tokens out of range");
+        return;
+    }
     bool stream = jv_bool(jv_get(req, "stream"), false);
     // OpenAI logprobs (chat, buffered responses only)
     bool want_lp = chat && !stream && jv_bool(jv_get(req, "logprobs"), false);
-    int lp_n = want_lp ? (int)jv_num(jv_get(req, "top_logprobs"), 0) : 0;
+    double lp_num = 0;
+    if (want_lp && !request_number(req, "top_logprobs", 0, 0, 20, &lp_num)) {
+        send_error(fd, 400, "top_logprobs out of range");
+        return;
+    }
+    int lp_n = (int)lp_num;
     if (lp_n < 0) lp_n = 0;
     if (lp_n > 20) lp_n = 20;
     jv *rf = jv_get(req, "response_format");
@@ -755,6 +793,14 @@ static void handle_conn(slot_t *s, int fd) {
         if (!req) {
             send_error(fd, 400, "invalid JSON body");
         } else {
+            bool has_keep_alive = false;
+            int keep_alive = 0;
+            if (!request_keep_alive(req, &has_keep_alive, &keep_alive)) {
+                send_error(fd, 400, "keep_alive out of range");
+                jv_free(req);
+                free(body);
+                return;
+            }
             atomic_store(&SV.busy, true);
             bool ok = true;
             if (SV.n_reg > 0 &&
@@ -768,12 +814,10 @@ static void handle_conn(slot_t *s, int fd) {
                 else handle_completion(s, fd, req);
                 // Ollama-style keep_alive: seconds of idle before the model
                 // unloads (swap mode) — 0 unloads now, negative pins forever
-                jv *ka = jv_get(req, "keep_alive");
-                if (ka && SV.n_reg > 0) {
-                    double v = jv_num(ka, (double)SV.ttl);
+                if (has_keep_alive && SV.n_reg > 0) {
                     pthread_mutex_lock(&SV.swap_mu);
-                    if (v == 0) unload_resident();
-                    else SV.ttl = v < 0 ? 0 : (int)v;
+                    if (keep_alive == 0) unload_resident();
+                    else SV.ttl = keep_alive < 0 ? 0 : keep_alive;
                     pthread_mutex_unlock(&SV.swap_mu);
                 }
             }
