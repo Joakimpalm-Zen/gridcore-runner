@@ -4,8 +4,10 @@ import io
 import json
 import os
 import socket
+import tempfile
 import unittest
 import urllib.error
+from pathlib import Path
 
 from gridcore_runner import (
     ManagedRunner,
@@ -13,10 +15,52 @@ from gridcore_runner import (
     RunnerProtocolError,
     RunnerStallError,
     ServerLaunch,
+    StartupLease,
     build_server_args,
     model_registry_argument,
     query_system_capabilities,
 )
+
+
+class StartupLeaseTests(unittest.TestCase):
+    def test_live_owner_keeps_a_second_claim_from_overwriting_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runner.lease"
+            first = StartupLease(path)
+            second = StartupLease(path)
+
+            self.assertTrue(first.acquire())
+            original = (path / "owner.json").read_text(encoding="utf-8")
+            self.assertFalse(second.acquire())
+            second.release()
+            self.assertEqual((path / "owner.json").read_text(encoding="utf-8"), original)
+            first.release()
+            self.assertFalse(path.exists())
+
+    def test_dead_owner_record_is_reclaimed_without_reaping_a_child(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runner.lease"
+            path.write_text(
+                json.dumps({"owner_pid": 2147483647, "token": "stale"}),
+                encoding="utf-8",
+            )
+
+            lease = StartupLease(path)
+
+            self.assertTrue(lease.acquire())
+            self.assertNotEqual(json.loads((path / "owner.json").read_text())["token"], "stale")
+            lease.release()
+
+    def test_release_is_token_safe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runner.lease"
+            owner = StartupLease(path)
+            non_owner = StartupLease(path)
+
+            self.assertTrue(owner.acquire())
+            non_owner.release()
+
+            self.assertTrue(path.exists())
 
 
 class _Response:

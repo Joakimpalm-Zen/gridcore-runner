@@ -12,6 +12,7 @@ from .process import (
     model_registry_argument,
     query_system_capabilities,
 )
+from .lease import StartupLease
 
 __all__ = [
     "ManagedRunner",
@@ -21,6 +22,7 @@ __all__ = [
     "RunnerStallError",
     "ServerLaunch",
     "StreamResult",
+    "StartupLease",
     "build_server_args",
     "model_registry_argument",
     "query_system_capabilities",
