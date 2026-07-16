@@ -346,7 +346,9 @@ void   schema_free(snode *n);
 typedef struct {
     const snode *node;
     uint8_t  phase, sub;
-    int16_t  idx, lit_pos;
+    int16_t  idx;
+    int32_t  lit_pos;   // string chars / literal bytes seen (int32: file-sized strings)
+    uint16_t disc;      // this object's discriminator choice + 1; 0 = not chosen yet
     uint64_t alive;
 } sframe;
 
@@ -354,7 +356,6 @@ typedef struct {
     sframe stack[48];
     int    depth;
     bool   done;
-    int    disc_choice; // selected discriminator alternative, or -1
     int    last_enum;   // enum literal completed by the most recent child
     jsonv  any;      // generic submachine for open {} schema nodes
 } sval;

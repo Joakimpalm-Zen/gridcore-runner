@@ -164,6 +164,25 @@ static snode *compile_discriminated_action(jv *alts, char *err, int errcap,
             }
         }
     }
+    // the compiled object carries one required set, so every alternative
+    // must declare the same one — a per-branch difference would be enforced
+    // as alternative 0's rules on all branches
+    for (int a = 1; a < alts->n; a++) {
+        jv *other = jv_get(alts->items[a], "required");
+        int rn = req && req->type == J_ARR ? req->n : 0;
+        int on = other && other->type == J_ARR ? other->n : 0;
+        bool same = rn == on;
+        for (int r = 0; same && r < rn; r++) {
+            const char *k0 = jv_str(req->items[r], NULL);
+            const char *k1 = jv_str(other->items[r], NULL);
+            same = k0 && k1 && !strcmp(k0, k1);
+        }
+        if (!same) {
+            snprintf(err, errcap, "oneOf alternatives declare different required keys");
+            schema_free(n);
+            return NULL;
+        }
+    }
     return n;
 }
 
@@ -248,6 +267,27 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
     return NULL;
 }
 
+// first bytes that can start a value of node `a`; false when the node cannot
+// be dispatched by first byte at all (nested unions/conditionals, open any)
+static bool union_start_bytes(const snode *a, bool set[256]) {
+    switch (a->kind) {
+        case SN_STR: set['"'] = true; return true;
+        case SN_ENUM:
+            for (int i = 0; i < a->n_lits; i++)
+                set[(uint8_t)a->lits[i][0]] = true;
+            return true;
+        case SN_OBJ: set['{'] = true; return true;
+        case SN_ARR: set['['] = true; return true;
+        case SN_BOOL: set['t'] = true; set['f'] = true; return true;
+        case SN_NULL: set['n'] = true; return true;
+        case SN_NUM: case SN_INT:
+            set['-'] = true;
+            for (int d = '0'; d <= '9'; d++) set[d] = true;
+            return true;
+        default: return false;
+    }
+}
+
 static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
     if (!alts || alts->type != J_ARR || alts->n <= 0) {
         snprintf(err, errcap, "oneOf/anyOf must be a non-empty array");
@@ -288,6 +328,30 @@ static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
         n->alts[n->n_alts] = compile_node(alts->items[i], err, errcap, depth + 1);
         if (!n->alts[n->n_alts]) { schema_free(n); return NULL; }
         n->n_alts++;
+    }
+    // the validator dispatches a union on the first byte of the value —
+    // alternatives it could never select must fail here, at request time,
+    // not silently mis-constrain sampling later
+    if (n->n_alts > 1) {
+        bool seen[256] = { false };
+        for (int i = 0; i < n->n_alts; i++) {
+            bool mine[256] = { false };
+            if (!union_start_bytes(n->alts[i], mine)) {
+                snprintf(err, errcap,
+                         "oneOf alternative %d cannot be dispatched by its first byte", i);
+                schema_free(n);
+                return NULL;
+            }
+            for (int b = 0; b < 256; b++) {
+                if (mine[b] && seen[b]) {
+                    snprintf(err, errcap,
+                             "oneOf alternatives are ambiguous (share a starting byte)");
+                    schema_free(n);
+                    return NULL;
+                }
+                if (mine[b]) seen[b] = true;
+            }
+        }
     }
     return n;
 }
@@ -392,8 +456,16 @@ void sval_init(sval *v, const snode *root) {
     memset(v, 0, sizeof(*v));
     v->stack[0] = (sframe){ .node = root, .phase = P_START };
     v->depth = 1;
-    v->disc_choice = -1;
     v->last_enum = -1;
+}
+
+// discriminator choice for the frame at stack index `at`: an SN_COND frame
+// reads its owning object (the frame below), everything else its own record
+static int frame_choice(const sval *v, int at) {
+    const sframe *f = &v->stack[at];
+    if (f->node->kind == SN_COND)
+        return at > 0 ? (int)v->stack[at - 1].disc - 1 : -1;
+    return (int)f->disc - 1;
 }
 
 // key candidates from prop index `from`: every prop until (and including)
@@ -421,9 +493,9 @@ static void frame_done(sval *v) {
     if (v->depth == 0) { v->done = true; return; }
     sframe *f = &v->stack[v->depth - 1];
     if (f->node->kind == SN_OBJ) {
-        if (f->sub < f->node->n_props &&
+        if (f->sub < f->node->n_props && v->last_enum >= 0 &&
             !strcmp(f->node->keys[f->sub], "tool"))
-            v->disc_choice = v->last_enum;
+            f->disc = (uint16_t)(v->last_enum + 1);
         f->phase = P_OBJ_NEXT;
     } else {
         f->phase = P_ARR_NEXT; // SN_ARR
@@ -444,7 +516,10 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
         const snode *a = u->alts[i];
         switch (a->kind) {
             case SN_STR:  if (c == '"') return a; break;
-            case SN_ENUM: if (c == a->lits[0][0]) return a; break; // usually strings
+            case SN_ENUM:
+                for (int j = 0; j < a->n_lits; j++)
+                    if (c == a->lits[j][0]) return a;
+                break;
             case SN_OBJ:  if (c == '{') return a; break;
             case SN_ARR:  if (c == '[') return a; break;
             case SN_BOOL: if (c == 't' || c == 'f') return a; break;
@@ -553,10 +628,12 @@ static int feed_byte(sval *v, uint8_t c) {
     case P_START:
         if (is_ws(c)) return 0;
         switch (n->kind) {
-        case SN_COND:
-            if (v->disc_choice < 0 || v->disc_choice >= n->n_alts) return -1;
-            v->stack[v->depth - 1].node = n->alts[v->disc_choice];
+        case SN_COND: {
+            int choice = frame_choice(v, v->depth - 1);
+            if (choice < 0 || choice >= n->n_alts) return -1;
+            v->stack[v->depth - 1].node = n->alts[choice];
             return feed_byte(v, c);
+        }
         case SN_UNION: {
             const snode *alt = pick_alt(n, c);
             if (!alt) return -1;
@@ -596,6 +673,11 @@ static int feed_byte(sval *v, uint8_t c) {
         }
 
     case P_STR: {
+        // a full string at maxLength admits only the closing quote — reject an
+        // escape opener up front so a close() can never overrun the bound
+        if (f->sub == 0 && c == '\\' &&
+            n->max_items >= 0 && f->lit_pos >= n->max_items)
+            return -1;
         int r = str_byte(c, &f->sub);
         if (r < 0) return -1;
         if (r == 1) {
@@ -808,7 +890,9 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
                 if (!first) eq_putc(q, ',');
                 first = false;
                 eq_putc(q, '"'); eq_put(q, n->keys[i]); eq_put(q, "\":");
-                emit_min_choice(q, n->props[i], depth + 1, choice);
+                // a fresh object emits its own discriminator as lits[0], so
+                // any SN_COND inside must follow alternative 0, not `choice`
+                emit_min_choice(q, n->props[i], depth + 1, 0);
             }
             eq_putc(q, '}');
             break;
@@ -846,16 +930,17 @@ int sval_close(sval *v, char *out, int cap) {
     // nothing generated at all: emit a full minimal document
     if (v->depth == 1 && v->stack[0].phase == P_START &&
         v->stack[0].node->kind != SN_ANY) {
-        emit_min_choice(&q, v->stack[0].node, 0, v->disc_choice);
+        emit_min_choice(&q, v->stack[0].node, 0, -1);
         out[q.n] = 0;
         return q.n;
     }
     while (v->depth > 0) {
         sframe *f = &v->stack[v->depth - 1];
         const snode *n = f->node;
+        int choice = frame_choice(v, v->depth - 1);
         switch (n->kind == SN_ANY ? P_STR + 100 : f->phase) {
         case P_STR + 100: { // any-subtree: let the generic machine close
-            if (f->phase == P_START) { emit_min_choice(&q, n, 0, v->disc_choice); break; }
+            if (f->phase == P_START) { emit_min_choice(&q, n, 0, -1); break; }
             char tmp[512];
             int cn = jsonv_close(&v->any, tmp, sizeof(tmp));
             if (cn > 0) eq_put(&q, tmp);
@@ -863,7 +948,7 @@ int sval_close(sval *v, char *out, int cap) {
             break;
         }
         case P_START:
-            emit_min_choice(&q, n, 0, v->disc_choice);
+            emit_min_choice(&q, n, 0, choice);
             break;
         case P_STR:
             if (f->sub == 1) eq_putc(&q, 'n');           // dangling backslash
@@ -881,22 +966,33 @@ int sval_close(sval *v, char *out, int cap) {
             const char *const *lits = n->kind == SN_ENUM ? (const char *const *)n->lits :
                                       n->kind == SN_BOOL ? bools : nulls;
             int cnt = n->kind == SN_ENUM ? n->n_lits : (n->kind == SN_BOOL ? 2 : 1);
+            int pick = -1;
             if (n->kind == SN_ENUM && f->sub) {
-                eq_put(&q, lits[f->sub - 1] + f->lit_pos);
-                break;
+                pick = f->sub - 1;
+            } else {
+                for (int i = 0; i < cnt; i++)
+                    if (f->alive & (1ull << i)) { pick = i; break; }
             }
-            for (int i = 0; i < cnt; i++)
-                if (f->alive & (1ull << i)) { eq_put(&q, lits[i] + f->lit_pos); break; }
+            if (pick < 0) break;
+            eq_put(&q, lits[pick] + f->lit_pos);
+            // finishing a discriminator literal decides the parent's choice —
+            // the args emitted next must come from the same alternative
+            if (n->kind == SN_ENUM && v->depth >= 2) {
+                sframe *pf = &v->stack[v->depth - 2];
+                if (pf->node->kind == SN_OBJ && pf->sub < pf->node->n_props &&
+                    !strcmp(pf->node->keys[pf->sub], "tool"))
+                    pf->disc = (uint16_t)(pick + 1);
+            }
             break;
         }
         case P_NUM:
             if (!num_complete(f->sub)) eq_putc(&q, '0');
             break;
         case P_OBJ_KEY1:
-            close_obj(&q, n, f->idx, false, false, v->disc_choice);
+            close_obj(&q, n, f->idx, false, false, choice);
             break;
         case P_OBJ_KEY: // a ',' was already consumed
-            close_obj(&q, n, f->idx, false, true, v->disc_choice);
+            close_obj(&q, n, f->idx, false, true, choice);
             break;
         case P_OBJ_INKEY: {
             // finish the lowest still-alive candidate key, give it a value
@@ -904,26 +1000,26 @@ int sval_close(sval *v, char *out, int cap) {
                 if (!(f->alive & (1ull << i))) continue;
                 eq_put(&q, n->keys[i] + f->lit_pos);
                 eq_put(&q, "\":");
-                emit_min_choice(&q, n->props[i], 0, v->disc_choice);
+                emit_min_choice(&q, n->props[i], 0, choice);
                 f->idx = i + 1;
                 break;
             }
-            close_obj(&q, n, f->idx, true, false, v->disc_choice);
+            close_obj(&q, n, f->idx, true, false, choice);
             break;
         }
         case P_OBJ_COLON:
             eq_putc(&q, ':');
-            emit_min_choice(&q, n->props[f->sub], 0, v->disc_choice);
-            close_obj(&q, n, f->idx, true, false, v->disc_choice);
+            emit_min_choice(&q, n->props[f->sub], 0, choice);
+            close_obj(&q, n, f->idx, true, false, choice);
             break;
         case P_OBJ_NEXT: // a value just completed, comma needed before more
-            close_obj(&q, n, f->idx, true, false, v->disc_choice);
+            close_obj(&q, n, f->idx, true, false, choice);
             break;
         case P_ARR_FIRST:
         case P_ARR_NEXT:
             for (int i = f->idx; i < n->min_items; i++) {
                 if (i > 0 || f->phase == P_ARR_NEXT) eq_putc(&q, ',');
-                emit_min_choice(&q, n->items, 0, v->disc_choice);
+                emit_min_choice(&q, n->items, 0, -1);
             }
             eq_putc(&q, ']');
             break;

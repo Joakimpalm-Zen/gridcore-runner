@@ -277,6 +277,209 @@ static void test_schema_discriminated_action_args(void) {
     jv_free(schema_json);
 }
 
+static void test_schema_union_dispatch_rules(void) {
+    // ambiguous alternatives (two object shapes) must fail at compile time
+    const char *dup =
+        "{\"oneOf\":[{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}},"
+        "{\"type\":\"object\",\"properties\":{\"b\":{\"type\":\"string\"}}}]}";
+    jv *j = json_parse(dup, strlen(dup));
+    assert(j != NULL);
+    char err[128];
+    assert(schema_compile(j, err, sizeof(err)) == NULL);
+    jv_free(j);
+
+    // nested oneOf inside a union alternative is not dispatchable
+    const char *nested =
+        "{\"oneOf\":[{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]},"
+        "{\"type\":\"boolean\"}]}";
+    j = json_parse(nested, strlen(nested));
+    assert(j != NULL);
+    assert(schema_compile(j, err, sizeof(err)) == NULL);
+    jv_free(j);
+
+    // a mixed-first-byte enum alternative must reach ALL its literals
+    const char *mixed =
+        "{\"oneOf\":[{\"enum\":[1,\"a\"]},{\"type\":\"boolean\"}]}";
+    j = json_parse(mixed, strlen(mixed));
+    assert(j != NULL);
+    snode *schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    sval v;
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "\"a\"", 3));
+    assert(v.done);
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "true", 4));
+    assert(v.done);
+    schema_free(schema);
+    jv_free(j);
+
+    // disjoint types still compile and dispatch
+    const char *ok = "{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"null\"}]}";
+    j = json_parse(ok, strlen(ok));
+    assert(j != NULL);
+    schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "null", 4));
+    assert(v.done);
+    schema_free(schema);
+    jv_free(j);
+}
+
+static void test_schema_discriminated_required_must_match(void) {
+    const char *src =
+        "{\"oneOf\":["
+        "{\"type\":\"object\",\"properties\":{"
+        "\"tool\":{\"const\":\"a\"},\"args\":{\"type\":\"object\","
+        "\"properties\":{\"x\":{\"type\":\"string\"}}}},"
+        "\"required\":[\"tool\",\"args\"]},"
+        "{\"type\":\"object\",\"properties\":{"
+        "\"tool\":{\"const\":\"b\"},\"args\":{\"type\":\"object\","
+        "\"properties\":{\"y\":{\"type\":\"string\"}}}},"
+        "\"required\":[\"tool\"]}"
+        "]}";
+    jv *j = json_parse(src, strlen(src));
+    assert(j != NULL);
+    char err[128];
+    assert(schema_compile(j, err, sizeof(err)) == NULL);
+    assert(strstr(err, "required") != NULL);
+    jv_free(j);
+}
+
+static void test_schema_long_string_value(void) {
+    // file-sized string values must not trip the length counter (a 16-bit
+    // counter would wrap past 32767 and reject the closing quote)
+    const char *src = "{\"type\":\"string\"}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "\"", 1));
+    char chunk[4096];
+    memset(chunk, 'a', sizeof(chunk));
+    for (int i = 0; i < 20; i++) // 80KB of content
+        assert(sval_feed(&v, chunk, sizeof(chunk)));
+    assert(sval_feed(&v, "\"", 1));
+    assert(v.done);
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
+static void test_schema_escape_at_maxlength_rejected(void) {
+    // at maxLength only the closing quote may follow; starting an escape
+    // there would force close() to overrun the bound to stay valid JSON
+    const char *src = "{\"type\":\"string\",\"maxLength\":3}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    sval_init(&v, schema);
+    assert(!sval_feed(&v, "\"abc\\", 5));
+
+    sval_init(&v, schema); // an escape below the bound still counts as one char
+    assert(sval_feed(&v, "\"ab\\n\"", 6));
+    assert(v.done);
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
+static void test_schema_nested_tool_key_keeps_discriminator(void) {
+    // a "tool" key inside a nested object between the discriminator and args
+    // must not overwrite the outer object's chosen alternative
+    const char *src =
+        "{\"oneOf\":["
+        "{\"type\":\"object\",\"properties\":{"
+        "\"tool\":{\"const\":\"read_file\"},"
+        "\"meta\":{\"type\":\"object\",\"properties\":{"
+        "\"tool\":{\"enum\":[\"x\",\"y\"]}},\"required\":[\"tool\"]},"
+        "\"args\":{\"type\":\"object\",\"properties\":{"
+        "\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"
+        "},\"required\":[\"tool\",\"meta\",\"args\"]},"
+        "{\"type\":\"object\",\"properties\":{"
+        "\"tool\":{\"const\":\"done\"},"
+        "\"meta\":{\"type\":\"object\",\"properties\":{"
+        "\"tool\":{\"enum\":[\"x\",\"y\"]}},\"required\":[\"tool\"]},"
+        "\"args\":{\"type\":\"object\",\"properties\":{"
+        "\"summary\":{\"type\":\"string\"}},\"required\":[\"summary\"]}"
+        "},\"required\":[\"tool\",\"meta\",\"args\"]}"
+        "]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    const char *valid = "{\"tool\":\"read_file\",\"meta\":{\"tool\":\"y\"},"
+                        "\"args\":{\"path\":\"a.txt\"}}";
+    sval_init(&v, schema);
+    assert(sval_feed(&v, valid, strlen(valid)));
+    assert(v.done);
+
+    // args from the wrong alternative must still be rejected
+    const char *invalid = "{\"tool\":\"read_file\",\"meta\":{\"tool\":\"y\"},"
+                          "\"args\":{\"summary\":\"no\"}}";
+    sval_init(&v, schema);
+    assert(!sval_feed(&v, invalid, strlen(invalid)));
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
+static void test_schema_close_mid_discriminator_matches_args(void) {
+    // aborting generation inside the second alternative's tool literal must
+    // close with that alternative's args, not alternative 0's
+    const char *src =
+        "{\"oneOf\":["
+        "{\"type\":\"object\",\"properties\":{"
+        "\"tool\":{\"const\":\"alpha\"},"
+        "\"args\":{\"type\":\"object\",\"properties\":{"
+        "\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"
+        "},\"required\":[\"tool\",\"args\"]},"
+        "{\"type\":\"object\",\"properties\":{"
+        "\"tool\":{\"const\":\"zeta\"},"
+        "\"args\":{\"type\":\"object\",\"properties\":{"
+        "\"summary\":{\"type\":\"string\"}},\"required\":[\"summary\"]}"
+        "},\"required\":[\"tool\",\"args\"]}"
+        "]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    const char *partial = "{\"tool\":\"ze"; // unambiguously alternative 1
+    sval_init(&v, schema);
+    assert(sval_feed(&v, partial, strlen(partial)));
+    char out[256];
+    int n = sval_close(&v, out, sizeof(out));
+    assert(n > 0);
+    char full[512];
+    snprintf(full, sizeof(full), "%s%s", partial, out);
+    jv *parsed = json_parse(full, strlen(full));
+    assert(parsed != NULL);
+    assert(!strcmp(jv_str(jv_get(parsed, "tool"), ""), "zeta"));
+    jv *args = jv_get(parsed, "args");
+    assert(args != NULL);
+    assert(jv_get(args, "summary") != NULL);
+    assert(jv_get(args, "path") == NULL);
+
+    jv_free(parsed);
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 static void test_schema_rejects_discriminator_after_conditional_args(void) {
     const char *src =
         "{\"oneOf\":["
@@ -313,6 +516,12 @@ int main(void) {
     test_schema_string_length_bounds_close_and_reject();
     test_schema_string_minlength_full_close();
     test_schema_discriminated_action_args();
+    test_schema_union_dispatch_rules();
+    test_schema_discriminated_required_must_match();
+    test_schema_long_string_value();
+    test_schema_escape_at_maxlength_rejected();
+    test_schema_nested_tool_key_keeps_discriminator();
+    test_schema_close_mid_discriminator_matches_args();
     test_schema_rejects_discriminator_after_conditional_args();
     puts("json/schema tests ok");
     return 0;
