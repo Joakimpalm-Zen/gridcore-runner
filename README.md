@@ -1,6 +1,7 @@
-# runner
+# Gridcore Runner
 
-A compact local LLM inference engine, written from scratch in plain C
+The inference engine of the Gridcore suite (repo: `gridcore-runner`,
+binary: `runner`). A compact local LLM inference engine, written from scratch in plain C
 (~8,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
 model files — the de-facto format for local models — and runs them on CPU
 (AVX2-accelerated) or GPU (CUDA, Metal), with a particular focus on squeezing
