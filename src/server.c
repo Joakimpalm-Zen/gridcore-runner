@@ -194,8 +194,8 @@ static int swap_to(const char *want) {
         slot_t *s = &SV.slots[0];
         fprintf(stderr, "swap: loading %s (%s)\n",
                 SV.reg[idx].name, SV.reg[idx].path);
-        s->m = malloc(sizeof(model_t));
-        s->tok = malloc(sizeof(tokenizer));
+        s->m = calloc(1, sizeof(model_t));
+        s->tok = calloc(1, sizeof(tokenizer));
         bool model_ok = s->m && model_load(s->m, SV.reg[idx].path, &SV.mp);
         bool tok_ok = model_ok && s->tok && tokenizer_init(s->tok, &s->m->gf);
         if (!model_ok || !tok_ok) {

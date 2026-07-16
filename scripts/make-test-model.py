@@ -10,9 +10,15 @@ import sys
 
 OUT = "test.gguf"
 SUPPRESS_ALL_BUT_EOS = False
+ZERO_FIRST_DIM = False
+WRAP_FIRST_OFFSET = False
 for a in sys.argv[1:]:
     if a == "--suppress-all-but-eos":
         SUPPRESS_ALL_BUT_EOS = True
+    elif a == "--zero-first-dim":
+        ZERO_FIRST_DIM = True
+    elif a == "--wrap-first-offset":
+        WRAP_FIRST_OFFSET = True
     else:
         OUT = a
 
@@ -115,11 +121,14 @@ header = struct.pack("<IIQQ", 0x46554747, 3, len(tensors), len(meta_kvs))
 
 info = b""
 offset = 0
-for name, ne, data in tensors:
+for index, (name, ne, data) in enumerate(tensors):
+    if index == 0 and ZERO_FIRST_DIM:
+        ne = [0, *ne[1:]]
     info += s(name) + struct.pack("<I", len(ne))
     for d in ne:
         info += struct.pack("<Q", d)
-    info += struct.pack("<IQ", 0, offset)  # type F32
+    stored_offset = (2**64 - 16) if index == 0 and WRAP_FIRST_OFFSET else offset
+    info += struct.pack("<IQ", 0, stored_offset)  # type F32
     offset += len(data)
     offset = (offset + 31) & ~31
 

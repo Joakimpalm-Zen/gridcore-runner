@@ -25,6 +25,18 @@ jobs:
           ./test-json-schema
       - name: smoke test (completion)
         run: ./runner -m test.gguf -p "hello" -n 8 --temp 0
+      - name: reject malformed tensor metadata
+        run: |
+          python3 scripts/make-test-model.py bad-zero.gguf --zero-first-dim
+          python3 scripts/make-test-model.py bad-offset.gguf --wrap-first-offset
+          for model in bad-zero.gguf bad-offset.gguf; do
+            set +e
+            ./runner -m "$model" -p hello -n 1 > /dev/null 2> "$model.err"
+            status=$?
+            set -e
+            [ "$status" -eq 1 ]
+            grep -q 'invalid tensor metadata' "$model.err"
+          done
       - name: smoke test (bench json)
         run: |
           ./runner -m test.gguf --bench-json -n 8 --temp 0 2>/dev/null \
@@ -212,6 +224,18 @@ jobs:
           ./test-json-schema.exe
       - name: smoke test (completion)
         run: ./runner.exe -m test.gguf -p "hello" -n 8 --temp 0
+      - name: reject malformed tensor metadata
+        run: |
+          python3 scripts/make-test-model.py bad-zero.gguf --zero-first-dim
+          python3 scripts/make-test-model.py bad-offset.gguf --wrap-first-offset
+          for model in bad-zero.gguf bad-offset.gguf; do
+            set +e
+            ./runner.exe -m "$model" -p hello -n 1 > /dev/null 2> "$model.err"
+            status=$?
+            set -e
+            [ "$status" -eq 1 ]
+            grep -q 'invalid tensor metadata' "$model.err"
+          done
       - name: smoke test (bench json)
         run: |
           ./runner.exe -m test.gguf --bench-json -n 8 --temp 0 2>/dev/null \
