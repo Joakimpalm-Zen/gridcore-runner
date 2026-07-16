@@ -10,6 +10,7 @@ from .process import (
     ServerLaunch,
     build_server_args,
     model_registry_argument,
+    query_system_capabilities,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "StreamResult",
     "build_server_args",
     "model_registry_argument",
+    "query_system_capabilities",
 ]

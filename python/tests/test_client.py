@@ -15,6 +15,7 @@ from gridcore_runner import (
     ServerLaunch,
     build_server_args,
     model_registry_argument,
+    query_system_capabilities,
 )
 
 
@@ -103,6 +104,27 @@ class EndpointTests(unittest.TestCase):
 
 
 class LaunchTests(unittest.TestCase):
+    def test_system_capabilities_are_parsed_from_runner_binary(self):
+        seen = []
+
+        class Completed:
+            stdout = json.dumps({
+                "os": "windows",
+                "arch": "x86_64",
+                "cpu_cores": 8,
+                "ram_bytes": 16 * 1024**3,
+                "gpu": {"backend": "cuda", "name": "RTX", "vram_bytes": 8 * 1024**3},
+                "quants": ["Q4_K"],
+                "gpu_quants": ["Q4_K"],
+            })
+
+        caps = query_system_capabilities(
+            "runner.exe", run=lambda args, **kwargs: seen.append((args, kwargs)) or Completed()
+        )
+
+        self.assertEqual(caps["gpu"]["backend"], "cuda")
+        self.assertEqual(seen[0][0], ["runner.exe", "--caps"])
+
     def test_registry_argument_is_stable_and_rejects_reserved_names(self):
         self.assertEqual(
             model_registry_argument({"worker": "C:/models/w.gguf", "planner": "C:/models/p.gguf"}),

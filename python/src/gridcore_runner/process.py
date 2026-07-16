@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -8,6 +9,28 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .endpoint import RunnerEndpoint
+
+
+def query_system_capabilities(
+    executable: str | Path,
+    *,
+    run: Callable[..., Any] | None = None,
+    timeout: float = 15,
+) -> dict[str, Any]:
+    """Ask the installed Runner binary what this build can execute."""
+    execute = run or subprocess.run
+    completed = execute(
+        [str(executable), "--caps"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+    data = json.loads(completed.stdout)
+    required = {"os", "arch", "cpu_cores", "ram_bytes", "gpu", "quants", "gpu_quants"}
+    if not isinstance(data, dict) or not required.issubset(data):
+        raise ValueError("runner --caps returned an incomplete capability report")
+    return data
 
 
 def model_registry_argument(models: Mapping[str, str | Path]) -> str:
