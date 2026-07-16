@@ -6,6 +6,25 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <limits.h>
+
+static inline bool checked_u64_add(uint64_t a, uint64_t b, uint64_t *out) {
+    if (b > UINT64_MAX - a) return false;
+    *out = a + b;
+    return true;
+}
+
+static inline bool checked_u64_mul(uint64_t a, uint64_t b, uint64_t *out) {
+    if (a != 0 && b > UINT64_MAX / a) return false;
+    *out = a * b;
+    return true;
+}
+
+static inline bool checked_size_mul(size_t a, size_t b, size_t *out) {
+    if (a != 0 && b > SIZE_MAX / a) return false;
+    *out = a * b;
+    return true;
+}
 
 // map a regular file read-only; returns NULL on failure (missing, empty,
 // directory, ...). The mapping outlives any internal handles.

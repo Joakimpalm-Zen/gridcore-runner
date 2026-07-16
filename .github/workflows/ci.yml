@@ -142,6 +142,12 @@ jobs:
         run: |
           ./runner -m test.gguf --quantize test-q8.gguf --quant q8_0
           ./runner -m test-q8.gguf -p "hi" -n 4 --temp 0
+      - name: quantize reports write failures
+        if: runner.os == 'Linux'
+        run: |
+          if ./runner -m test.gguf --quantize /dev/full --quant q8_0; then
+            echo "quantize ignored /dev/full write failure"; exit 1
+          fi
       - name: smoke test (model swap)
         run: |
           printf 'not a gguf' > bad.gguf

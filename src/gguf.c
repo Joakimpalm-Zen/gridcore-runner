@@ -17,17 +17,6 @@ static bool need(cursor *c, size_t n) {
     return true;
 }
 
-static bool u64_mul(uint64_t a, uint64_t b, uint64_t *out) {
-    if (a != 0 && b > UINT64_MAX / a) return false;
-    *out = a * b;
-    return true;
-}
-
-static bool u64_add(uint64_t a, uint64_t b, uint64_t *out) {
-    if (b > UINT64_MAX - a) return false;
-    *out = a + b;
-    return true;
-}
 static uint8_t  rd_u8 (cursor *c) { if (!need(c, 1)) return 0; return *c->p++; }
 static uint16_t rd_u16(cursor *c) { uint16_t v = 0; if (need(c, 2)) { memcpy(&v, c->p, 2); c->p += 2; } return v; }
 static uint32_t rd_u32(cursor *c) { uint32_t v = 0; if (need(c, 4)) { memcpy(&v, c->p, 4); c->p += 4; } return v; }
@@ -157,7 +146,7 @@ bool gguf_open(gguf_file *g, const char *path) {
     if (align == 0 || (align & (align - 1))) align = 32;
     uint64_t header_end = (uint64_t)(c.p - (const uint8_t *)g->map);
     uint64_t aligned_end;
-    if (!u64_add(header_end, align - 1, &aligned_end)) goto invalid;
+    if (!checked_u64_add(header_end, align - 1, &aligned_end)) goto invalid;
     uint64_t data_start = aligned_end & ~(align - 1);
     if (data_start > g->map_size) goto invalid;
 
@@ -170,14 +159,14 @@ bool gguf_open(gguf_file *g, const char *path) {
             t->ne[1] == 0 || t->ne[1] > INT_MAX ||
             t->ne[2] == 0 || t->ne[2] > INT_MAX ||
             t->ne[3] == 0 || t->ne[3] > INT_MAX ||
-            !u64_mul(t->ne[1], t->ne[2], &rows) ||
-            !u64_mul(rows, t->ne[3], &rows)) {
+            !checked_u64_mul(t->ne[1], t->ne[2], &rows) ||
+            !checked_u64_mul(rows, t->ne[3], &rows)) {
             fprintf(stderr, "error: invalid tensor metadata for %s\n", t->name);
             goto fail;
         }
         row_blocks = t->ne[0] / (uint64_t)bs;
-        if (!u64_mul(row_blocks, ggml_type_size(t->type), &row_bytes) ||
-            !u64_mul(row_bytes, rows, &t->nbytes)) {
+        if (!checked_u64_mul(row_blocks, ggml_type_size(t->type), &row_bytes) ||
+            !checked_u64_mul(row_bytes, rows, &t->nbytes)) {
             fprintf(stderr, "error: invalid tensor metadata for %s\n", t->name);
             goto fail;
         }
