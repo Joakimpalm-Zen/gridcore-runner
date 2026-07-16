@@ -136,7 +136,7 @@ static struct {
     fdqueue    q;
     const char *model_name;
     int        n_predict_cap;
-    int        ctx_size;
+    atomic_int ctx_size;
     atomic_int req_counter;
     // swap mode
     reg_entry   reg[16];
@@ -159,6 +159,14 @@ static int resident_load(void) {
 
 static void resident_store(int v) {
     atomic_store_explicit(&SV.resident, v, memory_order_relaxed);
+}
+
+static int context_load(void) {
+    return atomic_load_explicit(&SV.ctx_size, memory_order_relaxed);
+}
+
+static void context_store(int value) {
+    atomic_store_explicit(&SV.ctx_size, value, memory_order_relaxed);
 }
 
 static void unload_resident(void) {
@@ -213,6 +221,7 @@ static int swap_to(const char *want) {
             template_detect(gguf_get_str(&s->m->gf, "tokenizer.chat_template", NULL),
                             s->tok);
         engine_init(&s->e, s->m, s->tok, &s->smp);
+        context_store(s->m->n_ctx);
         if (SV.single && SV.draft) {
             // engine_init memsets the engine; the draft (own KV, own pool)
             // survives target unload/reload and is re-attached here
@@ -730,7 +739,7 @@ static void send_capabilities(int fd) {
     } else {
         sb_lit(&r, "null");
     }
-    sb_fmt(&r, ",\"context\":%d,\"models\":[", SV.ctx_size);
+    sb_fmt(&r, ",\"context\":%d,\"models\":[", context_load());
     if (SV.n_reg > 0) {
         for (int i = 0; i < SV.n_reg; i++) {
             if (i) sb_lit(&r, ",");
@@ -981,7 +990,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     if (bsname && (!name || bsname > name)) name = bsname;
     SV.model_name = SV.n_reg > 0 ? SV.reg[0].name : (name ? name + 1 : model_path);
     SV.n_predict_cap = 1024;
-    SV.ctx_size = mp->n_ctx;
+    context_store(base ? base->n_ctx : mp->n_ctx);
     SV.n_slots = parallel;
     SV.slots = calloc(parallel, sizeof(slot_t));
     if (!SV.slots) {
