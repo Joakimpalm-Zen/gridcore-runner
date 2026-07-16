@@ -968,16 +968,44 @@ tpool *tpool_create(int n_threads) {
     if (n_threads < 1) n_threads = 1;
     if (n_threads > TP_MAX) n_threads = TP_MAX;
     tpool *tp = calloc(1, sizeof(tpool));
+    if (!tp) return NULL;
     tp->n_threads = n_threads;
-    pthread_mutex_init(&tp->mu, NULL);
-    pthread_cond_init(&tp->cv_work, NULL);
-    pthread_cond_init(&tp->cv_done, NULL);
+    if (pthread_mutex_init(&tp->mu, NULL) != 0) { free(tp); return NULL; }
+    if (pthread_cond_init(&tp->cv_work, NULL) != 0) {
+        pthread_mutex_destroy(&tp->mu);
+        free(tp);
+        return NULL;
+    }
+    if (pthread_cond_init(&tp->cv_done, NULL) != 0) {
+        pthread_cond_destroy(&tp->cv_work);
+        pthread_mutex_destroy(&tp->mu);
+        free(tp);
+        return NULL;
+    }
+    int created = 0;
     for (int i = 1; i < n_threads; i++) {
         tp_arg *a = malloc(sizeof(tp_arg));
+        if (!a) goto fail;
         a->tp = tp; a->idx = i;
-        pthread_create(&tp->th[i], NULL, tp_worker, a);
+        if (pthread_create(&tp->th[i], NULL, tp_worker, a) != 0) {
+            free(a);
+            goto fail;
+        }
+        created++;
     }
     return tp;
+
+fail:
+    pthread_mutex_lock(&tp->mu);
+    tp->stop = true;
+    pthread_cond_broadcast(&tp->cv_work);
+    pthread_mutex_unlock(&tp->mu);
+    for (int i = 1; i <= created; i++) pthread_join(tp->th[i], NULL);
+    pthread_cond_destroy(&tp->cv_done);
+    pthread_cond_destroy(&tp->cv_work);
+    pthread_mutex_destroy(&tp->mu);
+    free(tp);
+    return NULL;
 }
 
 void tpool_destroy(tpool *tp) {
@@ -1008,7 +1036,7 @@ void tpool_run(tpool *tp, tp_fn fn, void *ctx, int n_items) {
 
     int i0, i1;
     tp_slice(0, tp->n_threads, n_items, &i0, &i1);
-    if (i0 < i1) fn(ctx, 0 < 1 ? i0 : i0, i1);
+    if (i0 < i1) fn(ctx, i0, i1);
 
     pthread_mutex_lock(&tp->mu);
     while (tp->n_done < tp->n_threads - 1) pthread_cond_wait(&tp->cv_done, &tp->mu);

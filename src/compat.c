@@ -165,14 +165,14 @@ void plat_parent_watch(long pid) {
 #endif
     pthread_t th;
     pthread_attr_t at;
-    pthread_attr_init(&at);
-    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&th, &at, parent_poll, (void *)(intptr_t)pid) != 0) {
+    bool attr_ok = pthread_attr_init(&at) == 0;
+    if (!attr_ok || pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED) != 0 ||
+        pthread_create(&th, &at, parent_poll, (void *)(intptr_t)pid) != 0) {
         // this runs pre-model-load (no CUDA threads exist yet), so a plain
         // _exit is fine — but continuing unwatched would silently break
         // the flag's contract, so fail hard instead
         fprintf(stderr, "error: --parent-pid watcher thread failed to start — exiting\n");
-        pthread_attr_destroy(&at);
+        if (attr_ok) pthread_attr_destroy(&at);
         _exit(0);
     }
     pthread_attr_destroy(&at);

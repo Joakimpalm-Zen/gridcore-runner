@@ -232,14 +232,26 @@ static void *ttl_reaper(void *arg) {
     for (;;) {
         struct timespec ts = { 5, 0 };
         nanosleep(&ts, NULL);
-        if (SV.ttl <= 0 || resident_load() < 0 || atomic_load(&SV.busy)) continue;
+        if (resident_load() < 0 || atomic_load(&SV.busy)) continue;
         if (pthread_mutex_trylock(&SV.swap_mu) != 0) continue;
-        if (resident_load() >= 0 && !atomic_load(&SV.busy) &&
-            now_s() - SV.last_used > SV.ttl)
+        int ttl = SV.ttl;
+        if (ttl > 0 && resident_load() >= 0 && !atomic_load(&SV.busy) &&
+            now_s() - SV.last_used > ttl)
             unload_resident();
         pthread_mutex_unlock(&SV.swap_mu);
     }
     return NULL;
+}
+
+static bool start_reaper(void) {
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) return false;
+    bool ok = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0;
+    pthread_t thread;
+    if (ok) ok = pthread_create(&thread, &attr, ttl_reaper, NULL) == 0;
+    pthread_attr_destroy(&attr);
+    if (!ok) fprintf(stderr, "error: cannot start model TTL reaper\n");
+    return ok;
 }
 
 static void q_push(int fd) {
@@ -971,8 +983,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         s->id = 0;
         s->smp = defaults;
         s->smp_base = defaults;
-        pthread_t rt;
-        pthread_create(&rt, NULL, ttl_reaper, NULL);
+        if (!start_reaper()) return 1;
     } else {
         single_setup = parallel == 1;
         int tmpl = template_detect(gguf_get_str(&base->gf, "tokenizer.chat_template", NULL),
@@ -1030,12 +1041,15 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             SV.draft = SV.slots[0].e.dm;
             SV.draft_k = draft_k;
             pthread_mutex_init(&SV.swap_mu, NULL);
-            pthread_t rt;
-            pthread_create(&rt, NULL, ttl_reaper, NULL);
+            if (!start_reaper()) return 1;
         }
     }
 
     int lfd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) {
+        fprintf(stderr, "error: cannot create server socket\n");
+        return 1;
+    }
     int one = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
     struct sockaddr_in addr = {0};
@@ -1044,12 +1058,22 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     addr.sin_port = htons((uint16_t)port);
     if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         fprintf(stderr, "error: cannot bind 127.0.0.1:%d (%s)\n", port, strerror(errno));
+        sock_close(lfd);
         return 1;
     }
-    listen(lfd, 64);
+    if (listen(lfd, 64) != 0) {
+        fprintf(stderr, "error: cannot listen on 127.0.0.1:%d\n", port);
+        sock_close(lfd);
+        return 1;
+    }
 
-    for (int i = 0; i < parallel; i++)
-        pthread_create(&SV.slots[i].th, NULL, slot_worker, &SV.slots[i]);
+    for (int i = 0; i < parallel; i++) {
+        if (pthread_create(&SV.slots[i].th, NULL, slot_worker, &SV.slots[i]) != 0) {
+            fprintf(stderr, "error: cannot start server slot %d\n", i);
+            sock_close(lfd);
+            return 1;
+        }
+    }
 
     if (SV.n_reg > 0 && !SV.single)
         fprintf(stderr,
