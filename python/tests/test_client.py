@@ -38,17 +38,24 @@ class _Response:
 
 class EndpointTests(unittest.TestCase):
     def test_capabilities_are_runner_identified_and_expose_context(self):
-        endpoint = RunnerEndpoint(
-            "http://127.0.0.1:8080",
-            opener=lambda request, timeout: _Response(payload={
+        seen = {}
+
+        def open_request(request, *, timeout):
+            seen["timeout"] = timeout
+            return _Response(payload={
                 "object": "runner.capabilities",
                 "context": 6144,
                 "features": {"json_schema": True},
-            }),
+            })
+
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=open_request,
         )
 
         self.assertEqual(endpoint.context_size(), 6144)
         self.assertTrue(endpoint.healthy())
+        self.assertEqual(seen["timeout"], 2.0)
 
     def test_stream_collects_content_and_requires_terminal_marker(self):
         lines = [

@@ -157,7 +157,7 @@ class RunnerEndpoint:
         return data
 
     def _open(self, request: urllib.request.Request, timeout: float):
-        return self._opener(request, timeout)
+        return self._opener(request, timeout=timeout)
 
     def _request(self, path: str, payload: dict[str, Any]) -> urllib.request.Request:
         return urllib.request.Request(
