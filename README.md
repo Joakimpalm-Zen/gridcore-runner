@@ -21,8 +21,8 @@ llama.cpp is the reference implementation — broader architecture coverage,
 more quant formats, faster kernels, a huge community. runner exists because
 this stack needs something llama.cpp structurally cannot be: an engine small
 enough to own outright, whose serving contracts the projects above it
-([clu](https://github.com/ZenZombie117/gridcore-clu),
-[gridcore-interpreter](https://github.com/ZenZombie117/gridcore-interpreter))
+([clu](https://github.com/Joakimpalm-Zen/gridcore-clu),
+[gridcore-interpreter](https://github.com/Joakimpalm-Zen/gridcore-interpreter))
 can build against *exactly*.
 
 **The whole engine bends in an afternoon.** ~8,000 lines of plain C, one
