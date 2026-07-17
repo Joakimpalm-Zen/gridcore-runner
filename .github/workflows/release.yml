@@ -1,0 +1,81 @@
+name: release
+
+# Tag a version (git tag v0.1.0-alpha && git push origin v0.1.0-alpha) and
+# this builds the three platform binaries and attaches them to a GitHub
+# Release draft — publish it after a once-over.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86 builds pin -march=x86-64-v3 (AVX2/FMA/F16C, what the hot
+          # kernels use) instead of the Makefile's -march=native, so a binary
+          # built on whatever CPU the CI runner has runs on any AVX2 machine.
+          - os: ubuntu-latest
+            artifact: runner-linux-x86_64
+            binary: runner
+            march: x86-64-v3
+          - os: macos-latest
+            artifact: runner-macos-arm64
+            binary: runner
+            march: native
+          - os: windows-latest
+            artifact: runner-windows-x86_64.exe
+            binary: runner.exe
+            march: x86-64-v3
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: msys2/setup-msys2@v2
+        if: matrix.os == 'windows-latest'
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+      - name: build
+        run: make CFLAGS="-O3 -ffast-math -std=gnu11 -Wall -Wextra -Wno-unused-parameter -march=${{ matrix.march }}"
+      - name: version matches the tag
+        run: |
+          BUILT=$(./${{ matrix.binary }} --version)
+          echo "built: $BUILT  tag: $GITHUB_REF_NAME"
+          [ "$BUILT" = "runner ${GITHUB_REF_NAME#v}" ]
+      - name: smoke test
+        run: |
+          python3 scripts/make-test-model.py test.gguf
+          ./${{ matrix.binary }} -m test.gguf -p "hello" -n 8 --temp 0
+      - name: rename artifact
+        run: cp ${{ matrix.binary }} ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            runner-linux-x86_64
+            runner-macos-arm64
+            runner-windows-x86_64.exe

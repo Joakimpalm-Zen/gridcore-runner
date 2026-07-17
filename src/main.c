@@ -119,6 +119,7 @@ static void usage(const char *prog) {
         "  --draft-k N    draft tokens per round (default 4)\n"
         "  --bench-json   run a small decode benchmark and print JSON metrics\n"
         "  --caps         print machine capabilities as JSON and exit\n"
+        "  --version      print the runner version and exit\n"
         "  --parent-pid N exit when process N dies (supervisor cleanup)\n"
         "  -v             verbose model info\n",
         prog);
@@ -226,6 +227,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--parent-pid")) parent_pid = (long)int_arg(a, NEXT, 1, LONG_MAX);
         else if (!strcmp(a, "--caps")) caps = true;
+        else if (!strcmp(a, "--version")) { printf("runner %s\n", RUNNER_VERSION); return 0; }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(argv[0]); return 1; }
     }
@@ -237,8 +239,9 @@ int main(int argc, char **argv) {
     if (caps) {
         char gname[128];
         bool has_gpu = gpu_available(gname, sizeof(gname));
-        printf("{\"os\":\"%s\",\"arch\":\"%s\",\"cpu_cores\":%d,"
+        printf("{\"version\":\"%s\",\"os\":\"%s\",\"arch\":\"%s\",\"cpu_cores\":%d,"
                "\"ram_bytes\":%llu,\"gpu\":",
+               RUNNER_VERSION,
 #if defined(_WIN32)
                "windows",
 #elif defined(__APPLE__)

@@ -2,6 +2,8 @@
 #ifndef RUNNER_H
 #define RUNNER_H
 
+#define RUNNER_VERSION "0.1.0-alpha"
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>

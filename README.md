@@ -1,5 +1,14 @@
 # Gridcore Runner
 
+> **Public alpha** (`0.1.0-alpha`). Runner is the inference engine of
+> Gridcore, a larger local-agent project whose other layers are not public
+> yet. The engine itself is complete, CI-tested on Linux/macOS/Windows, and
+> daily-driven by the rest of the stack — but it has met few machines other
+> than ours, which is exactly what an alpha is for. Run your GGUF models on
+> your hardware and [open an issue](../../issues) for anything that crashes,
+> misbehaves, or underperforms; `runner --version` and `runner --caps`
+> output make a bug report actionable.
+
 The inference engine of the Gridcore suite (repo: `gridcore-runner`,
 binary: `runner`). A compact local LLM inference engine, written from scratch in plain C
 (~8,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
@@ -20,10 +29,9 @@ model files — the de-facto format for local models — and runs them on CPU
 llama.cpp is the reference implementation — broader architecture coverage,
 more quant formats, faster kernels, a huge community. runner exists because
 this stack needs something llama.cpp structurally cannot be: an engine small
-enough to own outright, whose serving contracts the projects above it
-([clu](https://github.com/Joakimpalm-Zen/gridcore-clu),
-[gridcore-interpreter](https://github.com/Joakimpalm-Zen/gridcore-interpreter))
-can build against *exactly*.
+enough to own outright, whose serving contracts the projects above it (the
+Gridcore agent and task-interpreter layers, not yet public) can build
+against *exactly*.
 
 **The whole engine bends in an afternoon.** ~8,000 lines of plain C, one
 `make`, no ggml split, no CMake, no submodules — one person holds all of it
@@ -352,6 +360,7 @@ runner -m model [options]
   --draft-k N    draft tokens per round (default 4)
   --bench-json   run a small decode benchmark and print JSON metrics
   --caps         print machine capabilities as JSON and exit
+  --version      print the runner version and exit
   -v             print model hyperparameters and memory use
 ```
 
@@ -421,3 +430,7 @@ python/          supported Python endpoint + child-process client for Runner con
 
 Weights stay quantized in the mmap'd file; matmuls dequantize on the fly, so
 memory use is roughly file size + KV cache + a few MB of activations.
+
+## License
+
+[Apache 2.0](LICENSE).
