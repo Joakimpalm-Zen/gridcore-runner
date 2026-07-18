@@ -1,0 +1,40 @@
+name: Bug report
+description: Something crashed, misbehaved, or underperformed
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: runner --version
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: caps
+    attributes:
+      label: runner --caps
+      description: Paste the full JSON — it carries OS, GPU, and quant support.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model + quant
+      description: e.g. gemma-4-12B-it Q4_K_M, and where it came from
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Exact command / request
+      description: The CLI invocation or HTTP request body that triggers it.
+    validations:
+      required: true
