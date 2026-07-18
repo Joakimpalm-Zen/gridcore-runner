@@ -7,7 +7,8 @@
 > than ours, which is exactly what an alpha is for. Run your GGUF models on
 > your hardware and [open an issue](../../issues) for anything that crashes,
 > misbehaves, or underperforms; `runner --version` and `runner --caps`
-> output make a bug report actionable.
+> output make a bug report actionable. The threat model and security
+> policy live in [SECURITY.md](SECURITY.md).
 
 The inference engine of the Gridcore suite (repo: `gridcore-runner`,
 binary: `runner`). A compact local LLM inference engine, written from scratch in plain C
