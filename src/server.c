@@ -611,13 +611,27 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
 
     if (stream) {
         if (!g.dead) {
-            char fin[256];
+            char fin[384];
             int fn = snprintf(fin, sizeof(fin),
                 "data: {\"id\":\"%s\",\"object\":\"%s\",\"choices\":[{\"index\":0,"
-                "%s,\"finish_reason\":\"%s\"}]}\n\ndata: [DONE]\n\n",
+                "%s,\"finish_reason\":\"%s\"}]}\n\n",
                 g.id, chat ? "chat.completion.chunk" : "text_completion",
                 chat ? "\"delta\":{}" : "\"text\":\"\"", finish);
-            send_all(fd, fin, fn);
+            bool ok = send_all(fd, fin, fn);
+            // OpenAI stream_options {"include_usage": true}: one extra chunk
+            // with empty choices and the request's token accounting — AI-SDK
+            // clients (Cline et al.) request this on every stream
+            if (ok && jv_bool(jv_get(jv_get(req, "stream_options"),
+                                     "include_usage"), false)) {
+                fn = snprintf(fin, sizeof(fin),
+                    "data: {\"id\":\"%s\",\"object\":\"%s\",\"choices\":[],"
+                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
+                    "\"total_tokens\":%d}}\n\n",
+                    g.id, chat ? "chat.completion.chunk" : "text_completion",
+                    n_prompt, n_gen, n_prompt + n_gen);
+                ok = send_all(fd, fin, fn);
+            }
+            if (ok) send_all(fd, "data: [DONE]\n\n", 14);
         }
     } else {
         sbuf tc = {0};
@@ -698,6 +712,38 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
 
 // ---------------------------------------------------------------- routes
 
+// flatten one OpenAI message to plain text: string content passes through;
+// the AI-SDK part-array form (Cline et al.) concatenates its text parts;
+// assistant tool_calls render in runner's own call syntax so replayed
+// history reads like what the model actually emitted. Returns a heap
+// string, or NULL when the message carries nothing usable.
+static char *message_text(jv *msg) {
+    jv *content = jv_get(msg, "content");
+    sbuf b = {0};
+    if (content && content->type == J_STR) {
+        sb_put(&b, content->str, strlen(content->str));
+    } else if (content && content->type == J_ARR) {
+        for (int i = 0; i < content->n; i++) {
+            const char *type = jv_str(jv_get(content->items[i], "type"), "");
+            const char *text = jv_str(jv_get(content->items[i], "text"), NULL);
+            if (strcmp(type, "text") != 0 || !text) continue; // images etc.
+            if (b.n) sb_lit(&b, "\n");
+            sb_put(&b, text, strlen(text));
+        }
+    }
+    jv *calls = jv_get(msg, "tool_calls");
+    if (calls && calls->type == J_ARR) {
+        for (int i = 0; i < calls->n; i++) {
+            jv *fn = jv_get(calls->items[i], "function");
+            const char *name = jv_str(jv_get(fn, "name"), NULL);
+            const char *args = jv_str(jv_get(fn, "arguments"), "{}");
+            if (!name) continue;
+            sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", name, args);
+        }
+    }
+    return b.s;
+}
+
 static void handle_chat(slot_t *s, int fd, jv *req) {
     jv *msgs = jv_get(req, "messages");
     if (!msgs || msgs->type != J_ARR || msgs->n == 0) {
@@ -708,17 +754,20 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
     sbuf ts = {0};
     tools_render(jv_get(req, "tools"), &ts);
     chat_msg *cm = malloc(sizeof(chat_msg) * (msgs->n + 1));
+    char **owned = malloc(sizeof(char *) * msgs->n);
     size_t total = ts.n + 64;
-    int n_cm = 0;
+    int n_cm = 0, n_own = 0;
     if (ts.n) cm[n_cm++] = (chat_msg){ "system", ts.s };
     for (int i = 0; i < msgs->n; i++) {
         const char *role = jv_str(jv_get(msgs->items[i], "role"), "user");
-        const char *content = jv_str(jv_get(msgs->items[i], "content"), NULL);
+        char *content = message_text(msgs->items[i]);
         if (!content) continue;
+        owned[n_own++] = content;
         cm[n_cm++] = (chat_msg){ role, content };
         total += strlen(role) + strlen(content) + 64;
     }
     if (n_cm == 0) {
+        free(owned);
         free(cm);
         free(ts.s);
         send_error(fd, 400, "no message content");
@@ -728,6 +777,8 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
     render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
     run_completion(s, fd, prompt, true, req);
     free(prompt);
+    for (int i = 0; i < n_own; i++) free(owned[i]);
+    free(owned);
     free(cm);
     free(ts.s);
 }

@@ -182,6 +182,67 @@ jobs:
           PYEOF
           kill %1
           echo "stop sequences ok"
+      - name: smoke test (cline-shaped traffic)
+        # the @ai-sdk/openai-compatible wire format Cline/OpenCode send:
+        # multipart content arrays, assistant tool_calls in history,
+        # role:"tool" results, stream_options usage, extra fields
+        run: |
+          ./runner -m test.gguf -c 1024 --serve --port 8131 --parallel 1 &
+          sleep 2
+          python3 - <<'PYEOF'
+          import json, urllib.request
+          URL = "http://127.0.0.1:8131/v1/chat/completions"
+          def post(body):
+              req = urllib.request.Request(URL, data=json.dumps(body).encode(),
+                                           headers={"Content-Type": "application/json"})
+              return json.load(urllib.request.urlopen(req, timeout=60))
+          def content(r): return r["choices"][0]["message"]["content"]
+          flat = post({"messages": [{"role": "user", "content": "hel\nlo"}],
+                       "max_tokens": 12, "temperature": 0})
+          multi = post({"messages": [{"role": "user", "content": [
+                            {"type": "text", "text": "hel"},
+                            {"type": "text", "text": "lo"}]}],
+                        "max_tokens": 12, "temperature": 0})
+          assert content(multi) == content(flat), (content(multi), content(flat))
+          call = {"id": "c1", "type": "function",
+                  "function": {"name": "read_file", "arguments": "{\"path\":\"a.c\"}"}}
+          looped = post({"messages": [
+                             {"role": "user", "content": "go"},
+                             {"role": "assistant", "content": None, "tool_calls": [call]},
+                             {"role": "tool", "tool_call_id": "c1", "content": "data"}],
+                         "max_tokens": 12, "temperature": 0})
+          explicit = post({"messages": [
+                               {"role": "user", "content": "go"},
+                               {"role": "assistant",
+                                "content": "<|tool_call>call:read_file{\"path\":\"a.c\"}<tool_call|>"},
+                               {"role": "tool", "tool_call_id": "c1", "content": "data"}],
+                           "max_tokens": 12, "temperature": 0})
+          assert content(looped) == content(explicit), (content(looped), content(explicit))
+          body = json.dumps({"messages": [{"role": "user", "content": "hi"}],
+                             "max_tokens": 8, "temperature": 0, "stream": True,
+                             "stream_options": {"include_usage": True}}).encode()
+          req = urllib.request.Request(URL, data=body,
+                                       headers={"Content-Type": "application/json"})
+          usage, done = None, False
+          with urllib.request.urlopen(req, timeout=60) as resp:
+              for line in resp:
+                  line = line.decode().strip()
+                  if line == "data: [DONE]": done = True; continue
+                  if not line.startswith("data: "): continue
+                  d = json.loads(line[6:])
+                  usage = d.get("usage") or usage
+          assert done and usage and usage["prompt_tokens"] > 0, usage
+          r = post({"messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}],
+                    "max_tokens": 8, "temperature": 0,
+                    "tools": [{"type": "function", "function":
+                               {"name": "f", "description": "d",
+                                "parameters": {"type": "object", "properties": {}}}}],
+                    "tool_choice": "auto", "parallel_tool_calls": False,
+                    "frequency_penalty": 0, "presence_penalty": 0, "user": "cline"})
+          assert r["choices"][0]["finish_reason"] in ("stop", "length", "tool_calls")
+          PYEOF
+          kill %1
+          echo "cline-shaped traffic ok"
       - name: smoke test (parent-pid watch)
         # the runner must exit when the process named by --parent-pid dies
         run: |
