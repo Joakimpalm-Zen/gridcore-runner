@@ -42,6 +42,11 @@ static int  sock_recv(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n
 static int  sock_send(int fd, const char *buf, size_t n) { return send(fd, buf, (int)n, 0); }
 static int  sock_peek(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n, MSG_PEEK); }
 static void sock_close(int fd) { closesocket(fd); }
+static void sock_recv_timeout(int fd, double s) {
+    DWORD ms = (DWORD)(s * 1000.0);
+    if (ms == 0) ms = 1; // 0 would mean "block forever" on winsock
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof(ms));
+}
 #else
 #include <signal.h>
 #include <unistd.h>
@@ -54,6 +59,13 @@ static int  sock_recv(int fd, char *buf, size_t n) { return (int)read(fd, buf, n
 static int  sock_send(int fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
 static int  sock_peek(int fd, char *buf, size_t n) { return (int)recv(fd, buf, n, MSG_PEEK); }
 static void sock_close(int fd) { close(fd); }
+static void sock_recv_timeout(int fd, double s) {
+    struct timeval tv;
+    tv.tv_sec = (time_t)s;
+    tv.tv_usec = (suseconds_t)((s - (double)tv.tv_sec) * 1e6);
+    if (tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
 #endif
 
 // case-insensitive prefix compare (strncasecmp is not universal)
@@ -83,7 +95,8 @@ static void send_response(int fd, int code, const char *ctype, const char *body,
                           size_t blen) {
     char hdr[256];
     const char *msg = code == 200 ? "OK" : code == 400 ? "Bad Request" :
-                      code == 404 ? "Not Found" : "Internal Server Error";
+                      code == 404 ? "Not Found" : code == 408 ? "Request Timeout" :
+                      "Internal Server Error";
     int hn = snprintf(hdr, sizeof(hdr),
                       "HTTP/1.1 %d %s\r\nContent-Type: %s\r\n"
                       "Content-Length: %zu\r\nConnection: close\r\n\r\n",
@@ -765,12 +778,24 @@ static void send_capabilities(int fd) {
 }
 
 static void handle_conn(slot_t *s, int fd) {
+    // a stalled or dead client must not pin an inference slot: the whole
+    // request (header + body) has to arrive within this budget. Generation
+    // time stays unbounded — the deadline only covers reading the request.
+    double deadline = now_s() + 10.0;
     char hdr[16384];
     size_t got = 0;
     char *body_start = NULL;
     while (got < sizeof(hdr) - 1) {
+        double remaining = deadline - now_s();
+        if (remaining <= 0) { send_error(fd, 408, "request read timed out"); return; }
+        sock_recv_timeout(fd, remaining);
         int r = sock_recv(fd, hdr + got, sizeof(hdr) - 1 - got);
-        if (r <= 0) return;
+        if (r <= 0) {
+            // r == 0: orderly close, client is gone. r < 0: timeout (or a
+            // socket error, where the 408 write fails harmlessly).
+            if (r < 0) send_error(fd, 408, "request read timed out");
+            return;
+        }
         got += (size_t)r;
         hdr[got] = 0;
         if ((body_start = strstr(hdr, "\r\n\r\n")) != NULL) break;
@@ -796,12 +821,24 @@ static void handle_conn(slot_t *s, int fd) {
     char *body = NULL;
     if (content_length > 0) {
         body = malloc(content_length + 1);
+        if (!body) { send_error(fd, 500, "cannot allocate request body"); return; }
         size_t have = got - (size_t)(body_start - hdr);
         if (have > content_length) have = content_length;
         memcpy(body, body_start, have);
         while (have < content_length) {
+            double remaining = deadline - now_s();
+            if (remaining <= 0) {
+                free(body);
+                send_error(fd, 408, "request read timed out");
+                return;
+            }
+            sock_recv_timeout(fd, remaining);
             int r = sock_recv(fd, body + have, content_length - have);
-            if (r <= 0) { free(body); return; }
+            if (r <= 0) {
+                free(body);
+                if (r < 0) send_error(fd, 408, "request read timed out");
+                return;
+            }
             have += (size_t)r;
         }
         body[content_length] = 0;

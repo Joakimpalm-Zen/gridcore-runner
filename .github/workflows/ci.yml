@@ -104,6 +104,31 @@ jobs:
           curl -sf -m 3 http://127.0.0.1:8126/v1/capabilities | python3 -c "import json,sys; assert json.load(sys.stdin)['features']['json_schema']; print('capabilities bypass ok')"
           kill %1 %2 2>/dev/null || true
           echo "health bypass ok"
+      - name: smoke test (stalled request is reaped)
+        # a client that never finishes its request must get a 408 and release
+        # the slot within the 10s read deadline instead of pinning it forever
+        run: |
+          ./runner -m test.gguf --serve --port 8129 --parallel 1 &
+          sleep 2
+          python3 - <<'PYEOF'
+          import socket, sys
+          s = socket.create_connection(("127.0.0.1", 8129))
+          s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nContent-Length: 100\r\n")
+          s.settimeout(15)
+          data = b""
+          try:
+              while True:
+                  chunk = s.recv(4096)
+                  if not chunk: break
+                  data += chunk
+          except socket.timeout:
+              sys.exit("stalled connection not reaped within 15s")
+          assert b"408" in data.split(b"\r\n", 1)[0], data[:60]
+          PYEOF
+          curl -sf -m 10 -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
+            http://127.0.0.1:8129/v1/chat/completions > /dev/null
+          kill %1
+          echo "stall reap ok"
       - name: smoke test (parent-pid watch)
         # the runner must exit when the process named by --parent-pid dies
         run: |
