@@ -330,6 +330,12 @@ typedef struct {
     char  id[48];
     bool  chat;         // chat.completion vs text_completion chunk shape
     think_split ts;     // thinking-tag splitter (pass-through when untagged)
+    // OpenAI "stop" sequences: matched against the content channel only
+    // (reasoning text must not trigger a client's stop strings)
+    const char **stop_strs; // borrowed from the request jv, valid all request
+    int   n_stop;
+    sbuf  hold;         // held-back tail that may still begin a stop match
+    bool  stopped;      // a stop sequence matched; excluded from output
 } gen_ctx;
 
 static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
@@ -337,6 +343,7 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
     schema_free(schema);
     if (g) {
         think_free(&g->ts);
+        free(g->hold.s);
         free(g->reason.s);
         free(g->out.s);
     }
@@ -347,8 +354,7 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
 
 // emit one section of split output: reasoning goes to the OpenAI-style
 // reasoning_content field, everything else to content
-static int gen_emit(void *ud, int reasoning, const char *bytes, int n) {
-    gen_ctx *g = ud;
+static int emit_channel(gen_ctx *g, int reasoning, const char *bytes, int n) {
     sb_put(reasoning ? &g->reason : &g->out, bytes, n);
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
     sbuf chunk = {0};
@@ -366,6 +372,54 @@ static int gen_emit(void *ud, int reasoning, const char *bytes, int n) {
     free(chunk.s);
     free(sse.s);
     return g->dead ? 1 : 0;
+}
+
+// content-channel filter for user stop sequences: bytes are staged in
+// g->hold so a stop spanning token boundaries still matches, and only the
+// tail that could still begin a stop is withheld from the client
+static int stop_feed(gen_ctx *g, const char *bytes, int n) {
+    sb_put(&g->hold, bytes, n);
+    size_t at = 0, hit_len = 0;
+    for (size_t i = 0; !hit_len && i < g->hold.n; i++)
+        for (int s = 0; s < g->n_stop; s++) {
+            size_t len = strlen(g->stop_strs[s]);
+            if (i + len <= g->hold.n &&
+                memcmp(g->hold.s + i, g->stop_strs[s], len) == 0) {
+                at = i;
+                hit_len = len;
+                break;
+            }
+        }
+    if (hit_len) {
+        if (at > 0) emit_channel(g, 0, g->hold.s, (int)at);
+        g->hold.n = 0;
+        g->stopped = true;
+        return 1; // abort generation
+    }
+    size_t keep = 0;
+    for (int s = 0; s < g->n_stop; s++) {
+        size_t len = strlen(g->stop_strs[s]);
+        size_t k = len - 1 < g->hold.n ? len - 1 : g->hold.n;
+        for (; k > keep; k--)
+            if (memcmp(g->hold.s + g->hold.n - k, g->stop_strs[s], k) == 0) {
+                keep = k;
+                break;
+            }
+    }
+    size_t rel = g->hold.n - keep;
+    int rc = 0;
+    if (rel > 0) {
+        rc = emit_channel(g, 0, g->hold.s, (int)rel);
+        memmove(g->hold.s, g->hold.s + rel, keep);
+        g->hold.n = keep;
+    }
+    return rc;
+}
+
+static int gen_emit(void *ud, int reasoning, const char *bytes, int n) {
+    gen_ctx *g = ud;
+    if (!reasoning && g->n_stop) return stop_feed(g, bytes, n);
+    return emit_channel(g, reasoning, bytes, n);
 }
 
 static int gen_collect(void *ud, const char *bytes, int n) {
@@ -442,6 +496,31 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     int lp_n = (int)lp_num;
     if (lp_n < 0) lp_n = 0;
     if (lp_n > 20) lp_n = 20;
+    // OpenAI "stop": a string or an array of up to 4 non-empty strings.
+    // Pointers borrow from req, which outlives the whole request.
+    const char *stops[4];
+    int n_stops = 0;
+    jv *stopv = jv_get(req, "stop");
+    if (stopv && stopv->type != J_NULL) {
+        bool bad = false;
+        if (stopv->type == J_STR) {
+            bad = stopv->str[0] == 0;
+            if (!bad) stops[n_stops++] = stopv->str;
+        } else if (stopv->type == J_ARR && stopv->n <= 4) {
+            for (int i = 0; i < stopv->n && !bad; i++) {
+                jv *it = stopv->items[i];
+                if (!it || it->type != J_STR || it->str[0] == 0) bad = true;
+                else stops[n_stops++] = it->str;
+            }
+        } else {
+            bad = true;
+        }
+        if (bad) {
+            send_error(fd, 400,
+                       "stop must be a string or an array of up to 4 non-empty strings");
+            return;
+        }
+    }
     jv *rf = jv_get(req, "response_format");
     e->json_mode = rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_object") == 0;
     // schema-constrained decoding: OpenAI response_format {type:"json_schema",
@@ -503,7 +582,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         return;
     }
 
-    gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .chat = chat };
+    gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .chat = chat,
+                  .stop_strs = stops, .n_stop = n_stops };
     snprintf(g.id, sizeof(g.id), "%s-%d", chat ? "chatcmpl" : "cmpl",
              atomic_fetch_add(&SV.req_counter, 1));
     // split thinking channels out of chat responses; raw completions stay raw
@@ -521,7 +601,13 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     double gtime;
     int n_gen = engine_generate(e, logits, max_tokens, gen_collect, &g, &gtime);
     think_finish(&g.ts, gen_emit, &g);
-    const char *finish = e->hit_stop ? "stop" : "length";
+    // generation ended without a stop match: the withheld partial-match
+    // tail was ordinary output after all
+    if (!g.stopped && g.hold.n > 0) {
+        emit_channel(&g, 0, g.hold.s, (int)g.hold.n);
+        g.hold.n = 0;
+    }
+    const char *finish = g.stopped || e->hit_stop ? "stop" : "length";
 
     if (stream) {
         if (!g.dead) {
@@ -768,6 +854,7 @@ static void send_capabilities(int fd) {
     sb_lit(&r, "],\"features\":{"
                "\"json_object\":true,"
                "\"json_schema\":true,"
+               "\"stop_sequences\":true,"
                "\"schema_conditionals\":true,"
                "\"schema_string_bounds\":true,"
                "\"request_telemetry\":true,"

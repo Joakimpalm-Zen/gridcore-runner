@@ -129,6 +129,59 @@ jobs:
             http://127.0.0.1:8129/v1/chat/completions > /dev/null
           kill %1
           echo "stall reap ok"
+      - name: smoke test (stop sequences)
+        # OpenAI "stop": truncates before the match (also mid-token-stream),
+        # a partial match that never completes must flush, malformed -> 400
+        run: |
+          ./runner -m test.gguf --serve --port 8130 --parallel 1 &
+          sleep 2
+          python3 - <<'PYEOF'
+          import json, urllib.request, urllib.error, sys
+          def post(body, path="/v1/chat/completions"):
+              req = urllib.request.Request(f"http://127.0.0.1:8130{path}",
+                                           data=json.dumps(body).encode(),
+                                           headers={"Content-Type": "application/json"})
+              return json.load(urllib.request.urlopen(req, timeout=60))
+          base = {"messages": [{"role": "user", "content": "hello"}],
+                  "max_tokens": 24, "temperature": 0}
+          text = post(dict(base))["choices"][0]["message"]["content"]
+          clean = text.split("�")[0]  # invalid UTF-8 from the stub model
+          assert len(clean) >= 3, repr(text)
+          stop = clean[:3]
+          expected = text[:text.find(stop)]
+          r = post(dict(base, stop=[stop]))
+          assert r["choices"][0]["message"]["content"] == expected
+          assert r["choices"][0]["finish_reason"] == "stop"
+          r = post(dict(base, stop=stop))
+          assert r["choices"][0]["message"]["content"] == expected
+          r = post(dict(base, stop=[clean + "NEVER"]))
+          assert r["choices"][0]["message"]["content"] == text
+          assert r["choices"][0]["finish_reason"] != "stop"
+          req = urllib.request.Request("http://127.0.0.1:8130/v1/chat/completions",
+                                       data=json.dumps(dict(base, stop=[stop], stream=True)).encode(),
+                                       headers={"Content-Type": "application/json"})
+          got, fin = [], None
+          with urllib.request.urlopen(req, timeout=60) as resp:
+              for line in resp:
+                  line = line.decode().strip()
+                  if not line.startswith("data: ") or line == "data: [DONE]":
+                      continue
+                  d = json.loads(line[6:])
+                  got.append(d["choices"][0].get("delta", {}).get("content") or "")
+                  fin = d["choices"][0].get("finish_reason") or fin
+          assert "".join(got) == expected, "".join(got)
+          assert fin == "stop", fin
+          for bad in ([1], [""], ["a", "b", "c", "d", "e"], ""):
+              try:
+                  post(dict(base, stop=bad))
+                  sys.exit(f"malformed stop {bad!r} accepted")
+              except urllib.error.HTTPError as e:
+                  assert e.code == 400
+          caps = json.load(urllib.request.urlopen("http://127.0.0.1:8130/v1/capabilities", timeout=10))
+          assert caps["features"]["stop_sequences"] is True
+          PYEOF
+          kill %1
+          echo "stop sequences ok"
       - name: smoke test (parent-pid watch)
         # the runner must exit when the process named by --parent-pid dies
         run: |
