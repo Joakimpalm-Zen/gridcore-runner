@@ -418,10 +418,12 @@ bool gpu_init(model_t *m) {
             // prefill tiled-GEMM variants (batch>1 fast path for these formats)
             { &g->f_gemm[T_Q8_0], "k_gemm_q8_0" },
             { &g->f_gemm[T_Q4_K], "k_gemm_q4_K" },
+            { &g->f_gemm[T_Q5_K], "k_gemm_q5_K" },
             { &g->f_gemm[T_Q6_K], "k_gemm_q6_K" },
             // decode coalesced GEMV variants (batch==1 fast path for these formats)
             { &g->f_gemv[T_Q8_0], "k_gemv_q8_0" },
             { &g->f_gemv[T_Q4_K], "k_gemv_q4_K" },
+            { &g->f_gemv[T_Q5_K], "k_gemv_q5_K" },
             { &g->f_gemv[T_Q6_K], "k_gemv_q6_K" },
         };
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)

@@ -675,6 +675,101 @@ extern "C" __global__ void k_mv_q5_K_b(MV_PARAMS) {
     MV_TAIL_B;
 }
 
+// Q5_K decode GEMV: Q4_K's lane-per-element geometry with Q5_K's extra high
+// bit. Lane l owns eight consecutive elements in scale/min group l/4. The
+// nibble comes from quant segment l/8 and the fifth bit is bit l/4 of qh.
+// A warp therefore processes each 256-element block cooperatively, coalescing
+// the 128-byte qs region and 32-byte qh region instead of reading 176-byte-
+// strided blocks across lanes.
+extern "C" __global__ void k_gemv_q5_K(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 176;
+    int g     = (int)(lane >> 2);         // scale/min group 0..7
+    int ji    = (int)(lane >> 3);         // 32-byte quant segment 0..3
+    int lo    = (((int)lane >> 2) & 1) == 0;
+    int bbase = ((int)lane & 3) * 8;      // byte offset within segment/qh
+    int hmask = 1 << g;
+    float s = 0;
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 176;
+        float dd   = f16f(blk);
+        float dmin = f16f(blk + 2);
+        const uchar *sc = blk + 4;
+        const uchar *qh = blk + 16;
+        const uchar *q  = blk + 48 + ji * 32;
+        uchar sg, mg;
+        get_scale_min_k4(g, sc, &sg, &mg);
+        float dg = dd * (float)sg, mmg = dmin * (float)mg;
+        const float *xp = x + (ulong64)b * 256 + (int)lane * 8;
+        #pragma unroll
+        for (int k = 0; k < 8; k++) {
+            uchar byte = q[bbase + k];
+            int qv = (lo ? (byte & 0xF) : (byte >> 4)) +
+                     ((qh[bbase + k] & hmask) ? 16 : 0);
+            s += (dg * (float)qv - mmg) * xp[k];
+        }
+    }
+    MV_TAIL;
+}
+
+// Q5_K prefill GEMM: the decode geometry above with the current x block staged
+// in shared memory. Eight warps reuse that tile for eight output rows; each
+// warp reduces one 256-element weight block cooperatively.
+extern "C" __global__ void k_gemm_q5_K(MV_PARAMS) {
+    __shared__ float xsm[MVB][256];
+    unsigned warp = threadIdx.x >> 5;
+    unsigned lane = threadIdx.x & 31;
+    unsigned row  = blockIdx.x * GEMM_WARPS + warp;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off +
+                      (ulong64)(row < (unsigned)a.n_out ? row : 0) * nb * 176;
+    int g     = (int)(lane >> 2);         // scale/min group 0..7
+    int ji    = (int)(lane >> 3);         // 32-byte quant segment 0..3
+    int lo    = (((int)lane >> 2) & 1) == 0;
+    int bbase = ((int)lane & 3) * 8;      // byte offset within segment/qh
+    int hmask = 1 << g;
+    float s[MVB] = {0};
+
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 176;
+        int base_e = b * 256;
+        #pragma unroll
+        for (int t = 0; t < MVB; t++) {
+            const float *xg = x + (ulong64)t * a.xs + base_e;
+            for (int e = threadIdx.x; e < 256; e += blockDim.x) xsm[t][e] = xg[e];
+        }
+        __syncthreads();
+        if (row < (unsigned)a.n_out) {
+            float dd   = f16f(blk);
+            float dmin = f16f(blk + 2);
+            const uchar *sc = blk + 4;
+            const uchar *qh = blk + 16;
+            const uchar *q  = blk + 48 + ji * 32;
+            uchar sg, mg;
+            get_scale_min_k4(g, sc, &sg, &mg);
+            float dg = dd * (float)sg, mmg = dmin * (float)mg;
+            int el = (int)lane * 8;
+            #pragma unroll
+            for (int k = 0; k < 8; k++) {
+                uchar byte = q[bbase + k];
+                int qv = (lo ? (byte & 0xF) : (byte >> 4)) +
+                         ((qh[bbase + k] & hmask) ? 16 : 0);
+                float w = dg * (float)qv - mmg;
+                #pragma unroll
+                for (int t = 0; t < MVB; t++) s[t] += w * xsm[t][el + k];
+            }
+        }
+        __syncthreads();
+    }
+    if (row < (unsigned)a.n_out) {
+        for (int t = 0; t < a.batch; t++) {
+            float r = warp_sum(s[t]);
+            if (lane == 0) y[(ulong64)t * a.ys + row] = a.has_bias ? r + bias[row] : r;
+        }
+    }
+}
+
 extern "C" __global__ void k_mv_q6_K(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 256;
