@@ -233,6 +233,37 @@ extern "C" __global__ void k_gemm_q8_0(MV_PARAMS) {
     }
 }
 
+// -------------------------------------------------------------- decode GEMV
+// Batch-1 (decode) matvec replacements for the two formats that matter here
+// (Q8_0, Q4_K). The generic k_mv_* decode kernel maps one lane to a whole
+// quant block, so consecutive lanes read 34-byte-strided (Q8) addresses: the
+// loads never coalesce into 32-byte segments and the kernel tops out at ~18 %
+// of peak weight bandwidth (memory-latency/coalescing bound, see diagnosis).
+//
+// These variants flip the mapping to LANE-PER-ELEMENT: within each block lane
+// l owns element l, so the 32 lanes read 32 consecutive bytes -> one coalesced
+// transaction per block. Each lane accumulates its own element-position across
+// all blocks, then a single warp_sum reduces at the end. This REORDERS the
+// k-reduction relative to k_mv_* (per-element partials summed once, vs the
+// per-block d*(Sum q*x) of the originals), so identity is not bitwise and is
+// established empirically by kernel-verify on the real models. Same block
+// shape as k_mv_* (4 rows/block, 128 threads) so occupancy is unchanged; the
+// win is purely coalescing.
+
+extern "C" __global__ void k_gemv_q8_0(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 32;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 34;
+    float s = 0;
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 34;
+        float d = f16f(blk);
+        const signed char *q = (const signed char *)(blk + 2);
+        s += d * ((float)q[lane] * x[(ulong64)b * 32 + lane]);
+    }
+    MV_TAIL;
+}
+
 extern "C" __global__ void k_mv_q4_0(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 32;
@@ -545,6 +576,42 @@ extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
             if (lane == 0) y[(ulong64)t * a.ys + row] = a.has_bias ? r + bias[row] : r;
         }
     }
+}
+
+// Q4_K decode GEMV: lane-per-element coalesced variant of k_mv_q4_K. Lane l
+// owns the 8 elements [l*8, l*8+8), reusing the exact per-element weight
+// geometry of k_gemm_q4_K (which passed identity empirically) -> group l/4,
+// quant segment l/8, byte offset (l&3)*8, lower nibble iff group even. x is
+// read from global (single decode column, small + L1-cached); the 128-byte
+// quant region of each block is read coalesced across the warp. Reduction is
+// reordered vs k_mv_q4_K -> identity is verified empirically.
+extern "C" __global__ void k_gemv_q4_K(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 144;
+    int g     = (int)(lane >> 2);         // scale/min group 0..7
+    int ji    = (int)(lane >> 3);         // 32-byte quant segment 0..3
+    int lo    = (((int)lane >> 2) & 1) == 0;
+    int bbase = ((int)lane & 3) * 8;      // byte offset within the segment
+    float s = 0;
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 144;
+        float dd   = f16f(blk);
+        float dmin = f16f(blk + 2);
+        const uchar *sc = blk + 4;
+        const uchar *q  = blk + 16 + ji * 32;
+        uchar sg, mg;
+        get_scale_min_k4(g, sc, &sg, &mg);
+        float dg = dd * (float)sg, mmg = dmin * (float)mg;
+        const float *xp = x + (ulong64)b * 256 + (int)lane * 8;
+        #pragma unroll
+        for (int k = 0; k < 8; k++) {
+            uchar byte = q[bbase + k];
+            int nib = lo ? (byte & 0xF) : (byte >> 4);
+            s += (dg * (float)nib - mmg) * xp[k];
+        }
+    }
+    MV_TAIL;
 }
 
 extern "C" __global__ void k_mv_q5_K(MV_PARAMS) {
