@@ -28,13 +28,10 @@ Every change must hold these invariants, in CI and locally:
 
 ## Tests
 
-    python3 scripts/make-test-model.py test.gguf
-    cc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
-       src/json.c src/jsonmode.c src/schema.c -o test-json-schema -lm
-    ./test-json-schema
-
-The full smoke matrix lives in `.github/workflows/ci.yml`; new behavior
-lands with a smoke there (TDD: watch it fail first).
+Use `make test` for the fast schema and Python client correctness checks, and
+`make smoke` for a short CPU-only end-to-end run. CI runs the full smoke matrix
+on Linux, macOS, and Windows; new behavior lands with a smoke there (TDD: watch
+it fail first).
 
 ## Style
 

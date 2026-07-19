@@ -30,6 +30,10 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
             src/json.c src/jsonmode.c src/schema.c -o test-json-schema -lm
           ./test-json-schema
+      - name: python client tests
+        run: |
+          python3 -m pip install pytest
+          PYTHONPATH=python/src python3 -m pytest python/tests/test_client.py
       - name: smoke test (completion)
         run: ./runner -m test.gguf -p "hello" -n 8 --temp 0
       - name: reject malformed tensor metadata
@@ -367,6 +371,7 @@ jobs:
             make
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-pytest
       - name: build
         run: make
       - name: reject invalid CLI values
@@ -383,6 +388,8 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
             src/json.c src/jsonmode.c src/schema.c -o test-json-schema.exe -lm
           ./test-json-schema.exe
+      - name: python client tests
+        run: PYTHONPATH=python/src python3 -m pytest python/tests/test_client.py
       - name: smoke test (completion)
         run: ./runner.exe -m test.gguf -p "hello" -n 8 --temp 0
       - name: reject malformed tensor metadata
