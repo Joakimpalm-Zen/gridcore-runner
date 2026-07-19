@@ -208,9 +208,20 @@ int quantize_gguf(const char *in_path, const char *out_path, int target) {
     for (uint64_t i = 0; i < g.n_tensors; i++) {
         gguf_tensor *t = &g.tensors[i];
         if (!w.ok) break;
-        out_type[i] = should_quantize(t) ? target : (t->type == T_F16 ? T_F16 : T_F32);
-        // never grow a tensor that is already smaller than the target
-        if (should_quantize(t) &&
+        // diagnostic: RUNNER_REQUANT_ONLY=<substr> converts just the tensors
+        // whose name contains <substr> and leaves every other tensor at its
+        // ORIGINAL type, so a model can be bisected group by group
+        const char *only = getenv("RUNNER_REQUANT_ONLY");
+        bool filtered = only && *only && !strstr(t->name, only);
+        if (filtered)
+            out_type[i] = t->type;
+        else
+            out_type[i] = should_quantize(t) ? target
+                        : (t->type == T_F16 ? T_F16 : T_F32);
+        // never grow a tensor that is already smaller than the target —
+        // RUNNER_FORCE_REQUANT overrides this to build same-size conversions
+        // (e.g. Q4_K -> Q4_0) for diagnosing per-quant-type correctness bugs
+        if (!filtered && should_quantize(t) && !getenv("RUNNER_FORCE_REQUANT") &&
             ggml_row_size(t->type, t->ne[0]) <= ggml_row_size(target, t->ne[0]))
             out_type[i] = t->type;
         uint64_t rows, bytes, end;

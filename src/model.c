@@ -623,6 +623,58 @@ static void attn_heads(void *ctx, int h0, int h1) {
     }
 }
 
+// ------------------------------------------------- activation tracing (debug)
+// RUNNER_DEBUG_ACT=1 dumps per-layer activation statistics for the first
+// forward pass to stderr. Off by default; zero cost when unset (one cached
+// getenv + a predictable branch per dumped tensor).
+
+static int dbg_act_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("RUNNER_DEBUG_ACT");
+        mode = e && *e && strcmp(e, "0") != 0 ? atoi(e) : 0;
+        if (mode == 0 && e && *e && strcmp(e, "0") != 0) mode = 1;
+    }
+    return mode;
+}
+static int dbg_act_pass = 0; // forward passes seen so far
+
+static void dbg_stat(const char *tag, int layer, const float *v, size_t n) {
+    float mn = INFINITY, mx = -INFINITY, absmx = 0;
+    double sum = 0;
+    size_t n_inf = 0, n_nan = 0, n_zero = 0;
+    for (size_t i = 0; i < n; i++) {
+        float x = v[i];
+        if (x != x) { n_nan++; continue; }
+        if (x > 3.0e38f || x < -3.0e38f) { n_inf++; continue; }
+        if (x == 0.0f) n_zero++;
+        if (x < mn) mn = x;
+        if (x > mx) mx = x;
+        float a = x < 0 ? -x : x;
+        if (a > absmx) absmx = a;
+        sum += x;
+    }
+    size_t good = n - n_inf - n_nan;
+    fprintf(stderr, "ACT L%-3d %-16s n=%-7zu min=%+.4g max=%+.4g mean=%+.4g absmax=%.4g inf=%zu nan=%zu zero=%zu\n",
+            layer, tag, n, good ? mn : 0.0f, good ? mx : 0.0f,
+            good ? sum / (double)good : 0.0, absmx, n_inf, n_nan, n_zero);
+}
+
+// same, over an f16 buffer already written to the KV cache
+static void dbg_stat_f16(const char *tag, int layer, const f16_t *v, size_t n) {
+    float absmx = 0;
+    size_t n_inf = 0, n_nan = 0;
+    for (size_t i = 0; i < n; i++) {
+        float x = f16_load(v + i);
+        if (x != x) { n_nan++; continue; }
+        if (x > 3.0e38f || x < -3.0e38f) { n_inf++; continue; }
+        float a = x < 0 ? -x : x;
+        if (a > absmx) absmx = a;
+    }
+    fprintf(stderr, "ACT L%-3d %-16s n=%-7zu absmax=%.4g inf=%zu nan=%zu (f16 cache)\n",
+            layer, tag, n, absmx, n_inf, n_nan);
+}
+
 // ---------------------------------------------------------------- forward
 
 // suppress_tokens checkpoint workaround: a large finite constant instead of
@@ -639,6 +691,14 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     // leaves the boundary activation in the host x buffer + the offloaded
     // layers' KV in the host cache, and the CPU loop below finishes the rest.
     int start = 0;
+    int dbg = dbg_act_mode() && dbg_act_pass == 0;
+    if (dbg_act_mode()) dbg_act_pass++;
+    if (dbg)
+        fprintf(stderr, "ACT ==== forward n=%d pos=%d arch=%s embd_scale=%.5f "
+                "rms_eps=%.3g attn_scale=%.4f softcap=%.3f v_rmsnorm=%d "
+                "kv_q8=%d n_suppress=%d\n",
+                n, pos, m->arch, m->embd_scale, m->rms_eps, m->attn_scale,
+                m->logit_softcap, (int)m->v_rmsnorm, (int)m->kv_q8, m->n_suppress);
     if (m->gpu) {
         if (m->gpu_layers >= m->n_layer) {
             float *lg = NULL;
@@ -671,6 +731,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 for (int i = 0; i < n_embd; i++)
                     m->x[(size_t)b * n_embd + i] *= m->embd_scale;
         }
+        if (dbg) dbg_stat("post-embd", -1, m->x + (size_t)(n - 1) * n_embd, n_embd);
     }
 
     for (int l = start; l < m->n_layer; l++) {
@@ -689,6 +750,21 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         for (int b = 0; b < n; b++)
             rmsnorm(m->xb + (size_t)b * xdim, m->x + (size_t)b * n_embd,
                     ly->attn_norm_w, n_embd, m->rms_eps);
+        if (dbg) {
+            fprintf(stderr, "ACT L%-3d cfg swa=%d hd=%d n_kv=%d q_dim=%d kv_dim=%d "
+                    "scale=%.5f out_scale=%.6f wv=%d qn=%d kn=%d pan=%d pfn=%d "
+                    "anorm[absmax]=", l, (int)local, hd, n_kv, q_dim, kv_dim, scale,
+                    ly->out_scale, ly->wv != NULL, ly->qnorm_w != NULL,
+                    ly->knorm_w != NULL, ly->post_attn_norm_w != NULL,
+                    ly->post_ffn_norm_w != NULL);
+            float a = 0;
+            for (int i = 0; i < n_embd; i++) {
+                float t = ly->attn_norm_w[i] < 0 ? -ly->attn_norm_w[i] : ly->attn_norm_w[i];
+                if (t > a) a = t;
+            }
+            fprintf(stderr, "%.4g\n", a);
+            dbg_stat("post-attn-norm", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
+        }
         matvec_b(m->tp, m->q,     q_dim,  ly->wq, m->xb, xdim, n_embd, q_dim,  ly->bq, n);
         matvec_b(m->tp, m->k_tmp, kv_dim, ly->wk, m->xb, xdim, n_embd, kv_dim, ly->bk, n);
         if (ly->wv)
@@ -696,6 +772,11 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         else
             // gemma4 global layers have no V projection: V is the raw K
             memcpy(m->v_tmp, m->k_tmp, sizeof(float) * (size_t)n * kv_dim);
+        if (dbg) {
+            dbg_stat("q-raw", l, m->q + (size_t)(n - 1) * q_dim, q_dim);
+            dbg_stat("k-raw", l, m->k_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
+            dbg_stat("v-raw", l, m->v_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
+        }
         for (int b = 0; b < n; b++) {
             if (ly->qnorm_w)
                 qk_norm(m->q + (size_t)b * q_dim, ly->qnorm_w, m->n_head,
@@ -721,6 +802,17 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 }
             }
         }
+        if (dbg) {
+            dbg_stat("q-post-rope", l, m->q + (size_t)(n - 1) * q_dim, q_dim);
+            dbg_stat("k-post-rope", l, m->k_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
+            dbg_stat("v-post-norm", l, m->v_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
+            if (!m->kv_q8) {
+                dbg_stat_f16("k-cached", l,
+                    (const f16_t *)(kc_l + (size_t)(pos + n - 1) * row_b), kv_dim);
+                dbg_stat_f16("v-cached", l,
+                    (const f16_t *)(vc_l + (size_t)(pos + n - 1) * row_b), kv_dim);
+            }
+        }
         for (int b = 0; b < n; b++) {
             int p = pos + b;
             int t0 = local && p - m->swa_window + 1 > 0 ? p - m->swa_window + 1 : 0;
@@ -729,7 +821,9 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                             row_b, m->kv_q8, scale };
             tpool_run(m->tp, attn_heads, &aj, m->n_head);
         }
+        if (dbg) dbg_stat("attn-out", l, m->xb2 + (size_t)(n - 1) * xdim, q_dim);
         matvec_b(m->tp, m->xb, xdim, ly->wo, m->xb2, xdim, q_dim, n_embd, ly->bo, n);
+        if (dbg) dbg_stat("wo-out", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         if (ly->post_attn_norm_w)
             for (int b = 0; b < n; b++)
                 rmsnorm(m->xb + (size_t)b * xdim, m->xb + (size_t)b * xdim,
@@ -737,6 +831,9 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
+        if (dbg) {
+            dbg_stat("post-attn-res", l, m->x + (size_t)(n - 1) * n_embd, n_embd);
+        }
 
         // feed-forward (gated: silu for llama-family, gelu for gemma)
         for (int b = 0; b < n; b++)
@@ -756,7 +853,9 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 m->hb[i] = (g / (1.0f + expf(-g))) * m->hb2[i]; // silu(g) * up
             }
         }
+        if (dbg) dbg_stat("ffn-act", l, m->hb + (size_t)(n - 1) * m->n_ff, m->n_ff);
         matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, m->n_ff, m->n_ff, n_embd, NULL, n);
+        if (dbg) dbg_stat("ffn-down", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         if (ly->post_ffn_norm_w)
             for (int b = 0; b < n; b++)
                 rmsnorm(m->xb + (size_t)b * xdim, m->xb + (size_t)b * xdim,
@@ -770,15 +869,25 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             for (int b = 0; b < n; b++)
                 for (int i = 0; i < n_embd; i++)
                     m->x[(size_t)b * n_embd + i] *= ly->out_scale;
+        if (dbg) dbg_stat("layer-out", l, m->x + (size_t)(n - 1) * n_embd, n_embd);
     }
 
     if (!want_logits) return NULL;
     rmsnorm(m->xb, m->x + (size_t)(n - 1) * n_embd, m->out_norm_w, n_embd, m->rms_eps);
+    if (dbg) dbg_stat("final-norm", m->n_layer, m->xb, n_embd);
     matvec_b(m->tp, m->logits, m->n_vocab, m->output, m->xb, xdim, n_embd, m->n_vocab, NULL, 1);
+    if (dbg) dbg_stat("logits-raw", m->n_layer, m->logits, m->n_vocab);
     if (m->logit_softcap > 0)
         for (int i = 0; i < m->n_vocab; i++)
             m->logits[i] = m->logit_softcap * tanhf(m->logits[i] / m->logit_softcap);
     if (m->n_suppress) suppress_logits(m, m->logits);
+    if (dbg) {
+        dbg_stat("logits-final", m->n_layer, m->logits, m->n_vocab);
+        int am = 0;
+        for (int i = 1; i < m->n_vocab; i++)
+            if (m->logits[i] > m->logits[am]) am = i;
+        fprintf(stderr, "ACT top1 token=%d logit=%.5f\n", am, m->logits[am]);
+    }
     return m->logits;
 }
 
