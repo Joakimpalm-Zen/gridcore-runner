@@ -82,7 +82,52 @@ static struct {
     CUresult (*GraphLaunch)(CUgraphExec, CUstream);
     CUresult (*GraphExecDestroy)(CUgraphExec);
     CUresult (*GraphDestroy)(CUgraph);
+    // optional: CUDA events for RUNNER_CUDA_PROFILE phase timing
+    CUresult (*EventCreate)(void **, unsigned);
+    CUresult (*EventRecord)(void *, CUstream);
+    CUresult (*EventSynchronize)(void *);
+    CUresult (*EventElapsedTime)(float *, void *, void *);
+    CUresult (*EventDestroy)(void *);
 } cu;
+
+// ---------------------------------------------------- RUNNER_CUDA_PROFILE
+// Coarse GPU phase breakdown behind an env var; OFF by default. Uses CUDA
+// events recorded between kernel-group launches on the plain (non-graph)
+// path, so it perturbs neither correctness nor the default binary. See
+// prof_mark()/prof_flush() and the summary printed from gpu_free().
+typedef void *CUevent;
+enum { PH_NORM = 0, PH_MATVEC, PH_ROPE, PH_ATTN, PH_ELEM, PH_LOGITS, PH_N };
+static const char *PH_NAME[PH_N] = {
+    "norms(rms+qk)", "matvec", "rope", "attention", "elementwise", "logits-mv" };
+// two independent accumulator sets: mode 0 = prefill/batch tiles (tn>1, _b
+// kernels), mode 1 = single-token decode (tn==1, k_mv_* kernels). Set per
+// gpu_forward_batch call from n, so one run yields both clean breakdowns.
+enum { M_BATCH = 0, M_SINGLE = 1, M_N = 2 };
+static struct {
+    int      on;            // RUNNER_CUDA_PROFILE set
+    int      inited;        // events allocated
+    int      capturing;     // inside graph capture: do not mark
+    int      cur_mode;      // M_BATCH or M_SINGLE for the in-flight call
+    CUevent  ev[4096];      // per-call event pool
+    int      ph[4096];      // phase tag of the group ending at ev[k]
+    int      nev;           // events used this call
+    double   t_ph[M_N][PH_N];      // accumulated GPU ms per phase
+    long long total_launches[M_N]; // exact kernel launches
+    long long n_tiles[M_N], n_tokens[M_N];
+    double   wall_ms[M_N];
+    double   t_stage[M_N], t_copyback[M_N], t_logitscp[M_N], t_sync[M_N];
+    double   qpc_hz;
+} prof;
+
+static double prof_now(void) {
+#ifdef _WIN32
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / prof.qpc_hz;
+#else
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+#endif
+}
 
 // newer drivers export the 64-bit entry points under _v2 names; the plain
 // names are the legacy 32-bit-era ABI and must not be used
@@ -126,6 +171,11 @@ static bool cu_load(void) {
     cu.GraphLaunch        = dl_sym(cu.lib, "cuGraphLaunch");
     cu.GraphExecDestroy   = dl_sym(cu.lib, "cuGraphExecDestroy");
     cu.GraphDestroy       = dl_sym(cu.lib, "cuGraphDestroy");
+    cu.EventCreate        = dl_sym(cu.lib, "cuEventCreate");
+    cu.EventRecord        = dl_sym(cu.lib, "cuEventRecord");
+    cu.EventSynchronize   = dl_sym(cu.lib, "cuEventSynchronize");
+    cu.EventElapsedTime   = dl_sym(cu.lib, "cuEventElapsedTime");
+    cu.EventDestroy       = sym2("cuEventDestroy");
     return cu.Init && cu.DeviceGetCount && cu.DeviceGet && cu.DeviceGetName &&
            cu.PrimaryCtxRetain && cu.PrimaryCtxRelease && cu.CtxSetCurrent &&
            cu.MemGetInfo && cu.MemAlloc && cu.MemFree && cu.MemcpyHtoD &&
@@ -251,6 +301,7 @@ bool gpu_init(model_t *m) {
     }
 
     if (!cu_load() || cu.Init(0) != 0) return false;
+    prof.on = getenv("RUNNER_CUDA_PROFILE") != NULL;
     int ndev = 0;
     if (cu.DeviceGetCount(&ndev) != 0 || ndev < 1) return false;
 
@@ -469,7 +520,49 @@ unsupported:
 
 static bool launch(gpu_t *g, CUfunction f, unsigned gx, unsigned gy, unsigned gz,
                    unsigned bx, void **params) {
+    if (prof.on) prof.total_launches[prof.cur_mode]++;
     return cu.LaunchKernel(f, gx, gy, gz, bx, 1, 1, 0, g->stream, params, NULL) == 0;
+}
+
+static void prof_report(void);
+
+// lazily allocate the event pool the first time profiling runs
+static void prof_init(void) {
+    if (prof.inited || !prof.on) return;
+    if (!cu.EventCreate || !cu.EventRecord || !cu.EventElapsedTime ||
+        !cu.EventSynchronize) { prof.on = 0; return; }
+#ifdef _WIN32
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f); prof.qpc_hz = (double)f.QuadPart;
+#else
+    prof.qpc_hz = 1.0;
+#endif
+    for (int i = 0; i < 4096; i++)
+        if (cu.EventCreate(&prof.ev[i], 0) != 0) { prof.on = 0; return; }
+    prof.inited = 1;
+    atexit(prof_report);   // CLI mode returns without model_free/gpu_free
+}
+
+// record an event tagged with the phase of the kernel group just launched;
+// no-op unless profiling is on and we are not mid graph-capture
+static void prof_mark(gpu_t *g, int phase) {
+    if (!prof.on || prof.capturing || !prof.inited) return;
+    if (prof.nev >= 4096) return;
+    prof.ph[prof.nev] = phase;
+    cu.EventRecord(prof.ev[prof.nev], g->stream);
+    prof.nev++;
+}
+
+// after the call's stream/ctx has been synchronized, fold the per-group
+// GPU deltas into the phase accumulators and reset the pool
+static void prof_flush(void) {
+    if (!prof.on || !prof.inited) return;
+    for (int k = 1; k < prof.nev; k++) {
+        float ms = 0;
+        if (cu.EventElapsedTime(&ms, prof.ev[k - 1], prof.ev[k]) == 0 &&
+            prof.ph[k] >= 0 && prof.ph[k] < PH_N)
+            prof.t_ph[prof.cur_mode][prof.ph[k]] += ms;
+    }
+    prof.nev = 0;
 }
 
 static bool enc_rmsnorm(gpu_t *g, CUdeviceptr x, CUdeviceptr y, CUdeviceptr w,
@@ -562,7 +655,53 @@ static void gpu_ctx_free(model_t *m, gpu_t *g) {
     free(g);
 }
 
+static void prof_report_mode(int md, const char *label) {
+    if (prof.n_tiles[md] == 0) return;
+    double gpu_sum = 0;
+    for (int i = 0; i < PH_N; i++) gpu_sum += prof.t_ph[md][i];
+    double wall = prof.wall_ms[md];
+    double nt = (double)prof.n_tiles[md], ntok = (double)prof.n_tokens[md];
+    // On the plain path a synchronous cuMemcpyHtoD (inside stage_x) blocks on
+    // g->stream, so the GPU-execution wait is charged to whichever host timer
+    // issues the next blocking copy — it is NOT extra time. The GPU event sum
+    // is the authoritative busy time; residual = wall - GPU-busy is the true
+    // launch/host overhead (host copy timers overlap GPU and are shown raw).
+    double residual = wall - gpu_sum;
+    fprintf(stderr,
+      "\n==== RUNNER_CUDA_PROFILE [%s] ====\n"
+      "tiles=%lld tokens=%lld launches=%lld (%.1f/tile, %.1f/token)\n"
+      "wall: %.1f ms | %.4f ms/tile | %.4f ms/token\n"
+      "-- GPU phase (CUDA events, authoritative) --\n",
+      label, prof.n_tiles[md], prof.n_tokens[md], prof.total_launches[md],
+      prof.total_launches[md] / nt, prof.total_launches[md] / ntok,
+      wall, wall / nt, wall / ntok);
+    for (int i = 0; i < PH_N; i++)
+        fprintf(stderr, "  %-14s %9.1f ms  %5.1f%%  %.4f ms/tile  %.4f ms/tok\n",
+                PH_NAME[i], prof.t_ph[md][i],
+                100.0 * prof.t_ph[md][i] / (gpu_sum ? gpu_sum : 1),
+                prof.t_ph[md][i] / nt, prof.t_ph[md][i] / ntok);
+    fprintf(stderr,
+      "  %-14s %9.1f ms  (%.1f%% of wall)  %.4f ms/tile\n"
+      "-- host-side raw QPC (overlaps GPU via sync memcpy) --\n"
+      "  stage_x=%.1f  kv_copyback=%.1f  logitsDtoH=%.1f  sync-wait=%.1f ms\n"
+      "  residual(wall-GPUbusy)=%.1f ms (%.1f%% of wall) = launch+host overhead\n",
+      "GPU-TOTAL", gpu_sum, 100.0 * gpu_sum / (wall ? wall : 1), gpu_sum / nt,
+      prof.t_stage[md], prof.t_copyback[md], prof.t_logitscp[md], prof.t_sync[md],
+      residual, 100.0 * residual / (wall ? wall : 1));
+}
+
+static void prof_report(void) {
+    if (!prof.on || !prof.inited) return;
+    prof_report_mode(M_BATCH,  "PREFILL tile tn>1 (_b kernels)");
+    prof_report_mode(M_SINGLE, "DECODE  tn==1 (k_mv_* kernels)");
+    fprintf(stderr, "=============================\n");
+    for (int i = 0; i < 4096; i++)
+        if (prof.ev[i] && cu.EventDestroy) cu.EventDestroy(prof.ev[i]);
+    prof.inited = 0;
+}
+
 void gpu_free(model_t *m) {
+    prof_report();
     gpu_t *g = m->gpu;
     m->gpu = NULL;
     gpu_ctx_free(m, g);
@@ -627,6 +766,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         if (model_q_dim(m, l) > xdim) xdim = model_q_dim(m, l);
 
     bool ok = true;
+    prof_mark(g, -1);   // tile anchor: delta to the first group is charged below
     for (int l = l0; l < l1 && ok; l++) {
         layer_t *ly = &m->layers[l];
         bool local  = model_is_swa(m, l);
@@ -637,6 +777,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
 
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->attn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
+        prof_mark(g, PH_NORM);
         ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->bq[l], tn, xdim, q_dim);
         ok = ok && enc_mv(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->bk[l], tn, xdim, kv_dim);
         if (ly->wv) {
@@ -647,13 +788,16 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && cu.MemsetD8(g->vt, 0, sizeof(float) * (size_t)tn * kv_dim) == 0;
             ok = ok && enc_add(g, g->vt, g->kt, kv_dim, tn, kv_dim, kv_dim);
         }
+        prof_mark(g, PH_MATVEC);
         if (g->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->qn[l], m->n_head, hd, tn, q_dim);
         if (m->v_rmsnorm)
             // weightless per-head RMS norm on V (pre-K-norm values)
             ok = ok && enc_qknorm(g, m, g->vt, g->ones, n_kv, hd, tn, kv_dim);
         if (g->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->kn[l], n_kv, hd, tn, kv_dim);
+        prof_mark(g, PH_NORM);
         ok = ok && enc_rope(g, m, g->q,  m->n_head, tn, q_dim, l);
         ok = ok && enc_rope(g, m, g->kt, n_kv,      tn, kv_dim, l);
+        prof_mark(g, PH_ROPE);
 
         {
             // cache rows for consecutive positions are contiguous, so the
@@ -671,19 +815,26 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa, &g->pos_dev };
             ok = ok && launch(g, g->f_attn, m->n_head, tn, 1, 128, pa);
         }
+        prof_mark(g, PH_ATTN);
 
         ok = ok && enc_mv(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->bo[l], tn, xdim, xdim);
+        prof_mark(g, PH_MATVEC);
         if (g->pan[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->pan[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
+        prof_mark(g, PH_ELEM);
 
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->ffn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
+        prof_mark(g, PH_NORM);
         ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
         ok = ok && enc_mv(g, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
+        prof_mark(g, PH_MATVEC);
         ok = ok && enc_actmul(g, m, g->hb, g->hb2, tn * m->n_ff);
+        prof_mark(g, PH_ELEM);
         ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
+        prof_mark(g, PH_MATVEC);
         if (g->pfn[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->pfn[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);
@@ -691,13 +842,16 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
             // gemma4: whole-layer output scalar, applied after both residuals
             ok = ok && enc_scale(g, g->x, ly->out_scale, n_embd, tn, n_embd);
+        prof_mark(g, PH_ELEM);
     }
 
     if (want_logits) {
         CUdeviceptr xlast = g->x + (size_t)(tn - 1) * n_embd * sizeof(float);
         ok = ok && enc_rmsnorm(g, xlast, g->xb, g->out_norm, n_embd, m->rms_eps,
                                1, 0, 0);
+        prof_mark(g, PH_NORM);
         ok = ok && enc_mv(g, m, m->output, g->xb, g->logits, n_embd, m->n_vocab, 0, 1, 0, 0);
+        prof_mark(g, PH_LOGITS);
     }
     return ok;
 }
@@ -709,6 +863,10 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     if (n < 1) return true;
 
     if (cu.CtxSetCurrent(g->ctx) != 0) return false;
+    if (prof.on && !prof.inited) prof_init();
+    prof.cur_mode = (n == 1) ? M_SINGLE : M_BATCH;
+    int m_ = prof.cur_mode;
+    double t_fwd0 = prof.on ? prof_now() : 0;
 
     // a non-contiguous position step means the host KV holds rows the device
     // hasn't seen (a CPU-run batch, or a reset + new prompt): resync [0, pos)
@@ -719,9 +877,12 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     bool partial = m->gpu_layers < m->n_layer;
     if (n == 1 && want_logits && !partial && !g->graph_bad && g->stream &&
         !getenv("RUNNER_CUDA_GRAPH_OFF")) {
+        double ts0 = prof.on ? prof_now() : 0;
         if (!stage_x(g, m, tokens, 1) ||
             cu.MemcpyHtoD(g->pos_dev, &pos, sizeof(int)) != 0) return false;
+        if (prof.on) prof.t_stage[m_] += prof_now() - ts0;
         if (!g->gexec) {
+            prof.capturing = 1;
             // capture records the launch sequence without executing it; the
             // recorded graph is position-invariant because pos lives in
             // device memory, so one capture serves every decode token
@@ -742,15 +903,30 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 fprintf(stderr, "gpu: graph capture failed — plain launches\n");
                 g->graph_bad = true;
             }
+            prof.capturing = 0;
         }
-        if (g->gexec && cu.GraphLaunch(g->gexec, g->stream) == 0 &&
-            cu.StreamSynchronize(g->stream) == 0) {
-            if (!kv_copyback(g, m, pos, pos + 1)) return false;
-            g->last_pos = pos;
-            if (cu.MemcpyDtoH(g->h_logits, g->logits, sizeof(float) * m->n_vocab) != 0)
-                return false;
-            if (logits) *logits = g->h_logits;
-            return true;
+        if (g->gexec) {
+            double tg0 = prof.on ? prof_now() : 0;
+            bool gl = cu.GraphLaunch(g->gexec, g->stream) == 0 &&
+                      cu.StreamSynchronize(g->stream) == 0;
+            if (prof.on) prof.t_sync[m_] += prof_now() - tg0;
+            if (gl) {
+                double tc0 = prof.on ? prof_now() : 0;
+                if (!kv_copyback(g, m, pos, pos + 1)) return false;
+                if (prof.on) prof.t_copyback[m_] += prof_now() - tc0;
+                g->last_pos = pos;
+                double tl0 = prof.on ? prof_now() : 0;
+                if (cu.MemcpyDtoH(g->h_logits, g->logits, sizeof(float) * m->n_vocab) != 0)
+                    return false;
+                if (prof.on) {
+                    prof.t_logitscp[m_] += prof_now() - tl0;
+                    prof.n_tokens[m_] += 1; prof.n_tiles[m_] += 1;
+                    prof.wall_ms[m_] += prof_now() - t_fwd0;
+                    prof_flush();
+                }
+                if (logits) *logits = g->h_logits;
+                return true;
+            }
         }
         if (!g->graph_bad) { g->graph_bad = true;
             fprintf(stderr, "gpu: graph launch failed — plain launches\n"); }
@@ -762,8 +938,12 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         int p = pos + i;
         // device runs layers [0, gpu_layers); logits only when it owns the whole
         // model (partial hands the boundary activation back to the CPU)
-        if (!stage_x(g, m, tokens + i, tn) ||
-            cu.MemcpyHtoD(g->pos_dev, &p, sizeof(int)) != 0 ||
+        double ts0 = prof.on ? prof_now() : 0;
+        bool sok = stage_x(g, m, tokens + i, tn) &&
+                   cu.MemcpyHtoD(g->pos_dev, &p, sizeof(int)) == 0;
+        if (prof.on) { prof.t_stage[m_] += prof_now() - ts0; prof.n_tiles[m_] += 1;
+                       prof.n_tokens[m_] += tn; }
+        if (!sok ||
             !fwd_tile(g, m, tokens + i, tn, p,
                       want_logits && last && !partial, 0, m->gpu_layers)) {
             fprintf(stderr, "gpu: kernel launch failed — falling back to CPU\n");
@@ -776,20 +956,27 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                           g->x, sizeof(float) * tn * m->n_embd) != 0)
             return false;
     }
+    double tsy0 = prof.on ? prof_now() : 0;
     if (cu.CtxSynchronize() != 0) {
         fprintf(stderr, "gpu: forward failed — falling back to CPU\n");
         return false;
     }
+    if (prof.on) { prof.t_sync[m_] += prof_now() - tsy0; prof_flush(); }
 
     // keep the host KV cache authoritative: copy the offloaded layers' rows
     // back so the CPU path can take over at any point
+    double tc0 = prof.on ? prof_now() : 0;
     if (!kv_copyback(g, m, pos, pos + n)) return false;
+    if (prof.on) prof.t_copyback[m_] += prof_now() - tc0;
     g->last_pos = pos + n - 1;
 
     if (want_logits && !partial) {
+        double tl0 = prof.on ? prof_now() : 0;
         if (cu.MemcpyDtoH(g->h_logits, g->logits, sizeof(float) * m->n_vocab) != 0)
             return false;
+        if (prof.on) prof.t_logitscp[m_] += prof_now() - tl0;
         if (logits) *logits = g->h_logits;
     }
+    if (prof.on) prof.wall_ms[m_] += prof_now() - t_fwd0;
     return true;
 }
