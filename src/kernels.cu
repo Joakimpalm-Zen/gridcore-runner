@@ -737,6 +737,104 @@ extern "C" __global__ void k_mv_q6_K_b(MV_PARAMS) {
     MV_TAIL_B;
 }
 
+// Q6_K decode GEMV: lane-per-element coalesced variant of k_mv_q6_K. The
+// generic k_mv_q6_K maps one lane to a whole 210-byte block, so consecutive
+// lanes read 210-byte-strided addresses (uncoalesced). This variant makes the
+// warp process each block cooperatively: lane l owns the four sub-positions
+// {l, l+32, l+64, l+96} within each of the block's two 128-element halves (8
+// elements total). Then ql[l]/ql[l+32]/qh[l] each read 32 consecutive bytes
+// across the warp -> coalesced. Per-element weight d*sc[base+is]*q matches
+// k_mv_q6_K exactly; only the k-reduction is reordered (per-lane partials +
+// one warp_sum), so identity is verified empirically by kernel-verify.
+extern "C" __global__ void k_gemv_q6_K(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 210;
+    int is = (int)(lane >> 4);          // (lane/16)&1 for lane 0..31 -> 0 or 1
+    float s = 0;
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 210;
+        float d = f16f(blk + 208);
+        const float *xb = x + (ulong64)b * 256;
+        #pragma unroll
+        for (int half = 0; half < 2; half++) {
+            const uchar *ql = blk + half * 64;
+            const uchar *qh = blk + 128 + half * 32;
+            const signed char *sc = (const signed char *)(blk + 192) + half * 8;
+            int q1 = (int)((ql[lane]      & 0xF) | (((qh[lane] >> 0) & 3) << 4)) - 32;
+            int q2 = (int)((ql[lane + 32] & 0xF) | (((qh[lane] >> 2) & 3) << 4)) - 32;
+            int q3 = (int)((ql[lane]      >> 4)  | (((qh[lane] >> 4) & 3) << 4)) - 32;
+            int q4 = (int)((ql[lane + 32] >> 4)  | (((qh[lane] >> 6) & 3) << 4)) - 32;
+            const float *xp = xb + half * 128;
+            s += d * ((float)(sc[0 + is] * q1) * xp[lane] +
+                      (float)(sc[2 + is] * q2) * xp[lane + 32] +
+                      (float)(sc[4 + is] * q3) * xp[lane + 64] +
+                      (float)(sc[6 + is] * q4) * xp[lane + 96]);
+        }
+    }
+    MV_TAIL;
+}
+
+// Q6_K prefill GEMM: same shared-memory x staging as k_gemm_q4_K, with the
+// lane-per-element geometry of k_gemv_q6_K. Warp walks blocks sequentially;
+// its 32 lanes cooperatively reduce the 256 elements of each block (8/lane,
+// positions {l,l+32,l+64,l+96} per half). x for the current block is staged in
+// smem so decoded weights FMA against smem. Reordered k-reduction vs
+// k_mv_q6_K_b -> token identity verified empirically.
+extern "C" __global__ void k_gemm_q6_K(MV_PARAMS) {
+    __shared__ float xsm[MVB][256];
+    unsigned warp = threadIdx.x >> 5;
+    unsigned lane = threadIdx.x & 31;
+    unsigned row  = blockIdx.x * GEMM_WARPS + warp;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off +
+                      (ulong64)(row < (unsigned)a.n_out ? row : 0) * nb * 210;
+    int is = (int)(lane >> 4);
+    float s[MVB] = {0};
+
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 210;
+        int base_e = b * 256;
+        #pragma unroll
+        for (int t = 0; t < MVB; t++) {
+            const float *xg = x + (ulong64)t * a.xs + base_e;
+            for (int e = threadIdx.x; e < 256; e += blockDim.x) xsm[t][e] = xg[e];
+        }
+        __syncthreads();
+        if (row < (unsigned)a.n_out) {
+            float d = f16f(blk + 208);
+            #pragma unroll
+            for (int half = 0; half < 2; half++) {
+                const uchar *ql = blk + half * 64;
+                const uchar *qh = blk + 128 + half * 32;
+                const signed char *sc = (const signed char *)(blk + 192) + half * 8;
+                int q1 = (int)((ql[lane]      & 0xF) | (((qh[lane] >> 0) & 3) << 4)) - 32;
+                int q2 = (int)((ql[lane + 32] & 0xF) | (((qh[lane] >> 2) & 3) << 4)) - 32;
+                int q3 = (int)((ql[lane]      >> 4)  | (((qh[lane] >> 4) & 3) << 4)) - 32;
+                int q4 = (int)((ql[lane + 32] >> 4)  | (((qh[lane] >> 6) & 3) << 4)) - 32;
+                float w1 = d * (float)(sc[0 + is] * q1);
+                float w2 = d * (float)(sc[2 + is] * q2);
+                float w3 = d * (float)(sc[4 + is] * q3);
+                float w4 = d * (float)(sc[6 + is] * q4);
+                int e0 = half * 128;
+                #pragma unroll
+                for (int t = 0; t < MVB; t++) {
+                    const float *xs = xsm[t];
+                    s[t] += w1 * xs[e0 + lane]      + w2 * xs[e0 + lane + 32] +
+                            w3 * xs[e0 + lane + 64] + w4 * xs[e0 + lane + 96];
+                }
+            }
+        }
+        __syncthreads();
+    }
+    if (row < (unsigned)a.n_out) {
+        for (int t = 0; t < a.batch; t++) {
+            float r = warp_sum(s[t]);
+            if (lane == 0) y[(ulong64)t * a.ys + row] = a.has_bias ? r + bias[row] : r;
+        }
+    }
+}
+
 // IQ4: the nibble indexes a fixed 16-entry codebook
 static __device__ const signed char kv_iq4[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
@@ -949,6 +1047,134 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
         }
         out[(ulong64)tk * a.os + h * hd + 2 * i2]     = o0 / sum;
         out[(ulong64)tk * a.os + h * hd + 2 * i2 + 1] = o1 / sum;
+    }
+}
+
+// --------------------------------------------------- flash-decoding attention
+// Decode (batch==1, one query token, long KV) attention. The plain k_attn runs
+// one block per (head, token): a 4B decode step is 32 blocks on a 46-SM GPU,
+// each re-reading the whole fp16 KV cache serially. These two kernels split the
+// KV range across ATTN_SPLITS blocks per head (fixed, compile-time constant, so
+// the CUDA graph stays valid across positions) and merge the partials:
+//
+//   k_attn_dec  : grid (n_head, ATTN_SPLITS, tn). Each (head, split) block
+//                 computes softmax over its on-device-computed KV slice with
+//                 the SAME within-slice reduction structure as k_attn (paired
+//                 q*k, strided-then-tree max/sum, sequential weighted-V), and
+//                 writes an un-normalised partial: weighted-V + local max +
+//                 local sum. Empty slices write a -inf-max sentinel.
+//   k_attn_merge: grid (n_head, tn). Combines the ATTN_SPLITS partials with a
+//                 global max and the standard exp(m_j - M) rescale, divides by
+//                 the merged sum, writes out. Merge order is fixed (0..SPLITS)
+//                 so it is deterministic across positions.
+//
+// The cross-slice merge reassociates the softmax sum (extra exp(m_j - M) and a
+// regrouped add) relative to k_attn's single global reduction, so identity is
+// not bitwise and is verified empirically by kernel-verify. Within a slice the
+// order is preserved. Partials scratch layout per (tk, head, split):
+//   [0..hd)  un-normalised weighted V ; [hd] local max ; [hd+1] local sum.
+
+#define ATTN_SPLITS 8
+
+extern "C" __global__ void k_attn_dec(const float *q, const __half *kc,
+                                      const __half *vc, float *att, float *part,
+                                      attn_args a, const int *posp) {
+    __shared__ float red[128];
+    int h = blockIdx.x, sp = blockIdx.y, tk = blockIdx.z;
+    int tid = threadIdx.x, tpg = blockDim.x;
+    int pos = *posp + tk;
+    int hd = a.head_dim;
+    int kvh = h / (a.n_head / a.n_head_kv);
+    int kv_dim = a.n_head_kv * hd;
+    int t0 = 0;
+    if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1;
+    int total = pos + 1 - t0;
+    int slice = (total + ATTN_SPLITS - 1) / ATTN_SPLITS;     // on-device from pos
+    int s0 = t0 + sp * slice;
+    int s1 = s0 + slice;
+    if (s1 > pos + 1) s1 = pos + 1;
+    float *P = part + (((ulong64)tk * a.n_head + h) * ATTN_SPLITS + sp) * (hd + 2);
+    if (s0 >= s1) {                       // empty slice: sentinel, skipped in merge
+        if (tid == 0) { P[hd] = -1e30f; P[hd + 1] = 0.f; }
+        return;
+    }
+    const float *qh = q + (ulong64)tk * a.qs + h * hd;
+    float *ah = att + ((ulong64)tk * a.n_head + h) * a.n_ctx;
+
+    for (int t = s0 + tid; t < s1; t += tpg) {
+        const __half2 *kt2 = (const __half2 *)(kc + a.l_off +
+                             (ulong64)t * kv_dim + kvh * hd);
+        float s = 0;
+        for (int i = 0; i < hd / 2; i++) {
+            float2 kf = __half22float2(kt2[i]);
+            s += qh[2 * i] * kf.x + qh[2 * i + 1] * kf.y;
+        }
+        ah[t] = s * a.scale;
+    }
+    __syncthreads();
+    float mx = -1e30f;
+    for (int t = s0 + tid; t < s1; t += tpg) mx = fmaxf(mx, ah[t]);
+    red[tid] = mx;
+    __syncthreads();
+    for (int off = tpg / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] = fmaxf(red[tid], red[tid + off]);
+        __syncthreads();
+    }
+    mx = red[0];
+    __syncthreads();
+    float sum = 0;
+    for (int t = s0 + tid; t < s1; t += tpg) {
+        float e = expf(ah[t] - mx);
+        ah[t] = e;
+        sum += e;
+    }
+    red[tid] = sum;
+    __syncthreads();
+    for (int off = tpg / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] += red[tid + off];
+        __syncthreads();
+    }
+    sum = red[0];
+    __syncthreads();
+    for (int i2 = tid; i2 < hd / 2; i2 += tpg) {
+        float o0 = 0, o1 = 0;
+        for (int t = s0; t < s1; t++) {
+            const __half2 *vt2 = (const __half2 *)(vc + a.l_off +
+                                 (ulong64)t * kv_dim + kvh * hd);
+            float2 vf = __half22float2(vt2[i2]);
+            o0 += ah[t] * vf.x;
+            o1 += ah[t] * vf.y;
+        }
+        P[2 * i2]     = o0;               // un-normalised (merge divides by sum)
+        P[2 * i2 + 1] = o1;
+    }
+    if (tid == 0) { P[hd] = mx; P[hd + 1] = sum; }
+}
+
+extern "C" __global__ void k_attn_merge(float *out, const float *part,
+                                        attn_args a, const int *posp) {
+    int h = blockIdx.x, tk = blockIdx.y;
+    int tid = threadIdx.x, tpg = blockDim.x;
+    int hd = a.head_dim;
+    const float *base = part + ((ulong64)tk * a.n_head + h) * ATTN_SPLITS * (hd + 2);
+    float M = -1e30f;
+    for (int sp = 0; sp < ATTN_SPLITS; sp++)
+        M = fmaxf(M, base[sp * (hd + 2) + hd]);
+    float L = 0.f;
+    for (int sp = 0; sp < ATTN_SPLITS; sp++) {
+        float m = base[sp * (hd + 2) + hd];
+        if (m <= -1e29f) continue;
+        L += base[sp * (hd + 2) + hd + 1] * expf(m - M);
+    }
+    for (int i = tid; i < hd; i += tpg) {
+        float acc = 0.f;
+        for (int sp = 0; sp < ATTN_SPLITS; sp++) {
+            const float *P = base + sp * (hd + 2);
+            float m = P[hd];
+            if (m <= -1e29f) continue;
+            acc += P[i] * expf(m - M);
+        }
+        out[(ulong64)tk * a.os + h * hd + i] = acc / L;
     }
 }
 

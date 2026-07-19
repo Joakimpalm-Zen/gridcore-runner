@@ -204,13 +204,14 @@ typedef struct {
     CUmodule    mod;
     CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu,
                 f_add, f_scale;
+    CUfunction  f_attn_dec, f_attn_merge;   // flash-decoding attention (decode)
     CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
     CUfunction  f_gemm[32];             // prefill tiled-GEMM variants (Q8_0/Q4_K)
     CUfunction  f_gemv[32];             // decode coalesced GEMV variants (Q8_0/Q4_K)
     CUdeviceptr weights;
     size_t      weights_len;
     CUdeviceptr kc, vc;
-    CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
+    CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, attn_part, logits;
     CUdeviceptr inv_freq, inv_freq_local, out_norm, dummy;
     CUdeviceptr ones;                   // weightless V RMS norm (gemma4)
     CUdeviceptr *attn_norm, *ffn_norm;  // per layer
@@ -230,6 +231,10 @@ typedef struct {
 // max tokens per matvec tile — must match MVB in kernels.cu; every activation
 // buffer is allocated this many columns wide
 #define MVB 8
+
+// flash-decoding KV split count — must match ATTN_SPLITS in kernels.cu; fixed
+// (not context-dependent) so the decode CUDA graph stays valid across positions
+#define ATTN_SPLITS 8
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, neox; float mscale; } rope_args;
@@ -395,6 +400,7 @@ bool gpu_init(model_t *m) {
             { &g->f_rmsnorm,    "k_rmsnorm" },   { &g->f_qknorm, "k_qknorm" },
             { &g->f_rope,       "k_rope" },      { &g->f_store,  "k_store_kv" },
             { &g->f_attn,       "k_attn" },      { &g->f_silu,   "k_silu_mul" },
+            { &g->f_attn_dec,   "k_attn_dec" },  { &g->f_attn_merge, "k_attn_merge" },
             { &g->f_gelu,       "k_gelu_mul" },  { &g->f_add,    "k_add" },
             { &g->f_scale,      "k_scale" },
             { &g->f_mv[T_F32],  "k_mv_f32" },    { &g->f_mv[T_F16],  "k_mv_f16" },
@@ -412,9 +418,11 @@ bool gpu_init(model_t *m) {
             // prefill tiled-GEMM variants (batch>1 fast path for these formats)
             { &g->f_gemm[T_Q8_0], "k_gemm_q8_0" },
             { &g->f_gemm[T_Q4_K], "k_gemm_q4_K" },
+            { &g->f_gemm[T_Q6_K], "k_gemm_q6_K" },
             // decode coalesced GEMV variants (batch==1 fast path for these formats)
             { &g->f_gemv[T_Q8_0], "k_gemv_q8_0" },
             { &g->f_gemv[T_Q4_K], "k_gemv_q4_K" },
+            { &g->f_gemv[T_Q6_K], "k_gemv_q6_K" },
         };
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
             CK(cu.ModuleGetFunction(fns[i].f, g->mod, fns[i].name));
@@ -438,6 +446,9 @@ bool gpu_init(model_t *m) {
         CK(cu.MemAlloc(&g->hb,     sizeof(float) * MVB * m->n_ff));
         CK(cu.MemAlloc(&g->hb2,    sizeof(float) * MVB * m->n_ff));
         CK(cu.MemAlloc(&g->att,    sizeof(float) * MVB * (size_t)m->n_head * m->n_ctx));
+        // flash-decoding partials: per (token, head, split) -> hd weighted-V + max + sum
+        CK(cu.MemAlloc(&g->attn_part, sizeof(float) * MVB * (size_t)m->n_head *
+                                      ATTN_SPLITS * (max_hd + 2)));
         CK(cu.MemAlloc(&g->logits, sizeof(float) * m->n_vocab));
         CK(cu.MemAlloc(&g->dummy,  4));
         CK(cu.MemAlloc(&g->pos_dev, sizeof(int)));
@@ -661,7 +672,7 @@ static void gpu_ctx_free(model_t *m, gpu_t *g) {
     free(g->qn); free(g->kn);
     free(g->pan); free(g->pfn);
     CUdeviceptr bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
-                           g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
+                           g->q, g->kt, g->vt, g->hb, g->hb2, g->att, g->attn_part,
                            g->logits, g->inv_freq, g->inv_freq_local,
                            g->out_norm, g->dummy, g->ones, g->pos_dev };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
@@ -829,8 +840,22 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                              (uint64_t)m->kv_off[l],
                              model_attn_scale(m, l), q_dim, xdim,
                              local ? m->swa_window : 0 };
-            void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa, &g->pos_dev };
-            ok = ok && launch(g, g->f_attn, m->n_head, tn, 1, 128, pa);
+            // Decode (tn==1, one query, long KV): flash-decoding — split the KV
+            // range across ATTN_SPLITS blocks/head (higher occupancy, coalesced)
+            // then merge partials. Prefill (tn>1) already runs n_head*tn blocks,
+            // so it keeps the single-pass k_attn. tn is the tile size (constant
+            // at graph-capture time), not per-token state, so this branch is
+            // capture-safe.
+            if (tn == 1) {
+                void *pd[] = { &g->q, &g->kc, &g->vc, &g->att, &g->attn_part,
+                               &aa, &g->pos_dev };
+                ok = ok && launch(g, g->f_attn_dec, m->n_head, ATTN_SPLITS, 1, 128, pd);
+                void *pm[] = { &g->xb2, &g->attn_part, &aa, &g->pos_dev };
+                ok = ok && launch(g, g->f_attn_merge, m->n_head, 1, 1, 128, pm);
+            } else {
+                void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa, &g->pos_dev };
+                ok = ok && launch(g, g->f_attn, m->n_head, tn, 1, 128, pa);
+            }
         }
         prof_mark(g, PH_ATTN);
 
