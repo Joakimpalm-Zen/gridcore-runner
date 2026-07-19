@@ -171,6 +171,68 @@ extern "C" __global__ void k_mv_q8_0_b(MV_PARAMS) {
     MV_TAIL_B;
 }
 
+// -------------------------------------------------------------- prefill GEMM
+// Real tiled GEMM replacements for the two prefill formats that matter on this
+// machine (Q8_0, Q4_K). The batch _b kernels are compute/latency bound: each
+// decoded weight issues MVB scattered global x-loads. These variants stage the
+// x-tile columns into shared memory once per block, so every decoded weight
+// FMAs against smem instead of global memory, and multiple warps (rows) reuse
+// the same staged x.
+//
+// Correctness: the reduction is kept BIT-IDENTICAL to the _b kernels — lane b
+// still owns k-blocks b, b+32, ...; the inner j-order is 0..31; the per-weight
+// term is the same d*(float)q[j]; the final warp_sum tree is unchanged. Only
+// the *source* of x changes (smem vs global), so results match the _b kernels
+// exactly and greedy tokens are identical.
+
+#define GEMM_WARPS 8            // output rows per block (warps)
+#define Q8_CHUNK   32           // q8 blocks staged per k-iteration (== warp lanes)
+#define SMPAD      33           // 32 + 1: makes per-lane smem reads conflict-free
+
+// xsm[t][blk_in_chunk*SMPAD + j] holds x column t, element (chunk*1024)+blk*32+j
+extern "C" __global__ void k_gemm_q8_0(MV_PARAMS) {
+    __shared__ float xsm[MVB][Q8_CHUNK * SMPAD];
+    unsigned warp = threadIdx.x >> 5;
+    unsigned lane = threadIdx.x & 31;
+    unsigned row  = blockIdx.x * GEMM_WARPS + warp;
+    int nb = a.n_in / 32;
+    float s[MVB] = {0};
+    const uchar *rw = wb + a.w_off + (ulong64)(row < (unsigned)a.n_out ? row : 0) * nb * 34;
+
+    for (int cs = 0; cs < nb; cs += Q8_CHUNK) {
+        int cblocks = nb - cs < Q8_CHUNK ? nb - cs : Q8_CHUNK;
+        int celems  = cblocks * 32;
+        int base_e  = cs * 32;
+        // coalesced cooperative load of this chunk's x into padded smem
+        #pragma unroll
+        for (int t = 0; t < MVB; t++) {
+            const float *xg = x + (ulong64)t * a.xs + base_e;
+            for (int e = threadIdx.x; e < celems; e += blockDim.x)
+                xsm[t][(e >> 5) * SMPAD + (e & 31)] = xg[e];
+        }
+        __syncthreads();
+        if (row < (unsigned)a.n_out && lane < (unsigned)cblocks) {
+            const uchar *blk = rw + (ulong64)(cs + lane) * 34;
+            float d = f16f(blk);
+            const signed char *q = (const signed char *)(blk + 2);
+            int soff = (int)lane * SMPAD;
+            #pragma unroll
+            for (int j = 0; j < 32; j++) {
+                float w = d * (float)q[j];
+                #pragma unroll
+                for (int t = 0; t < MVB; t++) s[t] += w * xsm[t][soff + j];
+            }
+        }
+        __syncthreads();
+    }
+    if (row < (unsigned)a.n_out) {
+        for (int t = 0; t < a.batch; t++) {
+            float r = warp_sum(s[t]);
+            if (lane == 0) y[(ulong64)t * a.ys + row] = a.has_bias ? r + bias[row] : r;
+        }
+    }
+}
+
 extern "C" __global__ void k_mv_q4_0(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 32;
@@ -423,6 +485,66 @@ extern "C" __global__ void k_mv_q4_K_b(MV_PARAMS) {
         }
     }
     MV_TAIL_B;
+}
+
+// Q4_K prefill GEMM. Unlike Q8_0 the 256-element block is too wide to keep
+// lane==k-block (32 blocks -> 8192 x elements won't fit in smem), so the warp
+// instead walks k-blocks sequentially and its 32 lanes cooperatively reduce the
+// 256 elements of each block (8 elements/lane). x for the current block is
+// staged into smem (small, 256*MVB floats) so decoded weights FMA against smem.
+// This REORDERS the k-reduction relative to k_mv_q4_K_b, so it is not bitwise
+// identical — token-identity is verified empirically by kernel-verify on the
+// real Q4_K model. Lane l owns elements [l*8, l*8+8): all in scale group l/4,
+// quant segment l/8, byte offset (l&3)*8, lower nibble iff group even.
+extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
+    __shared__ float xsm[MVB][256];
+    unsigned warp = threadIdx.x >> 5;
+    unsigned lane = threadIdx.x & 31;
+    unsigned row  = blockIdx.x * GEMM_WARPS + warp;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off +
+                      (ulong64)(row < (unsigned)a.n_out ? row : 0) * nb * 144;
+    float s[MVB] = {0};
+    int g     = (int)(lane >> 2);         // scale/min group 0..7
+    int ji    = (int)(lane >> 3);         // 32-byte quant segment 0..3
+    int lo    = (((int)lane >> 2) & 1) == 0;
+    int bbase = ((int)lane & 3) * 8;      // byte offset within the segment
+
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 144;
+        int base_e = b * 256;
+        #pragma unroll
+        for (int t = 0; t < MVB; t++) {
+            const float *xg = x + (ulong64)t * a.xs + base_e;
+            for (int e = threadIdx.x; e < 256; e += blockDim.x) xsm[t][e] = xg[e];
+        }
+        __syncthreads();
+        if (row < (unsigned)a.n_out) {
+            float dd   = f16f(blk);
+            float dmin = f16f(blk + 2);
+            const uchar *sc = blk + 4;
+            const uchar *q  = blk + 16 + ji * 32;
+            uchar sg, mg;
+            get_scale_min_k4(g, sc, &sg, &mg);
+            float dg = dd * (float)sg, mmg = dmin * (float)mg;
+            int el = (int)lane * 8;
+            #pragma unroll
+            for (int k = 0; k < 8; k++) {
+                uchar byte = q[bbase + k];
+                int nib = lo ? (byte & 0xF) : (byte >> 4);
+                float w = dg * (float)nib - mmg;
+                #pragma unroll
+                for (int t = 0; t < MVB; t++) s[t] += w * xsm[t][el + k];
+            }
+        }
+        __syncthreads();
+    }
+    if (row < (unsigned)a.n_out) {
+        for (int t = 0; t < a.batch; t++) {
+            float r = warp_sum(s[t]);
+            if (lane == 0) y[(ulong64)t * a.ys + row] = a.has_bias ? r + bias[row] : r;
+        }
+    }
 }
 
 extern "C" __global__ void k_mv_q5_K(MV_PARAMS) {

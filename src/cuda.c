@@ -205,6 +205,7 @@ typedef struct {
     CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu,
                 f_add, f_scale;
     CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
+    CUfunction  f_gemm[32];             // prefill tiled-GEMM variants (Q8_0/Q4_K)
     CUdeviceptr weights;
     size_t      weights_len;
     CUdeviceptr kc, vc;
@@ -407,6 +408,9 @@ bool gpu_init(model_t *m) {
             { &g->f_mvb[T_Q5_1], "k_mv_q5_1_b" }, { &g->f_mvb[T_Q4_K], "k_mv_q4_K_b" },
             { &g->f_mvb[T_Q5_K], "k_mv_q5_K_b" }, { &g->f_mvb[T_Q6_K], "k_mv_q6_K_b" },
             { &g->f_mvb[T_IQ4_NL], "k_mv_iq4_nl_b" }, { &g->f_mvb[T_IQ4_XS], "k_mv_iq4_xs_b" },
+            // prefill tiled-GEMM variants (batch>1 fast path for these formats)
+            { &g->f_gemm[T_Q8_0], "k_gemm_q8_0" },
+            { &g->f_gemm[T_Q4_K], "k_gemm_q4_K" },
         };
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
             CK(cu.ModuleGetFunction(fns[i].f, g->mod, fns[i].name));
@@ -579,6 +583,10 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
                   bias != 0, batch, xs, ys };
     CUdeviceptr b = bias ? bias : g->dummy;
     void *p[] = { &g->weights, &x, &y, &a, &b };
+    // Prefill (batch>1) uses the tiled-GEMM variant where available (Q8_0/Q4_K):
+    // GEMM_WARPS(=8) rows per block, 256 threads, x staged in shared memory.
+    if (batch > 1 && g->f_gemm[w->type])
+        return launch(g, g->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p);
     // 128 threads = 4 warps = 4 rows per block; the tile variant applies each
     // decoded weight to all columns, the single variant is faster at batch 1
     CUfunction f = batch > 1 ? g->f_mvb[w->type] : g->f_mv[w->type];

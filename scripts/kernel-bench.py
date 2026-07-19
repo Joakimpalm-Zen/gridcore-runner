@@ -38,7 +38,7 @@ def main() -> int:
                                      encoding="utf-8") as handle:
         handle.write(prompt)
         prompt_file = handle.name
-    command = [args.runner, "-m", args.model, "-f", prompt_file,
+    command = [str(Path(args.runner).resolve()), "-m", args.model, "-f", prompt_file,
                "-n", str(args.gen), "-c", str(args.ctx), "--temp", "0"]
     if args.batch:
         command += ["-b", str(args.batch)]
