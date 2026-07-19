@@ -1,6 +1,6 @@
 # Gridcore Runner
 
-> **Public alpha** (`0.1.0-alpha`). Runner is the inference engine of
+> **Public alpha** (`0.1.1-alpha`). Runner is the inference engine of
 > Gridcore, a larger local-agent project whose other layers are not public
 > yet. The engine itself is complete, CI-tested on Linux/macOS/Windows, and
 > daily-driven by the rest of the stack — but it has met few machines other

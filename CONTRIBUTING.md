@@ -3,6 +3,11 @@
 Runner is in public alpha; bug reports with `runner --version` and
 `runner --caps` output are the most valuable contribution.
 
+When bumping the release, update `RUNNER_VERSION` in `src/runner.h` first;
+the versions in `README.md`, `SECURITY.md`, and `python/pyproject.toml` must
+match it. The Python client remains a separate distributable with no build-time
+coupling to the C header.
+
 ## Correctness gates (non-negotiable)
 
 Every change must hold these invariants, in CI and locally:
