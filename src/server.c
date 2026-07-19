@@ -108,8 +108,8 @@ static void send_error(int fd, int code, const char *message) {
     char body[512], esc[384];
     json_escape(message, strlen(message), esc, sizeof(esc));
     int n = snprintf(body, sizeof(body),
-                     "{\"error\":{\"message\":\"%s\",\"type\":\"invalid_request_error\"}}",
-                     esc);
+                     "{\"error\":{\"message\":\"%s\",\"type\":\"%s\"}}",
+                     esc, code >= 500 ? "server_error" : "invalid_request_error");
     send_response(fd, code, "application/json", body, n);
 }
 
@@ -198,7 +198,13 @@ static void unload_resident(void) {
     resident_store(-1);
 }
 
-// resolve + load the requested model; returns entry index or -1
+// swap_to results below 0: the name matched no registry entry (a caller
+// typo — 400) vs the entry exists but its model failed to load (a broken
+// model — 5xx). Callers must tell them apart.
+#define SWAP_UNKNOWN     (-1)
+#define SWAP_LOAD_FAILED (-2)
+
+// resolve + load the requested model; returns entry index or SWAP_*
 static int swap_to(const char *want) {
     int idx = 0; // default: first entry
     if (SV.single) want = NULL; // single-model serve answers as any name
@@ -209,7 +215,7 @@ static int swap_to(const char *want) {
         // OpenAI clients often send a placeholder model name; accept it
         if (idx < 0 && (!strcmp(want, "runner") || !strcmp(want, "default")))
             idx = 0;
-        if (idx < 0) return -1;
+        if (idx < 0) return SWAP_UNKNOWN;
     }
     pthread_mutex_lock(&SV.swap_mu);
     if (resident_load() != idx) {
@@ -228,7 +234,7 @@ static int swap_to(const char *want) {
             free(s->m); free(s->tok);
             s->m = NULL; s->tok = NULL;
             pthread_mutex_unlock(&SV.swap_mu);
-            return -1;
+            return SWAP_LOAD_FAILED;
         }
         s->tmpl = SV.reg[idx].tmpl =
             template_detect(gguf_get_str(&s->m->gf, "tokenizer.chat_template", NULL),
@@ -1015,10 +1021,16 @@ static void handle_conn(slot_t *s, int fd) {
             }
             atomic_store(&SV.busy, true);
             bool ok = true;
-            if (SV.n_reg > 0 &&
-                swap_to(jv_str(jv_get(req, "model"), NULL)) < 0) {
-                send_error(fd, 400, "unknown model (see /v1/models)");
-                ok = false;
+            if (SV.n_reg > 0) {
+                int sw = swap_to(jv_str(jv_get(req, "model"), NULL));
+                if (sw == SWAP_LOAD_FAILED) {
+                    send_error(fd, 500,
+                               "model failed to load (registered but broken; see server log)");
+                    ok = false;
+                } else if (sw < 0) {
+                    send_error(fd, 400, "unknown model (see /v1/models)");
+                    ok = false;
+                }
             }
             if (ok) {
                 if (strcmp(path, "/v1/chat/completions") == 0) handle_chat(s, fd, req);
