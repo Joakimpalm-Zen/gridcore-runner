@@ -9,6 +9,7 @@
 #include <limits.h>
 #include <math.h>
 #include <stdint.h>
+#include <errno.h>
 
 typedef struct { const char *p, *end; int depth; } jcur;
 
@@ -164,8 +165,13 @@ static jv *parse_number(jcur *c) {
     memcpy(tmp, start, n);
     tmp[n] = 0;
     char *endp = NULL;
+    errno = 0;
     double d = strtod(tmp, &endp);
-    bool ok = endp == tmp + n && isfinite(d);
+    // isfinite() is folded away by -ffast-math (the release build uses it), so
+    // an overflowing literal like 1e400 parsed as +inf and passed every later
+    // range check. strtod's ERANGE survives the optimiser.
+    bool ok = endp == tmp + n && errno != ERANGE &&
+              d > -1.7e308 && d < 1.7e308;
     if (tmp != local) free(tmp);
     if (!ok) return NULL;
 

@@ -6,7 +6,10 @@
 #include <string.h>
 
 static void test_strict_bounded_numbers(void) {
-    const char *bad[] = { "01", "1.", "-.1", "1e", "-nan", "1e9999" };
+    // 1e400/-1e400 overflow to inf: isfinite() catches that only when the
+    // build is not -ffast-math, which the release build is
+    const char *bad[] = { "01", "1.", "-.1", "1e", "-nan", "1e9999",
+                          "1e400", "-1e400", "1e308000" };
     for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++)
         assert(json_parse(bad[i], strlen(bad[i])) == NULL);
 
