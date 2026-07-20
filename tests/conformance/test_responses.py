@@ -25,6 +25,15 @@ from harness import ProtocolError, validate_against_schema
 BASE = {"input": "hello", "max_output_tokens": 8, "temperature": 0}
 
 
+def test_responses_is_advertised_in_capabilities(client):
+    """/v1/capabilities is the feature-discovery endpoint. A surface that
+    exists but is not discoverable there is one a client has to guess at."""
+    caps = client.get("/v1/capabilities").expect_status(200).json
+    if not caps.get("features", {}).get("responses_api"):
+        raise ProtocolError("/v1/responses is not advertised in capabilities",
+                            features=caps.get("features"))
+
+
 def test_responses_buffered_shape(client, report):
     r = client.responses(dict(BASE), name="responses-buffered").expect_status(200)
     d = r.json

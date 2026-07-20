@@ -2077,6 +2077,7 @@ static void send_capabilities(int fd) {
                (double)d->min_p, (double)d->repeat_penalty);
     }
     sb_lit(&r, ",\"features\":{"
+               "\"responses_api\":true,"
                "\"json_object\":true,"
                "\"json_schema\":true,"
                "\"stop_sequences\":true,"
@@ -2484,12 +2485,14 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         fprintf(stderr,
                 "server listening on http://127.0.0.1:%d — %d models, swap on demand"
                 " (ttl %ds)\n"
-                "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /v1/capabilities | GET /health\n",
+                "  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions\n"
+                "  GET /v1/models | GET /v1/capabilities | GET /health\n",
                 port, SV.n_reg, SV.ttl);
     else
         fprintf(stderr,
                 "server listening on http://127.0.0.1:%d — %d slot%s x %d threads\n"
-                "  POST /v1/chat/completions | POST /v1/completions | GET /v1/models | GET /v1/capabilities | GET /health\n",
+                "  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions\n"
+                "  GET /v1/models | GET /v1/capabilities | GET /health\n",
                 port, parallel, parallel > 1 ? "s" : "", threads_per_slot);
 
     for (;;) {

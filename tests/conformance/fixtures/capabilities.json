@@ -8,6 +8,7 @@
     "prefix_cache_controls": true,
     "repeat_penalty": true,
     "request_telemetry": true,
+    "responses_api": true,
     "schema_conditionals": true,
     "schema_string_bounds": true,
     "stop_sequences": true
