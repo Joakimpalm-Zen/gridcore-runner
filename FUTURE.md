@@ -167,6 +167,37 @@ Each of these is a real defect class that current CI would not have caught:
   currently unreachable in streaming mode at all, so that matrix will fail
   until Phase 2.
 
+## [carried over] Python client defects
+
+The managed client is the reference for how an SDK is expected to behave, so
+these matter more than their size suggests:
+
+- **`ManagedRunner.start()` leaves a failed child running.** On health-deadline
+  timeout it returns False without terminating the process, so a caller that
+  correctly handles a failed start still owns an orphaned runner holding VRAM.
+  Either stop it on timeout or make the ownership transfer explicit.
+- **The streaming client silently swallows malformed SSE.** Bad JSON, missing
+  `choices`, and unexpected chunk shapes are all caught and skipped, turning
+  protocol corruption into output that looks complete but is not — and any later
+  `finish_reason` then marks the stream finished. Malformed `data:` should raise,
+  carrying the partial response.
+- **The "stall" timeout is a socket-read timeout, not an inactivity timer.** The
+  message says "runner produced no bytes for N seconds", but nothing tracks the
+  time of the last received event. A real stall watchdog needs explicit
+  last-event timing.
+
+## [carried over] HTTP framing strictness
+
+`Content-Length` is matched anywhere in the header block rather than at a line
+start, `strtoull` runs without checking that digits were consumed or that the
+value did not overflow, duplicate and conflicting lengths are accepted, and
+`Transfer-Encoding: chunked` is ignored rather than rejected. The request line's
+`sscanf` return is also discarded, so a malformed request line becomes a 404
+instead of a 400. Severity is limited today by one-request-per-connection and a
+loopback bind, but it becomes a desync primitive behind a keep-alive proxy —
+which is the documented llama-swap deployment. A line-based parser that requires
+exactly one valid length is the fix.
+
 ---
 
 # Phase 1: Strict Tool-Call Schema Engine
