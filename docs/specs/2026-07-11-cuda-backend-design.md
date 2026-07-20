@@ -1,5 +1,23 @@
 # CUDA backend for runner — design
 
+> **Status: historical (superseded in part).** This records the design as of
+> 2026-07-11 and is kept for the reasoning behind it. Two things have since
+> changed and the README is authoritative where they disagree:
+>
+> - **Partial/layer-split offload shipped.** Listed below as a non-goal for
+>   this milestone, it was implemented afterwards: `gpu_forward_batch` runs
+>   layers `[0, gpu_layers)` on the device and hands the boundary activation
+>   back to the CPU loop, with `--reserve`/`--reserve-vram` budgeting the
+>   split. Models larger than VRAM now run hybrid rather than falling back to
+>   CPU wholesale.
+> - **Kernel design moved on.** The per-token/8-token-tile matvec shape
+>   described here was replaced on 2026-07-19/20 by coalesced GEMV kernels for
+>   decode and shared-memory tiled GEMM kernels for prefill (Q8_0, Q4_K, Q5_K,
+>   Q6_K), plus flash-decoding attention. The measured effect and the
+>   diagnosis that motivated it are in the commit history; the launch-overhead
+>   reasoning in this document was measured at 0.2-1.4% and is not the
+>   bottleneck it was assumed to be.
+
 Owner directive: whole-model GPU offload first; long-term goal is full use of
 gpu/cpu/ram/vram. This spec covers the first milestone: a CUDA port of the Metal
 backend behind the existing 4-function GPU interface, no interface changes.

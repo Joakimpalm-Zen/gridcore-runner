@@ -58,12 +58,45 @@ jobs:
         run: |
           python3 scripts/make-test-model.py test.gguf
           ./${{ matrix.binary }} -m test.gguf -p "hello" -n 8 --temp 0
-      - name: rename artifact
-        run: cp ${{ matrix.binary }} ${{ matrix.artifact }}
+      - name: package artifact
+        # "copy one binary to a node" stays true: the archive holds the bare
+        # binary plus provenance, and the loose binary is still published
+        # alongside it. SHA256 lets a node verify what it copied.
+        run: |
+          cp ${{ matrix.binary }} ${{ matrix.artifact }}
+          BUILT=$(./${{ matrix.binary }} --version)
+          cat > BUILD-INFO.txt <<EOF
+          ${BUILT}
+          tag:        ${GITHUB_REF_NAME}
+          commit:     ${GITHUB_SHA}
+          built:      $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          runner-os:  ${{ matrix.os }}
+          march:      ${{ matrix.march }}
+          EOF
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            # zip is the archive Windows users can open without extra tools
+            powershell -Command "Compress-Archive -Path '${{ matrix.artifact }}','BUILD-INFO.txt','README.md','LICENSE' -DestinationPath '${{ matrix.artifact }}.zip' -Force"
+            ARCHIVE="${{ matrix.artifact }}.zip"
+          else
+            tar -czf "${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}" BUILD-INFO.txt README.md LICENSE
+            ARCHIVE="${{ matrix.artifact }}.tar.gz"
+          fi
+          # one checksum file per artifact; the release job concatenates them
+          if command -v sha256sum > /dev/null 2>&1; then
+            sha256sum "${{ matrix.artifact }}" "$ARCHIVE" > "${{ matrix.artifact }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.artifact }}" "$ARCHIVE" > "${{ matrix.artifact }}.sha256"
+          fi
+          cat "${{ matrix.artifact }}.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.sha256
+          if-no-files-found: ignore
 
   release:
     needs: build
@@ -72,6 +105,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+      - name: collect checksums
+        # one SHA256SUMS covering every published file, so a node can verify
+        # whichever form it downloaded
+        run: |
+          cat ./*.sha256 > SHA256SUMS
+          cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
@@ -79,3 +118,7 @@ jobs:
             runner-linux-x86_64
             runner-macos-arm64
             runner-windows-x86_64.exe
+            runner-linux-x86_64.tar.gz
+            runner-macos-arm64.tar.gz
+            runner-windows-x86_64.exe.zip
+            SHA256SUMS
