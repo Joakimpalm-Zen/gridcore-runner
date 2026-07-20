@@ -306,6 +306,11 @@ typedef struct {
     uint64_t rng;
     int32_t recent[256];
     int n_recent, recent_head;
+    // Ids exempt from the repeat penalty. A chat template puts its own turn
+    // terminator in the prompt, and the prompt seeds the penalty window, so
+    // penalising terminators can stop a model ever ending its turn.
+    int32_t no_penalty[12];
+    int n_no_penalty;
 } sampler;
 
 // validity filter for constrained sampling; return true if token is allowed

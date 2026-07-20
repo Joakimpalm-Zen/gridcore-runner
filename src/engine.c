@@ -42,6 +42,16 @@ void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
         for (int j = 0; j < e->n_stop; j++) if (e->stop_ids[j] == id) dup = true;
         if (!dup) e->stop_ids[e->n_stop++] = id;
     }
+    // A stop token is not repetition: the chat template puts it in the prompt,
+    // the prompt seeds the penalty window, and penalising it can leave a model
+    // unable to end its turn at all.
+    if (smp) {
+        smp->n_no_penalty = 0;
+        for (int i = 0; i < e->n_stop &&
+             smp->n_no_penalty < (int)(sizeof(smp->no_penalty) / sizeof(*smp->no_penalty));
+             i++)
+            smp->no_penalty[smp->n_no_penalty++] = e->stop_ids[i];
+    }
     jsonv_init(&e->jv);
     constraint_reset(e);
     e->hist = malloc(sizeof(int32_t) * m->n_ctx);

@@ -42,6 +42,21 @@ static gguf_tensor *need_tensor(gguf_file *g, const char *fmt, int i, bool *ok) 
     return t;
 }
 
+// Carve a row range out of a tensor without copying. A row is a whole number
+// of quantization blocks (row length is always a multiple of the block size),
+// so the slice starts at an exact byte offset into the same mmapped data.
+static gguf_tensor *slice_rows(gguf_tensor *src, gguf_tensor *dst,
+                               int64_t row0, int64_t nrows) {
+    if (!src) return NULL;
+    size_t rs = ggml_row_size(src->type, (int64_t)src->ne[0]);
+    *dst = *src;
+    dst->ne[1] = (uint64_t)nrows;
+    dst->ne[2] = dst->ne[3] = 1;
+    dst->data  = (uint8_t *)src->data + (size_t)row0 * rs;
+    dst->nbytes = (uint64_t)nrows * rs;
+    return dst;
+}
+
 static gguf_tensor *opt_tensor(gguf_file *g, const char *fmt, int i) {
     char name[128];
     snprintf(name, sizeof(name), fmt, i);
@@ -73,6 +88,24 @@ static void rope_setup(model_t *m, gguf_file *g, const char *arch,
         const float *f = ff->data;
         for (int j = 0; j < half; j++) m->rope_inv_freq[j] /= f[j];
         fprintf(stderr, "rope: using model frequency factors (rope_freqs.weight)\n");
+    }
+
+    // phi3 LongRoPE ships two factor sets and which applies depends on the
+    // context in use, not on the model: short factors are not identity, so
+    // ignoring them mis-rotates even well inside the original window
+    if (strcmp(arch, "phi3") == 0) {
+        int orig_ctx = (int)gguf_get_u32(g, RK("rope.scaling.original_context_length"),
+                                         m->n_ctx_train);
+        bool use_long = orig_ctx > 0 && m->n_ctx > orig_ctx;
+        gguf_tensor *rf = gguf_find_tensor(g, use_long ? "rope_factors_long.weight"
+                                                       : "rope_factors_short.weight");
+        if (rf && rf->type == T_F32 && (int)rf->ne[0] >= half) {
+            const float *f = rf->data;
+            for (int j = 0; j < half; j++) m->rope_inv_freq[j] /= f[j];
+            m->rope_mscale = gguf_get_f32(g, RK("rope.scaling.attn_factor"), 1.0f);
+            fprintf(stderr, "rope: phi3 LongRoPE %s factors, mscale %.4f\n",
+                    use_long ? "long" : "short", (double)m->rope_mscale);
+        }
     }
 
     const char *sct = gguf_get_str(g, RK("rope.scaling.type"), "");
@@ -153,7 +186,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     if (strcmp(arch, "llama") != 0 && strcmp(arch, "qwen2") != 0 &&
         strcmp(arch, "qwen3") != 0 && strcmp(arch, "mistral") != 0 &&
         strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0 &&
-        strcmp(arch, "gemma3") != 0 && strcmp(arch, "gemma4") != 0) {
+        strcmp(arch, "gemma3") != 0 && strcmp(arch, "gemma4") != 0 &&
+        strcmp(arch, "phi3") != 0) {
         fprintf(stderr, "warning: architecture '%s' untested, attempting llama-style load\n", arch);
     }
     char key[128];
@@ -285,17 +319,43 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     }
 
     m->layers = calloc(m->n_layer, sizeof(layer_t));
+    // phi3 fuses Q/K/V into attn_qkv and gate/up into ffn_up: five slice
+    // descriptors per layer, pointing into the mmapped weights
+    bool fused_qkv = strcmp(arch, "phi3") == 0;
+    if (fused_qkv) m->fused_splits = calloc((size_t)m->n_layer * 5, sizeof(gguf_tensor));
     for (int i = 0; i < m->n_layer; i++) {
         layer_t *l = &m->layers[i];
         gguf_tensor *an = need_tensor(g, "blk.%d.attn_norm.weight", i, &ok);
         gguf_tensor *fn = need_tensor(g, "blk.%d.ffn_norm.weight", i, &ok);
-        l->wq     = need_tensor(g, "blk.%d.attn_q.weight", i, &ok);
-        l->wk     = need_tensor(g, "blk.%d.attn_k.weight", i, &ok);
-        l->wv     = m->v_rmsnorm ? opt_tensor(g, "blk.%d.attn_v.weight", i)
-                                 : need_tensor(g, "blk.%d.attn_v.weight", i, &ok);
+        if (fused_qkv) {
+            // phi3: [Q rows | K rows | V rows] in attn_qkv, and the FFN's
+            // gate and up halves stacked in ffn_up (HF's gate_up_proj)
+            gguf_tensor *qkv = need_tensor(g, "blk.%d.attn_qkv.weight", i, &ok);
+            gguf_tensor *gu  = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
+            if (!ok) return false;
+            int64_t q_rows = (int64_t)m->n_head * m->head_dim;
+            int64_t kv_rows = (int64_t)m->n_head_kv * m->head_dim;
+            if ((int64_t)qkv->ne[1] != q_rows + 2 * kv_rows ||
+                (int64_t)gu->ne[1] % 2 != 0) {
+                fprintf(stderr, "error: unexpected fused tensor shape in blk.%d\n", i);
+                return false;
+            }
+            gguf_tensor *sl = &m->fused_splits[i * 5];
+            l->wq     = slice_rows(qkv, &sl[0], 0, q_rows);
+            l->wk     = slice_rows(qkv, &sl[1], q_rows, kv_rows);
+            l->wv     = slice_rows(qkv, &sl[2], q_rows + kv_rows, kv_rows);
+            l->w_gate = slice_rows(gu,  &sl[3], 0, (int64_t)gu->ne[1] / 2);
+            l->w_up   = slice_rows(gu,  &sl[4], (int64_t)gu->ne[1] / 2,
+                                   (int64_t)gu->ne[1] / 2);
+        } else {
+            l->wq     = need_tensor(g, "blk.%d.attn_q.weight", i, &ok);
+            l->wk     = need_tensor(g, "blk.%d.attn_k.weight", i, &ok);
+            l->wv     = m->v_rmsnorm ? opt_tensor(g, "blk.%d.attn_v.weight", i)
+                                     : need_tensor(g, "blk.%d.attn_v.weight", i, &ok);
+            l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
+            l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
+        }
         l->wo     = need_tensor(g, "blk.%d.attn_output.weight", i, &ok);
-        l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
-        l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
         l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
         if (!ok) return false;
         l->attn_norm_w = tensor_to_f32(an);
@@ -465,6 +525,7 @@ void model_free(model_t *m) {
     free(m->l_head_kv); free(m->l_head_dim); free(m->l_rope_dim);
     free(m->l_is_swa); free(m->kv_off); free(m->suppress);
     free(m->layers);
+    free(m->fused_splits);
     free(m->out_norm_w);
     free(m->rope_inv_freq);
     free(m->rope_inv_freq_local);

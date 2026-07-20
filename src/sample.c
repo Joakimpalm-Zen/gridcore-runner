@@ -36,6 +36,10 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
     if (s->repeat_penalty != 1.0f) {
         for (int i = 0; i < s->n_recent; i++) {
             int tok = s->recent[i];
+            bool exempt = false;
+            for (int k = 0; k < s->n_no_penalty; k++)
+                if (s->no_penalty[k] == tok) { exempt = true; break; }
+            if (exempt) continue;
             if (logits[tok] > 0) logits[tok] /= s->repeat_penalty;
             else                 logits[tok] *= s->repeat_penalty;
         }
