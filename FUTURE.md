@@ -1717,7 +1717,7 @@ Target coverage, one validated family per jurisdiction:
 | US | Llama 3.x | validated: tokenizer 0/721, GPU==CPU, simplest arch |
 | US | Gemma 3 | validated, but see the licence note below |
 | China | Qwen 2.5 / 3 | validated: 0/721 both; Qwen3 is the strongest tool-caller |
-| EU | Mistral v0.3 | validated with one KNOWN divergence, 2/721 |
+| EU | Mistral v0.3 | validated with one KNOWN divergence, 44/721 (was 2/721 against the older, never-committed corpus) |
 | EU | Apertus (Swiss) | evaluated 2026-07-20 — **tokenizer and template done, blocked on architecture**; see below |
 
 **The binding constraint is licence, not geography** — but *which* licence binds
