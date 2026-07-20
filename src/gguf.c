@@ -60,6 +60,14 @@ static bool rd_kv_value(cursor *c, gguf_kv *kv, uint32_t type) {
             kv->arr_type = rd_u32(c);
             kv->arr_n    = rd_u64(c);
             if (kv->arr_type == GGUF_T_STR) {
+                // Every element carries at least a u64 length prefix, so a
+                // count larger than an eighth of what is left cannot be
+                // satisfied by this file. Without this the count is trusted
+                // as far as SIZE_MAX/sizeof(gg_str) and a 49-byte file
+                // declaring arr_n = 2^32 spends ~9s reserving 64 GiB before
+                // being correctly rejected. The scalar branch below already
+                // bounds itself this way via need().
+                if (kv->arr_n > (uint64_t)(c->end - c->p) / 8) return false;
                 if (kv->arr_n > SIZE_MAX / sizeof(gg_str)) return false;
                 kv->arr_str = calloc((size_t)kv->arr_n, sizeof(gg_str));
                 if (kv->arr_n > 0 && !kv->arr_str) return false;

@@ -114,10 +114,93 @@ smoke: runner test.gguf
 	./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu off
 	./$(RUNNER_EXE) -m test.gguf -p "hi" -n 24 --temp 0 --json --gpu off 2>/dev/null | $(PYTHON) -c "import json,sys; json.load(sys.stdin); print('valid json')"
 
+# ---------------------------------------------------------------- fuzzing
+#
+# libFuzzer harnesses for the hand-written parsers that eat untrusted input.
+# clang-only: `make fuzz` prints a notice and succeeds when clang is absent
+# (the Windows dev box is msys2/gcc), so it never breaks a normal build.
+#
+# Runs are deliberately short and memory-capped so CI can afford them. Seeds
+# are the committed corpora under tests/fuzz/corpus/<target>/; libFuzzer's own
+# discoveries and any crash artifacts go to the throwaway fuzz-corpus/ tree
+# rather than dirtying the checkout.
+FUZZ_CLANG   ?= clang
+FUZZ_TIME    ?= 20
+FUZZ_RSS_MB  ?= 2048
+FUZZ_TARGETS = json_parse schema_compile sval_feed jsonv_feed gguf_open
+# TODO: tok_encode (src/tokenizer.c) is deliberately absent. It needs a loaded
+# tokenizer rather than a bare buffer, so the harness has to stand up a vocab
+# first -- and tokenizer.c was rewritten substantially after the design in
+# HANDOVER.md sec.2 was written, so it needs re-reading before a harness is
+# worth trusting. The committed tests/fixtures/vocab-*.gguf are the natural
+# fixture when someone picks this up.
+
+# -O1 -g: libFuzzer wants speed but ASan reports want frames.
+# No -march=native and no -ffast-math: the point here is defined behaviour,
+# and UBSan must abort rather than warn or the run cannot gate anything.
+FUZZ_FLAGS = -g -O1 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
+             -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+             -fno-omit-frame-pointer
+
+FUZZ_SRC_json_parse     = src/json.c
+FUZZ_SRC_schema_compile = src/json.c src/schema.c src/jsonmode.c
+FUZZ_SRC_sval_feed      = src/json.c src/schema.c src/jsonmode.c
+FUZZ_SRC_jsonv_feed     = src/jsonmode.c
+FUZZ_SRC_gguf_open      = src/gguf.c src/compat.c src/quants.c
+
+fuzz-%: tests/fuzz/fuzz_%.c $(wildcard src/*.c) src/runner.h
+	$(FUZZ_CLANG) $(FUZZ_FLAGS) tests/fuzz/fuzz_$*.c $(FUZZ_SRC_$*) -o $@ -lm
+
+# build only; useful on its own to check the harnesses still compile
+fuzz-build: $(addprefix fuzz-,$(FUZZ_TARGETS))
+
+# allocator_may_return_null: a size read straight out of an untrusted file can
+# ask for tens of GB. Aborting on that turns every run into the same
+# already-known resource finding and hides everything behind it; returning NULL
+# instead makes the allocation *fail*, which is the behaviour on any host
+# without memory overcommit and which these parsers are supposed to handle. It
+# also means the OOM paths get fuzzed rather than skipped.
+FUZZ_SAN_OPTS = allocator_may_return_null=1:max_allocation_size_mb=1024
+
+# gguf_open mutes its own stderr per call (see the harness); log_path keeps
+# sanitizer reports that are raised inside the muted window.
+FUZZ_ENV_gguf_open = ASAN_OPTIONS=$(FUZZ_SAN_OPTS):log_path=fuzz-corpus/gguf_open/asan \
+                     UBSAN_OPTIONS=log_path=fuzz-corpus/gguf_open/ubsan
+# a valid GGUF header is ~8 KB; without a cap libFuzzer sizes inputs from the
+# largest seed and spends the budget copying weights instead of parsing
+FUZZ_ARGS_gguf_open = -max_len=16384
+
+# $(foreach) not a shell loop: the per-target FUZZ_ENV_*/FUZZ_ARGS_* lookups
+# have to happen while make is expanding, which `for t in ...; $(VAR_$$t)`
+# cannot do (make would resolve the name before the shell ever sets $t)
+fuzz-run: fuzz-build
+	@$(foreach t,$(FUZZ_TARGETS), \
+		echo "== fuzzing $(t) for $(FUZZ_TIME)s =="; \
+		mkdir -p fuzz-corpus/$(t); \
+		env ASAN_OPTIONS=$(FUZZ_SAN_OPTS) $(FUZZ_ENV_$(t)) \
+		    ./fuzz-$(t) fuzz-corpus/$(t) tests/fuzz/corpus/$(t) \
+			-max_total_time=$(FUZZ_TIME) -rss_limit_mb=$(FUZZ_RSS_MB) \
+			-malloc_limit_mb=1024 \
+			-timeout=25 -artifact_prefix=fuzz-corpus/$(t)/crash- \
+			-print_final_stats=1 $(FUZZ_ARGS_$(t)) \
+			|| { cat fuzz-corpus/$(t)/asan.* fuzz-corpus/$(t)/ubsan.* 2>/dev/null; exit 1; }; \
+	)
+	@echo "fuzz: all targets clean"
+
+fuzz:
+	@if command -v $(FUZZ_CLANG) > /dev/null 2>&1; then \
+		$(MAKE) --no-print-directory fuzz-run; \
+	else \
+		echo "make fuzz: skipped -- '$(FUZZ_CLANG)' is not on PATH."; \
+		echo "            libFuzzer needs clang; install it or set FUZZ_CLANG=<path>."; \
+	fi
+
 clean:
 	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE)
+	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
+	rm -rf fuzz-corpus
 
 # regenerate the committed PTX header (dev machines only: needs nvcc + a host
 # compiler). Normal builds and CI use the committed src/kernels_ptx.h.
@@ -126,4 +209,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test smoke
+.PHONY: clean debug ptx test smoke fuzz fuzz-build fuzz-run

@@ -19,6 +19,14 @@ test-sampler.exe
 *.gguf
 # committed vocabulary fixtures for the tokenizer tests
 !tests/fixtures/*.gguf
+# committed fuzzing seed corpus (make fuzz)
+!tests/fuzz/corpus/*/*.gguf
+fuzz-json_parse
+fuzz-schema_compile
+fuzz-sval_feed
+fuzz-jsonv_feed
+fuzz-gguf_open
+fuzz-corpus/
 src/kernels.ptx
 src/kernels-*.ptx.tmp
 bench-out.*.txt
