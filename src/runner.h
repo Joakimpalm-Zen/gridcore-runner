@@ -151,7 +151,8 @@ enum { TOK_SPM, TOK_BPE, TOK_BPE_SPM }; // BPE_SPM: gemma4 (spaces to U+2581, ra
 // regex (a leading space may join a run); the newer families let any single
 // non-letter/non-digit character lead a letter run and cap digit runs, which
 // changes where pre-token boundaries fall. Unrecognised values stay on GPT2.
-enum { TOK_PRE_GPT2, TOK_PRE_LLAMA3, TOK_PRE_QWEN2, TOK_PRE_SMOLLM };
+enum { TOK_PRE_GPT2, TOK_PRE_LLAMA3, TOK_PRE_QWEN2, TOK_PRE_SMOLLM,
+       TOK_PRE_TEKKEN };
 
 typedef struct { const char *key; uint32_t klen; int32_t val; } hmap_ent;
 typedef struct { hmap_ent *e; size_t cap; } hmap;
@@ -550,7 +551,7 @@ int  sval_close(sval *v, char *out, int cap);
 // template rejects a system role outright, so the text is folded into the
 // first user turn rather than wrapped in markers it never saw in training.
 enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
-       TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_RAW };
+       TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_APERTUS, TMPL_RAW };
 
 enum { ACT_SILU = 0, ACT_GELU = 1 };
 

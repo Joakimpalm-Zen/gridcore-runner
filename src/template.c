@@ -10,6 +10,9 @@
 
 int template_detect(const char *meta_tmpl, tokenizer *tok) {
     if (meta_tmpl) {
+        // apertus first: its vocabulary inherits Mistral's [INST]/[/INST]
+        // tokens, so the [INST] branch below would otherwise claim it
+        if (strstr(meta_tmpl, "<|assistant_start|>")) return TMPL_APERTUS;
         if (strstr(meta_tmpl, "<|im_start|>"))        return TMPL_CHATML;
         if (strstr(meta_tmpl, "<|start_header_id|>")) return TMPL_LLAMA3;
         if (strstr(meta_tmpl, "<|user|>"))
@@ -19,6 +22,7 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         if (strstr(meta_tmpl, "[INST]"))
             return strstr(meta_tmpl, "<<SYS>>") ? TMPL_LLAMA2 : TMPL_MISTRAL;
     }
+    if (tok_find(tok, "<|assistant_start|>") >= 0) return TMPL_APERTUS;
     if (tok_find(tok, "<|im_start|>") >= 0)        return TMPL_CHATML;
     if (tok_find(tok, "<|start_header_id|>") >= 0) return TMPL_LLAMA3;
     if (tok_find(tok, "<|user|>") >= 0)
@@ -37,6 +41,7 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "gemma4")) return TMPL_GEMMA4;
     if (!strcmp(name, "mistral")) return TMPL_MISTRAL;
     if (!strcmp(name, "phi3"))    return TMPL_PHI3;
+    if (!strcmp(name, "apertus")) return TMPL_APERTUS;
     if (!strcmp(name, "raw"))    return TMPL_RAW;
     return -1;
 }
@@ -49,6 +54,7 @@ const char *template_name(int t) {
         case TMPL_GEMMA4: return "gemma4";
         case TMPL_MISTRAL: return "mistral";
         case TMPL_PHI3:    return "phi3";
+        case TMPL_APERTUS: return "apertus";
         default: return "raw";
     }
 }
@@ -96,6 +102,43 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
         if (add_assistant)
             off = emit(out, cap, off, "<|assistant|>\n", NULL, NULL);
         break;
+    case TMPL_APERTUS: {
+        // apertus (reference: swiss-ai/Apertus-8B-Instruct-2509
+        // chat_template.jinja): <|role_start|>CONTENT<|role_end|> per turn,
+        // with a native system role that must come first.
+        //
+        // Between the system turn and the first real turn the reference always
+        // emits a developer block carrying two switches. Runner supports
+        // neither thinking mode nor Apertus-native tool declarations here, so
+        // it emits the both-disabled constant -- which is exactly what the
+        // reference produces for a plain chat, not an approximation of it.
+        //
+        // Two deliberate omissions, both matching decisions already made for
+        // other families: when there is no system message the reference
+        // substitutes a default one containing strftime_now('%Y-%m-%d'), and
+        // runner does not embed a live date in a prompt (as with Llama-3.2's
+        // "Cutting Knowledge Date" header); and BOS is added by the tokenizer,
+        // not spelled into the template.
+        const char *sys = NULL;
+        int first = 0;
+        if (n_msgs > 0 && !strcmp(msgs[0].role, "system")) {
+            sys = msgs[0].content;
+            first = 1;
+        }
+        if (sys)
+            off = emit(out, cap, off, "<|system_start|>%s<|system_end|>", sys, NULL);
+        off = emit(out, cap, off,
+                   "<|developer_start|>Deliberation: disabled\n"
+                   "Tool Capabilities: disabled<|developer_end|>", NULL, NULL);
+        for (int i = first; i < n_msgs; i++) {
+            off = emit(out, cap, off, "<|%s_start|>%s",
+                       msgs[i].role, msgs[i].content);
+            off = emit(out, cap, off, "<|%s_end|>", msgs[i].role, NULL);
+        }
+        if (add_assistant)
+            off = emit(out, cap, off, "<|assistant_start|>", NULL, NULL);
+        break;
+    }
     case TMPL_GEMMA4:
         // gemma4 (reference: llama.cpp models/templates/google-gemma-4-31B-it
         // .jinja): <|turn>role\n CONTENT <turn|>\n per turn, a native system

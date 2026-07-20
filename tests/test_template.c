@@ -42,6 +42,55 @@ static void test_detect_zephyr_vs_phi3(tokenizer *t) {
     assert(strcmp(out, "<|user|>\nHI<|end|>\n<|assistant|>\n") == 0);
 }
 
+// Apertus (Swiss AI) frames turns with <|role_start|>...<|role_end|>. The
+// prefix "<|user_start|>" contains no substring the other families key on, but
+// detection order still matters: the Apertus vocabulary inherits Mistral's
+// [/INST] tokens, so anything that reached the [INST] branch or the tok_find
+// fallback would come back TMPL_MISTRAL or TMPL_LLAMA2.
+//
+// Ground truth for the rendering is the model's own chat_template.jinja
+// rendered by jinja2 (swiss-ai/Apertus-8B-Instruct-2509).
+static void test_detect_and_render_apertus(tokenizer *t) {
+    const char *apertus =
+        "{%- set user_token = '<|user_start|>' -%}"
+        "{%- set end_user_token = '<|user_end|>' -%}"
+        "{%- set assistant_token = '<|assistant_start|>' -%}"
+        "{%- set end_assistant_token = '<|assistant_end|>' -%}";
+    assert(template_detect(apertus, t) == TMPL_APERTUS);
+
+    // The reference template always emits the developer block; with thinking
+    // and tools off it is this exact constant.
+    const chat_msg msgs[] = {
+        { "system", "SYS" }, { "user", "HI" },
+        { "assistant", "YO" }, { "user", "BYE" },
+    };
+    char out[1024];
+    render_messages(TMPL_APERTUS, msgs, 4, true, out, sizeof(out));
+    assert(strcmp(out,
+        "<|system_start|>SYS<|system_end|>"
+        "<|developer_start|>Deliberation: disabled\n"
+        "Tool Capabilities: disabled<|developer_end|>"
+        "<|user_start|>HI<|user_end|>"
+        "<|assistant_start|>YO<|assistant_end|>"
+        "<|user_start|>BYE<|user_end|>"
+        "<|assistant_start|>") == 0);
+}
+
+// With no system message the reference template substitutes a default one that
+// embeds strftime_now('%Y-%m-%d') -- a live date. Runner omits it, exactly as
+// it already omits Llama-3.2's "Cutting Knowledge Date" header, and emits the
+// developer block so the turn framing still matches.
+static void test_render_apertus_without_system(void) {
+    const chat_msg msgs[] = { { "user", "HI" } };
+    char out[512];
+    render_messages(TMPL_APERTUS, msgs, 1, true, out, sizeof(out));
+    assert(strcmp(out,
+        "<|developer_start|>Deliberation: disabled\n"
+        "Tool Capabilities: disabled<|developer_end|>"
+        "<|user_start|>HI<|user_end|>"
+        "<|assistant_start|>") == 0);
+}
+
 static void test_detect_by_marker(tokenizer *t) {
     assert(template_detect("<|im_start|>system", t) == TMPL_CHATML);
     assert(template_detect("<|start_header_id|>system<|end_header_id|>", t) == TMPL_LLAMA3);
@@ -76,7 +125,7 @@ static void test_render_without_system(void) {
 static void test_name_roundtrip(void) {
     static const char *const names[] = {
         "chatml", "llama2", "llama3", "zephyr", "gemma", "gemma4", "mistral",
-        "phi3", "raw",
+        "phi3", "apertus", "raw",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
         int id = template_from_name(names[i]);
@@ -101,6 +150,8 @@ int main(void) {
     test_detect_llama2_vs_mistral(&t);
     test_detect_zephyr_vs_phi3(&t);
     test_detect_by_marker(&t);
+    test_detect_and_render_apertus(&t);
+    test_render_apertus_without_system();
     test_render_system_prompt();
     test_render_without_system();
     test_name_roundtrip();

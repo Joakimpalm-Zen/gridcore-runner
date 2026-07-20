@@ -177,6 +177,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     if (strcmp(pre, "llama-bpe") == 0)   t->pre = TOK_PRE_LLAMA3;
     else if (strcmp(pre, "qwen2") == 0)  t->pre = TOK_PRE_QWEN2;
     else if (strcmp(pre, "smollm") == 0) t->pre = TOK_PRE_SMOLLM;
+    else if (strcmp(pre, "tekken") == 0) t->pre = TOK_PRE_TEKKEN;
     else                                 t->pre = TOK_PRE_GPT2;
 
     gguf_kv *toks = gguf_get(g, "tokenizer.ggml.tokens");
@@ -465,6 +466,132 @@ static int gpt2_split_next(const uint32_t *cp, int i, int end) {
     return k;
 }
 
+// ---------------------------------------------------------------- tekken
+//
+// Cased-letter classification. The tekken regex is the only split rule here
+// that distinguishes upper from lower case, so this is the only place a case
+// table is needed. Everything outside these ranges is treated as caseless
+// (\p{Lo}/\p{Lm}/\p{M}), which matches BOTH halves of the regex's letter
+// classes and so behaves exactly like the plain \p{L}+ the other families use.
+// That is the correct default: CJK, Thai, Arabic, Hebrew, Devanagari and the
+// rest of the caseless scripts are the majority of what >= 0x80 contains.
+// Latin Extended-A is laid out in capital/small pairs, but the parity of those
+// pairs flips twice inside the block, so a plain (c & 1) test is wrong for
+// exactly the ranges Polish, Czech and Slovak live in -- it reads "ź" (U+017A)
+// as a capital and splits "łódź" into łód|ź. Returns 1 upper, -1 lower, 0 for
+// the caseless/unpaired characters.
+static int latin_ext_a_case(uint32_t c) {
+    if (c == 0x138 || c == 0x149 || c == 0x17F) return -1; // ĸ, ŉ, ſ: no capital
+    if (c == 0x178) return 1;                              // Ÿ, paired down at 0x00FF
+    if (c <= 0x137) return (c & 1) == 0 ? 1 : -1;
+    if (c <= 0x148) return (c & 1) == 1 ? 1 : -1;          // parity flips at Ĺ
+    if (c <= 0x177) return (c & 1) == 0 ? 1 : -1;          // and back at Ŋ
+    return (c & 1) == 1 ? 1 : -1;                          // and again at Ź
+}
+
+static bool cp_upper(uint32_t c) {
+    if (c >= 'A' && c <= 'Z') return true;
+    if (c < 0x80) return false;
+    if (c >= 0xC0 && c <= 0xDE) return c != 0xD7;          // Latin-1, minus MULTIPLICATION SIGN
+    if (c >= 0x100 && c <= 0x17F) return latin_ext_a_case(c) > 0;
+    if (c >= 0x1E00 && c <= 0x1E95) return (c & 1) == 0;   // Latin Extended Additional
+    if (c >= 0x1EA0 && c <= 0x1EFF) return (c & 1) == 0;   // (0x1E96..0x1E9F have no capital)
+    if (c >= 0x386 && c <= 0x3AB) return true;             // Greek capitals
+    if (c >= 0x400 && c <= 0x42F) return true;             // Cyrillic capitals
+    return false;
+}
+
+static bool cp_lower(uint32_t c) {
+    if (c >= 'a' && c <= 'z') return true;
+    if (c < 0x80) return false;
+    if (c >= 0xDF && c <= 0xFF) return c != 0xF7;          // Latin-1, minus DIVISION SIGN
+    if (c >= 0x100 && c <= 0x17F) return latin_ext_a_case(c) < 0;
+    if (c >= 0x1E00 && c <= 0x1E9F) return (c & 1) == 1 || c >= 0x1E96;
+    if (c >= 0x1EA0 && c <= 0x1EFF) return (c & 1) == 1;
+    if (c >= 0x3AC && c <= 0x3CE) return true;             // Greek smalls
+    if (c >= 0x430 && c <= 0x45F) return true;             // Cyrillic smalls
+    return false;
+}
+
+// [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}] -- a letter that is not lowercase
+static bool cp_letter_upperish(uint32_t c) {
+    return cp_letter(c) && !cp_lower(c);
+}
+// [\p{Ll}\p{Lm}\p{Lo}\p{M}] -- a letter that is not uppercase
+static bool cp_letter_lowerish(uint32_t c) {
+    return cp_letter(c) && !cp_upper(c);
+}
+
+// The two letter alternatives of the tekken regex, tried in order at i:
+//   [^\r\n\p{L}\p{N}]? [upperish]* [lowerish]+
+//   [^\r\n\p{L}\p{N}]? [upperish]+ [lowerish]*
+// Returns the end index, or i if neither matches.
+//
+// This is what makes tekken split on case: "camelCase" is camel|Case and
+// "XMLHttpRequest" is XMLHttp|Request, where every other family in the lineup
+// takes the whole run as one pre-token. Caseless scripts are unaffected,
+// because a caseless letter satisfies both classes.
+static int tekken_letters(const uint32_t *cp, int i, int ncp) {
+    // the optional leading character: anything that is not CR/LF, letter or digit
+    int s = i;
+    if (!cp_letter(cp[i]) && !cp_digit(cp[i]) && cp[i] != '\r' && cp[i] != '\n')
+        s = i + 1;
+    if (s >= ncp || !cp_letter(cp[s])) return i;
+
+    // upperish* is greedy, but must leave at least one lowerish for alt 1.
+    // Backtracking is unnecessary: a lowerish that is also upperish (caseless)
+    // is consumed by the greedy run and still satisfies the tail, and a
+    // strictly-lowercase character stops the run on its own.
+    int u = s;
+    while (u < ncp && cp_letter_upperish(cp[u])) u++;
+
+    int j = u;
+    while (j < ncp && cp_letter_lowerish(cp[j])) j++;
+
+    // alt 1 requires lowerish+; alt 2 requires upperish+. If the greedy
+    // upperish run swallowed everything (all-caps, or caseless script), that is
+    // alt 2 with an empty lowerish tail.
+    if (j > u || u > s) return j;
+    return i;
+}
+
+// One pre-token of the tekken regex (Mistral's tokenizer v3/v7 and Apertus):
+//   [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+
+//   | [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*
+//   | \p{N} | ?[^\s\p{L}\p{N}]+[\r\n/]* | \s*[\r\n]+ | \s+(?!\S) | \s+
+//
+// Three things separate it from the llama3/qwen2 regex handled by
+// pre_split_next: no contraction alternative (so "it's" is it|'s only because
+// ' leads the letter run, and "it'S" is it|'S rather than it|'|S), single
+// digits, and '/' joins the trailing run of a punctuation pre-token so that
+// "//" in a comment or a URL path does not split away from its newline.
+static int tekken_split_next(const uint32_t *cp, int i, int ncp) {
+    int adv = tekken_letters(cp, i, ncp);
+    if (adv > i) return adv;
+
+    if (cp_digit(cp[i])) return i + 1;              // \p{N}, one digit at a time
+
+    {   // optional leading space, then a run of symbols/punctuation
+        int j = (cp[i] == ' ' && i + 1 < ncp && cp_other(cp[i + 1])) ? i + 1 : i;
+        if (j < ncp && cp_other(cp[j])) {
+            while (j < ncp && cp_other(cp[j])) j++;
+            // [\r\n/]* -- '/' here, not in the llama3/qwen2 form
+            while (j < ncp && (cp[j] == '\r' || cp[j] == '\n' || cp[j] == '/')) j++;
+            return j;
+        }
+    }
+    {   // \s*[\r\n]+ | \s+(?!\S) | \s+ -- identical to the other newer regexes
+        int j = i;
+        while (j < ncp && cp_space(cp[j])) j++;
+        int last_nl = -1;
+        for (int k = i; k < j; k++)
+            if (cp[k] == '\r' || cp[k] == '\n') last_nl = k;
+        if (last_nl >= 0) return last_nl + 1;
+        if (j < ncp && j - i > 1) j--;
+        return j;
+    }
+}
+
 // smollm runs a Digits(individual_digits) pass before the GPT-2 regex, so every
 // digit stands alone and never takes a leading space. Splitting first also
 // bounds the regex: in "  12" the space run ends at the digit and stays whole,
@@ -549,7 +676,8 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
     // the original GPT-2 regex it has always used.
     int max_digits = t->pre == TOK_PRE_LLAMA3 ? 3 : t->pre == TOK_PRE_QWEN2 ? 1 : 0;
     for (int i = 0; i < ncp; ) {
-        int end = max_digits                  ? pre_split_next(cp, i, ncp, max_digits)
+        int end = t->pre == TOK_PRE_TEKKEN    ? tekken_split_next(cp, i, ncp)
+                : max_digits                  ? pre_split_next(cp, i, ncp, max_digits)
                 : t->pre == TOK_PRE_SMOLLM    ? smollm_split_next(cp, i, ncp)
                                               : gpt2_split_next(cp, i, ncp);
         if (end <= i) end = i + 1; // never stall
