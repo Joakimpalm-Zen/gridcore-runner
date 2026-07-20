@@ -571,11 +571,13 @@ Convert technical differentiation into external testers and trust.
 
 Status is tracked here; nothing is removed when finished, only marked.
 
-1. ~~Conformance harness.~~ **DONE** — `tests/conformance/` (74 tests) plus its
+1. ~~Conformance harness.~~ **DONE** — `tests/conformance/` (127 tests) plus its
    own CI job. Remaining from Phase 0: real-model scripts, SDK compatibility
    smokes, and the peak-VRAM figure.
-2. Strict tool schemas and structured final responses. **IN PROGRESS**
-3. Correct streaming tool calls.
+2. ~~Strict tool schemas and structured final responses.~~ **DONE** — unknown
+   schema keywords rejected, wrong-typed scalars 400, tools compile to a
+   discriminated union. Buffered path only; streaming is item 3.
+3. Correct streaming tool calls. **IN PROGRESS**
 4. `/v1/responses`.
 5. Anthropic Messages compatibility.
 6. Shared CUDA weights.
