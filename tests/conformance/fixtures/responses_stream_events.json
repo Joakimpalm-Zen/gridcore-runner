@@ -1,0 +1,205 @@
+[
+  {
+    "response": {
+      "created_at": "<number>",
+      "error": null,
+      "id": "<redacted>",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": "<number>",
+      "metadata": null,
+      "model": "<redacted>",
+      "object": "response",
+      "output": [],
+      "output_text": "<redacted>",
+      "parallel_tool_calls": false,
+      "previous_response_id": null,
+      "reasoning": null,
+      "status": "<redacted>",
+      "store": false,
+      "temperature": "<number>",
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "<redacted>",
+      "tools": [],
+      "top_p": null,
+      "truncation": "<redacted>",
+      "usage": null,
+      "user": null
+    },
+    "sequence_number": "<number>",
+    "type": "response.created"
+  },
+  {
+    "response": {
+      "created_at": "<number>",
+      "error": null,
+      "id": "<redacted>",
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": "<number>",
+      "metadata": null,
+      "model": "<redacted>",
+      "object": "response",
+      "output": [],
+      "output_text": "<redacted>",
+      "parallel_tool_calls": false,
+      "previous_response_id": null,
+      "reasoning": null,
+      "status": "<redacted>",
+      "store": false,
+      "temperature": "<number>",
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "<redacted>",
+      "tools": [],
+      "top_p": null,
+      "truncation": "<redacted>",
+      "usage": null,
+      "user": null
+    },
+    "sequence_number": "<number>",
+    "type": "response.in_progress"
+  },
+  {
+    "item": {
+      "content": [
+        "<0 numbers>"
+      ],
+      "id": "<redacted>",
+      "role": "assistant",
+      "status": "<redacted>",
+      "type": "message"
+    },
+    "output_index": "<number>",
+    "sequence_number": "<number>",
+    "type": "response.output_item.added"
+  },
+  {
+    "content_index": "<number>",
+    "item_id": "<redacted>",
+    "output_index": "<number>",
+    "part": {
+      "annotations": [],
+      "text": "<redacted>",
+      "type": "output_text"
+    },
+    "sequence_number": "<number>",
+    "type": "response.content_part.added"
+  },
+  {
+    "content_index": "<number>",
+    "delta": "<redacted>",
+    "item_id": "<redacted>",
+    "logprobs": [],
+    "output_index": "<number>",
+    "sequence_number": "<number>",
+    "type": "response.output_text.delta"
+  },
+  {
+    "content_index": "<number>",
+    "item_id": "<redacted>",
+    "logprobs": [],
+    "output_index": "<number>",
+    "sequence_number": "<number>",
+    "text": "<redacted>",
+    "type": "response.output_text.done"
+  },
+  {
+    "content_index": "<number>",
+    "item_id": "<redacted>",
+    "output_index": "<number>",
+    "part": {
+      "annotations": [],
+      "text": "<redacted>",
+      "type": "output_text"
+    },
+    "sequence_number": "<number>",
+    "type": "response.content_part.done"
+  },
+  {
+    "item": {
+      "content": [
+        "<1 numbers>"
+      ],
+      "id": "<redacted>",
+      "role": "assistant",
+      "status": "<redacted>",
+      "type": "message"
+    },
+    "output_index": "<number>",
+    "sequence_number": "<number>",
+    "type": "response.output_item.done"
+  },
+  {
+    "response": {
+      "created_at": "<number>",
+      "error": null,
+      "id": "<redacted>",
+      "incomplete_details": {
+        "reason": "<redacted>"
+      },
+      "instructions": null,
+      "max_output_tokens": "<number>",
+      "metadata": null,
+      "model": "<redacted>",
+      "object": "response",
+      "output": [
+        {
+          "content": [
+            "<1 numbers>"
+          ],
+          "id": "<redacted>",
+          "role": "assistant",
+          "status": "<redacted>",
+          "type": "message"
+        }
+      ],
+      "output_text": "<redacted>",
+      "parallel_tool_calls": false,
+      "previous_response_id": null,
+      "reasoning": null,
+      "runner_telemetry": {
+        "generation_seconds": "<number>",
+        "generation_tok_s": "<number>",
+        "json_mode": false,
+        "prompt_cached_tokens": "<number>",
+        "prompt_eval_tokens": "<number>",
+        "schema": false,
+        "speculative": false
+      },
+      "status": "<redacted>",
+      "store": false,
+      "temperature": "<number>",
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "<redacted>",
+      "tools": [],
+      "top_p": null,
+      "truncation": "<redacted>",
+      "usage": {
+        "input_tokens": "<number>",
+        "input_tokens_details": {
+          "cached_tokens": "<number>"
+        },
+        "output_tokens": "<number>",
+        "output_tokens_details": {
+          "reasoning_tokens": "<number>"
+        },
+        "total_tokens": "<number>"
+      },
+      "user": null
+    },
+    "sequence_number": "<number>",
+    "type": "response.incomplete"
+  }
+]

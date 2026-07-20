@@ -409,6 +409,11 @@ typedef struct {
     // one that followed the deltas
     sbuf  out_items;
     sbuf  out_text;     // the `output_text` aggregate (assistant text only)
+    // status to close the *last* item with. An item that ends because another
+    // one starts did finish; one that ends because generation was cut short
+    // did not, and must say so — a client rendering output[] without reading
+    // the response status would otherwise show a truncated message as whole.
+    const char *close_status;
 } gen_ctx;
 
 // common prefix of every streamed chunk. `created` and `model` are required by
@@ -659,12 +664,13 @@ static int resp_close_item(gen_ctx *g) {
         }
         g->part_open = false;
     }
+    const char *status = g->close_status ? g->close_status : "completed";
     sbuf d = {0};
     sb_fmt(&d, ",\"output_index\":%d,\"item\":", g->output_index);
-    resp_item_json(&d, g, "completed", true);
+    resp_item_json(&d, g, status, true);
     // keep the completed item for the terminal response object
     if (g->out_items.n) sb_lit(&g->out_items, ",");
-    resp_item_json(&g->out_items, g, "completed", true);
+    resp_item_json(&g->out_items, g, status, true);
     if (resp_shape_of(g->item_kind) == &RESP_MESSAGE)
         sb_put(&g->out_text, g->item_text.s ? g->item_text.s : "",
                g->item_text.n);
@@ -1259,9 +1265,15 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
         // whatever item was still streaming is closed first: an item announced
         // with output_item.added must always reach output_item.done, including
         // when generation stopped mid-item
+        bool cut = strcmp(finish, "length") == 0;
+        // a tool call that was truncated is still an executable call — the
+        // envelope schema closed it to a legal document — so only a message
+        // is reported as unfinished
+        if (cut && resp_shape_of(g.item_kind) == &RESP_MESSAGE)
+            g.close_status = "incomplete";
         resp_close_item(&g);
         if (!g.dead) {
-            bool truncated = strcmp(finish, "length") == 0;
+            bool truncated = cut;
             resp_doc d = { .status = truncated ? "incomplete" : "completed",
                            .incomplete = truncated ? "max_output_tokens" : NULL,
                            .output_json = g.out_items.s ? g.out_items.s : "",
