@@ -33,6 +33,11 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_json_oom.c \
             -o test-json-oom -lm
           ./test-json-oom
+      - name: sampler preset tests
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_sampler.c \
+            src/sample.c -o test-sampler -lm
+          ./test-sampler
       # runs against the committed vocabulary fixtures in tests/fixtures
       - name: tokenizer tests
         run: |
@@ -93,6 +98,12 @@ jobs:
           curl -sf http://127.0.0.1:8123/health
           curl -sf http://127.0.0.1:8123/v1/models
           curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['features']['json_schema'] and d['models'][0]['id']; print('capabilities ok')"
+          # the family preset the server picked must be visible, and a client
+          # must be able to turn the repeat penalty off per request
+          curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); s=d['sampling']; assert s['preset'] and 'repeat_penalty' in s and d['features']['repeat_penalty']; print('sampling capabilities ok')"
+          curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0,"repeat_penalty":1.0}' \
+            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin)['choices'][0]['message']; print('repeat_penalty accepted')"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -d '{"prompt":"x","repeat_penalty":0}' http://127.0.0.1:8123/v1/completions)" = 400 ]
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'runner_telemetry' in d and 'prompt_cached_tokens' in d['runner_telemetry']; print('server valid json')"
           # prefix-cache regression: an identical greedy request must reuse the
@@ -407,6 +418,11 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_json_oom.c \
             -o test-json-oom.exe -lm
           ./test-json-oom.exe
+      - name: sampler preset tests
+        run: |
+          gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_sampler.c \
+            src/sample.c -o test-sampler.exe -lm
+          ./test-sampler.exe
       # runs against the committed vocabulary fixtures in tests/fixtures
       - name: tokenizer tests
         run: |
@@ -454,6 +470,12 @@ jobs:
           sleep 3
           curl -sf http://127.0.0.1:8123/health
           curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['features']['json_schema']; print('capabilities ok')"
+          # the family preset the server picked must be visible, and a client
+          # must be able to turn the repeat penalty off per request
+          curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); s=d['sampling']; assert s['preset'] and 'repeat_penalty' in s and d['features']['repeat_penalty']; print('sampling capabilities ok')"
+          curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0,"repeat_penalty":1.0}' \
+            http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; json.load(sys.stdin)['choices'][0]['message']; print('repeat_penalty accepted')"
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -d '{"prompt":"x","repeat_penalty":0}' http://127.0.0.1:8123/v1/completions)" = 400 ]
           curl -sf -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}' \
             http://127.0.0.1:8123/v1/chat/completions | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'runner_telemetry' in d; print('server valid json')"
           [ "$(curl -s -o /dev/null -w '%{http_code}' -d '{"prompt":"x","top_k":1e300}' http://127.0.0.1:8123/v1/completions)" = 400 ]

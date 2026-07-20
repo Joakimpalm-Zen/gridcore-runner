@@ -186,6 +186,10 @@ static struct {
     atomic_bool busy;
     model_t    *draft;        // per-slot draft would be plural; single-model
     int         draft_k;      // serve has exactly one slot (see swap_to)
+    // sampling defaults come from the served model's family preset; the CLI
+    // overrides are kept so a swapped-in model can be re-resolved against them
+    sampler_override ov;
+    const char *preset_name;
 } SV;
 
 static int resident_load(void) {
@@ -261,6 +265,16 @@ static int swap_to(const char *want) {
         s->tmpl = SV.reg[idx].tmpl =
             template_detect(gguf_get_str(&s->m->gf, "tokenizer.chat_template", NULL),
                             s->tok);
+        // sampling defaults follow the model, so they are re-resolved on every
+        // swap; rng state and the penalty exemptions carry across untouched
+        const sampler_preset *sp =
+            sampler_resolve(&s->smp, s->m->arch,
+                            gguf_get_str(&s->m->gf, "general.name", NULL), &SV.ov);
+        s->smp_base = s->smp;
+        SV.preset_name = sp->name;
+        char sdesc[256];
+        sampler_describe(&s->smp, sp, sdesc, sizeof(sdesc));
+        fprintf(stderr, "sampling: %s\n", sdesc);
         engine_init(&s->e, s->m, s->tok, &s->smp);
         context_store(s->m->n_ctx);
         if (SV.single && SV.draft) {
@@ -491,11 +505,16 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     // per-request sampling params start from the server defaults every time —
     // one request's overrides must not leak into the next on this slot; only
     // the rng STATE carries across so sampling sequences stay diverse
-    double temp, top_p, min_p, top_k, seed;
+    double temp, top_p, min_p, top_k, seed, repeat_penalty;
     if (!request_number(req, "temperature", s->smp_base.temp, 0, FLT_MAX, &temp) ||
         !request_number(req, "top_p", s->smp_base.top_p, 0, 1, &top_p) ||
         !request_number(req, "min_p", s->smp_base.min_p, 0, 1, &min_p) ||
         !request_number(req, "top_k", s->smp_base.top_k, 0, INT_MAX, &top_k) ||
+        // the model's family preset decides the default; a client that wants
+        // no penalty at all asks for 1. Zero is rejected rather than treated
+        // as "off": the penalty divides by it.
+        !request_number(req, "repeat_penalty", s->smp_base.repeat_penalty,
+                        FLT_MIN, FLT_MAX, &repeat_penalty) ||
         !request_number(req, "seed", 0, 0, 18446744073709549568.0, &seed)) {
         send_error(fd, 400, "numeric sampling parameter out of range");
         return;
@@ -507,6 +526,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     s->smp.top_p = (float)top_p;
     s->smp.min_p = (float)min_p;
     s->smp.top_k = (int)top_k;
+    s->smp.repeat_penalty = (float)repeat_penalty;
     if (seed > 0) s->smp.rng = (uint64_t)seed;
     int max_tokens = request_max_tokens(req, SV.n_predict_cap);
     if (max_tokens == -2) {
@@ -969,7 +989,22 @@ static void send_capabilities(int fd) {
         sb_esc(&r, SV.model_name, strlen(SV.model_name));
         sb_lit(&r, "\",\"resident\":true}");
     }
-    sb_lit(&r, "],\"features\":{"
+    sb_lit(&r, "],\"sampling\":{\"preset\":");
+    if (SV.preset_name) {
+        sb_lit(&r, "\"");
+        sb_esc(&r, SV.preset_name, strlen(SV.preset_name));
+        sb_lit(&r, "\"");
+    } else {
+        sb_lit(&r, "null");  // swap mode before the first model is resident
+    }
+    {
+        const sampler *d = &SV.slots[0].smp_base;
+        sb_fmt(&r, ",\"temperature\":%.2f,\"top_p\":%.2f,\"top_k\":%d,"
+                   "\"min_p\":%.2f,\"repeat_penalty\":%.2f}",
+               (double)d->temp, (double)d->top_p, d->top_k,
+               (double)d->min_p, (double)d->repeat_penalty);
+    }
+    sb_lit(&r, ",\"features\":{"
                "\"json_object\":true,"
                "\"json_schema\":true,"
                "\"stop_sequences\":true,"
@@ -977,7 +1012,9 @@ static void send_capabilities(int fd) {
                "\"schema_string_bounds\":true,"
                "\"request_telemetry\":true,"
                "\"prefix_cache\":true,"
-               "\"prefix_cache_controls\":true}}");
+               "\"prefix_cache_controls\":true,"
+               "\"repeat_penalty\":true,"
+               "\"family_sampling_presets\":true}}");
     send_built(fd, &r);
     free(r.s);
 }
@@ -1197,9 +1234,16 @@ static bool accept_fastpath(int fd) {
 // ---------------------------------------------------------------- entry
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
-               const model_params *mp, sampler defaults, int port, int parallel,
+               const model_params *mp, sampler defaults,
+               const sampler_override *ov, int port, int parallel,
                int n_threads, int ttl, const char *draft_path, int draft_k) {
     sock_init();
+    if (ov) SV.ov = *ov;
+    // `defaults` arrives already resolved against the preloaded model; in swap
+    // mode there is no model yet and swap_to resolves per load
+    SV.preset_name = base ? sampler_preset_for(base->arch,
+                        gguf_get_str(&base->gf, "general.name", NULL))->name
+                          : NULL;
     if (parallel < 1) parallel = 1;
     if (parallel > 16) parallel = 16;
     bool swap_mode = strchr(model_path, '=') != NULL;
