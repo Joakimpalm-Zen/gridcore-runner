@@ -13,7 +13,7 @@
 
 The inference engine of the Gridcore suite (repo: `gridcore-runner`,
 binary: `runner`). A compact local LLM inference engine, written from scratch in plain C
-(~8,000 lines, no dependencies beyond libc/pthreads). It loads standard **GGUF**
+(~9,700 lines of hand-written C, no dependencies beyond libc/pthreads). It loads standard **GGUF**
 model files — the de-facto format for local models — and runs them on CPU
 (AVX2-accelerated) or GPU (CUDA, Metal), with a particular focus on squeezing
 **large contexts out of small models**.
@@ -35,7 +35,7 @@ enough to own outright, whose serving contracts the projects above it (the
 Gridcore agent and task-interpreter layers, not yet public) can build
 against *exactly*.
 
-**The whole engine bends in an afternoon.** ~8,000 lines of plain C, one
+**The whole engine bends in an afternoon.** ~9,700 lines of hand-written C, one
 `make`, no ggml split, no CMake, no submodules — one person holds all of it
 in their head. When the grid's watchdog kept declaring busy-but-healthy
 runners dead, `/health` moved into the accept loop the same day. When
@@ -358,7 +358,8 @@ runner -m model [options]
   --rope-scale F force linear rope position scaling
   --rope-base F  override rope frequency base
   --system TEXT  system prompt for chat mode
-  --chat-template chatml|llama2|llama3|zephyr|gemma|gemma4|raw  (default: auto)
+  --chat-template chatml|llama2|llama3|mistral|zephyr|phi3|gemma|gemma4|raw
+                 (default: auto)
   --no-bos       don't prepend BOS
   --ignore-eos   keep generating past end-of-text tokens
   --gpu auto|off GPU offload if a backend is available (default auto)
@@ -372,8 +373,11 @@ runner -m model [options]
 ```
 
 Chat mode keeps the KV cache across turns (no re-processing of history) and
-auto-detects the chat template (ChatML, Llama-2/3, Zephyr, Gemma, Gemma-4)
-from the model's metadata and vocabulary. Thinking-tuned models show their
+auto-detects the chat template (ChatML, Llama-2/3, Mistral, Zephyr, Phi-3,
+Gemma, Gemma-4) from the model's metadata and vocabulary. Mistral and Llama-2
+both frame turns with `[INST]`, and Phi-3 and Zephyr both use `<|role|>`, so
+detection keys on the terminator each one actually uses — a Mistral model gets
+no `<<SYS>>` block, which its own template rejects. Thinking-tuned models show their
 reasoning between `[thinking]` markers. The server additionally reuses the
 KV cache for the longest shared prompt prefix across requests, so repeated
 system/template prefixes skip prompt evaluation entirely.
@@ -383,7 +387,8 @@ system/template prefixes skip prompt evaluation entirely.
 | Area | Support |
 |---|---|
 | File format | GGUF v2/v3, memory-mapped (weights are never copied) |
-| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp) — all CPU + CUDA |
+| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp) — all CPU + CUDA |
+| Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, and the original GPT-2 regex as the default |
 | Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
 | Tokenizers | SentencePiece (llama) with byte fallback; byte-level BPE (gpt2) with merges, special-token parsing |
@@ -398,6 +403,15 @@ Verified end-to-end with: SmolLM2-135M (Q8_0, Q4_K_M, Q3_K_M/IQ4_NL),
 TinyLlama-1.1B (Q4_K_M, Q2_K), Qwen2.5-0.5B-Instruct (Q4_K_M), including a
 needle-retrieval test at 2x and 4x training context and a 3,600-token
 needle test on Qwen2.5.
+
+Tokenizer output is checked against the HuggingFace reference tokenizer over a
+721-string corpus — exact for Llama-3.1-8B, Llama-3.2-3B, Qwen2.5-32B,
+Qwen3-4B, gemma-3-4b, SmolLM2-1.7B and Phi-3.5-mini. Mistral-7B-v0.3 differs on
+2 of 721, all inputs *beginning* with whitespace: its `Metaspace
+prepend_scheme=first` replaces a leading space with the U+2581 prefix where
+Llama-2 adds one on top, and no GGUF key distinguishes the two. Greedy
+generation at temperature 0 is token-identical between CUDA and CPU for every
+model above.
 
 Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
 MoE and hybrid-SSM architectures (Mamba/Jamba/Qwen3.5-style), gemma4's
