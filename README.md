@@ -13,7 +13,7 @@
 
 The inference engine of the Gridcore suite (repo: `gridcore-runner`,
 binary: `runner`). A compact local LLM inference engine, written from scratch in plain C
-(~9,700 lines of hand-written C, no dependencies beyond libc/pthreads). It loads standard **GGUF**
+(with no dependencies beyond libc/pthreads). It loads standard **GGUF**
 model files — the de-facto format for local models — and runs them on CPU
 (AVX2-accelerated) or GPU (CUDA, Metal), with a particular focus on squeezing
 **large contexts out of small models**.
@@ -35,7 +35,7 @@ enough to own outright, whose serving contracts the projects above it (the
 Gridcore agent and task-interpreter layers, not yet public) can build
 against *exactly*.
 
-**The whole engine bends in an afternoon.** ~9,700 lines of hand-written C, one
+**The whole engine bends in an afternoon.** One compact C codebase, one
 `make`, no ggml split, no CMake, no submodules — one person holds all of it
 in their head. When the grid's watchdog kept declaring busy-but-healthy
 runners dead, `/health` moved into the accept loop the same day. When
@@ -48,7 +48,8 @@ maintain anyway, without the small-codebase payoff.
 **Schema conformance is the product, not a plugin.** runner compiles a JSON
 Schema into a streaming validator that *drives sampling*: properties emit in
 declared order, unknown keys are impossible, and when the token budget dies
-mid-document the output is minimally completed so it still parses. Those
+mid-document the output is minimally completed so it still parses. If the model
+never starts the document, runner returns no fabricated document. Those
 exact semantics are load-bearing upstream — clu streams its `thinking` field
 live *because* declared-order emission is guaranteed, and the interpreter's
 planner/worker handoffs assume every call returns conformant JSON, so a weak
@@ -477,10 +478,12 @@ Two levels of guarantee:
   alternatives; unsupported constructs are rejected at request time with a
   clear error.
 
-Both modes: if the token budget expires mid-document, runner completes it
-minimally (per the schema when there is one) so the result always parses, and
-reports `finish_reason: "length"`. Syntax and structure are guaranteed;
-semantic quality is still the model's job.
+Both modes: if the token budget expires after the document has begun, runner
+completes it minimally (per the schema when there is one) so the result parses,
+and reports `finish_reason: "length"`. If the model spends the entire budget on
+a prelude and never starts the document, runner returns empty content rather
+than inventing values. Syntax and structure are guaranteed for documents the
+model starts; semantic quality is still the model's job.
 
 ## Getting reliable answers out of small models
 

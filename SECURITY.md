@@ -28,8 +28,8 @@ network input.
 
 ## The HTTP surface
 
-The built-in server is a deliberate subset of HTTP/1.1, small enough to
-audit in one sitting (`src/server.c`, ~1,200 lines). It is not a
+The built-in server is a deliberate subset of HTTP/1.1, kept in one source
+module (`src/server.c`) so its behavior can be audited as a unit. It is not a
 general-purpose web server and does not try to be:
 
 | Property | Behavior |
@@ -41,8 +41,10 @@ general-purpose web server and does not try to be:
 | Request read deadline | header + body must arrive within 10 s, else `408` and the inference slot is released |
 | TLS | none — loopback traffic only |
 
-Requests using features outside the subset fail closed (`400`), they are
-never half-interpreted.
+API and schema features outside the documented subset fail closed (`400`).
+The current HTTP framing limitations are documented below; the loopback-only
+listener is a required part of the threat model, not a substitute for a hardened
+internet-facing parser.
 
 ## Untrusted input
 
