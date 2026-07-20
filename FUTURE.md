@@ -484,16 +484,87 @@ Open a second tester funnel through Claude Code and Anthropic-compatible clients
 
 ## Work
 
-- Add `POST /v1/messages` and `/v1/messages/count_tokens`.
-- Support system content, content blocks, tool use/results, tool choice, stop
-  sequences, reasoning separation, and Anthropic SSE event ordering.
-- Translate Anthropic requests into the same internal strict-agent schema engine.
-- Do not create a separate generation implementation.
+- **DONE** Add `POST /v1/messages` and `/v1/messages/count_tokens`.
+  `handle_messages` (server.c) reshapes the request into the same prompt and
+  the same `tool_envelope_build` union the other two surfaces build, and
+  `run_completion` gained `API_MESSAGES` on the dialect seam Phase 3 opened,
+  so every line that decides *what* is generated is still shared.
+  `count_tokens` runs the whole inbound translation through the same
+  `messages_prompt` entry point and stops before generation, so the count it
+  reports is necessarily the count of the prompt the real request would have
+  run — the two cannot drift.
+- **DONE** Support system content, content blocks, tool use/results, tool
+  choice, stop sequences, reasoning separation, and Anthropic SSE event
+  ordering. `system` is accepted as a string or a text-block list; message
+  `content` as a string or a block list of `text` / `tool_use` /
+  `tool_result`; all four `tool_choice` forms map onto the three the envelope
+  compiler already understands (`any` → `required`). `stop_sequences` is
+  resolved to the same stop filter as `stop`, at the same entry point where
+  `max_tokens` already resolves its three names, and Anthropic additionally
+  reports *which* sequence matched — so `gen_ctx` now records the hit rather
+  than only a bool. Reasoning becomes a `thinking` block rather than a field.
+  The six events are framed by one `sse_send` shared with the Responses
+  emitter, so the SSE `event:` name and `data.type` cannot drift apart on
+  either surface.
+- **DONE** Translate Anthropic requests into the same internal strict-agent
+  schema engine. `anth_tools` re-serialises the `{name, description,
+  input_schema}` declaration into the nested chat shape and re-parses it —
+  exactly what `responses_tools` does — rather than teaching the envelope
+  compiler a third shape and putting the two working paths at risk.
+- **DONE** Do not create a separate generation implementation. There is one:
+  the only additions are framing (`anth_*`) and inbound translation.
+- **DONE** Add a `/v1/messages` conformance suite.
+  `tests/conformance/test_messages.py`, 40 tests. The suite grew from 172 to
+  212.
 
 ## Exit Criteria
 
-- A basic Claude Code-compatible tool loop runs through Runner.
-- OpenAI and Anthropic surfaces produce equivalent internal agent actions.
+- **DONE** A basic Claude Code-compatible tool loop runs through Runner.
+  Verified with the real `anthropic` 0.117.0 Python SDK against Qwen3-4B, not
+  written from the spec: `client.messages.create` returned `stop_reason:
+  "tool_use"` with a `ToolUseBlock(get_weather, {"city": "Oslo"})`, the
+  `tool_result` was fed back as an ordinary user block, and runner answered
+  *"The weather in Oslo is -3°C and snowing."* `client.messages.stream`
+  accumulates every event into its typed class and `get_final_message()`
+  returns the parsed turn including its tool call;
+  `client.messages.count_tokens` deserialises into `MessageTokensCount`; and a
+  refused feature arrives as a typed `BadRequestError` naming the field.
+  Five of those SDK checks are now conformance tests that skip when the SDK is
+  absent, so the real-client check is repeatable rather than a one-off.
+- **DONE** OpenAI and Anthropic surfaces produce equivalent internal agent
+  actions. `test_messages_and_chat_agree_on_the_same_turn` sends one prompt
+  and one tool to both surfaces and requires the same tool, the same arguments
+  document, and terminal reasons that are the same fact in two vocabularies
+  (`tool_use` / `tool_calls`).
+- **DONE** Unsupported features return clear errors rather than being ignored.
+  `mcp_servers`, `container`, server-side tool types, `image`/`document`
+  content blocks, `tool_choice.disable_parallel_tool_use:false` and
+  `thinking:enabled` on a model with no reasoning channel each return a 400
+  naming the field and why. `max_tokens` is required, as upstream.
+
+## Not done in this phase
+
+- Claude Code itself was not driven end to end. The official Anthropic SDK
+  was, including a complete two-step tool loop, which is the same wire
+  contract; what is unverified is Claude Code's own prompt scale and its
+  particular field usage, the way Phase 3 checked Codex.
+- Anthropic prompt caching (`cache_control`, `cache_creation_input_tokens`,
+  `cache_read_input_tokens`) is accepted-and-inert rather than implemented.
+  The usage fields are deliberately *not* claimed on the response — runner's
+  own prefix-cache figure is reported in `runner_telemetry`, as on every other
+  surface, rather than asserted in a vocabulary that means something else.
+- Replayed `thinking` / `redacted_thinking` blocks are dropped from the
+  prompt rather than re-rendered. Upstream wants them back to verify a
+  signature; there is nothing to verify locally, and they are the model's own
+  scratch work rather than anything the user said.
+- Free-text tool-call syntax is still parsed out of an *unconstrained* turn on
+  this surface as it is on the chat surface, so a conversation whose replayed
+  history contains runner's call syntax can produce a `tool_use` block naming
+  a tool the current request did not declare. That is pre-existing shared
+  behaviour (`tool_calls_parse`), identical on both surfaces, and is left
+  alone rather than forked here.
+- Multiple parallel tool calls in one turn, exactly as on the other two
+  surfaces.
 
 ---
 

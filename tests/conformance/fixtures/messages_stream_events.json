@@ -1,0 +1,52 @@
+[
+  {
+    "message": {
+      "content": [],
+      "id": "<redacted>",
+      "model": "<redacted>",
+      "role": "assistant",
+      "stop_reason": null,
+      "stop_sequence": null,
+      "type": "message",
+      "usage": {
+        "input_tokens": "<number>",
+        "output_tokens": "<number>"
+      }
+    },
+    "type": "message_start"
+  },
+  {
+    "content_block": {
+      "text": "<redacted>",
+      "type": "text"
+    },
+    "index": "<number>",
+    "type": "content_block_start"
+  },
+  {
+    "delta": {
+      "text": "<redacted>",
+      "type": "text_delta"
+    },
+    "index": "<number>",
+    "type": "content_block_delta"
+  },
+  {
+    "index": "<number>",
+    "type": "content_block_stop"
+  },
+  {
+    "delta": {
+      "stop_reason": "<redacted>",
+      "stop_sequence": null
+    },
+    "type": "message_delta",
+    "usage": {
+      "input_tokens": "<number>",
+      "output_tokens": "<number>"
+    }
+  },
+  {
+    "type": "message_stop"
+  }
+]

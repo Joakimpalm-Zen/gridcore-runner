@@ -373,6 +373,66 @@ Notes from running it for real:
   a *well-formed* call, not a well-*chosen* one.
 - `--parallel 1` is fine; Codex issues one request at a time.
 
+## Anthropic Messages API (`POST /v1/messages`)
+
+The Anthropic surface, so the `anthropic` SDK and Anthropic-compatible agent
+clients work against a local GGUF with no translation proxy. `POST
+/v1/messages/count_tokens` answers the matching pre-flight question.
+
+Like `/v1/responses`, it is a translation layer rather than a second engine: an
+Anthropic request is reshaped into the same prompt and the same strict tool
+envelope `/v1/chat/completions` builds, so a tool call made through this
+surface and one made through the OpenAI surfaces are the same internal action
+with the same guarantees.
+
+```python
+import anthropic
+client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="none")
+
+m = client.messages.create(
+    model="runner", max_tokens=256,
+    system="You are terse.",
+    tools=[{"name": "get_weather",
+            "description": "Look up the current weather for a city.",
+            "input_schema": {"type": "object",
+                             "properties": {"city": {"type": "string"}},
+                             "required": ["city"]}}],
+    messages=[{"role": "user", "content": "What is the weather in Oslo?"}])
+
+use = next(b for b in m.content if b.type == "tool_use")
+follow = client.messages.create(
+    model="runner", max_tokens=256,
+    tools=[...],
+    messages=[{"role": "user", "content": "What is the weather in Oslo?"},
+              {"role": "assistant", "content": m.content},
+              {"role": "user", "content": [{"type": "tool_result",
+                                            "tool_use_id": use.id,
+                                            "content": "-3C and snowing"}]}])
+```
+
+Verified against the real `anthropic` 0.117.0 Python SDK driving Qwen3-4B, not
+only asserted on the wire: the loop above returns `stop_reason: "tool_use"`
+with a `ToolUseBlock`, and the follow-up turn answers *"The weather in Oslo is
+-3°C and snowing."* `client.messages.stream` accumulates every event into its
+typed class and `get_final_message()` returns the parsed turn, including its
+tool call and, on a thinking-tagged model, its `ThinkingBlock`.
+
+Supported: `system` as a string or block list, `content` as a string or a
+block list, `tool_use` / `tool_result` blocks, all four `tool_choice` forms,
+`stop_sequences` (reported back by name in `stop_sequence`), `temperature`,
+`top_p`, `top_k`, `metadata`, and the full SSE event sequence —
+`message_start`, `content_block_start`, `content_block_delta`,
+`content_block_stop`, `message_delta`, `message_stop`, with no `[DONE]`
+sentinel. Reasoning is separated into `thinking` blocks on a model that has a
+reasoning channel.
+
+Refused rather than silently ignored, per this project's invariant:
+`mcp_servers`, `container`, server-side tools (`web_search_*`, `computer_*`,
+…), `image` and `document` content blocks, `tool_choice.
+disable_parallel_tool_use: false` (the envelope is one call per turn on every
+surface), and `thinking: {"type": "enabled"}` on a model with no reasoning
+channel to separate. `max_tokens` is required, as it is upstream.
+
 ## Structured output (JSON and JSON Schema)
 
 Two levels of guarantee:

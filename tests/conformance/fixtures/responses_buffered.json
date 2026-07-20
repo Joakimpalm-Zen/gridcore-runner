@@ -13,7 +13,11 @@
   "output": [
     {
       "content": [
-        "<1 numbers>"
+        {
+          "annotations": [],
+          "text": "<redacted>",
+          "type": "output_text"
+        }
       ],
       "id": "<redacted>",
       "role": "assistant",

@@ -571,6 +571,14 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet pytest
+      # The Anthropic SDK turns the /v1/messages tests in test_messages.py from
+      # a hand-written shape check into a real client parsing real events —
+      # which is the check that found bugs a spec reading did not. It is not
+      # required: those tests skip when it is absent, so a registry outage
+      # degrades the run rather than failing it.
+      - name: install the Anthropic SDK (optional, for real-client checks)
+        continue-on-error: true
+        run: .venv/bin/python -m pip install --quiet anthropic
       - name: agent-protocol conformance harness
         run: PYTHON=.venv/bin/python ./scripts/conformance.sh
       - name: conformance report

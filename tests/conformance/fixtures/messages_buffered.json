@@ -1,0 +1,27 @@
+{
+  "content": [
+    {
+      "text": "<redacted>",
+      "type": "text"
+    }
+  ],
+  "id": "<redacted>",
+  "model": "<redacted>",
+  "role": "assistant",
+  "runner_telemetry": {
+    "generation_seconds": "<number>",
+    "generation_tok_s": "<number>",
+    "json_mode": false,
+    "prompt_cached_tokens": "<number>",
+    "prompt_eval_tokens": "<number>",
+    "schema": false,
+    "speculative": false
+  },
+  "stop_reason": "<redacted>",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "input_tokens": "<number>",
+    "output_tokens": "<number>"
+  }
+}

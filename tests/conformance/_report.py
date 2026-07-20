@@ -39,7 +39,14 @@ def normalize(value, key=None):
     if isinstance(value, dict):
         return {k: normalize(v, k) for k, v in sorted(value.items())}
     if isinstance(value, list):
-        if key in VOLATILE_TEXT:  # e.g. an embedding vector
+        # a numeric vector under a volatile key (an embedding) carries no shape
+        # worth pinning, only a length. A *list of objects* under the same key
+        # is the opposite: "content" is a string on the chat surface but the
+        # block/part list on the Anthropic and Responses ones, and there that
+        # list IS the contract, so it must keep being described structurally.
+        if key in VOLATILE_TEXT and value and \
+                all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    for v in value):
             return [f"<{len(value)} numbers>"]
         # collapse homogeneous lists to one representative shape + a count so a
         # fixture does not encode how many tokens the stub model happened to emit

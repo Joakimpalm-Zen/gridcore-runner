@@ -1,0 +1,31 @@
+{
+  "content": [
+    {
+      "id": "<redacted>",
+      "input": {
+        "city": "<redacted>"
+      },
+      "name": "<redacted>",
+      "type": "tool_use"
+    }
+  ],
+  "id": "<redacted>",
+  "model": "<redacted>",
+  "role": "assistant",
+  "runner_telemetry": {
+    "generation_seconds": "<number>",
+    "generation_tok_s": "<number>",
+    "json_mode": false,
+    "prompt_cached_tokens": "<number>",
+    "prompt_eval_tokens": "<number>",
+    "schema": true,
+    "speculative": false
+  },
+  "stop_reason": "<redacted>",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "input_tokens": "<number>",
+    "output_tokens": "<number>"
+  }
+}

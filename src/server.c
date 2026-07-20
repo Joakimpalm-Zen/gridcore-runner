@@ -363,10 +363,11 @@ static int q_pop(void) {
 
 // ---------------------------------------------------------------- generation
 
-// Which wire dialect this request is answered in. All three run the *same*
+// Which wire dialect this request is answered in. All four run the *same*
 // generation path; they differ only in how the result is framed, which is why
-// the Responses surface is a translation layer rather than a second engine.
-enum { API_TEXT, API_CHAT, API_RESPONSES };
+// the Responses and Messages surfaces are translation layers rather than
+// second engines.
+enum { API_TEXT, API_CHAT, API_RESPONSES, API_MESSAGES };
 
 typedef struct {
     sbuf  out;          // accumulated completion text
@@ -383,6 +384,7 @@ typedef struct {
     int   n_stop;
     sbuf  hold;         // held-back tail that may still begin a stop match
     bool  stopped;      // a stop sequence matched; excluded from output
+    const char *stop_hit; // which one matched (Anthropic reports it back)
     long  created;      // stamped once: every chunk of a stream reports the
                         // same creation time, as the buffered body does
     bool  role_sent;    // "role":"assistant" is emitted on the first delta only
@@ -462,10 +464,15 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
 // one text delta on the named chat channel (or the legacy completion "text")
 static int responses_text_delta(gen_ctx *g, int reasoning, const char *bytes,
                                 int n);
+static int anth_delta(gen_ctx *g, const char *kind, const char *bytes, int n);
 
 static int send_text_delta(gen_ctx *g, int reasoning, const char *bytes, int n) {
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
     if (g->api == API_RESPONSES) return responses_text_delta(g, reasoning, bytes, n);
+    // Anthropic separates reasoning into a `thinking` content block rather
+    // than a field on the message, so the channel selects the block kind
+    if (g->api == API_MESSAGES)
+        return anth_delta(g, reasoning ? "thinking" : "text", bytes, n);
     sbuf c = {0};
     chunk_open(g, &c);
     if (g->api == API_CHAT) {
@@ -492,16 +499,19 @@ static int sink_content(void *ud, const char *b, int n) {
 static int resp_open_item(gen_ctx *g, const char *kind);
 static int resp_delta(gen_ctx *g, const char *kind, const char *bytes, int n);
 
+static int anth_open_block(gen_ctx *g, const char *kind);
+
 static int sink_call_begin(void *ud, const char *name) {
     gen_ctx *g = ud;
     if (g->dead) return 1;
-    if (g->api == API_RESPONSES) {
-        // the name identifies the item, so it must be known before the item is
-        // announced — which is exactly when tool_stream calls this
+    if (g->api == API_RESPONSES || g->api == API_MESSAGES) {
+        // the name identifies the item/block, so it must be known before that
+        // is announced — which is exactly when tool_stream calls this
         free(g->call_name);
         g->call_name = strdup(name);
         if (!g->call_name) { g->dead = true; return 1; }
-        return resp_open_item(g, "function_call");
+        return g->api == API_MESSAGES ? anth_open_block(g, "tool_use")
+                                      : resp_open_item(g, "function_call");
     }
     sbuf c = {0};
     chunk_open(g, &c);
@@ -519,6 +529,7 @@ static int sink_call_args(void *ud, const char *b, int n) {
     gen_ctx *g = ud;
     if (g->dead) return 1;
     if (g->api == API_RESPONSES) return resp_delta(g, "function_call", b, n);
+    if (g->api == API_MESSAGES) return anth_delta(g, "tool_use", b, n);
     sbuf c = {0};
     chunk_open(g, &c);
     sb_fmt(&c, "\"delta\":{\"tool_calls\":[{\"index\":%d,\"function\":"
@@ -579,18 +590,32 @@ static const resp_shape *resp_shape_of(const char *kind) {
     return &RESP_MESSAGE;
 }
 
-// frame one event. `fields` holds the event-specific members already written
-// as `,"key":value` pairs; it is consumed (freed) here.
-static int resp_send(gen_ctx *g, const char *type, sbuf *fields) {
+// frame one typed SSE event. `fields` holds the event-specific members already
+// written as `,"key":value` pairs; it is consumed (freed) here.
+//
+// Both typed surfaces name every event twice — in the SSE `event:` field and
+// in `data.type` — and both are validated by their SDKs, so the two names are
+// written from one argument here and cannot drift apart on either. The only
+// difference is `sequence_number`, which the Responses vocabulary stamps on
+// every event and the Anthropic one does not have at all.
+static int sse_send(gen_ctx *g, const char *type, sbuf *fields, bool seq) {
     sbuf e = {0};
-    sb_fmt(&e, "event: %s\ndata: {\"type\":\"%s\",\"sequence_number\":%ld",
-           type, type, g->seq++);
+    sb_fmt(&e, "event: %s\ndata: {\"type\":\"%s\"", type, type);
+    if (seq) sb_fmt(&e, ",\"sequence_number\":%ld", g->seq++);
     if (fields->s) sb_put(&e, fields->s, fields->n);
     sb_lit(&e, "}\n\n");
     if (fields->failed || e.failed || !send_all(g->fd, e.s, e.n)) g->dead = true;
     free(fields->s);
     free(e.s);
     return g->dead ? 1 : 0;
+}
+
+static int resp_send(gen_ctx *g, const char *type, sbuf *fields) {
+    return sse_send(g, type, fields, true);
+}
+
+static int anth_send(gen_ctx *g, const char *type, sbuf *fields) {
+    return sse_send(g, type, fields, false);
 }
 
 // the open item, rendered as a Responses output item
@@ -741,6 +766,11 @@ static int responses_text_delta(gen_ctx *g, int reasoning, const char *bytes,
 typedef struct {
     const char *status;      // in_progress | completed | incomplete
     const char *incomplete;  // reason, when status is incomplete
+    // the same two facts in the Anthropic vocabulary. Both surfaces derive
+    // them from the one `finish` string, so they cannot describe the turn
+    // differently.
+    const char *stop_reason; // end_turn | max_tokens | stop_sequence | tool_use
+    const char *stop_seq;    // the matched stop sequence, when that is the reason
     bool        with_output;
     // A streamed turn already rendered its items one by one, so it hands them
     // over verbatim rather than rebuilding them from different inputs — which
@@ -852,6 +882,168 @@ static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
     sb_lit(r, "}");
 }
 
+// ----------------------------------------------- Anthropic Messages framing
+//
+// The third vocabulary for the one generation path. Where the Responses
+// surface renders the turn as an `output[]` of items, Anthropic renders it as
+// a `content[]` of *blocks*, and the streaming form is the same state machine
+// one level flatter: a block is opened, filled with deltas, and closed, with no
+// content-part nesting inside it.
+//
+// The six event names and their order are the contract the Anthropic SDKs
+// validate:
+//
+//   message_start
+//     content_block_start / content_block_delta* / content_block_stop   (xN)
+//   message_delta        — the terminal stop_reason and the output token count
+//   message_stop
+//
+// There is no `data: [DONE]` sentinel: message_stop is the terminator.
+
+// The stop_reason vocabulary, derived from the same `finish` string the chat
+// dialect reports, so the two surfaces cannot disagree about how a turn ended.
+static const char *anth_stop_reason(const char *finish, bool stop_hit) {
+    if (!strcmp(finish, "tool_calls")) return "tool_use";
+    if (!strcmp(finish, "length"))     return "max_tokens";
+    // a user stop sequence is its own terminal reason in this vocabulary, and
+    // the matched string is reported alongside it
+    return stop_hit ? "stop_sequence" : "end_turn";
+}
+
+static int anth_close_block(gen_ctx *g) {
+    if (!g->item_open || g->dead) return g->dead ? 1 : 0;
+    sbuf f = {0};
+    sb_fmt(&f, ",\"index\":%d", g->output_index);
+    int rc = anth_send(g, "content_block_stop", &f);
+    g->item_open = false;
+    g->output_index++;
+    g->item_text.n = 0;
+    return rc;
+}
+
+// open a block of `kind`, closing any block already open. Re-opening the kind
+// that is already open is a no-op, which is what makes a run of deltas on one
+// channel land in one block.
+static int anth_open_block(gen_ctx *g, const char *kind) {
+    if (g->item_open && g->item_kind && !strcmp(g->item_kind, kind)) return 0;
+    if (anth_close_block(g)) return 1;
+    g->item_kind = kind;
+    sbuf f = {0};
+    sb_fmt(&f, ",\"index\":%d,\"content_block\":", g->output_index);
+    if (!strcmp(kind, "tool_use")) {
+        sb_fmt(&f, "{\"type\":\"tool_use\",\"id\":\"toolu_%d\",\"name\":\"",
+               g->tool_index);
+        sb_esc(&f, g->call_name ? g->call_name : "",
+               strlen(g->call_name ? g->call_name : ""));
+        // the arguments arrive as input_json_delta text; the block opens with
+        // the empty object an SDK accumulator starts from
+        sb_lit(&f, "\",\"input\":{}}");
+    } else if (!strcmp(kind, "thinking")) {
+        sb_lit(&f, "{\"type\":\"thinking\",\"thinking\":\"\"}");
+    } else {
+        sb_lit(&f, "{\"type\":\"text\",\"text\":\"\"}");
+    }
+    if (anth_send(g, "content_block_start", &f)) return 1;
+    g->item_open = true;
+    return 0;
+}
+
+static int anth_delta(gen_ctx *g, const char *kind, const char *bytes, int n) {
+    if (g->dead) return 1;
+    if (anth_open_block(g, kind)) return 1;
+    sb_put(&g->item_text, bytes, n);
+    sbuf f = {0};
+    sb_fmt(&f, ",\"index\":%d,\"delta\":{\"type\":\"", g->output_index);
+    // each block kind carries its text under its own delta type and key; an
+    // SDK dispatches on the first and reads the second
+    if (!strcmp(kind, "tool_use"))
+        sb_lit(&f, "input_json_delta\",\"partial_json\":\"");
+    else if (!strcmp(kind, "thinking"))
+        sb_lit(&f, "thinking_delta\",\"thinking\":\"");
+    else
+        sb_lit(&f, "text_delta\",\"text\":\"");
+    sb_esc(&f, bytes, n);
+    sb_lit(&f, "\"}");
+    return anth_send(g, "content_block_delta", &f);
+}
+
+// The Message object, in the one shape both the buffered body and the
+// streamed message_start/message_delta pair are built from. `content_json`,
+// when set, is the already-rendered block list a streamed turn accumulated,
+// for the same reason the Responses surface hands its items over verbatim:
+// the streamed and buffered documents stay identical by construction.
+static void anth_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
+    sb_fmt(r, "{\"id\":\"%s\",\"type\":\"message\",\"role\":\"assistant\","
+              "\"model\":\"", g->id);
+    sb_esc(r, SV.model_name, strlen(SV.model_name));
+    sb_lit(r, "\",\"content\":[");
+    if (d->with_output) {
+        int idx = 0;
+        if (d->reason_n) {
+            // reasoning is a block of its own here rather than a field on the
+            // message, and it always precedes the answer
+            sb_lit(r, "{\"type\":\"thinking\",\"thinking\":\"");
+            sb_esc(r, d->reason, d->reason_n);
+            sb_lit(r, "\",\"signature\":\"\"}");
+            idx++;
+        }
+        if (d->call_name) {
+            if (idx++) sb_lit(r, ",");
+            sb_fmt(r, "{\"type\":\"tool_use\",\"id\":\"toolu_%d\",\"name\":\"",
+                   g->tool_index);
+            sb_esc(r, d->call_name, strlen(d->call_name));
+            // Anthropic carries the arguments as a JSON *object*, where OpenAI
+            // carries the same document as a string. That difference is
+            // load-bearing: a string can hold anything, an inlined object
+            // cannot. Under the strict envelope the document is guaranteed to
+            // parse, but a call recovered from free text is only
+            // brace-matched, so it can be balanced and still invalid —
+            // inlining that verbatim would emit a body no client can read.
+            // Re-dumping through the parser is what makes this total.
+            sb_lit(r, "\",\"input\":");
+            const char *args = d->call_args ? d->call_args : "{}";
+            jv *parsed = json_parse(args, strlen(args));
+            if (parsed && parsed->type == J_OBJ) jv_dump(parsed, r);
+            else                                 sb_lit(r, "{}");
+            jv_free(parsed);
+            sb_lit(r, "}");
+        } else if (d->text_n || !idx) {
+            // an empty text block is still emitted when it is the only thing
+            // the turn produced: content[] must never be empty
+            if (idx++) sb_lit(r, ",");
+            sb_lit(r, "{\"type\":\"text\",\"text\":\"");
+            sb_esc(r, d->text ? d->text : "", d->text_n);
+            sb_lit(r, "\"}");
+        }
+    }
+    sb_lit(r, "],\"stop_reason\":");
+    if (d->stop_reason) sb_fmt(r, "\"%s\"", d->stop_reason);
+    else                sb_lit(r, "null");
+    sb_lit(r, ",\"stop_sequence\":");
+    if (d->stop_seq) {
+        sb_lit(r, "\"");
+        sb_esc(r, d->stop_seq, strlen(d->stop_seq));
+        sb_lit(r, "\"");
+    } else {
+        sb_lit(r, "null");
+    }
+    // Anthropic's cache_* usage fields describe *its* prompt-caching product
+    // and are deliberately not claimed here; runner's prefix-cache figure is
+    // reported in runner_telemetry, as it is on every other surface.
+    sb_fmt(r, ",\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d}",
+           d->n_prompt, d->n_gen);
+    if (d->with_usage)
+        sb_fmt(r, ",\"runner_telemetry\":{\"prompt_cached_tokens\":%d,"
+                  "\"prompt_eval_tokens\":%d,\"generation_seconds\":%.6f,"
+                  "\"generation_tok_s\":%.3f,\"json_mode\":%s,"
+                  "\"schema\":%s,\"speculative\":%s}",
+               d->cached, d->n_prompt - d->cached, d->gtime,
+               d->n_gen / (d->gtime > 0 ? d->gtime : 1e-9),
+               d->json_mode ? "true" : "false", d->schema ? "true" : "false",
+               d->spec ? "true" : "false");
+    sb_lit(r, "}");
+}
+
 static int emit_channel(gen_ctx *g, int reasoning, const char *bytes, int n) {
     sb_put(reasoning ? &g->reason : &g->out, bytes, n);
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
@@ -873,6 +1065,7 @@ static int stop_feed(gen_ctx *g, const char *bytes, int n) {
                 memcmp(g->hold.s + i, g->stop_strs[s], len) == 0) {
                 at = i;
                 hit_len = len;
+                g->stop_hit = g->stop_strs[s];
                 break;
             }
         }
@@ -1081,6 +1274,10 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
     const char *stops[4];
     int n_stops = 0;
     jv *stopv = jv_get(req, "stop");
+    // "stop_sequences" is the Anthropic spelling of the same field. Resolved
+    // here, as max_tokens already resolves its three names, so the stop filter
+    // has one implementation regardless of which surface asked for it.
+    if (absent(stopv)) stopv = jv_get(req, "stop_sequences");
     if (stopv && stopv->type != J_NULL) {
         bool bad = false;
         if (stopv->type == J_STR) {
@@ -1202,7 +1399,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                   .stop_strs = stops, .n_stop = n_stops,
                   .created = (long)time(NULL) };
     snprintf(g.id, sizeof(g.id), "%s%d",
-             api == API_RESPONSES ? "resp_" : api == API_CHAT ? "chatcmpl-"
+             api == API_RESPONSES ? "resp_" : api == API_MESSAGES ? "msg_"
+                                            : api == API_CHAT ? "chatcmpl-"
                                                               : "cmpl-",
              atomic_fetch_add(&SV.req_counter, 1));
     // split thinking channels out of chat responses; raw completions stay raw
@@ -1245,6 +1443,16 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                 resp_send(&g, i == 0 ? "response.created"
                                      : "response.in_progress", &f);
             }
+        } else if (api == API_MESSAGES) {
+            // An Anthropic stream opens with the whole Message object minus
+            // its content: the id, model and input token count are known
+            // before a token exists, and a client renders the turn's identity
+            // from them immediately. stop_reason is null until message_delta.
+            resp_doc d = { .n_prompt = n_prompt, .req = req };
+            sbuf f = {0};
+            sb_lit(&f, ",\"message\":");
+            anth_body(&f, &g, &d);
+            anth_send(&g, "message_start", &f);
         }
     }
 
@@ -1290,6 +1498,36 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
             responses_body(&f, &g, &d);
             resp_send(&g, truncated ? "response.incomplete"
                                     : "response.completed", &f);
+        }
+    } else if (stream && api == API_MESSAGES) {
+        // A turn that generated nothing at all still has to describe itself
+        // the way the buffered body would, which always carries at least one
+        // block. Opening an empty text block here is what keeps "the streamed
+        // and buffered turns agree" true even in the degenerate case.
+        if (!g.item_open && g.output_index == 0) anth_open_block(&g, "text");
+        // whatever block was still streaming is closed first: a block
+        // announced with content_block_start must always reach
+        // content_block_stop, including when generation stopped mid-block
+        anth_close_block(&g);
+        if (!g.dead) {
+            sbuf f = {0};
+            sb_fmt(&f, ",\"delta\":{\"stop_reason\":\"%s\",\"stop_sequence\":",
+                   anth_stop_reason(finish, g.stop_hit != NULL));
+            if (g.stop_hit) {
+                sb_lit(&f, "\"");
+                sb_esc(&f, g.stop_hit, strlen(g.stop_hit));
+                sb_lit(&f, "\"");
+            } else {
+                sb_lit(&f, "null");
+            }
+            // message_delta carries the *cumulative* output token count, which
+            // is the only place a streamed turn reports it
+            sb_fmt(&f, "},\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d}",
+                   n_prompt, n_gen);
+            if (!anth_send(&g, "message_delta", &f)) {
+                sbuf s2 = {0};
+                anth_send(&g, "message_stop", &s2);
+            }
         }
     } else if (stream) {
         if (!g.dead) {
@@ -1347,6 +1585,33 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                              // tool_calls (whatever followed was the model
                              // faking a result)
             }
+        }
+        if (api == API_MESSAGES) {
+            // Same canonical mapping the Responses branch below uses: the
+            // chat dialect's tool_calls item is where a call is extracted
+            // once, and each surface only renders it in its own vocabulary.
+            jv *call = n_tc ? json_parse(tc.s, tc.n) : NULL;
+            jv *fn = jv_get(call, "function");
+            resp_doc d = { .with_output = true,
+                           .stop_reason = anth_stop_reason(finish,
+                                                           g.stop_hit != NULL),
+                           .stop_seq = g.stop_hit,
+                           .call_name = jv_str(jv_get(fn, "name"), NULL),
+                           .call_args = jv_str(jv_get(fn, "arguments"), "{}"),
+                           .text = g.out.s, .text_n = g.out.n,
+                           .reason = g.reason.s, .reason_n = g.reason.n,
+                           .with_usage = true,
+                           .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
+                           .gtime = gtime, .schema = schema != NULL,
+                           .json_mode = e->json_mode, .spec = e->dm != NULL,
+                           .req = req };
+            sbuf r = {0};
+            anth_body(&r, &g, &d);
+            send_built(fd, &r);
+            free(r.s);
+            jv_free(call);
+            free(tc.s);
+            goto done;
         }
         if (api == API_RESPONSES) {
             // The chat dialect's tool_calls item is the canonical mapping, so
@@ -1942,6 +2207,488 @@ static void handle_responses(slot_t *s, int fd, jv *req) {
     jv_free(choice_owned);
 }
 
+// ----------------------------------------- Anthropic Messages request → chat
+//
+// The inbound half of the third translation, and the same move
+// handle_responses makes: an Anthropic request says the same things a chat
+// request does in a different vocabulary, so it is rewritten into that
+// vocabulary once, here, and everything downstream is the path
+// /v1/chat/completions already takes. Nothing below generates or samples.
+
+// A growable list of rendered chat turns.
+//
+// An Anthropic message does not map one-to-one onto a chat turn: a single user
+// message can carry several tool_result blocks *and* text, and the chat
+// vocabulary the templates speak files a tool result as its own turn. So turns
+// are appended as they are produced rather than indexed by message.
+typedef struct {
+    chat_msg *cm;
+    char    **owned;     // heap turns to free; borrowed ones are not listed
+    int       n, n_own, cap;
+    size_t    total;     // rendered-size estimate for the prompt buffer
+    bool      failed;
+} turnbuf;
+
+static void turn_add_borrowed(turnbuf *t, const char *role, const char *text) {
+    if (t->n >= t->cap) { t->failed = true; return; }
+    t->cm[t->n++] = (chat_msg){ role, text };
+    t->total += strlen(role) + strlen(text) + 64;
+}
+
+// takes ownership of `text` on every path, including failure
+static void turn_add(turnbuf *t, const char *role, char *text) {
+    if (!text) { t->failed = true; return; }
+    if (t->n >= t->cap) { free(text); t->failed = true; return; }
+    t->owned[t->n_own++] = text;
+    turn_add_borrowed(t, role, text);
+}
+
+static void turnbuf_free(turnbuf *t) {
+    for (int i = 0; i < t->n_own; i++) free(t->owned[i]);
+    free(t->owned);
+    free(t->cm);
+}
+
+// The text of one tool_result block. Its `content` is a string or a block
+// list, and `is_error` is the one bit of the result the model needs to see
+// that plain text would otherwise lose.
+static char *anth_tool_result_text(jv *b) {
+    sbuf r = {0};
+    if (jv_bool(jv_get(b, "is_error"), false)) sb_lit(&r, "error: ");
+    jv *c = jv_get(b, "content");
+    if (c && c->type == J_STR) {
+        sb_put(&r, c->str, strlen(c->str));
+    } else if (c && c->type == J_ARR) {
+        for (int i = 0; i < c->n; i++) {
+            const char *txt = jv_str(jv_get(c->items[i], "text"), NULL);
+            if (!txt) continue;
+            if (r.n) sb_lit(&r, "\n");
+            sb_put(&r, txt, strlen(txt));
+        }
+    } else if (c && c->type != J_NULL) {
+        jv_dump(c, &r);
+    }
+    return r.s ? r.s : strdup("");
+}
+
+// Flatten one message's content into turns. Returns false with err set when it
+// carries something this runtime cannot render: dropping an image would answer
+// a question about content the model never saw, which is exactly the silent
+// success this project refuses.
+static bool anth_blocks(jv *msg, const char *role, turnbuf *t,
+                        char *err, int errcap) {
+    jv *content = jv_get(msg, "content");
+    if (content && content->type == J_STR) {
+        turn_add(t, role, strdup(content->str));
+        return true;
+    }
+    if (!content || content->type != J_ARR) {
+        snprintf(err, errcap,
+                 "messages[].content must be a string or an array of blocks");
+        return false;
+    }
+    sbuf body = {0};
+    for (int i = 0; i < content->n; i++) {
+        jv *b = content->items[i];
+        if (!b || b->type != J_OBJ) {
+            snprintf(err, errcap,
+                     "each messages[].content block must be an object");
+            free(body.s);
+            return false;
+        }
+        const char *bt = jv_str(jv_get(b, "type"), "");
+        if (!strcmp(bt, "text")) {
+            const char *txt = jv_str(jv_get(b, "text"), NULL);
+            if (!txt) {
+                snprintf(err, errcap, "a text block must carry a text string");
+                free(body.s);
+                return false;
+            }
+            if (body.n) sb_lit(&body, "\n");
+            sb_put(&body, txt, strlen(txt));
+        } else if (!strcmp(bt, "tool_use")) {
+            // the assistant's own earlier call, replayed: rendered in runner's
+            // call syntax so the history reads like what the model emitted
+            const char *name = jv_str(jv_get(b, "name"), NULL);
+            if (!name) {
+                snprintf(err, errcap, "a tool_use block must carry a name");
+                free(body.s);
+                return false;
+            }
+            jv *input = jv_get(b, "input");
+            sb_fmt(&body, "<|tool_call>call:%s", name);
+            if (input && input->type != J_NULL) jv_dump(input, &body);
+            else                                sb_lit(&body, "{}");
+            sb_lit(&body, "<tool_call|>");
+        } else if (!strcmp(bt, "tool_result")) {
+            // the tool loop closing: a result is its own turn in the chat
+            // vocabulary, so it is emitted ahead of whatever text accompanies
+            // it in the same Anthropic message
+            turn_add(t, "tool", anth_tool_result_text(b));
+        } else if (!strcmp(bt, "thinking") || !strcmp(bt, "redacted_thinking")) {
+            // Replayed reasoning. Anthropic wants it back so *it* can verify a
+            // signature; there is nothing to verify locally, and it is the
+            // model's own scratch work rather than anything the user said, so
+            // it is not put back into the prompt.
+            continue;
+        } else {
+            snprintf(err, errcap,
+                     "messages[].content block type \"%.40s\" is not supported; "
+                     "this runtime renders text, tool_use and tool_result "
+                     "blocks only", bt);
+            free(body.s);
+            return false;
+        }
+    }
+    if (body.n) turn_add(t, role, body.s);
+    else        free(body.s);
+    return true;
+}
+
+// `system` is a string or a list of text blocks. Returns an owned string, or
+// NULL when there is no system content (which is not an error).
+static char *anth_system_text(jv *system, char *err, int errcap) {
+    if (!system || system->type == J_NULL) return NULL;
+    if (system->type == J_STR)
+        return system->str[0] ? strdup(system->str) : NULL;
+    if (system->type != J_ARR) {
+        snprintf(err, errcap,
+                 "system must be a string or an array of text blocks");
+        return NULL;
+    }
+    sbuf b = {0};
+    for (int i = 0; i < system->n; i++) {
+        const char *txt = jv_str(jv_get(system->items[i], "text"), NULL);
+        if (!txt) continue;
+        if (b.n) sb_lit(&b, "\n");
+        sb_put(&b, txt, strlen(txt));
+    }
+    return b.s;
+}
+
+// Anthropic declares a tool as {name, description, input_schema} where chat
+// nests it under "function" and calls the schema "parameters". Rather than
+// teach the envelope compiler a third shape (and risk the two paths already
+// using it), the Anthropic form is re-serialised into the nested one and
+// re-parsed — exactly what responses_tools does. Returns an owned jv.
+static jv *anth_tools(jv *tools, char *err, int errcap) {
+    if (!tools || tools->type == J_NULL) return NULL;
+    if (tools->type != J_ARR) {
+        snprintf(err, errcap, "tools must be an array");
+        return NULL;
+    }
+    sbuf b = {0};
+    sb_lit(&b, "[");
+    for (int i = 0; i < tools->n; i++) {
+        jv *t = tools->items[i];
+        if (!t || t->type != J_OBJ) {
+            snprintf(err, errcap, "each tools[] entry must be an object");
+            free(b.s);
+            return NULL;
+        }
+        // A server tool (web_search_*, computer_*, bash_*, text_editor_*) is
+        // named by its `type`; a client function tool has no type at all.
+        // Saying so beats leaving the caller waiting for a call that can never
+        // come from a runtime with no such capability.
+        const char *type = jv_str(jv_get(t, "type"), NULL);
+        if (type && strcmp(type, "custom") != 0 && strcmp(type, "function") != 0) {
+            snprintf(err, errcap,
+                     "tools[].type \"%.40s\" is a server-side tool and is not "
+                     "supported; only client tools can run locally", type);
+            free(b.s);
+            return NULL;
+        }
+        if (i) sb_lit(&b, ",");
+        sb_lit(&b, "{\"type\":\"function\",\"function\":{\"name\":");
+        jv *nm = jv_get(t, "name");
+        if (nm) jv_dump(nm, &b); else sb_lit(&b, "null");
+        jv *desc = jv_get(t, "description");
+        if (desc) { sb_lit(&b, ",\"description\":"); jv_dump(desc, &b); }
+        jv *params = jv_get(t, "input_schema");
+        if (params) { sb_lit(&b, ",\"parameters\":"); jv_dump(params, &b); }
+        sb_lit(&b, "}}");
+    }
+    sb_lit(&b, "]");
+    if (b.failed || !b.s) {
+        snprintf(err, errcap, "out of memory translating tools");
+        free(b.s);
+        return NULL;
+    }
+    jv *out = json_parse(b.s, b.n);
+    free(b.s);
+    if (!out) snprintf(err, errcap, "tools did not translate to a valid shape");
+    return out;
+}
+
+// tool_choice is an object in every Anthropic form; chat spells three of the
+// four as bare strings. Returns an owned jv, or NULL with err set.
+static jv *anth_tool_choice(jv *tc, char *err, int errcap) {
+    if (!tc || tc->type == J_NULL) return NULL;
+    if (tc->type != J_OBJ) {
+        snprintf(err, errcap, "tool_choice must be an object");
+        return NULL;
+    }
+    // "don't disable parallel use" is a request to allow several calls in one
+    // turn. The envelope is one call per turn on every surface, so this is
+    // refused here exactly as parallel_tool_calls:true is on the other two,
+    // rather than answered with a single call the caller cannot distinguish
+    // from a considered choice.
+    jv *par = jv_get(tc, "disable_parallel_tool_use");
+    if (par && par->type != J_NULL) {
+        if (par->type != J_BOOL) {
+            snprintf(err, errcap,
+                     "tool_choice.disable_parallel_tool_use must be a boolean");
+            return NULL;
+        }
+        if (!par->b) {
+            snprintf(err, errcap,
+                     "tool_choice.disable_parallel_tool_use:false is not "
+                     "supported yet; this runtime emits one tool call per turn. "
+                     "Omit it or send true.");
+            return NULL;
+        }
+    }
+    const char *type = jv_str(jv_get(tc, "type"), NULL);
+    const char *mapped = NULL;
+    if (!type) {
+        snprintf(err, errcap, "tool_choice.type is required");
+        return NULL;
+    }
+    if (!strcmp(type, "auto")) mapped = "\"auto\"";
+    else if (!strcmp(type, "none")) mapped = "\"none\"";
+    else if (!strcmp(type, "any")) mapped = "\"required\"";  // any one tool
+    else if (strcmp(type, "tool") != 0) {
+        snprintf(err, errcap,
+                 "tool_choice.type must be \"auto\", \"any\", \"tool\" or \"none\"");
+        return NULL;
+    }
+    sbuf b = {0};
+    if (mapped) {
+        sb_lit(&b, mapped);
+    } else {
+        const char *name = jv_str(jv_get(tc, "name"), NULL);
+        if (!name || !name[0]) {
+            snprintf(err, errcap,
+                     "tool_choice.type \"tool\" requires a name");
+            return NULL;
+        }
+        sb_lit(&b, "{\"type\":\"function\",\"function\":{\"name\":\"");
+        sb_esc(&b, name, strlen(name));
+        sb_lit(&b, "\"}}");
+    }
+    jv *out = b.failed || !b.s ? NULL : json_parse(b.s, b.n);
+    free(b.s);
+    if (!out) snprintf(err, errcap, "out of memory translating tool_choice");
+    return out;
+}
+
+// Features with no local implementation. Refusing them is the project
+// invariant: a client told 200 believes the thing it asked for happened.
+static bool anth_reject_unsupported(slot_t *s, int fd, jv *req) {
+    jv *v = jv_get(req, "mcp_servers");
+    if (v && v->type == J_ARR && v->n > 0) {
+        send_error(fd, 400,
+                   "mcp_servers is not supported: this runtime cannot reach "
+                   "remote MCP servers on your behalf. Run the tools locally "
+                   "and declare them in tools[].");
+        return true;
+    }
+    v = jv_get(req, "container");
+    if (v && v->type != J_NULL) {
+        send_error(fd, 400,
+                   "container is not supported: there is no code-execution "
+                   "container behind this runtime.");
+        return true;
+    }
+    v = jv_get(req, "metadata");
+    if (v && v->type != J_NULL && v->type != J_OBJ) {
+        send_error(fd, 400, "metadata must be an object");
+        return true;
+    }
+    // `thinking` promises the turn will carry thinking blocks. Whether it can
+    // is a property of the resident model — a thinking-tagged one separates
+    // its reasoning channel already — so it is answered honestly per model
+    // rather than accepted and quietly not done.
+    v = jv_get(req, "thinking");
+    if (v && v->type != J_NULL) {
+        if (v->type != J_OBJ) {
+            send_error(fd, 400, "thinking must be an object");
+            return true;
+        }
+        const char *type = jv_str(jv_get(v, "type"), NULL);
+        if (!type || (strcmp(type, "enabled") && strcmp(type, "disabled"))) {
+            send_error(fd, 400,
+                       "thinking.type must be \"enabled\" or \"disabled\"");
+            return true;
+        }
+        if (!strcmp(type, "enabled") && !s->m->think_open) {
+            send_error(fd, 400,
+                       "thinking:enabled is not supported by the resident "
+                       "model: it has no reasoning channel to separate, so no "
+                       "thinking block could be returned.");
+            return true;
+        }
+    }
+    return false;
+}
+
+// Build the prompt one Messages request asks for. Shared by /v1/messages and
+// /v1/messages/count_tokens so the count is necessarily the count of the
+// prompt the real request would have run — the two cannot drift.
+//
+// Returns a heap prompt on success (caller frees) with *strict/*env set, or
+// NULL having already answered `fd` with the error.
+static char *messages_prompt(slot_t *s, int fd, jv *req, tool_envelope *env,
+                             bool *strict) {
+    char terr[224];
+    *strict = false;
+    memset(env, 0, sizeof(*env));
+
+    jv *msgs = jv_get(req, "messages");
+    if (!msgs || msgs->type != J_ARR || msgs->n == 0) {
+        send_error(fd, 400, "missing messages");
+        return NULL;
+    }
+
+    jv *tools = anth_tools(jv_get(req, "tools"), terr, sizeof(terr));
+    jv *raw_tools = jv_get(req, "tools");
+    if (raw_tools && raw_tools->type != J_NULL && !tools) {
+        send_error(fd, 400, terr);
+        return NULL;
+    }
+    jv *choice = anth_tool_choice(jv_get(req, "tool_choice"), terr, sizeof(terr));
+    jv *raw_choice = jv_get(req, "tool_choice");
+    if (raw_choice && raw_choice->type != J_NULL && !choice) {
+        jv_free(tools);
+        send_error(fd, 400, terr);
+        return NULL;
+    }
+
+    // the same envelope compiler, from the same declarations, as both OpenAI
+    // surfaces: this is what makes an Anthropic tool call and a chat tool call
+    // the same internal agent action
+    int rc = tool_envelope_build(tools, choice, NULL, env, terr, sizeof(terr));
+    if (rc < 0) {
+        jv_free(tools);
+        jv_free(choice);
+        send_error(fd, 400, terr);
+        return NULL;
+    }
+    *strict = rc == 1;
+
+    sbuf ts = {0};
+    if (*strict) sb_put(&ts, env->system_turn, strlen(env->system_turn));
+    else         tools_render(tools, &ts);
+
+    // upper bound on turns: the tool system turn, the system turn, and for
+    // each message its own turn plus one per tool_result block it carries
+    int cap = 2 + msgs->n;
+    for (int i = 0; i < msgs->n; i++) {
+        jv *c = jv_get(msgs->items[i], "content");
+        if (c && c->type == J_ARR) cap += c->n;
+    }
+    turnbuf t = { .cm = malloc(sizeof(chat_msg) * (size_t)cap),
+                  .owned = malloc(sizeof(char *) * (size_t)cap),
+                  .cap = cap, .total = ts.n + 128 };
+    if (!t.cm || !t.owned) t.failed = true;
+
+    char *sys = NULL;
+    if (!t.failed) {
+        if (ts.n) turn_add_borrowed(&t, "system", ts.s);
+        terr[0] = 0;
+        sys = anth_system_text(jv_get(req, "system"), terr, sizeof(terr));
+        if (terr[0]) {
+            turnbuf_free(&t);
+            free(ts.s);
+            tool_envelope_free(env);
+            jv_free(tools);
+            jv_free(choice);
+            send_error(fd, 400, terr);
+            return NULL;
+        }
+        if (sys) turn_add(&t, "system", sys);
+    }
+
+    bool ok = !t.failed;
+    for (int i = 0; ok && i < msgs->n; i++) {
+        jv *msg = msgs->items[i];
+        const char *role = jv_str(jv_get(msg, "role"), NULL);
+        if (!role || (strcmp(role, "user") && strcmp(role, "assistant"))) {
+            snprintf(terr, sizeof(terr),
+                     "messages[].role must be \"user\" or \"assistant\"");
+            ok = false;
+            break;
+        }
+        ok = anth_blocks(msg, role, &t, terr, sizeof(terr));
+    }
+    if (ok && t.failed) {
+        snprintf(terr, sizeof(terr), "out of memory building the prompt");
+        ok = false;
+    }
+    if (ok && t.n == 0) {
+        snprintf(terr, sizeof(terr), "no message content");
+        ok = false;
+    }
+    char *prompt = NULL;
+    if (ok) {
+        prompt = malloc(t.total + 256);
+        if (prompt) render_messages(s->tmpl, t.cm, t.n, true, prompt,
+                                    t.total + 256);
+        else ok = false;
+    }
+    turnbuf_free(&t);
+    free(ts.s);
+    jv_free(tools);
+    jv_free(choice);
+    if (!ok) {
+        tool_envelope_free(env);
+        free(prompt);
+        send_error(fd, 400, terr[0] ? terr : "cannot build prompt");
+        return NULL;
+    }
+    return prompt;
+}
+
+static void handle_messages(slot_t *s, int fd, jv *req) {
+    if (anth_reject_unsupported(s, fd, req)) return;
+    // max_tokens is required on this surface, unlike the OpenAI ones where it
+    // defaults. A caller that forgot it wants a cap, not the server's.
+    jv *mt = jv_get(req, "max_tokens");
+    if (!mt || mt->type == J_NULL) {
+        send_error(fd, 400, "max_tokens is required");
+        return;
+    }
+    tool_envelope env;
+    bool strict = false;
+    char *prompt = messages_prompt(s, fd, req, &env, &strict);
+    if (!prompt) return;
+    run_completion(s, fd, prompt, API_MESSAGES, req, strict ? &env : NULL);
+    free(prompt);
+    tool_envelope_free(&env);
+}
+
+// POST /v1/messages/count_tokens: how many input tokens this exact request
+// would have cost. It runs the whole inbound translation and stops before
+// generation, so the answer is the prompt the request would really have used.
+static void handle_count_tokens(slot_t *s, int fd, jv *req) {
+    if (anth_reject_unsupported(s, fd, req)) return;
+    tool_envelope env;
+    bool strict = false;
+    char *prompt = messages_prompt(s, fd, req, &env, &strict);
+    if (!prompt) return;
+    size_t cap = strlen(prompt) + 16;
+    int32_t *toks = malloc(sizeof(int32_t) * cap);
+    int n = toks ? tok_encode(s->tok, prompt, toks, (int)cap, true, true) : 0;
+    free(toks);
+    free(prompt);
+    tool_envelope_free(&env);
+    if (!n) { send_error(fd, 400, "empty prompt"); return; }
+    sbuf r = {0};
+    sb_fmt(&r, "{\"input_tokens\":%d}", n);
+    send_built(fd, &r);
+    free(r.s);
+}
+
 static void handle_completion(slot_t *s, int fd, jv *req) {
     const char *prompt = jv_str(jv_get(req, "prompt"), NULL);
     if (!prompt) { send_error(fd, 400, "missing prompt"); return; }
@@ -2078,6 +2825,7 @@ static void send_capabilities(int fd) {
     }
     sb_lit(&r, ",\"features\":{"
                "\"responses_api\":true,"
+               "\"messages_api\":true,"
                "\"json_object\":true,"
                "\"json_schema\":true,"
                "\"stop_sequences\":true,"
@@ -2183,6 +2931,8 @@ static void handle_conn(slot_t *s, int fd) {
     } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/v1/chat/completions") ||
                 !strcmp(path, "/v1/responses") ||
+                !strcmp(path, "/v1/messages") ||
+                !strcmp(path, "/v1/messages/count_tokens") ||
                 !strcmp(path, "/v1/completions") ||
                 !strcmp(path, "/v1/embeddings"))) {
         jv *req = body ? json_parse(body, content_length) : NULL;
@@ -2213,6 +2963,9 @@ static void handle_conn(slot_t *s, int fd) {
             if (ok) {
                 if (strcmp(path, "/v1/chat/completions") == 0) handle_chat(s, fd, req);
                 else if (strcmp(path, "/v1/responses") == 0) handle_responses(s, fd, req);
+                else if (strcmp(path, "/v1/messages") == 0) handle_messages(s, fd, req);
+                else if (strcmp(path, "/v1/messages/count_tokens") == 0)
+                    handle_count_tokens(s, fd, req);
                 else if (strcmp(path, "/v1/embeddings") == 0) handle_embeddings(s, fd, req);
                 else handle_completion(s, fd, req);
                 // Ollama-style keep_alive: seconds of idle before the model

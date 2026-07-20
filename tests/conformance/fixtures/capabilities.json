@@ -4,6 +4,7 @@
     "family_sampling_presets": true,
     "json_object": true,
     "json_schema": true,
+    "messages_api": true,
     "prefix_cache": true,
     "prefix_cache_controls": true,
     "repeat_penalty": true,

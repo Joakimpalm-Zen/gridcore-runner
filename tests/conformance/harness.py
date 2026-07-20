@@ -28,7 +28,8 @@ from _sse import (DONE, SSEParser, decode_events, parse_named_stream,
                    parse_stream, split_points)
 
 __all__ = [
-    "Client", "Response", "Stream", "ResponseStream", "RunnerServer", "Report",
+    "Client", "Response", "Stream", "ResponseStream", "MessageStream",
+    "RunnerServer", "Report",
     "ConformanceError", "TransportError", "ProtocolError", "SchemaError",
     "ModelQualityError", "categorize", "CATEGORIES",
     "SSEParser", "parse_stream", "parse_named_stream", "split_points",
@@ -286,6 +287,48 @@ class ResponseStream:
                        for d in self.payloads("response.output_text.delta"))
 
 
+class MessageStream(ResponseStream):
+    """A completed /v1/messages SSE stream.
+
+    Shares ResponseStream's machinery — named events whose ``event:`` field
+    must agree with ``data.type`` — because that is the contract both typed
+    SDKs check. It differs in two ways that matter: an Anthropic stream has no
+    ``data: [DONE]`` sentinel (``message_stop`` is the terminator), and its
+    text arrives as ``content_block_delta`` rather than output_text deltas."""
+
+    @property
+    def text(self):
+        return "".join(d.get("delta", {}).get("text", "")
+                       for d in self.payloads("content_block_delta"))
+
+    @property
+    def blocks(self):
+        """Rebuild content[] the way an SDK accumulator does, so a test can
+        assert the streamed turn equals the buffered one."""
+        out = {}
+        for name, d in self.typed:
+            i = d.get("index")
+            if name == "content_block_start":
+                out[i] = dict(d.get("content_block") or {})
+                if out[i].get("type") == "tool_use":
+                    out[i]["input"] = ""
+            elif name == "content_block_delta":
+                delta = d.get("delta") or {}
+                kind = delta.get("type")
+                if kind == "text_delta":
+                    out[i]["text"] = out[i].get("text", "") + delta.get("text", "")
+                elif kind == "thinking_delta":
+                    out[i]["thinking"] = \
+                        out[i].get("thinking", "") + delta.get("thinking", "")
+                elif kind == "input_json_delta":
+                    out[i]["input"] = \
+                        out[i].get("input", "") + delta.get("partial_json", "")
+        for b in out.values():
+            if b.get("type") == "tool_use":
+                b["input"] = json.loads(b["input"]) if b["input"] else {}
+        return [out[i] for i in sorted(out)]
+
+
 # ------------------------------------------------------------------- client
 class Client:
     """Issues requests against a RunnerServer and records metrics."""
@@ -419,6 +462,21 @@ class Client:
         status, headers, body = _split_head(raw)
         st = ResponseStream(name, status, headers, body, latency, first)
         self._record(name, "/v1/responses", True, st)
+        return st
+
+    # ---- Anthropic Messages API
+    def messages(self, payload, name="messages"):
+        return self.raw(name, "POST", "/v1/messages", payload)
+
+    def count_tokens(self, payload, name="count-tokens"):
+        return self.raw(name, "POST", "/v1/messages/count_tokens", payload)
+
+    def messages_stream(self, payload, name="messages-stream"):
+        payload = dict(payload, stream=True)
+        raw, latency, first = self.stream_raw(name, "/v1/messages", payload)
+        status, headers, body = _split_head(raw)
+        st = MessageStream(name, status, headers, body, latency, first)
+        self._record(name, "/v1/messages", True, st)
         return st
 
     def expect_400(self, payload, name, contains=None, path="/v1/chat/completions"):
