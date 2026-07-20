@@ -29,6 +29,30 @@ position will be:
 - Reject unsupported API/schema features explicitly; never silently ignore them.
 - Preserve speculative decoding, prompt caching, model swap, reservations, and
   existing OpenAI Chat Completions compatibility.
+- The HTTP server binds `127.0.0.1` and nothing else. Do not add `--host`,
+  `--bind`, `--listen`, an address environment variable, or any other way to
+  reach the bind address. Remote access is a reverse proxy, an SSH tunnel, or
+  Tailscale — that is the supported answer, and it puts auth and TLS where they
+  belong. Enforced by `tests/test_bind.c` (source and CLI surface, in `make
+  test` and both CI jobs) and `tests/conformance/test_loopback_bind.py`
+  (the running server is unreachable on every non-loopback address).
+  - This one carries a dependency, and it is the reason the rule is absolute
+    rather than a preference. Two other things are only safe *because* of the
+    bind: the API has no authentication at all, and the request parser is
+    permissive in ways that are a smuggling primitive behind a keep-alive proxy
+    (`Content-Length` is matched anywhere in the header block instead of at a
+    line start, and `Transfer-Encoding: chunked` is ignored rather than
+    rejected). Both were assessed as not exploitable *given* a loopback-only
+    listener serving one request per connection. Since Phases 1–4 the server
+    also does tool calling on three API surfaces, which is what made the
+    ~175,000 exposed Ollama hosts of January 2026 an RCE story rather than a
+    leaked-prompts story.
+  - So if a `--host` flag is ever genuinely needed, it lands **together with**
+    (a) line-anchored `Content-Length` parsing, (b) explicit rejection of
+    `Transfer-Encoding`, (c) rejection of duplicate or conflicting length
+    headers, and (d) some form of authentication. Never before them, and never
+    on its own as a convenience. A standalone `--host` PR is a no, however
+    small the diff looks.
 - Add focused tests before each behavior change.
 - Do not prioritize broad architecture, multimodal, UI, or model-store expansion
   until the specialized agent runtime is proven.

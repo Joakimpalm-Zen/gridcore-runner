@@ -70,6 +70,24 @@ scheduler, `--reserve` budgeting with auto-fit context, `/unload`,
 llama-server + llama-swap + supervision scripts; this grid schedules whole
 machines, so the whole story lives in the one binary it already ships.
 
+**There is no `--host` flag to get wrong.** runner binds `127.0.0.1` and gives
+you no way to change it — no flag, no environment variable, no config key. The
+honest framing is not that runner is more secure: the *defaults* are identical,
+since llama-server and Ollama both bind loopback out of the box. The difference
+is that they kept the override and runner removed it. In January 2026
+SentinelLabs and Censys found ~175,000 exposed Ollama instances across 130
+countries, no auth, no firewall, and nearly half with tool calling enabled —
+which turns an open inference port into an open shell. Nobody set out to
+publish those; they set `0.0.0.0` for one afternoon's convenience and never got
+back to the firewall. runner has tool calling on three API surfaces too, so the
+blast radius would be the same; it just has no line to write. Reaching a runner
+from another machine is a reverse proxy, an SSH tunnel, or Tailscale, which is
+where authentication and TLS belong rather than hand-rolled inside an inference
+engine. And because it is a promise rather than an accident, it is a gate:
+`tests/test_bind.c` fails the build if the constant or the CLI surface moves,
+and `tests/conformance/test_loopback_bind.py` fails if the running server ever
+answers on a non-loopback address.
+
 The trade is explicit and deliberate: llama.cpp wins on raw speed, exotic
 quants, and new-architecture coverage (runner deliberately skips MoE/SSM
 architectures, IQ2/IQ3 quants, and Vulkan). runner wins when the engine is a

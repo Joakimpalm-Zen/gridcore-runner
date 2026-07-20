@@ -23,6 +23,15 @@ jobs:
               echo "unexpectedly accepted $args"; exit 1
             fi
           done
+      # The loopback-only bind is a product decision, so it gets a gate rather
+      # than a comment: no INADDR_ANY, no --host/--bind/--listen, no env var.
+      # The runtime half (server genuinely unreachable off-box) is in the
+      # conformance job, tests/conformance/test_loopback_bind.py.
+      - name: loopback bind invariant
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_bind.c \
+            -o test-bind
+          ./test-bind
       - name: make test model
         run: python3 scripts/make-test-model.py test.gguf
       - name: focused json/schema tests
@@ -448,6 +457,12 @@ jobs:
               echo "unexpectedly accepted $args"; exit 1
             fi
           done
+      # see the unix job: the loopback bind is enforced, not assumed
+      - name: loopback bind invariant
+        run: |
+          gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_bind.c \
+            -o test-bind.exe
+          ./test-bind.exe
       - name: make test model
         run: python3 scripts/make-test-model.py test.gguf
       - name: focused json/schema tests

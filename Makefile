@@ -24,6 +24,7 @@ TEST_SCHEMA_OOM = test-schema-oom.exe
 TEST_SAMPLER = test-sampler.exe
 TEST_SHARED = test-shared-weights.exe
 TEST_BATCH = test-batch.exe
+TEST_BIND = test-bind.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
@@ -38,6 +39,7 @@ TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
 TEST_SHARED = test-shared-weights
 TEST_BATCH = test-batch
+TEST_BIND = test-bind
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
@@ -52,6 +54,7 @@ TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
 TEST_SHARED = test-shared-weights
 TEST_BATCH = test-batch
+TEST_BIND = test-bind
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -126,12 +129,20 @@ TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
 $(TEST_BATCH): $(TEST_BATCH_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_BATCH_SRC) -o $@ $(LDFLAGS)
 
+# the loopback-only bind. Links nothing: it reads src/server.c and src/main.c
+# and interrogates the built ./runner, so a bind address introduced anywhere --
+# constant, flag, env var -- trips it. Depends on `runner` because the CLI half
+# of the check needs the shipped binary rather than a comment about it.
+$(TEST_BIND): tests/test_bind.c src/server.c src/main.c
+	$(CC) $(CFLAGS) -I src tests/test_bind.c -o $@
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
-      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) test.gguf
+      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) runner test.gguf
+	./$(TEST_BIND)
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)
 	./$(TEST_SCHEMA_OOM)
@@ -242,7 +253,7 @@ clean:
 	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
-	      $(TEST_BATCH) test-shared-asan-bin
+	      $(TEST_BATCH) $(TEST_BIND) test-shared-asan-bin
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 
