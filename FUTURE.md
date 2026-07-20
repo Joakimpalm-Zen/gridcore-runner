@@ -1526,53 +1526,6 @@ token one". Two things would close it:
 
 ---
 
----
-
-# Drop-in replacement for llama.cpp / Ollama in existing tooling
-
-A real deployment question, raised 2026-07-20: runner may be a candidate to
-replace llama.cpp or Ollama as the inference engine behind tools already in use
-at Arelion — OpenCode, Python tooling, and newer agents such as
-Ornith (https://deep-reinforce.com/ornith_1_0.html).
-
-This is a different goal from Phases 3-5, and worth stating separately. Those
-phases made runner speak OpenAI Chat Completions, OpenAI Responses and
-Anthropic Messages — three *API dialects*. Being a drop-in for tools that today
-point at llama.cpp or Ollama is about the *deployment contract*: the endpoint
-paths they probe, the model-listing shape they expect, how they discover
-context length, how they start and health-check a server, and whether they
-assume Ollama's native API rather than its OpenAI-compatible one.
-
-Work needed, in rough order:
-
-1. **Inventory what each tool actually requires.** Do not assume. Phases 3 and 4
-   each found bugs that no amount of spec-reading would have — tool namespace
-   containers from codex-cli, and Anthropic inlining tool arguments as an object
-   where OpenAI escapes them into a string. Run each tool against runner and
-   record what breaks.
-2. **Ollama's native API** (`/api/generate`, `/api/chat`, `/api/tags`,
-   `/api/show`) is a separate surface from its OpenAI-compatible one, and many
-   tools use the native path. Decide whether to implement it as a fourth API_*
-   dialect on the existing seam, or to declare OpenAI-compat the supported
-   route. Note runner already accepts Ollama-style `format` and `keep_alive`.
-3. **Model discovery and naming.** Tools expect to list models and pick one by
-   name; runner's registry/swap mode is close but its shape is not Ollama's.
-4. **Startup contract.** Ollama runs as a daemon on a fixed port with a CLI that
-   pulls models. Runner is a binary given a GGUF path. Anything expecting
-   `ollama serve` semantics needs either a shim or documentation.
-5. **A conformance suite per tool**, in the Phase 0 style, so "works with
-   OpenCode" is a gate rather than a claim that decays.
-
-Constraint that does not bend: the loopback-only bind (see the invariants).
-Tools expecting to reach an inference server across a network will need a
-reverse proxy or tunnel; that is the supported path, not a `--host` flag.
-
-Relationship to Phase 9: this is the strongest possible version of the
-"traction" work. A tool that already runs on Ollama and runs unmodified on
-runner is a more convincing demonstration than any benchmark table.
-
----
-
 # Strategy: jurisdiction coverage as a specialization
 
 Runner is a *local* engine: it loads GGUF weights from disk, binds
@@ -1594,7 +1547,7 @@ Target coverage, one validated family per jurisdiction:
 | US | Gemma 3 | validated, but see the licence note below |
 | China | Qwen 2.5 / 3 | validated: 0/721 both; Qwen3 is the strongest tool-caller |
 | EU | Mistral v0.3 | validated with one KNOWN divergence, 2/721 |
-| EU | Apertus (Swiss) | under evaluation — second EU option |
+| EU | Apertus (Swiss) | evaluated 2026-07-20 — **tokenizer and template done, blocked on architecture**; see below |
 
 **The binding constraint is licence, not geography**, and it inverts the naive
 mapping:
@@ -1622,6 +1575,116 @@ open weights alone.
 
 Sources: CNAS Sovereign AI Index; Mistral Help Center licence page; Google's
 Gemma Terms of Use.
+
+## Model lineup / jurisdiction coverage — as validated 2026-07-20
+
+| jurisdiction | family | licence | tokenizer | verdict |
+|---|---|---|---|---|
+| US | Llama 3.x | Llama 3.x Community (custom; >700M MAU clause) | 1/721 | validated, in lineup |
+| US | Gemma 3 | Google Gemma Terms (custom, flow-down, revocable) | 1/721 | validated; licence is the problem, not the tech |
+| China | Qwen 2.5 / 3 | Apache 2.0 | 1/721 | validated, cleanest licence in the lineup |
+| EU | Mistral v0.3 | Mistral Research License (**non-commercial**) | 44/721, one known cause | validated with the accepted divergence |
+| EU | **Apertus 8B Instruct (Swiss AI)** | **Apache 2.0** | **0/721 — best in lineup** | **NOT usable: architecture unsupported** |
+| — | SmolLM2 | Apache 2.0 | 0/721 | validated |
+| — | Phi-3.5-mini | MIT | 2/721 | validated |
+
+The tokenizer column is the differential against each model's own HuggingFace
+reference over `tests/fixtures/tokenizer-corpus.txt`, run by
+`scripts/difftok.py`. See the note below on why these numbers are not the ones
+recorded earlier in this file.
+
+### Apertus: verdict
+
+**Not viable today, and the blocker is not in tokenizer or template code.**
+
+Model: `bartowski/swiss-ai_Apertus-8B-Instruct-2509-GGUF`, Q4_K_M, 5,057,885,568
+bytes, verified complete (`scripts/verify-gguf.py`: last tensor ends at exactly
+the file size, zero slack).
+
+What passed:
+
+- **Licence — Apache 2.0.** Confirmed from the GGUF's own
+  `general.license` key, the HF repo `cardData`, and `LICENSE.txt` in
+  `swiss-ai/Apertus-8B-Instruct-2509` ("Copyright 2025 - The Swiss AI team",
+  stock Apache 2.0). Ungated. This is the single most permissive licence in the
+  EU column and strictly better than Mistral's non-commercial MRL. There is a
+  separate `USAGE_POLICY.md`, which should be read before shipping, but it is
+  not a licence restriction in the Gemma flow-down sense.
+- **Tokenizer — 0/721, the only exact model in the lineup.** It needed a new
+  pre-tokenizer: the GGUF declares `tokenizer.ggml.pre = tekken`, which runner
+  did not implement and silently fell back to the GPT-2 regex for, scoring
+  **142/721**. `TOK_PRE_TEKKEN` in `src/tokenizer.c` takes that to **0/721**.
+  Tekken is also Mistral's current tokenizer (Nemo, Small), so this is reusable
+  beyond Apertus.
+- **Chat template — detected and byte-exact.** `TMPL_APERTUS`
+  (`<|role_start|>…<|role_end|>`, native system role, plus the reference's
+  `<|developer_start|>Deliberation: … Tool Capabilities: …<|developer_end|>`
+  block). Detection has to run *before* the `[INST]` branch: the Apertus
+  vocabulary inherits Mistral's `[INST]`/`[/INST]` tokens, so it would otherwise
+  be claimed as `TMPL_MISTRAL`. Runner's render is byte-identical to the model's
+  own `chat_template.jinja` rendered with jinja2.
+
+What blocks it — all of it in `src/model.c`, which this work did not touch:
+
+1. **`general.architecture = apertus`** is not in the supported list, so the
+   load takes the "untested, attempting llama-style load" path and immediately
+   fails: `error: missing tensor blk.0.ffn_gate.weight`.
+2. **The MLP is not gated.** Apertus ships `ffn_up` and `ffn_down` only — there
+   is no `ffn_gate` tensor in the file. Runner's forward pass assumes SwiGLU
+   everywhere. This needs a non-gated FFN path, not a tensor rename.
+3. **The activation is xIELU** (`hidden_act: "xielu"` in the reference
+   `config.json`), a parametric activation, not SiLU/GELU. A new activation is
+   needed in the CPU path and in `kernels.cu`/`kernels.metal`.
+4. Lower risk, but needs wiring: `qk_norm` is on (`attn_q_norm`/`attn_k_norm`,
+   dim 128 = head_dim — runner already supports this shape for qwen3/gemma3),
+   `rope_theta` 12e6 with llama3-style scaling and a precomputed
+   `rope_freqs.weight` tensor, `post_norm: false`, untied embeddings.
+
+Consequently **not measured**: GPU-vs-CPU token identity, generation quality,
+and stop-token behaviour. All three need the model to load. On stop tokens the
+static analysis is encouraging and no change looks needed: Apertus declares
+`eos_token_id = 68` (`<|assistant_end|>`, the turn terminator the template
+emits) and `generation_config.json` also lists `2` (`</s>`), which is already in
+`engine.c`'s stop list. The third, `72` (`<|tools_suffix|>`), only matters in
+tool mode.
+
+Recommendation: Apertus is worth the architecture work whenever a Phase 8 agent
+touches `model.c` — it is the only candidate that gives the EU column an Apache
+2.0 answer, and it is now the only model in the lineup that tokenizes exactly.
+Until then Mistral remains the sole EU option and the single point of failure
+described above is unchanged.
+
+### Note: the tokenizer numbers above are not the ones recorded earlier
+
+The 721-string corpus every earlier number was quoted against was generated ad
+hoc and never committed, so no later agent could reproduce a single one of them.
+It is now committed as `tests/fixtures/tokenizer-corpus.txt`, regenerated
+deterministically by `scripts/tokenizer-corpus.py`, and driven by
+`scripts/difftok.py` against `tests/difftok.c`.
+
+The rebuilt corpus is the same size but deliberately harder, and it does not
+reproduce the old figures. It is validated by reproducing the known *cause*:
+every one of Mistral's 44 divergences is the documented
+`Metaspace prepend_scheme=first` case — 40 begin with whitespace and the other
+four are `▁`, `▁▁`, `▁hello` and `<unk>`, which is the same thing after
+Metaspace normalization. The count moved from 2 to 44 only because this corpus
+contains far more leading-whitespace strings; the accepted divergence has not
+grown.
+
+The corpus also found four small pre-existing divergences in families recorded
+here as 0/721, none of them Apertus-related and none of them fixed by this work:
+
+- **Llama-3.2**, 1/721: `"Tiếng Việt"` → runner splits ` Vi|ệ|t` where the
+  reference keeps ` Việt`. Runner's `\p{L}` approximation does not cover Latin
+  Extended Additional.
+- **Qwen3**, 1/721: `"สวัสดี"` — same class, Thai.
+- **gemma-3**, 1/721: `"▁▁"`, a literal U+2581 run in the *input*.
+- **Phi-3.5**, 2/721: `"not a <s> real tag"` and `"a<s>b"` — SPM whitespace
+  handling immediately after an embedded special token.
+
+These are narrow and confined to inputs the lineup is unlikely to see, but they
+are real and they were previously invisible. Worth a separate pass; folding them
+into the Apertus evaluation would have hidden the one number that mattered.
 
 ---
 
