@@ -1500,6 +1500,60 @@ token one". Two things would close it:
 
 ## Original report
 
+---
+
+# Strategy: jurisdiction coverage as a specialization
+
+Runner is a *local* engine: it loads GGUF weights from disk, binds
+INADDR_LOOPBACK and makes no outbound call, so no data crosses a border. That
+means the usual sovereignty machinery — SCCs, adequacy decisions, cross-border
+transfer analysis — does not engage. It is written for hosted APIs, where the
+data leaves.
+
+What that leaves is a genuine and narrower advantage: **whatever jurisdiction a
+buyer is constrained to, runner should already have a family validated for it.**
+Answering "yes, and here are the tokenizer and CPU/GPU numbers" is a stronger
+position than any argument about where a model was trained.
+
+Target coverage, one validated family per jurisdiction:
+
+| jurisdiction | family | status |
+|---|---|---|
+| US | Llama 3.x | validated: tokenizer 0/721, GPU==CPU, simplest arch |
+| US | Gemma 3 | validated, but see the licence note below |
+| China | Qwen 2.5 / 3 | validated: 0/721 both; Qwen3 is the strongest tool-caller |
+| EU | Mistral v0.3 | validated with one KNOWN divergence, 2/721 |
+| EU | Apertus (Swiss) | under evaluation — second EU option |
+
+**The binding constraint is licence, not geography**, and it inverts the naive
+mapping:
+
+- **Qwen** — Apache 2.0 across most models. Cleanest commercial path of the three.
+- **Gemma** — version-dependent. Gemma **4** is genuine Apache 2.0; earlier Gemma
+  (including the gemma-3-4b in models/) ships Google's custom terms with a
+  Prohibited Use Policy, a **flow-down obligation to every downstream user**, and
+  a unilateral termination right. The flow-down clause propagates obligations to
+  Gridcore's users, not just to us — check before shipping.
+- **Mistral** — the most restrictive. The Mistral Research License is
+  non-commercial; some models use a modified MIT requiring a commercial licence
+  above $20M revenue.
+
+So the "EU option" has the tightest commercial terms and the "China option" the
+loosest. Pick per-family *versions* by licence (Gemma 4 over Gemma 3) and treat
+jurisdiction as a filter to satisfy rather than the primary selector.
+
+Mistral being the sole EU option is a single point of failure on two counts: it
+is the only family with an unresolvable tokenizer divergence, and its licence is
+the least commercially usable. Apertus is being evaluated as a second EU option
+for that reason. Its appeal is that it is open weights *and* open training data
+*and* open recipes, with EU AI Act compliance by design — a stronger claim than
+open weights alone.
+
+Sources: CNAS Sovereign AI Index; Mistral Help Center licence page; Google's
+Gemma Terms of Use.
+
+---
+
 # URGENT — constrained decode can burn the whole budget and return an empty document
 
 Found by driving Clu (the suite's primary consumer) end to end, and reproduced
