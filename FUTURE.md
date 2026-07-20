@@ -1526,6 +1526,53 @@ token one". Two things would close it:
 
 ---
 
+---
+
+# Drop-in replacement for llama.cpp / Ollama in existing tooling
+
+A real deployment question, raised 2026-07-20: runner may be a candidate to
+replace llama.cpp or Ollama as the inference engine behind tools already in use
+at Arelion — OpenCode, Python tooling, and newer agents such as
+Ornith (https://deep-reinforce.com/ornith_1_0.html).
+
+This is a different goal from Phases 3-5, and worth stating separately. Those
+phases made runner speak OpenAI Chat Completions, OpenAI Responses and
+Anthropic Messages — three *API dialects*. Being a drop-in for tools that today
+point at llama.cpp or Ollama is about the *deployment contract*: the endpoint
+paths they probe, the model-listing shape they expect, how they discover
+context length, how they start and health-check a server, and whether they
+assume Ollama's native API rather than its OpenAI-compatible one.
+
+Work needed, in rough order:
+
+1. **Inventory what each tool actually requires.** Do not assume. Phases 3 and 4
+   each found bugs that no amount of spec-reading would have — tool namespace
+   containers from codex-cli, and Anthropic inlining tool arguments as an object
+   where OpenAI escapes them into a string. Run each tool against runner and
+   record what breaks.
+2. **Ollama's native API** (`/api/generate`, `/api/chat`, `/api/tags`,
+   `/api/show`) is a separate surface from its OpenAI-compatible one, and many
+   tools use the native path. Decide whether to implement it as a fourth API_*
+   dialect on the existing seam, or to declare OpenAI-compat the supported
+   route. Note runner already accepts Ollama-style `format` and `keep_alive`.
+3. **Model discovery and naming.** Tools expect to list models and pick one by
+   name; runner's registry/swap mode is close but its shape is not Ollama's.
+4. **Startup contract.** Ollama runs as a daemon on a fixed port with a CLI that
+   pulls models. Runner is a binary given a GGUF path. Anything expecting
+   `ollama serve` semantics needs either a shim or documentation.
+5. **A conformance suite per tool**, in the Phase 0 style, so "works with
+   OpenCode" is a gate rather than a claim that decays.
+
+Constraint that does not bend: the loopback-only bind (see the invariants).
+Tools expecting to reach an inference server across a network will need a
+reverse proxy or tunnel; that is the supported path, not a `--host` flag.
+
+Relationship to Phase 9: this is the strongest possible version of the
+"traction" work. A tool that already runs on Ollama and runs unmodified on
+runner is a more convincing demonstration than any benchmark table.
+
+---
+
 # Strategy: jurisdiction coverage as a specialization
 
 Runner is a *local* engine: it loads GGUF weights from disk, binds
