@@ -33,12 +33,18 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_json_oom.c \
             -o test-json-oom -lm
           ./test-json-oom
+          cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_schema_oom.c \
+            src/jsonmode.c -o test-schema-oom -lm
+          ./test-schema-oom
       # runs against the committed vocabulary fixtures in tests/fixtures
       - name: tokenizer tests
         run: |
           cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer.c \
             src/gguf.c src/tokenizer.c src/compat.c src/quants.c -o test-tokenizer -lm
           ./test-tokenizer
+          cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer_oom.c \
+            src/gguf.c src/compat.c src/quants.c -o test-tokenizer-oom -lm
+          ./test-tokenizer-oom
           cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_template.c \
             src/gguf.c src/tokenizer.c src/template.c src/json.c src/compat.c src/quants.c \
             -o test-template -lm
@@ -407,12 +413,18 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_json_oom.c \
             -o test-json-oom.exe -lm
           ./test-json-oom.exe
+          gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_schema_oom.c \
+            src/jsonmode.c -o test-schema-oom.exe -lm
+          ./test-schema-oom.exe
       # runs against the committed vocabulary fixtures in tests/fixtures
       - name: tokenizer tests
         run: |
           gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer.c \
             src/gguf.c src/tokenizer.c src/compat.c src/quants.c -o test-tokenizer.exe -lm
           ./test-tokenizer.exe
+          gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer_oom.c \
+            src/gguf.c src/compat.c src/quants.c -o test-tokenizer-oom.exe -lm
+          ./test-tokenizer-oom.exe
           gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_template.c \
             src/gguf.c src/tokenizer.c src/template.c src/json.c src/compat.c src/quants.c \
             -o test-template.exe -lm

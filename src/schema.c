@@ -14,11 +14,25 @@
 
 // ---------------------------------------------------------------- compile
 
+// NULL on allocation failure. Every caller already propagates NULL as "this
+// node did not compile", so the failure has a path home without a new
+// convention; schema_compile supplies the message.
 static snode *sn_new(int kind) {
     snode *n = calloc(1, sizeof(snode));
+    if (!n) return NULL;
     n->kind = kind;
     n->max_items = -1;
     return n;
+}
+
+// Serialise an enum/const literal. The builder latches `failed` on allocation
+// failure and a NULL literal would be dereferenced later by union_start_bytes,
+// pick_alt and emit_min_choice, so a failed dump must never reach n->lits.
+static char *sn_literal(const jv *v) {
+    sbuf lit = { 0 };
+    jv_dump(v, &lit);
+    if (lit.failed || !lit.s) { free(lit.s); return NULL; }
+    return lit.s;
 }
 
 void schema_free(snode *n) {
@@ -93,11 +107,15 @@ static snode *compile_discriminated_action(jv *alts, char *err, int errcap,
 
     *matched = true;
     snode *n = sn_new(SN_OBJ);
-    n->n_props = first_props->n;
+    if (!n) return NULL;
     n->keys    = calloc(first_props->n, sizeof(char *));
     n->key_len = calloc(first_props->n, sizeof(int));
     n->props   = calloc(first_props->n, sizeof(snode *));
     n->req     = calloc(first_props->n, sizeof(bool));
+    if (!n->keys || !n->key_len || !n->props || !n->req) { schema_free(n); return NULL; }
+    // published only now: schema_free walks keys[]/props[] n_props times, so a
+    // count set before the arrays exist would make the cleanup path the crash
+    n->n_props = first_props->n;
 
     for (int i = 0; i < first_props->n; i++) {
         if (!plain_key(first_props->keys[i])) {
@@ -106,30 +124,35 @@ static snode *compile_discriminated_action(jv *alts, char *err, int errcap,
             return NULL;
         }
         n->keys[i] = strdup(first_props->keys[i]);
+        if (!n->keys[i]) { schema_free(n); return NULL; }
         n->key_len[i] = (int)strlen(first_props->keys[i]);
     }
 
     snode *tool = sn_new(SN_ENUM);
+    if (!tool) { schema_free(n); return NULL; }
     tool->lits = calloc(alts->n, sizeof(char *));
+    if (!tool->lits) { schema_free(tool); schema_free(n); return NULL; }
     for (int a = 0; a < alts->n; a++) {
         jv *props = jv_get(alts->items[a], "properties");
-        sbuf lit = {0};
-        jv_dump(jv_get(props->items[tool_i], "const"), &lit);
+        char *lit = sn_literal(jv_get(props->items[tool_i], "const"));
+        if (!lit) { schema_free(tool); schema_free(n); return NULL; }
         for (int prev = 0; prev < a; prev++) {
-            if (!strcmp(tool->lits[prev], lit.s)) {
-                free(lit.s);
+            if (!strcmp(tool->lits[prev], lit)) {
+                free(lit);
                 snprintf(err, errcap, "duplicate discriminator const");
                 schema_free(tool);
                 schema_free(n);
                 return NULL;
             }
         }
-        tool->lits[tool->n_lits++] = lit.s;
+        tool->lits[tool->n_lits++] = lit;
     }
     n->props[tool_i] = tool;
 
     snode *args = sn_new(SN_COND);
+    if (!args) { schema_free(n); return NULL; }
     args->alts = calloc(alts->n, sizeof(snode *));
+    if (!args->alts) { schema_free(args); schema_free(n); return NULL; }
     for (int a = 0; a < alts->n; a++) {
         jv *props = jv_get(alts->items[a], "properties");
         args->alts[args->n_alts] = compile_node(props->items[args_i], err, errcap,
@@ -189,6 +212,7 @@ static snode *compile_discriminated_action(jv *alts, char *err, int errcap,
 static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int depth) {
     if (!strcmp(type, "string")) {
         snode *n = sn_new(SN_STR);
+        if (!n) return NULL;
         jv *mn = jv_get(s, "minLength"), *mx = jv_get(s, "maxLength");
         if (!compile_bound(mn, 0, &n->min_items) ||
             !compile_bound(mx, -1, &n->max_items) ||
@@ -205,6 +229,7 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
     if (!strcmp(type, "null"))    return sn_new(SN_NULL);
     if (!strcmp(type, "array")) {
         snode *n = sn_new(SN_ARR);
+        if (!n) return NULL;
         n->items = compile_node(jv_get(s, "items"), err, errcap, depth + 1);
         if (!n->items) { schema_free(n); return NULL; }
         jv *mi = jv_get(s, "minItems"), *ma = jv_get(s, "maxItems");
@@ -222,6 +247,7 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
         if (!props || props->type != J_OBJ || props->n == 0) {
             // open object: any JSON object (generic machine, '{' enforced)
             snode *n = sn_new(SN_ANY);
+            if (!n) return NULL;
             n->min_items = 1; // flag: object-rooted generic value
             return n;
         }
@@ -230,11 +256,13 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
             return NULL;
         }
         snode *n = sn_new(SN_OBJ);
-        n->n_props = props->n;
+        if (!n) return NULL;
         n->keys    = calloc(props->n, sizeof(char *));
         n->key_len = calloc(props->n, sizeof(int));
         n->props   = calloc(props->n, sizeof(snode *));
         n->req     = calloc(props->n, sizeof(bool));
+        if (!n->keys || !n->key_len || !n->props || !n->req) { schema_free(n); return NULL; }
+        n->n_props = props->n;   // only once the arrays schema_free walks exist
         for (int i = 0; i < props->n; i++) {
             if (!plain_key(props->keys[i])) {
                 snprintf(err, errcap, "property keys needing JSON escapes are unsupported");
@@ -242,6 +270,7 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
                 return NULL;
             }
             n->keys[i] = strdup(props->keys[i]);
+            if (!n->keys[i]) { schema_free(n); return NULL; }
             n->key_len[i] = (int)strlen(props->keys[i]);
             n->props[i] = compile_node(props->items[i], err, errcap, depth + 1);
             if (!n->props[i]) { schema_free(n); return NULL; }
@@ -308,11 +337,13 @@ static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
             return NULL;
         }
         snode *n = sn_new(SN_ENUM);
+        if (!n) return NULL;
         n->lits = calloc(alts->n, sizeof(char *));
+        if (!n->lits) { schema_free(n); return NULL; }
         for (int i = 0; i < alts->n; i++) {
-            sbuf lit = {0};
-            jv_dump(jv_get(alts->items[i], "const"), &lit);
-            n->lits[i] = lit.s;
+            char *lit = sn_literal(jv_get(alts->items[i], "const"));
+            if (!lit) { schema_free(n); return NULL; }
+            n->lits[i] = lit;
             n->n_lits++;
         }
         return n;
@@ -323,7 +354,9 @@ static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
     if (matched) return disc;
 
     snode *n = sn_new(SN_UNION);
+    if (!n) return NULL;
     n->alts = calloc(alts->n, sizeof(snode *));
+    if (!n->alts) { schema_free(n); return NULL; }
     for (int i = 0; i < alts->n; i++) {
         n->alts[n->n_alts] = compile_node(alts->items[i], err, errcap, depth + 1);
         if (!n->alts[n->n_alts]) { schema_free(n); return NULL; }
@@ -372,6 +405,7 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
     jv *cn = jv_get(s, "const");
     if (en || cn) {
         snode *n = sn_new(SN_ENUM);
+        if (!n) return NULL;
         int cnt = en ? en->n : 1;
         if (cnt <= 0 || cnt > 60) {
             snprintf(err, errcap, "enum size must be 1..60");
@@ -379,6 +413,7 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
             return NULL;
         }
         n->lits = calloc(cnt, sizeof(char *));
+        if (!n->lits) { schema_free(n); return NULL; }
         for (int i = 0; i < cnt; i++) {
             jv *v = en ? en->items[i] : cn;
             if (v->type != J_STR && v->type != J_NUM &&
@@ -387,9 +422,9 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
                 schema_free(n);
                 return NULL;
             }
-            sbuf lit = {0};
-            jv_dump(v, &lit);
-            n->lits[i] = lit.s;
+            char *lit = sn_literal(v);
+            if (!lit) { schema_free(n); return NULL; }
+            n->lits[i] = lit;
             n->n_lits++;
         }
         return n;
@@ -412,7 +447,9 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
             return NULL;
         }
         snode *n = sn_new(SN_UNION);
+        if (!n) return NULL;
         n->alts = calloc(ty->n, sizeof(snode *));
+        if (!n->alts) { schema_free(n); return NULL; }
         bool has_num = false;
         for (int i = 0; i < ty->n; i++) {
             const char *t = jv_str(ty->items[i], "?");
@@ -433,7 +470,13 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
 
 snode *schema_compile(struct jv *schema, char *err, int errcap) {
     err[0] = 0;
-    return compile_node(schema, err, errcap, 0);
+    snode *n = compile_node(schema, err, errcap, 0);
+    // An allocation failure unwinds as a bare NULL from wherever it happened,
+    // so the one message it cannot carry is filled in here. Callers print this
+    // string; leaving it empty would report a rejected schema with no reason.
+    if (!n && err[0] == 0)
+        snprintf(err, errcap, "out of memory compiling schema");
+    return n;
 }
 
 // ---------------------------------------------------------------- validate

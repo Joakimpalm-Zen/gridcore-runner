@@ -18,6 +18,8 @@ TEST_JSON_SCHEMA = test-json-schema.exe
 TEST_TOKENIZER = test-tokenizer.exe
 TEST_TEMPLATE = test-template.exe
 TEST_JSON_OOM = test-json-oom.exe
+TEST_TOKENIZER_OOM = test-tokenizer-oom.exe
+TEST_SCHEMA_OOM = test-schema-oom.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
@@ -26,6 +28,8 @@ TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
 TEST_TEMPLATE = test-template
 TEST_JSON_OOM = test-json-oom
+TEST_TOKENIZER_OOM = test-tokenizer-oom
+TEST_SCHEMA_OOM = test-schema-oom
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
@@ -34,6 +38,8 @@ TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
 TEST_TEMPLATE = test-template
 TEST_JSON_OOM = test-json-oom
+TEST_TOKENIZER_OOM = test-tokenizer-oom
+TEST_SCHEMA_OOM = test-schema-oom
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -64,13 +70,27 @@ $(TEST_TEMPLATE): $(TEST_TMPL_SRC) src/runner.h
 $(TEST_JSON_OOM): tests/test_json_oom.c src/json.c src/json.h
 	$(CC) $(CFLAGS) -I src tests/test_json_oom.c -o $@ -lm
 
+# compiles src/tokenizer.c into the test with instrumented allocators; gguf.c
+# and friends link normally so their allocations stay outside the failure window
+TEST_TOK_OOM_SRC = tests/test_tokenizer_oom.c src/gguf.c src/compat.c src/quants.c
+$(TEST_TOKENIZER_OOM): $(TEST_TOK_OOM_SRC) src/tokenizer.c src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_TOK_OOM_SRC) -o $@ -lm
+
+# schema.c and json.c both compile into the test: enum/const literals are
+# serialised through jv_dump, so builder failures are schema failure paths
+$(TEST_SCHEMA_OOM): tests/test_schema_oom.c src/schema.c src/json.c src/jsonmode.c src/runner.h
+	$(CC) $(CFLAGS) -I src tests/test_schema_oom.c src/jsonmode.c -o $@ -lm
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
-test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_TOKENIZER) $(TEST_TEMPLATE) test.gguf
+test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_TOKENIZER) \
+      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) test.gguf
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)
+	./$(TEST_SCHEMA_OOM)
 	./$(TEST_TOKENIZER)
+	./$(TEST_TOKENIZER_OOM)
 	./$(TEST_TEMPLATE)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
@@ -85,7 +105,8 @@ smoke: runner test.gguf
 	./$(RUNNER_EXE) -m test.gguf -p "hi" -n 24 --temp 0 --json --gpu off 2>/dev/null | $(PYTHON) -c "import json,sys; json.load(sys.stdin); print('valid json')"
 
 clean:
-	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_TOKENIZER) $(TEST_TEMPLATE)
+	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) \
+	      $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE)
 
 # regenerate the committed PTX header (dev machines only: needs nvcc + a host
 # compiler). Normal builds and CI use the committed src/kernels_ptx.h.

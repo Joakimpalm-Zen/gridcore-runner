@@ -17,11 +17,17 @@ static uint64_t fnv1a(const char *s, size_t n) {
     return h;
 }
 
-static void hmap_init(hmap *m, size_t expect) {
+// Publishing the capacity before the table exists would leave hmap_put masking
+// an index into a NULL `e`, so cap is set only once the allocation succeeded.
+// hmap_get already treats a NULL table as empty.
+static bool hmap_init(hmap *m, size_t expect) {
     size_t cap = 16;
-    while (cap < expect * 2) cap <<= 1;
+    while (cap < expect * 2 && cap <= SIZE_MAX / 2) cap <<= 1;
+    hmap_ent *e = calloc(cap, sizeof(hmap_ent));
+    if (!e) { m->e = NULL; m->cap = 0; return false; }
+    m->e = e;
     m->cap = cap;
-    m->e = calloc(cap, sizeof(hmap_ent));
+    return true;
 }
 
 static void hmap_put(hmap *m, const char *k, size_t klen, int v) {
@@ -120,12 +126,19 @@ static bool spm_scores_degenerate(const tokenizer *t) {
 // merges in BPE order. A piece that is no merge's result gets -inf: BPE only
 // ever produces multi-character pieces through a merge, so anything absent
 // here must never be merged into. Requires t->vocab to be populated.
+//
+// Returns false only when an allocation failed. A model that simply carries no
+// merges is left exactly as it was and still reports success — that is not an
+// error, and the caller must not abort the load over it.
 static bool spm_scores_from_merges(tokenizer *t, gguf_file *g) {
     gguf_kv *mg = gguf_get(g, "tokenizer.ggml.merges");
     if (!mg || mg->type != GGUF_T_ARR || mg->arr_type != GGUF_T_STR || mg->arr_n == 0)
-        return false;
+        return true;
 
-    if (!t->scores) t->scores = malloc(sizeof(float) * t->n_vocab);
+    if (!t->scores) {
+        t->scores = malloc(sizeof(float) * (size_t)t->n_vocab);
+        if (!t->scores) return false;
+    }
     for (int i = 0; i < t->n_vocab; i++) t->scores[i] = -INFINITY;
 
     char buf[512];
@@ -171,20 +184,29 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
         fprintf(stderr, "error: no tokenizer vocabulary in model\n");
         return false;
     }
+    // arr_n is a 64-bit count straight out of the file; a value past INT_MAX
+    // would wrap n_vocab negative and turn every `sizeof(x) * n_vocab` below
+    // into a huge or negative allocation size.
+    if (toks->arr_n > INT_MAX) {
+        fprintf(stderr, "error: tokenizer vocabulary is implausibly large\n");
+        return false;
+    }
     t->n_vocab = (int)toks->arr_n;
     t->tokens = toks->arr_str;
 
     gguf_kv *scores = gguf_get(g, "tokenizer.ggml.scores");
     if (scores && scores->type == GGUF_T_ARR && scores->arr_type == GGUF_T_F32 &&
         (int)scores->arr_n == t->n_vocab) {
-        t->scores = malloc(sizeof(float) * t->n_vocab);
-        memcpy(t->scores, scores->arr_raw, sizeof(float) * t->n_vocab);
+        t->scores = malloc(sizeof(float) * (size_t)t->n_vocab);
+        if (!t->scores) return false;
+        memcpy(t->scores, scores->arr_raw, sizeof(float) * (size_t)t->n_vocab);
     }
     gguf_kv *tty = gguf_get(g, "tokenizer.ggml.token_type");
     if (tty && tty->type == GGUF_T_ARR && tty->arr_type == GGUF_T_I32 &&
         (int)tty->arr_n == t->n_vocab) {
-        t->ttype = malloc(sizeof(int32_t) * t->n_vocab);
-        memcpy(t->ttype, tty->arr_raw, sizeof(int32_t) * t->n_vocab);
+        t->ttype = malloc(sizeof(int32_t) * (size_t)t->n_vocab);
+        if (!t->ttype) return false;
+        memcpy(t->ttype, tty->arr_raw, sizeof(int32_t) * (size_t)t->n_vocab);
     }
 
     t->bos_id = (int)gguf_get_u32(g, "tokenizer.ggml.bos_token_id", 1);
@@ -193,7 +215,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     t->add_bos = gguf_get_bool(g, "tokenizer.ggml.add_bos_token", t->model == TOK_SPM);
     t->add_space_prefix = gguf_get_bool(g, "tokenizer.ggml.add_space_prefix", true);
 
-    hmap_init(&t->vocab, t->n_vocab);
+    if (!hmap_init(&t->vocab, (size_t)t->n_vocab)) return false;
     for (int i = 0; i < t->n_vocab; i++)
         hmap_put(&t->vocab, t->tokens[i].s, t->tokens[i].n, i);
 
@@ -201,11 +223,13 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     // put the ordering in tokenizer.ggml.merges instead. Without this, every
     // score ties and "llama" encodes as "▁llam"+"a" instead of "▁ll"+"ama".
     // Models that carry neither usable scores nor merges are left as they were.
-    if (t->model == TOK_SPM && spm_scores_degenerate(t))
-        spm_scores_from_merges(t, g);
+    if (t->model == TOK_SPM && spm_scores_degenerate(t) &&
+        !spm_scores_from_merges(t, g))
+        return false;
 
     // special tokens (control + user-defined) for input parsing
-    t->special_ids = malloc(sizeof(int) * t->n_vocab);
+    t->special_ids = malloc(sizeof(int) * (size_t)t->n_vocab);
+    if (!t->special_ids) return false;
     for (int i = 0; i < t->n_vocab; i++) {
         int tt = t->ttype ? t->ttype[i] : TT_NORMAL;
         if ((tt == TT_CONTROL || tt == TT_USER_DEFINED) && t->tokens[i].n > 0)
@@ -230,7 +254,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
             fprintf(stderr, "error: BPE tokenizer has no merges\n");
             return false;
         }
-        hmap_init(&t->merges, mg->arr_n);
+        if (!hmap_init(&t->merges, mg->arr_n)) return false;
         for (uint64_t i = 0; i < mg->arr_n; i++)
             hmap_put(&t->merges, mg->arr_str[i].s, mg->arr_str[i].n, (int)i);
     }
@@ -255,7 +279,9 @@ typedef struct { int start, len, prev, next; } sym_t;
 static int spm_encode(tokenizer *t, const char *text, size_t n,
                       int32_t *out, int cap, int n_out) {
     if (n == 0) return n_out;
+    if (n > SIZE_MAX / sizeof(sym_t) - 1) return n_out;
     sym_t *sym = malloc(sizeof(sym_t) * (n + 1));
+    if (!sym) return n_out;   // no error channel: drop the segment, never write
     int n_sym = 0;
     for (size_t i = 0; i < n; ) {
         int l = u8_len((uint8_t)text[i]);
@@ -306,7 +332,9 @@ static int spm_encode(tokenizer *t, const char *text, size_t n,
 static int spm_encode_text(tokenizer *t, const char *text, size_t n,
                            int32_t *out, int cap, int n_out, bool first_segment) {
     // replace ' ' with U+2581, optionally prefix a space
+    if (n > (SIZE_MAX - 4) / 3) return n_out;
     char *buf = malloc(n * 3 + 4);
+    if (!buf) return n_out;
     size_t m = 0;
     if (t->add_space_prefix && first_segment && n > 0) {
         memcpy(buf + m, "\xE2\x96\x81", 3); m += 3;
@@ -450,8 +478,10 @@ static int smollm_split_next(const uint32_t *cp, int i, int ncp) {
 
 // BPE merge within one pre-token (already byte->unicode mapped, utf8 string)
 static int bpe_word(tokenizer *t, const char *w, int n, int32_t *out, int cap, int n_out) {
-    int max_sym = n + 1;
+    if (n <= 0) return n_out;
+    size_t max_sym = (size_t)n + 1;
     int *st = malloc(sizeof(int) * max_sym), *ln = malloc(sizeof(int) * max_sym);
+    if (!st || !ln) { free(st); free(ln); return n_out; }
     int ns = 0;
     for (int i = 0; i < n; ) {
         int l = u8_len((uint8_t)w[i]);
@@ -498,9 +528,13 @@ static int bpe_word(tokenizer *t, const char *w, int n, int32_t *out, int cap, i
 static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
                            int32_t *out, int cap, int n_out) {
     if (n == 0) return n_out;
+    if (n > SIZE_MAX / sizeof(size_t) - 2 || n > (SIZE_MAX - 8) / 2) return n_out;
     // decode to codepoints, remembering byte offsets
     uint32_t *cp = malloc(sizeof(uint32_t) * (n + 1));
     size_t *off = malloc(sizeof(size_t) * (n + 2));
+    // byte->unicode expands ascii <0x80 to <=2 bytes
+    char *word = malloc(n * 2 + 8);
+    if (!cp || !off || !word) { free(cp); free(off); free(word); return n_out; }
     int ncp = 0;
     for (size_t i = 0; i < n; ) {
         int l = u8_len((uint8_t)text[i]);
@@ -510,8 +544,6 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
         i += l;
     }
     off[ncp] = n;
-
-    char *word = malloc(n * 2 + 8); // byte->unicode expands ascii <0x80 to <=2 bytes
 
     // The split rules come from tokenizer.ggml.pre; anything unrecognised keeps
     // the original GPT-2 regex it has always used.
@@ -539,7 +571,9 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
 static int bpe_spm_encode_text(tokenizer *t, const char *text, size_t n,
                                int32_t *out, int cap, int n_out) {
     if (n == 0) return n_out;
+    if (n > (SIZE_MAX - 4) / 3) return n_out;
     char *buf = malloc(n * 3 + 4);
+    if (!buf) return n_out;
     size_t m = 0;
     for (size_t i = 0; i < n; i++) {
         if (text[i] == ' ') { memcpy(buf + m, "\xE2\x96\x81", 3); m += 3; }
