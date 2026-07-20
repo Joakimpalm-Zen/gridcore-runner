@@ -122,18 +122,34 @@ class ManagedRunner:
         return f"http://127.0.0.1:{self.launch.port}"
 
     def start(self, *, timeout: float = 600, interval: float = 0.5) -> bool:
+        """Spawn a Runner child and wait until it answers, returning whether it
+        did.
+
+        `start()` owns the child for the whole call: False means nothing is
+        left running. A runner that never became answerable — still loading
+        weights when the deadline expired, wedged, or abandoned by a
+        KeyboardInterrupt — is terminated before returning, because the caller
+        has no handle to it and would otherwise leak a process holding VRAM
+        for as long as the box stays up.
+        """
         if self.alive():
             return True
         self.process = self._spawn(build_server_args(self.launch))
         endpoint = self._endpoint_factory(self.base_url)
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not self.alive():
-                return False
-            if endpoint.healthy(timeout=min(2.0, max(interval, 0.1))):
-                return True
-            time.sleep(interval)
-        return False
+        started = False
+        try:
+            while time.monotonic() < deadline:
+                if not self.alive():
+                    break
+                if endpoint.healthy(timeout=min(2.0, max(interval, 0.1))):
+                    started = True
+                    break
+                time.sleep(interval)
+        finally:
+            if not started:
+                self.stop()
+        return started
 
     def alive(self) -> bool:
         return self.process is not None and self.process.poll() is None

@@ -4,7 +4,9 @@ import io
 import json
 import os
 import socket
+import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -19,7 +21,22 @@ from gridcore_runner import (
     build_server_args,
     model_registry_argument,
     query_system_capabilities,
+    spawn_detached,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RUNNER_BIN = REPO_ROOT / ("runner.exe" if os.name == "nt" else "runner")
+# smallest first: the integration test only needs a model runner will begin
+# loading, and the smallest one starts serving soonest
+MODELS = sorted((REPO_ROOT / "models").glob("*.gguf"), key=lambda p: p.stat().st_size)
+
+
+def free_port() -> int:
+    """A port nothing answers on, so health checks fail the way a
+    still-loading runner's do."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 class StartupLeaseTests(unittest.TestCase):
@@ -145,6 +162,167 @@ class EndpointTests(unittest.TestCase):
             endpoint.stream_chat({"messages": []}, stall_seconds=3)
 
         self.assertEqual(caught.exception.partial, "partial")
+
+    def test_stall_message_reports_measured_idle_time_not_the_window(self):
+        """The old message asserted "no bytes for N seconds" using the
+        configured window, a number nothing had measured. A stall report has
+        to state how long the stream was actually silent."""
+        class StallingResponse(_Response):
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n'
+                time.sleep(0.2)
+                raise socket.timeout("stalled")
+
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: StallingResponse(),
+        )
+
+        with self.assertRaises(RunnerStallError) as caught:
+            endpoint.stream_chat({"messages": []}, stall_seconds=0.1)
+
+        message = str(caught.exception)
+        self.assertIn("no stream data for 0.2", message)
+        self.assertIn("0.1", message)
+
+    def test_a_gap_between_events_is_a_stall_even_when_bytes_resume(self):
+        """A real inactivity watchdog fires on the gap itself. urllib's
+        per-socket-operation timeout does not see one that ends on its own."""
+        class SlowResponse(_Response):
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"before"}}]}\n'
+                time.sleep(0.3)
+                yield b'data: {"choices":[{"delta":{"content":"after"},"finish_reason":"stop"}]}\n'
+
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: SlowResponse(),
+        )
+
+        with self.assertRaises(RunnerStallError) as caught:
+            endpoint.stream_chat({"messages": []}, stall_seconds=0.1)
+
+        self.assertEqual(caught.exception.partial, "before")
+
+    def test_malformed_json_frame_raises_with_the_partial_response(self):
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: _Response([
+                b'data: {"choices":[{"delta":{"content":"good"}}]}\n',
+                b'data: {"choices":[{"delta":{"con\n',
+                b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
+            ]),
+        )
+
+        with self.assertRaises(RunnerProtocolError) as caught:
+            endpoint.stream_chat({"messages": []})
+
+        self.assertEqual(caught.exception.partial, "good")
+
+    def test_chunk_without_choices_raises_instead_of_completing_the_stream(self):
+        """The dangerous shape: a corrupt frame skipped, then a later
+        finish_reason marks a truncated stream "finished"."""
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: _Response([
+                b'data: {"choices":[{"delta":{"content":"good"}}]}\n',
+                b'data: {"object":"chat.completion.chunk"}\n',
+                b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n',
+                b'data: [DONE]\n',
+            ]),
+        )
+
+        with self.assertRaises(RunnerProtocolError) as caught:
+            endpoint.stream_chat({"messages": []})
+
+        self.assertEqual(caught.exception.partial, "good")
+
+    def test_usage_only_tail_chunk_is_not_malformed(self):
+        """stream_options.include_usage makes runner send one chunk with an
+        empty choices array. That is the contract, not corruption."""
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: _Response([
+                b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n',
+                b'data: {"choices":[],"usage":{"total_tokens":7}}\n',
+                b'data: [DONE]\n',
+            ]),
+        )
+
+        self.assertEqual(endpoint.stream_chat({"messages": []}).text, "hi")
+
+    def test_non_data_sse_lines_are_still_ignored(self):
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: _Response([
+                b": keep-alive\n",
+                b"\n",
+                b"event: ping\n",
+                b"id: 4\n",
+                b"retry: 1000\n",
+                b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n',
+                b"data: [DONE]\n",
+            ]),
+        )
+
+        self.assertEqual(endpoint.stream_chat({"messages": []}).text, "hi")
+
+
+class ManagedRunnerOwnershipTests(unittest.TestCase):
+    def test_failed_start_leaves_no_child_process_behind(self):
+        """A False start must not hand the caller an orphan. The child here
+        never answers, exactly like a runner still loading weights when the
+        health deadline expires."""
+        spawned = []
+
+        def spawn(args):
+            process = spawn_detached(
+                [sys.executable, "-c", "import time; time.sleep(120)"]
+            )
+            spawned.append(process)
+            return process
+
+        managed = ManagedRunner(
+            ServerLaunch("runner", "model.gguf", free_port()), spawn=spawn
+        )
+
+        self.assertFalse(managed.start(timeout=0.3, interval=0.05))
+
+        self.assertIsNotNone(spawned[0].poll(), "start() orphaned its child")
+        self.assertIsNone(managed.process)
+        self.assertFalse(managed.alive())
+
+    @unittest.skipUnless(
+        RUNNER_BIN.exists() and MODELS, "needs a built runner and a model"
+    )
+    def test_failed_start_leaves_no_runner_serve_process(self):
+        """The reported failure, with the real binary: a runner that cannot
+        become answerable in time must not survive holding memory."""
+        launch = ServerLaunch(
+            executable=RUNNER_BIN,
+            model=MODELS[0],
+            port=free_port(),
+            gpu="off",
+        )
+        spawned = []
+
+        def spawn(args):
+            process = spawn_detached(args, cwd=RUNNER_BIN.parent)
+            spawned.append(process)
+            return process
+
+        managed = ManagedRunner(launch, spawn=spawn)
+
+        # timeout=0 expires the health deadline deterministically, before this
+        # runner can answer — the same path a slow-loading model takes, without
+        # racing a load that happens to be fast on this box
+        self.assertFalse(managed.start(timeout=0.0, interval=0.1))
+
+        self.assertIsNotNone(
+            spawned[0].poll(), "a runner --serve process outlived a failed start()"
+        )
+        self.assertIsNone(managed.process)
+        self.assertFalse(managed.alive())
 
 
 class LaunchTests(unittest.TestCase):

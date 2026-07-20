@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -83,16 +84,45 @@ class RunnerEndpoint:
         on_reasoning_delta: Callable[[str], None] | None = None,
         stall_seconds: float | None = None,
     ) -> StreamResult:
+        """Consume one SSE chat completion.
+
+        Two guarantees the caller can rely on. A malformed `data:` frame
+        raises `RunnerProtocolError` rather than being skipped, because a
+        skipped frame produces text that looks whole and is not — and any
+        later `finish_reason` would certify the hole as a finished answer.
+        And silence is measured: `stall_seconds` is a no-stream-data
+        watchdog over the time between events, not merely a socket option,
+        so the raised `RunnerStallError` reports how long the stream was
+        actually quiet. Both errors carry the text received so far in
+        `.partial`, which is often a salvageable answer.
+
+        Genuine non-data SSE lines — comments, `event:`, `id:`, `retry:` —
+        are ignored, and count as activity for the watchdog.
+        """
         body = dict(payload)
         body["stream"] = True
         request = self._request("/v1/chat/completions", body)
-        timeout = stall_seconds if stall_seconds is not None else self.timeout
+        window = stall_seconds if stall_seconds is not None else self.timeout
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         complete = False
+        last_event = time.monotonic()
         try:
-            with self._open(request, timeout) as response:
+            with self._open(request, window) as response:
+                # the watchdog covers the stream, not the connect and prompt
+                # processing that precede the first chunk
+                last_event = time.monotonic()
                 for raw_line in response:
+                    now = time.monotonic()
+                    idle, last_event = now - last_event, now
+                    if idle > window:
+                        # the socket timeout cannot see a gap that ends on its
+                        # own; the watchdog can, so a resumed stream that went
+                        # quiet past the window still reports as a stall
+                        raise RunnerStallError(
+                            self._stall_message(idle, window),
+                            partial="".join(text_parts),
+                        )
                     line = raw_line.decode("utf-8", "replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -100,12 +130,10 @@ class RunnerEndpoint:
                     if data == "[DONE]":
                         complete = True
                         break
-                    try:
-                        chunk = json.loads(data)
-                        choice = chunk["choices"][0]
-                    except (ValueError, KeyError, IndexError, TypeError):
+                    choice = self._stream_choice(data, "".join(text_parts))
+                    if choice is None:
                         continue
-                    delta = choice.get("delta") or {}
+                    delta = self._stream_delta(choice, "".join(text_parts))
                     piece = delta.get("content") or ""
                     reasoning = delta.get("reasoning_content") or ""
                     if piece:
@@ -118,17 +146,19 @@ class RunnerEndpoint:
                             on_reasoning_delta(reasoning)
                     if choice.get("finish_reason") is not None:
                         complete = True
+        except (RunnerStallError, RunnerProtocolError):
+            raise
         except (socket.timeout, TimeoutError) as error:
-            partial = "".join(text_parts)
             raise RunnerStallError(
-                f"runner produced no bytes for {timeout:g} seconds", partial=partial
+                self._stall_message(time.monotonic() - last_event, window),
+                partial="".join(text_parts),
             ) from error
         except urllib.error.HTTPError as error:
             raise self._http_error(error) from error
         except urllib.error.URLError as error:
             if isinstance(getattr(error, "reason", None), (socket.timeout, TimeoutError)):
                 raise RunnerStallError(
-                    f"runner produced no bytes for {timeout:g} seconds",
+                    self._stall_message(time.monotonic() - last_event, window),
                     partial="".join(text_parts),
                 ) from error
             raise
@@ -143,6 +173,65 @@ class RunnerEndpoint:
             reasoning="".join(reasoning_parts),
             estimated_tokens=max(0, (generated_chars + 3) // 4),
         )
+
+    @staticmethod
+    def _stall_message(idle: float, window: float) -> str:
+        return (
+            f"runner sent no stream data for {idle:.1f}s "
+            f"(stall window {window:g}s)"
+        )
+
+    @staticmethod
+    def _stream_choice(data: str, partial: str) -> dict[str, Any] | None:
+        """The one choice carried by an SSE `data:` payload, or None for a
+        chunk that legitimately has none — the `stream_options.include_usage`
+        tail arrives with an empty choices array. Anything else that is not a
+        well-formed chunk raises: protocol corruption must not read as the end
+        of a healthy stream."""
+        try:
+            chunk = json.loads(data)
+        except ValueError as error:
+            raise RunnerProtocolError(
+                f"runner sent an unparseable SSE data frame: {data[:120]!r}",
+                partial=partial,
+            ) from error
+        if not isinstance(chunk, dict):
+            raise RunnerProtocolError(
+                "runner sent an SSE data frame that is not a JSON object",
+                partial=partial,
+            )
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            raise RunnerProtocolError(
+                "runner sent a stream chunk without a choices array",
+                partial=partial,
+            )
+        if not choices:
+            return None
+        if not isinstance(choices[0], dict):
+            raise RunnerProtocolError(
+                "runner sent a stream chunk whose choice is not an object",
+                partial=partial,
+            )
+        return choices[0]
+
+    @staticmethod
+    def _stream_delta(choice: dict[str, Any], partial: str) -> dict[str, Any]:
+        delta = choice.get("delta")
+        if delta is None:
+            return {}
+        if not isinstance(delta, dict):
+            raise RunnerProtocolError(
+                "runner sent a stream chunk whose delta is not an object",
+                partial=partial,
+            )
+        for field in ("content", "reasoning_content"):
+            value = delta.get(field)
+            if value is not None and not isinstance(value, str):
+                raise RunnerProtocolError(
+                    f"runner sent a non-string {field} delta", partial=partial
+                )
+        return delta
 
     def _read_json(
         self, request: urllib.request.Request, *, timeout: float | None
