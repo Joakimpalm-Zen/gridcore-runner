@@ -7,7 +7,9 @@ test-json-schema.exe
 test-tokenizer
 test-tokenizer.exe
 test-template
+test-tools
 test-template.exe
+test-tools.exe
 test-json-oom
 test-json-oom.exe
 test-schema-oom
@@ -36,3 +38,5 @@ bench-err.*.txt
 .claude/worktrees/
 # conformance harness run artifacts (report + recorded fixtures)
 tests/conformance/out/
+__pycache__/
+*.pyc

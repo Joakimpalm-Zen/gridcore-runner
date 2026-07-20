@@ -526,9 +526,27 @@ static bool request_bool(jv *req, const char *key, bool dflt, bool *out) {
     return true;
 }
 
-// run one completion on a slot and write the HTTP response
+// the caller's schema-constrained-output request: OpenAI response_format
+// {type:"json_schema", json_schema:{schema:{...}}} or an Ollama-style
+// "format" object. NULL when the request asked for no schema.
+static jv *request_schema(jv *req) {
+    jv *rf = jv_get(req, "response_format");
+    jv *sch = NULL;
+    if (rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_schema") == 0) {
+        jv *js = jv_get(rf, "json_schema");
+        sch = js ? (jv_get(js, "schema") ? jv_get(js, "schema") : js) : NULL;
+    }
+    jv *fmt = jv_get(req, "format");
+    if (!sch && fmt && fmt->type == J_OBJ) sch = fmt;
+    return sch;
+}
+
+// run one completion on a slot and write the HTTP response.
+// `env` is the strict tool-call envelope when the request opted into one; it
+// replaces the response_format schema, having already absorbed it as the
+// shape of its `final` branch.
 static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
-                           jv *req) {
+                           jv *req, const tool_envelope *env) {
     model_t *m = s->m;
     engine *e = &s->e;
 
@@ -649,17 +667,23 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         }
     }
     e->json_mode = rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_object") == 0;
-    // schema-constrained decoding: OpenAI response_format {type:"json_schema",
-    // json_schema:{schema:{...}}} or an Ollama-style "format" schema object
+    // Constrained decoding. The tool envelope wins when present: it already
+    // contains the caller's response_format schema as its `final` branch, so
+    // compiling that separately would drop the tool branches.
     snode *schema = NULL;
-    jv *sch = NULL;
-    if (rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_schema") == 0) {
-        jv *js = jv_get(rf, "json_schema");
-        sch = js ? (jv_get(js, "schema") ? jv_get(js, "schema") : js) : NULL;
-    }
-    jv *fmt = jv_get(req, "format");
-    if (!sch && fmt && fmt->type == J_OBJ) sch = fmt;
-    if (sch) {
+    jv *sch = env ? NULL : request_schema(req);
+    if (env) {
+        char serr[128] = "envelope did not parse";
+        jv *ej = json_parse(env->schema_src, strlen(env->schema_src));
+        schema = ej ? schema_compile(ej, serr, sizeof(serr)) : NULL;
+        jv_free(ej);
+        if (!schema) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "unsupported tool schema: %s", serr);
+            send_error(fd, 400, msg);
+            return;
+        }
+    } else if (sch) {
         char serr[128];
         schema = schema_compile(sch, serr, sizeof(serr));
         if (!schema) {
@@ -761,11 +785,34 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         }
     } else {
         sbuf tc = {0};
-        int n_tc = chat ? tool_calls_parse(&g.out, &tc) : 0;
-        if (n_tc) {
-            finish = "tool_calls";
-            g.out.n = 0; // OpenAI convention: no content alongside tool_calls
-                         // (whatever followed was the model faking a result)
+        int n_tc = 0;
+        if (env) {
+            // Strict mode: the whole response IS the envelope, guaranteed by
+            // the schema rather than fished out of free text. A truncated
+            // call was closed to a legal document by sval_close, so it is
+            // still executable and still reports "tool_calls".
+            sbuf mapped = {0};
+            int rc = tool_envelope_map(env, g.out.s ? g.out.s : "", g.out.n,
+                                       &mapped, &tc);
+            if (rc == 1) {
+                n_tc = 1;
+                finish = "tool_calls";
+                g.out.n = 0;
+                free(mapped.s);
+            } else if (rc == 0) {
+                free(g.out.s);
+                g.out = mapped;      // the final branch's payload is the reply
+            } else {
+                free(mapped.s);      // unparseable: hand back what was generated
+            }
+        } else if (chat) {
+            n_tc = tool_calls_parse(&g.out, &tc);
+            if (n_tc) {
+                finish = "tool_calls";
+                g.out.n = 0; // OpenAI convention: no content alongside
+                             // tool_calls (whatever followed was the model
+                             // faking a result)
+            }
         }
         sbuf r = {0};
         sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"", g.id,
@@ -877,9 +924,45 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
         send_error(fd, 400, "missing messages");
         return;
     }
-    // OpenAI "tools" become a leading system turn (template.c owns the syntax)
+    // OpenAI "tools" become a leading system turn (template.c owns the syntax).
+    //
+    // Strict mode compiles them into a discriminated union that constrains
+    // sampling, so the model cannot name an undeclared tool or malform its
+    // arguments. It applies to buffered requests only: a stream would send
+    // the envelope to the client as raw content, and streaming tool calls
+    // are Phase 2. Streams therefore keep the legacy declare-and-parse path,
+    // unchanged.
+    jv *tools = jv_get(req, "tools");
+    tool_envelope env = {0};
+    bool strict = false;
+    if (!jv_bool(jv_get(req, "stream"), false)) {
+        char terr[224];
+        int rc = tool_envelope_build(tools, jv_get(req, "tool_choice"),
+                                     request_schema(req), &env,
+                                     terr, sizeof(terr));
+        if (rc < 0) { send_error(fd, 400, terr); return; }
+        strict = rc == 1;
+    }
+    if (strict) {
+        // one call per turn for now; silently ignoring a request for
+        // several would leave the caller expecting calls it never gets
+        bool parallel = false;
+        if (!request_bool(req, "parallel_tool_calls", false, &parallel)) {
+            tool_envelope_free(&env);
+            send_error(fd, 400, "parallel_tool_calls must be a boolean");
+            return;
+        }
+        if (parallel) {
+            tool_envelope_free(&env);
+            send_error(fd, 400,
+                       "parallel_tool_calls:true is not supported yet; "
+                       "one call per turn");
+            return;
+        }
+    }
     sbuf ts = {0};
-    tools_render(jv_get(req, "tools"), &ts);
+    if (strict) sb_put(&ts, env.system_turn, strlen(env.system_turn));
+    else        tools_render(tools, &ts);
     chat_msg *cm = malloc(sizeof(chat_msg) * (msgs->n + 1));
     char **owned = malloc(sizeof(char *) * msgs->n);
     size_t total = ts.n + 64;
@@ -897,23 +980,25 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
         free(owned);
         free(cm);
         free(ts.s);
+        tool_envelope_free(&env);
         send_error(fd, 400, "no message content");
         return;
     }
     char *prompt = malloc(total + 256);
     render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
-    run_completion(s, fd, prompt, true, req);
+    run_completion(s, fd, prompt, true, req, strict ? &env : NULL);
     free(prompt);
     for (int i = 0; i < n_own; i++) free(owned[i]);
     free(owned);
     free(cm);
     free(ts.s);
+    tool_envelope_free(&env);
 }
 
 static void handle_completion(slot_t *s, int fd, jv *req) {
     const char *prompt = jv_str(jv_get(req, "prompt"), NULL);
     if (!prompt) { send_error(fd, 400, "missing prompt"); return; }
-    run_completion(s, fd, prompt, false, req);
+    run_completion(s, fd, prompt, false, req, NULL);
 }
 
 static void handle_embeddings(slot_t *s, int fd, jv *req) {
