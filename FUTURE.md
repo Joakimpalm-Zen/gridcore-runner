@@ -995,12 +995,17 @@ Status is tracked here; nothing is removed when finished, only marked.
 4. ~~`/v1/responses`.~~ **DONE** — verified against real codex-cli 0.144.6 and
    OpenAI SDK 2.46.0, not just the wire shape. Built as a translation layer over
    the existing engine so Phase 4 can reuse the same seam.
-5. Anthropic Messages compatibility. **NEXT** — reuses the API_* dialect seam.
+5. ~~Anthropic Messages compatibility.~~ **DONE** — /v1/messages and
+   /v1/messages/count_tokens as a third API_* dialect on the same seam; the
+   server.c diff removes only 13 existing lines. Verified with the real
+   anthropic SDK 0.117.0 including a full two-step tool loop on Qwen3-4B.
+   Claude Code itself was not driven end to end -- the one gap against the
+   literal exit criterion.
 6. ~~Shared CUDA weights.~~ **DONE (backend)** — one weight upload per resident
    model; an extra slot costs its KV only (0.27 GB, not 5.20 GB). The model_t
    struct itself is NOT split — that needs server.c/main.c signature changes.
    The Phase 5 server-lifecycle defects remain open and are orthogonal.
-7. Continuous batching.
+7. Continuous batching. **IN PROGRESS** (engine half)
 8. Persistent/forkable KV prefixes.
 9. GPU Q8 KV cache. **PARTIAL** — Q8 KV works on CUDA, 1.88x context where
    VRAM binds, fp16 still the default. Metal is a fallback stub (unverified),
