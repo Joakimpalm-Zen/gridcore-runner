@@ -808,8 +808,10 @@ Status is tracked here; nothing is removed when finished, only marked.
    incremental argument deltas, finish_reason "tool_calls" reachable, chunks
    carry created/model/role, no envelope leaks into content. Single call per
    turn; multi-call and real SDK acceptance testing remain.
-4. `/v1/responses`. **NEXT** — first public traction milestone.
-5. Anthropic Messages compatibility.
+4. ~~`/v1/responses`.~~ **DONE** — verified against real codex-cli 0.144.6 and
+   OpenAI SDK 2.46.0, not just the wire shape. Built as a translation layer over
+   the existing engine so Phase 4 can reuse the same seam.
+5. Anthropic Messages compatibility. **NEXT** — reuses the API_* dialect seam.
 6. Shared CUDA weights.
 7. Continuous batching.
 8. Persistent/forkable KV prefixes.
