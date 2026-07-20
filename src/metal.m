@@ -297,6 +297,26 @@ void gpu_disable(model_t *m) {
     m->gpu = NULL;
 }
 
+// Metal has no batched-decode kernels yet, so it declines the microbatch and
+// model_batch_decode decodes sequentially. The port is the same shape as the
+// CUDA one (per-column position and per-sequence KV buffer, batched twins of
+// the batch-1 matvec kernels) and is tracked in FUTURE.md Phase 6; unified
+// memory removes the KV upload/copyback half of it entirely.
+gpu_batch *gpu_batch_create(model_t **seqs, int n) {
+    (void)seqs; (void)n;
+    return NULL;
+}
+
+void gpu_batch_free(gpu_batch *b) {
+    (void)b;
+}
+
+bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
+                      const int *pos, int n, float **out) {
+    (void)b; (void)idx; (void)tok; (void)pos; (void)n; (void)out;
+    return false;
+}
+
 void gpu_free(model_t *m) {
     gpu_t *g = m->gpu;
     if (!g) return;

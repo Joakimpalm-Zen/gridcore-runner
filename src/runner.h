@@ -303,6 +303,31 @@ void   gpu_free(model_t *m); // releases GPU buffers; KV pointers become invalid
 // its reference to the shared weights, straight back.
 void   gpu_disable(model_t *m);
 
+// ------------------------------------------- batched decode (backend half)
+//
+// One decode step for several independent sequences in a single microbatch.
+// Every sequence keeps its own KV cache, its own position and its own logits;
+// what is shared is the *work*, because a decode step is weight-bandwidth
+// bound and reading the weights once for N tokens costs barely more than
+// reading them once for one.
+//
+// The contract that makes this usable is numerical, not structural: a batched
+// step must produce, for each sequence, the bits a lone step would have
+// produced. Nothing here reduces across sequences, and the matvecs pick the
+// multi-column twin of whatever kernel the batch-1 path would have used, so
+// that holds by construction rather than by luck. See gpu_batch_decode.
+typedef struct gpu_batch gpu_batch;
+// Group n sequences loaded from one file into a reusable microbatch context.
+// NULL = this backend/model cannot batch, and the caller decodes one by one.
+gpu_batch *gpu_batch_create(model_t **seqs, int n);
+void       gpu_batch_free(gpu_batch *b);
+// Evaluate one token for each of the n sequences named by idx (indices into
+// the create() array). tok[i]/pos[i] are that sequence's token and KV write
+// position; out[i] receives its logits, owned by the batch and valid until
+// the next call. false = nothing was evaluated, decode these sequences singly.
+bool       gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
+                            const int *pos, int n, float **out);
+
 typedef struct {
     int   gpu_mode;    // GPU_AUTO | GPU_OFF
     int   n_threads;   // worker threads for this instance (0 = 1)
@@ -339,6 +364,58 @@ bool   model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int po
 float *model_spec_row_logits(model_t *m, int b);
 // mean-pooled L2-normalized embedding of toks; clobbers KV slots [0, n)
 bool   model_embed(model_t *m, const int32_t *toks, int n, float *out);
+
+// ------------------------------------------------ continuous batching (Phase 6)
+//
+// The decode primitive continuous batching is built on: advance N independent
+// sequences by exactly one token each, in one pass over the weights.
+//
+// This is deliberately *only* the primitive. Deciding which sequences are
+// ready, when to cut a batch, how to admit and evict them, and what to do with
+// the logits afterwards is scheduling, and scheduling belongs to the server.
+// What this owns is the part the server cannot express: the microbatch itself,
+// and the guarantee that being in one changes nothing about the answer.
+//
+//   model_batch *b = model_batch_create(slots, n_slots);
+//   ...
+//   model_batch_decode(b, idx, tok, pos, n_ready, logits);   // once per step
+//
+// Sequences are the same model_t values the server already owns, so they keep
+// their own KV cache, position, sampler and schema state, and a sequence can
+// leave or rejoin a batch between steps at no cost — it is named per call, not
+// enrolled. A sequence that is prefilling, cancelled, or not yet ready simply
+// is not listed that step.
+typedef struct model_batch model_batch;
+
+// Largest number of sequences one microbatch evaluates at once. Longer lists
+// are split into consecutive microbatches, so this is a performance boundary,
+// not a limit on the caller.
+//
+// It is the backends' token-tile width: the activation scratch is already this
+// many columns wide and the multi-column matvec kernels unroll over it, so a
+// microbatch of this size reuses machinery that exists rather than adding any.
+#define MODEL_BATCH_MAX 8
+int model_batch_max(void);
+
+// Group sequences loaded from the same file with the same parameters into a
+// batch context. Never fails in a way the caller must handle: with no batching
+// backend the context still works and decodes sequentially, so the scheduler
+// above it needs no backend-specific branch.
+model_batch *model_batch_create(model_t **seqs, int n);
+void         model_batch_free(model_batch *b);
+
+// Advance the n sequences named by idx (indices into the create() array) by
+// one token each. tok[i] is the token to evaluate for that sequence and pos[i]
+// the KV position it occupies; out[i] receives that sequence's logits, valid
+// until the next call.
+//
+// Guarantee: out[i] is bit-identical to what model_forward(seq, tok[i], pos[i])
+// would have returned. Batching is a throughput decision and never a numerical
+// one — see tests/test_batch.c, which is that claim as a test.
+//
+// Returns false only if a sequence could not be evaluated at all.
+bool model_batch_decode(model_batch *b, const int *idx, const int32_t *tok,
+                        const int *pos, int n, float **out);
 
 // ---------------------------------------------------------------- sampler
 

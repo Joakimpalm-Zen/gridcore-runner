@@ -218,6 +218,14 @@ static const char *cu_err(CUresult r) {
 // plus the geometry and the derived rope tables, because those are the only
 // inputs to any of the buffers below. A key mismatch is not an error, just a
 // miss: that instance gets its own upload, exactly as before.
+// Microbatch width classes. The batched matvec kernels unroll their column
+// loop, so each instantiation has a fixed width and a narrower microbatch
+// simply runs the smallest one that covers it. Two classes are enough: the
+// step cost is flat within a class, so the only widths that pay for a column
+// they are not using are 3 (runs 4-wide) and 5..7 (run 8-wide).
+enum { BW_4 = 0, BW_8 = 1, BW_N = 2 };
+static inline int batch_width_class(int n) { return n <= 4 ? BW_4 : BW_8; }
+
 typedef struct gpu_weights {
     struct gpu_weights *next;
     int         refs;                   // live gpu_t values pointing here
@@ -239,6 +247,11 @@ typedef struct gpu_weights {
     CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
     CUfunction  f_gemm[32];             // prefill tiled-GEMM variants (Q8_0/Q4_K)
     CUfunction  f_gemv[32];             // decode coalesced GEMV variants (Q8_0/Q4_K)
+    // cross-sequence decode microbatch (Phase 6): per-column position and KV
+    CUfunction  f_rope_seq, f_store_seq, f_attn_dec_seq;
+    // multi-column twins of f_gemv, per microbatch width (see BW_* below):
+    // f_gemvb[w][type], w indexing the width class, not the width itself
+    CUfunction  f_gemvb[BW_N][32];
     CUdeviceptr weights;
     size_t      weights_len;
     int         gpu_layers;             // split decided by the first loader
@@ -276,6 +289,9 @@ typedef struct {
 // flash-decoding KV split count — must match ATTN_SPLITS in kernels.cu; fixed
 // (not context-dependent) so the decode CUDA graph stays valid across positions
 #define ATTN_SPLITS 8
+
+// output rows per batched-matvec block — must match GEMM_WARPS in kernels.cu
+#define GEMM_WARPS 8
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, neox; float mscale; } rope_args;
@@ -565,6 +581,21 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_gemv[T_Q4_K], "k_gemv_q4_K" },
             { &w->f_gemv[T_Q5_K], "k_gemv_q5_K" },
             { &w->f_gemv[T_Q6_K], "k_gemv_q6_K" },
+            // cross-sequence decode microbatch: per-column position and KV,
+            // plus the multi-column twins of the decode GEMVs above
+            { &w->f_rope_seq,      "k_rope_seq" },
+            { &w->f_store_seq,     "k_store_kv_seq" },
+            { &w->f_attn_dec_seq,  "k_attn_dec_seq" },
+            // twins of f_gemv: same per-column arithmetic, x staged in smem,
+            // one instantiation per microbatch width class
+            { &w->f_gemvb[BW_4][T_Q8_0], "k_gemvb_q8_0_x4" },
+            { &w->f_gemvb[BW_4][T_Q4_K], "k_gemvb_q4_K_x4" },
+            { &w->f_gemvb[BW_4][T_Q5_K], "k_gemvb_q5_K_x4" },
+            { &w->f_gemvb[BW_4][T_Q6_K], "k_gemvb_q6_K_x4" },
+            { &w->f_gemvb[BW_8][T_Q8_0], "k_gemvb_q8_0_x8" },
+            { &w->f_gemvb[BW_8][T_Q4_K], "k_gemvb_q4_K_x8" },
+            { &w->f_gemvb[BW_8][T_Q5_K], "k_gemvb_q5_K_x8" },
+            { &w->f_gemvb[BW_8][T_Q6_K], "k_gemvb_q6_K_x8" },
         };
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
             CK(cu.ModuleGetFunction(fns[i].f, w->mod, fns[i].name));
@@ -1124,6 +1155,367 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         prof_mark(g, PH_LOGITS);
     }
     return ok;
+}
+
+// ==========================================================================
+// Cross-sequence decode microbatch (Phase 6)
+// ==========================================================================
+//
+// One decode step for N independent sequences in one pass over the weights.
+//
+// What makes this cheap is that almost nothing new is allocated. The weights
+// are already shared (Phase 5), the activation scratch in every gpu_t is
+// already MVB columns wide because prompt tiles needed it, and each sequence
+// already owns its KV cache. The batch adds three small device arrays — the
+// per-column positions and the two per-column KV base pointers — plus room for
+// N rows of logits instead of one. Everything else is borrowed.
+//
+// It borrows the *lead* sequence's scratch, stream and graph slot rather than
+// allocating a second set. That is a deliberate constraint, not an oversight:
+// a microbatch and the lead's own solo forward would fight over the same
+// buffers, so a sequence must not be decoded both ways at once. The scheduler
+// this is built for is a single loop issuing one step at a time, which is
+// exactly that discipline; the constraint is documented on the public API.
+//
+// Sequences are named per call rather than enrolled, so the membership of a
+// batch can change every step at no cost — which is what makes it CONTINUOUS
+// batching rather than static batching. Positions and KV pointers live in
+// device memory precisely so that changing them does not invalidate a captured
+// graph, and a graph is captured per microbatch width.
+struct gpu_batch {
+    model_t   **seqs;              // borrowed: the caller owns these
+    int         n;                 // sequences enrolled at create time
+    gpu_t      *lead;              // whose scratch/stream/KV machinery is used
+    gpu_weights *sw;
+    int         n_vocab, n_embd, xdim;
+    CUdeviceptr logits_n;          // [MVB][n_vocab]
+    CUdeviceptr pos_d;             // [MVB] per-column position
+    CUdeviceptr kcp_d, vcp_d;      // [MVB] per-column KV base pointers
+    float      *h_logits;          // [MVB][n_vocab] host staging
+    int         h_pos[MVB];
+    uint64_t    h_kcp[MVB], h_vcp[MVB];
+    // one captured graph per microbatch width: grid shapes and mv_args.batch
+    // are baked in at capture, but positions and KV pointers are not, so a
+    // graph stays valid across steps and across a change of membership
+    CUgraph     graph[MVB + 1];
+    CUgraphExec gexec[MVB + 1];
+    bool        graph_bad;
+};
+
+// Every member must be decodable in one launch against one weight upload:
+// same shared weights, full offload (a partial split has to hand the boundary
+// activation back to the CPU per sequence, which is a different kernel shape),
+// and the batched kernels present. A no here is not a failure — the caller
+// decodes these sequences one at a time, exactly as before.
+static bool batch_eligible(model_t **seqs, int n, gpu_t **lead_out) {
+    if (n < 1) return false;
+    gpu_t *lead = NULL;
+    for (int i = 0; i < n; i++) {
+        model_t *m = seqs[i];
+        if (!m || !m->gpu) return false;
+        gpu_t *g = m->gpu;
+        if (m->gpu_layers < m->n_layer) return false;
+        if (!g->sw->f_rope_seq || !g->sw->f_store_seq || !g->sw->f_attn_dec_seq)
+            return false;
+        if (!lead) lead = g;
+        // one upload, one geometry: a member from a different registry entry
+        // would index a different weight blob with this one's offsets
+        else if (g->sw != lead->sw) return false;
+    }
+    *lead_out = lead;
+    return true;
+}
+
+gpu_batch *gpu_batch_create(model_t **seqs, int n) {
+    gpu_t *lead = NULL;
+    if (!batch_eligible(seqs, n, &lead)) return NULL;
+    model_t *m0 = seqs[0];
+
+    gpu_batch *b = calloc(1, sizeof(gpu_batch));
+    if (!b) return NULL;
+    b->seqs = malloc(sizeof(model_t *) * (size_t)n);
+    if (!b->seqs) { free(b); return NULL; }
+    memcpy(b->seqs, seqs, sizeof(model_t *) * (size_t)n);
+    b->n = n;
+    b->lead = lead;
+    b->sw = lead->sw;
+    b->n_vocab = m0->n_vocab;
+    b->n_embd  = m0->n_embd;
+    b->xdim = m0->n_embd;
+    for (int l = 0; l < m0->n_layer; l++)
+        if (model_q_dim(m0, l) > b->xdim) b->xdim = model_q_dim(m0, l);
+
+    if (cu.CtxSetCurrent(b->sw->ctx) != 0) goto fail;
+    CK(cu.MemAlloc(&b->logits_n, sizeof(float) * (size_t)MVB * b->n_vocab));
+    CK(cu.MemAlloc(&b->pos_d, sizeof(int) * MVB));
+    CK(cu.MemAlloc(&b->kcp_d, sizeof(uint64_t) * MVB));
+    CK(cu.MemAlloc(&b->vcp_d, sizeof(uint64_t) * MVB));
+    b->h_logits = malloc(sizeof(float) * (size_t)MVB * b->n_vocab);
+    if (!b->h_logits) goto fail;
+    // no stream means no graphs; plain launches still work, just slower.
+    // gemma4's V-copy path (ly->wv == NULL) uses a synchronous MemsetD8 that
+    // cannot be captured, same as the solo decode graph refuses it.
+    b->graph_bad = lead->stream == NULL || !cu_graphs_ok();
+    for (int l = 0; l < m0->n_layer; l++)
+        if (!m0->layers[l].wv) b->graph_bad = true;
+    return b;
+
+fail:
+    gpu_batch_free(b);
+    return NULL;
+}
+
+void gpu_batch_free(gpu_batch *b) {
+    if (!b) return;
+    if (b->sw && b->sw->ctx) cu.CtxSetCurrent(b->sw->ctx);
+    for (int i = 0; i <= MVB; i++) {
+        if (b->gexec[i] && cu.GraphExecDestroy) cu.GraphExecDestroy(b->gexec[i]);
+        if (b->graph[i] && cu.GraphDestroy) cu.GraphDestroy(b->graph[i]);
+    }
+    CUdeviceptr bufs[] = { b->logits_n, b->pos_d, b->kcp_d, b->vcp_d };
+    for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
+        if (bufs[i]) cu.MemFree(bufs[i]);
+    free(b->h_logits);
+    free(b->seqs);
+    free(b);
+}
+
+// Matvec for a decode microbatch. The selection rule is the whole correctness
+// argument: pick the MULTI-COLUMN TWIN of whatever kernel gpu_forward_batch
+// would have picked at batch 1 — f_gemvb where f_gemv exists, f_mvb otherwise
+// — so each column reproduces the lone-token result bit for bit. It must never
+// reach for f_gemm: the prefill GEMM is faster and reassociates the reduction,
+// which is exactly the trade this path exists to refuse.
+static bool enc_mv_batch(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
+                         CUdeviceptr y, int n_in, int n_out, CUdeviceptr bias,
+                         int batch, int xs, int ys) {
+    mv_args a = { n_in, n_out,
+                  (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
+                  bias != 0, batch, xs, ys };
+    CUdeviceptr bp = bias ? bias : g->sw->dummy;
+    void *p[] = { &g->sw->weights, &x, &y, &a, &bp };
+    // GEMM-shaped twins stage x in shared memory and give 8 rows per block;
+    // without that, MVB scattered global x-loads per decoded weight make a
+    // microbatch L1-bound and it loses to running the sequences separately.
+    CUfunction f = g->sw->f_gemvb[batch_width_class(batch)][w->type];
+    if (f) return launch(g, f, (n_out + GEMM_WARPS - 1) / GEMM_WARPS, 1, 1,
+                         GEMM_WARPS * 32, p);
+    return launch(g, g->sw->f_mvb[w->type], (n_out + 3) / 4, 1, 1, 128, p);
+}
+
+static bool enc_rope_batch(gpu_batch *B, model_t *m, CUdeviceptr v, int n_heads,
+                           int batch, int vs, int l) {
+    gpu_t *g = B->lead;
+    bool local = model_is_swa(m, l);
+    rope_args a = { model_head_dim(m, l), n_heads, model_rope_dim(m, l) / 2,
+                    m->rope_neox, local ? 1.0f : m->rope_mscale };
+    CUdeviceptr fr = local ? g->sw->inv_freq_local : g->sw->inv_freq;
+    void *p[] = { &v, &fr, &a, &B->pos_d, &vs };
+    return launch(g, g->sw->f_rope_seq, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
+}
+
+// The layer loop, structurally fwd_tile with tn = the microbatch width. Only
+// the position-bearing and KV-bearing kernels differ; every other launch is
+// the same call with a wider batch, and each already treats its columns
+// independently. Logits are produced for EVERY column, not just the last —
+// a microbatch has N answers, not one.
+static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
+    gpu_t *g = B->lead;
+    int n_embd = B->n_embd, xdim = B->xdim;
+    bool ok = true;
+
+    for (int l = 0; l < m->n_layer && ok; l++) {
+        layer_t *ly = &m->layers[l];
+        bool local  = model_is_swa(m, l);
+        int hd      = model_head_dim(m, l);
+        int n_kv    = model_n_head_kv(m, l);
+        int q_dim   = model_q_dim(m, l);
+        int kv_dim  = model_kv_dim(m, l);
+
+        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->attn_norm[l], n_embd,
+                               m->rms_eps, tn, n_embd, xdim);
+        ok = ok && enc_mv_batch(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->sw->bq[l], tn, xdim, q_dim);
+        ok = ok && enc_mv_batch(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->sw->bk[l], tn, xdim, kv_dim);
+        if (ly->wv) {
+            ok = ok && enc_mv_batch(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->sw->bv[l], tn, xdim, kv_dim);
+        } else {
+            ok = ok && cu.MemsetD8(g->vt, 0, sizeof(float) * (size_t)tn * kv_dim) == 0;
+            ok = ok && enc_add(g, g->vt, g->kt, kv_dim, tn, kv_dim, kv_dim);
+        }
+        if (g->sw->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->sw->qn[l], m->n_head, hd, tn, q_dim);
+        if (m->v_rmsnorm)
+            ok = ok && enc_qknorm(g, m, g->vt, g->sw->ones, n_kv, hd, tn, kv_dim);
+        if (g->sw->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->sw->kn[l], n_kv, hd, tn, kv_dim);
+        ok = ok && enc_rope_batch(B, m, g->q,  m->n_head, tn, q_dim, l);
+        ok = ok && enc_rope_batch(B, m, g->kt, n_kv,      tn, kv_dim, l);
+
+        {   // each column stores into its own sequence's cache at its own row
+            uint64_t l_off = model_kv_byte_off(m, l);
+            int q8 = m->kv_q8;
+            int units = q8 ? kv_dim / 32 : kv_dim;
+            void *ps[] = { &g->kt, &g->vt, &B->kcp_d, &B->vcp_d, &kv_dim,
+                           &l_off, &B->pos_d, &q8 };
+            ok = ok && launch(g, g->sw->f_store_seq, (units + 63) / 64, tn, 1, 64, ps);
+        }
+        {   // flash-decoding over N sequences: grid (head, split, sequence).
+            // The extra grid dimension is free occupancy — a solo decode step
+            // leaves most of the GPU idle, which is the headroom batching eats.
+            attn_args aa = { hd, m->n_head, n_kv, m->n_ctx,
+                             (uint64_t)model_kv_byte_off(m, l),
+                             model_attn_scale(m, l), q_dim, xdim,
+                             local ? m->swa_window : 0, m->kv_q8 };
+            void *pd[] = { &g->q, &B->kcp_d, &B->vcp_d, &g->att, &g->attn_part,
+                           &aa, &B->pos_d };
+            ok = ok && launch(g, g->sw->f_attn_dec_seq, m->n_head, ATTN_SPLITS, tn, 128, pd);
+            // k_attn_merge reads neither position nor cache, so the unbatched
+            // kernel serves here unchanged
+            void *pm[] = { &g->xb2, &g->attn_part, &aa, &B->pos_d };
+            ok = ok && launch(g, g->sw->f_attn_merge, m->n_head, tn, 1, 128, pm);
+        }
+
+        ok = ok && enc_mv_batch(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->sw->bo[l], tn, xdim, xdim);
+        if (g->sw->pan[l])
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->rms_eps, tn, xdim, xdim);
+        ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
+
+        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->ffn_norm[l], n_embd, m->rms_eps, tn, n_embd, xdim);
+        ok = ok && enc_mv_batch(g, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
+        ok = ok && enc_mv_batch(g, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
+        ok = ok && enc_actmul(g, m, g->hb, g->hb2, tn * m->n_ff);
+        ok = ok && enc_mv_batch(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
+        if (g->sw->pfn[l])
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->rms_eps, tn, xdim, xdim);
+        ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
+        if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
+            ok = ok && enc_scale(g, g->x, ly->out_scale, n_embd, tn, n_embd);
+    }
+
+    ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->out_norm, n_embd, m->rms_eps,
+                           tn, n_embd, xdim);
+    ok = ok && enc_mv_batch(g, m, m->output, g->xb, B->logits_n, n_embd,
+                            B->n_vocab, 0, tn, xdim, B->n_vocab);
+    return ok;
+}
+
+// Stage the microbatch's token embeddings: column i is sequence idx[i]'s token.
+// Identical arithmetic to stage_x, just gathering from N different callers.
+static bool stage_x_batch(gpu_batch *B, model_t *m, const int32_t *tok, int n) {
+    gpu_t *g = B->lead;
+    size_t ers = ggml_row_size(m->tok_embd->type, m->n_embd);
+    for (int b = 0; b < n; b++) {
+        float *hx = g->h_x + (size_t)b * m->n_embd;
+        dequant_row(m->tok_embd->type,
+                    (uint8_t *)m->tok_embd->data + (size_t)tok[b] * ers,
+                    hx, m->n_embd);
+        if (m->embd_scale != 1.0f)
+            for (int i = 0; i < m->n_embd; i++) hx[i] *= m->embd_scale;
+    }
+    return cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * (size_t)n * m->n_embd) == 0;
+}
+
+bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
+                      const int *pos, int n, float **out) {
+    if (!b || n < 1 || n > MVB) return false;
+    // A microbatch of one is just a decode step with extra staging, and the
+    // solo path is better at it: narrower matvec kernels, x straight from
+    // global, and a graph that is already warm. Hand it over rather than
+    // charge a lightly loaded server for machinery it is not using.
+    if (n == 1) {
+        model_t *m = b->seqs[idx[0]];
+        float *lg = NULL;
+        if (!gpu_forward_batch(m, tok, 1, pos[0], true, &lg) || !lg) return false;
+        out[0] = lg;
+        return true;
+    }
+    gpu_t *g = b->lead;
+    model_t *m0 = b->seqs[0];
+    // The lead supplies the scratch and the graphs. If it fell back to the CPU
+    // since this batch was created its buffers are gone, and the batch has to
+    // decline rather than launch against freed memory — the caller then decodes
+    // sequentially, which is where that sequence already is.
+    if (m0->gpu != g) return false;
+    if (cu.CtxSetCurrent(b->sw->ctx) != 0) return false;
+
+    // Bring each sequence's device KV in line with its host cache. This is the
+    // same contract gpu_forward_batch keeps — the host copy is authoritative —
+    // applied per member: a sequence that decoded its previous token in this
+    // same slot is already contiguous and costs nothing, while one that was
+    // just prefilled on the CPU, rewound, or swapped in resyncs [0, pos).
+    for (int i = 0; i < n; i++) {
+        model_t *m = b->seqs[idx[i]];
+        gpu_t   *gi = m->gpu;
+        if (!gi || gi->sw != b->sw || m->gpu_layers < m->n_layer) return false;
+        if (pos[i] < 0 || pos[i] >= m->n_ctx) return false;
+        if (pos[i] != gi->last_pos + 1 && !kv_upload(gi, m, 0, pos[i])) return false;
+        b->h_pos[i] = pos[i];
+        b->h_kcp[i] = (uint64_t)gi->kc;
+        b->h_vcp[i] = (uint64_t)gi->vc;
+    }
+    // pad the unused columns with column 0's sequence: the kernels compute
+    // them (grid dimensions are captured into the graph) and the results are
+    // discarded, but they must address real memory
+    for (int i = n; i < MVB; i++) {
+        b->h_pos[i] = b->h_pos[0];
+        b->h_kcp[i] = b->h_kcp[0];
+        b->h_vcp[i] = b->h_vcp[0];
+    }
+
+    if (!stage_x_batch(b, m0, tok, n) ||
+        cu.MemcpyHtoD(b->pos_d, b->h_pos, sizeof(int) * MVB) != 0 ||
+        cu.MemcpyHtoD(b->kcp_d, b->h_kcp, sizeof(uint64_t) * MVB) != 0 ||
+        cu.MemcpyHtoD(b->vcp_d, b->h_vcp, sizeof(uint64_t) * MVB) != 0)
+        return false;
+
+    // Capture once per microbatch width. Launch overhead is the thing batching
+    // is fighting — a solo decode step is already graph-captured, so a batched
+    // step issuing ~500 plain launches would hand back much of what it won.
+    bool ran = false;
+    if (!b->graph_bad) {
+        if (!b->gexec[n]) {
+            prof.capturing = 1;
+            if (cu.StreamBeginCapture(g->stream, 1) != 0 ||
+                !fwd_batch(b, m0, n) ||
+                cu.StreamEndCapture(g->stream, &b->graph[n]) != 0 ||
+                cu.GraphInstantiateWithFlags(&b->gexec[n], b->graph[n], 0) != 0) {
+                CUgraph junk = NULL;
+                cu.StreamEndCapture(g->stream, &junk);
+                if (junk && junk != b->graph[n]) cu.GraphDestroy(junk);
+                fprintf(stderr, "gpu: batch graph capture failed — plain launches\n");
+                b->graph_bad = true;
+            }
+            prof.capturing = 0;
+        }
+        if (b->gexec[n])
+            ran = cu.GraphLaunch(b->gexec[n], g->stream) == 0 &&
+                  cu.StreamSynchronize(g->stream) == 0;
+        if (!ran && !b->graph_bad) {
+            b->graph_bad = true;
+            fprintf(stderr, "gpu: batch graph launch failed — plain launches\n");
+        }
+    }
+    if (!ran) {
+        if (!fwd_batch(b, m0, n)) {
+            fprintf(stderr, "gpu: batched decode failed — falling back\n");
+            return false;
+        }
+        if (cu.CtxSynchronize() != 0) return false;
+    }
+
+    // Each sequence's newly written KV row goes back to its own host cache, so
+    // any member can leave the batch and continue on the CPU or in a solo
+    // forward without noticing it was ever batched.
+    for (int i = 0; i < n; i++) {
+        model_t *m = b->seqs[idx[i]];
+        gpu_t   *gi = m->gpu;
+        if (!kv_copyback(gi, m, pos[i], pos[i] + 1)) return false;
+        gi->last_pos = pos[i];
+    }
+    if (cu.MemcpyDtoH(b->h_logits, b->logits_n,
+                      sizeof(float) * (size_t)n * b->n_vocab) != 0)
+        return false;
+    for (int i = 0; i < n; i++)
+        out[i] = b->h_logits + (size_t)i * b->n_vocab;
+    return true;
 }
 
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
