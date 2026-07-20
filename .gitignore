@@ -47,5 +47,12 @@ tests/conformance/out/
 __pycache__/
 *.pyc
 
+# tokenizer differential harness binary (make difftok)
+difftok
+difftok.exe
+# models/ holds multi-GB GGUFs and the downloaded HuggingFace reference
+# tokenizers scripts/difftok.py compares against; both are fetched, not
+# committed. In an agent worktree this path is a symlink to the real tree.
+/models
 # reference tokenizers fetched for differential testing (vendor files, not ours)
 models/.ref/

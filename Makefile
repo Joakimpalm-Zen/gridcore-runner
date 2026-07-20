@@ -24,6 +24,7 @@ TEST_SCHEMA_OOM = test-schema-oom.exe
 TEST_SAMPLER = test-sampler.exe
 TEST_SHARED = test-shared-weights.exe
 TEST_BATCH = test-batch.exe
+DIFFTOK = difftok.exe
 TEST_BIND = test-bind.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
@@ -39,6 +40,7 @@ TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
 TEST_SHARED = test-shared-weights
 TEST_BATCH = test-batch
+DIFFTOK = difftok
 TEST_BIND = test-bind
 else
 GPU_SRC  = src/cuda.c
@@ -54,6 +56,7 @@ TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
 TEST_SHARED = test-shared-weights
 TEST_BATCH = test-batch
+DIFFTOK = difftok
 TEST_BIND = test-bind
 endif
 
@@ -75,6 +78,13 @@ $(TEST_JSON_SCHEMA): tests/test_json_schema.c src/json.c src/jsonmode.c src/sche
 TEST_TOK_SRC = tests/test_tokenizer.c src/gguf.c src/tokenizer.c src/compat.c src/quants.c
 $(TEST_TOKENIZER): $(TEST_TOK_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_SRC) -o $@ -lm
+
+# difftok: tokenizer differential harness. Not part of `make test` -- it needs a
+# real multi-GB model GGUF, which models/ is gitignored for. scripts/difftok.py
+# builds it on demand and compares against the HuggingFace reference.
+DIFFTOK_SRC = tests/difftok.c src/gguf.c src/tokenizer.c src/compat.c src/quants.c
+$(DIFFTOK): $(DIFFTOK_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(DIFFTOK_SRC) -o $@ -lm
 
 TEST_TMPL_SRC = tests/test_template.c src/gguf.c src/tokenizer.c src/template.c \
                 src/json.c src/compat.c src/quants.c
