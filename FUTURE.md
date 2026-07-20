@@ -90,7 +90,7 @@ Shared-weight structured batching makes it a stronger version of itself.
 
 ---
 
-# Phase 0: Baseline and Conformance Harness
+# Phase 0: Baseline and Conformance Harness — MOSTLY DONE
 
 ## Goal
 
@@ -542,15 +542,19 @@ Convert technical differentiation into external testers and trust.
 
 # Priority Order
 
-1. Conformance harness.
-2. Strict tool schemas and structured final responses.
+Status is tracked here; nothing is removed when finished, only marked.
+
+1. ~~Conformance harness.~~ **DONE** — `tests/conformance/` (74 tests) plus its
+   own CI job. Remaining from Phase 0: real-model scripts, SDK compatibility
+   smokes, and the peak-VRAM figure.
+2. Strict tool schemas and structured final responses. **IN PROGRESS**
 3. Correct streaming tool calls.
 4. `/v1/responses`.
 5. Anthropic Messages compatibility.
 6. Shared CUDA weights.
 7. Continuous batching.
 8. Persistent/forkable KV prefixes.
-9. GPU Q8 KV cache.
+9. GPU Q8 KV cache. **IN PROGRESS**
 10. Public comparative torture suite and ongoing compatibility releases.
 
 The first public traction milestone is Phase 3. The largest serving-performance
@@ -564,7 +568,7 @@ of strict tools, forkable agent prefixes, and quantized long-context KV.
 These predate this roadmap and are not scheduled by it. Listed so they are not
 lost; slot them in deliberately.
 
-## Recommended before or alongside Phase 0 — OOM crash bugs
+## DONE — OOM crash bugs
 
 `HANDOVER.md` §1 documents **three confirmed crash-on-OOM bugs in `src/json.c`**,
 all reachable from untrusted HTTP request bodies. Runner deliberately runs near
@@ -582,7 +586,7 @@ response is worse than a crash.
 `HANDOVER.md` §1.4 also flags ~70 further allocation sites from a heuristic scan
 that are **not** verified and should be triaged, not mass-patched.
 
-## Fits naturally into Phase 0 — fuzz and property tests
+## DONE — fuzz and property tests
 
 `HANDOVER.md` §2 contains a ready design: six targets in priority order with
 entry points, a `tests/fuzz/` layout, a bounded `make fuzz`, and the rule that a
