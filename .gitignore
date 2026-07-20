@@ -7,6 +7,8 @@ test-json-schema.exe
 test-tokenizer
 test-tokenizer.exe
 *.gguf
+# committed vocabulary fixtures for the tokenizer tests
+!tests/fixtures/*.gguf
 src/kernels.ptx
 src/kernels-*.ptx.tmp
 bench-out.*.txt

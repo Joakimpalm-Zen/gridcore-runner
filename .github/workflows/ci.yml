@@ -30,8 +30,7 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
             src/json.c src/jsonmode.c src/schema.c -o test-json-schema -lm
           ./test-json-schema
-      # no vocab model in CI, so this compiles and skips: it guards the build,
-      # while the assertions run locally after scripts/get-test-vocab.sh
+      # runs against the committed vocabulary fixtures in tests/fixtures
       - name: tokenizer tests
         run: |
           cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer.c \
@@ -398,8 +397,7 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
             src/json.c src/jsonmode.c src/schema.c -o test-json-schema.exe -lm
           ./test-json-schema.exe
-      # no vocab model in CI, so this compiles and skips: it guards the build,
-      # while the assertions run locally after scripts/get-test-vocab.sh
+      # runs against the committed vocabulary fixtures in tests/fixtures
       - name: tokenizer tests
         run: |
           gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer.c \

@@ -107,6 +107,44 @@ static void sort_specials(tokenizer *t) {
     }
 }
 
+// All-zero scores carry no ordering, so the merge loop in spm_encode would
+// just take the leftmost candidate every round.
+static bool spm_scores_degenerate(const tokenizer *t) {
+    if (!t->scores) return true;
+    for (int i = 0; i < t->n_vocab; i++)
+        if (t->scores[i] != 0.0f) return false;
+    return true;
+}
+
+// Rebuild scores from merge rank, highest score first, so spm_encode picks
+// merges in BPE order. A piece that is no merge's result gets -inf: BPE only
+// ever produces multi-character pieces through a merge, so anything absent
+// here must never be merged into. Requires t->vocab to be populated.
+static bool spm_scores_from_merges(tokenizer *t, gguf_file *g) {
+    gguf_kv *mg = gguf_get(g, "tokenizer.ggml.merges");
+    if (!mg || mg->type != GGUF_T_ARR || mg->arr_type != GGUF_T_STR || mg->arr_n == 0)
+        return false;
+
+    if (!t->scores) t->scores = malloc(sizeof(float) * t->n_vocab);
+    for (int i = 0; i < t->n_vocab; i++) t->scores[i] = -INFINITY;
+
+    char buf[512];
+    for (uint64_t r = 0; r < mg->arr_n; r++) {
+        const char *m = mg->arr_str[r].s;
+        size_t n = mg->arr_str[r].n;
+        // "left right": split on the first space, the pieces themselves use
+        // U+2581 rather than a literal space
+        const char *sep = memchr(m, ' ', n);
+        if (!sep || n - 1 >= sizeof(buf)) continue;
+        size_t left = (size_t)(sep - m);
+        memcpy(buf, m, left);
+        memcpy(buf + left, sep + 1, n - left - 1);
+        int id = hmap_get(&t->vocab, buf, n - 1);
+        if (id >= 0) t->scores[id] = -(float)r;
+    }
+    return true;
+}
+
 bool tokenizer_init(tokenizer *t, gguf_file *g) {
     memset(t, 0, sizeof(*t));
 
@@ -149,6 +187,13 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     hmap_init(&t->vocab, t->n_vocab);
     for (int i = 0; i < t->n_vocab; i++)
         hmap_put(&t->vocab, t->tokens[i].s, t->tokens[i].n, i);
+
+    // Many conversions (TheBloke's GGUFs among them) write all-zero scores and
+    // put the ordering in tokenizer.ggml.merges instead. Without this, every
+    // score ties and "llama" encodes as "▁llam"+"a" instead of "▁ll"+"ama".
+    // Models that carry neither usable scores nor merges are left as they were.
+    if (t->model == TOK_SPM && spm_scores_degenerate(t))
+        spm_scores_from_merges(t, g);
 
     // special tokens (control + user-defined) for input parsing
     t->special_ids = malloc(sizeof(int) * t->n_vocab);
