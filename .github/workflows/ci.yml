@@ -372,6 +372,36 @@ jobs:
           make debug
           ./runner-debug -m test.gguf -p "hello" -n 8 --temp 0
 
+  # libFuzzer harnesses for the hand-written parsers that eat untrusted input.
+  # Bounded by design: this is a regression gate that has to finish in a couple
+  # of minutes, not a fuzzing campaign. Long soaks belong on a schedule.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: install clang
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
+      # the harnesses must keep compiling even when nobody runs them locally
+      - name: build harnesses
+        run: make fuzz-build FUZZ_CLANG=clang
+      - name: fuzz (bounded)
+        run: make fuzz FUZZ_CLANG=clang FUZZ_TIME=30
+      # a crash artifact is the whole point of the job: keep it so the failure
+      # can be reproduced locally with ./fuzz-<target> <artifact>
+      - name: upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz-corpus/*/crash-*
+          if-no-files-found: ignore
+      # `make fuzz` must be a no-op, not an error, where clang is absent
+      - name: no-op without clang
+        run: |
+          OUT=$(make fuzz FUZZ_CLANG=definitely-not-a-compiler)
+          echo "$OUT"
+          echo "$OUT" | grep -q 'skipped'
+
   windows:
     runs-on: windows-latest
     defaults:
