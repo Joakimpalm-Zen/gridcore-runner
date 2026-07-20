@@ -61,6 +61,90 @@ static void test_spm_byte_fallback(tokenizer *t) {
     expect_ids(t, "\xF0\x9F\xA6\x99 llama", want, 8);
 }
 
+// ------------------------------------------------------------------ BPE
+
+// Assert the pre-token split by naming the pieces the text must break into.
+// Each piece is a single vocabulary entry in the BPE fixtures, so one id per
+// piece means a misplaced boundary shows up directly.
+static void expect_pieces(tokenizer *t, const char *text,
+                          const char *const *pieces, int n_pieces) {
+    int32_t want[32];
+    for (int i = 0; i < n_pieces; i++) {
+        want[i] = tok_find(t, pieces[i]);
+        if (want[i] < 0) {
+            fprintf(stderr, "%s: fixture lacks piece \"%s\"\n", current, pieces[i]);
+            abort();
+        }
+    }
+    int32_t got[32];
+    int n = tok_encode(t, text, got, (int)(sizeof(got) / sizeof(*got)), false, true);
+    if (n != n_pieces || memcmp(got, want, sizeof(int32_t) * n_pieces) != 0) {
+        fprintf(stderr, "%s: encode(\"%s\"): got %d ids [", current, text, n);
+        for (int i = 0; i < n; i++) fprintf(stderr, "%s%d", i ? ", " : "", got[i]);
+        fprintf(stderr, "], want %d [", n_pieces);
+        for (int i = 0; i < n_pieces; i++) fprintf(stderr, "%s%d", i ? ", " : "", want[i]);
+        fprintf(stderr, "]\n");
+        abort();
+    }
+}
+
+// A single non-letter character leads a following letter run, so the boundary
+// falls before "/end", not after it. The original GPT-2 rule split them apart.
+static void test_bpe_punct_leads_letters(tokenizer *t) {
+    static const char *const want[] = { "tokenization", "/end", "." };
+    expect_pieces(t, "tokenization/end.", want, 3);
+}
+
+// \s*[\r\n]+ takes the whole newline run, so "\n\n" is one pre-token.
+static void test_bpe_newline_run_is_one_token(tokenizer *t) {
+    // "\xC4\x8A" is U+010A, the byte-mapped newline
+    static const char *const want[] = { "a", "\xC4\x8A\xC4\x8A", "b" };
+    expect_pieces(t, "a\n\nb", want, 3);
+}
+
+// Contractions split off ahead of the letter rule, and a leading space joins
+// the word after them. "\xC4\xA0" is U+0120, the byte-mapped space.
+static void test_bpe_contraction_and_space(tokenizer *t) {
+    static const char *const want[] = { "I", "'ll", "\xC4\xA0go" };
+    expect_pieces(t, "I'll go", want, 3);
+}
+
+// The digit rule is the one place llama-bpe and qwen2 genuinely differ:
+// \p{N}{1,3} against \p{N}. Same vocabulary, same input, different split.
+static void test_bpe_digit_grouping_llama3(tokenizer *t) {
+    static const char *const want[] = { "123", "456", "789", "0" };
+    expect_pieces(t, "1234567890", want, 4);
+}
+
+static void test_bpe_digit_grouping_qwen2(tokenizer *t) {
+    static const char *const want[] = { "1","2","3","4","5","6","7","8","9","0" };
+    expect_pieces(t, "1234567890", want, 10);
+}
+
+static void run_bpe_fixture(const char *path, int pre, void (*digits)(tokenizer *)) {
+    current = path;
+    gguf_file g;
+    if (!gguf_open(&g, path)) {
+        fprintf(stderr, "cannot open fixture %s\n", path);
+        exit(1);
+    }
+    tokenizer t;
+    if (!tokenizer_init(&t, &g)) {
+        fprintf(stderr, "tokenizer_init failed on %s\n", path);
+        exit(1);
+    }
+    assert(t.model == TOK_BPE);
+    assert(t.pre == pre);
+
+    test_bpe_punct_leads_letters(&t);
+    test_bpe_newline_run_is_one_token(&t);
+    test_bpe_contraction_and_space(&t);
+    digits(&t);
+
+    tokenizer_free(&t);
+    gguf_close(&g);
+}
+
 int main(void) {
     for (size_t i = 0; i < sizeof(fixtures) / sizeof(*fixtures); i++) {
         current = fixtures[i];
@@ -87,6 +171,12 @@ int main(void) {
         tokenizer_free(&t);
         gguf_close(&g);
     }
+
+    run_bpe_fixture("tests/fixtures/vocab-bpe-llama3.gguf",
+                    TOK_PRE_LLAMA3, test_bpe_digit_grouping_llama3);
+    run_bpe_fixture("tests/fixtures/vocab-bpe-qwen2.gguf",
+                    TOK_PRE_QWEN2, test_bpe_digit_grouping_qwen2);
+
     puts("tokenizer tests ok");
     return 0;
 }

@@ -147,11 +147,18 @@ void   tpool_destroy(tpool *tp);
 
 enum { TOK_SPM, TOK_BPE, TOK_BPE_SPM }; // BPE_SPM: gemma4 (spaces to U+2581, raw-UTF-8 BPE)
 
+// BPE pre-tokenizer split rules, from tokenizer.ggml.pre. GPT2 is the original
+// regex (a leading space may join a run); the newer families let any single
+// non-letter/non-digit character lead a letter run and cap digit runs, which
+// changes where pre-token boundaries fall. Unrecognised values stay on GPT2.
+enum { TOK_PRE_GPT2, TOK_PRE_LLAMA3, TOK_PRE_QWEN2 };
+
 typedef struct { const char *key; uint32_t klen; int32_t val; } hmap_ent;
 typedef struct { hmap_ent *e; size_t cap; } hmap;
 
 typedef struct {
     int      model;         // TOK_SPM | TOK_BPE
+    int      pre;           // TOK_PRE_* split rules (BPE only)
     int      n_vocab;
     gg_str  *tokens;        // borrowed from gguf kv
     float   *scores;        // SPM (may be NULL)

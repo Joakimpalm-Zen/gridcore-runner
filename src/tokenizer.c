@@ -157,6 +157,14 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
         return false;
     }
 
+    // Split rules for the BPE families we have ground truth for. Everything
+    // else, including a missing key, keeps the original GPT-2 behavior rather
+    // than being silently retokenized by rules it was not checked against.
+    const char *pre = gguf_get_str(g, "tokenizer.ggml.pre", "");
+    if (strcmp(pre, "llama-bpe") == 0)   t->pre = TOK_PRE_LLAMA3;
+    else if (strcmp(pre, "qwen2") == 0)  t->pre = TOK_PRE_QWEN2;
+    else                                 t->pre = TOK_PRE_GPT2;
+
     gguf_kv *toks = gguf_get(g, "tokenizer.ggml.tokens");
     if (!toks || toks->type != GGUF_T_ARR || toks->arr_type != GGUF_T_STR) {
         fprintf(stderr, "error: no tokenizer vocabulary in model\n");
@@ -324,6 +332,83 @@ static int cp_class(uint32_t c) {
     return 2;
 }
 
+// Codepoints >= 0x80 are treated as letters, which is right for scripts but
+// wrong for symbols. Only these ranges need excluding to match \p{L} on real
+// text: emoji and dingbats otherwise glue onto adjacent words and shift every
+// pre-token boundary after them. Full Unicode tables buy nothing beyond this.
+static bool cp_symbol(uint32_t c) {
+    return (c >= 0x2000 && c <= 0x206F) || (c >= 0x2100 && c <= 0x2BFF) ||
+           (c >= 0x2E00 && c <= 0x2E7F) || (c >= 0x3000 && c <= 0x303F) ||
+           (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0x1F000 && c <= 0x1FAFF);
+}
+
+static bool cp_letter(uint32_t c) {
+    if (cp_class(c) == 3) return false;
+    return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= 0x80 && !cp_symbol(c)));
+}
+
+static bool cp_digit(uint32_t c)  { return c >= '0' && c <= '9'; }
+static bool cp_space(uint32_t c)  { return cp_class(c) == 3; }
+// \p{L} and \p{N} both excluded, i.e. the regex's [^\s\p{L}\p{N}] class
+static bool cp_other(uint32_t c)  { return !cp_space(c) && !cp_letter(c) && !cp_digit(c); }
+
+// case-insensitive 's 't 're 've 'm 'll 'd, as (?i:...) in the newer regexes
+static int contraction_len(const uint32_t *cp, int i, int ncp) {
+    if (cp[i] != '\'' || i + 1 >= ncp) return 0;
+    uint32_t a = cp[i + 1] | 32, b = (i + 2 < ncp) ? (cp[i + 2] | 32) : 0;
+    if (a == 's' || a == 't' || a == 'm' || a == 'd') return 2;
+    if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') || (a == 'l' && b == 'l')) return 3;
+    return 0;
+}
+
+// One pre-token of the newer BPE regex, returning the end index:
+//   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}{1,max_digits}
+//   | ?[^\s\p{L}\p{N}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+
+static int pre_split_next(const uint32_t *cp, int i, int ncp, int max_digits) {
+    int adv = contraction_len(cp, i, ncp);
+    if (adv) return i + adv;
+
+    // a single non-letter, non-digit, non-newline character may lead a letter run
+    if (!cp_letter(cp[i]) && !cp_digit(cp[i]) && cp[i] != '\r' && cp[i] != '\n' &&
+        i + 1 < ncp && cp_letter(cp[i + 1])) {
+        int j = i + 1;
+        while (j < ncp && cp_letter(cp[j])) j++;
+        return j;
+    }
+    if (cp_letter(cp[i])) {
+        int j = i;
+        while (j < ncp && cp_letter(cp[j])) j++;
+        return j;
+    }
+    if (cp_digit(cp[i])) {
+        int j = i;
+        while (j < ncp && cp_digit(cp[j]) && j - i < max_digits) j++;
+        return j;
+    }
+    {   // optional leading space, then a run of symbols/punctuation
+        int j = (cp[i] == ' ' && i + 1 < ncp && cp_other(cp[i + 1])) ? i + 1 : i;
+        if (j < ncp && cp_other(cp[j])) {
+            while (j < ncp && cp_other(cp[j])) j++;
+            while (j < ncp && (cp[j] == '\r' || cp[j] == '\n')) j++;
+            return j;
+        }
+    }
+    {
+        int j = i;
+        while (j < ncp && cp_space(cp[j])) j++;
+        // \s*[\r\n]+ runs through the last newline of the whitespace run, so
+        // "\n\n" stays one pre-token; trailing spaces after it split off
+        int last_nl = -1;
+        for (int k = i; k < j; k++)
+            if (cp[k] == '\r' || cp[k] == '\n') last_nl = k;
+        if (last_nl >= 0) return last_nl + 1;
+        // \s+(?!\S) keeps a trailing space for the next pre-token
+        if (j < ncp && j - i > 1) j--;
+        return j;
+    }
+}
+
 // BPE merge within one pre-token (already byte->unicode mapped, utf8 string)
 static int bpe_word(tokenizer *t, const char *w, int n, int32_t *out, int cap, int n_out) {
     int max_sym = n + 1;
@@ -388,6 +473,24 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
     off[ncp] = n;
 
     char *word = malloc(n * 2 + 8); // byte->unicode expands ascii <0x80 to <=2 bytes
+
+    // Newer families declare their split rules in tokenizer.ggml.pre; anything
+    // unrecognised keeps the original GPT-2 pre-tokenizer below.
+    int max_digits = t->pre == TOK_PRE_LLAMA3 ? 3 : t->pre == TOK_PRE_QWEN2 ? 1 : 0;
+    if (max_digits) {
+        for (int i = 0; i < ncp; ) {
+            int end = pre_split_next(cp, i, ncp, max_digits);
+            if (end <= i) end = i + 1; // never stall
+            size_t b0 = off[i], b1 = off[end];
+            int wl = 0;
+            for (size_t b = b0; b < b1; b++)
+                wl += u8_encode((uint32_t)t->b2u[(uint8_t)text[b]], word + wl);
+            n_out = bpe_word(t, word, wl, out, cap, n_out);
+            i = end;
+        }
+        free(cp); free(off); free(word);
+        return n_out;
+    }
 
     // simplified GPT-2 pre-tokenizer
     int i = 0;

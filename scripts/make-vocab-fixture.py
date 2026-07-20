@@ -113,5 +113,58 @@ def main():
                          kv_arr_str("tokenizer.ggml.merges", merges)])
 
 
+def bpe_alphabet():
+    """GPT-2 byte <-> unicode alphabet: the 256 single-byte vocabulary pieces."""
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(0xA1, 0xAD)) + list(range(0xAE, 0x100))
+    cs, n = bs[:], 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return [chr(c) for _, c in sorted(zip(bs, cs))]
+
+
+def make_bpe_fixtures():
+    """Small synthetic BPE vocabularies for the pre-tokenizer split rules.
+
+    A real llama-bpe vocabulary is ~5 MB of tokens and merges, far too big to
+    commit for what is being checked here: where pre-token boundaries fall.
+    So the vocab holds the 256 byte pieces plus exactly the pieces the test
+    strings should split into, each built by its own left-to-right merges.
+    An id per expected pre-token makes a wrong split immediately visible.
+
+    The two files differ only in tokenizer.ggml.pre, which is what decides
+    whether digits group in threes (llama-bpe) or stay single (qwen2).
+    """
+    tokens = bpe_alphabet()
+    merges = []
+    # 'G' is U+0120 (byte-mapped space), 'C' is U+010A (byte-mapped newline)
+    for piece in ["tokenization", "/end", "123", "456", "789",
+                  "ĊĊ", "'ll", "Ġgo", "Ġworld"]:
+        acc = piece[0]
+        for ch in piece[1:]:
+            merges.append(f"{acc} {ch}")
+            acc += ch
+            if acc not in tokens:
+                tokens.append(acc)
+
+    common = [
+        kv_str("general.architecture", "llama"),
+        kv_str("tokenizer.ggml.model", "gpt2"),
+        kv_arr_str("tokenizer.ggml.tokens", tokens),
+        kv_arr_i32("tokenizer.ggml.token_type", [1] * len(tokens)),
+        kv_arr_str("tokenizer.ggml.merges", merges),
+        kv_u32("tokenizer.ggml.bos_token_id", 0),
+        kv_u32("tokenizer.ggml.eos_token_id", 0),
+        kv_bool("tokenizer.ggml.add_bos_token", False),
+    ]
+    for name, pre in [("vocab-bpe-llama3.gguf", "llama-bpe"),
+                      ("vocab-bpe-qwen2.gguf", "qwen2")]:
+        write_gguf(os.path.join(OUTDIR, name),
+                   common + [kv_str("tokenizer.ggml.pre", pre)])
+
+
 if __name__ == "__main__":
     main()
+    make_bpe_fixtures()
