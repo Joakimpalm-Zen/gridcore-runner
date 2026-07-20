@@ -233,7 +233,7 @@ def main():
         command = [
             args.reference, "-m", args.model, "-p", args.prompt,
             "-n", str(args.tokens), "--temp", "0", "--ctx-size", str(args.ctx),
-            "--no-display-prompt", "--no-warmup", "--no-conversation",
+            "--no-display-prompt", "--no-warmup", "--single-turn",
             "--simple-io",
         ]
         report["smokes"]["llama_cpp"] = run_smoke(command, args.timeout)
