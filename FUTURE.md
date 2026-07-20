@@ -1240,6 +1240,35 @@ of strict tools, forkable agent prefixes, and quantized long-context KV.
 
 ---
 
+# URGENT — constrained decode can burn the whole budget and return an empty document
+
+Found by driving Clu (the suite's primary consumer) end to end, and reproduced
+directly: Qwen3-4B with a schema and a prompt that invites a preamble consumed
+all 200 max_tokens and returned `{"progress":"","next_step":""}` with
+`finish_reason: length`. The document parses, so nothing downstream can tell it
+failed.
+
+A model that would rather emit prose or a thinking block first is clamped to
+the only legal tokens — whitespace — and can spend its entire budget without
+reaching the opening brace. Runner then force-closes with empty values, which
+is correct behaviour for truncation but indistinguishable from a real answer.
+
+Consequences measured on Clu: compaction summaries came back silently empty, so
+the distilled session state was replaced with nothing while compaction *looked*
+like it worked; and ~3x wall-clock on agent turns, with 3 of 5 realistic action
+turns burning their full 2048 tokens.
+
+Two candidate fixes, both C-side: bound the leading whitespace a constrained
+document may emit before its opening token, and/or terminate generation at
+document completion rather than running to the cap. The conformance suite
+currently frames this as "a model-quality outcome" of the stub model — that
+framing understates it, since it bites production models on the primary
+consumer's real prompts.
+
+Pinned by a known_gap test in tests/conformance/test_clu_compat.py.
+
+---
+
 # [carried over] Work Outside the Phase Plan
 
 These predate this roadmap and are not scheduled by it. Listed so they are not
