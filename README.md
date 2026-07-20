@@ -89,8 +89,8 @@ and `tests/conformance/test_loopback_bind.py` fails if the running server ever
 answers on a non-loopback address.
 
 The trade is explicit and deliberate: llama.cpp wins on raw speed, exotic
-quants, and new-architecture coverage (runner deliberately skips MoE/SSM
-architectures, IQ2/IQ3 quants, and Vulkan). runner wins when the engine is a
+quants, and new-architecture coverage (runner deliberately skips MoE and most
+SSM architectures, IQ2/IQ3 quants, and Vulkan). runner wins when the engine is a
 load-bearing component of a larger system that has to trust it, extend it,
 and debug it to the last line. Correctness is held to the reference: GPU
 output is verified token-identical to the CPU path, and gemma4 is verified
@@ -552,7 +552,7 @@ runner -m model [options]
   --rope-scale F force linear rope position scaling
   --rope-base F  override rope frequency base
   --system TEXT  system prompt for chat mode
-  --chat-template chatml|llama2|llama3|mistral|zephyr|phi3|gemma|gemma4|apertus|raw
+  --chat-template chatml|llama2|llama3|mistral|zephyr|phi3|gemma|gemma4|apertus|ornith|raw
                  (default: auto)
   --no-bos       don't prepend BOS
   --ignore-eos   keep generating past end-of-text tokens
@@ -581,7 +581,7 @@ system/template prefixes skip prompt evaluation entirely.
 | Area | Support |
 |---|---|
 | File format | GGUF v2/v3, memory-mapped (weights are never copied) |
-| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp) — all CPU + CUDA |
+| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp). Qwen3.5 is CPU-only; the transformer architectures support CPU + CUDA. |
 | Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, `tekken` (Mistral Nemo/Small and Apertus: case-split letter runs, single digits), and the original GPT-2 regex as the default |
 | Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
@@ -617,7 +617,8 @@ Greedy generation at temperature 0 is token-identical between CUDA and CPU for
 every model above that loads.
 
 Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
-MoE and hybrid-SSM architectures (Mamba/Jamba/Qwen3.5-style), gemma4's
+MoE and unsupported hybrid-SSM architectures (Mamba/Jamba; dense Qwen3.5 is
+supported on CPU), gemma4's
 shared-KV E2B/E4B variants and MTP draft head, IQ2/IQ3 codebook quants, full
 GBNF grammar sampling (JSON mode only), TLS/auth on the server (bind it
 behind a reverse proxy if you need those).

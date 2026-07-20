@@ -224,7 +224,7 @@ def main():
     if args.runner:
         command = [
             args.runner, "-m", args.model, "-p", args.prompt,
-            "-n", str(args.tokens), "--temp", "0", "--ctx", str(args.ctx),
+            "-n", str(args.tokens), "--temp", "0", "-c", str(args.ctx),
             "--gpu", "off",
         ]
         report["smokes"]["runner"] = run_smoke(command, args.timeout)
