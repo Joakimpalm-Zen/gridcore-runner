@@ -249,8 +249,8 @@ already fixed; the rest remain:
   `"temperature": "0.7"` silently becomes the server default.
 - **Silently ignored fields**: `n`, `frequency_penalty`, `presence_penalty`,
   `logit_bias`, `tool_choice`, `parallel_tool_calls`, `user`, and on embeddings
-  `encoding_format` and `dimensions`. Note `repeat_penalty` has no request-level
-  override at all, so a client asking for no penalty still gets 1.1.
+  `encoding_format` and `dimensions`. (`repeat_penalty` was on this list and
+  is now an honoured request field.)
 - **`logprobs` is honoured only on non-streaming chat**, silently dropped on
   streaming and on `/v1/completions`, and `top_logprobs` is not range-checked
   unless `logprobs` is set.
@@ -605,24 +605,31 @@ of layer 0 is wrong" — was mistaken and is kept only as a caution: layer-0
 numerics being exact did not imply the forward pass was the problem, and the
 bug was two modules away in `sample.c`.
 
-## Unstarted — per-family sampling defaults
+## Done — per-family sampling defaults
 
-Default temp/top_p/repeat-penalty presets per model family. This was intended as
-the second half of a correctness-then-quality pass; the correctness half
-(tokenizers, chat templates) is done.
+Shipped. `sample.c` owns a preset table keyed off the GGUF's
+`general.architecture` and `general.name` (three families all declare `llama`,
+so the name is what separates Llama-3.x from Mistral from SmolLM2). Each entry
+cites its source in a comment and in `--caps`. Presets are visible rather than
+magic: logged at load, listed by `runner --caps`, and reported per served model
+by `GET /v1/capabilities`. An explicit CLI flag or request field always wins,
+and the CLI overrides survive a model swap.
 
-Two things a review turned up that belong in this work:
+Both review findings were addressed:
 
-- **The repeat penalty is applied before the `temp <= 0` greedy fast path**
-  (`sample.c`), so `--temp 0` does not return the model's argmax. That is
-  surprising for a flag whose whole purpose is determinism, and it is why an
-  exempt-list was needed rather than the penalty simply not applying. Whether
-  greedy should bypass penalties entirely is a product decision.
-- **The penalty's absolute strength scales with logit magnitude**, since it
-  divides the raw logit. Phi-3.5's logits reach ~+65 and Llama-3.2's ~+20, so
-  the same 1.1 setting is ~3x stronger on one than the other. Per-family
-  defaults should account for that, or the penalty should be applied in a
-  scale-invariant way.
+- **The greedy contract changed.** `temp <= 0` now returns the model's argmax
+  with no repeat penalty applied. Greedy is a determinism request, and a
+  penalty that can move the answer off the argmax defeats it. The stop-token
+  exemption stays for the sampling path, where it is still needed.
+- **The penalty's logit-magnitude sensitivity is handled in the table.** A
+  penalty p shifts a logit x by x*(1 - 1/p), so 1.1 at Llama's ~+20 peak is a
+  ~1.8 shift, and matching that at Phi-3.5's ~+65 needs ~1.03 — which is phi3's
+  preset value. It is the one number in the table that is calibration rather
+  than citation, and it is commented as such.
+
+`repeat_penalty` also became a request-level field, closing the hole noted
+below: a client can now ask for no penalty by sending `1`. Zero is rejected
+rather than read as "off", since the penalty divides by it.
 
 ## Verified baseline as of 2026-07-20
 

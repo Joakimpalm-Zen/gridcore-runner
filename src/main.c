@@ -14,7 +14,8 @@
 #include <math.h>
 
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
-               const model_params *mp, sampler defaults, int port, int parallel,
+               const model_params *mp, sampler defaults,
+               const sampler_override *ov, int port, int parallel,
                int n_threads, int ttl, const char *draft_path, int draft_k);
 int quantize_gguf(const char *in_path, const char *out_path, int target);
 
@@ -101,11 +102,14 @@ static void usage(const char *prog) {
         "  -b N           prompt batch size (default 64)\n"
         "  -t N           threads (default: min(8, cpus))\n"
         "  -s N           RNG seed (default: time)\n"
-        "  --temp F       temperature (default 0.8, 0 = greedy)\n"
-        "  --top-k N      top-k (default 40)\n"
-        "  --top-p F      top-p (default 0.95)\n"
-        "  --min-p F      min-p vs the top candidate (default 0.05, 0 = off)\n"
-        "  --repeat-penalty F  (default 1.1)\n"
+        "  --temp F       temperature (0 = greedy: returns the model's argmax\n"
+        "                 with no repeat penalty applied)\n"
+        "  --top-k N      top-k (0 = off)\n"
+        "  --top-p F      top-p\n"
+        "  --min-p F      min-p vs the top candidate (0 = off)\n"
+        "  --repeat-penalty F  penalty on recently emitted tokens (1 = off)\n"
+        "                 the four options above default to the model family's\n"
+        "                 published settings; see --caps for the preset table\n"
         "  --rope-scale F force linear rope position scaling by F\n"
         "  --rope-base F  override rope frequency base\n"
         "  --system TEXT  system prompt for chat mode\n"
@@ -172,8 +176,11 @@ int main(int argc, char **argv) {
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
     bool bench_json = false;
     model_params mp = {0};
-    sampler smp = { .temp = 0.8f, .top_p = 0.95f, .min_p = 0.05f,
-                    .repeat_penalty = 1.1f, .top_k = 40, .rng = 0 };
+    // The four sampling knobs are filled in from the model's family preset
+    // once the model is known; anything named on the command line is recorded
+    // here and wins over the preset.
+    sampler smp = { .rng = 0 };
+    sampler_override ov = {0};
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -196,11 +203,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--json-schema")) schema_file = NEXT;
         else if (!strcmp(a, "--quantize")) quant_out = NEXT;
         else if (!strcmp(a, "--quant")) quant_type = NEXT;
-        else if (!strcmp(a, "--temp")) smp.temp = (float)float_arg(a, NEXT, 0, FLT_MAX);
-        else if (!strcmp(a, "--top-k")) smp.top_k = (int)int_arg(a, NEXT, 0, INT_MAX);
-        else if (!strcmp(a, "--top-p")) smp.top_p = (float)float_arg(a, NEXT, 0, 1);
-        else if (!strcmp(a, "--min-p")) smp.min_p = (float)float_arg(a, NEXT, 0, 1);
-        else if (!strcmp(a, "--repeat-penalty")) smp.repeat_penalty = (float)float_arg(a, NEXT, FLT_MIN, FLT_MAX);
+        else if (!strcmp(a, "--temp")) { ov.temp = (float)float_arg(a, NEXT, 0, FLT_MAX); ov.has_temp = true; }
+        else if (!strcmp(a, "--top-k")) { ov.top_k = (int)int_arg(a, NEXT, 0, INT_MAX); ov.has_top_k = true; }
+        else if (!strcmp(a, "--top-p")) { ov.top_p = (float)float_arg(a, NEXT, 0, 1); ov.has_top_p = true; }
+        else if (!strcmp(a, "--min-p")) { ov.min_p = (float)float_arg(a, NEXT, 0, 1); ov.has_min_p = true; }
+        else if (!strcmp(a, "--repeat-penalty")) { ov.repeat_penalty = (float)float_arg(a, NEXT, FLT_MIN, FLT_MAX); ov.has_repeat_penalty = true; }
         else if (!strcmp(a, "--rope-scale")) mp.rope_scale = (float)float_arg(a, NEXT, 0, FLT_MAX);
         else if (!strcmp(a, "--rope-base")) mp.rope_base = (float)float_arg(a, NEXT, 0, FLT_MAX);
         else if (!strcmp(a, "--system")) system_prompt = NEXT;
@@ -274,6 +281,22 @@ int main(int argc, char **argv) {
             printf("}");
         } else
             printf("null");
+        // the preset table is a property of the build, not of any one model,
+        // so --caps can publish it without loading weights
+        printf(",\"sampling_presets\":[");
+        for (int i = 0; ; i++) {
+            const sampler_preset *sp = sampler_preset_at(i);
+            if (!sp) break;
+            char esc_src[512];
+            json_escape(sp->source, strlen(sp->source), esc_src, sizeof(esc_src));
+            printf("%s{\"name\":\"%s\",\"temperature\":%.2f,\"top_p\":%.2f,"
+                   "\"top_k\":%d,\"min_p\":%.2f,\"repeat_penalty\":%.2f,"
+                   "\"source\":\"%s\"}",
+                   i ? "," : "", sp->name, (double)sp->temp, (double)sp->top_p,
+                   sp->top_k, (double)sp->min_p, (double)sp->repeat_penalty,
+                   esc_src);
+        }
+        printf("]");
         printf(",\"quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
                "\"Q5_0\",\"Q5_1\",\"Q2_K\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
                "\"IQ4_NL\",\"IQ4_XS\"],"
@@ -333,12 +356,21 @@ int main(int argc, char **argv) {
         if (!tokenizer_init(&tok, &m.gf)) return 1;
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 model_path, m.arch, m.n_layer, m.n_ctx, n_threads, now_s() - t1);
+        const sampler_preset *sp =
+            sampler_resolve(&smp, m.arch,
+                            gguf_get_str(&m.gf, "general.name", NULL), &ov);
+        char sdesc[256];
+        sampler_describe(&smp, sp, sdesc, sizeof(sdesc));
+        fprintf(stderr, "sampling: %s\n", sdesc);
+    } else {
+        // swap mode: no model yet, so the preset is chosen per model at load
+        sampler_resolve(&smp, NULL, NULL, &ov);
     }
 
     if (serve)
         return server_run(registry ? NULL : &m, registry ? NULL : &tok,
-                          model_path, &mp, smp, port, parallel, n_threads, ttl,
-                          draft_path, draft_k);
+                          model_path, &mp, smp, &ov, port, parallel, n_threads,
+                          ttl, draft_path, draft_k);
 
     engine e = {0};
     engine_init(&e, &m, &tok, &smp); // e zero-initialized at declaration

@@ -229,9 +229,11 @@ This is runner's specialty. Three pieces work together:
 
 Endpoints: `POST /v1/chat/completions`, `POST /v1/completions`,
 `POST /v1/embeddings` (mean-pooled, L2-normalized), `GET /v1/models`,
-`GET /v1/capabilities`, `GET /health`, `GET /unload`. Chat completions understand `logprobs` /
-`top_logprobs`, `min_p`, `stop` (a string or up to 4 strings, matched
-across token boundaries and excluded from output), OpenAI `tools` (declared
+`GET /v1/capabilities` (which reports the active family sampling preset),
+`GET /health`, `GET /unload`. Chat completions understand `logprobs` /
+`top_logprobs`, `min_p`, `repeat_penalty` (send `1` for none), `stop` (a
+string or up to 4 strings, matched across token boundaries and excluded from
+output), OpenAI `tools` (declared
 in the prompt, parsed back into `tool_calls`), and swap-mode `keep_alive`.
 Agent clients speaking the AI-SDK dialect (Cline, OpenCode, …) work as-is:
 part-array message content is flattened, assistant `tool_calls` history and
@@ -307,7 +309,7 @@ the same model, same question:
 |---|---|
 | raw completion (`-p`), default sampling | "10" ✗ |
 | chat mode (`-i`), default sampling | "two, but…" (rambles) |
-| chat mode + `--temp 0 --repeat-penalty 1.0` | "One plus one equals two." ✓ |
+| chat mode + `--temp 0` | "One plus one equals two." ✓ |
 
 Rules of thumb, in order of impact:
 
@@ -317,9 +319,11 @@ Rules of thumb, in order of impact:
 2. **Always use the chat format** (`-i` or the HTTP API) for questions —
    instruct models are only calibrated inside their template. Raw `-p` is for
    text continuation.
-3. **For anything with a right answer**: `--temp 0 --repeat-penalty 1.0`.
-   The repeat penalty distorts short factual answers (it punishes reusing
-   tokens from the question); keep 1.1 only for long free-form generation.
+3. **For anything with a right answer**: `--temp 0`. Greedy returns the
+   model's argmax and applies no repeat penalty at all, so the answer is
+   reproducible. (The penalty distorts short factual answers by punishing
+   reuse of tokens from the question; it only earns its keep on long
+   free-form generation, where `--temp` is above zero anyway.)
 4. **Use `--json` / `response_format`** when output feeds a program — it
    eliminates format failures so only content errors remain.
 5. **Extended context ≠ extended reasoning.** YaRN retrieval works at 2–4x,
@@ -350,11 +354,17 @@ runner -m model [options]
   -b N           prompt batch size (default 64)
   -t N           threads (default: min(8, cpus))
   -s N           RNG seed
-  --temp F       temperature (default 0.8, 0 = greedy)
-  --top-k N      top-k sampling (default 40)
-  --top-p F      nucleus sampling (default 0.95)
-  --min-p F      min-p vs the top candidate (default 0.05, 0 = off)
-  --repeat-penalty F   (default 1.1)
+  --temp F       temperature (0 = greedy: the model's argmax, with no
+                 repeat penalty applied)
+  --top-k N      top-k sampling (0 = off)
+  --top-p F      nucleus sampling
+  --min-p F      min-p vs the top candidate (0 = off)
+  --repeat-penalty F   penalty on recently emitted tokens (1 = off)
+                 The five options above default to the served model family's
+                 published recommended settings, chosen from the GGUF's
+                 architecture and name and logged at load. `runner --caps`
+                 prints the whole preset table with a source for each entry;
+                 an option given explicitly always overrides its preset.
   --rope-scale F force linear rope position scaling
   --rope-base F  override rope frequency base
   --system TEXT  system prompt for chat mode

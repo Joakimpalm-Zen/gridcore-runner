@@ -20,6 +20,7 @@ TEST_TEMPLATE = test-template.exe
 TEST_JSON_OOM = test-json-oom.exe
 TEST_TOKENIZER_OOM = test-tokenizer-oom.exe
 TEST_SCHEMA_OOM = test-schema-oom.exe
+TEST_SAMPLER = test-sampler.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
@@ -30,6 +31,7 @@ TEST_TEMPLATE = test-template
 TEST_JSON_OOM = test-json-oom
 TEST_TOKENIZER_OOM = test-tokenizer-oom
 TEST_SCHEMA_OOM = test-schema-oom
+TEST_SAMPLER = test-sampler
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
@@ -40,6 +42,7 @@ TEST_TEMPLATE = test-template
 TEST_JSON_OOM = test-json-oom
 TEST_TOKENIZER_OOM = test-tokenizer-oom
 TEST_SCHEMA_OOM = test-schema-oom
+TEST_SAMPLER = test-sampler
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -66,6 +69,11 @@ TEST_TMPL_SRC = tests/test_template.c src/gguf.c src/tokenizer.c src/template.c 
 $(TEST_TEMPLATE): $(TEST_TMPL_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_TMPL_SRC) -o $@ -lm
 
+# sampler presets and the greedy/penalty contract need no model, so the test
+# links src/sample.c alone
+$(TEST_SAMPLER): tests/test_sampler.c src/sample.c src/runner.h
+	$(CC) $(CFLAGS) -I src tests/test_sampler.c src/sample.c -o $@ -lm
+
 # compiles src/json.c directly into the test with instrumented allocators
 $(TEST_JSON_OOM): tests/test_json_oom.c src/json.c src/json.h
 	$(CC) $(CFLAGS) -I src tests/test_json_oom.c -o $@ -lm
@@ -84,11 +92,12 @@ $(TEST_SCHEMA_OOM): tests/test_schema_oom.c src/schema.c src/json.c src/jsonmode
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
-test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_TOKENIZER) \
-      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) test.gguf
+test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
+      $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) test.gguf
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)
 	./$(TEST_SCHEMA_OOM)
+	./$(TEST_SAMPLER)
 	./$(TEST_TOKENIZER)
 	./$(TEST_TOKENIZER_OOM)
 	./$(TEST_TEMPLATE)
@@ -101,12 +110,14 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_TOKENIZER) 
 smoke: runner test.gguf
 	./$(RUNNER_EXE) --version
 	./$(RUNNER_EXE) --caps
+	./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; p=json.load(sys.stdin)['sampling_presets']; assert {x['name'] for x in p} >= {'generic','qwen3','llama3','gemma3','phi3'} and all(x['source'] for x in p); print('preset table ok')"
 	./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu off
 	./$(RUNNER_EXE) -m test.gguf -p "hi" -n 24 --temp 0 --json --gpu off 2>/dev/null | $(PYTHON) -c "import json,sys; json.load(sys.stdin); print('valid json')"
 
 clean:
-	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) \
-	      $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE)
+	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
+	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
+	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE)
 
 # regenerate the committed PTX header (dev machines only: needs nvcc + a host
 # compiler). Normal builds and CI use the committed src/kernels_ptx.h.
