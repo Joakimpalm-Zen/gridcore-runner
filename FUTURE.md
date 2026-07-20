@@ -1720,44 +1720,192 @@ Target coverage, one validated family per jurisdiction:
 | EU | Mistral v0.3 | validated with one KNOWN divergence, 2/721 |
 | EU | Apertus (Swiss) | evaluated 2026-07-20 — **tokenizer and template done, blocked on architecture**; see below |
 
-**The binding constraint is licence, not geography**, and it inverts the naive
-mapping:
+**The binding constraint is licence, not geography** — but *which* licence binds
+is a question that has to be answered from the licence text, not from summaries.
+The section below was rewritten on 2026-07-20 against primary sources. One
+previously stated claim (Mistral = non-commercial) was **wrong** and is corrected.
 
-- **Qwen** — Apache 2.0 across most models. Cleanest commercial path of the three.
-- **Gemma** — version-dependent. Gemma **4** is genuine Apache 2.0; earlier Gemma
-  (including the gemma-3-4b in models/) ships Google's custom terms with a
-  Prohibited Use Policy, a **flow-down obligation to every downstream user**, and
-  a unilateral termination right. The flow-down clause propagates obligations to
-  Gridcore's users, not just to us — check before shipping.
-- **Mistral** — the most restrictive. The Mistral Research License is
-  non-commercial; some models use a modified MIT requiring a commercial licence
-  above $20M revenue.
+### Licence verification method
 
-So the "EU option" has the tightest commercial terms and the "China option" the
-loosest. Pick per-family *versions* by licence (Gemma 4 over Gemma 3) and treat
-jurisdiction as a filter to satisfy rather than the primary selector.
+Every claim below was established from at least one of three primary sources,
+and the source is named per row:
 
-Mistral being the sole EU option is a single point of failure on two counts: it
-is the only family with an unresolvable tokenizer divergence, and its licence is
-the least commercially usable. Apertus is being evaluated as a second EU option
-for that reason. Its appeal is that it is open weights *and* open training data
-*and* open recipes, with EU AI Act compliance by design — a stronger claim than
-open weights alone.
+1. **GGUF `general.license`** — read directly out of the file in `models/`. This
+   is the strongest evidence for the exact artefact runner loads, but it is
+   *quantiser-supplied metadata*, not the licensor's own statement, and several
+   GGUFs omit the key entirely.
+2. **HuggingFace `cardData.license`** — from `https://huggingface.co/api/models/<repo>`,
+   which is the publisher-controlled field the HF licence tag renders from.
+3. **The licence text itself**, quoted verbatim with its section number.
 
-Sources: CNAS Sovereign AI Index; Mistral Help Center licence page; Google's
-Gemma Terms of Use.
+Where these disagree, or where no primary source could be reached, the row says
+**Unverified** rather than repeating a plausible summary.
+
+### Verified licence position, per family
+
+| family | licence | primary source | commercial use |
+|---|---|---|---|
+| Llama 3.2 | `llama3.2` — LLAMA 3.2 COMMUNITY LICENSE AGREEMENT | GGUF `general.license = llama3.2`; [HF card](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) `license: llama3.2`; [licence text](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/blob/main/LICENSE.txt) | Yes, below a user threshold — see §2 quote |
+| Gemma 3 | `gemma` — Gemma Terms of Use (custom) | GGUF `general.license = gemma`; [HF card](https://huggingface.co/google/gemma-3-4b-it) `license: gemma`, `gated: manual`; [Gemma Terms](https://ai.google.dev/gemma/terms) | Yes, but with flow-down and revocation — see §3.1/§3.2 |
+| Gemma 4 | `apache-2.0` | [HF card](https://huggingface.co/google/gemma-4-12B-it) `license: apache-2.0`, `gated: false`, `license_link` → [gemma_4_license](https://ai.google.dev/gemma/docs/gemma_4_license) | Yes. Scope of the Prohibited Use Policy is **Unverified** — see note |
+| Qwen 2.5 / Qwen 3 | Apache 2.0, unmodified | [HF card](https://huggingface.co/Qwen/Qwen3-4B) `license: apache-2.0`, ungated; [LICENSE](https://huggingface.co/Qwen/Qwen3-4B/raw/main/LICENSE) is stock Apache 2.0 text, "Copyright 2024 Alibaba Cloud" | Yes, unconditionally |
+| Mistral 7B Instruct v0.3 | **Apache 2.0** — *not* the Mistral Research License | [HF card](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3) `license: apache-2.0`, `gated: false` | **Yes, unconditionally.** Prior "non-commercial" claim was wrong |
+| Apertus 8B Instruct | Apache 2.0 | GGUF `general.license = apache-2.0`; [HF card](https://huggingface.co/swiss-ai/Apertus-8B-Instruct-2509) `license: apache-2.0`, ungated; `LICENSE.txt` stock Apache 2.0 | Yes, unconditionally |
+| SmolLM2 1.7B Instruct | Apache 2.0 | GGUF `general.license = apache-2.0`; [HF card](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct) `license: apache-2.0`, ungated | Yes, unconditionally |
+| Phi-3.5-mini Instruct | MIT | GGUF `general.license = mit` plus `general.license.link`; [HF card](https://huggingface.co/microsoft/Phi-3.5-mini-instruct) `license: mit`, ungated | Yes, unconditionally |
+
+### Correction: Mistral is not non-commercial
+
+This file previously stated that the EU option was licensed under the Mistral
+Research License and was therefore "the most restrictive" and "the least
+commercially usable". **That is wrong for the model actually in the lineup.**
+
+`mistralai/Mistral-7B-Instruct-v0.3` — the model in `models/` — is published
+under **Apache 2.0**, ungated, per its HuggingFace model card metadata
+(`cardData.license: apache-2.0`). Note that the Q4_K_M GGUF in `models/` carries
+**no `general.license` key at all**, so the GGUF cannot corroborate this; the HF
+card is the authority here.
+
+The Mistral Research License is a real licence and it *is* non-commercial — it
+just does not govern this model. Quoting it directly
+([MRL-0.1](https://mistral.ai/static/licenses/MRL-0.1.md)):
+
+> §3.2 "You shall only use the Mistral Models, Derivatives (whether or not
+> created by Mistral AI) and Outputs for Research Purposes."
+
+with "Research Purposes" defined in §9 as limited to "(a) personal, scientific or
+academic research, and (b) for non-profit and non-commercial purposes". Applying
+that clause to Mistral 7B v0.3 was the error.
+
+The separate "modified MIT above $20M" claim was also imprecise. Mistral's help
+centre states that most open models are Apache 2.0, and that a modified MIT
+licence applies to *certain* models, gated on **$20M monthly revenue** (not
+annual, and not revenue-in-general), naming `Devstral-2-123B-Instruct-2512` as
+the example. See
+[Mistral Help Center](https://help.mistral.ai/en/articles/347393-under-which-license-are-mistral-s-open-models-available).
+**No model in runner's lineup is under that licence.**
+
+Consequence for strategy: the EU option is *not* the commercially tightest one.
+Mistral v0.3 sits in the same Apache 2.0 tier as Qwen, Apertus and SmolLM2. The
+argument for adding Apertus as a second EU family now rests on the tokenizer
+divergence and on single-vendor risk — **not** on licence, which was the
+strongest stated reason and does not survive checking.
+
+### Gemma 3 is the genuinely constrained licence
+
+Gemma 3 ships Google's custom terms, not an OSI licence. Quoting the
+[Gemma Terms of Use](https://ai.google.dev/gemma/terms) verbatim:
+
+> §3.1(1) "You must include the use restrictions referenced in Section 3.2 as an
+> enforceable provision in any agreement...governing the use and/or distribution
+> of Gemma or Model Derivatives"
+>
+> §3.1(2) "You must provide all third party recipients of Gemma or Model
+> Derivatives a copy of this Agreement."
+>
+> §3.1 Distribution includes "providing or making Gemma or its functionality
+> available as a hosted service via API, web access, or any other electronic or
+> remote means."
+>
+> §3.2 "Google reserves the right to restrict (remotely or otherwise) usage of
+> any of the Gemma Services that Google reasonably believes are in violation of
+> this Agreement."
+>
+> §4.5 "Google may terminate this Agreement if you are in breach of any term."
+
+Two consequences, stated plainly because both are load-bearing:
+
+1. **Runner is an API server, so serving Gemma over HTTP is Distribution under
+   §3.1.** That is not a corner case — it is runner's primary mode of operation.
+   It triggers §3.1(1) and §3.1(2) together: Gridcore would have to write the
+   §3.2 use restrictions into its *own* customer agreements as an enforceable
+   provision, and hand every downstream recipient a copy of Google's terms. The
+   obligation propagates past Gridcore to its users.
+2. **Generated Outputs are not encumbered.** §3.3: "Google claims no rights in
+   Outputs you generate using Gemma." Whatever runner produces is clean. The
+   encumbrance is on *serving the model*, not on what comes out of it.
+
+Combined with §3.2's remote-restriction right and §4.5's termination right, Gemma
+3 is the only family in the lineup where a third party retains unilateral control
+over a deployed system. That is a procurement question, not an engineering one.
+
+### Gemma 4: better, with one unresolved question
+
+Gemma 4 is tagged `apache-2.0` and is **ungated** on HuggingFace, where Gemma 3
+is `gemma` and `gated: manual`. That is a real improvement and the
+"prefer Gemma 4 over Gemma 3" recommendation stands.
+
+**Unverified:** Gemma 4's HF `license_link` points at
+[ai.google.dev/gemma/docs/gemma_4_license](https://ai.google.dev/gemma/docs/gemma_4_license),
+which presents Apache 2.0 while also linking a
+[Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy). That
+policy carries "Last modified: February 21, 2024" — it predates Gemma 4 — and
+contains no scope sentence naming which models or licences it binds; it is
+written in the Gemma Terms vocabulary ("Gemma or Model Derivatives"). Whether it
+is contractually incorporated into an Apache-2.0 Gemma 4 grant, or is advisory
+policy sitting alongside it, **could not be determined from the licence text and
+is not asserted here either way.** If Gemma 4 becomes load-bearing for a
+procurement commitment, this needs a legal answer, not a documentation one.
+
+### Threshold clause, Llama 3.x
+
+Llama 3.2 is usable commercially but is not an OSI licence. From the
+[LLAMA 3.2 COMMUNITY LICENSE AGREEMENT](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct/blob/main/LICENSE.txt):
+
+> §2 Additional Commercial Terms. "If, on the Llama 3.2 version release date, the
+> monthly active users of the products or services made available by or for
+> Licensee, or Licensee's affiliates, is greater than 700 million monthly active
+> users in the preceding calendar month, you must request a license from Meta,
+> which Meta may grant to you in its sole discretion, and you are not authorized
+> to exercise any of the rights under this Agreement unless or until Meta
+> otherwise expressly grants you such rights."
+>
+> §1.b.iii "You must retain in all copies of the Llama Materials that you
+> distribute the following attribution notice within a "Notice" text file
+> distributed as a part of such copies: 'Llama 3.2 is licensed under the Llama
+> 3.2 Community License, Copyright © Meta Platforms, Inc. All Rights Reserved.'"
+
+The 700M MAU threshold is not a practical constraint for Gridcore. The §1.b.iii
+notice requirement *is* an actual obligation and is cheap to satisfy. Llama 3.2
+is also `gated: manual` on HuggingFace, which affects redistribution logistics
+rather than licence terms.
+
+### Revised conclusion
+
+The naive "EU is the safe jurisdiction" mapping was inverted in this document for
+the wrong reason. Corrected, the picture is:
+
+- **Unconditional Apache 2.0 / MIT:** Qwen 2.5/3, Mistral v0.3, Apertus, SmolLM2,
+  Phi-3.5-mini. Five families across three jurisdictions, no commercial
+  conditions. This is a much stronger position than previously recorded.
+- **Custom but workable:** Llama 3.x — threshold clause plus a notice file.
+- **Custom and genuinely constraining:** Gemma 3 — flow-down into Gridcore's own
+  contracts, plus supplier-side restriction and termination rights.
+- **Improved, one open question:** Gemma 4.
+
+Jurisdiction remains a filter to satisfy rather than the primary selector, but
+licence no longer forces the choice inside the EU.
+
+Sources: the licence texts and model cards linked inline above. The CNAS
+Sovereign AI Index was cited in the earlier draft for the jurisdiction framing;
+it is **not** a source for any licence claim in this section and none of the
+above depends on it.
 
 ## Model lineup / jurisdiction coverage — as validated 2026-07-20
 
 | jurisdiction | family | licence | tokenizer | verdict |
 |---|---|---|---|---|
 | US | Llama 3.x | Llama 3.x Community (custom; >700M MAU clause) | 1/721 | validated, in lineup |
-| US | Gemma 3 | Google Gemma Terms (custom, flow-down, revocable) | 1/721 | validated; licence is the problem, not the tech |
-| China | Qwen 2.5 / 3 | Apache 2.0 | 1/721 | validated, cleanest licence in the lineup |
-| EU | Mistral v0.3 | Mistral Research License (**non-commercial**) | 44/721, one known cause | validated with the accepted divergence |
+| US | Gemma 3 | Google Gemma Terms (custom; flow-down §3.1, revocable §3.2/§4.5) | 1/721 | validated; licence is the problem, not the tech |
+| China | Qwen 2.5 / 3 | Apache 2.0 (unmodified) | 1/721 | validated; tied-cleanest licence, see verified table above |
+| EU | Mistral v0.3 | **Apache 2.0** (was wrongly recorded here as non-commercial MRL — corrected 2026-07-20) | 44/721, one known cause | validated with the accepted divergence |
 | EU | **Apertus 8B Instruct (Swiss AI)** | **Apache 2.0** | **0/721 — best in lineup** | **NOT usable: architecture unsupported** |
 | — | SmolLM2 | Apache 2.0 | 0/721 | validated |
 | — | Phi-3.5-mini | MIT | 2/721 | validated |
+
+The licence column is a summary only. Every licence claim in it is sourced,
+quoted and section-numbered in "Verified licence position, per family" above;
+where the two differ, that section is authoritative.
 
 The tokenizer column is the differential against each model's own HuggingFace
 reference over `tests/fixtures/tokenizer-corpus.txt`, run by
