@@ -538,6 +538,52 @@ void tool_envelope_free(tool_envelope *e);
 int  tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                        struct sbuf *content, struct sbuf *tc);
 
+// Streaming counterpart of tool_envelope_map.
+//
+// tool_envelope_map needs the whole document, which is exactly what a stream
+// does not have: the envelope is decided one token at a time, and the client
+// must see the decision as it happens rather than after the fact. This is the
+// same mapping run incrementally — bytes in, demultiplexed events out — so a
+// streamed request reaches the same call as a buffered one.
+//
+// Nothing is emitted until the branch is known, which is what keeps envelope
+// syntax out of the client's `content`: the discriminator is buffered, and by
+// the time anything is forwarded it is already known to be either assistant
+// text or tool arguments. Argument text is forwarded raw (insignificant
+// whitespace removed) so it stays a JSON *string* the caller can execute;
+// `final` text is unescaped, matching what the buffered path hands back.
+//
+// Every callback returns non-zero to stop generation (the client went away);
+// that result propagates out of tool_stream_feed unchanged.
+typedef struct {
+    void *ud;
+    int (*content)(void *ud, const char *bytes, int n);
+    int (*call_begin)(void *ud, const char *name);
+    int (*call_args)(void *ud, const char *bytes, int n);
+} tool_stream_sink;
+
+typedef struct {
+    const tool_envelope *env;
+    tool_stream_sink     sink;
+    int   state;
+    char  *head;          // undecided prefix, held back from the client
+    size_t head_n, head_cap;
+    char *name;           // selected branch, once known (owned)
+    bool  called;         // a tool branch, rather than `final`, was selected
+    int   depth;          // nesting inside the value being forwarded
+    bool  started;        // the forwarded value has produced its first byte
+    bool  in_str, esc;    // JSON string state within that value
+    char  pend[16];       // partial escape sequence awaiting more bytes
+    int   n_pend;
+} tool_stream;
+
+void tool_stream_init(tool_stream *s, const tool_envelope *e,
+                      const tool_stream_sink *sink);
+int  tool_stream_feed(tool_stream *s, const char *bytes, int n);
+// true once a tool branch was selected, i.e. finish_reason is "tool_calls"
+bool tool_stream_called(const tool_stream *s);
+void tool_stream_free(tool_stream *s);
+
 // streaming splitter for thinking-tag models: bytes between
 // open and close tags, including architectures that interleave them with
 // plain text — reach the callback as reasoning (reasoning=1), the rest as

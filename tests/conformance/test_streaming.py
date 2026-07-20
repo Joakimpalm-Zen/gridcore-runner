@@ -165,67 +165,168 @@ def test_client_disconnect_mid_stream_releases_the_slot(client, server):
                     name=f"post-disconnect-{i}").expect_status(200)
 
 
-# --------------------------------------------------------- known gaps
-@pytest.mark.known_gap("phase-2", "tool_calls are unreachable on the streaming path")
-def test_known_gap_no_tool_calls_in_stream(client, report):
-    """KNOWN GAP (Phase 2) — pins today's behaviour, do not read as desired.
+# ------------------------------------------------------- streamed tool calls
+TOOL = {"type": "function",
+        "function": {"name": "f", "description": "d",
+                     "parameters": {"type": "object",
+                                    "properties": {"x": {"type": "string"}},
+                                    "required": ["x"]}}}
 
-    FUTURE.md: "tool_calls are currently unreachable in streaming mode at all".
-    The buffered path parses runner's tool-call syntax out of the generated text
-    and reports finish_reason "tool_calls"; the streaming path has no equivalent,
-    so a tool call is streamed as ordinary content and the stream ends "stop" or
-    "length".
 
-    WHEN PHASE 2 LANDS this test must be inverted: assert delta.tool_calls
-    arrives with incremental function arguments and finish_reason == "tool_calls".
-    """
-    st = client.chat_stream(
-        dict(BASE, max_tokens=16,
-             tools=[{"type": "function",
-                     "function": {"name": "f", "description": "d",
-                                  "parameters": {"type": "object",
-                                                 "properties": {}}}}],
-             tool_choice="auto"),
-        name="stream-tools").expect_sse()
+def collect_tool_calls(st):
+    """Reassemble streamed tool_calls the way an SDK does: an opening event
+    per index carrying the identity, then argument text keyed by that index."""
+    opened, args = {}, {}
     for d in st.deltas():
-        if "tool_calls" in d:
-            pytest.fail("delta.tool_calls appeared — Phase 2 has landed, "
-                        "rewrite test_known_gap_no_tool_calls_in_stream to "
-                        "assert the streamed tool-call contract instead")
-    if st.finish_reason == "tool_calls":
-        pytest.fail("streaming reported finish_reason tool_calls — Phase 2 has "
-                    "landed, rewrite this test")
-    report.note_quality("stream-tool-calls",
-                        "streaming path emitted no tool_calls (known Phase 2 gap)",
-                        finish_reason=st.finish_reason)
+        for call in d.get("tool_calls") or []:
+            i = call.get("index")
+            if not isinstance(i, int):
+                raise ProtocolError("tool_calls delta has no integer index",
+                                    got=call)
+            fn = call.get("function") or {}
+            if i not in opened:
+                if not call.get("id") or call.get("type") != "function" \
+                        or not fn.get("name"):
+                    raise ProtocolError(
+                        "the first delta for a tool call must carry id, type "
+                        "and function.name", index=i, got=call)
+                opened[i] = {"id": call["id"], "name": fn["name"]}
+                args[i] = ""
+            elif call.get("id") or call.get("type"):
+                raise ProtocolError("identity fields repeated on a later "
+                                    "tool_calls delta", index=i, got=call)
+            args[i] += fn.get("arguments") or ""
+    return [dict(opened[i], arguments=args[i]) for i in sorted(opened)]
 
 
-@pytest.mark.known_gap("phase-2", "streaming chunks omit created/model, first delta omits role")
-def test_known_gap_stream_chunk_omits_created_model_and_role(client):
-    """KNOWN GAP — pins today's behaviour, do not read as desired.
+def test_stream_emits_tool_calls_with_incremental_arguments(client):
+    """Phase 2 (was a known gap).
+
+    A streamed tool call must arrive as tool_calls deltas — identity once,
+    then argument text — and end with finish_reason "tool_calls". Streaming
+    the internal envelope as ordinary content, which is what runner used to
+    do, silently hands the caller a string instead of a call."""
+    st = client.chat_stream(
+        dict(BASE, max_tokens=32, tools=[TOOL], tool_choice="required"),
+        name="stream-tools").expect_sse()
+
+    if st.finish_reason != "tool_calls":
+        raise ProtocolError("a guaranteed call must end the stream with "
+                            "finish_reason \"tool_calls\"",
+                            got=st.finish_reason)
+    calls = collect_tool_calls(st)
+    if len(calls) != 1:
+        raise ProtocolError("expected exactly one streamed tool call",
+                            got=calls)
+    if calls[0]["name"] != "f":
+        raise ProtocolError("streamed call names an undeclared tool",
+                            got=calls[0]["name"])
+    try:
+        json.loads(calls[0]["arguments"])
+    except ValueError as exc:
+        raise ProtocolError("streamed arguments do not parse as JSON",
+                            arguments=calls[0]["arguments"][:200],
+                            error=str(exc)) from exc
+    # the envelope is internal: not one byte of it may reach `content`
+    if st.text:
+        raise ProtocolError("content was streamed alongside a tool call",
+                            got=st.text[:200])
+
+
+def test_stream_never_leaks_the_envelope_into_content(client):
+    """"auto" may land on either branch. Whichever it picks, the client sees
+    a normal answer or a normal call — never the discriminated union runner
+    uses internally to guarantee them."""
+    st = client.chat_stream(
+        dict(BASE, max_tokens=32, tools=[TOOL], tool_choice="auto"),
+        name="stream-tools-auto").expect_sse()
+    for marker in ('{"tool"', '"args"', '<|tool_call>'):
+        if marker in st.text:
+            raise ProtocolError("internal envelope syntax leaked into content",
+                                marker=marker, got=st.text[:200])
+    calls = collect_tool_calls(st)
+    if calls and st.finish_reason != "tool_calls":
+        raise ProtocolError("streamed tool_calls but finish_reason is not "
+                            "\"tool_calls\"", got=st.finish_reason)
+    if not calls and st.finish_reason == "tool_calls":
+        raise ProtocolError("finish_reason \"tool_calls\" with no streamed call")
+
+
+def test_stream_keeps_the_three_channels_separate(client):
+    """reasoning_content, content and tool_calls are distinct channels. A
+    delta that mixes them forces the client to guess which one it is reading,
+    and that guess is where reasoning text ends up in an executed call."""
+    st = client.chat_stream(
+        dict(BASE, max_tokens=32, tools=[TOOL], tool_choice="required"),
+        name="stream-tools-channels").expect_sse()
+    for d in st.deltas():
+        present = [k for k in ("content", "reasoning_content", "tool_calls")
+                   if d.get(k)]
+        if len(present) > 1:
+            raise ProtocolError("one delta carried more than one channel",
+                                channels=present, delta=d)
+
+
+def test_client_disconnect_mid_tool_call_releases_the_slot(client, server):
+    """The disconnect path, with the envelope demultiplexer live.
+
+    Hanging up part-way through a tool call leaves the demux holding an
+    undecided prefix; the slot must still be released and reusable."""
+    partial, _, _ = client.stream_raw(
+        "stream-tools-disconnect", "/v1/chat/completions",
+        dict(BASE, max_tokens=256, stream=True, tools=[TOOL],
+             tool_choice="required"), close_after_bytes=1)
+    if not partial:
+        raise ProtocolError("no bytes arrived before disconnecting")
+    server.assert_alive()
+    for i in range(server.parallel + 1):
+        client.chat(dict(BASE, max_tokens=4, tools=[TOOL],
+                         tool_choice="required"),
+                    name=f"post-tool-disconnect-{i}").expect_status(200)
+
+
+def test_stream_tool_call_survives_every_split_point(client):
+    """The boundary matrix, applied to a stream that carries a tool call:
+    argument deltas are the part most likely to be reassembled differently
+    depending on where the bytes were cut."""
+    st = client.chat_stream(
+        dict(BASE, max_tokens=32, tools=[TOOL], tool_choice="required"),
+        name="stream-tools-matrix").expect_sse()
+    reference = parse_stream(st.raw)
+    for chunks in split_points(st.raw):
+        if parse_stream(st.raw, chunks) != reference:
+            at = len(chunks[0]) if len(chunks) == 2 else "byte-at-a-time"
+            raise ProtocolError("a tool-call stream parses differently "
+                                "depending on chunk boundaries", split_at=at)
+
+
+def test_stream_chunk_carries_created_model_and_role(client):
+    """Phase 2 (was a known gap).
 
     OpenAI's chat.completion.chunk carries ``created`` and ``model`` on every
-    chunk and ``role: "assistant"`` on the first delta. Runner emits none of
-    the three. SDKs that key off the first delta's role (or that echo the model
-    back) see a chunk they consider malformed.
-
-    WHEN THIS IS FIXED: flip each assertion below to require the field, and
-    re-record fixtures/chat_stream_chunk.json.
-    """
+    chunk and ``role: "assistant"`` on the first delta. SDKs that key off the
+    first delta's role (or that echo the model back) reject a stream without
+    them, so all three are required here rather than merely tolerated."""
+    buffered = client.chat(dict(BASE), name="stream-chunk-fields-b")
     st = client.chat_stream(dict(BASE), name="stream-chunk-fields").expect_sse()
-    first = st.chunks[0]
-    for field in ("created", "model"):
-        if field in first:
-            pytest.fail(f"streamed chunk now carries {field!r} — the gap is "
-                        f"closed, update this test and re-record the fixture")
-    role = first["choices"][0].get("delta", {}).get("role")
-    if role is not None:
-        pytest.fail(f"first delta now carries role={role!r} — the gap is "
-                    f"closed, update this test and re-record the fixture")
-    # what IS guaranteed today, so a regression below this line is a real one
-    if "content" not in first["choices"][0].get("delta", {}):
-        raise ProtocolError("first delta carries neither role nor content",
-                            chunk=first)
+    for c in st.chunks:
+        if not isinstance(c.get("created"), int) or c["created"] <= 0:
+            raise ProtocolError("streamed chunk has no usable created",
+                                got=c.get("created"), chunk=c)
+        if not isinstance(c.get("model"), str) or not c["model"]:
+            raise ProtocolError("streamed chunk has no model", chunk=c)
+        if c["model"] != buffered.json["model"]:
+            raise ProtocolError("streamed model differs from the buffered one",
+                                buffered=buffered.json["model"],
+                                streamed=c["model"])
+    role = st.chunks[0]["choices"][0].get("delta", {}).get("role")
+    if role != "assistant":
+        raise ProtocolError("first delta must carry role \"assistant\"",
+                            got=role, chunk=st.chunks[0])
+    # ...and only the first: a repeated role confuses accumulating clients
+    later = [i for i, d in enumerate(st.deltas()[1:], 1) if "role" in d]
+    if later:
+        raise ProtocolError("role repeated after the first delta", at=later)
 
 
 def test_stream_flag_must_be_boolean(client):

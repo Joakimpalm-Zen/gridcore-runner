@@ -162,10 +162,11 @@ Each of these is a real defect class that current CI would not have caught:
   reaped" CI step stalls only the *read* side. A client that sends a valid
   request and then stops reading was able to pin a slot forever; a send timeout
   now bounds it, and a matching CI case belongs alongside the read-side one.
-- **Streaming has no token-boundary matrix.** Phase 0 already calls for splitting
-  streaming output at every possible boundary; note that `tool_calls` are
-  currently unreachable in streaming mode at all, so that matrix will fail
-  until Phase 2.
+- **DONE** ~~**Streaming has no token-boundary matrix.**~~ Phase 0 already calls
+  for splitting streaming output at every possible boundary; ~~note that
+  `tool_calls` are currently unreachable in streaming mode at all, so that
+  matrix will fail until Phase 2.~~ Phase 2 made `tool_calls` reachable on a
+  stream and put a tool-call stream through the same matrix.
 
 ## [carried over] Python client defects
 
@@ -223,12 +224,14 @@ hopeful model output afterward.
 - **DONE** Initially support one call with `parallel_tool_calls:false`;
   `parallel_tool_calls:true` is rejected rather than silently ignored.
 - Add bounded multi-call arrays for `parallel_tool_calls:true`.
-- **PARTIAL** Remove dependence on post-generation tag parsing for strict
+- **DONE** Remove dependence on post-generation tag parsing for strict
   requests while retaining the existing parser as a compatibility fallback.
-  Done on the buffered path. Streaming requests still take the legacy
+  ~~Done on the buffered path. Streaming requests still take the legacy
   declare-and-parse path, because emitting the envelope as `tool_calls`
   deltas is Phase 2 work; until then a stream would send the envelope to the
-  client as raw content.
+  client as raw content.~~ Phase 2 closed the streaming half: both paths now
+  compile the same envelope, and `tool_calls_parse` remains only as the
+  fallback for requests that declare no tools.
 
 ## Exit Criteria
 
@@ -242,7 +245,9 @@ hopeful model output afterward.
 All five hold on the buffered path and are covered by
 `tests/test_tools.c` (envelope compiled and driven through the real `sval`
 validator) and `tests/conformance/test_tool_calls.py` (the same guarantees
-asserted over HTTP). The streaming path is Phase 2 and is unchanged.
+asserted over HTTP). ~~The streaming path is Phase 2 and is unchanged.~~
+Phase 2 extended all five to the streaming path, which now runs the same
+envelope; the "(buffered)" qualifiers above no longer limit them.
 
 ## [carried over] Conformance holes to close here
 
@@ -275,9 +280,9 @@ remain:
   `logit_bias`, `user`, and on embeddings `encoding_format` and `dimensions`.
   (`repeat_penalty` was on this list and is now an honoured request field.
   `tool_choice` and `parallel_tool_calls` are now honoured on the buffered
-  path — `parallel_tool_calls:true` is rejected rather than ignored — but are
+  path — `parallel_tool_calls:true` is rejected rather than ignored — ~~but are
   still ignored on the streaming path, which keeps the legacy tool handling
-  until Phase 2.)
+  until Phase 2.~~ Phase 2: both are honoured on the streaming path too.)
 - **`logprobs` is honoured only on non-streaming chat**, silently dropped on
   streaming and on `/v1/completions`, and `top_logprobs` is not range-checked
   unless `logprobs` is set.
@@ -301,31 +306,68 @@ Make streaming tools as reliable as buffered tools.
 
 ## Work
 
-- Detect the selected tool branch while generation is still running.
-- Stream standards-compatible `tool_calls[].function.arguments` deltas.
-- Never leak internal tool tags into `content`.
-- Preserve separate `reasoning_content`, content, and tool-call channels.
-- Emit stable call IDs, indexes, function types, and terminal events.
+- **DONE** Detect the selected tool branch while generation is still running.
+  `tool_stream` (template.c) is the streaming counterpart of
+  `tool_envelope_map`: it holds bytes back until the `tool` discriminator
+  resolves, then forwards everything after it to the channel that branch
+  selected. The call is announced as soon as the name is known.
+- **DONE** Stream standards-compatible `tool_calls[].function.arguments`
+  deltas. Argument text is forwarded raw with insignificant whitespace
+  dropped, so the concatenated deltas are the same document the buffered path
+  re-serializes.
+- **DONE** Never leak internal tool tags into `content`. Holding the undecided
+  prefix back is what guarantees this: by the time any byte is forwarded it is
+  already known to be assistant text or argument text.
+- **DONE** Preserve separate `reasoning_content`, content, and tool-call
+  channels. The thinking splitter runs upstream of the demux, so reasoning
+  never enters the envelope document.
+- **DONE** Emit stable call IDs, indexes, function types, and terminal events.
+  Identity (`index`, `id`, `type`, `function.name`) is sent once in an opening
+  delta; later deltas carry argument text keyed by the same index. A streamed
+  call reaches `finish_reason:"tool_calls"` and reuses the buffered path's
+  `call_N` id scheme, so both paths report the same id.
+- **DONE** `created` and `model` on every chunk, and `"role":"assistant"` on
+  the first delta (sent as its own opening chunk, so the contract holds even
+  when the model generates nothing).
 - Support multiple sequential or parallel calls without index drift.
-- Handle client disconnects without leaving incomplete slot state.
-- Verify structured output with speculative decoding enabled.
+  *(Not started. `parallel_tool_calls:true` is still rejected rather than
+  ignored, and the envelope is one call per turn, so `index` is always 0. The
+  streaming events are already index-keyed, which is the shape a multi-call
+  envelope will need.)*
+- **DONE** Handle client disconnects without leaving incomplete slot state. A
+  sink returning non-zero propagates out of `tool_stream_feed` and aborts
+  generation exactly as a dead content channel already did;
+  `completion_cleanup` frees the demux on every exit path.
+- Verify structured output with speculative decoding enabled. *(Not started.)*
 
 ## [carried over] Known streaming defects
 
-- **`tool_calls` are unreachable when streaming.** `tool_calls_parse` is called
-  only on the buffered path, so a streaming request that triggers a tool call
-  streams the raw internal marker to the client as ordinary content and reports
-  `finish_reason: "stop"`. The value `"tool_calls"` cannot currently be produced
-  on a stream at all.
-- **Chunks omit `created` and `model`**, which the ChatCompletionChunk schema
-  requires and the non-streaming path does emit; the first delta also omits
-  `"role":"assistant"`. Strictly-validating SDK clients reject these.
+- **DONE** ~~`tool_calls` are unreachable when streaming.~~ `tool_calls_parse`
+  was called only on the buffered path, so a streaming request that triggered a
+  tool call streamed the raw internal marker to the client as ordinary content
+  and reported `finish_reason: "stop"`. Streams now compile the same strict
+  envelope as buffered requests and demultiplex it as it is generated;
+  `"tool_calls"` is reachable on a stream.
+- **DONE** ~~Chunks omit `created` and `model`~~, which the ChatCompletionChunk
+  schema requires and the non-streaming path does emit; ~~the first delta also
+  omits `"role":"assistant"`~~. All three are now emitted.
 
 ## Exit Criteria
 
-- Buffered and streamed requests produce equivalent normalized results.
+- **DONE** Buffered and streamed requests produce equivalent normalized
+  results. Asserted directly by
+  `test_streamed_and_buffered_calls_are_equivalent` and
+  `test_streamed_final_branch_matches_the_buffered_answer` in
+  `tests/conformance/test_tool_calls.py` — same finish_reason, same tool, same
+  call id, same arguments document, same final-branch text.
 - OpenAI Python, TypeScript, and Vercel AI SDK clients accept every event.
-- Every possible token/chunk split passes the streaming test matrix.
+  *(Not verified against the real SDKs; the wire shape they require is
+  asserted by the conformance suite, but no SDK is exercised in CI.)*
+- **DONE** Every possible token/chunk split passes the streaming test matrix.
+  `test_stream_tool_call_survives_every_split_point` runs the byte-boundary
+  matrix over a stream that carries a tool call, and `test_tools.c` runs the
+  same property one level down, feeding the demux every chunking of the
+  envelope and requiring identical output.
 
 ---
 
@@ -688,8 +730,11 @@ Status is tracked here; nothing is removed when finished, only marked.
 2. ~~Strict tool schemas and structured final responses.~~ **DONE** — unknown
    schema keywords rejected, wrong-typed scalars 400, tools compile to a
    discriminated union. Buffered path only; streaming is item 3.
-3. Correct streaming tool calls. **IN PROGRESS**
-4. `/v1/responses`.
+3. ~~Correct streaming tool calls.~~ **DONE** — tool_calls stream as
+   incremental argument deltas, finish_reason "tool_calls" reachable, chunks
+   carry created/model/role, no envelope leaks into content. Single call per
+   turn; multi-call and real SDK acceptance testing remain.
+4. `/v1/responses`. **NEXT** — first public traction milestone.
 5. Anthropic Messages compatibility.
 6. Shared CUDA weights.
 7. Continuous batching.

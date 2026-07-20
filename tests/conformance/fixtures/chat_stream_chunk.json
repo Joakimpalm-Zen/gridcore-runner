@@ -2,12 +2,14 @@
   "choices": [
     {
       "delta": {
-        "content": "<redacted>"
+        "role": "assistant"
       },
       "finish_reason": null,
       "index": "<number>"
     }
   ],
+  "created": "<redacted>",
   "id": "<redacted>",
+  "model": "<redacted>",
   "object": "chat.completion.chunk"
 }

@@ -258,6 +258,168 @@ static void test_map_produces_openai_tool_call_items(void) {
     jv_free(tools);
 }
 
+// ------------------------------------------------- streaming demultiplexer
+//
+// The streaming path cannot wait for the whole document, so the same mapping
+// runs incrementally. These tests drive it ONE BYTE AT A TIME, which is the
+// worst case a real token stream can produce and the one that catches a
+// decision made on a boundary the parser happened to like.
+
+typedef struct {
+    sbuf content, args;
+    char name[64];
+    int  begins;
+} demux_log;
+
+static int log_content(void *ud, const char *b, int n) {
+    sb_put(&((demux_log *)ud)->content, b, n);
+    return 0;
+}
+static int log_begin(void *ud, const char *name) {
+    demux_log *l = ud;
+    snprintf(l->name, sizeof(l->name), "%s", name);
+    l->begins++;
+    return 0;
+}
+static int log_args(void *ud, const char *b, int n) {
+    sb_put(&((demux_log *)ud)->args, b, n);
+    return 0;
+}
+
+// feed `doc` in chunks of `step` bytes (0 == one byte at a time) and return
+// what the sink saw
+static void demux_step(const tool_envelope *e, const char *doc, size_t step,
+                       demux_log *l) {
+    memset(l, 0, sizeof(*l));
+    tool_stream_sink sink = { l, log_content, log_begin, log_args };
+    tool_stream s;
+    tool_stream_init(&s, e, &sink);
+    size_t len = strlen(doc);
+    if (!step) step = 1;
+    for (size_t i = 0; i < len; i += step) {
+        size_t k = len - i < step ? len - i : step;
+        assert(tool_stream_feed(&s, doc + i, (int)k) == 0);
+    }
+    if (tool_stream_called(&s)) assert(l->begins == 1);
+    tool_stream_free(&s);
+}
+
+static void demux(const tool_envelope *e, const char *doc, demux_log *l) {
+    demux_step(e, doc, 1, l);
+}
+
+static void log_free(demux_log *l) { free(l->content.s); free(l->args.s); }
+
+// the same property the SSE boundary matrix asserts one level up: what the
+// client sees may not depend on where the token boundaries happened to fall
+static void demux_every_split(const tool_envelope *e, const char *doc) {
+    demux_log ref;
+    demux_step(e, doc, 1, &ref);
+    for (size_t step = 2; step <= strlen(doc) + 1; step++) {
+        demux_log got;
+        demux_step(e, doc, step, &got);
+        assert(got.begins == ref.begins);
+        assert(!strcmp(got.name, ref.name));
+        assert(got.content.n == ref.content.n);
+        assert(got.args.n == ref.args.n);
+        assert(!got.content.n || !memcmp(got.content.s, ref.content.s, ref.content.n));
+        assert(!got.args.n || !memcmp(got.args.s, ref.args.s, ref.args.n));
+        log_free(&got);
+    }
+    log_free(&ref);
+}
+
+// The headline guarantee of Phase 2: a streamed call arrives as tool-call
+// arguments, never as content, and never with a byte of envelope syntax.
+static void test_stream_demux_never_leaks_the_envelope(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+
+    demux_log l;
+    demux(&e, "{\"tool\":\"get_weather\","
+              "\"args\":{\"city\":\"Oslo\",\"units\":\"c\"}}", &l);
+    assert(l.begins == 1);
+    assert(!strcmp(l.name, "get_weather"));
+    assert(l.content.n == 0);          // no content alongside a call
+    assert(l.args.s != NULL);
+    // the concatenated deltas are exactly the argument document
+    assert(!strcmp(l.args.s, "{\"city\":\"Oslo\",\"units\":\"c\"}"));
+    free(l.content.s);
+    free(l.args.s);
+
+    // the final branch is unescaped assistant text, and no call at all
+    demux(&e, "{\"tool\":\"final\",\"args\":{\"content\":\"hi\\nthere\"}}", &l);
+    assert(l.begins == 0);
+    assert(l.args.n == 0);
+    assert(l.content.s && !strcmp(l.content.s, "hi\nthere"));
+    log_free(&l);
+
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
+// A demux that decides differently depending on how the tokenizer happened to
+// split the document would leak the envelope on some requests and not others.
+static void test_stream_demux_is_boundary_independent(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+
+    demux_every_split(&e, "{\"tool\":\"add\",\"args\":{\"a\":1,\"b\":-20}}");
+    demux_every_split(&e, "{\"tool\":\"final\",\"args\":"
+                          "{\"content\":\"a \\\"quoted\\\" \\u00e5 tail\"}}");
+    // whitespace the sampler is free to emit must not reach the client
+    demux_every_split(&e, "{ \"tool\" : \"add\" , \"args\" : "
+                          "{ \"a\" : 1 , \"b\" : 2 } }");
+
+    demux_log l;
+    demux(&e, "{ \"tool\" : \"add\" , \"args\" : { \"a\" : 1 , \"b\" : 2 } }", &l);
+    assert(!strcmp(l.args.s, "{\"a\":1,\"b\":2}"));
+    log_free(&l);
+
+    // escapes are decoded exactly as the buffered mapper decodes them
+    demux(&e, "{\"tool\":\"final\",\"args\":"
+              "{\"content\":\"a \\\"q\\\" \\u00e5 \\ud83d\\ude00\"}}", &l);
+    assert(!strcmp(l.content.s, "a \"q\" \xc3\xa5 \xf0\x9f\x98\x80"));
+    log_free(&l);
+
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
+// max_tokens can cut the envelope anywhere. sval_close completes it before
+// the last bytes reach us, but a prefix that stops earlier still must not
+// leak: whatever was undecided stays held back rather than becoming content.
+static void test_stream_demux_holds_back_an_undecided_prefix(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+
+    static const char *const doc =
+        "{\"tool\":\"get_weather\",\"args\":{\"city\":\"Oslo\",\"units\":\"c\"}}";
+    char prefix[128];
+    for (size_t k = 1; k < strlen(doc); k++) {
+        memcpy(prefix, doc, k);
+        prefix[k] = 0;
+        demux_log l;
+        demux(&e, prefix, &l);
+        // nothing that arrives is ever envelope syntax
+        assert(l.content.n == 0);
+        if (l.args.n)
+            assert(l.args.s[0] == '{' && !strstr(l.args.s, "\"tool\""));
+        // and a call is only announced once the tool is actually known
+        if (l.begins) assert(!strcmp(l.name, "get_weather"));
+        log_free(&l);
+    }
+
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
 // Malformed declarations are rejected at request time. Accepting them would
 // mean compiling a union that does not describe the tools the caller has, and
 // then guaranteeing it.
@@ -380,6 +542,9 @@ int main(void) {
     test_tool_choice_none_declines_strict_mode();
     test_response_format_schema_becomes_the_final_branch();
     test_map_produces_openai_tool_call_items();
+    test_stream_demux_never_leaks_the_envelope();
+    test_stream_demux_is_boundary_independent();
+    test_stream_demux_holds_back_an_undecided_prefix();
     test_malformed_tool_declarations_are_rejected();
     test_malformed_tool_choice_is_rejected();
     test_parameterless_tool();

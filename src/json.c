@@ -70,6 +70,48 @@ static int hex4(const char *p) {
     return v;
 }
 
+int json_unescape(const char *s, size_t n, char out[4], int *outn) {
+    *outn = 0;
+    if (n < 1 || s[0] != '\\') return -1;
+    if (n < 2) return 0;
+    char simple = 0;
+    switch (s[1]) {
+        case '"':  simple = '"';  break;
+        case '\\': simple = '\\'; break;
+        case '/':  simple = '/';  break;
+        case 'b':  simple = '\b'; break;
+        case 'f':  simple = '\f'; break;
+        case 'n':  simple = '\n'; break;
+        case 'r':  simple = '\r'; break;
+        case 't':  simple = '\t'; break;
+        case 'u':  break;
+        default: return -1;
+    }
+    if (simple) { out[0] = simple; *outn = 1; return 2; }
+    if (n < 6) return 0;
+    int cp = hex4(s + 2);
+    if (cp < 0) return -1;
+    size_t used = 6;
+    if (cp >= 0xD800 && cp <= 0xDBFF) {
+        // a high surrogate is only half a character: peek for its pair, but
+        // only wait for bytes that could still be one
+        if (n < 7) return 0;
+        if (s[6] == '\\') {
+            if (n < 8) return 0;
+            if (s[7] == 'u') {
+                if (n < 12) return 0;
+                int lo = hex4(s + 8);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    used = 12;
+                }
+            }
+        }
+    }
+    *outn = u8_emit((unsigned)cp, out);
+    return (int)used;
+}
+
 // parse a string (cursor at opening quote); returns malloc'd decoded string
 static char *parse_string(jcur *c) {
     if (c->p >= c->end || *c->p != '"') return NULL;

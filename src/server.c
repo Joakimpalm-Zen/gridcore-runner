@@ -378,12 +378,44 @@ typedef struct {
     int   n_stop;
     sbuf  hold;         // held-back tail that may still begin a stop match
     bool  stopped;      // a stop sequence matched; excluded from output
+    long  created;      // stamped once: every chunk of a stream reports the
+                        // same creation time, as the buffered body does
+    bool  role_sent;    // "role":"assistant" is emitted on the first delta only
+    // strict tool envelope, streaming: the generated document is demuxed into
+    // content and tool_calls deltas as it arrives, so the envelope itself is
+    // never what the client receives
+    tool_stream tsx;
+    bool  tsx_on;
+    int   tool_index;   // OpenAI tool_calls[].index; one call per turn for now
 } gen_ctx;
+
+// common prefix of every streamed chunk. `created` and `model` are required by
+// the ChatCompletionChunk schema and strictly-validating SDKs reject a chunk
+// without them, so they are written here rather than per call site.
+static void chunk_open(gen_ctx *g, sbuf *c) {
+    sb_fmt(c, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"",
+           g->id, g->chat ? "chat.completion.chunk" : "text_completion",
+           g->created);
+    sb_esc(c, SV.model_name, strlen(SV.model_name));
+    sb_lit(c, "\",\"choices\":[{\"index\":0,");
+}
+
+// frame one built chunk body as an SSE event and push it; a failed send marks
+// the client gone, which is what aborts generation upstream
+static int chunk_send(gen_ctx *g, sbuf *c) {
+    sbuf sse = {0};
+    sb_fmt(&sse, "data: %s\n\n", c->s ? c->s : "");
+    if (c->failed || sse.failed || !send_all(g->fd, sse.s, sse.n)) g->dead = true;
+    free(c->s);
+    free(sse.s);
+    return g->dead ? 1 : 0;
+}
 
 static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
     e->schema = NULL;
     schema_free(schema);
     if (g) {
+        tool_stream_free(&g->tsx);
         think_free(&g->ts);
         free(g->hold.s);
         free(g->reason.s);
@@ -396,24 +428,65 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
 
 // emit one section of split output: reasoning goes to the OpenAI-style
 // reasoning_content field, everything else to content
+// one text delta on the named chat channel (or the legacy completion "text")
+static int send_text_delta(gen_ctx *g, int reasoning, const char *bytes, int n) {
+    if (!g->stream || g->dead) return g->dead ? 1 : 0;
+    sbuf c = {0};
+    chunk_open(g, &c);
+    if (g->chat) {
+        sb_lit(&c, "\"delta\":{");
+        if (!g->role_sent) { sb_lit(&c, "\"role\":\"assistant\","); g->role_sent = true; }
+        sb_fmt(&c, "\"%s\":\"", reasoning ? "reasoning_content" : "content");
+    } else {
+        sb_lit(&c, "\"text\":\"");
+    }
+    sb_esc(&c, bytes, n);
+    sb_lit(&c, g->chat ? "\"},\"finish_reason\":null}]}"
+                       : "\",\"finish_reason\":null}]}");
+    return chunk_send(g, &c);
+}
+
+// ---- tool_stream sinks: the demuxed envelope, as OpenAI streaming events
+
+static int sink_content(void *ud, const char *b, int n) {
+    return send_text_delta(ud, 0, b, n);
+}
+
+// the opening event of a call carries everything that identifies it; the
+// deltas that follow carry argument text only, keyed by the same index
+static int sink_call_begin(void *ud, const char *name) {
+    gen_ctx *g = ud;
+    if (g->dead) return 1;
+    sbuf c = {0};
+    chunk_open(g, &c);
+    sb_lit(&c, "\"delta\":{");
+    if (!g->role_sent) { sb_lit(&c, "\"role\":\"assistant\","); g->role_sent = true; }
+    sb_fmt(&c, "\"tool_calls\":[{\"index\":%d,\"id\":\"call_%d\","
+               "\"type\":\"function\",\"function\":{\"name\":\"",
+           g->tool_index, g->tool_index);
+    sb_esc(&c, name, strlen(name));
+    sb_lit(&c, "\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}");
+    return chunk_send(g, &c);
+}
+
+static int sink_call_args(void *ud, const char *b, int n) {
+    gen_ctx *g = ud;
+    if (g->dead) return 1;
+    sbuf c = {0};
+    chunk_open(g, &c);
+    sb_fmt(&c, "\"delta\":{\"tool_calls\":[{\"index\":%d,\"function\":"
+               "{\"arguments\":\"", g->tool_index);
+    sb_esc(&c, b, n);
+    sb_lit(&c, "\"}}]},\"finish_reason\":null}]}");
+    return chunk_send(g, &c);
+}
+
 static int emit_channel(gen_ctx *g, int reasoning, const char *bytes, int n) {
     sb_put(reasoning ? &g->reason : &g->out, bytes, n);
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
-    sbuf chunk = {0};
-    sb_fmt(&chunk, "{\"id\":\"%s\",\"object\":\"%s\",\"choices\":[{\"index\":0,",
-           g->id, g->chat ? "chat.completion.chunk" : "text_completion");
-    if (g->chat) sb_fmt(&chunk, "\"delta\":{\"%s\":\"",
-                        reasoning ? "reasoning_content" : "content");
-    else         sb_lit(&chunk, "\"text\":\"");
-    sb_esc(&chunk, bytes, n);
-    if (g->chat) sb_lit(&chunk, "\"},\"finish_reason\":null}]}");
-    else         sb_lit(&chunk, "\",\"finish_reason\":null}]}");
-    sbuf sse = {0};
-    sb_fmt(&sse, "data: %s\n\n", chunk.s);
-    if (sse.failed || !send_all(g->fd, sse.s, sse.n)) g->dead = true;
-    free(chunk.s);
-    free(sse.s);
-    return g->dead ? 1 : 0;
+    // reasoning is its own channel and never part of the envelope document
+    if (!reasoning && g->tsx_on) return tool_stream_feed(&g->tsx, bytes, n);
+    return send_text_delta(g, reasoning, bytes, n);
 }
 
 // content-channel filter for user stop sequences: bytes are staged in
@@ -733,11 +806,18 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     }
 
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .chat = chat,
-                  .stop_strs = stops, .n_stop = n_stops };
+                  .stop_strs = stops, .n_stop = n_stops,
+                  .created = (long)time(NULL) };
     snprintf(g.id, sizeof(g.id), "%s-%d", chat ? "chatcmpl" : "cmpl",
              atomic_fetch_add(&SV.req_counter, 1));
     // split thinking channels out of chat responses; raw completions stay raw
     think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);
+    if (stream && env) {
+        tool_stream_sink sink = { &g, sink_content, sink_call_begin,
+                                  sink_call_args };
+        tool_stream_init(&g.tsx, env, &sink);
+        g.tsx_on = true;
+    }
 
     if (stream) {
         const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -745,6 +825,17 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         if (!send_all(fd, hdr, strlen(hdr))) {
             completion_cleanup(e, schema, &g);
             return;
+        }
+        // OpenAI opens a chat stream with a role-only delta. Emitting it up
+        // front rather than folding the role into whatever the first text
+        // delta happens to be keeps the contract independent of what the
+        // model generates — including generating nothing at all.
+        if (chat) {
+            sbuf c = {0};
+            chunk_open(&g, &c);
+            sb_lit(&c, "\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}");
+            g.role_sent = true;
+            chunk_send(&g, &c);
         }
     }
 
@@ -758,28 +849,32 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         g.hold.n = 0;
     }
     const char *finish = g.stopped || e->hit_stop ? "stop" : "length";
+    // a streamed call reports the same terminal reason a buffered one does
+    if (g.tsx_on && tool_stream_called(&g.tsx)) finish = "tool_calls";
 
     if (stream) {
         if (!g.dead) {
-            char fin[384];
-            int fn = snprintf(fin, sizeof(fin),
-                "data: {\"id\":\"%s\",\"object\":\"%s\",\"choices\":[{\"index\":0,"
-                "%s,\"finish_reason\":\"%s\"}]}\n\n",
-                g.id, chat ? "chat.completion.chunk" : "text_completion",
-                chat ? "\"delta\":{}" : "\"text\":\"\"", finish);
-            bool ok = send_all(fd, fin, fn);
+            sbuf c = {0};
+            chunk_open(&g, &c);
+            sb_fmt(&c, "%s,\"finish_reason\":\"%s\"}]}",
+                   chat ? "\"delta\":{}" : "\"text\":\"\"", finish);
+            bool ok = chunk_send(&g, &c) == 0;
             // OpenAI stream_options {"include_usage": true}: one extra chunk
             // with empty choices and the request's token accounting — AI-SDK
             // clients (Cline et al.) request this on every stream
             if (ok && jv_bool(jv_get(jv_get(req, "stream_options"),
                                      "include_usage"), false)) {
-                fn = snprintf(fin, sizeof(fin),
-                    "data: {\"id\":\"%s\",\"object\":\"%s\",\"choices\":[],"
-                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
-                    "\"total_tokens\":%d}}\n\n",
-                    g.id, chat ? "chat.completion.chunk" : "text_completion",
-                    n_prompt, n_gen, n_prompt + n_gen);
-                ok = send_all(fd, fin, fn);
+                sbuf u = {0};
+                sb_fmt(&u, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,"
+                           "\"model\":\"", g.id,
+                       chat ? "chat.completion.chunk" : "text_completion",
+                       g.created);
+                sb_esc(&u, SV.model_name, strlen(SV.model_name));
+                sb_fmt(&u, "\",\"choices\":[],"
+                           "\"usage\":{\"prompt_tokens\":%d,"
+                           "\"completion_tokens\":%d,\"total_tokens\":%d}}",
+                       n_prompt, n_gen, n_prompt + n_gen);
+                ok = chunk_send(&g, &u) == 0;
             }
             if (ok) send_all(fd, "data: [DONE]\n\n", 14);
         }
@@ -928,21 +1023,17 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
     //
     // Strict mode compiles them into a discriminated union that constrains
     // sampling, so the model cannot name an undeclared tool or malform its
-    // arguments. It applies to buffered requests only: a stream would send
-    // the envelope to the client as raw content, and streaming tool calls
-    // are Phase 2. Streams therefore keep the legacy declare-and-parse path,
-    // unchanged.
+    // arguments. It applies to streamed requests too: the envelope is
+    // demultiplexed as it is generated (tool_stream) rather than parsed
+    // afterward, so both paths reach the same call from the same guarantee.
     jv *tools = jv_get(req, "tools");
     tool_envelope env = {0};
-    bool strict = false;
-    if (!jv_bool(jv_get(req, "stream"), false)) {
-        char terr[224];
-        int rc = tool_envelope_build(tools, jv_get(req, "tool_choice"),
-                                     request_schema(req), &env,
-                                     terr, sizeof(terr));
-        if (rc < 0) { send_error(fd, 400, terr); return; }
-        strict = rc == 1;
-    }
+    char terr[224];
+    int rc = tool_envelope_build(tools, jv_get(req, "tool_choice"),
+                                 request_schema(req), &env,
+                                 terr, sizeof(terr));
+    if (rc < 0) { send_error(fd, 400, terr); return; }
+    bool strict = rc == 1;
     if (strict) {
         // one call per turn for now; silently ignoring a request for
         // several would leave the caller expecting calls it never gets
