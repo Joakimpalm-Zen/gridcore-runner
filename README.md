@@ -349,13 +349,29 @@ env_key = "RUNNER_API_KEY"
 
 ```
 export RUNNER_API_KEY=none
-./runner -m model.gguf --serve --port 8080
+./runner -m model.gguf --serve --port 8080 -c 16384
 codex "list the files here"
 ```
 
-Use a model that was instruction-tuned for tool use — the strict envelope
-guarantees a *well-formed* call, not a well-*chosen* one. `--parallel 1` is
-fine; Codex issues one request at a time.
+Verified against `codex-cli` 0.144.6 driving Qwen3-4B: Codex emits an
+`exec_command` function call, runs it, feeds the `function_call_output` back,
+and runner answers the follow-up turn.
+
+Notes from running it for real:
+
+- **Give it context.** Codex's system prompt plus its tool declarations is
+  around 10k tokens before your question, so `-c 16384` or more. The prefix
+  cache then does the heavy lifting — the second turn of the loop above reused
+  9943 of 9962 prompt tokens.
+- **Run Codex in its normal sandbox** (the default, or `--sandbox
+  workspace-write`). In those modes Codex declares `web_search` with
+  `external_web_access: false`, which runner drops as a disabled capability.
+  Under `--dangerously-bypass-approvals-and-sandbox` Codex *enables*
+  `web_search`, and runner refuses the request rather than pretend to offer a
+  tool it cannot run.
+- Use a model instruction-tuned for tool use — the strict envelope guarantees
+  a *well-formed* call, not a well-*chosen* one.
+- `--parallel 1` is fine; Codex issues one request at a time.
 
 ## Structured output (JSON and JSON Schema)
 
