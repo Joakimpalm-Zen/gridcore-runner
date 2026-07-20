@@ -247,3 +247,91 @@ def test_embeddings_do_not_corrupt_the_next_completion(client):
     if before != after:
         raise ProtocolError("completion changed after an embeddings request "
                             "(stale KV cache)", before=before, after=after)
+
+
+# --------------------------------------------------------- downstream client
+# The suite's own agent client (gridcore-clu) drives runner through
+# /v1/chat/completions with a hand-built discriminated union in
+# `response_format`, not through tools[]. That shape therefore exercises the
+# schema compiler by a different route than test_tool_calls.py does, and a
+# change to either path could break it without any other test noticing. It is
+# pinned here so it cannot regress silently. Kept structurally identical to
+# clu/context.py:action_schema -- if that file changes shape, change this too.
+CLU_ACTION_SCHEMA = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "thinking": {"type": "string"},
+                "tool": {"const": "read_file"},
+                "args": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"},
+                                   "limit": {"type": "integer"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["thinking", "tool", "args"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "thinking": {"type": "string"},
+                "tool": {"const": "finish"},
+                "args": {
+                    "type": "object",
+                    "properties": {"summary": {"type": "string"}},
+                    "required": ["summary"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["thinking", "tool", "args"],
+            "additionalProperties": False,
+        },
+    ]
+}
+
+
+def test_clu_action_schema_still_compiles(client, report):
+    """A discriminated union built by hand in response_format, as the project's
+    own agent client sends it: `const` discriminators, nested required args and
+    additionalProperties:false on both levels."""
+    r = client.chat({"messages": [{"role": "user", "content": "read a file"}],
+                     "max_tokens": 64, "temperature": 0,
+                     "response_format": {
+                         "type": "json_schema",
+                         "json_schema": {"name": "action",
+                                         "schema": CLU_ACTION_SCHEMA}}},
+                    name="clu-action-schema").expect_status(200)
+    if r.telemetry.get("schema") is not True:
+        raise ProtocolError("the client's action schema was accepted but not "
+                            "applied as a decoding constraint",
+                            telemetry=r.telemetry)
+    _expect_json_prefix(r.content, "clu-action", report, "clu_action_schema")
+    value = _decode_constrained(r, report, "clu_action_schema", "clu-action")
+    if value is None:
+        return
+    if value.get("tool") not in ("read_file", "finish"):
+        raise SchemaError("discriminator is not one of the declared branches",
+                          got=value.get("tool"))
+    branch = next(b for b in CLU_ACTION_SCHEMA["oneOf"]
+                  if b["properties"]["tool"]["const"] == value["tool"])
+    validate_against_schema(value, branch)
+
+
+def test_clu_action_schema_streams(client, report):
+    """The same shape on the streaming path: clu renders `thinking` live, so
+    the declared key order has to survive streaming too."""
+    st = client.chat_stream({"messages": [{"role": "user", "content": "read a file"}],
+                             "max_tokens": 64, "temperature": 0,
+                             "response_format": {
+                                 "type": "json_schema",
+                                 "json_schema": {"name": "action",
+                                                 "schema": CLU_ACTION_SCHEMA}}},
+                            name="clu-action-stream").expect_sse()
+    text = st.text.lstrip()
+    if text and not text.startswith("{"):
+        raise SchemaError("streamed constrained output does not open a JSON object",
+                          text=st.text[:200])
