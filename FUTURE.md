@@ -432,21 +432,108 @@ efficient concurrent serving.
 
 ## Work
 
-- Split `model_t` into immutable shared model/backend weights and mutable
-  sequence contexts.
-- Allocate and upload CUDA weights once per resident model.
-- Give every sequence its own KV cache, positions, activations, sampler,
-  speculative state, and schema-validator state.
+- **PARTIAL** — Split `model_t` into immutable shared model/backend weights and
+  mutable sequence contexts. The *backend* half is split and shared (see
+  "Where the split actually landed" below); the `model_t` struct itself is not
+  yet two types, because every caller of it lives in `server.c`/`main.c`.
+- **DONE** — Allocate and upload CUDA weights once per resident model.
+- **DONE** — Give every sequence its own KV cache, positions, activations,
+  sampler, speculative state, and schema-validator state. These were already
+  per-instance on the host; what was missing was the device side, where the
+  KV cache and activation scratch are now the only per-slot allocations.
 - Share compiled schemas and tokenized static prefixes where immutable.
-- Update memory accounting, unloading, model swap, and failure cleanup.
-- Correct documentation around CPU, Metal, and CUDA sharing behavior.
+- **PARTIAL** — Update memory accounting, unloading, model swap, and failure
+  cleanup. Unloading, swap and failure cleanup are refcounted and verified;
+  the reservation *accounting* still bills every slot for a private copy of
+  the weights (see "Remaining for Phase 5").
+- **DONE** — Correct documentation around CPU, Metal, and CUDA sharing
+  behavior (`src/runner.h` `model_t`, `gpu_disable` in `src/metal.m`).
 
 ## Exit Criteria
 
-- `--parallel N` uses one CUDA weight allocation.
-- VRAM grows primarily by per-sequence KV and working state.
-- One failed sequence cannot corrupt another.
-- Unloading frees every shared and per-sequence allocation exactly once.
+- **DONE** — `--parallel N` uses one CUDA weight allocation.
+- **DONE** — VRAM grows primarily by per-sequence KV and working state.
+- **DONE** — One failed sequence cannot corrupt another.
+- **DONE (device side)** — Unloading frees every shared and per-sequence
+  allocation exactly once. Verified by the driver's own accounting rather than
+  by a sanitizer: ASan cannot instrument this path because the CUDA driver
+  will not enumerate devices under ASan (the sanitized run of
+  `tests/test_shared_weights.c` is a CPU run and is clean). See below.
+
+## Where the split actually landed
+
+`src/cuda.c` now has two types instead of one `gpu_t`:
+
+- `gpu_weights` — the uploaded weight blob, the `CUmodule` and every
+  `CUfunction`, the rope tables, `out_norm`, the per-layer norm/bias buffers,
+  and the CPU/GPU layer split. Refcounted, in a mutex-guarded registry keyed on
+  file identity (path + size + mtime + inode), geometry, and a `memcmp` of the
+  derived rope tables. The rope tables are part of the key on purpose: YaRN
+  auto-extension, phi3's LongRoPE factor choice, and `--rope-base`/
+  `--rope-scale` all mean one file can legitimately want different tables.
+- `gpu_t` — one per `model_t`: the device KV cache, activation scratch, host
+  staging, its own stream and captured decode graph. Nothing shared.
+
+A second loader adopts the first one's `gpu_layers` rather than re-deciding
+against a VRAM figure the first one has already reduced. That also fixes a
+latent bug: parallel slots could previously land on *different* CPU/GPU splits
+purely because of load order.
+
+### Measured (24 GB MIG slice of an RTX PRO 6000, Llama-3.1-8B Q4_K_M, `-c 2048`)
+
+Free VRAM read from `cuMemGetInfo` at each slot's init.
+
+| `--parallel` | before (total VRAM) | after (total VRAM) |
+| --- | --- | --- |
+| 1 | 5.20 GB | 5.20 GB |
+| 2 | 10.40 GB | 5.47 GB |
+| 4 | 20.80 GB | 6.02 GB |
+
+Marginal cost of one additional slot: **5.20 GB → 0.27 GB**, and 0.27 GB is
+exactly this model's f16 KV cache at 2048 context (32 layers x 1024 kv_dim x
+2 x 2 bytes). VRAM now grows by KV and nothing else, which is the criterion.
+
+### How it was verified
+
+- `scripts/kernel-verify.py` against a baseline binary built from the previous
+  HEAD: token-identical on all 5 prompts, GPU vs GPU.
+- `scripts/kernel-verify.py` CPU (`--gpu off`) vs GPU on the new binary:
+  token-identical on all 5 prompts. The invariant holds.
+- 4 concurrent requests against `--parallel 4` (one upload, 4 slots) produce
+  byte-identical completions to the same 4 prompts run one at a time against
+  `--parallel 1`. This is the "one sequence cannot corrupt another" criterion.
+- `tests/test_shared_weights.c` (`make test`, and `make test-shared-asan` for
+  the host heap) interleaves two instances against a solo reference, frees them
+  in the order that outlives the uploader, and requires free VRAM to return to
+  its pre-load value. Red-checked both ways: a refcount that never destroys
+  fails it with "4930.4 MB of VRAM still held" on the 8B model, and a refcount
+  that always destroys hangs the driver rather than passing.
+- `--draft` speculative decoding, prompt caching (`4 cached` on a repeat
+  request), `make test`, and `make smoke` all unchanged.
+
+## Remaining for Phase 5
+
+- The `model_t` struct is still one type. Splitting it into
+  `model_weights_t` + `model_ctx_t` changes the signature of `model_load`,
+  `model_free`, `model_forward*`, `engine_init` and `spec_draft_load`, and
+  every caller is in `server.c`/`main.c`. The backend sharing above was done
+  first because that is where the duplication cost gigabytes; the struct split
+  buys host-side memory (duplicated `gguf_file` parses and dequantized norm
+  weights, a few MB per slot) and clarity, not VRAM.
+- Host-side weight data is still per-instance: each slot `mmap`s the file
+  again (physical RAM is deduplicated by the page cache, so this is cheap) and
+  re-runs `tensor_to_f32` on every norm and bias.
+- Reservation accounting is now wrong in the conservative direction. The
+  `-c 0` auto-fit in `model.c` still subtracts a whole `map_size` per instance
+  when sizing the context, so slots 2..N under `--reserve-vram` get a smaller
+  context than they could now afford. It should bill the weights once and the
+  KV N times.
+- A sharing instance that cannot fit its KV cache falls back to CPU entirely
+  instead of partially offloading. Before, it would have recomputed a smaller
+  `gpu_layers`; now it adopts the shared split or nothing. Much rarer than it
+  was (a slot costs KV only), but it is a behaviour change worth closing by
+  letting a hit fall back to a prefix of the shared upload.
+- Compiled schemas and tokenized static prefixes are still per request.
 
 ## Release
 
@@ -485,6 +572,32 @@ These all stem from state that is global today and becomes per-sequence here:
   `q`, `k_tmp`, `v_tmp`, `hb`, `hb2`, `att`, `logits`, `all_logits`.
 - `engine` already holds `stop_ids`/`n_stop` per instance; the stop list is
   derived from the tokenizer and is a candidate for sharing.
+
+### Corrections to the inventory above, after doing the work
+
+The inventory was right as far as it went — every field it named landed on the
+side it predicted. Three things it missed, all of which mattered:
+
+- **`model_t` has no `path`.** The registry needs to know *which model* an
+  instance is, and nothing in the struct answered that; `model_load` took the
+  path and threw it away. A `char *path` was added.
+- **`gpu_layers` is neither.** It reads like per-instance config but it is a
+  property of the shared upload: two instances of one file that disagree about
+  it run different numbers of layers on the GPU. It belongs to the shared half
+  and per-instance values must be derived from it, not decided independently.
+- **`m->gpu` is mutable state on the "immutable" side.** `model_forward_batch`
+  writes `m->gpu = NULL` when a GPU forward fails at runtime. That was a plain
+  leak before (the backend context was orphaned, never freed) and becomes worse
+  with sharing, because an orphaned context also pins every other slot's copy of
+  the weights. It is now a `gpu_disable()` call — a real backend entry point,
+  because the correct behaviour differs per backend: CUDA can free everything
+  (the host KV copy is authoritative), while Metal must not, since its KV cache
+  *is* the GPU buffer the CPU fallback is about to read.
+
+The rope tables also turned out not to be shareable on file identity alone:
+they depend on `n_ctx` (YaRN auto-extension, phi3 LongRoPE factor choice) and
+on the `--rope-base`/`--rope-scale` overrides, so they are compared, not
+assumed.
 
 ---
 

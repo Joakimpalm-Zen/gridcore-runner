@@ -22,6 +22,7 @@ TEST_JSON_OOM = test-json-oom.exe
 TEST_TOKENIZER_OOM = test-tokenizer-oom.exe
 TEST_SCHEMA_OOM = test-schema-oom.exe
 TEST_SAMPLER = test-sampler.exe
+TEST_SHARED = test-shared-weights.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
@@ -34,6 +35,7 @@ TEST_JSON_OOM = test-json-oom
 TEST_TOKENIZER_OOM = test-tokenizer-oom
 TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
+TEST_SHARED = test-shared-weights
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
@@ -46,6 +48,7 @@ TEST_JSON_OOM = test-json-oom
 TEST_TOKENIZER_OOM = test-tokenizer-oom
 TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
+TEST_SHARED = test-shared-weights
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -99,12 +102,26 @@ $(TEST_TOKENIZER_OOM): $(TEST_TOK_OOM_SRC) src/tokenizer.c src/runner.h
 $(TEST_SCHEMA_OOM): tests/test_schema_oom.c src/schema.c src/json.c src/jsonmode.c src/runner.h
 	$(CC) $(CFLAGS) -I src tests/test_schema_oom.c src/jsonmode.c -o $@ -lm
 
+# shared model weights: needs the real model + backend, so it links the same
+# sources the runner does minus the CLI/server front end
+TEST_SHARED_SRC = tests/test_shared_weights.c src/gguf.c src/compat.c \
+                  src/quants.c src/model.c $(GPU_SRC)
+$(TEST_SHARED): $(TEST_SHARED_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_SHARED_SRC) -o $@ $(LDFLAGS)
+
+# same test under ASan/UBSan: the free-exactly-once half of it only fails
+# loudly here. Kept out of `make test` because a sanitized model load is slow.
+test-shared-asan: $(TEST_SHARED_SRC) src/runner.h test.gguf
+	$(CC) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    -std=gnu11 -Wall -I src $(TEST_SHARED_SRC) -o test-shared-asan-bin $(LDFLAGS)
+	./test-shared-asan-bin $(ASAN_MODEL)
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
-      $(TEST_TOOLS) test.gguf
+      $(TEST_TOOLS) $(TEST_SHARED) test.gguf
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)
 	./$(TEST_SCHEMA_OOM)
@@ -113,6 +130,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TOKENIZER_OOM)
 	./$(TEST_TEMPLATE)
 	./$(TEST_TOOLS)
+	./$(TEST_SHARED)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 	else \
@@ -212,7 +230,8 @@ fuzz:
 clean:
 	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
-	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE)
+	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
+	      test-shared-asan-bin
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 
@@ -223,4 +242,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test smoke fuzz fuzz-build fuzz-run
+.PHONY: clean debug ptx test smoke fuzz fuzz-build fuzz-run test-shared-asan

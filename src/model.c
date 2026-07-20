@@ -171,6 +171,12 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     memset(m, 0, sizeof(*m));
     if (!gguf_open(&m->gf, path)) return false;
     gguf_file *g = &m->gf;
+    // kept for the backend's shared-weight registry: two instances of the same
+    // file are what let `--parallel N` upload the weights once
+    size_t plen = strlen(path) + 1;
+    m->path = malloc(plen);
+    if (!m->path) return false;
+    memcpy(m->path, path, plen);
 
     const char *arch = gguf_get_str(g, "general.architecture", "?");
     snprintf(m->arch, sizeof(m->arch), "%s", arch);
@@ -530,6 +536,7 @@ void model_free(model_t *m) {
     free(m->l_head_kv); free(m->l_head_dim); free(m->l_rope_dim);
     free(m->l_is_swa); free(m->kv_off); free(m->suppress);
     free(m->layers);
+    free(m->path);
     free(m->fused_splits);
     free(m->out_norm_w);
     free(m->rope_inv_freq);
@@ -781,11 +788,14 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 if (lg && m->n_suppress) suppress_logits(m, lg);
                 return lg;
             }
-            m->gpu = NULL; // GPU failed at runtime: fall back to CPU permanently
+            // GPU failed at runtime: fall back to CPU permanently. Release the
+            // backend rather than just forgetting it — with shared weights an
+            // orphaned context also pins every other slot's copy of them.
+            gpu_disable(m);
         } else if (gpu_forward_batch(m, tokens, n, pos, false, NULL)) {
             start = m->gpu_layers;
         } else {
-            m->gpu = NULL;
+            gpu_disable(m);
         }
     }
     int n_embd = m->n_embd;

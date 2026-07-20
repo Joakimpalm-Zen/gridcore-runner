@@ -287,6 +287,16 @@ static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
+// Metal's KV cache *is* the GPU buffer (unified memory: m->kcache points at
+// g->kc.contents), and the CPU path is about to read the rows already in it.
+// Releasing the buffers here would pull them out from under the fallback, so
+// this only detaches the backend; the buffers are freed at model_free. Unlike
+// CUDA there is nothing duplicated per slot to reclaim — the weights are the
+// mmap itself, shared by the page cache.
+void gpu_disable(model_t *m) {
+    m->gpu = NULL;
+}
+
 void gpu_free(model_t *m) {
     gpu_t *g = m->gpu;
     if (!g) return;
