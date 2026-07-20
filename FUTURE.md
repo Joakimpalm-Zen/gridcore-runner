@@ -1240,6 +1240,72 @@ of strict tools, forkable agent prefixes, and quantized long-context KV.
 
 ---
 
+# RESOLVED — constrained decode can burn the whole budget and return an empty document
+
+**Fixed. Two changes, both in the validators (`src/jsonmode.c`, `src/schema.c`).**
+The original diagnosis below was half right; what the code actually did is
+recorded under "What was actually happening" at the end of this section.
+
+1. **Leading whitespace is refused.** A constrained document must begin with
+   its opening token. This is the livelock: with prose tokens rejected,
+   whitespace was the only legal move, so a model that wanted a preamble
+   emitted spaces until the budget was gone. Interior whitespace is
+   deliberately untouched — `{ "a" : "b" }` is ordinary model output, and by
+   then the document has real content in it.
+2. **`sval_close` no longer fabricates a document that was never started.** It
+   now matches the contract `jsonv_close` always had ("returns 0 if generation
+   never started an object"). Completing a document the model *started* is
+   truncation and still happens, so the truncation invariant holds; inventing
+   one it never started is fabrication, and that is what made the failure
+   invisible.
+
+The two are mutually enabling: (1) makes (2) safe, because with the livelock
+gone "nothing generated at all" only happens when the budget was genuinely
+too small to emit one token.
+
+Measured, Qwen3-4B on the reproducer, `max_tokens` 200:
+before `{"progress":"","next_step":""}` / `finish_reason: length`;
+after empty content / `finish_reason: length` — a caller now gets a parse
+error it can act on. At `max_tokens` 1024 the same request still completes
+normally (692 tokens, `finish_reason: stop`, real content).
+
+Llama-3.2-3B is byte- and token-identical before and after on four schema
+prompts (20 / 46 / 86 / 37 tokens), which is the well-behaved-model guarantee.
+
+Conformance is 222 green; the `known_gap` marker in
+`tests/conformance/test_clu_compat.py` is replaced by two real assertions
+(`test_constrained_output_opens_immediately`,
+`test_unproductive_constrained_decode_returns_nothing`).
+
+**What was actually happening.** The section below attributes the Qwen3
+reproducer to the whitespace livelock. It was not: token capture shows Qwen3
+emitting `<think>` immediately and spending all 200 tokens *inside* the
+thinking block, which the engine samples unconstrained. The livelock is real
+and was reproduced separately — the stub model with `tool_choice: required`
+and `max_tokens: 32` emitted 32 tab tokens and no document — but it was
+masked everywhere by the fabrication in (2). Both mechanisms end in the same
+force-closed empty document, which is why one diagnosis covered both.
+
+**Still open, and it needs `engine.c` (owned by the Phase 6 agent).** The
+thinking prelude itself is unbounded: `CP_THINK` sampling is free-running, so
+a model can still spend an entire budget reasoning and never reach the
+payload. The validator cannot see this — by the time `constraint_close` runs,
+`engine.c` has already reset the validator to virgin state, so `sval_close`
+cannot distinguish "budget died in a think block" from "budget died before
+token one". Two things would close it:
+
+- **Bound the prelude.** Cap prelude tokens at a fraction of `max_new` and
+  force the transition to `CP_OUTPUT` when it is hit, rather than letting the
+  think block run to the cap.
+- **Report it.** `constraint_close` knows `constraint_phase != CP_OUTPUT`, and
+  `sval_close` now returns 0 for "nothing generated". Either signal could give
+  `server.c` a distinct `finish_reason` (or an error) instead of `length`, so
+  the failure is named rather than merely empty.
+
+---
+
+## Original report
+
 # URGENT — constrained decode can burn the whole budget and return an empty document
 
 Found by driving Clu (the suite's primary consumer) end to end, and reproduced
@@ -1266,6 +1332,7 @@ framing understates it, since it bites production models on the primary
 consumer's real prompts.
 
 Pinned by a known_gap test in tests/conformance/test_clu_compat.py.
+(That marker is gone; see the resolution above for what replaced it.)
 
 ---
 

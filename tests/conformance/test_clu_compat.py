@@ -26,8 +26,6 @@ rejected forms that a stricter gate could plausibly catch them by accident.
 
 import json
 
-import pytest
-
 from harness import ProtocolError
 
 # Clu's real tool surface (gridcore_toolbox.ARG_KEYS) as of this writing.
@@ -197,42 +195,68 @@ def test_unnamed_model_is_accepted_on_a_single_model_server(client):
                 name="clu-model-tag").expect_status(200)
 
 
-# ------------------------------------------------------------- known gaps
-@pytest.mark.known_gap(
-    phase="constrained-decode termination",
-    what="a schema-constrained decode permits unbounded leading whitespace, so "
-         "a model that would rather emit a preamble (prose, or a thinking "
-         "block) is clamped to whitespace and can spend its entire max_tokens "
-         "budget without reaching the opening brace; the document is then "
-         "force-closed with empty values and reported finish_reason=length")
-def test_leading_whitespace_livelock_is_pinned(client, report):
-    """Pin the whitespace livelock that costs Clu its compaction summaries.
+# ------------------------------------------- constrained-decode termination
+def test_constrained_output_opens_immediately(client):
+    """A schema-constrained document must begin with its opening token.
 
-    This was measured against real models, not the stub: Llama-3.2-3B-Instruct
-    and Qwen3-4B, given Clu's actual compaction prompt, spend the whole budget
-    on whitespace and return `{"progress":"","facts":[],...}` — a
-    schema-*valid*, information-free document. Clu raises no exception on it,
-    so its documented "summary failed, keep going with a placeholder" fallback
-    never fires and the distilled state is silently lost.
+    This was the whitespace livelock that cost Clu its compaction summaries.
+    A model that would rather emit a preamble (prose, or a thinking block)
+    found every prose token rejected and whitespace the only legal move, so it
+    could spend the entire max_tokens budget without ever reaching the opening
+    brace. The document was then force-closed with empty values and returned
+    as `{"progress":"","facts":[],...}` with finish_reason=length — schema
+    *valid*, information-free, and indistinguishable from a real answer, so
+    Clu's "summary failed, use a placeholder" fallback never fired and the
+    distilled session state was silently replaced with nothing.
 
-    The assertion is deliberately weak (the stub model's behaviour is not the
-    point); the marker carries the finding. When constrained decode learns to
-    stop at document completion, rewrite this test."""
+    Leading whitespace is now refused by the validator, so the only legal
+    first token is one that opens the document. Interior whitespace is
+    untouched — `{ "a" : "b" }` is ordinary model output.
+    """
     r = client.chat(_schema_request(CLU_SUMMARY_SCHEMA, max_tokens=128),
-                    name="clu-whitespace-livelock")
+                    name="clu-opens-immediately")
     r.expect_status(200)
     try:
         content = r.content
     except ProtocolError:
-        return  # stub-model byte soup; the marker carries the finding
-    if r.finish_reason == "length" and not content.lstrip().startswith("{"):
-        report.note_quality("clu-whitespace-livelock",
-                            "whole token budget spent before the document "
-                            "opened", bytes=len(content))
-    if content.strip():
-        # whatever came back, a closed document must still parse
-        try:
-            json.loads(content)
-        except ValueError:
-            assert r.finish_reason == "length", (
-                "an unparseable document must at least be reported truncated")
+        # The stub model emits near-random token ids, so the cap can split a
+        # multi-byte UTF-8 sequence. Not a statement about this behaviour.
+        return
+    if not content:
+        return          # nothing generated at all — asserted below
+    assert content[0] == "{", (
+        "a constrained document must open with its first byte, not whitespace",
+        repr(content[:32]))
+
+
+def test_unproductive_constrained_decode_returns_nothing(client):
+    """An empty document must never be invented on the caller's behalf.
+
+    If the budget really does run out before the model produces anything,
+    Runner returns empty content rather than synthesizing a conforming
+    document out of nothing. A caller then gets a parse error it can act on —
+    retry, raise, fall back — instead of a well-formed record of nothing.
+    Completing a document the model *started* is truncation and still
+    happens; inventing one it never started is fabrication.
+
+    Measured on Qwen3-4B, which spends its budget inside a `<think>` block:
+    before this, `{"progress":"","next_step":""}` / finish_reason=length;
+    now, empty content / finish_reason=length.
+    """
+    r = client.chat(_schema_request(CLU_SUMMARY_SCHEMA, max_tokens=128),
+                    name="clu-no-fabricated-document")
+    r.expect_status(200)
+    try:
+        content = r.content
+    except ProtocolError:
+        return
+    if not content.strip():
+        # nothing generated: it must be reported as truncated, not as a
+        # finished answer
+        assert r.finish_reason == "length", (
+            "an empty constrained answer must be reported truncated",
+            r.finish_reason)
+        return
+    # anything actually generated still has to parse and conform
+    doc = json.loads(content)
+    assert set(doc) <= set(CLU_SUMMARY_SCHEMA["properties"]), doc

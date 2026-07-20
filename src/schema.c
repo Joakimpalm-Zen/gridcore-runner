@@ -773,6 +773,27 @@ static bool num_complete(uint8_t st) {
     return st == N_ZERO || st == N_INT || st == N_FRAC || st == N_EXP;
 }
 
+// A constrained document must begin with its opening token: whitespace before
+// the root value opens is refused (-1), whitespace before any nested value is
+// consumed as usual (0).
+//
+// Leading whitespace is where constrained decode livelocks. A model that
+// would rather emit a preamble has every prose token rejected, leaving spaces
+// and newlines as the only legal continuations — so it emits those until the
+// budget is gone and never reaches the opening brace. The result used to be a
+// force-closed document with empty values that parsed cleanly, so no caller
+// could tell. Refusing the very first whitespace byte costs a well-behaved
+// model nothing (there is always a token starting with the opening character)
+// and denies the livelock its fuel.
+//
+// The ban stops at the root. Interior whitespace is how models pretty-print —
+// `{ "a" : "b" }` is Llama-3.2's ordinary output — and bounding it there would
+// break well-behaved models for no gain, since by then the document has real
+// content in it.
+static int leading_ws_ok(const sval *v) {
+    return v->depth > 1 ? 0 : -1;
+}
+
 // feed one byte; returns -1 invalid, 0 consumed, 1 reconsume (frame popped)
 static int feed_byte(sval *v, uint8_t c) {
     if (v->done) return -1; // nothing after the root value
@@ -782,7 +803,7 @@ static int feed_byte(sval *v, uint8_t c) {
     // generic any-value subtree
     if (n->kind == SN_ANY) {
         if (f->phase == P_START) {
-            if (is_ws(c)) return 0;
+            if (is_ws(c)) return leading_ws_ok(v);
             if (n->min_items) jsonv_init(&v->any);      // object-rooted
             else              jsonv_init_any(&v->any);  // any value
             f->phase = P_STR; // "running"
@@ -800,7 +821,7 @@ static int feed_byte(sval *v, uint8_t c) {
 
     switch (f->phase) {
     case P_START:
-        if (is_ws(c)) return 0;
+        if (is_ws(c)) return leading_ws_ok(v);
         switch (n->kind) {
         case SN_COND: {
             int choice = frame_choice(v, v->depth - 1);
@@ -1106,12 +1127,20 @@ static void close_obj(emitq *q, const snode *n, int from, bool need_comma,
 int sval_close(sval *v, char *out, int cap) {
     emitq q = { out, cap, 0 };
     if (v->done) { out[0] = 0; return 0; }
-    // nothing generated at all: emit a full minimal document
-    if (v->depth == 1 && v->stack[0].phase == P_START &&
-        v->stack[0].node->kind != SN_ANY) {
-        emit_min_choice(&q, v->stack[0].node, 0, -1);
-        out[q.n] = 0;
-        return q.n;
+    // Nothing generated at all — the root value never opened, so there is no
+    // partial document to complete. Emit nothing.
+    //
+    // This branch used to synthesize a full minimal document instead, which
+    // made an unproductive decode indistinguishable from a real answer: a
+    // budget spent entirely on a reasoning prelude came back as
+    // `{"progress":"","next_step":""}` with finish_reason "length", parsing
+    // and conforming while carrying nothing the model actually produced.
+    // Completing a document the model started is truncation; inventing one it
+    // never started is fabrication, and a caller must be able to tell the
+    // difference. jsonv_close has always drawn that line the same way.
+    if (v->depth == 1 && v->stack[0].phase == P_START) {
+        out[0] = 0;
+        return 0;
     }
     while (v->depth > 0) {
         sframe *f = &v->stack[v->depth - 1];

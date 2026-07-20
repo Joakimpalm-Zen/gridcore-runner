@@ -71,6 +71,117 @@ static void test_schema_required_close(void) {
     jv_free(schema_json);
 }
 
+// A constrained document must begin with its opening token.
+//
+// Leading whitespace is the livelock that burns the budget. A model that
+// would rather write a preamble finds every prose token rejected, and the
+// only legal bytes left are spaces and newlines — so it emits those, forever,
+// and never reaches the opening brace. Measured on the stub model with
+// tool_choice=required and max_tokens=32: 32 tab tokens and no document.
+//
+// Whitespace *inside* the document is untouched: it is how a real model
+// pretty-prints, and Llama-3.2 emits `{ "a" : "b" }` spacing on every call.
+// Only the run before the root value opens is banned, because that is the
+// only position where burning whitespace yields a document with no content
+// in it at all.
+static void test_leading_whitespace_is_refused_but_interior_is_kept(void) {
+    const char *src =
+        "{\"type\":\"object\",\"properties\":{"
+        "\"a\":{\"type\":\"string\"},"
+        "\"b\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}"
+        "},\"required\":[\"a\",\"b\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    // every flavour of leading whitespace is refused outright
+    const char *ws[] = { " ", "\n", "\t", "\r", "\n\n  " };
+    for (size_t i = 0; i < sizeof(ws) / sizeof(*ws); i++) {
+        sval_init(&v, schema);
+        assert(!sval_feed(&v, ws[i], (int)strlen(ws[i])));
+    }
+
+    // the opening token itself is of course still fine
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "{", 1));
+
+    // ...and interior whitespace, in every position a model uses it, is
+    // accepted exactly as before: this is Llama-3.2's real output shape
+    const char *pretty =
+        "{\n  \"a\" : \"x\" ,\n  \"b\" : [ \"p\" , \"q\" ]\n}";
+    sval_init(&v, schema);
+    assert(sval_feed(&v, pretty, (int)strlen(pretty)));
+    assert(v.done);
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
+// json mode (no schema) draws the same line through the same states.
+static void test_json_mode_leading_whitespace_is_refused(void) {
+    jsonv v;
+    jsonv_init(&v);
+    assert(!jsonv_feed(&v, " ", 1));
+    jsonv_init(&v);
+    assert(!jsonv_feed(&v, "\n\n", 2));
+
+    jsonv_init(&v);
+    const char *pretty = "{\n  \"a\" : [ 1 , 2 ] ,\n  \"b\" : null\n}";
+    assert(jsonv_feed(&v, pretty, (int)strlen(pretty)));
+    assert(v.done);
+}
+
+// A close() with no generated payload behind it used to invent a complete,
+// schema-valid document out of nothing: `{"progress":"","next_step":""}`.
+// That is indistinguishable from an answer the model actually produced, so a
+// caller could not tell that its whole token budget had gone on a reasoning
+// prelude that never reached the opening brace. Measured on Qwen3-4B, this
+// silently replaced Clu's compaction summaries with empty session state.
+//
+// jsonv_close has always declined to fabricate ("returns 0 if generation
+// never started an object"); sval_close must honour the same contract, so an
+// unproductive decode fails visibly instead of parsing as a real answer.
+static void test_schema_close_without_payload_fabricates_nothing(void) {
+    const char *src =
+        "{\"type\":\"object\",\"properties\":{"
+        "\"progress\":{\"type\":\"string\"},"
+        "\"next_step\":{\"type\":\"string\"}"
+        "},\"required\":[\"progress\",\"next_step\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    char out[256];
+
+    // nothing fed at all
+    sval v;
+    sval_init(&v, schema);
+    out[0] = 'x';
+    assert(sval_close(&v, out, sizeof(out)) == 0);
+    assert(out[0] == 0);
+
+    // the moment the document opens, truncation must still complete it
+    sval_init(&v, schema);
+    assert(sval_feed(&v, "{", 1));
+    int n = sval_close(&v, out, sizeof(out));
+    assert(n > 0);
+    char full[512];
+    snprintf(full, sizeof(full), "{%s", out);
+    jv *parsed = json_parse(full, strlen(full));
+    assert(parsed != NULL);
+    assert(jv_get(parsed, "progress") != NULL);
+    assert(jv_get(parsed, "next_step") != NULL);
+    jv_free(parsed);
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 // An empty "type" array compiled to a union with no alternatives. pick_alt
 // then matched no byte, so sampling stalled and the forced-completion path
 // read alts[0] out of a zero-byte allocation: a single unauthenticated
@@ -391,22 +502,24 @@ static void test_schema_string_minlength_full_close(void) {
     assert(schema != NULL);
 
     sval v;
-    sval_init(&v, schema);
     char out[128];
-    int n = sval_close(&v, out, sizeof(out));
-    assert(n > 0);
-    jv *parsed = json_parse(out, strlen(out));
-    assert(parsed != NULL);
-    assert(strlen(jv_str(jv_get(parsed, "name"), "")) >= 3);
-    jv_free(parsed);
+
+    // Closing a decode that never opened the document emits nothing: there is
+    // no partial value to pad out. (This used to return a fabricated
+    // `{"name":"   "}`; see
+    // test_schema_close_without_payload_fabricates_nothing for why that had
+    // to stop.) minLength padding is exercised below, where the model really
+    // did start the string.
+    sval_init(&v, schema);
+    assert(sval_close(&v, out, sizeof(out)) == 0);
 
     sval_init(&v, schema);
     assert(sval_feed(&v, "{\"name\":", 8));
-    n = sval_close(&v, out, sizeof(out));
+    int n = sval_close(&v, out, sizeof(out));
     assert(n > 0);
     char full[256];
     snprintf(full, sizeof(full), "{\"name\":%s", out);
-    parsed = json_parse(full, strlen(full));
+    jv *parsed = json_parse(full, strlen(full));
     assert(parsed != NULL);
     assert(strlen(jv_str(jv_get(parsed, "name"), "")) >= 3);
 
@@ -698,6 +811,9 @@ int main(void) {
     test_strict_bounded_numbers();
     test_json_close_partial_string();
     test_schema_required_close();
+    test_leading_whitespace_is_refused_but_interior_is_kept();
+    test_json_mode_leading_whitespace_is_refused();
+    test_schema_close_without_payload_fabricates_nothing();
     test_schema_rejects_empty_type_union();
     test_schema_huge_min_bounds_terminate();
     test_schema_rejects_bad_bounds();

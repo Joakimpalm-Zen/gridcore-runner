@@ -71,7 +71,14 @@ static bool feed_byte(jsonv *v, uint8_t c, bool *reconsume) {
     *reconsume = false;
     switch (v->st) {
     case S_START:
-        if (is_ws(c)) return true;
+        // A constrained document must begin with its opening token. Leading
+        // whitespace is refused because it is the one position where a model
+        // can burn its whole budget without producing any content: with every
+        // other byte illegal, spaces and newlines are the only moves left, and
+        // the decode livelocks until max_tokens forces a close. Interior
+        // whitespace stays legal throughout (see S_VALUE, S_AFTER, and the
+        // rest) — that is ordinary pretty-printing, and by then the document
+        // has real content in it. See leading_ws_ok() in schema.c.
         if (c == '{') { v->st = S_KEY_OR_END; return push(v, 'O'); }
         return false;
 
