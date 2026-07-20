@@ -145,7 +145,7 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
 
 // ------------------------------------------------- thinking-tag splitter
 
-// gemma4 interleaves channel blocks with plain text anywhere in a response
+// Some models interleave thinking blocks with plain text anywhere in a response
 // (thought . answer . thought . ...), so the splitter scans the whole stream:
 // bytes between open and close tags are reasoning, the rest is content. The
 // last strlen(tag)-1 bytes are held back while scanning so a tag split across
@@ -292,4 +292,3 @@ int tool_calls_parse(sbuf *content, sbuf *tc) {
     if (n_calls) content->n = (int)(w - content->s);
     return n_calls;
 }
-

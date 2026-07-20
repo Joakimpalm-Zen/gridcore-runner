@@ -215,7 +215,7 @@ typedef struct {
     float     logit_softcap; // final logits = c*tanh(x/c) when > 0
     int32_t  *suppress;      // token ids forced to -inf in the logits
     int       n_suppress;    // (tokenizer.ggml.suppress_tokens)
-    const char *think_open, *think_close; // thinking-tag pair (gemma4), or NULL
+    const char *think_open, *think_close; // architecture thinking-tag pair, or NULL
     gguf_tensor *tok_embd;
     gguf_tensor *output;     // may equal tok_embd (tied)
     float       *out_norm_w;
@@ -427,8 +427,8 @@ void tools_render(const struct jv *tools, struct sbuf *out);
 // returns the call count, content is compacted in place
 int  tool_calls_parse(struct sbuf *content, struct sbuf *tc);
 
-// streaming splitter for thinking-tag models (gemma4 channels): bytes between
-// open and close tags — anywhere in the stream, gemma4 interleaves them with
+// streaming splitter for thinking-tag models: bytes between
+// open and close tags, including architectures that interleave them with
 // plain text — reach the callback as reasoning (reasoning=1), the rest as
 // content (reasoning=0). Partial tags at chunk boundaries are held back until
 // they resolve. With open == NULL every byte passes straight through.
@@ -464,6 +464,11 @@ typedef struct {
     const snode *schema;   // constrain output to a JSON schema (overrides json_mode)
     sval  sv;
     jsonv jv;
+    // constrained thinking-tag prelude: probe for think_open, sample freely
+    // through think_close, then enforce sv/jv and emit only the payload
+    uint8_t constraint_phase;
+    bool    constraint_tag_possible;
+    int     constraint_tag_match, constraint_close_match;
     bool progress;         // print prompt progress to stderr
     int32_t *hist;         // tokens whose KV occupies slots [0, pos)
     // optional per-token logprob capture (server "logprobs"): caller points

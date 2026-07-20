@@ -189,6 +189,12 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         for (int i = 0; i < m->n_layer; i++)
             m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % pattern) != 0;
     }
+    if (strcmp(arch, "qwen3") == 0) {
+        // Thinking-tuned Qwen3 responses wrap hidden reasoning before the
+        // visible answer; shared CLI/server output handling splits this pair.
+        m->think_open  = "<think>";
+        m->think_close = "</think>";
+    }
     if (strcmp(arch, "gemma4") == 0) {
         // gemma4 (reference: llama.cpp src/models/gemma4.cpp): heterogeneous
         // layers — per-layer kv heads and head dims (global 512 / sliding

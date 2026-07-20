@@ -138,7 +138,7 @@ static int discard_cb(void *ud, const char *bytes, int n) {
 }
 
 // chat-mode display: thinking channels are shown between [thinking] markers
-// instead of leaking the raw <|channel> tags
+// instead of leaking the architecture's raw thinking tags
 typedef struct {
     think_split ts;
     bool in_think;

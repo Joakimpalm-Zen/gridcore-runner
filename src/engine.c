@@ -10,6 +10,16 @@
 
 double now_s(void) { return plat_now(); }
 
+enum { CP_PROBE, CP_THINK, CP_OUTPUT };
+
+static void constraint_reset(engine *e) {
+    e->constraint_phase = e->m && e->m->think_open && e->m->think_close
+                            ? CP_PROBE : CP_OUTPUT;
+    e->constraint_tag_possible = e->constraint_phase == CP_PROBE;
+    e->constraint_tag_match = 0;
+    e->constraint_close_match = 0;
+}
+
 void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     free(e->hist); // slot engines are re-inited on model swap; e must be zeroed
     memset(e, 0, sizeof(*e));
@@ -29,6 +39,7 @@ void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
         if (!dup) e->stop_ids[e->n_stop++] = id;
     }
     jsonv_init(&e->jv);
+    constraint_reset(e);
     e->hist = malloc(sizeof(int32_t) * m->n_ctx);
 }
 
@@ -38,6 +49,7 @@ void engine_reset(engine *e) {
     sampler_reset(e->smp);
     jsonv_init(&e->jv);
     if (e->schema) sval_init(&e->sv, e->schema);
+    constraint_reset(e);
     e->dpos = 0;
 }
 
@@ -56,6 +68,7 @@ int engine_rewind(engine *e, const int32_t *toks, int n) {
     for (int i = 0; i < keep; i++) sampler_accept(e->smp, toks[i]);
     jsonv_init(&e->jv);
     if (e->schema) sval_init(&e->sv, e->schema);
+    constraint_reset(e);
     return keep;
 }
 
@@ -117,26 +130,160 @@ float *engine_feed(engine *e, const int32_t *toks, int n) {
     return logits;
 }
 
-// validity filter for JSON mode: token must keep output a valid JSON prefix;
-// stop/control tokens are allowed only once the object is complete
-static bool schema_ok(void *ud, int id) {
-    engine *e = ud;
-    if (is_stop(e, id) || tok_is_control(e->tok, id)) return e->sv.done;
+// Advance a tag-prefix match by one byte, retaining the longest suffix that
+// can still begin the tag. Tags are tiny, so the direct overlap check keeps
+// this state self-contained without another allocation or public parser API.
+static int tag_advance(const char *tag, int match, char c) {
+    int tl = (int)strlen(tag);
+    int max = match + 1 < tl ? match + 1 : tl;
+    for (int k = max; k > 0; k--) {
+        int start = match + 1 - k;
+        bool same = true;
+        for (int j = 0; j < k; j++) {
+            int at = start + j;
+            char got = at < match ? tag[at] : c;
+            if (got != tag[j]) { same = false; break; }
+        }
+        if (same) return k;
+    }
+    return 0;
+}
+
+static bool constraint_payload_feed(engine *e, bool schema,
+                                    const char *bytes, int n) {
+    if (schema) {
+        sval tmp = e->sv;
+        if (!sval_feed(&tmp, bytes, n)) return false;
+        e->sv = tmp;
+    } else {
+        jsonv tmp = e->jv;
+        if (!jsonv_feed(&tmp, bytes, n)) return false;
+        e->jv = tmp;
+    }
+    return true;
+}
+
+static void constraint_payload_reset(engine *e, bool schema) {
+    if (schema) sval_init(&e->sv, e->schema);
+    else        jsonv_init(&e->jv);
+}
+
+// Feed one decoded token through the optional thinking prelude and then the
+// JSON/schema validator. On success, *visible is the first byte belonging to
+// the constrained payload, or -1 when this token is entirely prelude/tag.
+// The function mutates only its engine argument, so sample lookahead calls it
+// on a shallow engine copy and acceptance calls it on the real engine.
+static bool constraint_feed(engine *e, bool schema, const char *bytes, int n,
+                            int *visible) {
+    *visible = -1;
+    if (e->constraint_phase == CP_OUTPUT) {
+        if (!constraint_payload_feed(e, schema, bytes, n)) return false;
+        *visible = 0;
+        return true;
+    }
+
+    const char *open = e->m->think_open;
+    const char *close = e->m->think_close;
+    if (e->constraint_phase == CP_THINK) {
+        int cl = (int)strlen(close);
+        for (int i = 0; i < n; i++) {
+            e->constraint_close_match = tag_advance(
+                close, e->constraint_close_match, bytes[i]);
+            if (e->constraint_close_match != cl) continue;
+            e->constraint_phase = CP_OUTPUT;
+            e->constraint_close_match = 0;
+            constraint_payload_reset(e, schema);
+            int at = i + 1;
+            if (at < n && !constraint_payload_feed(e, schema, bytes + at, n - at))
+                return false;
+            if (at < n) *visible = at;
+            return true;
+        }
+        return true;
+    }
+
+    // CP_PROBE keeps both safe starts alive: a direct constrained payload, or
+    // optional leading whitespace followed by the declared opening tag.
+    bool payload_ok;
+    sval sv = e->sv;
+    jsonv jv = e->jv;
+    if (schema) payload_ok = sval_feed(&sv, bytes, n);
+    else        payload_ok = jsonv_feed(&jv, bytes, n);
+
+    int ol = (int)strlen(open);
+    bool tag_ok = e->constraint_tag_possible;
+    int match = e->constraint_tag_match;
+    for (int i = 0; tag_ok && i < n; i++) {
+        char c = bytes[i];
+        if (match == 0 && (c == ' ' || c == '\n' || c == '\r' || c == '\t'))
+            continue;
+        if (c != open[match]) { tag_ok = false; break; }
+        match++;
+        if (match != ol) continue;
+
+        e->constraint_phase = CP_THINK;
+        e->constraint_tag_possible = false;
+        e->constraint_tag_match = 0;
+        e->constraint_close_match = 0;
+        constraint_payload_reset(e, schema);
+        int sub = -1;
+        if (i + 1 < n &&
+            !constraint_feed(e, schema, bytes + i + 1, n - i - 1, &sub))
+            return false;
+        if (sub >= 0) *visible = i + 1 + sub;
+        return true;
+    }
+
+    if (!payload_ok && !tag_ok) return false;
+    if (payload_ok) {
+        if (schema) e->sv = sv;
+        else        e->jv = jv;
+    }
+    e->constraint_tag_possible = tag_ok;
+    e->constraint_tag_match = tag_ok ? match : 0;
+    if (!tag_ok) {
+        e->constraint_phase = CP_OUTPUT;
+        *visible = 0;
+    }
+    // Ambiguous leading whitespace is deliberately held back. It is optional
+    // JSON whitespace if the payload wins, and prelude whitespace otherwise.
+    return true;
+}
+
+static bool constraint_done(const engine *e, bool schema) {
+    return e->constraint_phase == CP_OUTPUT &&
+           (schema ? e->sv.done : e->jv.done);
+}
+
+// validity filter for constrained mode. Before a declared thinking block
+// closes, ordinary tokens are allowed; stop/control tokens remain valid only
+// inside that prelude or after the constrained payload is complete.
+static bool constraint_token_ok(engine *e, int id, bool schema) {
+    if (is_stop(e, id) || tok_is_control(e->tok, id))
+        return e->constraint_phase == CP_THINK || constraint_done(e, schema);
     char buf[512];
     int n = tok_decode(e->tok, id, buf, sizeof(buf));
-    if (n == 0) return e->sv.done;
-    sval tmp = e->sv;
-    return sval_feed(&tmp, buf, n);
+    if (n == 0)
+        return e->constraint_phase == CP_THINK || constraint_done(e, schema);
+    engine tmp = *e;
+    int visible;
+    return constraint_feed(&tmp, schema, buf, n, &visible);
+}
+
+static bool schema_ok(void *ud, int id) {
+    return constraint_token_ok(ud, id, true);
 }
 
 static bool json_ok(void *ud, int id) {
-    engine *e = ud;
-    if (is_stop(e, id) || tok_is_control(e->tok, id)) return e->jv.done;
-    char buf[512];
-    int n = tok_decode(e->tok, id, buf, sizeof(buf));
-    if (n == 0) return e->jv.done;
-    jsonv tmp = e->jv;
-    return jsonv_feed(&tmp, buf, n);
+    return constraint_token_ok(ud, id, false);
+}
+
+static int constraint_accept(engine *e, bool schema, const char *bytes, int n,
+                             gen_cb cb, void *ud) {
+    int visible;
+    if (!constraint_feed(e, schema, bytes, n, &visible)) return 1;
+    return cb && visible >= 0 && visible < n
+             ? cb(ud, bytes + visible, n - visible) : 0;
 }
 
 // logprob capture: raw-logit log-softmax stats taken BEFORE sample_pick
@@ -181,6 +328,14 @@ static void lp_capture_pre(engine *e, const float *logits, lp_pre *p) {
 // budget expired mid-document: complete it so constrained output stays valid
 // JSON (the caller's finish_reason stays "length")
 static void constraint_close(engine *e, gen_cb cb, void *ud) {
+    // A hard token ceiling may land inside the reasoning prelude. Preserve the
+    // constrained-output contract by synthesizing the same minimal valid tail
+    // used for an ordinary mid-document ceiling; reasoning tokens still count
+    // toward max_new and no extra model sampling occurs here.
+    if ((e->schema || e->json_mode) && e->constraint_phase != CP_OUTPUT) {
+        constraint_payload_reset(e, e->schema != NULL);
+        e->constraint_phase = CP_OUTPUT;
+    }
     if (e->schema && !e->sv.done) {
         char cbuf[4096];
         int cn = sval_close(&e->sv, cbuf, sizeof(cbuf));
@@ -260,21 +415,22 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                 e->hit_stop = true;
                 e->pos += i; // keep the accepted drafts' KV
                 if (e->dpos > e->pos) e->dpos = e->pos;
-                if (gen_time) *gen_time = now_s() - t0;
-                SPEC_STATS();
-                return n_gen;
+                goto done;
             }
             int n = tok_decode(e->tok, tok, buf, sizeof(buf));
-            if (e->schema && n > 0) sval_feed(&e->sv, buf, n);
-            else if (e->json_mode && n > 0) jsonv_feed(&e->jv, buf, n);
-            int rc = cb && n > 0 ? cb(ud, buf, n) : 0;
+            int rc = e->schema && n > 0
+                       ? constraint_accept(e, true, buf, n, cb, ud)
+                   : e->json_mode && n > 0
+                       ? constraint_accept(e, false, buf, n, cb, ud)
+                   : cb && n > 0 ? cb(ud, buf, n) : 0;
             n_gen++;
-            bool constraint_done = (e->schema && e->sv.done) ||
-                                   (!e->schema && e->json_mode && e->jv.done);
+            bool constrained_done = e->schema
+                                      ? constraint_done(e, true)
+                                      : e->json_mode && constraint_done(e, false);
             if (i < nd && tok == d[i] && rc == 0) {
                 e->hist[e->pos + i] = tok; // accepted: its KV is already right
                 st_accepted++;
-                if (constraint_done) {
+                if (constrained_done) {
                     e->hit_stop = true;
                     e->pos += i + 1;
                     if (e->dpos > e->pos) e->dpos = e->pos;
@@ -286,7 +442,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             }
             // mismatch, bonus position, or aborted: forward the real token
             e->pos += i;
-            if (constraint_done) {
+            if (constrained_done) {
                 e->hit_stop = true;
                 if (e->dpos > e->pos) e->dpos = e->pos;
                 if (gen_time) *gen_time = now_s() - t0;
@@ -354,11 +510,15 @@ int engine_generate(engine *e, float *logits, int max_new,
             e->lp_count++;
         }
         int n = tok_decode(e->tok, tok, buf, sizeof(buf));
-        if (e->schema && n > 0) sval_feed(&e->sv, buf, n);
-        else if (e->json_mode && n > 0) jsonv_feed(&e->jv, buf, n);
-        if (cb && n > 0 && cb(ud, buf, n) != 0) { n_gen++; break; }
+        int rc = e->schema && n > 0
+                   ? constraint_accept(e, true, buf, n, cb, ud)
+               : e->json_mode && n > 0
+                   ? constraint_accept(e, false, buf, n, cb, ud)
+               : cb && n > 0 ? cb(ud, buf, n) : 0;
+        if (rc != 0) { n_gen++; break; }
         n_gen++;
-        if ((e->schema && e->sv.done) || (!e->schema && e->json_mode && e->jv.done)) {
+        if ((e->schema && constraint_done(e, true)) ||
+            (!e->schema && e->json_mode && constraint_done(e, false))) {
             e->hit_stop = true;
             break;
         }
