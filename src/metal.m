@@ -73,6 +73,14 @@ static id<MTLBuffer> f32_buf(id<MTLDevice> dev, const float *src, size_t n) {
 
 static float *gpu_forward(model_t *m, int token, int pos);
 
+bool gpu_kv_q8_ok(void) {
+    // The Metal kernels and the host<->device KV copies still speak fp16 only;
+    // porting them is the remaining half of Phase 8. Returning false here keeps
+    // `--kv q8` from silently handing q8_0 blocks to an fp16 reader on macOS:
+    // the cache falls back to f16 (with a note) unless --gpu off is used.
+    return false;
+}
+
 bool gpu_init(model_t *m) {
     if (m->swa_window > 0 || m->embd_scale != 1.0f) {
         fprintf(stderr, "gpu: '%s' (sliding-window attention) is not on the metal backend yet — using CPU\n",

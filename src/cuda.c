@@ -241,7 +241,9 @@ typedef struct {
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, neox; float mscale; } rope_args;
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx; uint64_t l_off; float scale; int qs, os, window; } attn_args;
+// l_off is a BYTE offset: the cache is fp16 or q8_0 depending on m->kv_q8,
+// so element indexing is not enough (see the kv storage block in kernels.cu)
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx; uint64_t l_off; float scale; int qs, os, window, q8; } attn_args;
 
 bool gpu_available(char *name, int cap) {
     if (!cu_load()) return false;
@@ -298,6 +300,10 @@ static CUdeviceptr f32_dbuf(const float *src, size_t n) {
     return d;
 }
 
+bool gpu_kv_q8_ok(void) {
+    return true;    // k_store_kv / k_attn / k_attn_dec all read q8_0 blocks
+}
+
 bool gpu_init(model_t *m) {
     // every weight matmul must have a kernel for its quant type (wv may be
     // absent: gemma4 global layers reuse the raw K projection as V)
@@ -333,7 +339,7 @@ bool gpu_init(model_t *m) {
             if (model_head_dim(m, l) > max_hd) max_hd = model_head_dim(m, l);
         }
         int xdim = q_dim > m->n_embd ? q_dim : m->n_embd;
-        size_t kv_bytes = m->kv_off[m->n_layer] * sizeof(f16_t);
+        size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
         size_t act_bytes = sizeof(float) * (MVB * ((size_t)m->n_embd + 3 * xdim +
                            q_dim + 2 * kv_dim + 2 * m->n_ff +
                            (size_t)m->n_head * m->n_ctx) + m->n_vocab);
@@ -360,7 +366,9 @@ bool gpu_init(model_t *m) {
                                   ly->w_gate, ly->w_up, ly->w_down };
             size_t w = 0;
             for (int i = 0; i < 7; i++) if (ws[i]) w += ws[i]->nbytes;
-            size_t kv = 2 * (size_t)m->n_ctx * model_kv_dim(m, l) * sizeof(f16_t);
+            // KV bytes honour the cache format: a q8_0 cache is ~53% of fp16,
+            // so quantized KV directly buys more offloaded layers here
+            size_t kv = 2 * (size_t)m->n_ctx * model_kv_row_bytes(m, l);
             if (used + w + kv > vram_budget) break;
             used += w + kv;
             G = l + 1;
@@ -396,7 +404,7 @@ bool gpu_init(model_t *m) {
         }
         g->weights_len = upload_len;
         // device KV holds only the offloaded layers [0, gpu_layers)
-        kv_bytes = m->kv_off[m->gpu_layers] * sizeof(f16_t);
+        kv_bytes = model_kv_byte_off(m, m->gpu_layers);
 
         CK(cu.ModuleLoadData(&g->mod, k_ptx_src));
         struct { CUfunction *f; const char *name; } fns[] = {
@@ -744,8 +752,8 @@ void gpu_free(model_t *m) {
 static bool kv_upload(gpu_t *g, model_t *m, int lo, int hi) {
     if (lo >= hi) return true;
     for (int l = 0; l < m->gpu_layers; l++) {
-        size_t row = (size_t)model_kv_dim(m, l) * sizeof(f16_t);
-        size_t off = m->kv_off[l] * sizeof(f16_t) + (size_t)lo * row;
+        size_t row = model_kv_row_bytes(m, l);
+        size_t off = model_kv_byte_off(m, l) + (size_t)lo * row;
         size_t len = (size_t)(hi - lo) * row;
         if (cu.MemcpyHtoD(g->kc + off, (uint8_t *)m->kcache + off, len) != 0 ||
             cu.MemcpyHtoD(g->vc + off, (uint8_t *)m->vcache + off, len) != 0)
@@ -758,8 +766,8 @@ static bool kv_upload(gpu_t *g, model_t *m, int lo, int hi) {
 static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
     if (lo >= hi) return true;
     for (int l = 0; l < m->gpu_layers; l++) {
-        size_t row = (size_t)model_kv_dim(m, l) * sizeof(f16_t);
-        size_t off = m->kv_off[l] * sizeof(f16_t) + (size_t)lo * row;
+        size_t row = model_kv_row_bytes(m, l);
+        size_t off = model_kv_byte_off(m, l) + (size_t)lo * row;
         size_t len = (size_t)(hi - lo) * row;
         if (cu.MemcpyDtoH((uint8_t *)m->kcache + off, g->kc + off, len) != 0 ||
             cu.MemcpyDtoH((uint8_t *)m->vcache + off, g->vc + off, len) != 0)
@@ -835,16 +843,21 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         {
             // cache rows for consecutive positions are contiguous, so the
             // kernel indexes both source column and destination row by grid.y
-            uint64_t l_off = m->kv_off[l];
-            void *ps[] = { &g->kt, &g->vt, &g->kc, &g->vc, &kv_dim, &l_off, &g->pos_dev };
-            ok = ok && launch(g, g->f_store, (kv_dim + 63) / 64, tn, 1, 64, ps);
+            uint64_t l_off = model_kv_byte_off(m, l);
+            int q8 = m->kv_q8;
+            // one thread per stored unit: per value for fp16, per 32-value
+            // q8_0 block (the whole block shares one amax/scale)
+            int units = q8 ? kv_dim / 32 : kv_dim;
+            void *ps[] = { &g->kt, &g->vt, &g->kc, &g->vc, &kv_dim, &l_off,
+                           &g->pos_dev, &q8 };
+            ok = ok && launch(g, g->f_store, (units + 63) / 64, tn, 1, 64, ps);
         }
 
         {
             attn_args aa = { hd, m->n_head, n_kv, m->n_ctx,
-                             (uint64_t)m->kv_off[l],
+                             (uint64_t)model_kv_byte_off(m, l),
                              model_attn_scale(m, l), q_dim, xdim,
-                             local ? m->swa_window : 0 };
+                             local ? m->swa_window : 0, m->kv_q8 };
             // Decode (tn==1, one query, long KV): flash-decoding — split the KV
             // range across ATTN_SPLITS blocks/head (higher occupancy, coalesced)
             // then merge partials. Prefill (tn>1) already runs n_head*tn blocks,

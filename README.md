@@ -120,7 +120,8 @@ freeing the CPU cores and growing headroom on bigger GPUs.
 **CUDA (NVIDIA, Linux/Windows):** the driver API is loaded dynamically
 (`nvcuda.dll` / `libcuda.so.1`) and kernels ship as embedded PTX, so neither
 building nor running needs the CUDA toolkit — a machine without an NVIDIA
-driver just uses the CPU. Weights are copied to VRAM once, the fp16 KV cache lives in VRAM with the
+driver just uses the CPU. Weights are copied to VRAM once, the KV cache (fp16
+or q8_0, see `--kv`) lives in VRAM with the
 host copy kept authoritative, and prompt batches run as 8-token tiles that
 decode each weight once for all tokens. A model too large for VRAM is
 **partially offloaded** — as many leading layers as fit run on the GPU and
@@ -212,9 +213,17 @@ This is runner's specialty. Three pieces work together:
   Models with rope-scaling metadata (linear/YaRN) or llama-3.x frequency
   factors (`rope_freqs.weight`) get their native scaling applied; manual
   control via `--rope-scale` and `--rope-base`.
-- **fp16 KV cache** — half the memory per context token, so twice the context
-  fits. A 1.1B model at 32k context needs ~740 MB of cache; the verbose flag
-  (`-v`) prints the exact number before committing.
+- **fp16 or q8_0 KV cache** (`--kv f16|q8`) — fp16 is half the memory per
+  context token of fp32, so twice the context fits. A 1.1B model at 32k context
+  needs ~740 MB of fp16 cache; the verbose flag (`-v`) prints the exact number
+  before committing. `--kv q8` packs the cache as `q8_0` blocks (34 bytes per
+  32 values), cutting it to ~53% of fp16 and roughly doubling the context that
+  fits a given budget. It works on both the CPU path and the CUDA backend, and
+  it is included in the `--reserve` auto-fit and the GPU layer-split
+  calculation. It requires every layer's `head_dim` to be a multiple of 32
+  (checked at load; the cache silently stays fp16 otherwise). q8 KV is
+  **lossy** — it does not reproduce fp16 output token-for-token — so fp16
+  remains the default.
 - **Batched prompt processing.** Long prompts are evaluated in batches
   (default 64 tokens): each weight row is dequantized once and reused across
   the whole batch, and logits are skipped for all but the last token.
@@ -373,7 +382,7 @@ runner -m model [options]
   --no-bos       don't prepend BOS
   --ignore-eos   keep generating past end-of-text tokens
   --gpu auto|off GPU offload if a backend is available (default auto)
-  --kv f16|q8    KV cache storage; q8 halves it again (needs --gpu off)
+  --kv f16|q8    KV cache storage (default f16); q8 halves it, CPU and CUDA
   --draft PATH   small same-vocab GGUF for speculative decoding
   --draft-k N    draft tokens per round (default 4)
   --bench-json   run a small decode benchmark and print JSON metrics

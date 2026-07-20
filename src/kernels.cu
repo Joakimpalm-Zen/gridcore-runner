@@ -1047,19 +1047,93 @@ extern "C" __global__ void k_rope(float *v, const float *fr, rope_args a,
     p[i1] = x0 * s + x1 * c;
 }
 
-// ---------------------------------------------------------------- kv store
+// ------------------------------------------------------------- kv storage
+// The cache is either fp16 (2 bytes/value) or q8_0 (32 values per 34-byte
+// block: one fp16 scale + 32 int8 quants), selected at load and identical in
+// layout to the CPU cache so the two paths share the same host buffer. All
+// cache offsets below are therefore BYTE offsets, and the pointers are byte
+// pointers: a q8_0 row is only 2-byte aligned, so no wider load is legal.
+//
+// q8_0 quantization here is the same arithmetic as q8_quant_row() in quants.c
+// (amax/127 scale, round-half-away-from-zero, RN fp16 scale), so a row
+// quantized on the GPU is bit-identical to the same row quantized on the CPU.
+
+struct q8_blk { __half d; signed char qs[32]; };   // 34 bytes, 2-byte aligned
+
+#define KV_ROW_BYTES(kv_dim, q8) \
+    ((q8) ? (ulong64)((kv_dim) / 32) * 34 : (ulong64)(kv_dim) * 2)
+
+__device__ __forceinline__ void kv_store_row(unsigned char *cache,
+                                             const float *src, int kv_dim,
+                                             int q8, int i) {
+    if (q8) {
+        q8_blk *b = (q8_blk *)(cache + (ulong64)i * 34);
+        const float *x = src + i * 32;
+        float amax = 0;
+        for (int j = 0; j < 32; j++) amax = fmaxf(amax, fabsf(x[j]));
+        float d  = amax / 127.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        b->d = __float2half(d);
+        for (int j = 0; j < 32; j++) b->qs[j] = (signed char)roundf(x[j] * id);
+    } else {
+        ((__half *)cache)[i] = __float2half(src[i]);
+    }
+}
+
+// q * k for one head: paired accumulation, mirroring the fp16 path and
+// vec_dot(T_Q8_0) in quants.c (per-block int sum, then scaled)
+__device__ __forceinline__ float kv_dot(const unsigned char *row,
+                                        const float *qh, int hd, int q8) {
+    float s = 0;
+    if (q8) {
+        for (int b = 0; b < hd / 32; b++) {
+            const q8_blk *blk = (const q8_blk *)(row + (ulong64)b * 34);
+            const float *xp = qh + b * 32;
+            float t = 0;
+            for (int j = 0; j < 32; j += 2)
+                t += xp[j] * blk->qs[j] + xp[j + 1] * blk->qs[j + 1];
+            s += __half2float(blk->d) * t;
+        }
+    } else {
+        const __half2 *k2 = (const __half2 *)row;
+        for (int i = 0; i < hd / 2; i++) {
+            float2 kf = __half22float2(k2[i]);
+            // paired add reassociates FP vs. a sequential accumulation;
+            // temp-0 gate covered it on tested models
+            s += qh[2 * i] * kf.x + qh[2 * i + 1] * kf.y;
+        }
+    }
+    return s;
+}
+
+// the value pair at element offset 2*i2 of one head's row. Element pairs never
+// straddle a q8 block (32 is even), so one block lookup serves both.
+__device__ __forceinline__ float2 kv_pair(const unsigned char *row,
+                                          int i2, int q8) {
+    if (q8) {
+        const q8_blk *blk = (const q8_blk *)(row + (ulong64)(i2 / 16) * 34);
+        float d = __half2float(blk->d);
+        int j = (2 * i2) & 31;
+        return make_float2(d * blk->qs[j], d * blk->qs[j + 1]);
+    }
+    return __half22float2(((const __half2 *)row)[i2]);
+}
+
 // grid.y = token column; cache rows for consecutive positions are contiguous
 
 extern "C" __global__ void k_store_kv(const float *k, const float *v,
-                                      __half *kc, __half *vc,
+                                      unsigned char *kc, unsigned char *vc,
                                       int kv_dim, ulong64 l_off,
-                                      const int *posp) {
+                                      const int *posp, int q8) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < kv_dim) {
-        ulong64 src = (ulong64)blockIdx.y * kv_dim + i;
-        ulong64 dst = l_off + (ulong64)(*posp + blockIdx.y) * kv_dim + i;
-        kc[dst] = __float2half(k[src]);
-        vc[dst] = __float2half(v[src]);
+    int n = q8 ? kv_dim / 32 : kv_dim;
+    if (i < n) {
+        ulong64 row_b = KV_ROW_BYTES(kv_dim, q8);
+        ulong64 dst = l_off + (ulong64)(*posp + blockIdx.y) * row_b;
+        const float *ks = k + (ulong64)blockIdx.y * kv_dim;
+        const float *vs = v + (ulong64)blockIdx.y * kv_dim;
+        kv_store_row(kc + dst, ks, kv_dim, q8, i);
+        kv_store_row(vc + dst, vs, kv_dim, q8, i);
     }
 }
 
@@ -1069,14 +1143,20 @@ extern "C" __global__ void k_store_kv(const float *k, const float *v,
 
 struct attn_args {
     int     head_dim, n_head, n_head_kv, n_ctx;
-    ulong64 l_off;    // this layer's element offset into the kv cache
+    ulong64 l_off;    // this layer's BYTE offset into the kv cache
     float   scale;
     int     qs, os;   // q / out element stride per token column
     int     window;   // sliding-window size for this layer (0 = full)
+    int     q8;       // cache rows are q8_0 blocks rather than fp16
 };
 
-extern "C" __global__ void k_attn(const float *q, const __half *kc,
-                                  const __half *vc, float *att, float *out,
+// byte offset of head kvh's slice within a cache row
+__device__ __forceinline__ ulong64 kv_head_off(int kvh, int hd, int q8) {
+    return q8 ? (ulong64)(kvh * hd / 32) * 34 : (ulong64)(kvh * hd) * 2;
+}
+
+extern "C" __global__ void k_attn(const float *q, const unsigned char *kc,
+                                  const unsigned char *vc, float *att, float *out,
                                   attn_args a, const int *posp) {
     __shared__ float red[256];
     int h = blockIdx.x, tid = threadIdx.x, tpg = blockDim.x;
@@ -1085,23 +1165,15 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
     int hd = a.head_dim;
     int kvh = h / (a.n_head / a.n_head_kv);
     int kv_dim = a.n_head_kv * hd;
+    ulong64 row_b = KV_ROW_BYTES(kv_dim, a.q8);
+    ulong64 base  = a.l_off + kv_head_off(kvh, hd, a.q8);
     int t0 = 0;                          // sliding-window start
     if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1;
     const float *qh = q + (ulong64)tk * a.qs + h * hd;
     float *ah = att + ((ulong64)tk * a.n_head + h) * a.n_ctx;
 
-    for (int t = t0 + tid; t <= pos; t += tpg) {
-        const __half2 *kt2 = (const __half2 *)(kc + a.l_off +
-                             (ulong64)t * kv_dim + kvh * hd);
-        float s = 0;
-        for (int i = 0; i < hd / 2; i++) {
-            float2 kf = __half22float2(kt2[i]);
-            // paired add reassociates FP vs. the old sequential accumulation;
-            // temp-0 gate covered it on tested models
-            s += qh[2 * i] * kf.x + qh[2 * i + 1] * kf.y;
-        }
-        ah[t] = s * a.scale;
-    }
+    for (int t = t0 + tid; t <= pos; t += tpg)
+        ah[t] = kv_dot(kc + base + (ulong64)t * row_b, qh, hd, a.q8) * a.scale;
     __syncthreads();
 
     // max
@@ -1134,9 +1206,7 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
     for (int i2 = tid; i2 < hd / 2; i2 += tpg) {
         float o0 = 0, o1 = 0;
         for (int t = t0; t <= pos; t++) {
-            const __half2 *vt2 = (const __half2 *)(vc + a.l_off +
-                                 (ulong64)t * kv_dim + kvh * hd);
-            float2 vf = __half22float2(vt2[i2]);
+            float2 vf = kv_pair(vc + base + (ulong64)t * row_b, i2, a.q8);
             o0 += ah[t] * vf.x;
             o1 += ah[t] * vf.y;
         }
@@ -1171,8 +1241,8 @@ extern "C" __global__ void k_attn(const float *q, const __half *kc,
 
 #define ATTN_SPLITS 8
 
-extern "C" __global__ void k_attn_dec(const float *q, const __half *kc,
-                                      const __half *vc, float *att, float *part,
+extern "C" __global__ void k_attn_dec(const float *q, const unsigned char *kc,
+                                      const unsigned char *vc, float *att, float *part,
                                       attn_args a, const int *posp) {
     __shared__ float red[128];
     int h = blockIdx.x, sp = blockIdx.y, tk = blockIdx.z;
@@ -1181,6 +1251,8 @@ extern "C" __global__ void k_attn_dec(const float *q, const __half *kc,
     int hd = a.head_dim;
     int kvh = h / (a.n_head / a.n_head_kv);
     int kv_dim = a.n_head_kv * hd;
+    ulong64 row_b = KV_ROW_BYTES(kv_dim, a.q8);
+    ulong64 base  = a.l_off + kv_head_off(kvh, hd, a.q8);
     int t0 = 0;
     if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1;
     int total = pos + 1 - t0;
@@ -1196,16 +1268,8 @@ extern "C" __global__ void k_attn_dec(const float *q, const __half *kc,
     const float *qh = q + (ulong64)tk * a.qs + h * hd;
     float *ah = att + ((ulong64)tk * a.n_head + h) * a.n_ctx;
 
-    for (int t = s0 + tid; t < s1; t += tpg) {
-        const __half2 *kt2 = (const __half2 *)(kc + a.l_off +
-                             (ulong64)t * kv_dim + kvh * hd);
-        float s = 0;
-        for (int i = 0; i < hd / 2; i++) {
-            float2 kf = __half22float2(kt2[i]);
-            s += qh[2 * i] * kf.x + qh[2 * i + 1] * kf.y;
-        }
-        ah[t] = s * a.scale;
-    }
+    for (int t = s0 + tid; t < s1; t += tpg)
+        ah[t] = kv_dot(kc + base + (ulong64)t * row_b, qh, hd, a.q8) * a.scale;
     __syncthreads();
     float mx = -1e30f;
     for (int t = s0 + tid; t < s1; t += tpg) mx = fmaxf(mx, ah[t]);
@@ -1234,9 +1298,7 @@ extern "C" __global__ void k_attn_dec(const float *q, const __half *kc,
     for (int i2 = tid; i2 < hd / 2; i2 += tpg) {
         float o0 = 0, o1 = 0;
         for (int t = s0; t < s1; t++) {
-            const __half2 *vt2 = (const __half2 *)(vc + a.l_off +
-                                 (ulong64)t * kv_dim + kvh * hd);
-            float2 vf = __half22float2(vt2[i2]);
+            float2 vf = kv_pair(vc + base + (ulong64)t * row_b, i2, a.q8);
             o0 += ah[t] * vf.x;
             o1 += ah[t] * vf.y;
         }

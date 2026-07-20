@@ -31,6 +31,8 @@ def main() -> int:
     parser.add_argument("--gen", type=int, default=64)
     parser.add_argument("--ctx", type=int, default=4096)
     parser.add_argument("--batch", type=int, default=0, help="runner -b override")
+    parser.add_argument("--kv", choices=("f16", "q8"),
+                        help="KV cache storage to benchmark (default: runner's)")
     args = parser.parse_args()
 
     prompt = " ".join(f"item{i:04d}" for i in range(args.prompt_words))
@@ -42,6 +44,8 @@ def main() -> int:
                "-n", str(args.gen), "-c", str(args.ctx), "--temp", "0"]
     if args.batch:
         command += ["-b", str(args.batch)]
+    if args.kv:
+        command += ["--kv", args.kv]
     started = time.time()
     proc = subprocess.run(command, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=1800)
@@ -59,6 +63,7 @@ def main() -> int:
     result = {
         "model": Path(args.model).name,
         "runner": str(Path(args.runner)),
+        "kv": args.kv or "default",
         "prompt_tokens": int(match.group(1)),
         "prefill_tok_s": float(match.group(2)),
         "gen_tokens": int(match.group(3)),

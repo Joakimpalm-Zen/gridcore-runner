@@ -387,6 +387,28 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
                 m->suppress[m->n_suppress++] = ids[i];
     }
 
+    // KV storage format. q8_0 halves the cache again and is supported by both
+    // the CPU path and the CUDA kernels, so it is decided here — before the
+    // reservation auto-fit — and the sizing below uses the real per-token cost.
+    // Requires per-HEAD block alignment, not just per-row: attention slices the
+    // row at kvh*head_dim, which must land on a q8 block boundary.
+    if (p->kv_q8) {
+        bool aligned = true;
+        for (int l = 0; l < m->n_layer; l++)
+            if (model_head_dim(m, l) % 32 != 0) aligned = false;
+        // a GPU backend without q8 attention kernels would read the blocks as
+        // fp16, so fall back rather than corrupt
+        char gname[128];
+        bool gpu_path = p->gpu_mode == GPU_AUTO && gpu_available(gname, sizeof(gname));
+        if (!aligned)
+            fprintf(stderr, "kv: head_dim not a multiple of 32 — keeping f16\n");
+        else if (gpu_path && !gpu_kv_q8_ok())
+            fprintf(stderr, "kv: this GPU backend has no q8_0 attention kernels "
+                            "— keeping f16 (use --gpu off for a q8 cache)\n");
+        else
+            m->kv_q8 = true;
+    }
+
     // runtime buffers
     m->reserve_vram_pct = p->reserve_vram_pct;
     int n_ctx = p->n_ctx;
@@ -395,11 +417,10 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         // reservation leaves after the weights, so small models grow their
         // window into the reserved room instead of idling at the default
         size_t kv_per_tok = 0;
-        bool q8 = p->kv_q8 && p->gpu_mode == GPU_OFF;
         for (int l = 0; l < m->n_layer; l++) {
             int d = model_kv_dim(m, l);
-            kv_per_tok += 2ull * (q8 && d % 32 == 0 ? (size_t)(d / 32) * 34
-                                                    : (size_t)d * sizeof(f16_t));
+            kv_per_tok += 2ull * (m->kv_q8 ? (size_t)(d / 32) * 34
+                                           : (size_t)d * sizeof(f16_t));
         }
         size_t head = 256u << 20;                 // activations + slack
         long long best = -1;
@@ -444,23 +465,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->kv_off[0] = 0;
     for (int l = 0; l < m->n_layer; l++)
         m->kv_off[l + 1] = m->kv_off[l] + (size_t)n_ctx * model_kv_dim(m, l);
-    if (p->kv_q8) {
-        // q8_0 KV halves cache memory again; CPU-only (the GPU kernels and
-        // host<->device KV copies speak f16), and rows must be block-aligned
-        bool aligned = true;
-        for (int l = 0; l < m->n_layer; l++)
-            // per-HEAD alignment, not just per-row: attention slices the row
-            // at kvh*head_dim, which must land on a q8 block boundary
-            if (model_head_dim(m, l) % 32 != 0) aligned = false;
-        if (p->gpu_mode != GPU_OFF)
-            fprintf(stderr, "kv: q8_0 cache needs --gpu off — keeping f16\n");
-        else if (!aligned)
-            fprintf(stderr, "kv: head_dim not a multiple of 32 — keeping f16\n");
-        else
-            m->kv_q8 = true;
-    }
-    size_t kv_bytes = m->kv_q8 ? m->kv_off[m->n_layer] / 32 * 34
-                               : m->kv_off[m->n_layer] * sizeof(f16_t);
+    size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
     m->kcache = calloc(1, kv_bytes);
     m->vcache = calloc(1, kv_bytes);
     m->x      = malloc(sizeof(float) * (size_t)B * m->n_embd);
