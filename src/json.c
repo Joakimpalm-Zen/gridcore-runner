@@ -343,12 +343,27 @@ void sb_put(sbuf *b, const char *s, size_t n) {
 
 void sb_fmt(sbuf *b, const char *fmt, ...) {
     if (b->failed) return;
+    // The stack buffer is a fast path, not a limit: a caller formats
+    // client-supplied text through here (tool-call arguments, which routinely
+    // exceed 4 KB), and silently keeping the first 4095 bytes corrupted the
+    // prompt mid-JSON and dropped the closing marker.
     char tmp[4096];
-    va_list ap;
+    va_list ap, ap2;
     va_start(ap, fmt);
+    va_copy(ap2, ap);
     int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
     va_end(ap);
-    if (n > 0) sb_put(b, tmp, n < (int)sizeof(tmp) ? (size_t)n : sizeof(tmp) - 1);
+    if (n < 0) { b->failed = true; va_end(ap2); return; }
+    if ((size_t)n < sizeof(tmp)) {
+        sb_put(b, tmp, (size_t)n);
+    } else {
+        char *big = malloc((size_t)n + 1);
+        if (!big) { b->failed = true; va_end(ap2); return; }
+        vsnprintf(big, (size_t)n + 1, fmt, ap2);
+        sb_put(b, big, (size_t)n);
+        free(big);
+    }
+    va_end(ap2);
 }
 
 void sb_esc(sbuf *b, const char *s, size_t n) {

@@ -140,9 +140,40 @@ static void test_builder_survives_allocation_failure(void) {
     fail_at = -1;
 }
 
+// sb_fmt formats client-supplied text: tool-call arguments replayed from
+// assistant history can be far larger than any stack buffer. Truncating them
+// silently cut the JSON mid-value and lost the closing tool-call marker, so
+// the prompt no longer matched the request that produced it.
+static void test_builder_does_not_truncate(void) {
+    fail_at = -1;
+    alloc_calls = 0;
+    alloc_live = 0;
+
+    size_t big_len = 10000;
+    char *big = malloc(big_len + 1);
+    assert(big != NULL);
+    memset(big, 'x', big_len);
+    big[big_len] = 0;
+
+    sbuf b = { 0 };
+    sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", "toolname", big);
+    assert(!b.failed);
+
+    // the whole payload survives, and so does the terminator after it
+    assert(b.n == strlen("<|tool_call>call:toolname<tool_call|>") + big_len);
+    assert(strstr(b.s, "<tool_call|>") != NULL);
+    assert(strstr(b.s, "xxxx") != NULL);
+    assert(b.s[b.n] == 0);
+
+    t_free(b.s);
+    free(big);
+    assert(alloc_live == 0);
+}
+
 int main(void) {
     test_parse_survives_allocation_failure();
     test_builder_survives_allocation_failure();
+    test_builder_does_not_truncate();
     puts("json oom tests ok");
     return 0;
 }
