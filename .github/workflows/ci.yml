@@ -484,3 +484,37 @@ jobs:
             echo "runner survived parent death"; exit 1
           fi
           echo "parent-pid ok"
+
+  # Phase 0 agent-protocol conformance harness. Runs against the synthetic
+  # test.gguf so it needs no model download and no GPU. Locally: scripts/conformance.sh
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: build
+        run: make
+      - name: make test model
+        run: python3 scripts/make-test-model.py test.gguf
+      - name: install pytest
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --quiet pytest
+      - name: agent-protocol conformance harness
+        run: PYTHON=.venv/bin/python ./scripts/conformance.sh
+      - name: conformance report
+        if: always()
+        run: |
+          test -f tests/conformance/out/report.json
+          python3 -c "
+          import json
+          d = json.load(open('tests/conformance/out/report.json'))
+          print(json.dumps(d['totals'], indent=2))
+          print(json.dumps(d['latency_ms'], indent=2))
+          print('peak_rss_kb', d['resources'])
+          for n in d['model_quality_notes']: print('quality:', n['test'], '-', n['message'])
+          "
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-report
+          path: tests/conformance/out/

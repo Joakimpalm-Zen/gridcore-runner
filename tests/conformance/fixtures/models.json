@@ -1,0 +1,10 @@
+{
+  "data": [
+    {
+      "id": "<redacted>",
+      "object": "model",
+      "owned_by": "runner"
+    }
+  ],
+  "object": "list"
+}
