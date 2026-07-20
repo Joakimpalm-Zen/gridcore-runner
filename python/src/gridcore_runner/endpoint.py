@@ -28,6 +28,12 @@ class RunnerStallError(TimeoutError):
         self.partial = partial
 
 
+class RunnerCancelledError(RuntimeError):
+    def __init__(self, message: str = "runner stream cancelled", *, partial: str = ""):
+        super().__init__(message)
+        self.partial = partial
+
+
 @dataclass(frozen=True)
 class StreamResult:
     text: str
@@ -83,6 +89,7 @@ class RunnerEndpoint:
         on_delta: Callable[[str], None] | None = None,
         on_reasoning_delta: Callable[[str], None] | None = None,
         stall_seconds: float | None = None,
+        cancel_event: Any | None = None,
     ) -> StreamResult:
         """Consume one SSE chat completion.
 
@@ -107,12 +114,16 @@ class RunnerEndpoint:
         reasoning_parts: list[str] = []
         complete = False
         last_event = time.monotonic()
+        if cancel_event is not None and cancel_event.is_set():
+            raise RunnerCancelledError()
         try:
             with self._open(request, window) as response:
                 # the watchdog covers the stream, not the connect and prompt
                 # processing that precede the first chunk
                 last_event = time.monotonic()
                 for raw_line in response:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RunnerCancelledError(partial="".join(text_parts))
                     now = time.monotonic()
                     idle, last_event = now - last_event, now
                     if idle > window:
@@ -144,9 +155,11 @@ class RunnerEndpoint:
                         reasoning_parts.append(reasoning)
                         if on_reasoning_delta is not None:
                             on_reasoning_delta(reasoning)
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RunnerCancelledError(partial="".join(text_parts))
                     if choice.get("finish_reason") is not None:
                         complete = True
-        except (RunnerStallError, RunnerProtocolError):
+        except (RunnerCancelledError, RunnerStallError, RunnerProtocolError):
             raise
         except (socket.timeout, TimeoutError) as error:
             raise RunnerStallError(

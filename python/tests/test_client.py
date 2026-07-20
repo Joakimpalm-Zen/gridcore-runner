@@ -7,6 +7,7 @@ import socket
 import sys
 import tempfile
 import time
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -15,6 +16,7 @@ from gridcore_runner import (
     ManagedRunner,
     RunnerEndpoint,
     RunnerProtocolError,
+    RunnerCancelledError,
     RunnerStallError,
     ServerLaunch,
     StartupLease,
@@ -99,6 +101,34 @@ class _Response:
 
 
 class EndpointTests(unittest.TestCase):
+    def test_pre_cancelled_stream_never_opens_request(self):
+        cancelled = threading.Event()
+        cancelled.set()
+        opened = []
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda *args, **kwargs: opened.append(True))
+
+        with self.assertRaises(RunnerCancelledError):
+            endpoint.stream_chat({"messages": []}, cancel_event=cancelled)
+
+        self.assertEqual(opened, [])
+
+    def test_stream_cancellation_preserves_partial_and_closes_response(self):
+        cancelled = threading.Event()
+        response = _Response([
+            b'data: {"choices":[{"delta":{"content":"partial"}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"ignored"},"finish_reason":"stop"}]}\n',
+        ])
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080", opener=lambda *args, **kwargs: response)
+
+        with self.assertRaises(RunnerCancelledError) as caught:
+            endpoint.stream_chat(
+                {"messages": []}, cancel_event=cancelled,
+                on_delta=lambda piece: cancelled.set())
+
+        self.assertEqual(caught.exception.partial, "partial")
     def test_capabilities_are_runner_identified_and_expose_context(self):
         seen = {}
 

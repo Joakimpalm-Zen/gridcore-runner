@@ -1,5 +1,6 @@
 from .endpoint import (
     RunnerEndpoint,
+    RunnerCancelledError,
     RunnerHttpError,
     RunnerProtocolError,
     RunnerStallError,
@@ -18,6 +19,7 @@ from .lease import StartupLease
 __all__ = [
     "ManagedRunner",
     "RunnerEndpoint",
+    "RunnerCancelledError",
     "RunnerHttpError",
     "RunnerProtocolError",
     "RunnerStallError",
