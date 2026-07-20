@@ -712,21 +712,16 @@ exactly this model's f16 KV cache at 2048 context (32 layers x 1024 kv_dim x
 
 These all stem from state that is global today and becomes per-sequence here:
 
-- **`SV.busy` is a single global flag** written by every slot. It is safe only
-  because swap mode implies one slot, and nothing encodes that dependency. With
-  a registry and `parallel > 1`, one slot finishing clears `busy` while another
-  is still generating, and the TTL reaper can then unload the model underneath
-  it. A per-sequence refcount is what this actually needs.
-- **`last_used` is stamped at request start**, so any generation longer than the
-  TTL is followed by an immediate unload of a model that just finished working.
-- **No graceful shutdown exists.** `SV.q.shutdown` is read but never written, so
-  `q_pop` never returns -1 and the slot-worker exit path is unreachable; there
-  is no SIGINT/SIGTERM handler, and the accept loop returns without closing the
-  listener, joining slot threads, or answering queued connections.
+- **DONE** — Active work is reference-counted across slots, so one request
+  finishing cannot make the TTL reaper treat another in-flight request as idle.
+- **DONE** — `last_used` is stamped when a request finishes, under the swap
+  mutex, so long generations receive a full idle TTL afterward.
+- **DONE (POSIX)** — SIGINT/SIGTERM stop admission, answer queued connections
+  with 503, join slot/decode/reaper threads, and release scheduler/model state.
 - **`swap_to` holds `swap_mu` across a full model load**, blocking `/unload` for
   seconds.
-- **`/unload` does not release the draft model**, and `context_load()` keeps
-  reporting the previous model's geometry after an unload.
+- **DONE** — `/unload` releases the draft model and reports context size zero
+  until the target model is loaded again.
 
 ## [carried over] Notes for the `model_t` split
 

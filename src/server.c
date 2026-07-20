@@ -183,7 +183,10 @@ static struct {
     int         ttl;
     model_params mp;
     pthread_mutex_t swap_mu;
-    atomic_bool busy;
+    atomic_int  active_requests;
+    atomic_bool shutdown;
+    pthread_t   reaper_th;
+    bool        reaper_started;
     model_t    *draft;        // per-slot draft would be plural; single-model
     int         draft_k;      // serve has exactly one slot (see swap_to)
     // sampling defaults come from the served model's family preset; the CLI
@@ -223,7 +226,18 @@ static void unload_resident(void) {
     SV.borrowed = false;
     s->m = NULL;
     s->tok = NULL;
+    s->e.m = NULL;
+    s->e.tok = NULL;
+    context_store(0);
     resident_store(-1);
+}
+
+static void unload_draft(void) {
+    if (!SV.draft) return;
+    model_free(SV.draft);
+    free(SV.draft);
+    SV.draft = NULL;
+    for (int i = 0; i < SV.n_slots; i++) SV.slots[i].e.dm = NULL;
 }
 
 // swap_to results below 0: the name matched no registry entry (a caller
@@ -287,7 +301,6 @@ static int swap_to(const char *want) {
         }
         resident_store(idx);
     }
-    SV.last_used = now_s();
     SV.model_name = SV.reg[idx].name;
     pthread_mutex_unlock(&SV.swap_mu);
     return idx;
@@ -295,13 +308,13 @@ static int swap_to(const char *want) {
 
 static void *ttl_reaper(void *arg) {
     (void)arg;
-    for (;;) {
+    while (!atomic_load(&SV.shutdown)) {
         struct timespec ts = { 5, 0 };
         nanosleep(&ts, NULL);
-        if (resident_load() < 0 || atomic_load(&SV.busy)) continue;
+        if (resident_load() < 0 || atomic_load(&SV.active_requests)) continue;
         if (pthread_mutex_trylock(&SV.swap_mu) != 0) continue;
         int ttl = SV.ttl;
-        if (ttl > 0 && resident_load() >= 0 && !atomic_load(&SV.busy) &&
+        if (ttl > 0 && resident_load() >= 0 && !atomic_load(&SV.active_requests) &&
             now_s() - SV.last_used > ttl)
             unload_resident();
         pthread_mutex_unlock(&SV.swap_mu);
@@ -310,12 +323,8 @@ static void *ttl_reaper(void *arg) {
 }
 
 static bool start_reaper(void) {
-    pthread_attr_t attr;
-    if (pthread_attr_init(&attr) != 0) return false;
-    bool ok = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0;
-    pthread_t thread;
-    if (ok) ok = pthread_create(&thread, &attr, ttl_reaper, NULL) == 0;
-    pthread_attr_destroy(&attr);
+    bool ok = pthread_create(&SV.reaper_th, NULL, ttl_reaper, NULL) == 0;
+    SV.reaper_started = ok;
     if (!ok) fprintf(stderr, "error: cannot start model TTL reaper\n");
     return ok;
 }
@@ -3298,6 +3307,7 @@ static void handle_conn(slot_t *s, int fd) {
         // llama-swap-compatible: free the resident model's memory now
         if (SV.n_reg > 0) {
             pthread_mutex_lock(&SV.swap_mu);
+            unload_draft();
             unload_resident();
             pthread_mutex_unlock(&SV.swap_mu);
         }
@@ -3341,7 +3351,7 @@ static void handle_conn(slot_t *s, int fd) {
                 free(body);
                 return;
             }
-            atomic_store(&SV.busy, true);
+            atomic_fetch_add(&SV.active_requests, 1);
             bool ok = true;
             if (SV.n_reg > 0) {
                 int sw = swap_to(jv_str(jv_get(req, "model"), NULL));
@@ -3371,7 +3381,12 @@ static void handle_conn(slot_t *s, int fd) {
                     pthread_mutex_unlock(&SV.swap_mu);
                 }
             }
-            atomic_store(&SV.busy, false);
+            if (SV.n_reg > 0) {
+                pthread_mutex_lock(&SV.swap_mu);
+                SV.last_used = now_s();
+                pthread_mutex_unlock(&SV.swap_mu);
+            }
+            atomic_fetch_sub(&SV.active_requests, 1);
             jv_free(req);
         }
     } else {
@@ -3455,11 +3470,76 @@ static bool accept_fastpath(int fd) {
 
 // ---------------------------------------------------------------- entry
 
+#ifndef _WIN32
+static volatile sig_atomic_t stop_requested;
+static volatile sig_atomic_t listener_fd = -1;
+
+static void stop_handler(int sig) {
+    (void)sig;
+    stop_requested = 1;
+    int fd = (int)listener_fd;
+    if (fd >= 0) {
+        listener_fd = -1;
+        close(fd); // async-signal-safe; wakes accept()
+    }
+}
+
+static void install_stop_handlers(void) {
+    struct sigaction sa = {0};
+    sa.sa_handler = stop_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+#else
+static void install_stop_handlers(void) { }
+#endif
+
+static void queue_shutdown(void) {
+    int pending[512], n = 0;
+    pthread_mutex_lock(&SV.q.mu);
+    SV.q.shutdown = true;
+    while (SV.q.count > 0) {
+        pending[n++] = SV.q.fds[SV.q.head];
+        SV.q.head = (SV.q.head + 1) % (int)(sizeof(SV.q.fds) / sizeof(int));
+        SV.q.count--;
+    }
+    pthread_cond_broadcast(&SV.q.cv);
+    pthread_mutex_unlock(&SV.q.mu);
+    for (int i = 0; i < n; i++) {
+        send_error(pending[i], 503, "server shutting down");
+        sock_close(pending[i]);
+    }
+}
+
+static void sched_shutdown(void) {
+    if (!SCH.running) return;
+    pthread_mutex_lock(&SCH.mu);
+    SCH.stop = true;
+    pthread_cond_broadcast(&SCH.dec_cv);
+    pthread_cond_broadcast(&SCH.slot_cv);
+    pthread_mutex_unlock(&SCH.mu);
+    pthread_join(SCH.th, NULL);
+    model_batch_free(SCH.batch);
+    for (int i = 0; i < SV.n_slots; i++) free(SCH.seq[i].logits);
+    free(SCH.seq);
+    pthread_cond_destroy(&SCH.slot_cv);
+    pthread_cond_destroy(&SCH.dec_cv);
+    pthread_mutex_destroy(&SCH.dev_mu);
+    pthread_mutex_destroy(&SCH.mu);
+    memset(&SCH, 0, sizeof(SCH));
+}
+
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults,
                const sampler_override *ov, int port, int parallel,
                int n_threads, int ttl, const char *draft_path, int draft_k) {
     sock_init();
+#ifndef _WIN32
+    stop_requested = 0;
+    listener_fd = -1;
+#endif
+    install_stop_handlers();
     if (ov) SV.ov = *ov;
     // `defaults` arrives already resolved against the preloaded model; in swap
     // mode there is no model yet and swap_to resolves per load
@@ -3637,6 +3717,9 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         sock_close(lfd);
         return 1;
     }
+#ifndef _WIN32
+    listener_fd = lfd;
+#endif
 
     // Every slot's model exists now, which is the only precondition the batch
     // has. Declining is not an error: sched_generate then runs the untouched
@@ -3670,10 +3753,49 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     for (;;) {
         int cfd = (int)accept(lfd, NULL, NULL);
         if (cfd < 0) {
+#ifndef _WIN32
+            if (stop_requested) break;
+#endif
             if (errno == EINTR) continue;
             break;
         }
         if (!accept_fastpath(cfd)) q_push(cfd);
     }
+    // Stop admission first, fail work that has not started, then allow active
+    // requests to finish before dismantling the scheduler and model state.
+#ifndef _WIN32
+    if (listener_fd >= 0) {
+        listener_fd = -1;
+        sock_close(lfd);
+    }
+#else
+    sock_close(lfd);
+#endif
+    queue_shutdown();
+    for (int i = 0; i < parallel; i++) pthread_join(SV.slots[i].th, NULL);
+    sched_shutdown();
+    atomic_store(&SV.shutdown, true);
+    if (SV.reaper_started) pthread_join(SV.reaper_th, NULL);
+
+    for (int i = 0; i < parallel; i++) free(SV.slots[i].e.hist);
+    if (SV.n_reg > 0) {
+        pthread_mutex_lock(&SV.swap_mu);
+        unload_draft();
+        unload_resident();
+        pthread_mutex_unlock(&SV.swap_mu);
+        pthread_mutex_destroy(&SV.swap_mu);
+    } else {
+        tokenizer_free(tok);
+        for (int i = 0; i < parallel; i++) {
+            model_t *draft = SV.slots[i].e.dm;
+            if (draft) { model_free(draft); free(draft); }
+            model_free(SV.slots[i].m);
+            if (i > 0) free(SV.slots[i].m);
+        }
+    }
+    prefix_cache_clear();
+    pthread_cond_destroy(&SV.q.cv);
+    pthread_mutex_destroy(&SV.q.mu);
+    free(SV.slots);
     return 0;
 }
