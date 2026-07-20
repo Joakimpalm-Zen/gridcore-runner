@@ -8,6 +8,7 @@
 #include <string.h>
 #include <limits.h>
 #include <math.h>
+#include <stdint.h>
 
 typedef struct { const char *p, *end; int depth; } jcur;
 
@@ -18,6 +19,7 @@ static void skip_ws(jcur *c) {
 
 static jv *jv_new(jtype t) {
     jv *v = calloc(1, sizeof(jv));
+    if (!v) return NULL;
     v->type = t;
     return v;
 }
@@ -73,8 +75,16 @@ static char *parse_string(jcur *c) {
     c->p++;
     size_t cap = 32, m = 0;
     char *out = malloc(cap);
+    if (!out) return NULL;
     while (c->p < c->end) {
-        if (m + 8 > cap) { cap *= 2; out = realloc(out, cap); }
+        if (m + 8 > cap) {
+            // via a temporary: `out = realloc(out, cap)` strands the original
+            // block on failure and then yields NULL for the next write
+            char *tmp = realloc(out, cap * 2);
+            if (!tmp) goto fail;
+            out = tmp;
+            cap *= 2;
+        }
         unsigned char ch = (unsigned char)*c->p;
         if (ch == '"') { c->p++; out[m] = 0; return out; }
         if (ch == '\\') {
@@ -169,6 +179,7 @@ static jv *parse_number(jcur *c) {
 static jv *parse_container(jcur *c, char open) {
     char close = open == '{' ? '}' : ']';
     jv *v = jv_new(open == '{' ? J_OBJ : J_ARR);
+    if (!v) return NULL;
     c->p++; // consume open
     skip_ws(c);
     if (c->p < c->end && *c->p == close) { c->p++; return v; }
@@ -184,9 +195,16 @@ static jv *parse_container(jcur *c, char open) {
         }
         jv *item = parse_value(c);
         if (!item) { free(key); goto fail; }
-        v->items = realloc(v->items, sizeof(jv *) * (v->n + 1));
-        if (v->type == J_OBJ)
-            v->keys = realloc(v->keys, sizeof(char *) * (v->n + 1));
+        // item and key are not owned by v until both arrays have grown, so a
+        // failure here has to free them itself
+        jv **grown = realloc(v->items, sizeof(jv *) * (v->n + 1));
+        if (!grown) { free(key); jv_free(item); goto fail; }
+        v->items = grown;
+        if (v->type == J_OBJ) {
+            char **kgrown = realloc(v->keys, sizeof(char *) * (v->n + 1));
+            if (!kgrown) { free(key); jv_free(item); goto fail; }
+            v->keys = kgrown;
+        }
         v->items[v->n] = item;
         if (v->type == J_OBJ) v->keys[v->n] = key;
         v->n++;
@@ -210,11 +228,15 @@ static jv *parse_value(jcur *c) {
             r = parse_container(c, ch);
         } else if (ch == '"') {
             char *s = parse_string(c);
-            if (s) { r = jv_new(J_STR); r->str = s; }
+            if (s) {
+                r = jv_new(J_STR);
+                if (r) r->str = s;
+                else free(s);
+            }
         } else if (ch == 't' && c->end - c->p >= 4 && !memcmp(c->p, "true", 4)) {
-            r = jv_new(J_BOOL); r->b = true; c->p += 4;
+            r = jv_new(J_BOOL); if (r) r->b = true; c->p += 4;
         } else if (ch == 'f' && c->end - c->p >= 5 && !memcmp(c->p, "false", 5)) {
-            r = jv_new(J_BOOL); r->b = false; c->p += 5;
+            r = jv_new(J_BOOL); if (r) r->b = false; c->p += 5;
         } else if (ch == 'n' && c->end - c->p >= 4 && !memcmp(c->p, "null", 4)) {
             r = jv_new(J_NULL); c->p += 4;
         } else if (ch == '-' || (ch >= '0' && ch <= '9')) {
@@ -305,9 +327,14 @@ size_t json_escape(const char *s, size_t n, char *out, size_t cap) {
 // -------------------------------------------------------- string builder
 
 void sb_put(sbuf *b, const char *s, size_t n) {
+    if (b->failed) return;
     if (b->n + n + 1 > b->cap) {
-        b->cap = (b->n + n + 1) * 2 + 256;
-        b->s = realloc(b->s, b->cap);
+        if (n > SIZE_MAX / 2 - b->n - 256) { b->failed = true; return; }
+        size_t cap = (b->n + n + 1) * 2 + 256;
+        char *grown = realloc(b->s, cap);
+        if (!grown) { b->failed = true; return; }
+        b->s = grown;
+        b->cap = cap;
     }
     memcpy(b->s + b->n, s, n);
     b->n += n;
@@ -315,6 +342,7 @@ void sb_put(sbuf *b, const char *s, size_t n) {
 }
 
 void sb_fmt(sbuf *b, const char *fmt, ...) {
+    if (b->failed) return;
     char tmp[4096];
     va_list ap;
     va_start(ap, fmt);
@@ -324,8 +352,12 @@ void sb_fmt(sbuf *b, const char *fmt, ...) {
 }
 
 void sb_esc(sbuf *b, const char *s, size_t n) {
-    char *tmp = malloc(n * 6 + 8);
-    size_t m = json_escape(s, n, tmp, n * 6 + 8);
+    if (b->failed) return;
+    if (n > (SIZE_MAX - 8) / 6) { b->failed = true; return; }
+    size_t cap = n * 6 + 8;
+    char *tmp = malloc(cap);
+    if (!tmp) { b->failed = true; return; }
+    size_t m = json_escape(s, n, tmp, cap);
     sb_put(b, tmp, m);
     free(tmp);
 }

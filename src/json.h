@@ -29,8 +29,14 @@ bool        jv_bool(jv *v, bool dflt);
 // returns bytes written, always NUL-terminates within cap
 size_t json_escape(const char *s, size_t n, char *out, size_t cap);
 
-// growable string builder for assembling JSON/HTTP bodies
-typedef struct sbuf { char *s; size_t n, cap; } sbuf;
+// Growable string builder for assembling JSON/HTTP bodies.
+//
+// `failed` latches on allocation failure and every sb_* call then becomes a
+// no-op, so a caller can build a whole body and check once at the end. A
+// caller that ignores it would emit a short body that still looks successful,
+// which is worse than an error: check it and answer 500. Zero-initialised
+// (`sbuf b = {0}`) means healthy.
+typedef struct sbuf { char *s; size_t n, cap; bool failed; } sbuf;
 void sb_put(sbuf *b, const char *s, size_t n);
 #define sb_lit(b, lit) sb_put(b, lit, strlen(lit))
 #if defined(__GNUC__) || defined(__clang__)

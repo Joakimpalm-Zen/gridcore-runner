@@ -104,6 +104,16 @@ static void send_response(int fd, int code, const char *ctype, const char *body,
     if (send_all(fd, hdr, hn)) send_all(fd, body, blen);
 }
 
+// Send a built JSON body, or 500 if the builder ran out of memory. A short
+// body that still parses as success is worse than an error: the client cannot
+// tell anything went wrong.
+static void send_error(int fd, int code, const char *message);
+
+static void send_built(int fd, sbuf *b) {
+    if (b->failed) send_error(fd, 500, "out of memory building response");
+    else send_response(fd, 200, "application/json", b->s, b->n);
+}
+
 static void send_error(int fd, int code, const char *message) {
     char body[512], esc[384];
     json_escape(message, strlen(message), esc, sizeof(esc));
@@ -374,7 +384,7 @@ static int emit_channel(gen_ctx *g, int reasoning, const char *bytes, int n) {
     else         sb_lit(&chunk, "\",\"finish_reason\":null}]}");
     sbuf sse = {0};
     sb_fmt(&sse, "data: %s\n\n", chunk.s);
-    if (!send_all(g->fd, sse.s, sse.n)) g->dead = true;
+    if (sse.failed || !send_all(g->fd, sse.s, sse.n)) g->dead = true;
     free(chunk.s);
     free(sse.s);
     return g->dead ? 1 : 0;
@@ -659,7 +669,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         sb_lit(&r, "\"");
         if (n_tc) {
             sb_lit(&r, ",\"tool_calls\":[");
-            sb_put(&r, tc.s, tc.n);
+            if (tc.failed) r.failed = true;
+            else sb_put(&r, tc.s, tc.n);
             sb_lit(&r, "]");
         }
         free(tc.s);
@@ -705,7 +716,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
                e->json_mode ? "true" : "false",
                schema ? "true" : "false",
                e->dm ? "true" : "false");
-        send_response(fd, 200, "application/json", r.s, r.n);
+        send_built(fd, &r);
         free(r.s);
     }
     fprintf(stderr, "[slot %d] %s: %d prompt (%d cached) + %d gen tok (%.1f tok/s)%s%s\n",
@@ -835,7 +846,7 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
         sb_esc(&r, SV.model_name, strlen(SV.model_name));
         sb_fmt(&r, "\",\"usage\":{\"prompt_tokens\":%d,\"total_tokens\":%d}}",
                total, total);
-        send_response(fd, 200, "application/json", r.s, r.n);
+        send_built(fd, &r);
         fprintf(stderr, "[slot %d] embeddings: %d input(s), %d tok\n",
                 s->id, n_in, total);
     }
@@ -878,7 +889,7 @@ static void send_models(int fd) {
         sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"model\",\"owned_by\":\"runner\"}", esc);
     }
     sb_lit(&r, "]}");
-    send_response(fd, 200, "application/json", r.s, r.n);
+    send_built(fd, &r);
     free(r.s);
 }
 
@@ -917,7 +928,7 @@ static void send_capabilities(int fd) {
                "\"request_telemetry\":true,"
                "\"prefix_cache\":true,"
                "\"prefix_cache_controls\":true}}");
-    send_response(fd, 200, "application/json", r.s, r.n);
+    send_built(fd, &r);
     free(r.s);
 }
 

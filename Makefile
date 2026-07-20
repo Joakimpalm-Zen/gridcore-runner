@@ -17,6 +17,7 @@ RUNNER_EXE = runner.exe
 TEST_JSON_SCHEMA = test-json-schema.exe
 TEST_TOKENIZER = test-tokenizer.exe
 TEST_TEMPLATE = test-template.exe
+TEST_JSON_OOM = test-json-oom.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
@@ -24,6 +25,7 @@ RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
 TEST_TEMPLATE = test-template
+TEST_JSON_OOM = test-json-oom
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
@@ -31,6 +33,7 @@ RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
 TEST_TEMPLATE = test-template
+TEST_JSON_OOM = test-json-oom
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -57,11 +60,16 @@ TEST_TMPL_SRC = tests/test_template.c src/gguf.c src/tokenizer.c src/template.c 
 $(TEST_TEMPLATE): $(TEST_TMPL_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_TMPL_SRC) -o $@ -lm
 
+# compiles src/json.c directly into the test with instrumented allocators
+$(TEST_JSON_OOM): tests/test_json_oom.c src/json.c src/json.h
+	$(CC) $(CFLAGS) -I src tests/test_json_oom.c -o $@ -lm
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
-test: $(TEST_JSON_SCHEMA) $(TEST_TOKENIZER) $(TEST_TEMPLATE) test.gguf
+test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_TOKENIZER) $(TEST_TEMPLATE) test.gguf
 	./$(TEST_JSON_SCHEMA)
+	./$(TEST_JSON_OOM)
 	./$(TEST_TOKENIZER)
 	./$(TEST_TEMPLATE)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
@@ -77,7 +85,7 @@ smoke: runner test.gguf
 	./$(RUNNER_EXE) -m test.gguf -p "hi" -n 24 --temp 0 --json --gpu off 2>/dev/null | $(PYTHON) -c "import json,sys; json.load(sys.stdin); print('valid json')"
 
 clean:
-	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_TOKENIZER) $(TEST_TEMPLATE)
+	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_TOKENIZER) $(TEST_TEMPLATE)
 
 # regenerate the committed PTX header (dev machines only: needs nvcc + a host
 # compiler). Normal builds and CI use the committed src/kernels_ptx.h.

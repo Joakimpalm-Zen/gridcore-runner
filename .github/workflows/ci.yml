@@ -30,6 +30,9 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
             src/json.c src/jsonmode.c src/schema.c -o test-json-schema -lm
           ./test-json-schema
+          cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_json_oom.c \
+            -o test-json-oom -lm
+          ./test-json-oom
       # runs against the committed vocabulary fixtures in tests/fixtures
       - name: tokenizer tests
         run: |
@@ -401,6 +404,9 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
             src/json.c src/jsonmode.c src/schema.c -o test-json-schema.exe -lm
           ./test-json-schema.exe
+          gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_json_oom.c \
+            -o test-json-oom.exe -lm
+          ./test-json-oom.exe
       # runs against the committed vocabulary fixtures in tests/fixtures
       - name: tokenizer tests
         run: |

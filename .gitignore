@@ -8,6 +8,8 @@ test-tokenizer
 test-tokenizer.exe
 test-template
 test-template.exe
+test-json-oom
+test-json-oom.exe
 *.gguf
 # committed vocabulary fixtures for the tokenizer tests
 !tests/fixtures/*.gguf
