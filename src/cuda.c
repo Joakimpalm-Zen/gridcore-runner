@@ -18,6 +18,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+// clock_gettime/CLOCK_MONOTONIC in prof_now: not transitively available on
+// every libc, so include it directly rather than relying on another header
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
