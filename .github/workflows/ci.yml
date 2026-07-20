@@ -30,10 +30,20 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
             src/json.c src/jsonmode.c src/schema.c -o test-json-schema -lm
           ./test-json-schema
-      - name: python client tests
+      # no vocab model in CI, so this compiles and skips: it guards the build,
+      # while the assertions run locally after scripts/get-test-vocab.sh
+      - name: tokenizer tests
         run: |
-          python3 -m pip install pytest
-          PYTHONPATH=python/src python3 -m pytest python/tests/test_client.py
+          cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer.c \
+            src/gguf.c src/tokenizer.c src/compat.c src/quants.c -o test-tokenizer -lm
+          ./test-tokenizer
+      - name: python client tests
+        # PEP 668: the macOS runner's Homebrew python is externally managed and
+        # refuses a bare pip install, so install into a venv instead
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --quiet pytest
+          PYTHONPATH=python/src .venv/bin/python -m pytest python/tests/test_client.py
       - name: smoke test (completion)
         run: ./runner -m test.gguf -p "hello" -n 8 --temp 0
       - name: reject malformed tensor metadata
@@ -388,6 +398,13 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
             src/json.c src/jsonmode.c src/schema.c -o test-json-schema.exe -lm
           ./test-json-schema.exe
+      # no vocab model in CI, so this compiles and skips: it guards the build,
+      # while the assertions run locally after scripts/get-test-vocab.sh
+      - name: tokenizer tests
+        run: |
+          gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer.c \
+            src/gguf.c src/tokenizer.c src/compat.c src/quants.c -o test-tokenizer.exe -lm
+          ./test-tokenizer.exe
       - name: python client tests
         run: PYTHONPATH=python/src python3 -m pytest python/tests/test_client.py
       - name: smoke test (completion)

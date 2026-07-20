@@ -47,11 +47,20 @@ int main(void) {
     const char *path = getenv(MODEL_ENV);
     if (!path) path = MODEL_PATH;
 
-    gguf_file g;
-    if (!gguf_open(&g, path)) {
+    // probe first: gguf_open prints "error: ..." on a missing file, which reads
+    // as a failure in CI logs even though absence is an expected skip
+    FILE *probe = fopen(path, "rb");
+    if (!probe) {
         printf("tokenizer tests skipped: no vocab model at %s "
                "(run scripts/get-test-vocab.sh, or set %s)\n", path, MODEL_ENV);
         return 0;
+    }
+    fclose(probe);
+
+    gguf_file g;
+    if (!gguf_open(&g, path)) {
+        fprintf(stderr, "cannot read %s as GGUF\n", path);
+        return 1;
     }
 
     tokenizer t;
