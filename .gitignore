@@ -23,3 +23,6 @@ src/kernels.ptx
 src/kernels-*.ptx.tmp
 bench-out.*.txt
 bench-err.*.txt
+
+# agent worktrees (transient)
+.claude/worktrees/
