@@ -144,6 +144,29 @@ lessons worth keeping:
   Arbitrate numerics against exact math (`gguf.quants.dequantize` + numpy f64);
   use llama.cpp only for *behavioral* comparison — does it stop, is the text sane.
 
+## [carried over] Gaps a multi-angle review found in the existing gates
+
+Each of these is a real defect class that current CI would not have caught:
+
+- **No allocation-failure testing existed.** `tests/test_json_oom.c` now covers
+  `json.c` by compiling it with instrumented allocators and failing each
+  allocation in turn. The same technique applies to `schema.c`, `tokenizer.c`
+  and the request path in `server.c`, all of which still have unchecked
+  allocations sized directly from request or GGUF input.
+- **No adversarial schema testing existed.** Two single-request denial-of-service
+  bugs were found by reading rather than by any gate: `{"type":[]}` crashed the
+  process, and `minItems` up to INT_MAX pinned a slot for minutes. Both are now
+  fixed with regression tests, but the fuzz work in HANDOVER.md §2 is what would
+  have found them, and `schema_compile` should be its first target.
+- **The write side of the socket has no test.** The existing "stalled request is
+  reaped" CI step stalls only the *read* side. A client that sends a valid
+  request and then stops reading was able to pin a slot forever; a send timeout
+  now bounds it, and a matching CI case belongs alongside the read-side one.
+- **Streaming has no token-boundary matrix.** Phase 0 already calls for splitting
+  streaming output at every possible boundary; note that `tool_calls` are
+  currently unreachable in streaming mode at all, so that matrix will fail
+  until Phase 2.
+
 ---
 
 # Phase 1: Strict Tool-Call Schema Engine
@@ -175,6 +198,37 @@ hopeful model output afterward.
 - Truncated tool calls remain valid and executable.
 - Tools and `response_format` work in the same request.
 
+## [carried over] Conformance holes to close here
+
+A review of the current surface against the "never silently ignore" invariant
+found these. The two response_format holes and the non-boolean `stream` are
+already fixed; the rest remain:
+
+- **~20 JSON Schema keywords are accepted and ignored**, including `pattern`,
+  `minimum`/`maximum`, `additionalProperties`, `allOf`, `$ref` and `format`.
+  Two are actively wrong rather than merely absent: `pattern` is dropped, so a
+  constrained string is unconstrained in exactly the way the caller asked it not
+  to be; and `additionalProperties: true` is dropped while the compiled object
+  enforces a *closed* property set, making output stricter than the schema
+  permits. An object schema with `required` but no `properties` silently drops
+  `required` entirely. Rejecting unknown keywords is the invariant-compliant
+  behaviour and belongs with the tool-schema compiler.
+- **Wrong-typed request values fall back to defaults instead of erroring.**
+  `request_number` cannot distinguish absent from wrong-typed, so
+  `"temperature": "0.7"` silently becomes the server default.
+- **Silently ignored fields**: `n`, `frequency_penalty`, `presence_penalty`,
+  `logit_bias`, `tool_choice`, `parallel_tool_calls`, `user`, and on embeddings
+  `encoding_format` and `dimensions`. Note `repeat_penalty` has no request-level
+  override at all, so a client asking for no penalty still gets 1.1.
+- **`logprobs` is honoured only on non-streaming chat**, silently dropped on
+  streaming and on `/v1/completions`, and `top_logprobs` is not range-checked
+  unless `logprobs` is set.
+- **Negative `max_tokens` is accepted as "unlimited"** rather than rejected.
+- **Error objects omit `param` and `code`**, so clients cannot branch on
+  `context_length_exceeded`. Unknown model returns 400 where OpenAI returns 404;
+  context overflow returns 500 for what is a request-caused error; a full
+  request queue closes the connection with no HTTP response at all.
+
 ## Release
 
 `v0.2.0-alpha`: Guaranteed tool calls for local GGUF models.
@@ -197,6 +251,17 @@ Make streaming tools as reliable as buffered tools.
 - Support multiple sequential or parallel calls without index drift.
 - Handle client disconnects without leaving incomplete slot state.
 - Verify structured output with speculative decoding enabled.
+
+## [carried over] Known streaming defects
+
+- **`tool_calls` are unreachable when streaming.** `tool_calls_parse` is called
+  only on the buffered path, so a streaming request that triggers a tool call
+  streams the raw internal marker to the client as ordinary content and reports
+  `finish_reason: "stop"`. The value `"tool_calls"` cannot currently be produced
+  on a stream at all.
+- **Chunks omit `created` and `model`**, which the ChatCompletionChunk schema
+  requires and the non-streaming path does emit; the first delta also omits
+  `"role":"assistant"`. Strictly-validating SDK clients reject these.
 
 ## Exit Criteria
 
@@ -286,6 +351,26 @@ efficient concurrent serving.
 ## Release
 
 `v0.4.0-alpha`: Shared-weight concurrent agent serving.
+
+## [carried over] Server lifecycle defects to fix with this refactor
+
+These all stem from state that is global today and becomes per-sequence here:
+
+- **`SV.busy` is a single global flag** written by every slot. It is safe only
+  because swap mode implies one slot, and nothing encodes that dependency. With
+  a registry and `parallel > 1`, one slot finishing clears `busy` while another
+  is still generating, and the TTL reaper can then unload the model underneath
+  it. A per-sequence refcount is what this actually needs.
+- **`last_used` is stamped at request start**, so any generation longer than the
+  TTL is followed by an immediate unload of a model that just finished working.
+- **No graceful shutdown exists.** `SV.q.shutdown` is read but never written, so
+  `q_pop` never returns -1 and the slot-worker exit path is unreachable; there
+  is no SIGINT/SIGTERM handler, and the accept loop returns without closing the
+  listener, joining slot threads, or answering queued connections.
+- **`swap_to` holds `swap_mu` across a full model load**, blocking `/unload` for
+  seconds.
+- **`/unload` does not release the draft model**, and `context_load()` keeps
+  reporting the previous model's geometry after an unload.
 
 ## [carried over] Notes for the `model_t` split
 
@@ -479,30 +564,34 @@ writing a `tok_encode` harness — it changed substantially. And the three
 `json.c` bugs above should reproduce immediately; if a harness does not find
 them, it is not reaching the code.
 
-## Unfinished — phi3 architecture support
+## Done — phi3 architecture support
 
-Written but **deliberately not committed**; the diff is preserved outside the
-repo. Fused `attn_qkv` → Q/K/V and fused `ffn_up` → gate/up row slicing
-(zero-copy), plus LongRoPE short/long factor selection.
-
-Proven: layer-0 Q and V match an exact f64 dequantized matmul to 0.01%, so the
-splits and orderings are right; loads and generates fluent text; CUDA and CPU
-token-identical. Unresolved: it never emits `<|end|>` and rambles where llama.cpp
-answers and stops, so something downstream of layer 0 is wrong. Not shipped
-because `model.c` deliberately refuses `granite`/`gemma2` rather than generating
-plausible gibberish, and fluent non-terminating output is that failure mode.
-
-Next step: compute the full forward in numpy/f64 from dequantized weights for a
-short prompt and binary-search the first layer that diverges from Runner.
-
-The phi3 *chat template* and the `<|end|>` stop token were verified separately
-and are already on `main`.
+Shipped. The weight wiring was correct throughout; what blocked it was the
+repeat penalty suppressing `<|end|>`, since the chat template puts the turn
+terminator in the prompt and the prompt seeds the penalty window. Stop tokens
+are now exempt from the penalty. The earlier note here — "something downstream
+of layer 0 is wrong" — was mistaken and is kept only as a caution: layer-0
+numerics being exact did not imply the forward pass was the problem, and the
+bug was two modules away in `sample.c`.
 
 ## Unstarted — per-family sampling defaults
 
 Default temp/top_p/repeat-penalty presets per model family. This was intended as
 the second half of a correctness-then-quality pass; the correctness half
 (tokenizers, chat templates) is done.
+
+Two things a review turned up that belong in this work:
+
+- **The repeat penalty is applied before the `temp <= 0` greedy fast path**
+  (`sample.c`), so `--temp 0` does not return the model's argmax. That is
+  surprising for a flag whose whole purpose is determinism, and it is why an
+  exempt-list was needed rather than the penalty simply not applying. Whether
+  greedy should bypass penalties entirely is a product decision.
+- **The penalty's absolute strength scales with logit magnitude**, since it
+  divides the raw logit. Phi-3.5's logits reach ~+65 and Llama-3.2's ~+20, so
+  the same 1.1 setting is ~3x stronger on one than the other. Per-family
+  defaults should account for that, or the penalty should be applied in a
+  scale-invariant way.
 
 ## Verified baseline as of 2026-07-20
 
