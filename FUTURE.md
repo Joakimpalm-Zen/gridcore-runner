@@ -380,21 +380,95 @@ clients, without a translation proxy.
 
 ## Work
 
-- Add `POST /v1/responses`.
-- Support `instructions`, `input`, function tools, `tool_choice`,
+- **DONE** Add `POST /v1/responses`. It is a translation layer over the
+  existing engine, not a second one: `handle_responses` (server.c) reshapes
+  the request into the same prompt and the same `tool_envelope_build` union
+  `/v1/chat/completions` builds, and `run_completion`'s `bool chat` became an
+  `API_*` dialect so every line that decides *what* is generated is shared.
+  Phase 4 can hang Anthropic off the same seam.
+- **DONE** Support `instructions`, `input`, function tools, `tool_choice`,
   `parallel_tool_calls`, `text.format`, reasoning fields, and `store:false`.
-- Emit ordered Responses events: created, output-item added, content-part added,
-  text/tool deltas, item completion, and response completion.
-- Support function-call outputs in subsequent requests.
-- Preserve usage, cached-token, finish-reason, and Runner telemetry.
-- Add a `/v1/responses` conformance test suite.
-- Document a working Codex custom-provider configuration.
+  `instructions` becomes a system turn; `input` accepts a string or an item
+  array; tools are accepted in the flat Responses shape, the nested chat
+  shape, and inside a `namespace` group (which Codex sends); `text.format`
+  resolves through the same `request_schema` entry point as
+  `response_format`. `parallel_tool_calls:true` is still refused rather than
+  ignored — the envelope is one call per turn, as on the chat surface.
+  `reasoning` is accepted and echoed rather than refused: `effort` is a hint
+  about how much thinking to do, not a promise about the response document,
+  and a thinking-tag model's channel already comes back as a `reasoning`
+  output item. A malformed one is still a 400.
+- **DONE** Emit ordered Responses events: created, output-item added,
+  content-part added, text/tool deltas, item completion, and response
+  completion. Framed in one place (`resp_send`) so the SSE `event:` name and
+  `data.type` cannot drift apart and `sequence_number` cannot drift from send
+  order. `response.incomplete` replaces `response.completed` when
+  `max_output_tokens` cut the turn short, and the item is then marked
+  `incomplete` too — a client rendering `output[]` without reading the
+  response status would otherwise show a truncated message as a finished one.
+- **DONE** Support function-call outputs in subsequent requests.
+  `function_call` and `function_call_output` input items render into the
+  conversation the same way replayed chat `tool_calls` history does.
+  `test_function_call_output_is_accepted_in_a_later_request` asserts the
+  result actually reaches the prompt (via input-token growth) rather than
+  merely being accepted.
+- **DONE** Preserve usage, cached-token, finish-reason, and Runner telemetry.
+  `usage.input_tokens_details.cached_tokens` and `runner_telemetry` ride on
+  both the buffered body and the terminal stream event.
+- **DONE** Add a `/v1/responses` conformance test suite.
+  `tests/conformance/test_responses.py`, 37 tests. The suite grew from 134 to
+  171.
+- **DONE** Document a working Codex custom-provider configuration. README,
+  "Responses API" section — verified against the real `codex-cli` 0.144.6, not
+  written from the spec.
 
 ## Exit Criteria
 
-- Codex can complete a local tool-call loop through Runner.
-- OpenAI SDK Responses clients work in buffered and streaming modes.
-- Unsupported stateful features return clear errors rather than being ignored.
+- **DONE** Codex can complete a local tool-call loop through Runner. Verified
+  with the real `codex-cli` 0.144.6 against Qwen3-4B: Codex emitted an
+  `exec_command` function call, ran it, fed the `function_call_output` back,
+  and Runner answered the follow-up turn — three requests, with the prefix
+  cache reusing 9943 of 9962 prompt tokens on the second.
+  Getting there needed three fixes that only a real client exposed, all of
+  them shapes a from-the-spec reading does not predict:
+  - Codex groups function tools under a `{"type":"namespace","tools":[...]}`
+    entry. A namespace is a container, not a tool, so it is flattened.
+  - Codex declares `web_search` with `external_web_access:false` even when web
+    access is off. That is the client stating a capability is *disabled*, not
+    asking for it, so it is dropped; an enabled hosted tool is still refused.
+  - Codex's zero-argument tools declare
+    `{"properties":{},"additionalProperties":false}`. schema.c rejected this,
+    because an *absent* properties map with `additionalProperties:false`
+    genuinely cannot be compiled — but an empty one is exactly expressible
+    (an object with no permitted keys, i.e. `{}`), and now compiles to a
+    zero-property `SN_OBJ`. See `test_schema_empty_closed_object`.
+- **DONE** OpenAI SDK Responses clients work in buffered and streaming modes.
+  Verified against the real `openai` 2.46.0 Python SDK, not only asserted on
+  the wire: `client.responses.create` parses into a `Response`, and
+  `client.responses.stream` deserialises every event into its typed class
+  (`ResponseCreatedEvent`, `ResponseOutputItemAddedEvent`,
+  `ResponseTextDeltaEvent`, `ResponseFunctionCallArgumentsDeltaEvent`,
+  `ResponseCompletedEvent`, …) with `get_final_response()` returning the
+  parsed turn including its function call. Note that the SDK's
+  `get_final_response()` raises on a truncated stream because it has no
+  `response.incomplete` branch — that is SDK behaviour against real OpenAI
+  too, not a Runner defect.
+- **DONE** Unsupported stateful features return clear errors rather than being
+  ignored. `store:true`, `previous_response_id`, `background:true`,
+  `conversation`, `truncation:"auto"`, `include[]` and enabled hosted tools
+  each return a 400 naming the field and why.
+
+## Not done in this phase
+
+- Multiple parallel tool calls in one turn. `parallel_tool_calls:true` is
+  refused on both surfaces; the envelope is still one call per turn, and the
+  Responses items are already `output_index`-keyed, which is the shape a
+  multi-call envelope will need.
+- No C-level unit test covers the Responses event state machine. It is static
+  in server.c, which no test binary links, so it is asserted through the HTTP
+  surface instead (per AGENTS.md "test through public interfaces"). The
+  ordering assertions were mutation-checked: deleting the terminal
+  `resp_close_item` call fails four conformance tests.
 
 ## Release
 

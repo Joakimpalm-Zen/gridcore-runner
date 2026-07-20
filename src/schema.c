@@ -127,7 +127,8 @@ static bool check_object_rules(jv *s, char *err, int errcap) {
     jv *props = jv_get(s, "properties");
     bool has_props = props && props->type == J_OBJ && props->n > 0;
     jv *ap = jv_get(s, "additionalProperties");
-    if (ap && !(ap->type == J_BOOL && !ap->b && has_props)) {
+    bool empty_closed = props && props->type == J_OBJ && props->n == 0;
+    if (ap && !(ap->type == J_BOOL && !ap->b && (has_props || empty_closed))) {
         snprintf(err, errcap,
                  "additionalProperties is only supported as false alongside "
                  "declared properties");
@@ -353,6 +354,18 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
     if (!strcmp(type, "object")) {
         if (!check_object_rules(s, err, errcap)) return NULL;
         jv *props = jv_get(s, "properties");
+        jv *apv = jv_get(s, "additionalProperties");
+        bool closed_empty = props && props->type == J_OBJ && props->n == 0 &&
+                            apv && apv->type == J_BOOL && !apv->b;
+        if (closed_empty) {
+            // {"properties":{},"additionalProperties":false} declares an object
+            // with no permitted keys, i.e. exactly `{}`. Compiling it to the
+            // open machine would accept any object at all, which is the
+            // opposite of what was asked for.
+            snode *n = sn_new(SN_OBJ);
+            if (!n) return NULL;
+            return n;
+        }
         if (!props || props->type != J_OBJ || props->n == 0) {
             // open object: any JSON object (generic machine, '{' enforced)
             snode *n = sn_new(SN_ANY);

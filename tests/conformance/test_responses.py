@@ -421,6 +421,76 @@ def test_nested_chat_style_tools_are_accepted(client):
                             output=d["output"])
 
 
+# ------------------------------------------------------- what Codex sends
+# These four cases are taken from a captured request of the real Codex CLI
+# (codex-cli 0.144.6, wire_api = "responses"). They are the shapes that a
+# from-the-spec reading of the Responses API does not predict, so they are
+# pinned against the client rather than against the document.
+def test_namespace_tools_are_flattened(client):
+    """Codex groups related function tools under a `namespace` entry.
+
+    A namespace is not a tool — it is a container of them — so it is flattened
+    into the union rather than refused: every leaf really is a local function
+    this runtime can drive."""
+    payload = {"input": "weather in Oslo?", "temperature": 0,
+               "max_output_tokens": 40, "tool_choice": "required",
+               "tools": [{"type": "namespace", "name": "grouped",
+                          "description": "a group of tools",
+                          "tools": [WEATHER]}]}
+    d = client.responses(payload, name="responses-namespace").expect_status(200).json
+    calls = [i for i in d["output"] if i["type"] == "function_call"]
+    if not calls:
+        raise ProtocolError("a namespaced tool was not offered to the model",
+                            output=d["output"])
+    if calls[0]["name"] != "get_weather":
+        raise ProtocolError("namespaced tool called under the wrong name",
+                            got=calls[0]["name"])
+
+
+def test_disabled_hosted_tool_is_not_a_request(client):
+    """Codex declares `web_search` with `external_web_access: false` even when
+    web access is off. That is the client stating the capability is disabled,
+    not asking for it, so it must not be refused — while an *enabled* hosted
+    tool still must be, since this runtime cannot run one."""
+    ok = client.responses({"input": "hello", "temperature": 0,
+                           "max_output_tokens": 8,
+                           "tools": [{"type": "web_search",
+                                      "external_web_access": False}]},
+                          name="responses-websearch-off")
+    ok.expect_status(200)
+    client.expect_400({"input": "hello",
+                       "tools": [{"type": "web_search",
+                                  "external_web_access": True}]},
+                      name="responses-websearch-on", contains="function",
+                      path="/v1/responses")
+
+
+def test_developer_role_is_accepted(client):
+    """`developer` is the Responses spelling of a system turn."""
+    d = client.responses({"input": [
+        {"type": "message", "role": "developer",
+         "content": [{"type": "input_text", "text": "You are terse."}]},
+        {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "hello"}]}],
+        "temperature": 0, "max_output_tokens": 8},
+        name="responses-developer-role").expect_status(200).json
+    if not d["output"]:
+        raise ProtocolError("developer-role input produced no output", body=d)
+
+
+def test_unknown_advisory_fields_are_tolerated(client):
+    """`prompt_cache_key` and `client_metadata` are routing and telemetry
+    hints. They make no promise about the response document, so unlike a
+    dropped schema they can be accepted without misleading the caller."""
+    r = client.responses({"input": "hello", "temperature": 0,
+                          "max_output_tokens": 8, "store": False,
+                          "include": [], "parallel_tool_calls": False,
+                          "prompt_cache_key": "abc-123",
+                          "client_metadata": {"session_id": "abc"}},
+                         name="responses-advisory")
+    r.expect_status(200)
+
+
 # --------------------------------------------------------------- tool loop
 def test_function_call_output_is_accepted_in_a_later_request(client):
     """The agent loop: the call this runtime produced is fed back with its

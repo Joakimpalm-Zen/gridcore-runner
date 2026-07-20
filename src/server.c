@@ -1574,41 +1574,71 @@ static jv *responses_tools(jv *tools, char *err, int errcap) {
     }
     sbuf b = {0};
     sb_lit(&b, "[");
+    int emitted = 0;
+    // one level of `namespace` nesting is flattened, so the loop walks the
+    // outer list and, for a namespace, its inner list
     for (int i = 0; i < tools->n; i++) {
-        jv *t = tools->items[i];
-        if (!t || t->type != J_OBJ) {
+        jv *outer = tools->items[i];
+        if (!outer || outer->type != J_OBJ) {
             snprintf(err, errcap, "each tools[] entry must be an object");
             free(b.s);
             return NULL;
         }
-        const char *type = jv_str(jv_get(t, "type"), "function");
-        if (strcmp(type, "function") != 0) {
-            // web_search / file_search / computer_use are hosted tools this
-            // runtime has nothing to run; accepting and dropping them would
-            // leave the caller waiting for a call that cannot happen
-            snprintf(err, errcap,
-                     "tools[].type \"%.40s\" is not supported; "
-                     "only \"function\" tools can run locally", type);
-            free(b.s);
-            return NULL;
+        const char *otype = jv_str(jv_get(outer, "type"), "function");
+        jv *group = NULL;
+        if (!strcmp(otype, "namespace")) {
+            // Codex groups related function tools under a namespace entry. A
+            // namespace is a container, not a tool, so it is flattened rather
+            // than refused: every leaf is a local function after all.
+            group = jv_get(outer, "tools");
+            if (!group || group->type != J_ARR) {
+                snprintf(err, errcap,
+                         "tools[].type \"namespace\" must carry a tools array");
+                free(b.s);
+                return NULL;
+            }
         }
-        // already nested (a client reusing its chat tool definitions): pass through
-        jv *nested = jv_get(t, "function");
-        if (i) sb_lit(&b, ",");
-        sb_lit(&b, "{\"type\":\"function\",\"function\":");
-        if (nested && nested->type == J_OBJ) {
-            jv_dump(nested, &b);
-        } else {
-            sb_lit(&b, "{\"name\":");
-            jv *nm = jv_get(t, "name");
-            if (nm) jv_dump(nm, &b); else sb_lit(&b, "null");
-            jv *desc = jv_get(t, "description");
-            if (desc) { sb_lit(&b, ",\"description\":"); jv_dump(desc, &b); }
-            jv *params = jv_get(t, "parameters");
-            if (params) { sb_lit(&b, ",\"parameters\":"); jv_dump(params, &b); }
+        int inner_n = group ? group->n : 1;
+        for (int k = 0; k < inner_n; k++) {
+            jv *t = group ? group->items[k] : outer;
+            if (!t || t->type != J_OBJ) {
+                snprintf(err, errcap, "each tools[] entry must be an object");
+                free(b.s);
+                return NULL;
+            }
+            const char *type = jv_str(jv_get(t, "type"), "function");
+            if (strcmp(type, "function") != 0) {
+                // A hosted tool the client itself marked unavailable is not a
+                // request for anything, so dropping it misleads nobody. One
+                // that is actually asked for is a capability this runtime does
+                // not have, and saying so beats leaving the caller waiting for
+                // a call that can never come.
+                jv *web = jv_get(t, "external_web_access");
+                if (web && web->type == J_BOOL && !web->b) continue;
+                snprintf(err, errcap,
+                         "tools[].type \"%.40s\" is not supported; "
+                         "only \"function\" tools can run locally", type);
+                free(b.s);
+                return NULL;
+            }
+            // already nested (a client reusing its chat tool definitions)
+            jv *nested = jv_get(t, "function");
+            if (emitted++) sb_lit(&b, ",");
+            sb_lit(&b, "{\"type\":\"function\",\"function\":");
+            if (nested && nested->type == J_OBJ) {
+                jv_dump(nested, &b);
+            } else {
+                sb_lit(&b, "{\"name\":");
+                jv *nm = jv_get(t, "name");
+                if (nm) jv_dump(nm, &b); else sb_lit(&b, "null");
+                jv *desc = jv_get(t, "description");
+                if (desc) { sb_lit(&b, ",\"description\":"); jv_dump(desc, &b); }
+                jv *params = jv_get(t, "parameters");
+                if (params) { sb_lit(&b, ",\"parameters\":"); jv_dump(params, &b); }
+                sb_lit(&b, "}");
+            }
             sb_lit(&b, "}");
         }
-        sb_lit(&b, "}");
     }
     sb_lit(&b, "]");
     if (b.failed || !b.s) {
@@ -1703,6 +1733,9 @@ static char *responses_item_text(jv *item, const char **role) {
         return b.s;
     }
     *role = jv_str(jv_get(item, "role"), "user");
+    // "developer" is the Responses spelling of a system turn; chat templates
+    // know the latter
+    if (!strcmp(*role, "developer")) *role = "system";
     jv *content = jv_get(item, "content");
     if (content && content->type == J_STR) {
         sb_put(&b, content->str, strlen(content->str));

@@ -236,7 +236,8 @@ This is runner's specialty. Three pieces work together:
 ./runner -m model.gguf --serve --port 8080 --parallel 2
 ```
 
-Endpoints: `POST /v1/chat/completions`, `POST /v1/completions`,
+Endpoints: `POST /v1/chat/completions`, `POST /v1/responses`,
+`POST /v1/completions`,
 `POST /v1/embeddings` (mean-pooled, L2-normalized), `GET /v1/models`,
 `GET /v1/capabilities` (which reports the active family sampling preset),
 `GET /health`, `GET /unload`. Chat completions understand `logprobs` /
@@ -275,6 +276,86 @@ mmap page cache, so memory grows only by KV cache per slot. The server binds
 to 127.0.0.1 only. Streaming clients that disconnect stop generation
 immediately. Multiple *processes* also share weights the same way — running
 several `runner` instances against one GGUF costs the file size once.
+
+## Responses API (`POST /v1/responses`)
+
+The OpenAI Responses surface, so Codex-style agent clients and the OpenAI
+SDK's `client.responses` work against a local GGUF with no translation proxy.
+
+It is a translation layer, not a second engine: a Responses request is
+reshaped into the same prompt and the same strict tool envelope that
+`/v1/chat/completions` builds, so both surfaces produce identical calls with
+identical guarantees, and `stream=True` stays a transport choice.
+
+```python
+import openai
+client = openai.OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="none")
+r = client.responses.create(
+    model="runner",
+    instructions="You are terse.",
+    input="What is the weather in Oslo?",
+    tools=[{"type": "function", "name": "get_weather",
+            "parameters": {"type": "object",
+                           "properties": {"city": {"type": "string"}},
+                           "required": ["city"]}}],
+)
+for item in r.output:
+    if item.type == "function_call":
+        print(item.name, item.arguments)   # guaranteed to parse and conform
+```
+
+Supported: `instructions`; `input` as a string or an item array (including
+`function_call` and `function_call_output` items, which is the tool loop);
+function `tools` in both the flat Responses shape and the nested chat shape;
+`tool_choice` auto/none/required/named; `text.format` text/`json_object`/
+`json_schema`; `max_output_tokens`; the usual sampling parameters;
+`reasoning` (accepted and echoed — a local model's thinking channel comes back
+as a `reasoning` output item); and `store:false`.
+
+Streaming emits the ordered typed events SDKs validate: `response.created`,
+`response.in_progress`, `response.output_item.added`,
+`response.content_part.added`, `response.output_text.delta` (or
+`response.function_call_arguments.delta`), the matching `.done` events,
+`response.output_item.done`, and `response.completed` — or
+`response.incomplete` when `max_output_tokens` cut the turn short. Every event
+carries a monotonic `sequence_number`, and usage, cached-token counts and
+`runner_telemetry` ride on the terminal event exactly as on a buffered body.
+
+**Not supported, and refused rather than ignored** (this runtime is stateless,
+so answering 200 would tell a caller its turn was persisted when it was not):
+`store:true`, `previous_response_id`, `background:true`, `conversation`,
+`truncation:"auto"`, `include[]`, hosted tools (`web_search`, `file_search`,
+…), and `parallel_tool_calls:true` (one call per turn for now). Each returns
+400 with a message naming the field and why.
+
+### Codex CLI custom provider
+
+Point Codex at runner as an OpenAI-compatible Responses provider. In
+`~/.codex/config.toml`:
+
+```toml
+model = "runner"
+model_provider = "runner"
+
+[model_providers.runner]
+name = "Gridcore Runner"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+# runner ignores the key, but the client insists on sending one
+env_key = "RUNNER_API_KEY"
+# this runtime has no response store, so history must be sent every turn
+# rather than referenced by previous_response_id
+```
+
+```
+export RUNNER_API_KEY=none
+./runner -m model.gguf --serve --port 8080
+codex "list the files here"
+```
+
+Use a model that was instruction-tuned for tool use — the strict envelope
+guarantees a *well-formed* call, not a well-*chosen* one. `--parallel 1` is
+fine; Codex issues one request at a time.
 
 ## Structured output (JSON and JSON Schema)
 
