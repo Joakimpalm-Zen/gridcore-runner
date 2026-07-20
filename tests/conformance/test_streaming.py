@@ -252,6 +252,39 @@ def test_stream_never_leaks_the_envelope_into_content(client):
         raise ProtocolError("finish_reason \"tool_calls\" with no streamed call")
 
 
+def test_stream_keeps_the_three_channels_separate(client):
+    """reasoning_content, content and tool_calls are distinct channels. A
+    delta that mixes them forces the client to guess which one it is reading,
+    and that guess is where reasoning text ends up in an executed call."""
+    st = client.chat_stream(
+        dict(BASE, max_tokens=32, tools=[TOOL], tool_choice="required"),
+        name="stream-tools-channels").expect_sse()
+    for d in st.deltas():
+        present = [k for k in ("content", "reasoning_content", "tool_calls")
+                   if d.get(k)]
+        if len(present) > 1:
+            raise ProtocolError("one delta carried more than one channel",
+                                channels=present, delta=d)
+
+
+def test_client_disconnect_mid_tool_call_releases_the_slot(client, server):
+    """The disconnect path, with the envelope demultiplexer live.
+
+    Hanging up part-way through a tool call leaves the demux holding an
+    undecided prefix; the slot must still be released and reusable."""
+    partial, _, _ = client.stream_raw(
+        "stream-tools-disconnect", "/v1/chat/completions",
+        dict(BASE, max_tokens=256, stream=True, tools=[TOOL],
+             tool_choice="required"), close_after_bytes=1)
+    if not partial:
+        raise ProtocolError("no bytes arrived before disconnecting")
+    server.assert_alive()
+    for i in range(server.parallel + 1):
+        client.chat(dict(BASE, max_tokens=4, tools=[TOOL],
+                         tool_choice="required"),
+                    name=f"post-tool-disconnect-{i}").expect_status(200)
+
+
 def test_stream_tool_call_survives_every_split_point(client):
     """The boundary matrix, applied to a stream that carries a tool call:
     argument deltas are the part most likely to be reassembled differently
