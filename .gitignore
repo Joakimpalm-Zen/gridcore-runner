@@ -26,3 +26,5 @@ bench-err.*.txt
 
 # agent worktrees (transient)
 .claude/worktrees/
+# conformance harness run artifacts (report + recorded fixtures)
+tests/conformance/out/

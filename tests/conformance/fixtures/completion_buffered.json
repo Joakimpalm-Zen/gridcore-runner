@@ -1,0 +1,27 @@
+{
+  "choices": [
+    {
+      "finish_reason": "<redacted>",
+      "index": "<number>",
+      "text": "<redacted>"
+    }
+  ],
+  "created": "<redacted>",
+  "id": "<redacted>",
+  "model": "<redacted>",
+  "object": "text_completion",
+  "runner_telemetry": {
+    "generation_seconds": "<number>",
+    "generation_tok_s": "<number>",
+    "json_mode": false,
+    "prompt_cached_tokens": "<number>",
+    "prompt_eval_tokens": "<number>",
+    "schema": false,
+    "speculative": false
+  },
+  "usage": {
+    "completion_tokens": "<number>",
+    "prompt_tokens": "<number>",
+    "total_tokens": "<number>"
+  }
+}

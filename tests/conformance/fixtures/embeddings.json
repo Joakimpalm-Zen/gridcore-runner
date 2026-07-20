@@ -1,0 +1,17 @@
+{
+  "data": [
+    {
+      "embedding": [
+        "<64 numbers>"
+      ],
+      "index": "<number>",
+      "object": "embedding"
+    }
+  ],
+  "model": "<redacted>",
+  "object": "list",
+  "usage": {
+    "prompt_tokens": "<number>",
+    "total_tokens": "<number>"
+  }
+}

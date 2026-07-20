@@ -1,0 +1,32 @@
+{
+  "context": "<number>",
+  "features": {
+    "family_sampling_presets": true,
+    "json_object": true,
+    "json_schema": true,
+    "prefix_cache": true,
+    "prefix_cache_controls": true,
+    "repeat_penalty": true,
+    "request_telemetry": true,
+    "schema_conditionals": true,
+    "schema_string_bounds": true,
+    "stop_sequences": true
+  },
+  "models": [
+    {
+      "id": "<redacted>",
+      "resident": true
+    }
+  ],
+  "object": "runner.capabilities",
+  "resident": null,
+  "sampling": {
+    "min_p": "<number>",
+    "preset": "<redacted>",
+    "repeat_penalty": "<number>",
+    "temperature": "<number>",
+    "top_k": "<number>",
+    "top_p": "<number>"
+  },
+  "swap": false
+}

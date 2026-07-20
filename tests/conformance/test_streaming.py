@@ -1,0 +1,262 @@
+"""Streaming chat completions: SSE framing, the token-boundary matrix,
+client disconnect, and the chunk-shape gaps Phase 2 is expected to close."""
+
+import json
+
+import pytest
+
+from harness import ProtocolError, SSEParser, decode_events, parse_stream, split_points
+
+BASE = {"messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 8, "temperature": 0}
+
+
+def test_stream_framing(client, report):
+    st = client.chat_stream(dict(BASE), name="stream-basic").expect_sse()
+    for c in st.chunks:
+        if c.get("object") != "chat.completion.chunk":
+            raise ProtocolError("streamed chunk has wrong object type",
+                                got=c.get("object"), chunk=c)
+        if not c.get("id"):
+            raise ProtocolError("streamed chunk has no id", chunk=c)
+        if not isinstance(c.get("choices"), list):
+            raise ProtocolError("streamed chunk has no choices array", chunk=c)
+    if st.finish_reason not in ("stop", "length"):
+        raise ProtocolError("stream ended with no usable finish_reason",
+                            got=st.finish_reason)
+    # exactly one chunk carries a finish_reason, and it is the last one
+    fins = [i for i, c in enumerate(st.chunks)
+            if any(ch.get("finish_reason") for ch in c.get("choices", []))]
+    if fins != [len(st.chunks) - 1]:
+        raise ProtocolError("finish_reason must appear once, on the final chunk",
+                            at=fins, total=len(st.chunks))
+    report.check_fixture("chat_stream_chunk", st.chunks[0])
+    report.check_fixture("chat_stream_final", st.chunks[-1])
+
+
+def test_stream_matches_buffered(client):
+    """The same greedy request must produce the same text either way. A
+    streaming path that drops or duplicates a token is invisible otherwise."""
+    buffered = client.chat(dict(BASE, max_tokens=16), name="stream-vs-buffered-b")
+    st = client.chat_stream(dict(BASE, max_tokens=16), name="stream-vs-buffered-s")
+    st.expect_sse()
+    if st.text != buffered.content:
+        raise ProtocolError("streamed text differs from buffered text",
+                            buffered=buffered.content, streamed=st.text)
+    if st.finish_reason != buffered.finish_reason:
+        raise ProtocolError("streamed finish_reason differs from buffered",
+                            buffered=buffered.finish_reason,
+                            streamed=st.finish_reason)
+
+
+def test_stream_options_include_usage(client):
+    st = client.chat_stream(dict(BASE, stream_options={"include_usage": True}),
+                            name="stream-usage").expect_sse()
+    usage = [c["usage"] for c in st.chunks if "usage" in c]
+    if len(usage) != 1:
+        raise ProtocolError("include_usage must add exactly one usage chunk",
+                            got=len(usage))
+    u = usage[0]
+    if u["prompt_tokens"] <= 0 or u["total_tokens"] != u["prompt_tokens"] + u["completion_tokens"]:
+        raise ProtocolError("streamed usage is not self-consistent", usage=u)
+    if st.chunks[-1].get("usage") is not usage[0] or st.chunks[-1].get("choices") != []:
+        raise ProtocolError("usage chunk must be last and carry empty choices",
+                            last=st.chunks[-1])
+
+
+# ------------------------------------------------------- boundary matrix
+@pytest.fixture(scope="module")
+def recorded_stream(client):
+    """One real SSE byte stream, captured once and replayed by the matrix."""
+    st = client.chat_stream(dict(BASE, max_tokens=12,
+                                 stream_options={"include_usage": True}),
+                            name="stream-for-boundary-matrix")
+    st.expect_sse()
+    return st.raw
+
+
+def test_every_split_point_parses_identically(recorded_stream):
+    """Phase 0: split the stream at EVERY possible byte boundary.
+
+    A client that reassembles differently depending on how TCP happened to
+    segment the response is broken in a way that only shows up under load, so
+    every split of the byte string must yield the identical event list."""
+    raw = recorded_stream
+    reference = parse_stream(raw)
+    if not reference:
+        raise ProtocolError("recorded stream parsed to nothing", bytes=len(raw))
+    for chunks in split_points(raw):
+        got = parse_stream(raw, chunks)
+        if got != reference:
+            at = len(chunks[0]) if len(chunks) == 2 else "byte-at-a-time"
+            raise ProtocolError("parse depends on chunk boundaries",
+                                split_at=at, expected=len(reference),
+                                got=len(got),
+                                first_difference=_first_diff(reference, got))
+
+
+def test_every_split_point_decodes_identically(recorded_stream):
+    """Same matrix, one level up: the decoded chunk objects and the [DONE]
+    terminator must also be boundary-independent."""
+    raw = recorded_stream
+    ref_chunks, ref_done = decode_events(parse_stream(raw))
+    for chunks in split_points(raw):
+        got_chunks, got_done = decode_events(parse_stream(raw, chunks))
+        if got_chunks != ref_chunks or got_done != ref_done:
+            at = len(chunks[0]) if len(chunks) == 2 else "byte-at-a-time"
+            raise ProtocolError("decoded stream depends on chunk boundaries",
+                                split_at=at)
+
+
+def test_partial_event_is_never_dispatched(recorded_stream):
+    """Every strict prefix of the stream must parse to a prefix of the events.
+
+    This is the property a real client depends on: bytes received so far may
+    only ever yield events that are genuinely complete. Half of an event must
+    never surface as a whole one."""
+    raw = recorded_stream
+    reference = parse_stream(raw)
+    for i in range(len(raw) + 1):
+        p = SSEParser()
+        p.feed(raw[:i])
+        got = p.close()
+        if got != reference[:len(got)]:
+            raise ProtocolError("prefix parse is not a prefix of the full parse",
+                                prefix_bytes=i, got=len(got))
+
+
+def test_malformed_sse_is_an_error_not_a_skip(recorded_stream):
+    """FUTURE.md, "Python client defects": swallowing a bad ``data:`` line
+    turns protocol corruption into output that looks complete. The harness
+    must raise instead."""
+    corrupted = recorded_stream.replace(b"data: {", b"data: {,", 1)
+    with pytest.raises(ProtocolError):
+        decode_events(parse_stream(corrupted))
+
+
+def _first_diff(a, b):
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return {"index": i, "expected": x[:120], "got": y[:120]}
+    return {"index": min(len(a), len(b)), "expected": None, "got": None}
+
+
+# ------------------------------------------------------------ disconnect
+def test_client_disconnect_mid_stream_releases_the_slot(client, server):
+    """Hang up partway through an SSE response.
+
+    The server must notice the dead socket, stop generating, release the slot
+    and stay healthy. A leaked slot here is invisible until the next request
+    blocks forever, which is why the assertion is "the next requests still
+    work", not "no error was logged"."""
+    partial, _, _ = client.stream_raw(
+        "stream-disconnect", "/v1/chat/completions",
+        dict(BASE, max_tokens=256, stream=True), close_after_bytes=1)
+    if not partial:
+        raise ProtocolError("no bytes arrived before disconnecting")
+    if b"200" not in partial.split(b"\r\n", 1)[0]:
+        raise ProtocolError("stream did not start OK before disconnect",
+                            head=partial[:80].decode("utf-8", "replace"))
+    server.assert_alive()
+    # every slot must still be usable: run more requests than there are slots
+    for i in range(server.parallel + 1):
+        client.get("/health").expect_status(200)
+        client.chat(dict(BASE, max_tokens=4),
+                    name=f"post-disconnect-{i}").expect_status(200)
+
+
+# --------------------------------------------------------- known gaps
+@pytest.mark.known_gap("phase-2", "tool_calls are unreachable on the streaming path")
+def test_known_gap_no_tool_calls_in_stream(client, report):
+    """KNOWN GAP (Phase 2) — pins today's behaviour, do not read as desired.
+
+    FUTURE.md: "tool_calls are currently unreachable in streaming mode at all".
+    The buffered path parses runner's tool-call syntax out of the generated text
+    and reports finish_reason "tool_calls"; the streaming path has no equivalent,
+    so a tool call is streamed as ordinary content and the stream ends "stop" or
+    "length".
+
+    WHEN PHASE 2 LANDS this test must be inverted: assert delta.tool_calls
+    arrives with incremental function arguments and finish_reason == "tool_calls".
+    """
+    st = client.chat_stream(
+        dict(BASE, max_tokens=16,
+             tools=[{"type": "function",
+                     "function": {"name": "f", "description": "d",
+                                  "parameters": {"type": "object",
+                                                 "properties": {}}}}],
+             tool_choice="auto"),
+        name="stream-tools").expect_sse()
+    for d in st.deltas():
+        if "tool_calls" in d:
+            pytest.fail("delta.tool_calls appeared — Phase 2 has landed, "
+                        "rewrite test_known_gap_no_tool_calls_in_stream to "
+                        "assert the streamed tool-call contract instead")
+    if st.finish_reason == "tool_calls":
+        pytest.fail("streaming reported finish_reason tool_calls — Phase 2 has "
+                    "landed, rewrite this test")
+    report.note_quality("stream-tool-calls",
+                        "streaming path emitted no tool_calls (known Phase 2 gap)",
+                        finish_reason=st.finish_reason)
+
+
+@pytest.mark.known_gap("phase-2", "streaming chunks omit created/model, first delta omits role")
+def test_known_gap_stream_chunk_omits_created_model_and_role(client):
+    """KNOWN GAP — pins today's behaviour, do not read as desired.
+
+    OpenAI's chat.completion.chunk carries ``created`` and ``model`` on every
+    chunk and ``role: "assistant"`` on the first delta. Runner emits none of
+    the three. SDKs that key off the first delta's role (or that echo the model
+    back) see a chunk they consider malformed.
+
+    WHEN THIS IS FIXED: flip each assertion below to require the field, and
+    re-record fixtures/chat_stream_chunk.json.
+    """
+    st = client.chat_stream(dict(BASE), name="stream-chunk-fields").expect_sse()
+    first = st.chunks[0]
+    for field in ("created", "model"):
+        if field in first:
+            pytest.fail(f"streamed chunk now carries {field!r} — the gap is "
+                        f"closed, update this test and re-record the fixture")
+    role = first["choices"][0].get("delta", {}).get("role")
+    if role is not None:
+        pytest.fail(f"first delta now carries role={role!r} — the gap is "
+                    f"closed, update this test and re-record the fixture")
+    # what IS guaranteed today, so a regression below this line is a real one
+    if "content" not in first["choices"][0].get("delta", {}):
+        raise ProtocolError("first delta carries neither role nor content",
+                            chunk=first)
+
+
+def test_stream_flag_must_be_boolean(client):
+    """KNOWN CURRENT BEHAVIOUR (and a deliberate one): "stream":"true" used to
+    read as false and answer with a buffered body, leaving an SSE client
+    waiting forever. It must 400."""
+    for bad in ("true", 1, 0, [], {}):
+        client.expect_400(dict(BASE, stream=bad), name=f"stream-nonbool-{bad!r}",
+                          contains="stream")
+    # ...but a real boolean false is fine and means "buffered"
+    r = client.chat(dict(BASE, stream=False), name="stream-false")
+    r.expect_status(200)
+    if r.json.get("object") != "chat.completion":
+        raise ProtocolError("stream:false did not produce a buffered response",
+                            got=r.json.get("object"))
+
+
+def test_stream_error_is_reported_before_the_stream_starts(client):
+    """A request rejected at validation time must fail as a normal HTTP error,
+    not as a 200 SSE stream carrying an error event — clients branch on the
+    status code long before they parse events."""
+    raw, _, _ = client.stream_raw(
+        "stream-rejected", "/v1/chat/completions",
+        dict(BASE, stream=True, response_format={"type": "nonsense"}))
+    head = raw.split(b"\r\n", 1)[0]
+    if b"400" not in head:
+        raise ProtocolError("invalid streaming request did not fail with 400",
+                            head=head.decode("utf-8", "replace"))
+    if b"text/event-stream" in raw:
+        raise ProtocolError("rejected request still opened an SSE stream")
+    body = raw.split(b"\r\n\r\n", 1)[1]
+    if "error" not in json.loads(body):
+        raise ProtocolError("rejection body is not an error envelope",
+                            body=body[:200].decode("utf-8", "replace"))

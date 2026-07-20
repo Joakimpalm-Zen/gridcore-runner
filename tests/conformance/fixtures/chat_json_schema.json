@@ -1,0 +1,30 @@
+{
+  "choices": [
+    {
+      "finish_reason": "<redacted>",
+      "index": "<number>",
+      "message": {
+        "content": "<redacted>",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": "<redacted>",
+  "id": "<redacted>",
+  "model": "<redacted>",
+  "object": "chat.completion",
+  "runner_telemetry": {
+    "generation_seconds": "<number>",
+    "generation_tok_s": "<number>",
+    "json_mode": false,
+    "prompt_cached_tokens": "<number>",
+    "prompt_eval_tokens": "<number>",
+    "schema": true,
+    "speculative": false
+  },
+  "usage": {
+    "completion_tokens": "<number>",
+    "prompt_tokens": "<number>",
+    "total_tokens": "<number>"
+  }
+}
