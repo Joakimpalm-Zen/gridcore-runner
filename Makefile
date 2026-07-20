@@ -15,16 +15,19 @@ LDFLAGS += -lws2_32 -static
 GPU_SRC  = src/cuda.c
 RUNNER_EXE = runner.exe
 TEST_JSON_SCHEMA = test-json-schema.exe
+TEST_TOKENIZER = test-tokenizer.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
 RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
+TEST_TOKENIZER = test-tokenizer
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
 RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
+TEST_TOKENIZER = test-tokenizer
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -40,11 +43,18 @@ debug: $(SRC) src/runner.h
 $(TEST_JSON_SCHEMA): tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c
 	$(CC) -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c -o $@ -lm
 
+# quants.c is needed for the ggml_type_* helpers gguf.c links against; CFLAGS
+# (not the plainer flags above) so the AVX2 paths match a real build
+TEST_TOK_SRC = tests/test_tokenizer.c src/gguf.c src/tokenizer.c src/compat.c src/quants.c
+$(TEST_TOKENIZER): $(TEST_TOK_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_TOK_SRC) -o $@ -lm
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
-test: $(TEST_JSON_SCHEMA) test.gguf
+test: $(TEST_JSON_SCHEMA) $(TEST_TOKENIZER) test.gguf
 	./$(TEST_JSON_SCHEMA)
+	./$(TEST_TOKENIZER)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 	else \
@@ -58,7 +68,7 @@ smoke: runner test.gguf
 	./$(RUNNER_EXE) -m test.gguf -p "hi" -n 24 --temp 0 --json --gpu off 2>/dev/null | $(PYTHON) -c "import json,sys; json.load(sys.stdin); print('valid json')"
 
 clean:
-	rm -f runner runner-debug $(TEST_JSON_SCHEMA)
+	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_TOKENIZER)
 
 # regenerate the committed PTX header (dev machines only: needs nvcc + a host
 # compiler). Normal builds and CI use the committed src/kernels_ptx.h.

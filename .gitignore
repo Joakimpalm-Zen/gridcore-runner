@@ -2,6 +2,10 @@ runner
 runner.exe
 runner-debug
 runner-debug.exe
+test-json-schema
+test-json-schema.exe
+test-tokenizer
+test-tokenizer.exe
 *.gguf
 src/kernels.ptx
 src/kernels-*.ptx.tmp
