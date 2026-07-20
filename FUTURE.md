@@ -1223,7 +1223,10 @@ Status is tracked here; nothing is removed when finished, only marked.
    model; an extra slot costs its KV only (0.27 GB, not 5.20 GB). The model_t
    struct itself is NOT split — that needs server.c/main.c signature changes.
    The Phase 5 server-lifecycle defects remain open and are orthogonal.
-7. Continuous batching. **IN PROGRESS** (engine half)
+7. Continuous batching. **PARTIAL** — the engine half is done:
+   model_batch_decode advances N sequences in one microbatch, 2.3-2.6x
+   throughput at N=4, logits BITWISE identical to solo decode. The server-side
+   scheduler is specified in Phase 6's section but not written.
 8. Persistent/forkable KV prefixes.
 9. GPU Q8 KV cache. **PARTIAL** — Q8 KV works on CUDA, 1.88x context where
    VRAM binds, fp16 still the default. Metal is a fallback stub (unverified),
