@@ -1008,6 +1008,92 @@ float *model_forward(model_t *m, int token, int pos) {
     return model_forward_batch(m, &t, 1, pos, true);
 }
 
+// ------------------------------------------------ continuous batching (Phase 6)
+//
+// The host half of the batched decode primitive: it owns the sequence list and
+// the fallback, and it owns the decision of when a microbatch is worth forming.
+// The arithmetic lives in the backend (gpu_batch_* in cuda.c), because that is
+// the only place a decode step for N sequences can actually be *one* pass over
+// the weights.
+//
+// The fallback is the whole reason this layer exists as a type rather than as a
+// free function. Without a batching backend — CPU, Metal, partial offload, a
+// model whose quant types have no batched kernel — the answer is still correct,
+// it is just computed one sequence at a time. Callers get one API and one code
+// path, and a scheduler written against it keeps working on a laptop.
+struct model_batch {
+    model_t **seqs;
+    int       n;
+    gpu_batch *gb;      // NULL = decode sequentially
+};
+
+int model_batch_max(void) {
+    return MODEL_BATCH_MAX;
+}
+
+model_batch *model_batch_create(model_t **seqs, int n) {
+    if (n < 1) return NULL;
+    model_batch *b = calloc(1, sizeof(model_batch));
+    if (!b) return NULL;
+    b->seqs = malloc(sizeof(model_t *) * (size_t)n);
+    if (!b->seqs) { free(b); return NULL; }
+    memcpy(b->seqs, seqs, sizeof(model_t *) * (size_t)n);
+    b->n = n;
+    // A NULL here is not a failure: it means this build, backend or model has
+    // no microbatch, and every decode falls through to the sequential path.
+    b->gb = gpu_batch_create(seqs, n);
+    return b;
+}
+
+void model_batch_free(model_batch *b) {
+    if (!b) return;
+    gpu_batch_free(b->gb);
+    free(b->seqs);
+    free(b);
+}
+
+bool model_batch_decode(model_batch *b, const int *idx, const int32_t *tok,
+                        const int *pos, int n, float **out) {
+    if (!b || n < 1) return false;
+    for (int i = 0; i < n; i++)
+        if (idx[i] < 0 || idx[i] >= b->n) return false;
+
+    // Split into microbatches the backend can take in one launch. A caller
+    // with more ready sequences than MODEL_BATCH_MAX gets consecutive passes
+    // rather than an error, so the scheduler above never has to know the size.
+    int done = 0;
+    while (done < n) {
+        int take = n - done;
+        if (take > MODEL_BATCH_MAX) take = MODEL_BATCH_MAX;
+        bool ok = b->gb && gpu_batch_decode(b->gb, idx + done, tok + done,
+                                            pos + done, take, out + done);
+        if (ok) {
+            // The backend returns raw logits, exactly as gpu_forward_batch
+            // does; the head transforms live here for both paths so a batched
+            // step and a solo step cannot drift apart on them.
+            for (int i = done; i < done + take; i++) {
+                model_t *m = b->seqs[idx[i]];
+                float *lg = out[i];
+                if (m->logit_softcap > 0)
+                    for (int v = 0; v < m->n_vocab; v++)
+                        lg[v] = m->logit_softcap * tanhf(lg[v] / m->logit_softcap);
+                if (m->n_suppress) suppress_logits(m, lg);
+            }
+        }
+        if (!ok) {
+            // Sequential fallback. Also the recovery path: a backend that
+            // fails mid-run has already released its GPU state, and these
+            // forwards land on the CPU without the caller noticing.
+            for (int i = done; i < done + take; i++) {
+                out[i] = model_forward(b->seqs[idx[i]], tok[i], pos[i]);
+                if (!out[i]) return false;
+            }
+        }
+        done += take;
+    }
+    return true;
+}
+
 // mean-pooled, L2-normalized embedding of toks (final layer, output-normed).
 // Clobbers KV slots [0, n) — the caller owns resetting its engine state.
 bool model_embed(model_t *m, const int32_t *toks, int n, float *out) {

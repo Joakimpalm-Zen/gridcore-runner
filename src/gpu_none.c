@@ -34,3 +34,20 @@ void gpu_free(model_t *m) {
 void gpu_disable(model_t *m) {
     m->gpu = NULL;
 }
+
+// No backend, so no microbatch: model_batch_decode sees NULL and decodes the
+// sequences one at a time, which is what this platform would have done anyway.
+gpu_batch *gpu_batch_create(model_t **seqs, int n) {
+    (void)seqs; (void)n;
+    return NULL;
+}
+
+void gpu_batch_free(gpu_batch *b) {
+    (void)b;
+}
+
+bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
+                      const int *pos, int n, float **out) {
+    (void)b; (void)idx; (void)tok; (void)pos; (void)n; (void)out;
+    return false;
+}

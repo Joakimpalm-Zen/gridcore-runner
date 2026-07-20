@@ -23,6 +23,7 @@ TEST_TOKENIZER_OOM = test-tokenizer-oom.exe
 TEST_SCHEMA_OOM = test-schema-oom.exe
 TEST_SAMPLER = test-sampler.exe
 TEST_SHARED = test-shared-weights.exe
+TEST_BATCH = test-batch.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
@@ -36,6 +37,7 @@ TEST_TOKENIZER_OOM = test-tokenizer-oom
 TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
 TEST_SHARED = test-shared-weights
+TEST_BATCH = test-batch
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
@@ -49,6 +51,7 @@ TEST_TOKENIZER_OOM = test-tokenizer-oom
 TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
 TEST_SHARED = test-shared-weights
+TEST_BATCH = test-batch
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -116,12 +119,19 @@ test-shared-asan: $(TEST_SHARED_SRC) src/runner.h test.gguf
 	    -std=gnu11 -Wall -I src $(TEST_SHARED_SRC) -o test-shared-asan-bin $(LDFLAGS)
 	./test-shared-asan-bin $(ASAN_MODEL)
 
+# batched decode: same sources as the shared-weights test (real model +
+# backend), because the property under test is a backend property
+TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
+                 src/quants.c src/model.c $(GPU_SRC)
+$(TEST_BATCH): $(TEST_BATCH_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_BATCH_SRC) -o $@ $(LDFLAGS)
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
-      $(TEST_TOOLS) $(TEST_SHARED) test.gguf
+      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) test.gguf
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)
 	./$(TEST_SCHEMA_OOM)
@@ -131,6 +141,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TEMPLATE)
 	./$(TEST_TOOLS)
 	./$(TEST_SHARED)
+	./$(TEST_BATCH)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 	else \
@@ -231,7 +242,7 @@ clean:
 	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
-	      test-shared-asan-bin
+	      $(TEST_BATCH) test-shared-asan-bin
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 

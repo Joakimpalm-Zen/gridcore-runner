@@ -755,18 +755,236 @@ Increase completed agent tasks per second without weakening schema guarantees.
 ## Work
 
 - Add a scheduler that gathers ready sequences into decode microbatches.
-- Pass sequence IDs and positions through batched CUDA kernels.
-- Preserve independent schema, sampler, stop, and streaming state per sequence.
-- Add prompt-prefill scheduling separately from decode scheduling.
+  **NOT DONE** — this is the server half and is specified below under
+  "The server integration this needs next", precisely enough to wire without
+  redesign. The primitive it schedules onto exists and is verified.
+- **DONE** — Pass sequence IDs and positions through batched CUDA kernels.
+  `model_batch_decode` (src/runner.h, src/model.c) advances N independent
+  sequences by one token in one pass over the weights; the backend half is
+  `gpu_batch_*` in src/cuda.c.
+- **DONE (by construction)** — Preserve independent schema, sampler, stop, and
+  streaming state per sequence. The batch never touches any of it: sequences
+  are the caller's own `model_t` values, named per call rather than enrolled,
+  and the primitive returns per-sequence logits and nothing else.
+- **PARTIAL** — Add prompt-prefill scheduling separately from decode
+  scheduling. The separation exists at the API — prefill stays on
+  `model_forward_batch` per sequence, decode goes through `model_batch_decode`
+  — because a prefill tile and a decode microbatch are different kernel
+  shapes. Deciding *when* to run each is the missing scheduler.
 - Add fairness, cancellation, queue limits, and per-request deadlines.
-- Keep single-request latency as a first-class metric.
+  **NOT DONE** — scheduler-side, see below.
+- **DONE** — Keep single-request latency as a first-class metric. A microbatch
+  of one delegates to the existing solo decode path, and `scripts/kernel-bench.py`
+  measures 60.33 tok/s decode against the baseline's 60.24 on Qwen3-4B — the
+  single-request path is untouched.
 
 ## Exit Criteria
 
-- Concurrent throughput materially exceeds independent-slot execution.
-- No additional model-weight copies are created.
-- Batched and unbatched greedy output remain identical.
+- **DONE (decode primitive)** — Concurrent throughput materially exceeds
+  independent-slot execution: 2.3-2.6x at 4 and 8 sequences, on six
+  architectures. Numbers below. The end-to-end server figure waits on the
+  scheduler.
+- **DONE** — No additional model-weight copies are created. The batch holds a
+  borrowed pointer to the Phase 5 shared `gpu_weights` and allocates only
+  three MVB-element device arrays (positions, two KV base-pointer tables) plus
+  MVB rows of logits — kilobytes, independent of model size.
+- **DONE** — Batched and unbatched greedy output remain identical. Stronger
+  than required: the logits are *bitwise* equal, not merely argmax-equal, and
+  that is what `tests/test_batch.c` asserts.
 - Every sequence retains valid structured output under cancellation/truncation.
+  **NOT DONE** — needs the scheduler; the primitive makes it reachable, since
+  a cancelled sequence is simply not listed in the next step.
+
+## What landed: the batched decode primitive
+
+`model_batch_decode(b, idx, tok, pos, n, out)` evaluates one token for each of
+n independent sequences in a single GPU microbatch. Each sequence keeps its own
+KV cache, its own position and its own logits; what is shared is the pass over
+the weights, which is the entire point — a decode step is weight-bandwidth
+bound, so reading 2.5 GB once for eight tokens costs barely more than reading
+it once for one.
+
+### The identity argument
+
+The exit criterion is that batching must not change the answer, and the design
+makes that structural rather than empirical.
+
+Nothing in a decode step reduces across sequences: rmsnorm, qknorm, rope, the
+elementwise ops and attention are all per column already, and the KV caches are
+disjoint by construction. That leaves the matvecs, which is where a naive
+implementation loses: the natural thing is to reach for the prefill tiled-GEMM
+at batch > 1, and it reassociates the k-reduction.
+
+So the selection rule is: **the batched matvec is the multi-column twin of
+whatever kernel the batch-1 path would have used** — same lane mapping, same
+block order, same expression grouping, same `warp_sum` tree, with x read from
+shared memory instead of global (which changes where a value comes from, never
+its value). `f_gemvb[width][type]` in src/cuda.c is that table, and the twins
+are generated per microbatch width in src/kernels.cu.
+
+Two formats needed a kernel written rather than reused, both because the
+prefill GEMM groups its arithmetic differently from the decode GEMV:
+
+- **Q8_0** — `k_gemm_q8_0` maps a lane to a whole 32-value block (the
+  `k_mv_q8_0` geometry), not to one element.
+- **Q6_K** — `k_gemm_q6_K` premultiplies the block scale into each weight,
+  `(d*A)*x1 + (d*B)*x2 + ...`, where `k_gemv_q6_K` factors it out of the group,
+  `d * (A*x1 + B*x2 + ...)`. Those agree in exact arithmetic and, on every
+  model tested here, produce identical tokens — but "very nearly equal" is not
+  the guarantee this path is supposed to make, so the grouping is reproduced.
+
+Q4_K and Q5_K needed no new arithmetic: `k_gemm_q4_K`/`k_gemm_q5_K` were
+already built on the lane-per-element geometry of their `k_gemv_*` twins.
+
+### Measured (24 GB MIG slice of an RTX PRO 6000, Q4_K_M, `tests/test_batch.c`)
+
+N sequences decoded in one microbatch vs the same N decoded one at a time.
+Every row was bitwise identical between the two.
+
+| model | N=1 | N=2 | N=4 | N=8 |
+| --- | --- | --- | --- | --- |
+| Qwen3-4B | 1.00x | 1.26x | 2.31x | 2.53x |
+| Llama-3.2-3B | 1.02x | 1.28x | 2.34x | 2.57x |
+| Mistral-7B | 1.01x | 1.35x | 2.58x | 2.64x |
+| Phi-3.5-mini | 1.01x | 1.34x | 2.46x | 2.64x |
+| Gemma-3-4B | 1.00x | 1.29x | 2.35x | 2.59x |
+| SmolLM2-1.7B | 1.02x | 1.38x | 2.47x | 2.43x |
+| TinyLlama-1.1B | 1.02x | 1.32x | 2.33x | 2.36x |
+
+In absolute terms on Qwen3-4B: 70 tok/s single-stream becomes 162 tok/s at
+N=4 (24.7 ms per 4-token step against 57.1 ms for four separate steps) and
+177 tok/s at N=8.
+
+The coverage is deliberately wide because the risky part is architectural, not
+arithmetic: gemma3 brings sliding-window attention and sandwich norms, phi3
+brings fused QKV, qwen3 brings per-head Q/K norms. All bitwise identical.
+
+### How it was verified
+
+- `tests/test_batch.c` (in `make test`) decodes 4 sequences with *different
+  prompts at different lengths*, so every sequence in a microbatch sits at a
+  different KV position on every step — a batch that broadcast one position or
+  crossed two KV regions cannot survive it. It compares raw logit vectors with
+  `memcmp`, not just sampled tokens, because argmax hides drift that would
+  surface as a divergence hundreds of tokens later. Red-checked by cross-wiring
+  the sequences, which fails it at step 0.
+- `scripts/kernel-verify.py` against a baseline binary built from the previous
+  HEAD: token-identical on all 5 prompts on Qwen3-4B, Gemma-3-4B, Phi-3.5-mini
+  and Llama-3.2-3B. The batched path is additive, so this is really a check
+  that it stayed additive.
+- `src/kernels.cu` is a pure addition: every committed kernel body is present
+  verbatim, checked mechanically, and the regenerated `src/kernels_ptx.h` was
+  confirmed to reproduce the previous PTX byte-for-byte before the new kernels
+  were added. The prefill and solo-decode paths execute the same instructions
+  they did before.
+- `scripts/kernel-bench.py`: 140.5 tok/s prefill / 60.33 tok/s decode against
+  the baseline's 140.48 / 60.24. Single-stream performance is unmoved.
+- `make test` and `make smoke` green. `make test` exercises the batch on
+  test.gguf, whose F32/F16 tensors take the `f_mvb` fallback rather than the
+  twin table, so both matvec paths are covered.
+- ASan/UBSan build of the batch test: no leak or undefined behaviour from the
+  new code. (The 14 allocations it does report all originate inside
+  `libcuda`'s `cuInit`, the same driver-under-ASan limitation Phase 5 hit.)
+
+### Known pre-existing issue, not introduced here
+
+CPU-vs-GPU on Qwen3-4B diverges on one of the five kernel-verify prompts
+(`"1 2 3 4 5 6 7 8"`, at the 24th generated token). The **baseline binary
+built from HEAD produces the byte-identical divergence**, so this predates
+Phase 6 and is unrelated to batching, but the project invariant says GPU
+output is token-identical to the CPU reference and on this model it currently
+is not. Worth its own investigation.
+
+## The server integration this needs next
+
+This phase built the primitive and deliberately stopped at the boundary of
+`src/server.c`. What follows is the contract the scheduler should be written
+against; none of it requires the primitive to change.
+
+**Setup.** The server already owns an array of per-slot `model_t`. Once, after
+the slots are loaded:
+
+```c
+SV.batch = model_batch_create(slot_models, SV.n_slots);   // never returns
+                                                          // NULL on success
+```
+
+`model_batch_create` cannot fail in a way the caller must branch on: without a
+batching backend (CPU, Metal, partial offload) the context still works and
+decodes sequentially, so there is no backend-specific code path in the server.
+Free it with `model_batch_free` before the slots are freed.
+
+**The step loop.** Replace "each slot thread calls `engine_generate`
+independently" with one decode thread running:
+
+1. Gather the slots that are ready — prefilled, not finished, not cancelled,
+   client still connected — into `idx[]`, with each slot's next token in
+   `tok[]` and its `engine.pos` in `pos[]`.
+2. `model_batch_decode(SV.batch, idx, tok, pos, n, out)`.
+3. For each i: run that slot's *existing* per-sequence logic on `out[i]` —
+   sampler, schema/JSON validator, stop-token check, logprob capture,
+   streaming callback, `pos++`. None of that changes at all; it just reads its
+   logits from `out[i]` instead of from `model_forward`.
+
+**What the scheduler owes the primitive.**
+
+- `idx[i]` indexes the `model_batch_create` array; `pos[i]` must be that
+  sequence's true KV position. Positions may differ freely between members —
+  that is the normal case, and the test pins it.
+- A sequence is *named per step*, never enrolled, so admitting, finishing or
+  cancelling one is just a change to next step's `idx[]`. Nothing has to be
+  torn down.
+- Do not run a slot's own `model_forward*` concurrently with a
+  `model_batch_decode` that includes it: the microbatch borrows the lead
+  sequence's activation scratch and stream. One decode thread issuing one step
+  at a time satisfies this; it is the reason the loop above is a loop and not
+  a thread per slot.
+- Prefill stays per-sequence on `model_forward_batch`, interleaved between
+  decode steps (that is the prefill/decode scheduling item above). A sequence
+  is simply absent from `idx[]` on the steps where it is prefilling.
+
+**What the primitive already guarantees, so the scheduler need not.**
+
+- Per-sequence logits bitwise equal to the unbatched result, so a request's
+  output cannot depend on how busy the server was — which is what keeps the
+  schema and determinism guarantees intact under load.
+- Lists longer than `model_batch_max()` (8) are split into consecutive
+  microbatches automatically; the scheduler can pass every ready slot and
+  ignore the width.
+- A microbatch of one delegates to the solo decode path, so a lightly loaded
+  server pays nothing for the machinery.
+- KV residency, upload/copyback and the host-authoritative invariant are
+  handled per member, so a sequence can move between batched and solo decoding
+  — or fall back to CPU — with no bookkeeping from the caller.
+
+**Cost model, for the batching policy.** The batched matvec kernels unroll
+their column loop, so a step costs roughly the same anywhere within a width
+class (`n<=4`, `n<=8`). Waiting a moment to fill a microbatch to 4 is close to
+free; waiting past 4 to reach 8 buys much less. `model_batch_max()` reports the
+ceiling.
+
+## Remaining for Phase 6
+
+- The scheduler above: it is the other half of this phase.
+- Throughput leaves a lot on the table. The batched matvec tiles only the
+  output rows, so every block re-stages the whole x for all its columns —
+  x traffic exceeds weight traffic and the step is no longer weight-bandwidth
+  bound, which is why N=8 costs about twice N=4 instead of about the same. A
+  real two-dimensional tile (stage a k-chunk once, reuse across many more
+  output rows) is the next big win, and identity survives it as long as the
+  per-column reduction order is preserved.
+- Only Q8_0/Q4_K/Q5_K/Q6_K have batched twins. Other quant types fall back to
+  `f_mvb`, which is bitwise identical to the `f_mv` the solo path uses for
+  them, so they are correct but do not get the coalesced-load win.
+- Metal has no batched kernels; `gpu_batch_create` declines and the caller
+  decodes sequentially. The port is the same shape (per-column position, per-
+  sequence KV buffer, batched twins of the batch-1 matvecs) and unified memory
+  removes the KV upload/copyback half of it entirely.
+- Partial GPU offload declines the microbatch, because finishing the tail
+  layers on the CPU per sequence is a different kernel shape.
+- Speculative decoding and batched decode do not compose yet: a draft round
+  verifies several tokens for *one* sequence, which is the tile shape, not the
+  microbatch shape.
 
 ## Release
 
