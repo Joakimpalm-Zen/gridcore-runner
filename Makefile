@@ -54,6 +54,10 @@ TEST_SHARED = test-shared-weights
 TEST_BATCH = test-batch
 endif
 
+# same .exe suffix rule as every other test binary, without repeating the
+# three-way platform branch above
+TEST_PREFIX = $(TEST_BATCH:test-batch=test-prefix)
+
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
       src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/server.c \
       src/main.c $(GPU_SRC)
@@ -126,12 +130,21 @@ TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
 $(TEST_BATCH): $(TEST_BATCH_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_BATCH_SRC) -o $@ $(LDFLAGS)
 
+# forkable KV prefixes: needs the real model, the real tokenizer and the real
+# engine, because the property under test is that a forked cache produces the
+# same logits the model would have produced by prefilling
+TEST_PREFIX_SRC = tests/test_prefix.c src/gguf.c src/compat.c src/quants.c \
+                  src/tokenizer.c src/model.c src/sample.c src/jsonmode.c \
+                  src/schema.c src/json.c src/engine.c $(GPU_SRC)
+$(TEST_PREFIX): $(TEST_PREFIX_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_PREFIX_SRC) -o $@ $(LDFLAGS)
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
-      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) test.gguf
+      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_PREFIX) test.gguf
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)
 	./$(TEST_SCHEMA_OOM)
@@ -142,6 +155,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TOOLS)
 	./$(TEST_SHARED)
 	./$(TEST_BATCH)
+	./$(TEST_PREFIX)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 	else \

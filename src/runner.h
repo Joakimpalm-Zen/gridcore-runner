@@ -753,6 +753,10 @@ typedef struct {
     // in-flight generation budget, owned by engine_gen_begin/step/end
     int      gen_max, gen_count;
     double   gen_t0;
+    // identity of everything that decides what this engine's KV bytes mean:
+    // the weights, the geometry, the tokenizer and the cache element type.
+    // Computed once by engine_init; see engine_prefix_reuse.
+    uint64_t model_key;
 } engine;
 
 void   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
@@ -793,5 +797,55 @@ int    engine_gen_end(engine *e, gen_cb cb, void *ud, double *gen_time);
 model_t *spec_draft_load(const char *path, const model_t *target,
                          const model_params *mp);
 double now_s(void);
+
+// ------------------------------------------- shared, forkable KV prefixes
+//
+// engine_rewind reuses the KV a slot happens to still hold from its own last
+// request. This is the same idea made durable and shareable: a completed
+// prefix is snapshotted out of a slot's KV cache into host memory, and any
+// slot serving a compatible model can fork it back in. Agent traffic is what
+// pays for it — every request in a session repeats the same system prompt,
+// tool list and schema verbatim, and that block is usually most of the prompt.
+//
+// Two calls, in the order a request meets them:
+//
+//   prefix_reuse r = engine_prefix_reuse(e, toks, n);   // before prefill
+//   logits = engine_feed(e, toks + r.keep, n - r.keep);
+//   engine_prefix_publish(e, toks, n, r.keep, prefill_seconds); // after
+//
+// There is deliberately no "look up" / "install" pair: installing a prefix
+// that does not match the prompt is the one failure mode that produces a
+// plausible wrong answer instead of an error, so the decision and the install
+// are one operation that never sees a token vector it did not itself compare.
+typedef struct {
+    int    keep;     // prompt tokens whose KV is in place; feed from here
+    int    forked;   // of those, tokens installed from a shared snapshot
+    double saved_s;  // prefill seconds those forked tokens would have cost,
+                     // priced at this process's measured seconds-per-token
+} prefix_reuse;
+prefix_reuse engine_prefix_reuse(engine *e, const int32_t *toks, int n);
+// Offer the KV now occupying [0, n) for future forks. fed is how many of those
+// tokens this request actually prefilled and prefill_s how long that took;
+// together they price future hits. Cheap and safe to call unconditionally.
+void engine_prefix_publish(engine *e, const int32_t *toks, int n,
+                           int fed, double prefill_s);
+
+typedef struct {
+    uint64_t hits, misses, stores, evictions;
+    uint64_t tokens_reused;
+    double   saved_prefill_s;   // cumulative, same pricing as prefix_reuse
+    double   cost_per_token_s;  // measured prefill cost behind that figure
+    size_t   bytes, budget;
+    int      entries;
+    double   ttl;
+} prefix_cache_stats;
+
+// budget 0 disables the shared cache (each slot's own rewind is unaffected);
+// ttl_s is how long an unused snapshot survives.
+void   prefix_cache_configure(size_t budget_bytes, double ttl_s);
+void   prefix_cache_stats_get(prefix_cache_stats *out);
+void   prefix_cache_clear(void);
+// host bytes one n-token snapshot of this model would occupy
+size_t prefix_cache_entry_bytes(const model_t *m, int n);
 
 #endif // RUNNER_H

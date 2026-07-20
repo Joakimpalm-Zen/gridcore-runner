@@ -2,6 +2,7 @@
   "context": "<number>",
   "features": {
     "family_sampling_presets": true,
+    "forkable_prefixes": true,
     "json_object": true,
     "json_schema": true,
     "messages_api": true,
@@ -12,6 +13,7 @@
     "responses_api": true,
     "schema_conditionals": true,
     "schema_string_bounds": true,
+    "shared_prefix_cache": true,
     "stop_sequences": true
   },
   "models": [

@@ -14,8 +14,10 @@
     "generation_seconds": "<number>",
     "generation_tok_s": "<number>",
     "json_mode": false,
+    "prefix_cache_saved_seconds": "<number>",
     "prompt_cached_tokens": "<number>",
     "prompt_eval_tokens": "<number>",
+    "prompt_forked_tokens": "<number>",
     "schema": false,
     "speculative": false
   },

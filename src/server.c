@@ -1061,10 +1061,31 @@ typedef struct {
     const char *reason; size_t reason_n;
     bool        with_usage;
     int         n_prompt, n_gen, cached;
+    // of `cached`, how many rows were forked out of the shared prefix cache
+    // rather than left over in this slot, and what that saved
+    int         forked;
+    double      saved_s;
     double      gtime;
     bool        schema, json_mode, spec;
     jv         *req;         // echoed request fields
 } resp_doc;
+
+// One rendering of runner_telemetry for every surface that carries it — chat,
+// completions, responses (streamed and buffered) and messages. They report the
+// same facts, so they share the one place those facts are spelled rather than
+// four format strings that drift.
+static void telemetry_json(sbuf *r, const resp_doc *d) {
+    sb_fmt(r, "\"runner_telemetry\":{\"prompt_cached_tokens\":%d,"
+              "\"prompt_forked_tokens\":%d,\"prompt_eval_tokens\":%d,"
+              "\"prefix_cache_saved_seconds\":%.6f,"
+              "\"generation_seconds\":%.6f,"
+              "\"generation_tok_s\":%.3f,\"json_mode\":%s,"
+              "\"schema\":%s,\"speculative\":%s}",
+           d->cached, d->forked, d->n_prompt - d->cached, d->saved_s, d->gtime,
+           d->n_gen / (d->gtime > 0 ? d->gtime : 1e-9),
+           d->json_mode ? "true" : "false", d->schema ? "true" : "false",
+           d->spec ? "true" : "false");
+}
 
 static void resp_echo(sbuf *r, jv *req, const char *key, const char *dflt) {
     jv *v = jv_get(req, key);
@@ -1145,14 +1166,8 @@ static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
                   "\"output_tokens_details\":{\"reasoning_tokens\":0},"
                   "\"total_tokens\":%d}",
                d->n_prompt, d->cached, d->n_gen, d->n_prompt + d->n_gen);
-        sb_fmt(r, ",\"runner_telemetry\":{\"prompt_cached_tokens\":%d,"
-                  "\"prompt_eval_tokens\":%d,\"generation_seconds\":%.6f,"
-                  "\"generation_tok_s\":%.3f,\"json_mode\":%s,"
-                  "\"schema\":%s,\"speculative\":%s}",
-               d->cached, d->n_prompt - d->cached, d->gtime,
-               d->n_gen / (d->gtime > 0 ? d->gtime : 1e-9),
-               d->json_mode ? "true" : "false", d->schema ? "true" : "false",
-               d->spec ? "true" : "false");
+        sb_lit(r, ",");
+        telemetry_json(r, d);
     } else {
         sb_lit(r, "null");
     }
@@ -1309,15 +1324,10 @@ static void anth_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
     // reported in runner_telemetry, as it is on every other surface.
     sb_fmt(r, ",\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d}",
            d->n_prompt, d->n_gen);
-    if (d->with_usage)
-        sb_fmt(r, ",\"runner_telemetry\":{\"prompt_cached_tokens\":%d,"
-                  "\"prompt_eval_tokens\":%d,\"generation_seconds\":%.6f,"
-                  "\"generation_tok_s\":%.3f,\"json_mode\":%s,"
-                  "\"schema\":%s,\"speculative\":%s}",
-               d->cached, d->n_prompt - d->cached, d->gtime,
-               d->n_gen / (d->gtime > 0 ? d->gtime : 1e-9),
-               d->json_mode ? "true" : "false", d->schema ? "true" : "false",
-               d->spec ? "true" : "false");
+    if (d->with_usage) {
+        sb_lit(r, ",");
+        telemetry_json(r, d);
+    }
     sb_lit(r, "}");
 }
 
@@ -1672,21 +1682,41 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
         e->lp_top    = lp_n ? malloc(sizeof(lp_alt) * (size_t)max_tokens * lp_n) : NULL;
     }
 
-    // reuse the KV for whatever prefix this prompt shares with the last one —
-    // pipeline callers repeat long system/template prefixes verbatim. Callers
-    // can disable reuse per request when they need exact fresh-prompt telemetry
-    // or want to isolate a pathological prompt from the previous cache state.
+    // Reuse the KV for whatever prefix this prompt shares with one already
+    // computed — pipeline callers repeat long system/template prefixes
+    // verbatim. Two tiers. The slot's own KV is free — it is already in
+    // the cache this sequence decodes against. The shared snapshot store is
+    // not free (a memcpy, and on CUDA a device resync), but it reaches across
+    // slots, across requests and across model swaps, so it is what turns a
+    // repeated system/tool/schema block into work nobody does twice.
     bool cache_prompt = jv_bool(jv_get(req, "cache_prompt"), true);
-    int keep = 0;
-    if (cache_prompt) keep = engine_rewind(e, toks, n_prompt);
-    else              engine_reset(e);
+    // Opt out of the *shared* tier only: a caller isolating a pathological
+    // prompt still wants its own slot's cache, and one that wants fresh-prompt
+    // telemetry wants neither. cache_prompt:false remains the full opt-out.
+    bool share_prefix = jv_bool(jv_get(req, "prefix_cache"), true);
+    prefix_reuse reuse = { 0, 0, 0.0 };
     // Prefill is scheduled apart from decode: different kernel shape, and it
     // is this slot's own model_forward_batch, so it must not overlap a
     // microbatch containing this sequence. It cannot — the sequence only joins
-    // a batch below, after prefill has returned.
+    // a batch below, after prefill has returned. Forking a prefix is prefill
+    // work (it touches this slot's KV, and on CUDA it issues a forward), so it
+    // belongs inside the same device turn.
     sched_prefill_begin();
+    if (cache_prompt && share_prefix)
+        reuse = engine_prefix_reuse(e, toks, n_prompt);
+    else if (cache_prompt)
+        reuse.keep = engine_rewind(e, toks, n_prompt);
+    else
+        engine_reset(e);
+    int keep = reuse.keep;
+    double prefill_t0 = now_s();
     float *logits = engine_feed(e, toks + keep, n_prompt - keep);
+    double prefill_s = now_s() - prefill_t0;
     sched_prefill_end();
+    // Publish outside the device turn: it is a host-memory copy, and this
+    // sequence is the only writer of its own KV between prefill and decode.
+    if (logits && cache_prompt && share_prefix)
+        engine_prefix_publish(e, toks, n_prompt, n_prompt - keep, prefill_s);
     free(toks);
     if (!logits) {
         completion_cleanup(e, schema, NULL);
@@ -1790,6 +1820,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                            .output_text_n = g.out_text.n,
                            .with_usage = true,
                            .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
+                           .forked = reuse.forked, .saved_s = reuse.saved_s,
                            .gtime = gtime, .schema = schema != NULL,
                            .json_mode = e->json_mode, .spec = e->dm != NULL,
                            .req = req };
@@ -1902,6 +1933,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                            .reason = g.reason.s, .reason_n = g.reason.n,
                            .with_usage = true,
                            .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
+                           .forked = reuse.forked, .saved_s = reuse.saved_s,
                            .gtime = gtime, .schema = schema != NULL,
                            .json_mode = e->json_mode, .spec = e->dm != NULL,
                            .req = req };
@@ -1929,6 +1961,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                            .reason = g.reason.s, .reason_n = g.reason.n,
                            .with_usage = true,
                            .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
+                           .forked = reuse.forked, .saved_s = reuse.saved_s,
                            .gtime = gtime, .schema = schema != NULL,
                            .json_mode = e->json_mode, .spec = e->dm != NULL,
                            .req = req };
@@ -1988,17 +2021,14 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
         }
         sb_fmt(&r, "\"finish_reason\":\"%s\"}],"
                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
-                   "\"total_tokens\":%d},"
-                   "\"runner_telemetry\":{\"prompt_cached_tokens\":%d,"
-                   "\"prompt_eval_tokens\":%d,\"generation_seconds\":%.6f,"
-                   "\"generation_tok_s\":%.3f,\"json_mode\":%s,"
-                   "\"schema\":%s,\"speculative\":%s}}",
-               finish, n_prompt, n_gen, n_prompt + n_gen,
-               keep, n_prompt - keep, gtime,
-               n_gen / (gtime > 0 ? gtime : 1e-9),
-               e->json_mode ? "true" : "false",
-               schema ? "true" : "false",
-               e->dm ? "true" : "false");
+                   "\"total_tokens\":%d},",
+               finish, n_prompt, n_gen, n_prompt + n_gen);
+        resp_doc td = { .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
+                        .forked = reuse.forked, .saved_s = reuse.saved_s,
+                        .gtime = gtime, .schema = schema != NULL,
+                        .json_mode = e->json_mode, .spec = e->dm != NULL };
+        telemetry_json(&r, &td);
+        sb_lit(&r, "}");
         send_built(fd, &r);
         free(r.s);
     }
@@ -3082,6 +3112,29 @@ static void send_models(int fd) {
     free(r.s);
 }
 
+// Server-wide prefix-cache telemetry. Per-request telemetry says what one
+// request saved; this says whether the cache is earning its memory —
+// hit rate, resident bytes against the budget, and the prefill time it has
+// avoided so far.
+static void send_prefix_cache(int fd) {
+    prefix_cache_stats st;
+    prefix_cache_stats_get(&st);
+    char b[640];
+    int n = snprintf(b, sizeof(b),
+        "{\"object\":\"runner.prefix_cache\","
+        "\"enabled\":%s,\"entries\":%d,\"bytes\":%llu,\"budget_bytes\":%llu,"
+        "\"ttl_seconds\":%.1f,\"hits\":%llu,\"misses\":%llu,\"stores\":%llu,"
+        "\"evictions\":%llu,\"tokens_reused\":%llu,"
+        "\"saved_prefill_seconds\":%.6f,\"prefill_seconds_per_token\":%.9f}",
+        st.budget ? "true" : "false", st.entries,
+        (unsigned long long)st.bytes, (unsigned long long)st.budget, st.ttl,
+        (unsigned long long)st.hits, (unsigned long long)st.misses,
+        (unsigned long long)st.stores, (unsigned long long)st.evictions,
+        (unsigned long long)st.tokens_reused,
+        st.saved_prefill_s, st.cost_per_token_s);
+    send_response(fd, 200, "application/json", b, n);
+}
+
 static void send_capabilities(int fd) {
     sbuf r = {0};
     int res = resident_load();
@@ -3134,6 +3187,8 @@ static void send_capabilities(int fd) {
                "\"request_telemetry\":true,"
                "\"prefix_cache\":true,"
                "\"prefix_cache_controls\":true,"
+               "\"shared_prefix_cache\":true,"
+               "\"forkable_prefixes\":true,"
                "\"repeat_penalty\":true,"
                "\"family_sampling_presets\":true}}");
     send_built(fd, &r);
@@ -3220,8 +3275,21 @@ static void handle_conn(slot_t *s, int fd) {
             unload_resident();
             pthread_mutex_unlock(&SV.swap_mu);
         }
+        // /unload means "give the memory back now", so the snapshots go too.
+        // A model *swap* deliberately keeps them: surviving a swap is the
+        // whole point of snapshotting a prefix instead of holding a slot.
+        prefix_cache_clear();
         const char *b = "{\"status\":\"ok\"}";
         send_response(fd, 200, "application/json", b, strlen(b));
+    } else if (!strcmp(method, "GET") &&
+               !strcmp(path, "/v1/runner/prefix-cache")) {
+        send_prefix_cache(fd);
+    } else if (!strcmp(method, "POST") &&
+               !strcmp(path, "/v1/runner/prefix-cache/clear")) {
+        // Explicit release, for benchmarks that need a cold cache and for
+        // operators reclaiming the memory without unloading the model.
+        prefix_cache_clear();
+        send_prefix_cache(fd);
     } else if (!strcmp(method, "GET") && !strcmp(path, "/health")) {
         send_health(fd);
     } else if (!strcmp(method, "GET") && !strcmp(path, "/v1/models")) {
@@ -3423,6 +3491,17 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     }
     if (getenv("RUNNER_REQUEST_TIMEOUT"))
         SV.req_timeout = atof(getenv("RUNNER_REQUEST_TIMEOUT"));
+    // Shared, forkable prompt prefixes. Sized in host RAM rather than as a
+    // fraction of anything, because it is the one cache whose useful size is
+    // set by the *traffic* (how many distinct system/tool/schema blocks the
+    // agents on this box use) and not by the model.
+    {
+        const char *mb = getenv("RUNNER_PREFIX_CACHE_MB");
+        const char *tl = getenv("RUNNER_PREFIX_CACHE_TTL");
+        prefix_cache_configure((size_t)(mb ? strtoull(mb, NULL, 10) : 512)
+                                   * 1024 * 1024,
+                               tl ? atof(tl) : 600.0);
+    }
     context_store(base ? base->n_ctx : mp->n_ctx);
     SV.n_slots = parallel;
     SV.slots = calloc(parallel, sizeof(slot_t));

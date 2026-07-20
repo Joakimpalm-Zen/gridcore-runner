@@ -1189,28 +1189,199 @@ Turn repeated agent instructions, tools, and schemas into a performance advantag
 
 ## Work
 
-- Key reusable prefixes by model, template, system prompt, tools, and schema.
-- Snapshot completed KV prefixes in host memory.
-- Fork one cached prefix into multiple sequence contexts.
-- Add optional disk persistence across unloads and restarts.
-- Validate snapshots against model hash, context geometry, KV type, and version.
-- Add TTL and memory-budget eviction.
-- Expose cache hits, bytes, and saved prefill time through telemetry.
+- **DONE** — Key reusable prefixes by model, template, system prompt, tools,
+  and schema. Keyed on `(model identity, token vector)`, which subsumes the
+  list: the template, system prompt, tool list and schema all reach the engine
+  as rendered prompt text and then as tokens, so keying on the tokens covers
+  every one of them and anything else a future surface renders into the prompt.
+  Candidates keep their whole token vector and it is compared element by
+  element; only the run that actually matches is installed (`engine.c`,
+  `engine_prefix_reuse`).
+- **DONE** — Snapshot completed KV prefixes in host memory. `pfx_save` copies
+  rows `[0, n)` out of the slot's cache into a per-layer packed
+  `{K[n][row], V[n][row]}` block. The n-major packing is what makes a *partial*
+  restore a straight memcpy, so one stored prompt serves every later prompt
+  sharing any leading run of tokens with it, not only exact repeats.
+- **DONE** — Fork one cached prefix into multiple sequence contexts. Any slot
+  with a matching key can install any prefix of any snapshot; nothing is
+  handed out by reference, so two slots forking the same block decode
+  independently.
+- **NOT DONE** — Add optional disk persistence across unloads and restarts.
+  The in-memory store is deliberately the whole of this phase (see Remaining).
+- **DONE** — Validate snapshots against model hash, context geometry, KV type,
+  and version. `model_identity()` in `engine.c` digests the weights (sampled
+  per layer, because two finetunes share every tensor name and shape), the full
+  geometry, `n_ctx`, `kv_q8`, a format-version tag, and the tokenizer that was
+  actually built — every vocabulary string, score and token type, plus the
+  split rule and BOS/space flags. A snapshot whose byte length no longer
+  matches what the model would allocate for it is skipped as well.
+- **DONE** — Add TTL and memory-budget eviction. TTL and byte budget are
+  configured by `prefix_cache_configure` (server: `RUNNER_PREFIX_CACHE_MB`,
+  default 512, and `RUNNER_PREFIX_CACHE_TTL`, default 600s). Expiry runs on
+  every lookup and store; the budget evicts least-recently-used, and no single
+  snapshot may exceed half the budget (it is truncated instead, which is free).
+  A budget of 0 disables the shared tier without touching each slot's own
+  rewind. Eviction is LRU with one refinement that measurement forced: entries
+  that have been forked at least once are only evicted after every unproven
+  entry is gone. Plain LRU failed in the exact case the cache exists for —
+  publishing stores the whole prompt, so one-shot requests leave large entries
+  behind, and two 800-token one-shot prompts were observed evicting a
+  2900-token shared prefix in the gap between the request that stored it and
+  the request that wanted it.
+- **DONE** — Expose cache hits, bytes, and saved prefill time through
+  telemetry. Per request, `runner_telemetry` gained `prompt_forked_tokens` and
+  `prefix_cache_saved_seconds` on every surface (chat, completions, responses,
+  messages). Server-wide, `GET /v1/runner/prefix-cache` reports entries, bytes
+  against budget, TTL, hits/misses/stores/evictions, tokens reused, cumulative
+  saved prefill seconds and the measured seconds-per-token behind that figure.
+  `POST /v1/runner/prefix-cache/clear` releases the snapshots.
 
 ## Exit Criteria
 
-- Repeated agent requests skip static system/tool/schema prefill.
-- Multiple users can fork the same prefix without interfering.
-- Invalid or stale snapshots are rejected safely.
-- Model swapping no longer necessarily destroys expensive prompt work.
+- **MET** — Repeated agent requests skip static system/tool/schema prefill.
+  Measured below.
+- **MET** — Multiple users can fork the same prefix without interfering.
+  `test_concurrent_forks_of_one_prefix_do_not_interfere` forks one snapshot
+  into both slots at once and requires each to reproduce its own cold-run
+  logprobs.
+- **MET** — Invalid or stale snapshots are rejected safely. A mismatched key
+  (different weights, geometry, context length, KV type or tokenizer) and an
+  expired or byte-length-inconsistent snapshot all fall through to a normal
+  prefill; there is no path on which a rejected snapshot is partially applied.
+- **PARTIALLY MET** — Model swapping no longer necessarily destroys expensive
+  prompt work. A swap keeps the snapshots (they are keyed by model, so the old
+  model's prefixes are still valid when it swaps back) and they survive an
+  unload of the *model*. They do not survive a process restart, and the
+  explicit `/unload` endpoint clears them, because its contract is "give the
+  memory back now".
 
-## [carried over] Cache-key hazard
+## [DONE] Cache-key hazard (carried over)
 
 A prefix key must include everything that changes tokenization, not just the
 text. `tokenizer.ggml.pre` now selects between distinct split rules
 (`llama-bpe`, `qwen2`, `smollm`, GPT-2 default), and SPM scores may be rebuilt
 from merge ranks at load. Two models with identical system prompts and different
 `pre` values must not share a prefix. Key on the model hash, which covers this.
+
+Answered by `model_identity()`, and answered one level below the metadata: it
+digests the tokenizer *that was built* rather than the fields it was built
+from. Every vocabulary string, every score (so a rebuilt SPM score table keys
+differently from a loaded one), every token type, `pre`, `model`, and the
+BOS/space flags all feed the hash. A future `pre` value nobody has thought of
+yet cannot slip through, because it changes `t->pre` and therefore the key.
+
+## [DONE] Prerequisite bug: hist could describe another request's tokens
+
+Found and fixed before building on it. `engine_feed` wrote the whole token run
+into `e->hist` up front and only when the run fit the remaining context
+(`pos + n <= n_ctx`). A run that did *not* fit skipped the write entirely,
+while the loop still fed and counted every batch that did fit — so `e->pos`
+ended up pointing past KV rows belonging to this request while `e->hist` still
+described the *previous* one. The next request's `engine_rewind` then "kept" a
+prefix that matched nothing in the cache, silently conditioning generation on
+another request's context. hist, pos and the sampler's penalty window now
+advance together, one batch at a time. Regression test:
+`test_hist_tracks_kv_on_overflow` in `tests/test_prefix.c` (verified red before
+the fix).
+
+## Correctness argument
+
+Two facts and one hazard, all three load-bearing:
+
+1. Attention is causal, so KV row `i` is a function of tokens `[0, i]` only.
+   Any prefix of a snapshot is therefore itself a valid snapshot. This is what
+   licenses partial forks.
+2. The host `kcache`/`vcache` is authoritative on every backend. CUDA keeps a
+   device mirror and resyncs it from the host whenever a forward's position is
+   not `last_pos + 1`; Metal's unified buffer *is* the host cache. **A fork has
+   to create that discontinuity rather than hope for one**: a slot whose
+   previous generation happened to stop at position `best - 1` would otherwise
+   keep decoding against the previous request's device rows. The install
+   therefore issues one forward of `toks[0]` at position 0 — recomputing a row
+   the snapshot overwrites with identical bytes a moment later — which leaves
+   the mirror at position 0 so the next forward at `best` always uploads.
+3. The hazard is that a bad fork does not fail, it answers. So the token
+   comparison is exact and exhaustive; hashing is used only for the things
+   that are *not* tokens, where a collision costs a prefill and never an
+   answer.
+
+## Verification
+
+- `tests/test_prefix.c` (`make test`) — the gate is logit identity: a third,
+  never-used model instance forks a prefix stored by another instance, feeds
+  only the tail, and must produce **bit-identical** logits to a cold full
+  prefill. Also covers partial forks, key rejection by context length and KV
+  type, TTL expiry, byte-budget eviction and the zero-budget disable.
+- `tests/conformance/test_prefix_cache.py` (11 tests) — the same claim over
+  HTTP, using per-token logprobs rather than decoded text. The suite's model is
+  a tiny generated GGUF whose greedy continuation is dominated by the last
+  token, so text equality is nearly vacuous here; logprobs are a function of
+  the whole attended context. Tolerance is `1e-3`, which sits in the gap
+  between prefill retiling noise (~1e-6, pre-existing and unavoidable when
+  reuse moves the batch boundaries) and a wrong context (~1e-1).
+- Both gates were **mutation-tested**: forking without comparing the token
+  vectors is caught by `test_prefix.c` and by the HTTP neighbour test (worst
+  logprob delta 0.074, 74x the tolerance).
+
+## Measured results (SmolLM2-1.7B-Q4_K_M, CPU, `--parallel 2`)
+
+The agent shape: a ~2900-token preamble (system rules + 60 tool signatures +
+an output schema) repeated verbatim, with only the user turn changing. Between
+requests both slots are given an unrelated 16-token prompt, so the slot's own
+`engine_rewind` cannot supply the prefix and every reused token comes from the
+shared store. `max_tokens` is 4 so the figures are prompt-side.
+
+| budget | prompt tokens evaluated | forked | wall clock |
+|---|---|---|---|
+| cold (`prefix_cache: false`) | 2921 | 0 | 29.6 s |
+| 512 MB (default) | 1557 | 1365 | 23.5 s |
+| cold (`prefix_cache: false`) | 2921 | 0 | 47.7 s |
+| 4096 MB | **10** | **2912** | **0.85 s** |
+
+With room to hold the whole preamble, a repeated agent request evaluates only
+the ten tokens of its own user turn: 99.7% of the prompt is forked and the
+request completes **56x faster**. That is the exit criterion, measured.
+
+At the 512 MB default the same request still skips 47% of its prompt and runs
+21% faster, and the reason it is not more is worth naming: SmolLM2-1.7B is MHA
+(32 KV heads x 64), so one token of f16 KV costs 192 KB across its 24 layers,
+and the "no entry may exceed half the budget" rule truncates a 2921-token
+snapshot to 1365 tokens. A GQA model is far cheaper per token (Llama-3.2-3B:
+8 KV heads x 128 = 112 KB/token) and `--kv q8` halves it again. **The default
+budget, not the mechanism, is the binding constraint on MHA models.**
+
+The telemetry's own saved-time estimate tracks reality but runs optimistic:
+8.6 s estimated against 6.1 s measured in the 512 MB row, 28.3 s against 46.9 s
+in the 4096 MB row (optimistic in the first because the fork's memcpy and the
+retiled remainder are real costs it does not model; pessimistic in the second
+because its smoothed cost-per-token was seeded on a less contended run).
+It is an estimate by construction; the wall-clock column is the measurement.
+
+These numbers were taken on a box running three other agents' inference
+servers. Absolute latencies are therefore contended and not comparable across
+runs; the cold/forked pair within one run is, because they were measured
+seconds apart under the same load.
+
+## Remaining for Phase 7
+
+1. Disk persistence. Not started. The in-memory format is already
+   version-tagged and self-validating (`runner.prefix.v1` + geometry + byte
+   length), so the file format is mostly a header away — but a snapshot on
+   disk outlives the process that validated it, which raises trust questions
+   the in-memory store does not have.
+2. The snapshot memcpy and the fork's device resync both run under one global
+   mutex. That is fine at `--parallel 2..16` (prefill already serializes on the
+   device lock), but it is the first thing to reach for if slot counts grow.
+3. Publishing stores the *whole* prompt, so unique user text is cached
+   alongside the shared block it follows. The LRU handles the churn, but a
+   store that stopped at the divergence point between consecutive prompts would
+   fit far more distinct system blocks in the same budget.
+4. `saved_prefill_seconds` prices forked tokens at a smoothed measured
+   seconds-per-token. It is an estimate by construction; the end-to-end
+   latency numbers below are the honest measurement.
+5. Sliding-window (SWA) models are correct here by fact 1 but were not measured
+   separately; the KV row a SWA layer will later evict is still exactly the row
+   a cold prefill would have written.
 
 ---
 

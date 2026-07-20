@@ -20,6 +20,10 @@ test-sampler
 test-sampler.exe
 test-shared-weights
 test-shared-weights.exe
+test-batch
+test-batch.exe
+test-prefix
+test-prefix.exe
 test-shared-asan-bin
 runner-baseline
 *.gguf
