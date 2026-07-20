@@ -117,7 +117,31 @@ static void test_detect_and_render_ornith(tokenizer *t) {
         "<|im_start|>system\nSYS<|im_end|>\n"
         "<|im_start|>user\nHI<|im_end|>\n"
         "<|im_start|>assistant\n<think>\nPLAN\n</think>\n\nANSWER<|im_end|>\n"
-        "<|im_start|>assistant\n") == 0);
+        "<|im_start|>assistant\n<think>\n") == 0);
+}
+
+typedef struct { char reason[128], content[128]; int nr, nc; } split_capture;
+
+static int capture_split(void *ud, int reasoning, const char *bytes, int n) {
+    split_capture *c = ud;
+    char *dst = reasoning ? c->reason : c->content;
+    int *len = reasoning ? &c->nr : &c->nc;
+    memcpy(dst + *len, bytes, n);
+    *len += n;
+    dst[*len] = 0;
+    return 0;
+}
+
+static void test_ornith_split_starts_inside_prompted_think(void) {
+    think_split split;
+    split_capture got = {0};
+    think_init_reasoning(&split, "<think>", "</think>");
+    const char *generated = "Thinking Process:</think>answer";
+    think_feed(&split, generated, strlen(generated), capture_split, &got);
+    think_finish(&split, capture_split, &got);
+    assert(!strcmp(got.reason, "Thinking Process:"));
+    assert(!strcmp(got.content, "answer"));
+    think_free(&split);
 }
 
 static void test_ornith_groups_consecutive_tool_responses(void) {
@@ -190,6 +214,7 @@ int main(void) {
     test_detect_by_marker(&t);
     test_detect_and_render_ornith(&t);
     test_ornith_groups_consecutive_tool_responses();
+    test_ornith_split_starts_inside_prompted_think();
     test_detect_and_render_apertus(&t);
     test_render_apertus_without_system();
     test_render_system_prompt();

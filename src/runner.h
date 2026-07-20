@@ -724,6 +724,7 @@ typedef struct {
     int   n, cap;
 } think_split;
 void think_init(think_split *t, const char *open, const char *close);
+void think_init_reasoning(think_split *t, const char *open, const char *close);
 int  think_feed(think_split *t, const char *bytes, int n, think_cb cb, void *ud);
 int  think_finish(think_split *t, think_cb cb, void *ud); // flush held bytes
 void think_free(think_split *t);
@@ -773,6 +774,7 @@ typedef struct {
 
 void   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
 void   engine_reset(engine *e); // clear KV position + sampler + json state
+void   engine_think_started(engine *e); // prompt already contains think_open
 // keep the KV for the longest common prefix of hist and toks, reset the rest
 // of the engine state; returns how many prompt tokens can be skipped
 int    engine_rewind(engine *e, const int32_t *toks, int n);

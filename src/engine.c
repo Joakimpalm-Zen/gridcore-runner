@@ -67,6 +67,14 @@ void engine_reset(engine *e) {
     e->dpos = 0;
 }
 
+void engine_think_started(engine *e) {
+    if (!e || !e->m || !e->m->think_close) return;
+    e->constraint_phase = CP_THINK;
+    e->constraint_tag_possible = false;
+    e->constraint_tag_match = 0;
+    e->constraint_close_match = 0;
+}
+
 int engine_rewind(engine *e, const int32_t *toks, int n) {
     int keep = 0;
     if (e->hist)

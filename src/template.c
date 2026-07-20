@@ -103,13 +103,8 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
                            msgs[i].role, msgs[i].content);
             }
         }
-        // The official Jinja appends "<think>\n" here. Runner's engine owns
-        // that same prelude: it constrains and emits model.think_open before
-        // free sampling, allowing the streaming splitter to put the following
-        // bytes on reasoning_content. Spelling it into the prompt as well
-        // would produce two opening tags.
         if (add_assistant)
-            off = emit(out, cap, off, "<|im_start|>assistant\n", NULL, NULL);
+            off = emit(out, cap, off, "<|im_start|>assistant\n<think>\n", NULL, NULL);
         break;
     case TMPL_CHATML:
         for (int i = 0; i < n_msgs; i++)
@@ -260,6 +255,11 @@ void think_init(think_split *t, const char *open, const char *close) {
     memset(t, 0, sizeof(*t));
     t->open  = open;
     t->close = close;
+}
+
+void think_init_reasoning(think_split *t, const char *open, const char *close) {
+    think_init(t, open, close);
+    if (open) t->state = TS_THINK;
 }
 
 void think_free(think_split *t) {

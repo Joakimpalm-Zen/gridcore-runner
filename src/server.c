@@ -1693,6 +1693,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
         send_error(fd, 500, "context overflow");
         return;
     }
+    if (chat && s->tmpl == TMPL_ORNITH) engine_think_started(e);
 
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
                   .stop_strs = stops, .n_stop = n_stops,
@@ -1703,7 +1704,10 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                                                               : "cmpl-",
              atomic_fetch_add(&SV.req_counter, 1));
     // split thinking channels out of chat responses; raw completions stay raw
-    think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);
+    if (chat && s->tmpl == TMPL_ORNITH)
+        think_init_reasoning(&g.ts, m->think_open, m->think_close);
+    else
+        think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);
     if (stream && env) {
         tool_stream_sink sink = { &g, sink_content, sink_call_begin,
                                   sink_call_args };
