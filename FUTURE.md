@@ -1896,7 +1896,8 @@ above depends on it.
 | jurisdiction | family | licence | tokenizer | verdict |
 |---|---|---|---|---|
 | US | Llama 3.x | Llama 3.x Community (custom; >700M MAU clause) | 1/721 | validated, in lineup |
-| US | Gemma 3 | Google Gemma Terms (custom; flow-down §3.1, revocable §3.2/§4.5) | 1/721 | validated; licence is the problem, not the tech |
+| US | ~~Gemma 3~~ | Google Gemma Terms (custom, flow-down, revocable) | 1/721 | **superseded by Gemma 4 on licence grounds** — tech was never the problem; kept in `models/` as the record |
+| US | **Gemma 4 12B It** | **Apache 2.0** | **0/721** | **validated, in lineup** (see below) |
 | China | Qwen 2.5 / 3 | Apache 2.0 (unmodified) | 1/721 | validated; tied-cleanest licence, see verified table above |
 | EU | Mistral v0.3 | **Apache 2.0** (was wrongly recorded here as non-commercial MRL — corrected 2026-07-20) | 44/721, one known cause | validated with the accepted divergence |
 | EU | **Apertus 8B Instruct (Swiss AI)** | **Apache 2.0** | **0/721 — best in lineup** | **NOT usable: architecture unsupported** |
@@ -1911,6 +1912,107 @@ The tokenizer column is the differential against each model's own HuggingFace
 reference over `tests/fixtures/tokenizer-corpus.txt`, run by
 `scripts/difftok.py`. See the note below on why these numbers are not the ones
 recorded earlier in this file.
+
+### Gemma 4 replaces Gemma 3: verdict
+
+**Safe to adopt.** Model: `lmstudio-community/gemma-4-12B-it-GGUF`, Q4_K_M,
+7,381,384,864 bytes, verified complete (`scripts/verify-gguf.py`: last tensor
+ends at exactly the file size, zero slack).
+
+**Why the swap.** `models/google_gemma-3-4b-it-Q4_K_M.gguf` self-declares
+`general.license = gemma` — Google's custom Gemma Terms, not Apache 2.0. Under
+§3.1 those terms treat "making Gemma or its functionality available as a hosted
+service via API" as Distribution, and runner *is* an API server. That drags two
+obligations onto Gridcore's own contracts and onto every downstream recipient:
+carry the §3.2 use restrictions as an enforceable term, and hand every recipient
+a copy of the agreement. §3.2 also reserves Google a remote right to restrict
+usage. (§3.3 disclaims rights in Outputs, so generated text was never
+encumbered — the exposure was in *serving the weights*, which is exactly what
+runner does.) Gemma 4 removes all of it.
+
+**Licence — Apache 2.0, confirmed three ways.** The HF card for
+`google/gemma-4-12B-it` carries `license: apache-2.0`, the repo is ungated
+(gemma-3 is gated), and its `license_link`,
+`https://ai.google.dev/gemma/docs/gemma_4_license`, serves verbatim Apache
+License 2.0 text — not a Gemma-Terms page under an Apache name. Google's own
+GGUF (`google/gemma-4-12B-it-qat-q4_0-gguf`) and the `ggml-org` conversion both
+self-declare `general.license = apache-2.0` with that same link.
+
+One caveat worth carrying: **the lmstudio-community Q4_K_M in `models/` has no
+`general.license` key at all** — the conversion drops it. Absence is not an
+Apache declaration. The file is a derivative of an Apache-2.0 upstream so the
+licence holds, but anything that wants the licence provable from the artefact
+itself should serve the `ggml-org` or Google QAT GGUF, which do declare it.
+
+**Size.** There is no supported ~4B-class Gemma 4. The 4B-class models are E2B
+and E4B, and both are exactly the shared-KV / per-layer-embedding variants
+`model.c` rejects (`num_kv_shared_layers` 20 and 18, `hidden_size_per_layer_input`
+256). 26B-A4B is MoE. That leaves dense 12B as the smallest supported member —
+so the swap trades a 2.5 GB model for a 7.4 GB one.
+
+Validation, every number measured on this checkout:
+
+- **Tokenizer differential: 0/721** vs `google/gemma-4-12B-it` — tied best in
+  the lineup with SmolLM2 and Qwen3. It was **13/721 before this work**; see
+  the byte-fallback fix below.
+- **Architecture: loads as `gemma4`**, the arch string the GGUF actually
+  declares. 48 layers, 3840 embd, 16 heads, head dim 512, vocab 262144, train
+  context 262144. `attention.shared_kv_layers = 0` and
+  `embedding_length_per_layer_input = 0`, so it clears the E2B/E4B guard.
+- **GPU vs CPU at `--temp 0`: token-identical**, checked twice on different
+  prompts (16 and 89 generated tokens) because another agent was contending for
+  the MIG slice.
+- **Chat template: auto-detected as `gemma4`**, off the GGUF's own
+  `chat_template`. Detection is unambiguous here — gemma4 opens turns with
+  `<|turn>` where gemma1-3 use `<start_of_turn>`, so neither can claim the
+  other, and the terminator disambiguation that Mistral/Llama-2 and Phi-3/Zephyr
+  need does not arise.
+- **Generation: correct and stops cleanly.** Chat-formatted prompts answer
+  correctly and terminate on EOS well inside the token budget (10 of 200, 16 of
+  60, 89 of 200) rather than running to the cap.
+
+**One template divergence, benign but worth knowing.** Rendering the model's own
+`chat_template` with jinja2 (`add_generation_prompt=True`, thinking off) gives:
+
+```
+<bos><|turn>user\nHI<turn|>\n<|turn>model\n<|channel>thought\n<channel|>
+```
+
+Runner stops after `<|turn>model\n` and does not pre-seed the empty
+`<|channel>thought\n<channel|>` block that signals "do not think". In practice
+the model emits that empty block itself as its first output, so answers are
+correct and stop cleanly — but runner's prompt is not byte-identical to the
+reference, and a token-identity comparison against llama.cpp driven by the same
+jinja template would differ by those seeded tokens. Closing it means deciding
+whether runner's default is thinking or non-thinking, which is a behaviour
+choice rather than a bug fix, so it is left open here.
+
+**Sampling** still resolves through the `gemma3` preset (`sample.c` maps both
+gemma3 and gemma4 to it). Gemma 4's GGUF carries its own
+`general.sampling.{temp,top_p,top_k}` = 1.0 / 0.95 / 64, which match that preset
+exactly, so nothing is currently mis-set — but the preset is named for the
+family being retired.
+
+#### The byte-fallback bug this uncovered
+
+Gemma 4 started at **13/721**, and every divergence was runner *dropping input*:
+11 strings containing CR, plus `"\xa0"` and `"a\xa0b"` (U+00A0). The real
+gemma-4 vocabulary has no literal piece for either character, so the reference
+decomposes them into `<0x0D>` and `<0xC2> <0xA0>`. `bpe_word`'s per-character
+fallback looked the character up in the vocabulary and, on a miss, silently
+skipped it — no byte fallback, unlike the SPM path which has had one all along.
+
+Fixed in `src/tokenizer.c` by falling through to the `<0xNN>` byte pieces (then
+`unk`) the way `spm_encode_text` does, which takes gemma-4 to 0/721. The change
+is inert for the existing families: a gpt2-style BPE vocabulary carries no
+`<0xNN>` pieces and its byte→unicode alphabet already covers all 256 bytes, so
+the branch is unreachable there. Confirmed by re-running the whole lineup before
+and after — every other family's count is unchanged.
+
+Covered by `tests/fixtures/vocab-bpe-spm-gemma4.gguf`, a 5 KB synthetic gemma4
+vocabulary (byte pieces plus a handful of characters and merges) that omits CR
+and U+00A0 exactly as the real one does, so the fallback is asserted rather than
+assumed.
 
 ### Apertus: verdict
 
@@ -2000,6 +2102,19 @@ here as 0/721, none of them Apertus-related and none of them fixed by this work:
 - **gemma-3**, 1/721: `"▁▁"`, a literal U+2581 run in the *input*.
 - **Phi-3.5**, 2/721: `"not a <s> real tag"` and `"a<s>b"` — SPM whitespace
   handling immediately after an embedded special token.
+
+Re-measured 2026-07-20 during the Gemma 4 evaluation, two of those numbers have
+moved and the change is **not** attributable to that work — both reproduce on an
+unmodified `src/tokenizer.c`:
+
+- **Qwen3** is now **0/721**: the Thai case above is fixed.
+- **Apertus** is now **3/721**, not 0/721: `"नमस्ते"`, `"हिन्दी"` and
+  `"สวัสดี"`, all Devanagari/Thai combining-mark merges where the reference
+  merges the mark into the preceding cluster (`स्त`, `िन्द`, `วั`) and runner
+  splits it. Same class as the Llama-3.2 case, in the `tekken` path. This is
+  the one number the Apertus verdict rested on, so it is worth a look by
+  whoever owns that family — the README and the lineup tables here still claim
+  0/721.
 
 These are narrow and confined to inputs the lineup is unlikely to see, but they
 are real and they were previously invisible. Worth a separate pass; folding them

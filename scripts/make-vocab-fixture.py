@@ -168,6 +168,53 @@ def make_bpe_fixtures():
                    common + [kv_str("tokenizer.ggml.pre", pre)])
 
 
+def make_bpe_spm_fixture():
+    """Small synthetic gemma4 (SPM-style BPE) vocabulary.
+
+    gemma4 tokenizes differently from both families above: the normalizer
+    rewrites spaces to U+2581 and BPE merges then run over raw UTF-8 with no
+    GPT-2 byte->unicode mapping. A real gemma4 vocabulary is 262144 tokens, so
+    this carries only the byte-fallback pieces plus the handful of characters
+    and merges the assertions need.
+
+    The point of the fixture is the byte-fallback path: CR and U+00A0 are
+    deliberately absent as literal pieces, exactly as in the real gemma-4
+    vocabulary, so a character with no piece of its own must decompose into one
+    <0xNN> token per UTF-8 byte rather than being dropped.
+    """
+    tokens = ["<pad>", "<eos>", "<bos>", "<unk>"]
+    ttype = [3, 3, 3, 2]
+    tokens += [f"<0x{b:02X}>" for b in range(256)]
+    ttype += [6] * 256
+    # literal pieces: note CR and U+00A0 are intentionally NOT here
+    for ch in ["▁", "\n", "a", "b", "h", "e", "l", "o"]:
+        tokens.append(ch)
+        ttype.append(1)
+
+    merges = []
+    for piece in ["hello", "▁hello"]:
+        acc = piece[0]
+        for ch in piece[1:]:
+            merges.append(f"{acc} {ch}")
+            acc += ch
+            if acc not in tokens:
+                tokens.append(acc)
+                ttype.append(1)
+
+    write_gguf(os.path.join(OUTDIR, "vocab-bpe-spm-gemma4.gguf"), [
+        kv_str("general.architecture", "gemma4"),
+        kv_str("tokenizer.ggml.model", "gemma4"),
+        kv_arr_str("tokenizer.ggml.tokens", tokens),
+        kv_arr_i32("tokenizer.ggml.token_type", ttype),
+        kv_arr_str("tokenizer.ggml.merges", merges),
+        kv_u32("tokenizer.ggml.bos_token_id", 2),
+        kv_u32("tokenizer.ggml.eos_token_id", 1),
+        kv_u32("tokenizer.ggml.unknown_token_id", 3),
+        kv_bool("tokenizer.ggml.add_bos_token", False),
+    ])
+
+
 if __name__ == "__main__":
     main()
     make_bpe_fixtures()
+    make_bpe_spm_fixture()

@@ -581,8 +581,8 @@ system/template prefixes skip prompt evaluation entirely.
 | Area | Support |
 |---|---|
 | File format | GGUF v2/v3, memory-mapped (weights are never copied) |
-| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp). Qwen3.5 is CPU-only; the transformer architectures support CPU + CUDA. |
-| Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, `tekken` (Mistral Nemo/Small and Apertus: case-split letter runs, single digits), and the original GPT-2 regex as the default |
+| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it). Qwen3.5 is CPU-only; the transformer architectures support CPU + CUDA. |
+| Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, `tekken` (Mistral Nemo/Small and Apertus: case-split letter runs, single digits), and the original GPT-2 regex as the default. gemma4 adds an SPM-style BPE: spaces normalize to U+2581 and merges run over raw UTF-8, with `<0xNN>` byte fallback for characters the vocabulary has no piece for |
 | Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
 | Tokenizers | SentencePiece (llama) with byte fallback; byte-level BPE (gpt2) with merges, special-token parsing |
@@ -602,9 +602,9 @@ Tokenizer output is checked against each model's own HuggingFace reference
 tokenizer over the committed 721-string corpus in
 `tests/fixtures/tokenizer-corpus.txt` (regenerate with
 `scripts/tokenizer-corpus.py`, run with `scripts/difftok.py`). Exact for
-SmolLM2-1.7B and Apertus-8B-Instruct; 1 of 721 for Llama-3.2-3B, Qwen3-4B and
-gemma-3-4b, and 2 of 721 for Phi-3.5-mini, each a single narrow case listed in
-`FUTURE.md`.
+SmolLM2-1.7B, Qwen3-4B and gemma-4-12B; 1 of 721 for Llama-3.2-3B and
+gemma-3-4b, 2 of 721 for Phi-3.5-mini and 3 of 721 for Apertus-8B-Instruct,
+each a narrow case listed in `FUTURE.md`.
 
 Mistral-7B-v0.3 differs on 44 of 721, all one known and accepted cause: its
 `Metaspace prepend_scheme=first` replaces a leading space with the U+2581 prefix

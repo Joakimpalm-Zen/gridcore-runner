@@ -242,6 +242,58 @@ static void run_bpe_fixture(const char *path, int pre, void (*digits)(tokenizer 
     gguf_close(&g);
 }
 
+// gemma4's normalizer rewrites a space to U+2581 before any merging, so a
+// space becomes a piece of its own rather than a prefix on the next word.
+static void test_bpe_spm_space_becomes_metaspace(tokenizer *t) {
+    static const char *const want[] = { "a", "\xE2\x96\x81", "b" };
+    expect_pieces(t, "a b", want, 3);
+}
+
+// Merges still run normally over raw UTF-8, with no byte->unicode mapping.
+static void test_bpe_spm_merges_run(tokenizer *t) {
+    static const char *const want[] = { "hello" };
+    expect_pieces(t, "hello", want, 1);
+}
+
+// The real gemma-4 vocabulary has no literal CR piece, so CR must fall back to
+// its <0x0D> byte token. Dropping it silently loses input: runner and the
+// HuggingFace reference disagreed on 11 of the 721 corpus strings for exactly
+// this reason, every one of them containing CR.
+static void test_bpe_spm_byte_fallback_single(tokenizer *t) {
+    static const char *const want[] = { "<0x0D>" };
+    expect_pieces(t, "\r", want, 1);
+}
+
+// A multi-byte codepoint with no piece of its own decomposes to one <0xNN>
+// token per UTF-8 byte, in order. U+00A0 (NBSP) is the corpus case.
+static void test_bpe_spm_byte_fallback_multibyte(tokenizer *t) {
+    static const char *const want[] = { "a", "<0xC2>", "<0xA0>", "b" };
+    expect_pieces(t, "a\xC2\xA0" "b", want, 4);
+}
+
+static void run_bpe_spm_fixture(const char *path) {
+    current = path;
+    gguf_file g;
+    if (!gguf_open(&g, path)) {
+        fprintf(stderr, "cannot open fixture %s\n", path);
+        exit(1);
+    }
+    tokenizer t;
+    if (!tokenizer_init(&t, &g)) {
+        fprintf(stderr, "tokenizer_init failed on %s\n", path);
+        exit(1);
+    }
+    assert(t.model == TOK_BPE_SPM);
+
+    test_bpe_spm_space_becomes_metaspace(&t);
+    test_bpe_spm_merges_run(&t);
+    test_bpe_spm_byte_fallback_single(&t);
+    test_bpe_spm_byte_fallback_multibyte(&t);
+
+    tokenizer_free(&t);
+    gguf_close(&g);
+}
+
 int main(void) {
     for (size_t i = 0; i < sizeof(fixtures) / sizeof(*fixtures); i++) {
         current = fixtures[i];
@@ -280,6 +332,8 @@ int main(void) {
                     TOK_PRE_QWEN2, test_bpe_digit_grouping_qwen2);
     run_bpe_fixture("tests/fixtures/vocab-bpe-smollm.gguf",
                     TOK_PRE_SMOLLM, test_bpe_digit_grouping_qwen2);
+
+    run_bpe_spm_fixture("tests/fixtures/vocab-bpe-spm-gemma4.gguf");
 
     puts("tokenizer tests ok");
     return 0;

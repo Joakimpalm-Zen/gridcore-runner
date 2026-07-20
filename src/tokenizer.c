@@ -654,11 +654,28 @@ static int bpe_word(tokenizer *t, const char *w, int n, int32_t *out, int cap, i
     for (int i = 0; i < ns; i++) {
         int id = hmap_get(&t->vocab, w + st[i], ln[i]);
         if (id < 0) {
-            // fall back to per-character lookup
+            // fall back to per-character lookup, then to the <0xNN> byte
+            // pieces. Silently dropping a character loses input outright:
+            // gemma4's vocabulary has no literal CR or U+00A0 piece, and both
+            // must decompose to their UTF-8 bytes the way the reference does.
+            // A gpt2-style BPE vocabulary carries no <0xNN> pieces and its
+            // byte->unicode alphabet already covers every byte, so this path
+            // stays unreachable there.
             for (int j = 0; j < ln[i]; ) {
                 int l = u8_len((uint8_t)w[st[i] + j]);
                 int cid = hmap_get(&t->vocab, w + st[i] + j, l);
-                if (cid >= 0 && n_out < cap) out[n_out++] = cid;
+                if (cid >= 0) {
+                    if (n_out < cap) out[n_out++] = cid;
+                } else {
+                    for (int b = 0; b < l; b++) {
+                        char name[8];
+                        snprintf(name, sizeof(name), "<0x%02X>",
+                                 (uint8_t)w[st[i] + j + b]);
+                        int bid = hmap_get(&t->vocab, name, 6);
+                        if (bid < 0) bid = t->unk_id;
+                        if (bid >= 0 && n_out < cap) out[n_out++] = bid;
+                    }
+                }
                 j += l;
             }
         } else if (n_out < cap) {
