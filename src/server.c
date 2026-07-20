@@ -469,30 +469,60 @@ static int gen_collect(void *ud, const char *bytes, int n) {
     return think_feed(&g->ts, bytes, n, gen_emit, g);
 }
 
+// A request field the server cannot use must be an error, never a silent
+// fallback to the default: the caller then gets a response generated with
+// settings it did not ask for and no way to detect it. Stringified numbers
+// are the common shape of the mistake — several HTTP layers produce them
+// from form or env-derived config.
+//
+// `null` is the deliberate exception and reads as absent. Every mainstream
+// OpenAI SDK serialises an unset optional field as null rather than omitting
+// it, so treating null as a wrong type would 400 on ordinary traffic from an
+// unmodified client.
+static bool absent(const jv *v) { return !v || v->type == J_NULL; }
+
 static bool request_number(jv *req, const char *key, double dflt,
                            double min, double max, double *out) {
     jv *v = jv_get(req, key);
-    double n = v && v->type == J_NUM ? v->num : dflt;
+    if (!absent(v) && v->type != J_NUM) return false;
+    double n = absent(v) ? dflt : v->num;
     if (!isfinite(n) || n < min || n > max) return false;
     *out = n;
     return true;
 }
 
+// negative sentinels: MT_UNLIMITED clamps to the context window later,
+// the other two are request errors with distinct messages
+enum { MT_BAD_TYPE = -3, MT_NON_FINITE = -2, MT_UNLIMITED = -1 };
+
 static int request_max_tokens(jv *req, int dflt) {
-    double v = jv_num(jv_get(req, "max_tokens"),
-               jv_num(jv_get(req, "max_completion_tokens"), dflt));
-    if (!isfinite(v)) return -2;
-    if (v < 0) return -1;
-    if (v > INT_MAX) return INT_MAX;
-    return (int)v;
+    jv *v = jv_get(req, "max_tokens");
+    if (absent(v)) v = jv_get(req, "max_completion_tokens");
+    if (absent(v)) return dflt;
+    if (v->type != J_NUM) return MT_BAD_TYPE;
+    if (!isfinite(v->num)) return MT_NON_FINITE;
+    if (v->num < 0) return MT_UNLIMITED;
+    if (v->num > INT_MAX) return INT_MAX;
+    return (int)v->num;
 }
 
 static bool request_keep_alive(jv *req, bool *present, int *seconds) {
     jv *v = jv_get(req, "keep_alive");
-    *present = v && v->type == J_NUM;
+    if (!absent(v) && v->type != J_NUM) return false;
+    *present = !absent(v);
     if (!*present) return true;
     if (!isfinite(v->num) || v->num > INT_MAX) return false;
     *seconds = v->num < 0 ? -1 : (int)v->num;
+    return true;
+}
+
+// a boolean request flag: absent takes the default, a non-boolean is an
+// error rather than a silent `false`
+static bool request_bool(jv *req, const char *key, bool dflt, bool *out) {
+    jv *v = jv_get(req, key);
+    if (absent(v)) { *out = dflt; return true; }
+    if (v->type != J_BOOL) return false;
+    *out = v->b;
     return true;
 }
 
@@ -529,21 +559,31 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     s->smp.repeat_penalty = (float)repeat_penalty;
     if (seed > 0) s->smp.rng = (uint64_t)seed;
     int max_tokens = request_max_tokens(req, SV.n_predict_cap);
-    if (max_tokens == -2) {
+    if (max_tokens == MT_NON_FINITE) {
         send_error(fd, 400, "max_tokens out of range");
         return;
     }
-    jv *stream_v = jv_get(req, "stream");
-    if (stream_v && stream_v->type != J_BOOL) {
-        // "stream":"true" used to read as false and answer with a buffered
-        // body, leaving a client that expected SSE waiting on events that
-        // would never arrive
+    if (max_tokens == MT_BAD_TYPE) {
+        send_error(fd, 400, "max_tokens must be a number");
+        return;
+    }
+    // "stream":"true" used to read as false and answer with a buffered
+    // body, leaving a client that expected SSE waiting on events that
+    // would never arrive
+    bool stream = false;
+    if (!request_bool(req, "stream", false, &stream)) {
         send_error(fd, 400, "stream must be a boolean");
         return;
     }
-    bool stream = jv_bool(stream_v, false);
     // OpenAI logprobs (chat, buffered responses only)
-    bool want_lp = chat && !stream && jv_bool(jv_get(req, "logprobs"), false);
+    // chat only: on /v1/completions OpenAI defines logprobs as an integer
+    // count, so a number there is not a type error
+    bool lp_on = false;
+    if (chat && !request_bool(req, "logprobs", false, &lp_on)) {
+        send_error(fd, 400, "logprobs must be a boolean");
+        return;
+    }
+    bool want_lp = chat && !stream && lp_on;
     double lp_num = 0;
     if (want_lp && !request_number(req, "top_logprobs", 0, 0, 20, &lp_num)) {
         send_error(fd, 400, "top_logprobs out of range");
