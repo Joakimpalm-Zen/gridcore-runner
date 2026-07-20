@@ -36,22 +36,20 @@ position will be:
   belong. Enforced by `tests/test_bind.c` (source and CLI surface, in `make
   test` and both CI jobs) and `tests/conformance/test_loopback_bind.py`
   (the running server is unreachable on every non-loopback address).
-  - This one carries a dependency, and it is the reason the rule is absolute
-    rather than a preference. Two other things are only safe *because* of the
-    bind: the API has no authentication at all, and the request parser is
-    permissive in ways that are a smuggling primitive behind a keep-alive proxy
-    (`Content-Length` is matched anywhere in the header block instead of at a
-    line start, and `Transfer-Encoding: chunked` is ignored rather than
-    rejected). Both were assessed as not exploitable *given* a loopback-only
-    listener serving one request per connection. Since Phases 1–4 the server
+  - The API has no authentication at all, which is only safe *because* of the
+    bind and is why the rule is absolute rather than a preference. The former
+    framing weakness has been closed with a line-based parser that rejects
+    ambiguous lengths and all transfer codings, while preserving the
+    one-request-per-connection model. Since Phases 1–4 the server
     also does tool calling on three API surfaces, which is what made the
     ~175,000 exposed Ollama hosts of January 2026 an RCE story rather than a
     leaked-prompts story.
   - So if a `--host` flag is ever genuinely needed, it lands **together with**
     (a) line-anchored `Content-Length` parsing, (b) explicit rejection of
     `Transfer-Encoding`, (c) rejection of duplicate or conflicting length
-    headers, and (d) some form of authentication. Never before them, and never
-    on its own as a convenience. A standalone `--host` PR is a no, however
+    headers (all three now enforced), and (d) some form of authentication.
+    Never before them, and never on its own as a convenience. A standalone
+    `--host` PR is a no, however
     small the diff looks.
 - Add focused tests before each behavior change.
 - Do not prioritize broad architecture, multimodal, UI, or model-store expansion
@@ -211,17 +209,14 @@ these matter more than their size suggests:
   time of the last received event. A real stall watchdog needs explicit
   last-event timing.
 
-## [carried over] HTTP framing strictness
+## DONE — [carried over] HTTP framing strictness
 
-`Content-Length` is matched anywhere in the header block rather than at a line
-start, `strtoull` runs without checking that digits were consumed or that the
-value did not overflow, duplicate and conflicting lengths are accepted, and
-`Transfer-Encoding: chunked` is ignored rather than rejected. The request line's
-`sscanf` return is also discarded, so a malformed request line becomes a 404
-instead of a 400. Severity is limited today by one-request-per-connection and a
-loopback bind, but it becomes a desync primitive behind a keep-alive proxy —
-which is the documented llama-swap deployment. A line-based parser that requires
-exactly one valid length is the fix.
+The server now parses framing line by line: `Content-Length` is an exact,
+case-insensitive field name with one unsigned decimal value (OWS allowed),
+duplicates, signs, junk and overflow are rejected, and every
+`Transfer-Encoding` is rejected. Malformed request lines return 400. Raw-socket
+tests exercise both the slot-worker path and the accept-loop fast path, while
+the loopback bind and one-request-per-connection behavior remain unchanged.
 
 ---
 

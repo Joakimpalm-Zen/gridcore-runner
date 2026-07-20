@@ -91,6 +91,75 @@ static int ci_ncmp(const char *a, const char *b, size_t n) {
     return 0;
 }
 
+// Parse the two HTTP fields that determine request framing. Header names are
+// compared as complete, line-anchored fields: text inside another field's
+// value must never influence framing. Runner does not implement transfer
+// codings, and multiple Content-Length fields are rejected even when equal so
+// every accepted request has one unambiguous interpretation.
+static bool parse_request_framing(char *first_header, char *header_end,
+                                  size_t *content_length) {
+    bool saw_length = false;
+    *content_length = 0;
+    for (char *line = first_header; line < header_end;) {
+        char *end = strstr(line, "\r\n");
+        if (!end || end > header_end) return false;
+        char *colon = memchr(line, ':', (size_t)(end - line));
+        if (colon) {
+            size_t name_n = (size_t)(colon - line);
+            bool is_length = name_n == 14 &&
+                             ci_ncmp(line, "Content-Length", 14) == 0;
+            bool is_transfer = name_n == 17 &&
+                               ci_ncmp(line, "Transfer-Encoding", 17) == 0;
+            if (is_transfer) return false;
+            if (is_length) {
+                if (saw_length) return false;
+                saw_length = true;
+                char *p = colon + 1;
+                while (p < end && (*p == ' ' || *p == '\t')) p++;
+                char *digits = p;
+                size_t value = 0;
+                while (p < end && *p >= '0' && *p <= '9') {
+                    size_t digit = (size_t)(*p - '0');
+                    if (value > ((size_t)-1 - digit) / 10) return false;
+                    value = value * 10 + digit;
+                    p++;
+                }
+                if (p == digits) return false;
+                while (p < end && (*p == ' ' || *p == '\t')) p++;
+                if (p != end) return false;
+                *content_length = value;
+            }
+        }
+        line = end + 2;
+    }
+    return true;
+}
+
+static bool parse_request_line(char *hdr, char method[8], char path[256],
+                               char **first_header) {
+    char *end = strstr(hdr, "\r\n");
+    if (!end) return false;
+    *end = 0;
+    char *sp1 = strchr(hdr, ' ');
+    char *sp2 = sp1 ? strchr(sp1 + 1, ' ') : NULL;
+    bool shape = sp1 && sp1 != hdr && sp2 && sp2 != sp1 + 1 &&
+                 sp2[1] != 0 && strchr(sp2 + 1, ' ') == NULL;
+    size_t method_n = shape ? (size_t)(sp1 - hdr) : 0;
+    size_t path_n = shape ? (size_t)(sp2 - sp1 - 1) : 0;
+    bool valid = shape && method_n < 8 && path_n < 256 &&
+                 (!strcmp(sp2 + 1, "HTTP/1.1") ||
+                  !strcmp(sp2 + 1, "HTTP/1.0"));
+    if (valid) {
+        memcpy(method, hdr, method_n);
+        method[method_n] = 0;
+        memcpy(path, sp1 + 1, path_n);
+        path[path_n] = 0;
+    }
+    *end = '\r';
+    *first_header = end + 2;
+    return valid;
+}
+
 // ---------------------------------------------------------------- helpers
 
 static bool send_all(int fd, const char *s, size_t n) {
@@ -3260,17 +3329,20 @@ static void handle_conn(slot_t *s, int fd) {
         if ((body_start = strstr(hdr, "\r\n\r\n")) != NULL) break;
     }
     if (!body_start) { send_error(fd, 400, "bad request"); return; }
+    char *header_end = body_start;
     body_start += 4;
 
     char method[8] = {0}, path[256] = {0};
-    sscanf(hdr, "%7s %255s", method, path);
+    char *first_header = NULL;
+    if (!parse_request_line(hdr, method, path, &first_header)) {
+        send_error(fd, 400, "malformed request line");
+        return;
+    }
 
     size_t content_length = 0;
-    for (char *p = hdr; p < body_start; p++) {
-        if (ci_ncmp(p, "Content-Length:", 15) == 0) {
-            content_length = (size_t)strtoull(p + 15, NULL, 10);
-            break;
-        }
+    if (!parse_request_framing(first_header, header_end, &content_length)) {
+        send_error(fd, 400, "invalid request framing");
+        return;
     }
     if (content_length > 32u * 1024 * 1024) {
         send_error(fd, 400, "body too large");
@@ -3460,6 +3532,22 @@ static bool accept_fastpath(int fd) {
         if (r <= 0) break;
         got += (size_t)r;
         hdr[got] = 0;
+    }
+    char *header_end = strstr(hdr, "\r\n\r\n");
+    if (!header_end) {
+        send_error(fd, 400, "bad request");
+        sock_close(fd);
+        return true;
+    }
+    char method[8] = {0}, path[256] = {0};
+    char *first_header = NULL;
+    size_t content_length = 0;
+    if (!parse_request_line(hdr, method, path, &first_header) ||
+        !parse_request_framing(first_header, header_end, &content_length) ||
+        content_length > 32u * 1024 * 1024) {
+        send_error(fd, 400, "invalid request framing");
+        sock_close(fd);
+        return true;
     }
     if (health) send_health(fd);
     else if (models) send_models(fd);
