@@ -47,6 +47,11 @@ static void sock_recv_timeout(int fd, double s) {
     if (ms == 0) ms = 1; // 0 would mean "block forever" on winsock
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof(ms));
 }
+static void sock_send_timeout(int fd, double s) {
+    DWORD ms = (DWORD)(s * 1000.0);
+    if (ms == 0) ms = 1;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms, sizeof(ms));
+}
 #else
 #include <signal.h>
 #include <unistd.h>
@@ -65,6 +70,13 @@ static void sock_recv_timeout(int fd, double s) {
     tv.tv_usec = (suseconds_t)((s - (double)tv.tv_sec) * 1e6);
     if (tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1000;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+static void sock_send_timeout(int fd, double s) {
+    struct timeval tv;
+    tv.tv_sec = (time_t)s;
+    tv.tv_usec = (suseconds_t)((s - (double)tv.tv_sec) * 1e6);
+    if (tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1000;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 #endif
 
@@ -501,7 +513,15 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         send_error(fd, 400, "max_tokens out of range");
         return;
     }
-    bool stream = jv_bool(jv_get(req, "stream"), false);
+    jv *stream_v = jv_get(req, "stream");
+    if (stream_v && stream_v->type != J_BOOL) {
+        // "stream":"true" used to read as false and answer with a buffered
+        // body, leaving a client that expected SSE waiting on events that
+        // would never arrive
+        send_error(fd, 400, "stream must be a boolean");
+        return;
+    }
+    bool stream = jv_bool(stream_v, false);
     // OpenAI logprobs (chat, buffered responses only)
     bool want_lp = chat && !stream && jv_bool(jv_get(req, "logprobs"), false);
     double lp_num = 0;
@@ -538,6 +558,36 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         }
     }
     jv *rf = jv_get(req, "response_format");
+    if (rf) {
+        // An unrecognised or malformed response_format used to fall through to
+        // unconstrained decoding while still answering 200, so a caller asking
+        // for guaranteed structure silently got none.
+        if (rf->type != J_OBJ) {
+            send_error(fd, 400, "response_format must be an object");
+            return;
+        }
+        const char *rft = jv_str(jv_get(rf, "type"), "");
+        if (strcmp(rft, "json_object") != 0 && strcmp(rft, "json_schema") != 0 &&
+            strcmp(rft, "text") != 0) {
+            send_error(fd, 400,
+                       "response_format.type must be text, json_object or json_schema");
+            return;
+        }
+        if (strcmp(rft, "json_schema") == 0) {
+            jv *js = jv_get(rf, "json_schema");
+            if (!js || js->type != J_OBJ) {
+                send_error(fd, 400,
+                           "response_format.json_schema must be an object");
+                return;
+            }
+            jv *inner = jv_get(js, "schema");
+            if (inner && inner->type != J_OBJ) {
+                send_error(fd, 400,
+                           "response_format.json_schema.schema must be an object");
+                return;
+            }
+        }
+    }
     e->json_mode = rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_object") == 0;
     // schema-constrained decoding: OpenAI response_format {type:"json_schema",
     // json_schema:{schema:{...}}} or an Ollama-style "format" schema object
@@ -936,6 +986,12 @@ static void handle_conn(slot_t *s, int fd) {
     // a stalled or dead client must not pin an inference slot: the whole
     // request (header + body) has to arrive within this budget. Generation
     // time stays unbounded — the deadline only covers reading the request.
+    //
+    // The write side needs its own bound. A client that sends a valid request
+    // and then stops reading fills the socket buffer, and an unbounded
+    // blocking write parks the slot forever: the read deadline is already
+    // satisfied and never fires again, so the slot is never returned.
+    sock_send_timeout(fd, 30.0);
     double deadline = now_s() + 10.0;
     char hdr[16384];
     size_t got = 0;

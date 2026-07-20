@@ -403,6 +403,14 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
     }
     if (ty->type == J_STR) return compile_typed(s, ty->str, err, errcap, depth);
     if (ty->type == J_ARR) { // union, e.g. ["string","null"]
+        // An empty list compiles to a union with no alternatives, which every
+        // consumer treats as "at least one exists": pick_alt matches nothing so
+        // sampling stalls, and the forced-completion path then reads alts[0]
+        // out of a zero-byte allocation. Reject it at compile time.
+        if (ty->n <= 0) {
+            snprintf(err, errcap, "'type' array must list at least one type");
+            return NULL;
+        }
         snode *n = sn_new(SN_UNION);
         n->alts = calloc(ty->n, sizeof(snode *));
         bool has_num = false;
@@ -847,6 +855,11 @@ static void eq_put(emitq *q, const char *s) {
 static void eq_putc(emitq *q, char c) {
     if (q->n < q->cap - 1) q->out[q->n++] = c;
 }
+// Once the buffer is full nothing further can be emitted, so the minItems /
+// minLength loops below stop there. Without this they still iterate to the
+// declared bound, and minItems:2000000000 (nested, worse) spins for minutes
+// while a slot is held.
+static bool eq_full(const emitq *q) { return q->n >= q->cap - 1; }
 
 // minimal complete value for a schema node
 static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
@@ -864,7 +877,7 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
         case SN_NUM: case SN_INT: eq_putc(q, '0'); break;
         case SN_STR:
             eq_putc(q, '"');
-            for (int i = 0; i < n->min_items; i++) eq_putc(q, ' ');
+            for (int i = 0; i < n->min_items && !eq_full(q); i++) eq_putc(q, ' ');
             eq_putc(q, '"');
             break;
         case SN_ENUM: eq_put(q, n->lits[0]); break;
@@ -876,7 +889,7 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
         }
         case SN_ARR:
             eq_putc(q, '[');
-            for (int i = 0; i < n->min_items; i++) {
+            for (int i = 0; i < n->min_items && !eq_full(q); i++) {
                 if (i) eq_putc(q, ',');
                 emit_min_choice(q, n->items, depth + 1, choice);
             }
@@ -954,7 +967,7 @@ int sval_close(sval *v, char *out, int cap) {
             if (f->sub == 1) eq_putc(&q, 'n');           // dangling backslash
             while (f->sub >= 2) { eq_putc(&q, '0');       // partial \uXXXX
                                   f->sub = f->sub == 5 ? 0 : f->sub + 1; }
-            while (f->lit_pos < n->min_items) {
+            while (f->lit_pos < n->min_items && !eq_full(&q)) {
                 eq_putc(&q, ' ');
                 f->lit_pos++;
             }
@@ -1017,7 +1030,7 @@ int sval_close(sval *v, char *out, int cap) {
             break;
         case P_ARR_FIRST:
         case P_ARR_NEXT:
-            for (int i = f->idx; i < n->min_items; i++) {
+            for (int i = f->idx; i < n->min_items && !eq_full(&q); i++) {
                 if (i > 0 || f->phase == P_ARR_NEXT) eq_putc(&q, ',');
                 emit_min_choice(&q, n->items, 0, -1);
             }

@@ -68,6 +68,54 @@ static void test_schema_required_close(void) {
     jv_free(schema_json);
 }
 
+// An empty "type" array compiled to a union with no alternatives. pick_alt
+// then matched no byte, so sampling stalled and the forced-completion path
+// read alts[0] out of a zero-byte allocation: a single unauthenticated
+// request body segfaulted the whole server, taking every slot with it.
+// Reachable nested as well, so the check belongs at the compile site.
+static void test_schema_rejects_empty_type_union(void) {
+    static const char *const bad[] = {
+        "{\"type\":[]}",
+        "{\"type\":\"array\",\"items\":{\"type\":[]},\"minItems\":1}",
+        "{\"properties\":{\"a\":{\"type\":[]}},\"required\":[\"a\"]}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        jv *j = json_parse(bad[i], strlen(bad[i]));
+        assert(j != NULL);
+        char err[128];
+        snode *schema = schema_compile(j, err, sizeof(err));
+        assert(schema == NULL);
+        jv_free(j);
+    }
+}
+
+// minItems/minLength are bounded only by INT_MAX, and the completion path
+// looped to that bound even though the output buffer had long since filled.
+// Nested, this pinned a slot for minutes. The loops now stop when the buffer
+// is full, so an absurd bound costs the same as a small one.
+static void test_schema_huge_min_bounds_terminate(void) {
+    static const char *const src[] = {
+        "{\"type\":\"string\",\"minLength\":2000000000}",
+        "{\"type\":\"array\",\"minItems\":2000000000,"
+        "\"items\":{\"type\":\"array\",\"minItems\":2000000000,"
+        "\"items\":{\"type\":\"integer\"}}}",
+    };
+    for (size_t i = 0; i < sizeof(src) / sizeof(*src); i++) {
+        jv *j = json_parse(src[i], strlen(src[i]));
+        assert(j != NULL);
+        char err[128];
+        snode *schema = schema_compile(j, err, sizeof(err));
+        assert(schema != NULL);   // the schema itself is legal
+        sval v;
+        sval_init(&v, schema);
+        char out[4096];
+        int n = sval_close(&v, out, sizeof(out));   // must return, not spin
+        assert(n >= 0 && n < (int)sizeof(out));
+        schema_free(schema);
+        jv_free(j);
+    }
+}
+
 static void test_schema_rejects_bad_bounds(void) {
     const char *src =
         "{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
@@ -507,6 +555,8 @@ int main(void) {
     test_strict_bounded_numbers();
     test_json_close_partial_string();
     test_schema_required_close();
+    test_schema_rejects_empty_type_union();
+    test_schema_huge_min_bounds_terminate();
     test_schema_rejects_bad_bounds();
     test_schema_rejects_non_integer_or_huge_bounds();
     test_schema_rejects_escaped_keys();
