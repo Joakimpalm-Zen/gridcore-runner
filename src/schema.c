@@ -49,6 +49,105 @@ void schema_free(snode *n) {
 
 static snode *compile_node(jv *s, char *err, int errcap, int depth);
 
+// ------------------------------------------------------- keyword gate
+//
+// The compiler enforces a fixed, small subset of JSON Schema. A keyword it
+// does not implement must be a compile error rather than a silently weaker
+// constraint: `pattern` dropped from a string leaves the value unconstrained
+// in exactly the way the caller asked it not to be, which is worse than an
+// error because it answers 200. Annotations are the one exemption — they
+// carry no constraint, so ignoring one ignores nothing, and real OpenAI tool
+// payloads are full of them.
+
+static bool kw_in(const char *k, const char *const *list) {
+    for (; *list; list++)
+        if (!strcmp(k, *list)) return true;
+    return false;
+}
+
+static const char *const KW_ANNOTATION[] = {
+    "title", "description", "$comment", "$schema", "$id", "examples",
+    "default", "deprecated", "readOnly", "writeOnly", NULL
+};
+static const char *const KW_STRING[] = { "minLength", "maxLength", NULL };
+static const char *const KW_ARRAY[]  = { "items", "minItems", "maxItems", NULL };
+static const char *const KW_OBJECT[] = { "properties", "required",
+                                         "additionalProperties", NULL };
+
+// does `s` declare (or imply) type `want`? mirrors compile_node's dispatch
+static bool declares_type(jv *s, const char *want) {
+    jv *ty = jv_get(s, "type");
+    if (ty && ty->type == J_STR) return !strcmp(ty->str, want);
+    if (ty && ty->type == J_ARR) {
+        for (int i = 0; i < ty->n; i++)
+            if (!strcmp(jv_str(ty->items[i], "?"), want)) return true;
+        return false;
+    }
+    if (ty) return false;
+    if (jv_get(s, "properties")) return !strcmp(want, "object");
+    if (jv_get(s, "items"))      return !strcmp(want, "array");
+    return false;
+}
+
+static bool check_keywords(jv *s, char *err, int errcap) {
+    if (!s || s->type != J_OBJ) return true;
+    bool one = jv_get(s, "oneOf") != NULL, any = jv_get(s, "anyOf") != NULL;
+    if (one && any) {
+        snprintf(err, errcap, "keyword 'anyOf' cannot be combined with 'oneOf'");
+        return false;
+    }
+    bool composed = one || any;
+    bool literal  = !composed &&
+                    (jv_get(s, "enum") != NULL || jv_get(s, "const") != NULL);
+    for (int i = 0; i < s->n; i++) {
+        const char *k = s->keys[i];
+        if (kw_in(k, KW_ANNOTATION)) continue;
+        if (!strcmp(k, "type")) continue;
+        bool ok;
+        if (composed)     ok = !strcmp(k, "oneOf") || !strcmp(k, "anyOf");
+        else if (literal) ok = !strcmp(k, "enum") || !strcmp(k, "const");
+        else ok = (declares_type(s, "string")  && kw_in(k, KW_STRING)) ||
+                  (declares_type(s, "array")   && kw_in(k, KW_ARRAY))  ||
+                  (declares_type(s, "object")  && kw_in(k, KW_OBJECT));
+        if (!ok) {
+            snprintf(err, errcap,
+                     "unsupported schema keyword '%.40s'", k);
+            return false;
+        }
+    }
+    return true;
+}
+
+// `additionalProperties` and a `required` list are the two object keywords
+// whose absence changes what the compiled machine accepts, so they get rules
+// beyond the name check. The compiled object always enforces a CLOSED
+// property set, which is what `additionalProperties:false` asks for and the
+// opposite of what `true` asks for.
+static bool check_object_rules(jv *s, char *err, int errcap) {
+    jv *props = jv_get(s, "properties");
+    bool has_props = props && props->type == J_OBJ && props->n > 0;
+    jv *ap = jv_get(s, "additionalProperties");
+    if (ap && !(ap->type == J_BOOL && !ap->b && has_props)) {
+        snprintf(err, errcap,
+                 "additionalProperties is only supported as false alongside "
+                 "declared properties");
+        return false;
+    }
+    jv *req = jv_get(s, "required");
+    if (req && req->type != J_ARR) {
+        snprintf(err, errcap, "required must be an array");
+        return false;
+    }
+    if (req && req->n > 0 && !has_props) {
+        // without properties the object compiles to the generic any-object
+        // machine, which cannot enforce a required key at all
+        snprintf(err, errcap,
+                 "required needs a properties map to constrain");
+        return false;
+    }
+    return true;
+}
+
 static bool compile_bound(jv *v, int dflt, int *out) {
     if (!v) { *out = dflt; return true; }
     if (v->type != J_NUM || v->num < 0 || v->num > INT_MAX ||
@@ -105,7 +204,16 @@ static snode *compile_discriminated_action(jv *alts, char *err, int errcap,
             return NULL;
     }
 
+    // Alternatives on this path are consumed field by field rather than
+    // through compile_node, so the keyword gate has to be applied here too —
+    // otherwise `pattern` on a tool branch would be dropped exactly where a
+    // strict tool call needs it most.
     *matched = true;
+    for (int a = 0; a < alts->n; a++) {
+        if (!check_keywords(alts->items[a], err, errcap) ||
+            !check_object_rules(alts->items[a], err, errcap))
+            return NULL;
+    }
     snode *n = sn_new(SN_OBJ);
     if (!n) return NULL;
     n->keys    = calloc(first_props->n, sizeof(char *));
@@ -243,6 +351,7 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
         return n;
     }
     if (!strcmp(type, "object")) {
+        if (!check_object_rules(s, err, errcap)) return NULL;
         jv *props = jv_get(s, "properties");
         if (!props || props->type != J_OBJ || props->n == 0) {
             // open object: any JSON object (generic machine, '{' enforced)
@@ -395,6 +504,7 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
         s->type == J_BOOL) // `true` / `{}` = anything
         return sn_new(SN_ANY);
     if (s->type != J_OBJ) { snprintf(err, errcap, "schema node must be an object"); return NULL; }
+    if (!check_keywords(s, err, errcap)) return NULL;
 
     jv *one = jv_get(s, "oneOf");
     jv *any = jv_get(s, "anyOf");
