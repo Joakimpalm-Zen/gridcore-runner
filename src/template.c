@@ -12,7 +12,8 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
     if (meta_tmpl) {
         if (strstr(meta_tmpl, "<|im_start|>"))        return TMPL_CHATML;
         if (strstr(meta_tmpl, "<|start_header_id|>")) return TMPL_LLAMA3;
-        if (strstr(meta_tmpl, "<|user|>"))            return TMPL_ZEPHYR;
+        if (strstr(meta_tmpl, "<|user|>"))
+            return strstr(meta_tmpl, "<|end|>") ? TMPL_PHI3 : TMPL_ZEPHYR;
         if (strstr(meta_tmpl, "<|turn>"))             return TMPL_GEMMA4;
         if (strstr(meta_tmpl, "<start_of_turn>"))     return TMPL_GEMMA;
         if (strstr(meta_tmpl, "[INST]"))
@@ -20,7 +21,8 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
     }
     if (tok_find(tok, "<|im_start|>") >= 0)        return TMPL_CHATML;
     if (tok_find(tok, "<|start_header_id|>") >= 0) return TMPL_LLAMA3;
-    if (tok_find(tok, "<|user|>") >= 0)            return TMPL_ZEPHYR;
+    if (tok_find(tok, "<|user|>") >= 0)
+        return tok_find(tok, "<|end|>") >= 0 ? TMPL_PHI3 : TMPL_ZEPHYR;
     if (tok_find(tok, "<|turn>") >= 0)             return TMPL_GEMMA4;
     if (tok_find(tok, "<start_of_turn>") >= 0)     return TMPL_GEMMA;
     return TMPL_LLAMA2;
@@ -34,6 +36,7 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "gemma"))  return TMPL_GEMMA;
     if (!strcmp(name, "gemma4")) return TMPL_GEMMA4;
     if (!strcmp(name, "mistral")) return TMPL_MISTRAL;
+    if (!strcmp(name, "phi3"))    return TMPL_PHI3;
     if (!strcmp(name, "raw"))    return TMPL_RAW;
     return -1;
 }
@@ -45,6 +48,7 @@ const char *template_name(int t) {
         case TMPL_GEMMA:  return "gemma";
         case TMPL_GEMMA4: return "gemma4";
         case TMPL_MISTRAL: return "mistral";
+        case TMPL_PHI3:    return "phi3";
         default: return "raw";
     }
 }
@@ -80,6 +84,14 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
     case TMPL_ZEPHYR:
         for (int i = 0; i < n_msgs; i++)
             off = emit(out, cap, off, "<|%s|>\n%s</s>\n",
+                       msgs[i].role, msgs[i].content);
+        if (add_assistant)
+            off = emit(out, cap, off, "<|assistant|>\n", NULL, NULL);
+        break;
+    case TMPL_PHI3:
+        // same <|role|> framing as zephyr, but turns end with <|end|>
+        for (int i = 0; i < n_msgs; i++)
+            off = emit(out, cap, off, "<|%s|>\n%s<|end|>\n",
                        msgs[i].role, msgs[i].content);
         if (add_assistant)
             off = emit(out, cap, off, "<|assistant|>\n", NULL, NULL);

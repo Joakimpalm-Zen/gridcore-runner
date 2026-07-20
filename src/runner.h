@@ -227,6 +227,9 @@ typedef struct {
     gguf_tensor *output;     // may equal tok_embd (tied)
     float       *out_norm_w;
     layer_t     *layers;
+    // phi3 fuses Q/K/V and the FFN gate/up into single tensors; these are the
+    // sliced descriptors the layers point at, owned here so they outlive init
+    gguf_tensor *fused_splits;
     float       *rope_inv_freq; // [rope_dim/2], scaling factors folded in
     float       *rope_inv_freq_local; // sliding-window layers, own base, unscaled
     int          rope_dim_local;      // rotated dims on sliding layers
@@ -379,7 +382,7 @@ int  sval_close(sval *v, char *out, int cap);
 // template rejects a system role outright, so the text is folded into the
 // first user turn rather than wrapped in markers it never saw in training.
 enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
-       TMPL_GEMMA4, TMPL_MISTRAL, TMPL_RAW };
+       TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_RAW };
 
 enum { ACT_SILU = 0, ACT_GELU = 1 };
 
@@ -466,7 +469,7 @@ typedef struct {
     tokenizer *tok;
     sampler   *smp;
     int  pos;              // next free KV slot
-    int  stop_ids[8];
+    int  stop_ids[12];
     int  n_stop;
     bool ignore_eos;
     bool hit_stop;         // last generate ended on a stop token / json done

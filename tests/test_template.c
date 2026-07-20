@@ -28,6 +28,20 @@ static void test_detect_llama2_vs_mistral(tokenizer *t) {
     assert(template_detect(mistral, t) == TMPL_MISTRAL);
 }
 
+// phi3 uses zephyr's <|role|> framing but terminates turns with <|end|>
+// rather than </s>, so the terminator is what tells them apart.
+static void test_detect_zephyr_vs_phi3(tokenizer *t) {
+    const char *zephyr = "{{'<|user|>\n' + message['content'] + '</s>\n'}}";
+    const char *phi3   = "{{'<|user|>\n' + message['content'] + '<|end|>\n'}}";
+    assert(template_detect(zephyr, t) == TMPL_ZEPHYR);
+    assert(template_detect(phi3, t) == TMPL_PHI3);
+
+    const chat_msg msgs[] = { { "user", "HI" } };
+    char out[512];
+    render_messages(TMPL_PHI3, msgs, 1, true, out, sizeof(out));
+    assert(strcmp(out, "<|user|>\nHI<|end|>\n<|assistant|>\n") == 0);
+}
+
 static void test_detect_by_marker(tokenizer *t) {
     assert(template_detect("<|im_start|>system", t) == TMPL_CHATML);
     assert(template_detect("<|start_header_id|>system<|end_header_id|>", t) == TMPL_LLAMA3);
@@ -61,7 +75,8 @@ static void test_render_without_system(void) {
 
 static void test_name_roundtrip(void) {
     static const char *const names[] = {
-        "chatml", "llama2", "llama3", "zephyr", "gemma", "gemma4", "mistral", "raw",
+        "chatml", "llama2", "llama3", "zephyr", "gemma", "gemma4", "mistral",
+        "phi3", "raw",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
         int id = template_from_name(names[i]);
@@ -84,6 +99,7 @@ int main(void) {
     }
 
     test_detect_llama2_vs_mistral(&t);
+    test_detect_zephyr_vs_phi3(&t);
     test_detect_by_marker(&t);
     test_render_system_prompt();
     test_render_without_system();

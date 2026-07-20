@@ -30,10 +30,14 @@ void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     static const char *stops[] = { "<|im_end|>", "<|eot_id|>", "<|end_of_text|>",
                                    "<|endoftext|>", "</s>",
                                    // gemma turn terminators (gemma1-3 / gemma4)
-                                   "<end_of_turn>", "<turn|>" };
+                                   "<end_of_turn>", "<turn|>",
+                                   // phi3 ends assistant turns with <|end|>,
+                                   // which is not its declared eos_token_id
+                                   "<|end|>" };
     for (size_t i = 0; i < sizeof(stops) / sizeof(*stops); i++) {
         int id = tok_find(tok, stops[i]);
-        if (id < 0 || e->n_stop >= 8) continue;
+        if (id < 0 || e->n_stop >= (int)(sizeof(e->stop_ids) / sizeof(*e->stop_ids)))
+            continue;
         bool dup = false;
         for (int j = 0; j < e->n_stop; j++) if (e->stop_ids[j] == id) dup = true;
         if (!dup) e->stop_ids[e->n_stop++] = id;
