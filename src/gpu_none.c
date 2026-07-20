@@ -30,3 +30,7 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
 void gpu_free(model_t *m) {
     (void)m;
 }
+
+void gpu_disable(model_t *m) {
+    m->gpu = NULL;
+}

@@ -199,8 +199,29 @@ typedef struct {
     float        out_scale;              // whole-layer output scalar (gemma4; 1.0 = off)
 } layer_t;
 
+// One model_t is one *sequence*: a set of weights plus the mutable state
+// needed to decode one stream against them. The fields below are grouped by
+// which half of that they belong to, because concurrent serving turns the
+// distinction into a memory bill:
+//
+//   IMMUTABLE (weight side) — derived from the GGUF and never written after
+//   model_load returns. Two model_t values loaded from the same file with the
+//   same parameters hold bit-identical copies of all of it, so it is safe to
+//   share. The CUDA backend already does: gpu_init keys a refcounted device
+//   registry on the file identity and geometry below, so `--parallel N`
+//   uploads the weights once rather than N times (see src/cuda.c).
+//
+//   PER-SEQUENCE (state side) — written by every forward pass. Never share:
+//   two sequences writing one KV cache is silent cross-contamination.
+//
+// The struct itself is not yet split into two types. Doing that changes the
+// public interface every caller uses (server slots, model swap, speculative
+// draft models), so the sharing was pushed into the backend first, where the
+// duplication actually cost gigabytes.
 typedef struct {
+    // ---- immutable: file and geometry ----
     gguf_file gf;
+    char     *path;          // owned copy of the load path (shared-weight key)
     char      arch[32];
     int       n_layer, n_embd, n_head, n_head_kv, head_dim, n_ff;
     int       n_vocab, n_ctx_train, rope_dim;
@@ -233,7 +254,7 @@ typedef struct {
     float       *rope_inv_freq; // [rope_dim/2], scaling factors folded in
     float       *rope_inv_freq_local; // sliding-window layers, own base, unscaled
     int          rope_dim_local;      // rotated dims on sliding layers
-    // runtime state
+    // ---- per-sequence: mutable state, one set per decoding stream ----
     tpool *tp;               // worker pool used by this instance
     int    n_ctx, n_batch;
     f16_t *kcache, *vcache;  // [n_layer][n_ctx][kv_dim], fp16 (or q8_0 blocks
@@ -246,8 +267,13 @@ typedef struct {
     int    spec_batch;       // rows all_logits can hold
     int    reserve_vram_pct; // VRAM cap for the GPU backend (0 = free VRAM)
     int    gpu_layers;       // leading layers run on GPU (n_layer = full,
-                             // <n_layer = partial offload, CPU finishes the rest)
-    void  *gpu;              // GPU backend context (NULL = CPU only)
+                             // <n_layer = partial offload, CPU finishes the rest).
+                             // Decided by the first instance to upload a given
+                             // file and reused by every instance sharing it, so
+                             // parallel slots cannot end up on different splits.
+    void  *gpu;              // GPU backend context (NULL = CPU only). Per
+                             // sequence: it owns this stream's KV and
+                             // activations and points at the shared weights.
 } model_t;
 
 // ---------------------------------------------------------------- gpu
@@ -268,6 +294,14 @@ bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 bool   gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                          bool want_logits, float **logits);
 void   gpu_free(model_t *m); // releases GPU buffers; KV pointers become invalid
+// Stop using the GPU for this model after a runtime failure, releasing
+// whatever the backend can release while leaving the model usable on the CPU.
+// Distinct from gpu_free: a backend whose KV cache lives in GPU-owned memory
+// (Metal's unified buffers) cannot free it here, because the CPU path is about
+// to read those very rows. CUDA can and does — the host KV copy is
+// authoritative there — so a slot that falls back mid-run hands its VRAM, and
+// its reference to the shared weights, straight back.
+void   gpu_disable(model_t *m);
 
 typedef struct {
     int   gpu_mode;    // GPU_AUTO | GPU_OFF

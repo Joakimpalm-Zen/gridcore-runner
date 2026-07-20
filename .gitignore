@@ -18,6 +18,10 @@ test-tokenizer-oom
 test-tokenizer-oom.exe
 test-sampler
 test-sampler.exe
+test-shared-weights
+test-shared-weights.exe
+test-shared-asan-bin
+runner-baseline
 *.gguf
 # committed vocabulary fixtures for the tokenizer tests
 !tests/fixtures/*.gguf

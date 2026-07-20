@@ -21,6 +21,10 @@
 // clock_gettime/CLOCK_MONOTONIC in prof_now: not transitively available on
 // every libc, so include it directly rather than relying on another header
 #include <time.h>
+// stat() identifies the weight file for the shared-upload registry, and the
+// registry itself is mutex-guarded: slots load in parallel with serving
+#include <pthread.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -201,7 +205,31 @@ static const char *cu_err(CUresult r) {
 
 // ------------------------------------------------------------------ backend
 
-typedef struct {
+// ---------------------------------------------------- shared model weights
+//
+// Everything a model puts on the device that a forward pass only ever *reads*.
+// It is identical for two model_t values loaded from the same file with the
+// same parameters, and it is the expensive part — gigabytes of quantized
+// weights — so it is uploaded once and refcounted rather than once per slot.
+// Before this, `--parallel 4` on an 8B model spent four times the VRAM on four
+// byte-identical copies of the same weights.
+//
+// The registry is keyed on the identity of the file (path, size, mtime, inode)
+// plus the geometry and the derived rope tables, because those are the only
+// inputs to any of the buffers below. A key mismatch is not an error, just a
+// miss: that instance gets its own upload, exactly as before.
+typedef struct gpu_weights {
+    struct gpu_weights *next;
+    int         refs;                   // live gpu_t values pointing here
+    // --- identity ---
+    char       *path;
+    uint64_t    fsize, fino;
+    int64_t     fmtime;
+    int         n_layer, n_embd, n_head, n_head_kv, head_dim, n_ff, n_vocab;
+    int         n_ctx, rope_dim, rope_dim_local, kv_q8, v_rmsnorm;
+    float       rope_base, rope_mscale;
+    float      *rope_inv_freq, *rope_inv_freq_local;  // owned copies, compared
+    // --- device state (immutable once built) ---
     CUcontext   ctx;
     CUdevice    dev;
     CUmodule    mod;
@@ -213,14 +241,24 @@ typedef struct {
     CUfunction  f_gemv[32];             // decode coalesced GEMV variants (Q8_0/Q4_K)
     CUdeviceptr weights;
     size_t      weights_len;
-    CUdeviceptr kc, vc;
-    CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, attn_part, logits;
+    int         gpu_layers;             // split decided by the first loader
     CUdeviceptr inv_freq, inv_freq_local, out_norm, dummy;
     CUdeviceptr ones;                   // weightless V RMS norm (gemma4)
     CUdeviceptr *attn_norm, *ffn_norm;  // per layer
     CUdeviceptr *pan, *pfn;             // gemma3 sandwich norms, may be 0
     CUdeviceptr *bq, *bk, *bv, *bo;     // per layer, may be 0
     CUdeviceptr *qn, *kn;               // qwen3 per-head q/k norms
+} gpu_weights;
+
+// ------------------------------------------------ per-sequence backend state
+//
+// One per model_t: the KV cache this stream is decoding into, its activation
+// scratch, and its own stream/graph. Nothing here is shared, so one sequence
+// failing, resetting, or being unloaded cannot touch another's.
+typedef struct {
+    gpu_weights *sw;                    // shared weights, refcounted
+    CUdeviceptr kc, vc;
+    CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, attn_part, logits;
     float       *h_x, *h_logits;        // host staging
     int          last_pos;              // -2 = nothing synced yet
     // CUDA graphs for the single-token decode path (Experiment A)
@@ -304,6 +342,320 @@ bool gpu_kv_q8_ok(void) {
     return true;    // k_store_kv / k_attn / k_attn_dec all read q8_0 blocks
 }
 
+// ------------------------------------------------- shared-weight registry
+//
+// Resident uploads, refcounted and keyed on model identity. The lock is held
+// across the whole build so two instances racing on the same file cannot both
+// pay for the upload — model swap and draft-model loads can run while other
+// slots are serving.
+static gpu_weights *g_shared;
+static pthread_mutex_t g_shared_mu = PTHREAD_MUTEX_INITIALIZER;
+
+// File identity beyond the path: a model rebuilt on disk between two loads
+// must not be served out of the previous upload.
+static bool file_id(const char *path, uint64_t *size, uint64_t *ino,
+                    int64_t *mtime) {
+    struct stat st;
+    if (!path || stat(path, &st) != 0) return false;
+    *size  = (uint64_t)st.st_size;
+    *ino   = (uint64_t)st.st_ino;
+    *mtime = (int64_t)st.st_mtime;
+    return true;
+}
+
+// Everything the shared buffers are derived from, compared rather than assumed
+// from the path. The rope tables in particular are not a property of the file
+// alone: YaRN auto-extension keys off the requested context, phi3 picks its
+// LongRoPE factor set the same way, and --rope-base/--rope-scale override both.
+// Two loads of one file can legitimately want different tables, and a miss here
+// is not an error — that instance just gets its own upload, as before.
+static bool shared_matches(const gpu_weights *w, const model_t *m,
+                           uint64_t size, uint64_t ino, int64_t mtime) {
+    if (!w->path || !m->path || strcmp(w->path, m->path) != 0) return false;
+    if (w->fsize != size || w->fino != ino || w->fmtime != mtime) return false;
+    if (w->n_layer != m->n_layer || w->n_embd != m->n_embd ||
+        w->n_head  != m->n_head  || w->n_head_kv != m->n_head_kv ||
+        w->head_dim != m->head_dim || w->n_ff != m->n_ff ||
+        w->n_vocab != m->n_vocab || w->n_ctx != m->n_ctx ||
+        w->rope_dim != m->rope_dim || w->rope_dim_local != m->rope_dim_local ||
+        w->kv_q8 != (int)m->kv_q8 || w->v_rmsnorm != (int)m->v_rmsnorm ||
+        w->rope_base != m->rope_base || w->rope_mscale != m->rope_mscale)
+        return false;
+    if ((w->rope_inv_freq_local != NULL) != (m->rope_inv_freq_local != NULL))
+        return false;
+    if (memcmp(w->rope_inv_freq, m->rope_inv_freq,
+               sizeof(float) * (size_t)(m->rope_dim / 2)) != 0)
+        return false;
+    if (m->rope_inv_freq_local &&
+        memcmp(w->rope_inv_freq_local, m->rope_inv_freq_local,
+               sizeof(float) * (size_t)(m->rope_dim_local / 2)) != 0)
+        return false;
+    return true;
+}
+
+static void shared_destroy(gpu_weights *w) {
+    if (!w) return;
+    if (w->ctx) cu.CtxSetCurrent(w->ctx);
+    for (int l = 0; l < w->n_layer; l++) {
+        CUdeviceptr bufs[] = {
+            w->attn_norm ? w->attn_norm[l] : 0,
+            w->ffn_norm  ? w->ffn_norm[l]  : 0,
+            w->bq ? w->bq[l] : 0, w->bk ? w->bk[l] : 0,
+            w->bv ? w->bv[l] : 0, w->bo ? w->bo[l] : 0,
+            w->qn ? w->qn[l] : 0, w->kn ? w->kn[l] : 0,
+            w->pan ? w->pan[l] : 0, w->pfn ? w->pfn[l] : 0,
+        };
+        for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
+            if (bufs[i]) cu.MemFree(bufs[i]);
+    }
+    free(w->attn_norm); free(w->ffn_norm);
+    free(w->bq); free(w->bk); free(w->bv); free(w->bo);
+    free(w->qn); free(w->kn);
+    free(w->pan); free(w->pfn);
+    CUdeviceptr bufs[] = { w->weights, w->inv_freq, w->inv_freq_local,
+                           w->out_norm, w->dummy, w->ones };
+    for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
+        if (bufs[i]) cu.MemFree(bufs[i]);
+    if (w->mod) cu.ModuleUnload(w->mod);
+    if (w->ctx) cu.PrimaryCtxRelease(w->dev);
+    free(w->rope_inv_freq); free(w->rope_inv_freq_local);
+    free(w->path);
+    free(w);
+}
+
+static void shared_release(gpu_weights *w) {
+    if (!w) return;
+    pthread_mutex_lock(&g_shared_mu);
+    bool last = --w->refs <= 0;
+    if (last)
+        // unlink first so a concurrent acquire cannot find a dying entry; the
+        // loop is a no-op for an entry that was never listed (no file identity)
+        for (gpu_weights **pp = &g_shared; *pp; pp = &(*pp)->next)
+            if (*pp == w) { *pp = w->next; break; }
+    pthread_mutex_unlock(&g_shared_mu);
+    if (last) shared_destroy(w);
+}
+
+// Upload one model's immutable device data and decide the CPU/GPU layer split.
+// act_bytes/max_hd describe the *per-sequence* scratch one instance needs; they
+// only feed the fitting decision, they are not allocated here.
+static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
+                                 uint64_t fsize, uint64_t fino, int64_t fmtime) {
+    gpu_weights *w = calloc(1, sizeof(gpu_weights));
+    if (!w) return NULL;
+    if (m->path) {
+        size_t n = strlen(m->path) + 1;
+        w->path = malloc(n);
+        if (!w->path) goto fail_quiet;
+        memcpy(w->path, m->path, n);
+    }
+    w->fsize = fsize; w->fino = fino; w->fmtime = fmtime;
+    w->n_layer = m->n_layer; w->n_embd = m->n_embd; w->n_head = m->n_head;
+    w->n_head_kv = m->n_head_kv; w->head_dim = m->head_dim; w->n_ff = m->n_ff;
+    w->n_vocab = m->n_vocab; w->n_ctx = m->n_ctx;
+    w->rope_dim = m->rope_dim; w->rope_dim_local = m->rope_dim_local;
+    w->kv_q8 = (int)m->kv_q8; w->v_rmsnorm = (int)m->v_rmsnorm;
+    w->rope_base = m->rope_base; w->rope_mscale = m->rope_mscale;
+    {   // own copies of the rope tables so a later match can compare against
+        // them without reaching into a model_t that may since have been freed
+        size_t nb = sizeof(float) * (size_t)(m->rope_dim / 2);
+        w->rope_inv_freq = malloc(nb);
+        if (!w->rope_inv_freq) goto fail_quiet;
+        memcpy(w->rope_inv_freq, m->rope_inv_freq, nb);
+        if (m->rope_inv_freq_local) {
+            size_t lb = sizeof(float) * (size_t)(m->rope_dim_local / 2);
+            w->rope_inv_freq_local = malloc(lb);
+            if (!w->rope_inv_freq_local) goto fail_quiet;
+            memcpy(w->rope_inv_freq_local, m->rope_inv_freq_local, lb);
+        }
+    }
+
+    CK(cu.DeviceGet(&w->dev, 0));
+    CK(cu.PrimaryCtxRetain(&w->ctx, w->dev));
+    CK(cu.CtxSetCurrent(w->ctx));
+
+    {
+        size_t vram_free = 0, vram_total = 0;
+        CK(cu.MemGetInfo(&vram_free, &vram_total));
+        size_t vram_budget = vram_free;
+        if (m->reserve_vram_pct > 0) {
+            size_t cap = vram_total / 100 * m->reserve_vram_pct;
+            if (cap < vram_budget) vram_budget = cap;
+        }
+        // fixed device overhead regardless of split: activation scratch, the
+        // token-embedding weights (always uploaded), and a margin covering the
+        // CUDA context + PTX JIT + WDDM reserve
+        size_t fixed = act_bytes + m->tok_embd->nbytes + (512u << 20);
+        // decide how many *leading* layers fit — accumulate each layer's weight
+        // bytes plus its KV bytes until the budget runs out; the CPU runs the
+        // rest (partial offload)
+        int G = 0;
+        size_t used = fixed;
+        for (int l = 0; l < m->n_layer; l++) {
+            layer_t *ly = &m->layers[l];
+            gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
+                                  ly->w_gate, ly->w_up, ly->w_down };
+            size_t wb = 0;
+            for (int i = 0; i < 7; i++) if (ws[i]) wb += ws[i]->nbytes;
+            // KV bytes honour the cache format: a q8_0 cache is ~53% of fp16,
+            // so quantized KV directly buys more offloaded layers here
+            size_t kv = 2 * (size_t)m->n_ctx * model_kv_row_bytes(m, l);
+            if (used + wb + kv > vram_budget) break;
+            used += wb + kv;
+            G = l + 1;
+        }
+        // a full split also needs token_embd + output weights resident
+        bool full = G == m->n_layer &&
+                    used + m->tok_embd->nbytes + m->output->nbytes <= vram_budget;
+        if (G == 0) {
+            fprintf(stderr,
+                    "gpu: not even one layer fits %.1f GB %s VRAM — using CPU\n",
+                    vram_budget / 1e9, m->reserve_vram_pct > 0 ? "reserved" : "free");
+            goto fail_quiet;
+        }
+        fprintf(stderr, "gpu-split: budget=%.2fGB fixed=%.2fGB G=%d/%d full=%d used=%.2fGB\n", vram_budget/1e9, fixed/1e9, G, m->n_layer, (int)full, used/1e9);
+        w->gpu_layers = full ? m->n_layer : G;
+        // weight bytes to upload: whole file for a full split (output/embedding
+        // offsets stay valid), else the prefix covering token_embd + [0, G)
+        size_t upload_len = m->gf.map_size;
+        if (!full) {
+            upload_len = (size_t)((uint8_t *)m->tok_embd->data - (uint8_t *)m->gf.map)
+                       + m->tok_embd->nbytes;
+            for (int l = 0; l < G; l++) {
+                layer_t *ly = &m->layers[l];
+                gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
+                                      ly->w_gate, ly->w_up, ly->w_down };
+                for (int i = 0; i < 7; i++) {
+                    if (!ws[i]) continue;
+                    size_t end = (size_t)((uint8_t *)ws[i]->data - (uint8_t *)m->gf.map)
+                               + ws[i]->nbytes;
+                    if (end > upload_len) upload_len = end;
+                }
+            }
+        }
+        w->weights_len = upload_len;
+
+        CK(cu.ModuleLoadData(&w->mod, k_ptx_src));
+        struct { CUfunction *f; const char *name; } fns[] = {
+            { &w->f_rmsnorm,    "k_rmsnorm" },   { &w->f_qknorm, "k_qknorm" },
+            { &w->f_rope,       "k_rope" },      { &w->f_store,  "k_store_kv" },
+            { &w->f_attn,       "k_attn" },      { &w->f_silu,   "k_silu_mul" },
+            { &w->f_attn_dec,   "k_attn_dec" },  { &w->f_attn_merge, "k_attn_merge" },
+            { &w->f_gelu,       "k_gelu_mul" },  { &w->f_add,    "k_add" },
+            { &w->f_scale,      "k_scale" },
+            { &w->f_mv[T_F32],  "k_mv_f32" },    { &w->f_mv[T_F16],  "k_mv_f16" },
+            { &w->f_mv[T_Q8_0], "k_mv_q8_0" },   { &w->f_mv[T_Q4_0], "k_mv_q4_0" },
+            { &w->f_mv[T_Q4_1], "k_mv_q4_1" },   { &w->f_mv[T_Q5_0], "k_mv_q5_0" },
+            { &w->f_mv[T_Q5_1], "k_mv_q5_1" },   { &w->f_mv[T_Q4_K], "k_mv_q4_K" },
+            { &w->f_mv[T_Q5_K], "k_mv_q5_K" },   { &w->f_mv[T_Q6_K], "k_mv_q6_K" },
+            { &w->f_mv[T_IQ4_NL], "k_mv_iq4_nl" }, { &w->f_mv[T_IQ4_XS], "k_mv_iq4_xs" },
+            { &w->f_mvb[T_F32],  "k_mv_f32_b" },  { &w->f_mvb[T_F16],  "k_mv_f16_b" },
+            { &w->f_mvb[T_Q8_0], "k_mv_q8_0_b" }, { &w->f_mvb[T_Q4_0], "k_mv_q4_0_b" },
+            { &w->f_mvb[T_Q4_1], "k_mv_q4_1_b" }, { &w->f_mvb[T_Q5_0], "k_mv_q5_0_b" },
+            { &w->f_mvb[T_Q5_1], "k_mv_q5_1_b" }, { &w->f_mvb[T_Q4_K], "k_mv_q4_K_b" },
+            { &w->f_mvb[T_Q5_K], "k_mv_q5_K_b" }, { &w->f_mvb[T_Q6_K], "k_mv_q6_K_b" },
+            { &w->f_mvb[T_IQ4_NL], "k_mv_iq4_nl_b" }, { &w->f_mvb[T_IQ4_XS], "k_mv_iq4_xs_b" },
+            // prefill tiled-GEMM variants (batch>1 fast path for these formats)
+            { &w->f_gemm[T_Q8_0], "k_gemm_q8_0" },
+            { &w->f_gemm[T_Q4_K], "k_gemm_q4_K" },
+            { &w->f_gemm[T_Q5_K], "k_gemm_q5_K" },
+            { &w->f_gemm[T_Q6_K], "k_gemm_q6_K" },
+            // decode coalesced GEMV variants (batch==1 fast path for these formats)
+            { &w->f_gemv[T_Q8_0], "k_gemv_q8_0" },
+            { &w->f_gemv[T_Q4_K], "k_gemv_q4_K" },
+            { &w->f_gemv[T_Q5_K], "k_gemv_q5_K" },
+            { &w->f_gemv[T_Q6_K], "k_gemv_q6_K" },
+        };
+        for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
+            CK(cu.ModuleGetFunction(fns[i].f, w->mod, fns[i].name));
+
+        // weights: the file bytes the offloaded layers reference (whole file
+        // for a full split, a prefix for partial) so byte offsets stay valid.
+        // Every instance sharing this upload indexes it with offsets computed
+        // against its own mmap base, which is the same layout by construction.
+        CK(cu.MemAlloc(&w->weights, w->weights_len));
+        CK(cu.MemcpyHtoD(w->weights, m->gf.map, w->weights_len));
+        CK(cu.MemAlloc(&w->dummy, 4));
+
+        w->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
+        w->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim_local / 2);
+        w->out_norm = f32_dbuf(m->out_norm_w, m->n_embd);
+        if (!w->inv_freq || !w->out_norm ||
+            (m->rope_inv_freq_local && !w->inv_freq_local)) goto fail;
+        if (m->v_rmsnorm) { // weightless per-head V norm: weight of ones
+            float *ones = malloc(sizeof(float) * max_hd);
+            if (!ones) goto fail;
+            for (int i = 0; i < max_hd; i++) ones[i] = 1.0f;
+            w->ones = f32_dbuf(ones, max_hd);
+            free(ones);
+            if (!w->ones) goto fail;
+        }
+        w->attn_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ffn_norm  = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->bq = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->bk = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->bv = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->bo = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->qn = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->kn = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->pan = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->pfn = calloc(m->n_layer, sizeof(CUdeviceptr));
+        if (!w->attn_norm || !w->ffn_norm || !w->bq || !w->bk || !w->bv ||
+            !w->bo || !w->qn || !w->kn || !w->pan || !w->pfn)
+            goto fail;
+        for (int l = 0; l < m->n_layer; l++) {
+            layer_t *ly = &m->layers[l];
+            w->attn_norm[l] = f32_dbuf(ly->attn_norm_w, m->n_embd);
+            w->ffn_norm[l]  = f32_dbuf(ly->ffn_norm_w, m->n_embd);
+            w->bq[l] = f32_dbuf(ly->bq, model_q_dim(m, l));
+            w->bk[l] = f32_dbuf(ly->bk, model_kv_dim(m, l));
+            w->bv[l] = f32_dbuf(ly->bv, model_kv_dim(m, l));
+            w->bo[l] = f32_dbuf(ly->bo, m->n_embd);
+            w->qn[l] = f32_dbuf(ly->qnorm_w, model_head_dim(m, l));
+            w->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l));
+            w->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
+            w->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
+            if (!w->attn_norm[l] || !w->ffn_norm[l] ||
+                (ly->bq && !w->bq[l]) || (ly->bk && !w->bk[l]) ||
+                (ly->bv && !w->bv[l]) || (ly->bo && !w->bo[l]) ||
+                (ly->qnorm_w && !w->qn[l]) || (ly->knorm_w && !w->kn[l]) ||
+                (ly->post_attn_norm_w && !w->pan[l]) ||
+                (ly->post_ffn_norm_w && !w->pfn[l]))
+                goto fail;
+        }
+    }
+    w->refs = 1;
+    return w;
+
+fail:
+fail_quiet:
+    shared_destroy(w);
+    return NULL;
+}
+
+static gpu_weights *shared_acquire(model_t *m, size_t act_bytes, int max_hd) {
+    uint64_t fsize = 0, fino = 0;
+    int64_t  fmtime = 0;
+    bool have_id = file_id(m->path, &fsize, &fino, &fmtime);
+    gpu_weights *w = NULL;
+    pthread_mutex_lock(&g_shared_mu);
+    if (have_id)
+        for (w = g_shared; w; w = w->next)
+            if (shared_matches(w, m, fsize, fino, fmtime)) break;
+    if (w) {
+        w->refs++;
+        fprintf(stderr, "gpu: reusing resident weights (%.1f GB, now shared by "
+                "%d instances)\n", w->weights_len / 1e9, w->refs);
+    } else {
+        w = shared_build(m, act_bytes, max_hd, fsize, fino, fmtime);
+        // an entry with no file identity is private: never listed, so it is
+        // never matched, and shared_release still frees it at refs 0
+        if (w && have_id) { w->next = g_shared; g_shared = w; }
+    }
+    pthread_mutex_unlock(&g_shared_mu);
+    return w;
+}
+
 bool gpu_init(model_t *m) {
     // every weight matmul must have a kernel for its quant type (wv may be
     // absent: gemma4 global layers reuse the raw K projection as V)
@@ -325,10 +677,6 @@ bool gpu_init(model_t *m) {
     if (!g) return false;
     g->last_pos = -2;
 
-    CK(cu.DeviceGet(&g->dev, 0));
-    CK(cu.PrimaryCtxRetain(&g->ctx, g->dev));
-    CK(cu.CtxSetCurrent(g->ctx));
-
     {
         // heterogeneous archs (gemma4) vary q/kv widths per layer: size the
         // shared activation buffers to the maxima
@@ -339,112 +687,19 @@ bool gpu_init(model_t *m) {
             if (model_head_dim(m, l) > max_hd) max_hd = model_head_dim(m, l);
         }
         int xdim = q_dim > m->n_embd ? q_dim : m->n_embd;
-        size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
         size_t act_bytes = sizeof(float) * (MVB * ((size_t)m->n_embd + 3 * xdim +
                            q_dim + 2 * kv_dim + 2 * m->n_ff +
                            (size_t)m->n_head * m->n_ctx) + m->n_vocab);
 
-        size_t vram_free = 0, vram_total = 0;
-        CK(cu.MemGetInfo(&vram_free, &vram_total));
-        size_t vram_budget = vram_free;
-        if (m->reserve_vram_pct > 0) {
-            size_t cap = vram_total / 100 * m->reserve_vram_pct;
-            if (cap < vram_budget) vram_budget = cap;
-        }
-        // fixed device overhead regardless of split: activation scratch, the
-        // token-embedding weights (always uploaded), and a margin covering the
-        // CUDA context + PTX JIT + WDDM reserve
-        size_t fixed = act_bytes + m->tok_embd->nbytes + (512u << 20);
-        // decide how many *leading* layers fit — accumulate each layer's weight
-        // bytes plus its KV bytes until the budget runs out; the CPU runs the
-        // rest (partial offload)
-        int G = 0;
-        size_t used = fixed;
-        for (int l = 0; l < m->n_layer; l++) {
-            layer_t *ly = &m->layers[l];
-            gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
-                                  ly->w_gate, ly->w_up, ly->w_down };
-            size_t w = 0;
-            for (int i = 0; i < 7; i++) if (ws[i]) w += ws[i]->nbytes;
-            // KV bytes honour the cache format: a q8_0 cache is ~53% of fp16,
-            // so quantized KV directly buys more offloaded layers here
-            size_t kv = 2 * (size_t)m->n_ctx * model_kv_row_bytes(m, l);
-            if (used + w + kv > vram_budget) break;
-            used += w + kv;
-            G = l + 1;
-        }
-        // a full split also needs token_embd + output weights resident
-        bool full = G == m->n_layer &&
-                    used + m->tok_embd->nbytes + m->output->nbytes <= vram_budget;
-        if (G == 0) {
-            fprintf(stderr,
-                    "gpu: not even one layer fits %.1f GB %s VRAM — using CPU\n",
-                    vram_budget / 1e9, m->reserve_vram_pct > 0 ? "reserved" : "free");
-            goto fail_quiet;
-        }
-        fprintf(stderr, "gpu-split: budget=%.2fGB fixed=%.2fGB G=%d/%d full=%d used=%.2fGB\n", vram_budget/1e9, fixed/1e9, G, m->n_layer, (int)full, used/1e9);
-        m->gpu_layers = full ? m->n_layer : G;
-        // weight bytes to upload: whole file for a full split (output/embedding
-        // offsets stay valid), else the prefix covering token_embd + [0, G)
-        size_t upload_len = m->gf.map_size;
-        if (!full) {
-            upload_len = (size_t)((uint8_t *)m->tok_embd->data - (uint8_t *)m->gf.map)
-                       + m->tok_embd->nbytes;
-            for (int l = 0; l < G; l++) {
-                layer_t *ly = &m->layers[l];
-                gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
-                                      ly->w_gate, ly->w_up, ly->w_down };
-                for (int i = 0; i < 7; i++) {
-                    if (!ws[i]) continue;
-                    size_t end = (size_t)((uint8_t *)ws[i]->data - (uint8_t *)m->gf.map)
-                               + ws[i]->nbytes;
-                    if (end > upload_len) upload_len = end;
-                }
-            }
-        }
-        g->weights_len = upload_len;
+        // the weights (and the CPU/GPU split they imply) come from the registry:
+        // a second instance of the same file reuses the first one's upload
+        g->sw = shared_acquire(m, act_bytes, max_hd);
+        if (!g->sw) goto fail_quiet;
+        m->gpu_layers = g->sw->gpu_layers;
+        CK(cu.CtxSetCurrent(g->sw->ctx));
+
         // device KV holds only the offloaded layers [0, gpu_layers)
-        kv_bytes = model_kv_byte_off(m, m->gpu_layers);
-
-        CK(cu.ModuleLoadData(&g->mod, k_ptx_src));
-        struct { CUfunction *f; const char *name; } fns[] = {
-            { &g->f_rmsnorm,    "k_rmsnorm" },   { &g->f_qknorm, "k_qknorm" },
-            { &g->f_rope,       "k_rope" },      { &g->f_store,  "k_store_kv" },
-            { &g->f_attn,       "k_attn" },      { &g->f_silu,   "k_silu_mul" },
-            { &g->f_attn_dec,   "k_attn_dec" },  { &g->f_attn_merge, "k_attn_merge" },
-            { &g->f_gelu,       "k_gelu_mul" },  { &g->f_add,    "k_add" },
-            { &g->f_scale,      "k_scale" },
-            { &g->f_mv[T_F32],  "k_mv_f32" },    { &g->f_mv[T_F16],  "k_mv_f16" },
-            { &g->f_mv[T_Q8_0], "k_mv_q8_0" },   { &g->f_mv[T_Q4_0], "k_mv_q4_0" },
-            { &g->f_mv[T_Q4_1], "k_mv_q4_1" },   { &g->f_mv[T_Q5_0], "k_mv_q5_0" },
-            { &g->f_mv[T_Q5_1], "k_mv_q5_1" },   { &g->f_mv[T_Q4_K], "k_mv_q4_K" },
-            { &g->f_mv[T_Q5_K], "k_mv_q5_K" },   { &g->f_mv[T_Q6_K], "k_mv_q6_K" },
-            { &g->f_mv[T_IQ4_NL], "k_mv_iq4_nl" }, { &g->f_mv[T_IQ4_XS], "k_mv_iq4_xs" },
-            { &g->f_mvb[T_F32],  "k_mv_f32_b" },  { &g->f_mvb[T_F16],  "k_mv_f16_b" },
-            { &g->f_mvb[T_Q8_0], "k_mv_q8_0_b" }, { &g->f_mvb[T_Q4_0], "k_mv_q4_0_b" },
-            { &g->f_mvb[T_Q4_1], "k_mv_q4_1_b" }, { &g->f_mvb[T_Q5_0], "k_mv_q5_0_b" },
-            { &g->f_mvb[T_Q5_1], "k_mv_q5_1_b" }, { &g->f_mvb[T_Q4_K], "k_mv_q4_K_b" },
-            { &g->f_mvb[T_Q5_K], "k_mv_q5_K_b" }, { &g->f_mvb[T_Q6_K], "k_mv_q6_K_b" },
-            { &g->f_mvb[T_IQ4_NL], "k_mv_iq4_nl_b" }, { &g->f_mvb[T_IQ4_XS], "k_mv_iq4_xs_b" },
-            // prefill tiled-GEMM variants (batch>1 fast path for these formats)
-            { &g->f_gemm[T_Q8_0], "k_gemm_q8_0" },
-            { &g->f_gemm[T_Q4_K], "k_gemm_q4_K" },
-            { &g->f_gemm[T_Q5_K], "k_gemm_q5_K" },
-            { &g->f_gemm[T_Q6_K], "k_gemm_q6_K" },
-            // decode coalesced GEMV variants (batch==1 fast path for these formats)
-            { &g->f_gemv[T_Q8_0], "k_gemv_q8_0" },
-            { &g->f_gemv[T_Q4_K], "k_gemv_q4_K" },
-            { &g->f_gemv[T_Q5_K], "k_gemv_q5_K" },
-            { &g->f_gemv[T_Q6_K], "k_gemv_q6_K" },
-        };
-        for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
-            CK(cu.ModuleGetFunction(fns[i].f, g->mod, fns[i].name));
-
-        // weights: the file bytes the offloaded layers reference (whole file
-        // for a full split, a prefix for partial) so byte offsets stay valid
-        CK(cu.MemAlloc(&g->weights, g->weights_len));
-        CK(cu.MemcpyHtoD(g->weights, m->gf.map, g->weights_len));
-
+        size_t kv_bytes = model_kv_byte_off(m, m->gpu_layers);
         CK(cu.MemAlloc(&g->kc, kv_bytes));
         CK(cu.MemAlloc(&g->vc, kv_bytes));
         CK(cu.MemsetD8(g->kc, 0, kv_bytes));
@@ -463,7 +718,6 @@ bool gpu_init(model_t *m) {
         CK(cu.MemAlloc(&g->attn_part, sizeof(float) * MVB * (size_t)m->n_head *
                                       ATTN_SPLITS * (max_hd + 2)));
         CK(cu.MemAlloc(&g->logits, sizeof(float) * m->n_vocab));
-        CK(cu.MemAlloc(&g->dummy,  4));
         CK(cu.MemAlloc(&g->pos_dev, sizeof(int)));
         if (cu_graphs_ok() && cu.StreamCreate(&g->stream, 0) != 0)
             g->stream = NULL;
@@ -472,67 +726,28 @@ bool gpu_init(model_t *m) {
         for (int l = 0; l < m->gpu_layers; l++)
             if (!m->layers[l].wv) g->graph_bad = true;
 
-        g->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
-        g->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim_local / 2);
-        g->out_norm = f32_dbuf(m->out_norm_w, m->n_embd);
-        if (!g->inv_freq || !g->out_norm ||
-            (m->rope_inv_freq_local && !g->inv_freq_local)) goto fail;
-        if (m->v_rmsnorm) { // weightless per-head V norm: weight of ones
-            float *ones = malloc(sizeof(float) * max_hd);
-            if (!ones) goto fail;
-            for (int i = 0; i < max_hd; i++) ones[i] = 1.0f;
-            g->ones = f32_dbuf(ones, max_hd);
-            free(ones);
-            if (!g->ones) goto fail;
-        }
-        g->attn_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->ffn_norm  = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->bq = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->bk = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->bv = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->bo = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->qn = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->kn = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->pan = calloc(m->n_layer, sizeof(CUdeviceptr));
-        g->pfn = calloc(m->n_layer, sizeof(CUdeviceptr));
-        if (!g->attn_norm || !g->ffn_norm || !g->bq || !g->bk || !g->bv ||
-            !g->bo || !g->qn || !g->kn || !g->pan || !g->pfn)
-            goto fail;
-        for (int l = 0; l < m->n_layer; l++) {
-            layer_t *ly = &m->layers[l];
-            g->attn_norm[l] = f32_dbuf(ly->attn_norm_w, m->n_embd);
-            g->ffn_norm[l]  = f32_dbuf(ly->ffn_norm_w, m->n_embd);
-            g->bq[l] = f32_dbuf(ly->bq, model_q_dim(m, l));
-            g->bk[l] = f32_dbuf(ly->bk, model_kv_dim(m, l));
-            g->bv[l] = f32_dbuf(ly->bv, model_kv_dim(m, l));
-            g->bo[l] = f32_dbuf(ly->bo, m->n_embd);
-            g->qn[l] = f32_dbuf(ly->qnorm_w, model_head_dim(m, l));
-            g->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l));
-            g->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
-            g->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
-            if (!g->attn_norm[l] || !g->ffn_norm[l] ||
-                (ly->bq && !g->bq[l]) || (ly->bk && !g->bk[l]) ||
-                (ly->bv && !g->bv[l]) || (ly->bo && !g->bo[l]) ||
-                (ly->qnorm_w && !g->qn[l]) || (ly->knorm_w && !g->kn[l]) ||
-                (ly->post_attn_norm_w && !g->pan[l]) ||
-                (ly->post_ffn_norm_w && !g->pfn[l]))
-                goto fail;
-        }
-
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
         if (!g->h_x || !g->h_logits) goto fail;
 
-
         char name[128] = "CUDA GPU";
-        cu.DeviceGetName(name, sizeof(name), g->dev);
+        cu.DeviceGetName(name, sizeof(name), g->sw->dev);
         if (m->gpu_layers < m->n_layer)
             fprintf(stderr, "gpu: CUDA backend on %s (%d/%d layers, %.1f GB in "
                     "VRAM; CPU runs the rest)\n", name, m->gpu_layers, m->n_layer,
-                    g->weights_len / 1e9);
+                    g->sw->weights_len / 1e9);
         else
             fprintf(stderr, "gpu: CUDA backend on %s (%.1f GB weights in VRAM)\n",
-                    name, g->weights_len / 1e9);
+                    name, g->sw->weights_len / 1e9);
+        // the number Phase 5 is judged on: with weights shared, a second slot
+        // should cost only its KV cache and activation scratch
+        size_t vfree = 0, vtotal = 0;
+        if (cu.MemGetInfo(&vfree, &vtotal) == 0)
+            fprintf(stderr, "gpu: VRAM %.2f GB free of %.2f GB after init "
+                    "(kv %.2f GB + scratch %.2f GB this instance)\n",
+                    vfree / 1e9, vtotal / 1e9,
+                    2.0 * model_kv_byte_off(m, m->gpu_layers) / 1e9,
+                    act_bytes / 1e9);
     }
 
     m->gpu = g;
@@ -600,7 +815,7 @@ static void prof_flush(void) {
 static bool enc_rmsnorm(gpu_t *g, CUdeviceptr x, CUdeviceptr y, CUdeviceptr w,
                         int n, float eps, int batch, int xs, int ys) {
     void *p[] = { &x, &y, &w, &n, &eps, &xs, &ys };
-    return launch(g, g->f_rmsnorm, 1, batch, 1, 256, p);
+    return launch(g, g->sw->f_rmsnorm, 1, batch, 1, 256, p);
 }
 
 static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
@@ -609,20 +824,20 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
     mv_args a = { n_in, n_out,
                   (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
                   bias != 0, batch, xs, ys };
-    CUdeviceptr b = bias ? bias : g->dummy;
-    void *p[] = { &g->weights, &x, &y, &a, &b };
+    CUdeviceptr b = bias ? bias : g->sw->dummy;
+    void *p[] = { &g->sw->weights, &x, &y, &a, &b };
     // Prefill (batch>1) uses the tiled-GEMM variant where available (Q8_0/Q4_K):
     // GEMM_WARPS(=8) rows per block, 256 threads, x staged in shared memory.
-    if (batch > 1 && g->f_gemm[w->type])
-        return launch(g, g->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p);
+    if (batch > 1 && g->sw->f_gemm[w->type])
+        return launch(g, g->sw->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p);
     // Decode (batch==1) uses the coalesced lane-per-element GEMV where available
     // (Q8_0/Q4_K); same 4-rows/block shape, so capture-compatible with no
     // host-side branching on per-token state.
-    if (batch == 1 && g->f_gemv[w->type])
-        return launch(g, g->f_gemv[w->type], (n_out + 3) / 4, 1, 1, 128, p);
+    if (batch == 1 && g->sw->f_gemv[w->type])
+        return launch(g, g->sw->f_gemv[w->type], (n_out + 3) / 4, 1, 1, 128, p);
     // 128 threads = 4 warps = 4 rows per block; the tile variant applies each
     // decoded weight to all columns, the single variant is faster at batch 1
-    CUfunction f = batch > 1 ? g->f_mvb[w->type] : g->f_mv[w->type];
+    CUfunction f = batch > 1 ? g->sw->f_mvb[w->type] : g->sw->f_mv[w->type];
     return launch(g, f, (n_out + 3) / 4, 1, 1, 128, p);
 }
 
@@ -630,7 +845,7 @@ static bool enc_qknorm(gpu_t *g, model_t *m, CUdeviceptr v, CUdeviceptr w,
                        int n_heads, int hd, int batch, int vs) {
     float eps = m->rms_eps;
     void *p[] = { &v, &w, &hd, &eps, &vs };
-    return launch(g, g->f_qknorm, n_heads, batch, 1, 64, p);
+    return launch(g, g->sw->f_qknorm, n_heads, batch, 1, 64, p);
 }
 
 static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads,
@@ -640,59 +855,45 @@ static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads,
     bool local = model_is_swa(m, l);
     rope_args a = { model_head_dim(m, l), n_heads, model_rope_dim(m, l) / 2,
                     m->rope_neox, local ? 1.0f : m->rope_mscale };
-    CUdeviceptr fr = local ? g->inv_freq_local : g->inv_freq;
+    CUdeviceptr fr = local ? g->sw->inv_freq_local : g->sw->inv_freq;
     void *p[] = { &v, &fr, &a, &g->pos_dev, &vs };
-    return launch(g, g->f_rope, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
+    return launch(g, g->sw->f_rope, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
 }
 
 static bool enc_scale(gpu_t *g, CUdeviceptr x, float s, int n, int batch, int xs) {
     void *p[] = { &x, &s, &n, &xs };
-    return launch(g, g->f_scale, (n + 255) / 256, batch, 1, 256, p);
+    return launch(g, g->sw->f_scale, (n + 255) / 256, batch, 1, 256, p);
 }
 
 static bool enc_add(gpu_t *g, CUdeviceptr x, CUdeviceptr d, int n,
                     int batch, int xs, int ds) {
     void *p[] = { &x, &d, &n, &xs, &ds };
-    return launch(g, g->f_add, (n + 255) / 256, batch, 1, 256, p);
+    return launch(g, g->sw->f_add, (n + 255) / 256, batch, 1, 256, p);
 }
 
 static bool enc_actmul(gpu_t *g, model_t *m, CUdeviceptr a, CUdeviceptr b, int n) {
     void *p[] = { &a, &b, &n };
-    CUfunction f = m->ffn_act == ACT_GELU ? g->f_gelu : g->f_silu;
+    CUfunction f = m->ffn_act == ACT_GELU ? g->sw->f_gelu : g->sw->f_silu;
     return launch(g, f, (n + 255) / 256, 1, 1, 256, p);
 }
 
+// Per-sequence teardown. The shared weights are not touched here beyond
+// dropping this instance's reference: another slot may still be decoding
+// against them, and only the last release frees them.
 static void gpu_ctx_free(model_t *m, gpu_t *g) {
+    (void)m;
     if (!g) return;
-    if (g->ctx) cu.CtxSetCurrent(g->ctx);
+    if (g->sw && g->sw->ctx) cu.CtxSetCurrent(g->sw->ctx);
     if (g->gexec && cu.GraphExecDestroy) cu.GraphExecDestroy(g->gexec);
     if (g->graph && cu.GraphDestroy) cu.GraphDestroy(g->graph);
     if (g->stream && cu.StreamDestroy) cu.StreamDestroy(g->stream);
-    for (int l = 0; l < m->n_layer; l++) {
-        CUdeviceptr bufs[] = {
-            g->attn_norm ? g->attn_norm[l] : 0,
-            g->ffn_norm ? g->ffn_norm[l] : 0,
-            g->bq ? g->bq[l] : 0, g->bk ? g->bk[l] : 0,
-            g->bv ? g->bv[l] : 0, g->bo ? g->bo[l] : 0,
-            g->qn ? g->qn[l] : 0, g->kn ? g->kn[l] : 0,
-            g->pan ? g->pan[l] : 0, g->pfn ? g->pfn[l] : 0,
-        };
-        for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
-            if (bufs[i]) cu.MemFree(bufs[i]);
-    }
-    free(g->attn_norm); free(g->ffn_norm);
-    free(g->bq); free(g->bk); free(g->bv); free(g->bo);
-    free(g->qn); free(g->kn);
-    free(g->pan); free(g->pfn);
-    CUdeviceptr bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
-                           g->q, g->kt, g->vt, g->hb, g->hb2, g->att, g->attn_part,
-                           g->logits, g->inv_freq, g->inv_freq_local,
-                           g->out_norm, g->dummy, g->ones, g->pos_dev };
+    CUdeviceptr bufs[] = { g->kc, g->vc, g->x, g->xb, g->xb2,
+                           g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
+                           g->attn_part, g->logits, g->pos_dev };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
-    if (g->mod) cu.ModuleUnload(g->mod);
-    if (g->ctx) cu.PrimaryCtxRelease(g->dev);
     free(g->h_x); free(g->h_logits);
+    shared_release(g->sw);
     free(g);
 }
 
@@ -746,6 +947,15 @@ void gpu_free(model_t *m) {
     gpu_t *g = m->gpu;
     m->gpu = NULL;
     gpu_ctx_free(m, g);
+}
+
+// A runtime GPU failure on CUDA is fully recoverable on the host: the host KV
+// cache is the authoritative copy and the device one is a mirror, so there is
+// nothing to rescue before releasing. Freeing rather than orphaning matters
+// now that weights are shared — an abandoned context would keep every other
+// slot's copy of them alive too.
+void gpu_disable(model_t *m) {
+    gpu_free(m);
 }
 
 // upload host KV rows [lo, hi) for every layer (CPU prompt processing wrote them)
@@ -816,13 +1026,13 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         int q_dim   = model_q_dim(m, l);
         int kv_dim  = model_kv_dim(m, l);
 
-        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->attn_norm[l], n_embd, m->rms_eps,
+        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->attn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
         prof_mark(g, PH_NORM);
-        ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->bq[l], tn, xdim, q_dim);
-        ok = ok && enc_mv(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->bk[l], tn, xdim, kv_dim);
+        ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->sw->bq[l], tn, xdim, q_dim);
+        ok = ok && enc_mv(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->sw->bk[l], tn, xdim, kv_dim);
         if (ly->wv) {
-            ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->bv[l], tn, xdim, kv_dim);
+            ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->sw->bv[l], tn, xdim, kv_dim);
         } else {
             // gemma4 global layers have no V projection: V is the raw K
             // (zero + add = device-side copy with the kernels we have)
@@ -830,11 +1040,11 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && enc_add(g, g->vt, g->kt, kv_dim, tn, kv_dim, kv_dim);
         }
         prof_mark(g, PH_MATVEC);
-        if (g->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->qn[l], m->n_head, hd, tn, q_dim);
+        if (g->sw->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->sw->qn[l], m->n_head, hd, tn, q_dim);
         if (m->v_rmsnorm)
             // weightless per-head RMS norm on V (pre-K-norm values)
-            ok = ok && enc_qknorm(g, m, g->vt, g->ones, n_kv, hd, tn, kv_dim);
-        if (g->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->kn[l], n_kv, hd, tn, kv_dim);
+            ok = ok && enc_qknorm(g, m, g->vt, g->sw->ones, n_kv, hd, tn, kv_dim);
+        if (g->sw->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->sw->kn[l], n_kv, hd, tn, kv_dim);
         prof_mark(g, PH_NORM);
         ok = ok && enc_rope(g, m, g->q,  m->n_head, tn, q_dim, l);
         ok = ok && enc_rope(g, m, g->kt, n_kv,      tn, kv_dim, l);
@@ -850,7 +1060,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             int units = q8 ? kv_dim / 32 : kv_dim;
             void *ps[] = { &g->kt, &g->vt, &g->kc, &g->vc, &kv_dim, &l_off,
                            &g->pos_dev, &q8 };
-            ok = ok && launch(g, g->f_store, (units + 63) / 64, tn, 1, 64, ps);
+            ok = ok && launch(g, g->sw->f_store, (units + 63) / 64, tn, 1, 64, ps);
         }
 
         {
@@ -867,25 +1077,25 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             if (tn == 1) {
                 void *pd[] = { &g->q, &g->kc, &g->vc, &g->att, &g->attn_part,
                                &aa, &g->pos_dev };
-                ok = ok && launch(g, g->f_attn_dec, m->n_head, ATTN_SPLITS, 1, 128, pd);
+                ok = ok && launch(g, g->sw->f_attn_dec, m->n_head, ATTN_SPLITS, 1, 128, pd);
                 void *pm[] = { &g->xb2, &g->attn_part, &aa, &g->pos_dev };
-                ok = ok && launch(g, g->f_attn_merge, m->n_head, 1, 1, 128, pm);
+                ok = ok && launch(g, g->sw->f_attn_merge, m->n_head, 1, 1, 128, pm);
             } else {
                 void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa, &g->pos_dev };
-                ok = ok && launch(g, g->f_attn, m->n_head, tn, 1, 128, pa);
+                ok = ok && launch(g, g->sw->f_attn, m->n_head, tn, 1, 128, pa);
             }
         }
         prof_mark(g, PH_ATTN);
 
-        ok = ok && enc_mv(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->bo[l], tn, xdim, xdim);
+        ok = ok && enc_mv(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->sw->bo[l], tn, xdim, xdim);
         prof_mark(g, PH_MATVEC);
-        if (g->pan[l])
-            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->pan[l], n_embd, m->rms_eps,
+        if (g->sw->pan[l])
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         prof_mark(g, PH_ELEM);
 
-        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->ffn_norm[l], n_embd, m->rms_eps,
+        ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->ffn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
         prof_mark(g, PH_NORM);
         ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
@@ -895,8 +1105,8 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         prof_mark(g, PH_ELEM);
         ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
         prof_mark(g, PH_MATVEC);
-        if (g->pfn[l])
-            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->pfn[l], n_embd, m->rms_eps,
+        if (g->sw->pfn[l])
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
@@ -907,7 +1117,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
 
     if (want_logits) {
         CUdeviceptr xlast = g->x + (size_t)(tn - 1) * n_embd * sizeof(float);
-        ok = ok && enc_rmsnorm(g, xlast, g->xb, g->out_norm, n_embd, m->rms_eps,
+        ok = ok && enc_rmsnorm(g, xlast, g->xb, g->sw->out_norm, n_embd, m->rms_eps,
                                1, 0, 0);
         prof_mark(g, PH_NORM);
         ok = ok && enc_mv(g, m, m->output, g->xb, g->logits, n_embd, m->n_vocab, 0, 1, 0, 0);
@@ -922,7 +1132,7 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     if (logits) *logits = NULL;
     if (n < 1) return true;
 
-    if (cu.CtxSetCurrent(g->ctx) != 0) return false;
+    if (cu.CtxSetCurrent(g->sw->ctx) != 0) return false;
     if (prof.on && !prof.inited) prof_init();
     prof.cur_mode = (n == 1) ? M_SINGLE : M_BATCH;
     int m_ = prof.cur_mode;
