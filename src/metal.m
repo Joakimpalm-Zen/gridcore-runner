@@ -93,10 +93,37 @@ static id<MTLBuffer> f32_buf(id<MTLDevice> dev, const float *src, size_t n) {
 static float *gpu_forward(model_t *m, int token, int pos);
 
 bool gpu_kv_q8_ok(void) {
-    // The Metal kernels and the host<->device KV copies still speak fp16 only;
-    // porting them is the remaining half of Phase 8. Returning false here keeps
-    // `--kv q8` from silently handing q8_0 blocks to an fp16 reader on macOS:
-    // the cache falls back to f16 (with a note) unless --gpu off is used.
+    // FALSE ON PURPOSE, and not a placeholder to be flipped casually.
+    //
+    // The Metal kernels speak fp16 KV only, so `--kv q8` falls back to an f16
+    // cache here (with a stderr note) instead of handing q8_0 blocks to an
+    // fp16 reader. macOS users still get the full context win from a q8 cache
+    // via `--gpu off`, which uses the CPU path that has always supported it.
+    //
+    // Why this was left as a fallback rather than ported blind: there is no
+    // macOS machine on this project, and Metal compiles its shaders at
+    // *runtime* from the source string in kernels_metal.h — so an untested
+    // port would not even fail at build time. It would fail on a user's Mac,
+    // and the likely failure (a wrong block stride, a wrong scale, a head
+    // slice landing off a 32-value block boundary) does not crash: it returns
+    // fluent, plausible, subtly wrong text. That is strictly worse than not
+    // offering the feature. tests/test_kv_tol.c asserts the invariant this
+    // function exists to provide, on every platform.
+    //
+    // A port needs exactly three things, all of which CUDA already did and
+    // can be copied from (src/kernels.cu, src/cuda.c):
+    //   1. k_store_kv (kernels_metal.h) must quantize each row to q8_0 —
+    //      amax/127 per 32-value block, roundf, fp16 scale — matching
+    //      q8_quant_row() in src/quants.c bit for bit.
+    //   2. k_attn must read K and V as q8_0 blocks. Every head slice starts
+    //      at kvh*head_dim, which is why model_load already requires head_dim
+    //      to be a multiple of 32 before enabling q8 at all.
+    //   3. The kv_off arithmetic in gpu_forward below is an *element* offset
+    //      (l * n_ctx + pos) * kv_dim, which is only valid for fp16. It must
+    //      become the byte offset the shared layout helpers give:
+    //      model_kv_byte_off(m, l) and model_kv_row_bytes(m, l). Host and
+    //      device must agree on one layout, or the hybrid CPU/GPU split
+    //      silently reads the wrong rows.
     return false;
 }
 

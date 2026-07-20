@@ -189,6 +189,13 @@ done:
 
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "test.gguf";
+    // Required before any CPU forward pass: it builds the fp16 -> fp32 table
+    // that f16_to_f32 reads. Without it the whole CPU path evaluates to zeros
+    // and the identity assertion below passes vacuously, because two all-zero
+    // logit vectors are bit-identical. That is exactly what happened here
+    // until it was caught: on a GPU box the full offload hid it, and on a
+    // CPU-only box this test was asserting nothing at all.
+    f16_init();
     printf("batch: %s | microbatch max %d\n", path, model_batch_max());
     // Sweep the width: one sequence must not regress (a batch of one is the
     // path a lightly loaded server spends most of its time on), and the win

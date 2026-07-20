@@ -64,6 +64,7 @@ endif
 # three-way platform branch above
 TEST_PREFIX = $(TEST_BATCH:test-batch=test-prefix)
 TEST_VRAMREG = $(TEST_BATCH:test-batch=test-vram-registry)
+TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
@@ -168,6 +169,13 @@ $(TEST_PREFIX): $(TEST_PREFIX_SRC) src/runner.h
 $(TEST_VRAMREG): tests/test_vram_registry.c src/vramreg.c src/compat.c src/runner.h
 	$(CC) $(CFLAGS) -I src tests/test_vram_registry.c src/vramreg.c src/compat.c -o $@ $(LDFLAGS)
 
+# q8 KV tolerance gate: needs the tokenizer too, because it teacher-forces a
+# fixed piece of real text rather than synthetic token ids
+TEST_KV_TOL_SRC = tests/test_kv_tol.c src/gguf.c src/compat.c src/quants.c \
+                  src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
+$(TEST_KV_TOL): $(TEST_KV_TOL_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_KV_TOL_SRC) -o $@ $(LDFLAGS)
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
@@ -179,7 +187,7 @@ test-ornith-cpu: runner
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
-      $(TEST_PREFIX) $(TEST_VRAMREG) runner test.gguf
+      $(TEST_PREFIX) $(TEST_VRAMREG) $(TEST_KV_TOL) runner test.gguf
 	./$(TEST_BIND)
 	./$(TEST_VRAMREG)
 	./$(TEST_JSON_SCHEMA)
@@ -193,6 +201,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_SHARED)
 	./$(TEST_BATCH)
 	./$(TEST_PREFIX)
+	./$(TEST_KV_TOL)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py; \

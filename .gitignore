@@ -27,6 +27,10 @@ test-batch.exe
 test-prefix
 test-prefix.exe
 test-shared-asan-bin
+test-batch
+test-batch.exe
+test-kv-tol
+test-kv-tol.exe
 runner-baseline
 *.gguf
 # committed vocabulary fixtures for the tokenizer tests
