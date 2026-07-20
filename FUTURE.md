@@ -925,7 +925,10 @@ Status is tracked here; nothing is removed when finished, only marked.
    OpenAI SDK 2.46.0, not just the wire shape. Built as a translation layer over
    the existing engine so Phase 4 can reuse the same seam.
 5. Anthropic Messages compatibility. **NEXT** — reuses the API_* dialect seam.
-6. Shared CUDA weights.
+6. ~~Shared CUDA weights.~~ **DONE (backend)** — one weight upload per resident
+   model; an extra slot costs its KV only (0.27 GB, not 5.20 GB). The model_t
+   struct itself is NOT split — that needs server.c/main.c signature changes.
+   The Phase 5 server-lifecycle defects remain open and are orthogonal.
 7. Continuous batching.
 8. Persistent/forkable KV prefixes.
 9. GPU Q8 KV cache. **PARTIAL** — Q8 KV works on CUDA, 1.88x context where
