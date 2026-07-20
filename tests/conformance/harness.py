@@ -24,13 +24,15 @@ from _errors import (CATEGORIES, ConformanceError, ModelQualityError,
                       ProtocolError, SchemaError, TransportError, categorize)
 from _process import RunnerServer, find_runner, free_port, peak_rss_kb, rss_kind
 from _report import Report, normalize
-from _sse import DONE, SSEParser, decode_events, parse_stream, split_points
+from _sse import (DONE, SSEParser, decode_events, parse_named_stream,
+                   parse_stream, split_points)
 
 __all__ = [
-    "Client", "Response", "Stream", "RunnerServer", "Report",
+    "Client", "Response", "Stream", "ResponseStream", "RunnerServer", "Report",
     "ConformanceError", "TransportError", "ProtocolError", "SchemaError",
     "ModelQualityError", "categorize", "CATEGORIES",
-    "SSEParser", "parse_stream", "split_points", "decode_events", "DONE",
+    "SSEParser", "parse_stream", "parse_named_stream", "split_points",
+    "decode_events", "DONE",
     "normalize", "find_runner", "free_port", "peak_rss_kb", "rss_kind",
     "validate_against_schema",
 ]
@@ -222,6 +224,68 @@ class Stream:
                 for c in self.chunks for ch in c.get("choices", [])]
 
 
+class ResponseStream:
+    """A completed /v1/responses SSE stream.
+
+    Unlike a chat stream this one is a sequence of *named* typed events with a
+    mandatory order, so the parsed form keeps the ``event:`` name alongside the
+    payload rather than collapsing to a chunk list."""
+
+    def __init__(self, name, status, headers, raw, latency_ms, first_byte_ms):
+        self.name = name
+        self.status = status
+        self.headers = headers
+        self.raw = raw
+        self.latency_ms = latency_ms
+        self.first_byte_ms = first_byte_ms
+        self.pairs = parse_named_stream(raw)
+        self.events = [p[1] for p in self.pairs]
+
+    def expect_sse(self):
+        if self.status != 200:
+            raise ProtocolError("response stream did not start with 200",
+                                got=self.status, request=self.name,
+                                body=self.raw[:300].decode("utf-8", "replace"))
+        ctype = self.headers.get("content-type", "")
+        if "text/event-stream" not in ctype:
+            raise ProtocolError("stream Content-Type is not text/event-stream",
+                                got=ctype, request=self.name)
+        return self
+
+    @property
+    def typed(self):
+        """[(event_name, decoded_payload)], asserting the two names agree."""
+        out = []
+        for name, data in self.pairs:
+            try:
+                d = json.loads(data)
+            except ValueError as e:
+                raise ProtocolError("malformed JSON in Responses SSE data",
+                                    request=self.name, event=data[:200],
+                                    error=str(e))
+            if name is None:
+                raise ProtocolError("Responses event has no SSE event: name",
+                                    request=self.name, payload=d)
+            if d.get("type") != name:
+                raise ProtocolError("SSE event name disagrees with data.type",
+                                    request=self.name, event_field=name,
+                                    data_type=d.get("type"))
+            out.append((name, d))
+        return out
+
+    @property
+    def names(self):
+        return [n for n, _ in self.typed]
+
+    def payloads(self, kind):
+        return [d for n, d in self.typed if n == kind]
+
+    @property
+    def text(self):
+        return "".join(d.get("delta", "")
+                       for d in self.payloads("response.output_text.delta"))
+
+
 # ------------------------------------------------------------------- client
 class Client:
     """Issues requests against a RunnerServer and records metrics."""
@@ -343,6 +407,18 @@ class Client:
         status, headers, body = _split_head(raw)
         st = Stream(name, status, headers, body, latency, first)
         self._record(name, "/v1/chat/completions", True, st)
+        return st
+
+    # ---- Responses API
+    def responses(self, payload, name="responses"):
+        return self.raw(name, "POST", "/v1/responses", payload)
+
+    def responses_stream(self, payload, name="responses-stream"):
+        payload = dict(payload, stream=True)
+        raw, latency, first = self.stream_raw(name, "/v1/responses", payload)
+        status, headers, body = _split_head(raw)
+        st = ResponseStream(name, status, headers, body, latency, first)
+        self._record(name, "/v1/responses", True, st)
         return st
 
     def expect_400(self, payload, name, contains=None, path="/v1/chat/completions"):

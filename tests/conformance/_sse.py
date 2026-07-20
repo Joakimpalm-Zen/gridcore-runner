@@ -24,6 +24,7 @@ class SSEParser:
     def __init__(self):
         self._buf = b""
         self._events = []
+        self._names = []
         self._closed = False
 
     def feed(self, chunk):
@@ -49,6 +50,11 @@ class SSEParser:
     def events(self):
         return list(self._events)
 
+    @property
+    def names(self):
+        """The ``event:`` field of each dispatched event (None when absent)."""
+        return list(self._names)
+
     # ------------------------------------------------------------------
     def _find_dispatch(self):
         # an event ends at a blank line: \n\n or \r\n\r\n (or the mixed forms)
@@ -61,6 +67,7 @@ class SSEParser:
 
     def _dispatch(self, block):
         data = []
+        name = None
         for raw in block.replace(b"\r\n", b"\n").split(b"\n"):
             if not raw or raw.startswith(b":"):
                 continue  # blank or comment
@@ -69,8 +76,11 @@ class SSEParser:
                 value = value[1:]
             if field == b"data":
                 data.append(value)
+            elif field == b"event":
+                name = value.decode("utf-8", "replace")
         if data:
             self._events.append(b"\n".join(data).decode("utf-8", "replace"))
+            self._names.append(name)
 
 
 def parse_stream(raw, chunks=None):
@@ -80,6 +90,19 @@ def parse_stream(raw, chunks=None):
         p.feed(c)
     p.close()
     return p.events
+
+
+def parse_named_stream(raw, chunks=None):
+    """Like ``parse_stream`` but returns ``(event_name, data)`` pairs.
+
+    The Responses API names every event twice — once in the SSE ``event:``
+    field and once as ``data.type`` — and typed SDK clients dispatch on the
+    former. Keeping both lets a test assert they agree."""
+    p = SSEParser()
+    for c in chunks if chunks is not None else [raw]:
+        p.feed(c)
+    p.close()
+    return list(zip(p.names, p.events))
 
 
 def split_points(raw):

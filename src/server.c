@@ -363,6 +363,11 @@ static int q_pop(void) {
 
 // ---------------------------------------------------------------- generation
 
+// Which wire dialect this request is answered in. All three run the *same*
+// generation path; they differ only in how the result is framed, which is why
+// the Responses surface is a translation layer rather than a second engine.
+enum { API_TEXT, API_CHAT, API_RESPONSES };
+
 typedef struct {
     sbuf  out;          // accumulated completion text
     sbuf  reason;       // accumulated reasoning text (thinking-tag models)
@@ -370,7 +375,7 @@ typedef struct {
     bool  stream;       // SSE mode
     bool  dead;         // client went away
     char  id[48];
-    bool  chat;         // chat.completion vs text_completion chunk shape
+    int   api;          // API_* — the dialect this response is framed in
     think_split ts;     // thinking-tag splitter (pass-through when untagged)
     // OpenAI "stop" sequences: matched against the content channel only
     // (reasoning text must not trigger a client's stop strings)
@@ -387,6 +392,23 @@ typedef struct {
     tool_stream tsx;
     bool  tsx_on;
     int   tool_index;   // OpenAI tool_calls[].index; one call per turn for now
+    // Responses streaming: the typed events are ordered and each one carries a
+    // monotonic sequence_number, so the emitter is a small state machine over
+    // "which item / content part is currently open" rather than a formatter.
+    long  seq;          // next sequence_number
+    int   output_index; // index of the item being streamed
+    bool  item_open;    // an output_item.added has no matching .done yet
+    bool  part_open;    // likewise for content_part.added
+    char  item_id[48];  // id of the open item (msg_/fc_)
+    sbuf  item_text;    // its text so far, replayed in the .done events
+    const char *item_kind; // "message" or "function_call"
+    char *call_name;    // function_call name, once known (owned)
+    // items are accumulated as they complete so the terminal event can report
+    // the same `output[]` a buffered request would have returned; a client
+    // that only reads response.completed must not see a different turn than
+    // one that followed the deltas
+    sbuf  out_items;
+    sbuf  out_text;     // the `output_text` aggregate (assistant text only)
 } gen_ctx;
 
 // common prefix of every streamed chunk. `created` and `model` are required by
@@ -394,7 +416,7 @@ typedef struct {
 // without them, so they are written here rather than per call site.
 static void chunk_open(gen_ctx *g, sbuf *c) {
     sb_fmt(c, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"",
-           g->id, g->chat ? "chat.completion.chunk" : "text_completion",
+           g->id, g->api == API_CHAT ? "chat.completion.chunk" : "text_completion",
            g->created);
     sb_esc(c, SV.model_name, strlen(SV.model_name));
     sb_lit(c, "\",\"choices\":[{\"index\":0,");
@@ -420,6 +442,10 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
         free(g->hold.s);
         free(g->reason.s);
         free(g->out.s);
+        free(g->item_text.s);
+        free(g->call_name);
+        free(g->out_items.s);
+        free(g->out_text.s);
     }
     free(e->lp_chosen); free(e->lp_ids); free(e->lp_top);
     e->lp_chosen = NULL; e->lp_ids = NULL; e->lp_top = NULL;
@@ -429,11 +455,15 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
 // emit one section of split output: reasoning goes to the OpenAI-style
 // reasoning_content field, everything else to content
 // one text delta on the named chat channel (or the legacy completion "text")
+static int responses_text_delta(gen_ctx *g, int reasoning, const char *bytes,
+                                int n);
+
 static int send_text_delta(gen_ctx *g, int reasoning, const char *bytes, int n) {
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
+    if (g->api == API_RESPONSES) return responses_text_delta(g, reasoning, bytes, n);
     sbuf c = {0};
     chunk_open(g, &c);
-    if (g->chat) {
+    if (g->api == API_CHAT) {
         sb_lit(&c, "\"delta\":{");
         if (!g->role_sent) { sb_lit(&c, "\"role\":\"assistant\","); g->role_sent = true; }
         sb_fmt(&c, "\"%s\":\"", reasoning ? "reasoning_content" : "content");
@@ -441,8 +471,8 @@ static int send_text_delta(gen_ctx *g, int reasoning, const char *bytes, int n) 
         sb_lit(&c, "\"text\":\"");
     }
     sb_esc(&c, bytes, n);
-    sb_lit(&c, g->chat ? "\"},\"finish_reason\":null}]}"
-                       : "\",\"finish_reason\":null}]}");
+    sb_lit(&c, g->api == API_CHAT ? "\"},\"finish_reason\":null}]}"
+                                  : "\",\"finish_reason\":null}]}");
     return chunk_send(g, &c);
 }
 
@@ -454,9 +484,20 @@ static int sink_content(void *ud, const char *b, int n) {
 
 // the opening event of a call carries everything that identifies it; the
 // deltas that follow carry argument text only, keyed by the same index
+static int resp_open_item(gen_ctx *g, const char *kind);
+static int resp_delta(gen_ctx *g, const char *kind, const char *bytes, int n);
+
 static int sink_call_begin(void *ud, const char *name) {
     gen_ctx *g = ud;
     if (g->dead) return 1;
+    if (g->api == API_RESPONSES) {
+        // the name identifies the item, so it must be known before the item is
+        // announced — which is exactly when tool_stream calls this
+        free(g->call_name);
+        g->call_name = strdup(name);
+        if (!g->call_name) { g->dead = true; return 1; }
+        return resp_open_item(g, "function_call");
+    }
     sbuf c = {0};
     chunk_open(g, &c);
     sb_lit(&c, "\"delta\":{");
@@ -472,6 +513,7 @@ static int sink_call_begin(void *ud, const char *name) {
 static int sink_call_args(void *ud, const char *b, int n) {
     gen_ctx *g = ud;
     if (g->dead) return 1;
+    if (g->api == API_RESPONSES) return resp_delta(g, "function_call", b, n);
     sbuf c = {0};
     chunk_open(g, &c);
     sb_fmt(&c, "\"delta\":{\"tool_calls\":[{\"index\":%d,\"function\":"
@@ -479,6 +521,329 @@ static int sink_call_args(void *ud, const char *b, int n) {
     sb_esc(&c, b, n);
     sb_lit(&c, "\"}}]},\"finish_reason\":null}]}");
     return chunk_send(g, &c);
+}
+
+// ------------------------------------------------- Responses API framing
+//
+// The Responses surface is a second *vocabulary* for the one generation path,
+// not a second engine. Everything below is framing: the same bytes the chat
+// dialect sends as ChatCompletionChunk deltas are sent here as ordered typed
+// events, and the same buffered result is rendered as an `output[]` of items.
+//
+// Two properties are the actual contract, and both are what SDK clients
+// validate:
+//
+//   1. Order. An item is announced (`output_item.added`) before any of its
+//      deltas and closed (`output_item.done`) after them, with a content part
+//      opened and closed inside it; `response.created` opens the stream and
+//      `response.completed` closes it.
+//   2. Naming. Every event names itself twice — in the SSE `event:` field and
+//      in `data.type` — and typed clients dispatch on the first while
+//      validating the second, so the two must always agree. Framing them in
+//      one place is what guarantees that.
+//
+// A monotonic `sequence_number` is stamped on every event by the framer for
+// the same reason: it cannot drift from the send order if nothing else can
+// assign it.
+
+// item kinds share one state machine and differ only in these names
+typedef struct {
+    const char *kind;       // the item's "type"
+    const char *id_prefix;
+    const char *part_added, *delta, *text_done, *part_done;
+} resp_shape;
+
+static const resp_shape RESP_MESSAGE = {
+    "message", "msg", "response.content_part.added",
+    "response.output_text.delta", "response.output_text.done",
+    "response.content_part.done" };
+static const resp_shape RESP_REASONING = {
+    "reasoning", "rs", "response.reasoning_summary_part.added",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_summary_part.done" };
+static const resp_shape RESP_CALL = {
+    "function_call", "fc", NULL,
+    "response.function_call_arguments.delta",
+    "response.function_call_arguments.done", NULL };
+
+static const resp_shape *resp_shape_of(const char *kind) {
+    if (!kind) return &RESP_MESSAGE;
+    if (!strcmp(kind, "reasoning")) return &RESP_REASONING;
+    if (!strcmp(kind, "function_call")) return &RESP_CALL;
+    return &RESP_MESSAGE;
+}
+
+// frame one event. `fields` holds the event-specific members already written
+// as `,"key":value` pairs; it is consumed (freed) here.
+static int resp_send(gen_ctx *g, const char *type, sbuf *fields) {
+    sbuf e = {0};
+    sb_fmt(&e, "event: %s\ndata: {\"type\":\"%s\",\"sequence_number\":%ld",
+           type, type, g->seq++);
+    if (fields->s) sb_put(&e, fields->s, fields->n);
+    sb_lit(&e, "}\n\n");
+    if (fields->failed || e.failed || !send_all(g->fd, e.s, e.n)) g->dead = true;
+    free(fields->s);
+    free(e.s);
+    return g->dead ? 1 : 0;
+}
+
+// the open item, rendered as a Responses output item
+static void resp_item_json(sbuf *b, gen_ctx *g, const char *status, bool filled) {
+    const resp_shape *sh = resp_shape_of(g->item_kind);
+    const char *text = g->item_text.s ? g->item_text.s : "";
+    size_t text_n = g->item_text.n;
+    sb_fmt(b, "{\"id\":\"%s\",\"type\":\"%s\",\"status\":\"%s\"",
+           g->item_id, sh->kind, status);
+    if (sh == &RESP_CALL) {
+        sb_fmt(b, ",\"call_id\":\"call_%d\",\"name\":\"", g->tool_index);
+        sb_esc(b, g->call_name ? g->call_name : "", strlen(g->call_name ? g->call_name : ""));
+        // arguments are already a JSON *string* on the wire, so the accumulated
+        // argument text is escaped into it exactly as the chat dialect does
+        sb_lit(b, "\",\"arguments\":\"");
+        if (filled) sb_esc(b, text, text_n);
+        sb_lit(b, "\"}");
+        return;
+    }
+    if (sh == &RESP_REASONING) {
+        sb_lit(b, ",\"summary\":[");
+        if (filled) {
+            sb_lit(b, "{\"type\":\"summary_text\",\"text\":\"");
+            sb_esc(b, text, text_n);
+            sb_lit(b, "\"}");
+        }
+        sb_lit(b, "]}");
+        return;
+    }
+    sb_lit(b, ",\"role\":\"assistant\",\"content\":[");
+    if (filled) {
+        sb_lit(b, "{\"type\":\"output_text\",\"text\":\"");
+        sb_esc(b, text, text_n);
+        sb_lit(b, "\",\"annotations\":[]}");
+    }
+    sb_lit(b, "]}");
+}
+
+// close whatever item is open: part done (when the kind has parts), then the
+// item itself. Nothing is emitted when no item is open, so this is safe to
+// call on every path that ends an item — including the terminal one.
+static int resp_close_item(gen_ctx *g) {
+    if (!g->item_open || g->dead) return g->dead ? 1 : 0;
+    const resp_shape *sh = resp_shape_of(g->item_kind);
+    const char *text = g->item_text.s ? g->item_text.s : "";
+    size_t text_n = g->item_text.n;
+    if (g->part_open) {
+        sbuf f = {0};
+        sb_fmt(&f, ",\"item_id\":\"%s\",\"output_index\":%d,\"content_index\":0,"
+                   "\"%s\":\"", g->item_id, g->output_index,
+               sh == &RESP_CALL ? "arguments" : "text");
+        sb_esc(&f, text, text_n);
+        sb_lit(&f, "\"");
+        if (sh != &RESP_CALL) sb_lit(&f, ",\"logprobs\":[]");
+        if (resp_send(g, sh->text_done, &f)) return 1;
+        if (sh->part_done) {
+            sbuf p = {0};
+            sb_fmt(&p, ",\"item_id\":\"%s\",\"output_index\":%d,"
+                       "\"content_index\":0,\"part\":", g->item_id,
+                   g->output_index);
+            if (sh == &RESP_REASONING) {
+                sb_lit(&p, "{\"type\":\"summary_text\",\"text\":\"");
+                sb_esc(&p, text, text_n);
+                sb_lit(&p, "\"}");
+            } else {
+                sb_lit(&p, "{\"type\":\"output_text\",\"text\":\"");
+                sb_esc(&p, text, text_n);
+                sb_lit(&p, "\",\"annotations\":[]}");
+            }
+            if (resp_send(g, sh->part_done, &p)) return 1;
+        }
+        g->part_open = false;
+    }
+    sbuf d = {0};
+    sb_fmt(&d, ",\"output_index\":%d,\"item\":", g->output_index);
+    resp_item_json(&d, g, "completed", true);
+    // keep the completed item for the terminal response object
+    if (g->out_items.n) sb_lit(&g->out_items, ",");
+    resp_item_json(&g->out_items, g, "completed", true);
+    if (resp_shape_of(g->item_kind) == &RESP_MESSAGE)
+        sb_put(&g->out_text, g->item_text.s ? g->item_text.s : "",
+               g->item_text.n);
+    int rc = resp_send(g, "response.output_item.done", &d);
+    g->item_open = false;
+    g->output_index++;
+    g->item_text.n = 0;
+    return rc;
+}
+
+// open an item of `kind`, closing any item already open. The id is derived
+// from the kind and the output index so it is stable and collision-free.
+static int resp_open_item(gen_ctx *g, const char *kind) {
+    if (g->item_open && g->item_kind && !strcmp(g->item_kind, kind)) return 0;
+    if (resp_close_item(g)) return 1;
+    const resp_shape *sh = resp_shape_of(kind);
+    g->item_kind = sh->kind;
+    snprintf(g->item_id, sizeof(g->item_id), "%s_%d", sh->id_prefix,
+             g->output_index);
+    sbuf a = {0};
+    sb_fmt(&a, ",\"output_index\":%d,\"item\":", g->output_index);
+    resp_item_json(&a, g, "in_progress", false);
+    if (resp_send(g, "response.output_item.added", &a)) return 1;
+    g->item_open = true;
+    // a function_call carries its arguments directly on the item, so it has no
+    // content part; the other kinds open one before their first delta
+    if (sh->part_added) {
+        sbuf p = {0};
+        sb_fmt(&p, ",\"item_id\":\"%s\",\"output_index\":%d,\"content_index\":0,"
+                   "\"part\":", g->item_id, g->output_index);
+        if (sh == &RESP_REASONING)
+            sb_lit(&p, "{\"type\":\"summary_text\",\"text\":\"\"}");
+        else
+            sb_lit(&p, "{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]}");
+        if (resp_send(g, sh->part_added, &p)) return 1;
+        g->part_open = true;
+    } else {
+        g->part_open = true; // the arguments "part" is the item itself
+    }
+    return 0;
+}
+
+static int resp_delta(gen_ctx *g, const char *kind, const char *bytes, int n) {
+    if (g->dead) return 1;
+    if (resp_open_item(g, kind)) return 1;
+    sb_put(&g->item_text, bytes, n);
+    const resp_shape *sh = resp_shape_of(kind);
+    sbuf f = {0};
+    sb_fmt(&f, ",\"item_id\":\"%s\",\"output_index\":%d", g->item_id,
+           g->output_index);
+    if (sh != &RESP_CALL) sb_lit(&f, ",\"content_index\":0");
+    sb_lit(&f, ",\"delta\":\"");
+    sb_esc(&f, bytes, n);
+    sb_lit(&f, "\"");
+    if (sh == &RESP_MESSAGE) sb_lit(&f, ",\"logprobs\":[]");
+    return resp_send(g, sh->delta, &f);
+}
+
+static int responses_text_delta(gen_ctx *g, int reasoning, const char *bytes,
+                                int n) {
+    return resp_delta(g, reasoning ? "reasoning" : "message", bytes, n);
+}
+
+// Everything the response object reports about one finished (or just-started)
+// turn. Passing it as one value is what lets the buffered body and the
+// terminal `response.completed` event be the *same* document: a client that
+// switches `stream` on and off sees one shape, not two that drifted.
+typedef struct {
+    const char *status;      // in_progress | completed | incomplete
+    const char *incomplete;  // reason, when status is incomplete
+    bool        with_output;
+    // A streamed turn already rendered its items one by one, so it hands them
+    // over verbatim rather than rebuilding them from different inputs — which
+    // is what keeps the streamed and buffered documents identical by
+    // construction instead of by review.
+    const char *output_json; size_t output_n;
+    const char *output_text; size_t output_text_n;
+    const char *call_name;   // non-NULL when this turn was a tool call
+    const char *call_args;
+    const char *text;   size_t text_n;
+    const char *reason; size_t reason_n;
+    bool        with_usage;
+    int         n_prompt, n_gen, cached;
+    double      gtime;
+    bool        schema, json_mode, spec;
+    jv         *req;         // echoed request fields
+} resp_doc;
+
+static void resp_echo(sbuf *r, jv *req, const char *key, const char *dflt) {
+    jv *v = jv_get(req, key);
+    sb_fmt(r, ",\"%s\":", key);
+    if (!v || v->type == J_NULL) sb_lit(r, dflt);
+    else jv_dump(v, r);
+}
+
+static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
+    sb_fmt(r, "{\"id\":\"%s\",\"object\":\"response\",\"created_at\":%ld,"
+              "\"status\":\"%s\",\"error\":null,\"incomplete_details\":",
+           g->id, g->created, d->status);
+    if (d->incomplete) sb_fmt(r, "{\"reason\":\"%s\"}", d->incomplete);
+    else               sb_lit(r, "null");
+    sb_lit(r, ",\"model\":\"");
+    sb_esc(r, SV.model_name, strlen(SV.model_name));
+    sb_lit(r, "\",\"output\":[");
+    if (d->output_json) {
+        sb_put(r, d->output_json, d->output_n);
+    } else if (d->with_output) {
+        int idx = 0;
+        if (d->reason_n) {
+            sb_fmt(r, "{\"id\":\"rs_%d\",\"type\":\"reasoning\","
+                      "\"status\":\"completed\",\"summary\":"
+                      "[{\"type\":\"summary_text\",\"text\":\"", idx);
+            sb_esc(r, d->reason, d->reason_n);
+            sb_lit(r, "\"}]}");
+            idx++;
+        }
+        if (d->call_name) {
+            // a tool call replaces the assistant message rather than
+            // accompanying it, matching finish_reason "tool_calls"
+            if (idx) sb_lit(r, ",");
+            sb_fmt(r, "{\"id\":\"fc_%d\",\"type\":\"function_call\","
+                      "\"status\":\"completed\",\"call_id\":\"call_0\","
+                      "\"name\":\"", idx);
+            sb_esc(r, d->call_name, strlen(d->call_name));
+            sb_lit(r, "\",\"arguments\":\"");
+            sb_esc(r, d->call_args ? d->call_args : "{}",
+                   strlen(d->call_args ? d->call_args : "{}"));
+            sb_lit(r, "\"}");
+        } else {
+            if (idx) sb_lit(r, ",");
+            sb_fmt(r, "{\"id\":\"msg_%d\",\"type\":\"message\","
+                      "\"status\":\"%s\",\"role\":\"assistant\",\"content\":"
+                      "[{\"type\":\"output_text\",\"text\":\"", idx,
+                   d->incomplete ? "incomplete" : "completed");
+            sb_esc(r, d->text ? d->text : "", d->text_n);
+            sb_lit(r, "\",\"annotations\":[]}]}");
+        }
+    }
+    sb_lit(r, "],\"output_text\":\"");
+    // the SDK's `response.output_text` convenience aggregate: the assistant
+    // text only, empty when the turn produced a call instead
+    if (d->output_json) sb_esc(r, d->output_text ? d->output_text : "",
+                               d->output_text_n);
+    else if (d->with_output && !d->call_name)
+        sb_esc(r, d->text ? d->text : "", d->text_n);
+    sb_lit(r, "\"");
+    // request echo: a Responses client reads these back off the object rather
+    // than remembering what it sent
+    resp_echo(r, d->req, "instructions", "null");
+    resp_echo(r, d->req, "metadata", "null");
+    resp_echo(r, d->req, "temperature", "null");
+    resp_echo(r, d->req, "top_p", "null");
+    resp_echo(r, d->req, "max_output_tokens", "null");
+    resp_echo(r, d->req, "reasoning", "null");
+    resp_echo(r, d->req, "text", "{\"format\":{\"type\":\"text\"}}");
+    resp_echo(r, d->req, "tools", "[]");
+    resp_echo(r, d->req, "tool_choice", "\"auto\"");
+    resp_echo(r, d->req, "parallel_tool_calls", "false");
+    sb_lit(r, ",\"previous_response_id\":null,\"store\":false,"
+              "\"truncation\":\"disabled\",\"user\":null,\"usage\":");
+    if (d->with_usage) {
+        sb_fmt(r, "{\"input_tokens\":%d,"
+                  "\"input_tokens_details\":{\"cached_tokens\":%d},"
+                  "\"output_tokens\":%d,"
+                  "\"output_tokens_details\":{\"reasoning_tokens\":0},"
+                  "\"total_tokens\":%d}",
+               d->n_prompt, d->cached, d->n_gen, d->n_prompt + d->n_gen);
+        sb_fmt(r, ",\"runner_telemetry\":{\"prompt_cached_tokens\":%d,"
+                  "\"prompt_eval_tokens\":%d,\"generation_seconds\":%.6f,"
+                  "\"generation_tok_s\":%.3f,\"json_mode\":%s,"
+                  "\"schema\":%s,\"speculative\":%s}",
+               d->cached, d->n_prompt - d->cached, d->gtime,
+               d->n_gen / (d->gtime > 0 ? d->gtime : 1e-9),
+               d->json_mode ? "true" : "false", d->schema ? "true" : "false",
+               d->spec ? "true" : "false");
+    } else {
+        sb_lit(r, "null");
+    }
+    sb_lit(r, "}");
 }
 
 static int emit_channel(gen_ctx *g, int reasoning, const char *bytes, int n) {
@@ -571,6 +936,8 @@ enum { MT_BAD_TYPE = -3, MT_NON_FINITE = -2, MT_UNLIMITED = -1 };
 static int request_max_tokens(jv *req, int dflt) {
     jv *v = jv_get(req, "max_tokens");
     if (absent(v)) v = jv_get(req, "max_completion_tokens");
+    // the Responses API's name for the same cap
+    if (absent(v)) v = jv_get(req, "max_output_tokens");
     if (absent(v)) return dflt;
     if (v->type != J_NUM) return MT_BAD_TYPE;
     if (!isfinite(v->num)) return MT_NON_FINITE;
@@ -611,15 +978,35 @@ static jv *request_schema(jv *req) {
     }
     jv *fmt = jv_get(req, "format");
     if (!sch && fmt && fmt->type == J_OBJ) sch = fmt;
+    // the Responses spelling of the same request. Resolved here rather than at
+    // the route so the constrained-decoding path has exactly one entry point
+    // regardless of which surface asked for it.
+    if (!sch) {
+        jv *tf = jv_get(jv_get(req, "text"), "format");
+        if (tf && strcmp(jv_str(jv_get(tf, "type"), ""), "json_schema") == 0) {
+            jv *inner = jv_get(tf, "schema");
+            if (inner && inner->type == J_OBJ) sch = inner;
+        }
+    }
     return sch;
+}
+
+// did the caller ask for free-form JSON (rather than a schema)? Both dialects.
+static bool request_json_mode(jv *req) {
+    jv *rf = jv_get(req, "response_format");
+    if (rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_object") == 0)
+        return true;
+    jv *tf = jv_get(jv_get(req, "text"), "format");
+    return tf && strcmp(jv_str(jv_get(tf, "type"), ""), "json_object") == 0;
 }
 
 // run one completion on a slot and write the HTTP response.
 // `env` is the strict tool-call envelope when the request opted into one; it
 // replaces the response_format schema, having already absorbed it as the
 // shape of its `final` branch.
-static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
+static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                            jv *req, const tool_envelope *env) {
+    bool chat = api != API_TEXT; // chat-shaped: thinking channels, tools
     model_t *m = s->m;
     engine *e = &s->e;
 
@@ -670,11 +1057,11 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     // chat only: on /v1/completions OpenAI defines logprobs as an integer
     // count, so a number there is not a type error
     bool lp_on = false;
-    if (chat && !request_bool(req, "logprobs", false, &lp_on)) {
+    if (api == API_CHAT && !request_bool(req, "logprobs", false, &lp_on)) {
         send_error(fd, 400, "logprobs must be a boolean");
         return;
     }
-    bool want_lp = chat && !stream && lp_on;
+    bool want_lp = api == API_CHAT && !stream && lp_on;
     double lp_num = 0;
     if (want_lp && !request_number(req, "top_logprobs", 0, 0, 20, &lp_num)) {
         send_error(fd, 400, "top_logprobs out of range");
@@ -739,7 +1126,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
             }
         }
     }
-    e->json_mode = rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_object") == 0;
+    e->json_mode = request_json_mode(req);
     // Constrained decoding. The tool envelope wins when present: it already
     // contains the caller's response_format schema as its `final` branch, so
     // compiling that separately would drop the tool branches.
@@ -805,10 +1192,12 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         return;
     }
 
-    gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .chat = chat,
+    gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
                   .stop_strs = stops, .n_stop = n_stops,
                   .created = (long)time(NULL) };
-    snprintf(g.id, sizeof(g.id), "%s-%d", chat ? "chatcmpl" : "cmpl",
+    snprintf(g.id, sizeof(g.id), "%s%d",
+             api == API_RESPONSES ? "resp_" : api == API_CHAT ? "chatcmpl-"
+                                                              : "cmpl-",
              atomic_fetch_add(&SV.req_counter, 1));
     // split thinking channels out of chat responses; raw completions stay raw
     think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);
@@ -830,12 +1219,26 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         // front rather than folding the role into whatever the first text
         // delta happens to be keeps the contract independent of what the
         // model generates — including generating nothing at all.
-        if (chat) {
+        if (api == API_CHAT) {
             sbuf c = {0};
             chunk_open(&g, &c);
             sb_lit(&c, "\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}");
             g.role_sent = true;
             chunk_send(&g, &c);
+        } else if (api == API_RESPONSES) {
+            // A Responses stream opens with the response object twice: created,
+            // then in_progress. Both carry an empty output — the items are
+            // announced as they start — so they are emitted before any token
+            // exists, which is exactly what makes a client able to render the
+            // turn's identity immediately.
+            resp_doc d = { .status = "in_progress", .req = req };
+            for (int i = 0; i < 2 && !g.dead; i++) {
+                sbuf f = {0};
+                sb_lit(&f, ",\"response\":");
+                responses_body(&f, &g, &d);
+                resp_send(&g, i == 0 ? "response.created"
+                                     : "response.in_progress", &f);
+            }
         }
     }
 
@@ -852,7 +1255,31 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     // a streamed call reports the same terminal reason a buffered one does
     if (g.tsx_on && tool_stream_called(&g.tsx)) finish = "tool_calls";
 
-    if (stream) {
+    if (stream && api == API_RESPONSES) {
+        // whatever item was still streaming is closed first: an item announced
+        // with output_item.added must always reach output_item.done, including
+        // when generation stopped mid-item
+        resp_close_item(&g);
+        if (!g.dead) {
+            bool truncated = strcmp(finish, "length") == 0;
+            resp_doc d = { .status = truncated ? "incomplete" : "completed",
+                           .incomplete = truncated ? "max_output_tokens" : NULL,
+                           .output_json = g.out_items.s ? g.out_items.s : "",
+                           .output_n = g.out_items.n,
+                           .output_text = g.out_text.s,
+                           .output_text_n = g.out_text.n,
+                           .with_usage = true,
+                           .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
+                           .gtime = gtime, .schema = schema != NULL,
+                           .json_mode = e->json_mode, .spec = e->dm != NULL,
+                           .req = req };
+            sbuf f = {0};
+            sb_lit(&f, ",\"response\":");
+            responses_body(&f, &g, &d);
+            resp_send(&g, truncated ? "response.incomplete"
+                                    : "response.completed", &f);
+        }
+    } else if (stream) {
         if (!g.dead) {
             sbuf c = {0};
             chunk_open(&g, &c);
@@ -908,6 +1335,33 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
                              // tool_calls (whatever followed was the model
                              // faking a result)
             }
+        }
+        if (api == API_RESPONSES) {
+            // The chat dialect's tool_calls item is the canonical mapping, so
+            // the Responses item is derived from it rather than re-extracted
+            // from the envelope: one mapping, two renderings.
+            jv *call = n_tc ? json_parse(tc.s, tc.n) : NULL;
+            jv *fn = jv_get(call, "function");
+            bool truncated = strcmp(finish, "length") == 0;
+            resp_doc d = { .status = truncated ? "incomplete" : "completed",
+                           .incomplete = truncated ? "max_output_tokens" : NULL,
+                           .with_output = true,
+                           .call_name = jv_str(jv_get(fn, "name"), NULL),
+                           .call_args = jv_str(jv_get(fn, "arguments"), "{}"),
+                           .text = g.out.s, .text_n = g.out.n,
+                           .reason = g.reason.s, .reason_n = g.reason.n,
+                           .with_usage = true,
+                           .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
+                           .gtime = gtime, .schema = schema != NULL,
+                           .json_mode = e->json_mode, .spec = e->dm != NULL,
+                           .req = req };
+            sbuf r = {0};
+            responses_body(&r, &g, &d);
+            send_built(fd, &r);
+            free(r.s);
+            jv_free(call);
+            free(tc.s);
+            goto done;
         }
         sbuf r = {0};
         sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"", g.id,
@@ -971,6 +1425,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         send_built(fd, &r);
         free(r.s);
     }
+done:
     fprintf(stderr, "[slot %d] %s: %d prompt (%d cached) + %d gen tok (%.1f tok/s)%s%s\n",
             s->id, g.id, n_prompt, keep, n_gen,
             n_gen / (gtime > 0 ? gtime : 1e-9),
@@ -1077,7 +1532,7 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
     }
     char *prompt = malloc(total + 256);
     render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
-    run_completion(s, fd, prompt, true, req, strict ? &env : NULL);
+    run_completion(s, fd, prompt, API_CHAT, req, strict ? &env : NULL);
     free(prompt);
     for (int i = 0; i < n_own; i++) free(owned[i]);
     free(owned);
@@ -1086,10 +1541,366 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
     tool_envelope_free(&env);
 }
 
+// ------------------------------------------------ Responses request → chat
+//
+// The inbound half of the translation. A Responses request says the same
+// things a chat request does in a different vocabulary, so it is rewritten
+// into that vocabulary once, here, and everything downstream is the path
+// /v1/chat/completions already takes. Nothing below generates or samples; if
+// it did, there would be two engines to keep honest instead of one.
+
+// Responses declares a tool flat — {"type":"function","name":...,"parameters":
+// ...} — where chat nests it under "function". Rather than teach the envelope
+// compiler a second shape (and risk the chat path with it), the flat form is
+// re-serialised into the nested one and re-parsed. Returns an owned jv the
+// caller frees, or NULL with err set.
+static jv *responses_tools(jv *tools, char *err, int errcap) {
+    if (!tools || tools->type == J_NULL) return NULL;
+    if (tools->type != J_ARR) {
+        snprintf(err, errcap, "tools must be an array");
+        return NULL;
+    }
+    sbuf b = {0};
+    sb_lit(&b, "[");
+    for (int i = 0; i < tools->n; i++) {
+        jv *t = tools->items[i];
+        if (!t || t->type != J_OBJ) {
+            snprintf(err, errcap, "each tools[] entry must be an object");
+            free(b.s);
+            return NULL;
+        }
+        const char *type = jv_str(jv_get(t, "type"), "function");
+        if (strcmp(type, "function") != 0) {
+            // web_search / file_search / computer_use are hosted tools this
+            // runtime has nothing to run; accepting and dropping them would
+            // leave the caller waiting for a call that cannot happen
+            snprintf(err, errcap,
+                     "tools[].type \"%.40s\" is not supported; "
+                     "only \"function\" tools can run locally", type);
+            free(b.s);
+            return NULL;
+        }
+        // already nested (a client reusing its chat tool definitions): pass through
+        jv *nested = jv_get(t, "function");
+        if (i) sb_lit(&b, ",");
+        sb_lit(&b, "{\"type\":\"function\",\"function\":");
+        if (nested && nested->type == J_OBJ) {
+            jv_dump(nested, &b);
+        } else {
+            sb_lit(&b, "{\"name\":");
+            jv *nm = jv_get(t, "name");
+            if (nm) jv_dump(nm, &b); else sb_lit(&b, "null");
+            jv *desc = jv_get(t, "description");
+            if (desc) { sb_lit(&b, ",\"description\":"); jv_dump(desc, &b); }
+            jv *params = jv_get(t, "parameters");
+            if (params) { sb_lit(&b, ",\"parameters\":"); jv_dump(params, &b); }
+            sb_lit(&b, "}");
+        }
+        sb_lit(&b, "}");
+    }
+    sb_lit(&b, "]");
+    if (b.failed || !b.s) {
+        snprintf(err, errcap, "out of memory translating tools");
+        free(b.s);
+        return NULL;
+    }
+    jv *out = json_parse(b.s, b.n);
+    free(b.s);
+    if (!out) snprintf(err, errcap, "tools did not translate to a valid shape");
+    return out;
+}
+
+// tool_choice, likewise: the named form is flat here and nested in chat.
+static jv *responses_tool_choice(jv *tc, char *err, int errcap) {
+    if (!tc || tc->type != J_OBJ) return NULL; // strings pass through unchanged
+    const char *name = jv_str(jv_get(tc, "name"), NULL);
+    if (!name) {
+        snprintf(err, errcap,
+                 "tool_choice object must be {\"type\":\"function\",\"name\":...}");
+        return NULL;
+    }
+    sbuf b = {0};
+    sb_lit(&b, "{\"type\":\"function\",\"function\":{\"name\":\"");
+    sb_esc(&b, name, strlen(name));
+    sb_lit(&b, "\"}}");
+    jv *out = b.failed || !b.s ? NULL : json_parse(b.s, b.n);
+    free(b.s);
+    if (!out) snprintf(err, errcap, "out of memory translating tool_choice");
+    return out;
+}
+
+// `text.format` is the Responses spelling of `response_format`. Returns the
+// schema to constrain to, or NULL; *bad is set when the field is malformed.
+static jv *responses_schema(jv *req, bool *bad, char *err, int errcap) {
+    *bad = false;
+    jv *text = jv_get(req, "text");
+    if (!text || text->type == J_NULL) return NULL;
+    if (text->type != J_OBJ) {
+        snprintf(err, errcap, "text must be an object");
+        *bad = true;
+        return NULL;
+    }
+    jv *fmt = jv_get(text, "format");
+    if (!fmt || fmt->type == J_NULL) return NULL;
+    if (fmt->type != J_OBJ) {
+        snprintf(err, errcap, "text.format must be an object");
+        *bad = true;
+        return NULL;
+    }
+    const char *type = jv_str(jv_get(fmt, "type"), "");
+    if (!strcmp(type, "text")) return NULL;
+    if (!strcmp(type, "json_object")) return NULL; // handled as json mode
+    if (strcmp(type, "json_schema") != 0) {
+        snprintf(err, errcap,
+                 "text.format.type must be text, json_object or json_schema");
+        *bad = true;
+        return NULL;
+    }
+    // Responses puts the schema directly on the format object rather than
+    // under a json_schema wrapper
+    jv *sch = jv_get(fmt, "schema");
+    if (!sch || sch->type != J_OBJ) {
+        snprintf(err, errcap, "text.format.schema must be an object");
+        *bad = true;
+        return NULL;
+    }
+    return sch;
+}
+
+// Flatten one `input` item to prompt text, appending it as a chat turn.
+// Returns the role to file it under, or NULL when the item carries nothing.
+static char *responses_item_text(jv *item, const char **role) {
+    const char *type = jv_str(jv_get(item, "type"), NULL);
+    sbuf b = {0};
+    // a tool result the caller is feeding back: this is the tool loop
+    if (type && !strcmp(type, "function_call_output")) {
+        *role = "tool";
+        jv *out = jv_get(item, "output");
+        if (out && out->type == J_STR) sb_put(&b, out->str, strlen(out->str));
+        else if (out) jv_dump(out, &b);
+        return b.s ? b.s : strdup("");
+    }
+    // the assistant's own earlier call, replayed: rendered in runner's call
+    // syntax so the history reads like what the model actually emitted
+    if (type && !strcmp(type, "function_call")) {
+        *role = "assistant";
+        const char *name = jv_str(jv_get(item, "name"), NULL);
+        const char *args = jv_str(jv_get(item, "arguments"), "{}");
+        if (!name) { free(b.s); return NULL; }
+        sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", name, args);
+        return b.s;
+    }
+    *role = jv_str(jv_get(item, "role"), "user");
+    jv *content = jv_get(item, "content");
+    if (content && content->type == J_STR) {
+        sb_put(&b, content->str, strlen(content->str));
+    } else if (content && content->type == J_ARR) {
+        for (int i = 0; i < content->n; i++) {
+            jv *part = content->items[i];
+            const char *pt = jv_str(jv_get(part, "type"), "");
+            // input_text / output_text are the Responses spellings; "text" is
+            // accepted too because clients reusing chat parts send it
+            if (strcmp(pt, "input_text") && strcmp(pt, "output_text") &&
+                strcmp(pt, "text"))
+                continue; // images and files have no local renderer
+            const char *txt = jv_str(jv_get(part, "text"), NULL);
+            if (!txt) continue;
+            if (b.n) sb_lit(&b, "\n");
+            sb_put(&b, txt, strlen(txt));
+        }
+    }
+    return b.s;
+}
+
+// Stateful Responses features this runtime has no store behind. Refusing them
+// is the project invariant: a client that asked the server to remember a turn
+// and got a 200 would believe it did.
+static bool responses_reject_stateful(int fd, jv *req) {
+    jv *v = jv_get(req, "previous_response_id");
+    if (v && v->type != J_NULL) {
+        send_error(fd, 400,
+                   "previous_response_id is not supported: this runtime is "
+                   "stateless and stores no conversation. Send the prior turns "
+                   "in `input` instead.");
+        return true;
+    }
+    v = jv_get(req, "store");
+    if (v && v->type != J_NULL) {
+        if (v->type != J_BOOL) {
+            send_error(fd, 400, "store must be a boolean");
+            return true;
+        }
+        if (v->b) {
+            send_error(fd, 400,
+                       "store:true is not supported: this runtime is stateless "
+                       "and cannot retrieve a stored response. Use store:false.");
+            return true;
+        }
+    }
+    v = jv_get(req, "background");
+    if (v && v->type != J_NULL) {
+        if (v->type != J_BOOL) {
+            send_error(fd, 400, "background must be a boolean");
+            return true;
+        }
+        if (v->b) {
+            send_error(fd, 400,
+                       "background:true is not supported: there is no response "
+                       "store to poll. Use a streaming or buffered request.");
+            return true;
+        }
+    }
+    v = jv_get(req, "conversation");
+    if (v && v->type != J_NULL) {
+        send_error(fd, 400,
+                   "conversation is not supported: this runtime is stateless "
+                   "and stores no conversation.");
+        return true;
+    }
+    // "truncation":"auto" asks the server to silently drop history to fit; a
+    // caller told 200 would never learn its context had been edited
+    const char *tr = jv_str(jv_get(req, "truncation"), NULL);
+    if (tr && strcmp(tr, "disabled") != 0) {
+        send_error(fd, 400,
+                   "truncation:\"auto\" is not supported; a prompt that exceeds "
+                   "the context window is rejected rather than silently cut");
+        return true;
+    }
+    // `include` asks for extra output payloads (logprobs, image URLs, encrypted
+    // reasoning) none of which this runtime can produce
+    v = jv_get(req, "include");
+    if (v && v->type == J_ARR && v->n > 0) {
+        send_error(fd, 400,
+                   "include[] is not supported; no additional output payloads "
+                   "are available from this runtime");
+        return true;
+    }
+    return false;
+}
+
+static void handle_responses(slot_t *s, int fd, jv *req) {
+    if (responses_reject_stateful(fd, req)) return;
+
+    jv *input = jv_get(req, "input");
+    if (!input || input->type == J_NULL) {
+        send_error(fd, 400, "missing input");
+        return;
+    }
+    if (input->type != J_STR && input->type != J_ARR) {
+        send_error(fd, 400, "input must be a string or an array of items");
+        return;
+    }
+    // reasoning is accepted and echoed back rather than rejected: `effort` and
+    // `summary` are hints about how much thinking to do, not guarantees about
+    // the response document, and a local model's thinking channel is already
+    // reported as a reasoning item. A malformed one is still an error.
+    jv *reasoning = jv_get(req, "reasoning");
+    if (reasoning && reasoning->type != J_NULL && reasoning->type != J_OBJ) {
+        send_error(fd, 400, "reasoning must be an object");
+        return;
+    }
+
+    char terr[224];
+    bool bad_fmt = false;
+    jv *final_schema = responses_schema(req, &bad_fmt, terr, sizeof(terr));
+    if (bad_fmt) { send_error(fd, 400, terr); return; }
+
+    jv *tools = responses_tools(jv_get(req, "tools"), terr, sizeof(terr));
+    if (jv_get(req, "tools") && jv_get(req, "tools")->type != J_NULL && !tools) {
+        send_error(fd, 400, terr);
+        return;
+    }
+    jv *choice_raw = jv_get(req, "tool_choice");
+    jv *choice_owned = NULL;
+    if (choice_raw && choice_raw->type == J_OBJ) {
+        choice_owned = responses_tool_choice(choice_raw, terr, sizeof(terr));
+        if (!choice_owned) { jv_free(tools); send_error(fd, 400, terr); return; }
+    }
+
+    tool_envelope env = {0};
+    int rc = tool_envelope_build(tools, choice_owned ? choice_owned : choice_raw,
+                                 final_schema, &env, terr, sizeof(terr));
+    if (rc < 0) {
+        jv_free(tools);
+        jv_free(choice_owned);
+        send_error(fd, 400, terr);
+        return;
+    }
+    bool strict = rc == 1;
+    if (strict) {
+        bool parallel = false;
+        if (!request_bool(req, "parallel_tool_calls", false, &parallel)) {
+            tool_envelope_free(&env);
+            jv_free(tools);
+            jv_free(choice_owned);
+            send_error(fd, 400, "parallel_tool_calls must be a boolean");
+            return;
+        }
+        if (parallel) {
+            tool_envelope_free(&env);
+            jv_free(tools);
+            jv_free(choice_owned);
+            send_error(fd, 400,
+                       "parallel_tool_calls:true is not supported yet; "
+                       "one call per turn");
+            return;
+        }
+    }
+
+    // assemble the turns: tool system turn, then `instructions` as a system
+    // message, then the input items in order
+    int n_items = input->type == J_ARR ? input->n : 1;
+    sbuf ts = {0};
+    if (strict) sb_put(&ts, env.system_turn, strlen(env.system_turn));
+    else        tools_render(tools, &ts);
+    chat_msg *cm = malloc(sizeof(chat_msg) * (size_t)(n_items + 2));
+    char **owned = malloc(sizeof(char *) * (size_t)n_items);
+    size_t total = ts.n + 128;
+    int n_cm = 0, n_own = 0;
+    if (ts.n) cm[n_cm++] = (chat_msg){ "system", ts.s };
+    const char *instructions = jv_str(jv_get(req, "instructions"), NULL);
+    if (instructions && instructions[0]) {
+        cm[n_cm++] = (chat_msg){ "system", instructions };
+        total += strlen(instructions) + 64;
+    }
+    if (input->type == J_STR) {
+        cm[n_cm++] = (chat_msg){ "user", input->str };
+        total += strlen(input->str) + 64;
+    } else {
+        for (int i = 0; i < input->n; i++) {
+            const char *role = "user";
+            char *text = responses_item_text(input->items[i], &role);
+            if (!text) continue;
+            owned[n_own++] = text;
+            cm[n_cm++] = (chat_msg){ role, text };
+            total += strlen(role) + strlen(text) + 64;
+        }
+    }
+    if (n_cm == 0) {
+        free(owned); free(cm); free(ts.s);
+        tool_envelope_free(&env);
+        jv_free(tools);
+        jv_free(choice_owned);
+        send_error(fd, 400, "no input content");
+        return;
+    }
+    char *prompt = malloc(total + 256);
+    render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
+    run_completion(s, fd, prompt, API_RESPONSES, req, strict ? &env : NULL);
+    free(prompt);
+    for (int i = 0; i < n_own; i++) free(owned[i]);
+    free(owned);
+    free(cm);
+    free(ts.s);
+    tool_envelope_free(&env);
+    jv_free(tools);
+    jv_free(choice_owned);
+}
+
 static void handle_completion(slot_t *s, int fd, jv *req) {
     const char *prompt = jv_str(jv_get(req, "prompt"), NULL);
     if (!prompt) { send_error(fd, 400, "missing prompt"); return; }
-    run_completion(s, fd, prompt, false, req, NULL);
+    run_completion(s, fd, prompt, API_TEXT, req, NULL);
 }
 
 static void handle_embeddings(slot_t *s, int fd, jv *req) {
@@ -1325,6 +2136,7 @@ static void handle_conn(slot_t *s, int fd) {
         send_capabilities(fd);
     } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/v1/chat/completions") ||
+                !strcmp(path, "/v1/responses") ||
                 !strcmp(path, "/v1/completions") ||
                 !strcmp(path, "/v1/embeddings"))) {
         jv *req = body ? json_parse(body, content_length) : NULL;
@@ -1354,6 +2166,7 @@ static void handle_conn(slot_t *s, int fd) {
             }
             if (ok) {
                 if (strcmp(path, "/v1/chat/completions") == 0) handle_chat(s, fd, req);
+                else if (strcmp(path, "/v1/responses") == 0) handle_responses(s, fd, req);
                 else if (strcmp(path, "/v1/embeddings") == 0) handle_embeddings(s, fd, req);
                 else handle_completion(s, fd, req);
                 // Ollama-style keep_alive: seconds of idle before the model
