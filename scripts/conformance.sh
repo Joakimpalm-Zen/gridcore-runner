@@ -4,7 +4,7 @@
 #   scripts/conformance.sh                 run everything
 #   scripts/conformance.sh -k streaming    pass any extra args through to pytest
 #
-# Builds ./runner and ./test.gguf if they are missing, starts a server on a
+# Rebuilds ./runner if stale, builds ./test.gguf if missing, starts a server on a
 # free port, runs tests/conformance, and writes tests/conformance/out/report.json
 # with latency, prompt/generation speed and peak RSS.
 #
@@ -37,9 +37,12 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
     MINGW*|MSYS*|CYGWIN*) EXE=runner.exe ;;
 esac
 
-if [ -z "${RUNNER_EXE:-}" ] && [ ! -x "./$EXE" ]; then
-    echo "conformance: building ./$EXE"
-    make ${CC:+CC="$CC"} "$EXE" >/dev/null || make ${CC:+CC="$CC"} runner
+# Always ask make, rather than only building when the binary is absent: an
+# existing-but-stale runner silently produced a false green after a src/ change.
+# make itself decides whether anything needs rebuilding, so this is cheap when
+# the tree is already current.
+if [ -z "${RUNNER_EXE:-}" ]; then
+    make ${CC:+CC="$CC"} "$EXE" >/dev/null 2>&1 || make ${CC:+CC="$CC"} runner
 fi
 
 MODEL=${RUNNER_TEST_MODEL:-test.gguf}
