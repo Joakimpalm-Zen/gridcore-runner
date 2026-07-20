@@ -1412,7 +1412,12 @@ Status is tracked here; nothing is removed when finished, only marked.
    model; an extra slot costs its KV only (0.27 GB, not 5.20 GB). The model_t
    struct itself is NOT split — that needs server.c/main.c signature changes.
    The Phase 5 server-lifecycle defects remain open and are orthogonal.
-7. Continuous batching. **PARTIAL** — the engine half is done:
+7. ~~Continuous batching.~~ **DONE** — engine primitive plus the server
+   scheduler. 2.07x at 4 concurrent and 2.24x at 8, against this build's own
+   single-stream rate; single-request latency 0.99x. Remaining: prefill is not
+   chunked against decode, fairness has no request-age notion, and --draft
+   slots serialize the server. Original note follows:
+   the engine half is done:
    model_batch_decode advances N sequences in one microbatch, 2.3-2.6x
    throughput at N=4, logits BITWISE identical to solo decode. The server-side
    scheduler is specified in Phase 6's section but not written.
