@@ -149,6 +149,11 @@ $(TEST_BIND): tests/test_bind.c src/server.c src/main.c
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
+# Ornith/Qwen3.5 CPU tracer: a committed generator builds a tiny hybrid model
+# with three recurrent DeltaNet blocks and one full-attention block.
+test-ornith-cpu: runner
+	$(PYTHON) -m pytest -q tests/test_ornith_cpu.py
+
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) runner test.gguf
@@ -165,6 +170,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_BATCH)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
+		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py; \
 	else \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
 	fi

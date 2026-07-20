@@ -190,7 +190,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         return false;
     }
     if (strcmp(arch, "llama") != 0 && strcmp(arch, "qwen2") != 0 &&
-        strcmp(arch, "qwen3") != 0 && strcmp(arch, "mistral") != 0 &&
+        strcmp(arch, "qwen3") != 0 && strcmp(arch, "qwen35") != 0 &&
+        strcmp(arch, "mistral") != 0 &&
         strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0 &&
         strcmp(arch, "gemma3") != 0 && strcmp(arch, "gemma4") != 0 &&
         strcmp(arch, "phi3") != 0) {
@@ -234,6 +235,30 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         // visible answer; shared CLI/server output handling splits this pair.
         m->think_open  = "<think>";
         m->think_close = "</think>";
+    }
+    if (strcmp(arch, "qwen35") == 0) {
+        // Qwen3.5 dense (the architecture used by Ornith-1.0-9B) alternates
+        // three Gated DeltaNet layers with one conventional attention layer.
+        // MTP weights, when present, are outside block_count and intentionally
+        // do not participate in ordinary autoregressive decoding.
+        m->qwen35            = true;
+        m->think_open        = "<think>";
+        m->think_close       = "</think>";
+        m->full_attn_interval = (int)gguf_get_u32(g, AK("full_attention_interval"), 4);
+        m->ssm_conv_kernel   = (int)gguf_get_u32(g, AK("ssm.conv_kernel"), 0);
+        m->ssm_inner         = (int)gguf_get_u32(g, AK("ssm.inner_size"), 0);
+        m->ssm_state         = (int)gguf_get_u32(g, AK("ssm.state_size"), 0);
+        m->ssm_v_heads       = (int)gguf_get_u32(g, AK("ssm.time_step_rank"), 0);
+        m->ssm_groups        = (int)gguf_get_u32(g, AK("ssm.group_count"), 0);
+        if (m->full_attn_interval <= 0 || m->ssm_conv_kernel <= 0 ||
+            m->ssm_inner <= 0 || m->ssm_state <= 0 ||
+            m->ssm_v_heads <= 0 || m->ssm_groups <= 0 ||
+            m->ssm_inner % m->ssm_v_heads != 0 ||
+            m->ssm_inner / m->ssm_v_heads != m->ssm_state ||
+            m->ssm_v_heads % m->ssm_groups != 0) {
+            fprintf(stderr, "error: invalid qwen35 Gated DeltaNet geometry\n");
+            return false;
+        }
     }
     if (strcmp(arch, "gemma4") == 0) {
         // gemma4 (reference: llama.cpp src/models/gemma4.cpp): heterogeneous
@@ -298,7 +323,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         fprintf(stderr, "error: MoE models are not supported\n");
         return false;
     }
-    if (gguf_get(g, AK("ssm.conv_kernel"))) {
+    if (!m->qwen35 && gguf_get(g, AK("ssm.conv_kernel"))) {
         fprintf(stderr, "error: '%s' is a hybrid SSM/attention architecture — "
                 "only pure-transformer llama-family models are supported\n", arch);
         return false;
@@ -332,7 +357,29 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     for (int i = 0; i < m->n_layer; i++) {
         layer_t *l = &m->layers[i];
         gguf_tensor *an = need_tensor(g, "blk.%d.attn_norm.weight", i, &ok);
-        gguf_tensor *fn = need_tensor(g, "blk.%d.ffn_norm.weight", i, &ok);
+        gguf_tensor *fn = m->qwen35
+            ? need_tensor(g, "blk.%d.post_attention_norm.weight", i, &ok)
+            : need_tensor(g, "blk.%d.ffn_norm.weight", i, &ok);
+        l->recurrent = m->qwen35 && ((i + 1) % m->full_attn_interval != 0);
+        if (l->recurrent) {
+            l->wqkv      = need_tensor(g, "blk.%d.attn_qkv.weight", i, &ok);
+            l->wq_gate   = need_tensor(g, "blk.%d.attn_gate.weight", i, &ok);
+            l->ssm_conv  = need_tensor(g, "blk.%d.ssm_conv1d.weight", i, &ok);
+            l->ssm_beta  = need_tensor(g, "blk.%d.ssm_beta.weight", i, &ok);
+            l->ssm_alpha = need_tensor(g, "blk.%d.ssm_alpha.weight", i, &ok);
+            l->ssm_out   = need_tensor(g, "blk.%d.ssm_out.weight", i, &ok);
+            l->ssm_dt    = tensor_to_f32(need_tensor(g, "blk.%d.ssm_dt.bias", i, &ok));
+            l->ssm_a     = tensor_to_f32(need_tensor(g, "blk.%d.ssm_a", i, &ok));
+            l->ssm_norm_w = tensor_to_f32(need_tensor(g, "blk.%d.ssm_norm.weight", i, &ok));
+            l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
+            l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
+            l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
+            if (!ok) return false;
+            l->attn_norm_w = tensor_to_f32(an);
+            l->ffn_norm_w = tensor_to_f32(fn);
+            l->out_scale = 1.0f;
+            continue;
+        }
         if (fused_qkv) {
             // phi3: [Q rows | K rows | V rows] in attn_qkv, and the FFN's
             // gate and up halves stacked in ffn_up (HF's gate_up_proj)
@@ -372,7 +419,10 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         l->bo = tensor_to_f32(opt_tensor(g, "blk.%d.attn_output.bias", i));
         l->qnorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q_norm.weight", i));
         l->knorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k_norm.weight", i));
-        l->post_attn_norm_w = tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i));
+        // Qwen3.5's post_attention_norm is the FFN input norm (loaded as
+        // ffn_norm_w above), not a sandwich norm on the attention projection.
+        l->post_attn_norm_w = m->qwen35 ? NULL
+            : tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i));
         l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i));
         l->out_scale = 1.0f;
         gguf_tensor *osc = opt_tensor(g, "blk.%d.layer_output_scale.weight", i);
@@ -480,6 +530,20 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->q      = malloc(sizeof(float) * (size_t)B * q_dim);
     m->k_tmp  = malloc(sizeof(float) * (size_t)B * kv_dim);
     m->v_tmp  = malloc(sizeof(float) * (size_t)B * kv_dim);
+    if (m->qwen35) {
+        int conv_dim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
+        int hv = m->ssm_inner / m->ssm_v_heads;
+        m->q_gate = malloc(sizeof(float) * (size_t)B * q_dim);
+        m->ssm_qkv = malloc(sizeof(float) * (size_t)B * conv_dim);
+        m->ssm_z = malloc(sizeof(float) * (size_t)B * m->ssm_inner);
+        m->ssm_aux = malloc(sizeof(float) * (size_t)B *
+                            (conv_dim + m->ssm_v_heads));
+        m->ssm_conv_state = calloc((size_t)m->n_layer *
+                                   (m->ssm_conv_kernel - 1) * conv_dim,
+                                   sizeof(float));
+        m->ssm_state_mem = calloc((size_t)m->n_layer * m->ssm_v_heads *
+                                  hv * hv, sizeof(float));
+    }
     m->hb     = malloc(sizeof(float) * (size_t)B * m->n_ff);
     m->hb2    = malloc(sizeof(float) * (size_t)B * m->n_ff);
     m->att    = malloc(sizeof(float) * (size_t)m->n_head * n_ctx);
@@ -487,7 +551,10 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->spec_batch = 16; // all_logits rows, allocated lazily on first use
     if (!m->kv_off || !m->kcache || !m->vcache || !m->x || !m->xb ||
         !m->xb2 || !m->q || !m->k_tmp || !m->v_tmp || !m->hb ||
-        !m->hb2 || !m->att || !m->logits) {
+        !m->hb2 || !m->att || !m->logits ||
+        (m->qwen35 && (!m->q_gate || !m->ssm_qkv || !m->ssm_z ||
+                       !m->ssm_aux || !m->ssm_conv_state ||
+                       !m->ssm_state_mem))) {
         fprintf(stderr, "error: cannot allocate buffers (ctx %d needs %.1f MB KV cache)\n",
                 n_ctx, 2.0 * kv_bytes / 1e6);
         return false; // caller owns cleanup: every load failure ends in model_free
@@ -500,7 +567,9 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     }
     rope_setup(m, g, arch, p->rope_base, p->rope_scale);
 
-    if (p->gpu_mode == GPU_AUTO) gpu_init(m); // sets m->gpu on success
+    // The existing GPU backends implement KV attention only. Keep Qwen3.5 on
+    // the correct CPU path until a native recurrent backend is available.
+    if (p->gpu_mode == GPU_AUTO && !m->qwen35) gpu_init(m); // sets m->gpu on success
 
     if (p->verbose) {
         fprintf(stderr, "%-24s %s\n", "architecture", m->arch);
@@ -514,7 +583,9 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         fprintf(stderr, "%-24s %.1f MB (%s)\n", "kv cache", 2.0 * kv_bytes / 1e6,
                 m->kv_q8 ? "q8_0" : "fp16");
         fprintf(stderr, "%-24s %d\n", "batch", m->n_batch);
-        fprintf(stderr, "%-24s %s\n", "weight type", ggml_type_name(m->layers[0].wq->type));
+        gguf_tensor *w0 = m->layers[0].recurrent ? m->layers[0].wqkv
+                                                  : m->layers[0].wq;
+        fprintf(stderr, "%-24s %s\n", "weight type", ggml_type_name(w0->type));
         fprintf(stderr, "%-24s %.1f\n", "rope base", m->rope_base);
     }
     return true;
@@ -532,6 +603,7 @@ void model_free(model_t *m) {
         free(l->bq); free(l->bk); free(l->bv); free(l->bo);
         free(l->qnorm_w); free(l->knorm_w);
         free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
+        free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
     }
     free(m->l_head_kv); free(m->l_head_dim); free(m->l_rope_dim);
     free(m->l_is_swa); free(m->kv_off); free(m->suppress);
@@ -544,6 +616,8 @@ void model_free(model_t *m) {
     free(m->kcache); free(m->vcache);
     free(m->x); free(m->xb); free(m->xb2); free(m->q);
     free(m->k_tmp); free(m->v_tmp);
+    free(m->q_gate); free(m->ssm_qkv); free(m->ssm_z); free(m->ssm_aux);
+    free(m->ssm_conv_state); free(m->ssm_state_mem);
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
     tpool_destroy(m->tp);
     gguf_close(&m->gf);
@@ -763,8 +837,111 @@ static void suppress_logits(const model_t *m, float *logits) {
         logits[m->suppress[i]] = -1e30f;
 }
 
+// One CPU Gated DeltaNet layer for Qwen3.5. State is stored transposed
+// ([value_column][key_row]), matching the reference operator: decay, delta
+// correction, outer-product update, then query readout.
+static void qwen35_linear(model_t *m, layer_t *ly, int layer, int n, int xdim) {
+    int sk = m->ssm_state, ng = m->ssm_groups, nh = m->ssm_v_heads;
+    int inner = m->ssm_inner, hv = inner / nh;
+    int keydim = sk * ng, convdim = 2 * keydim + inner;
+    int histn = m->ssm_conv_kernel - 1;
+
+    matvec_b(m->tp, m->ssm_qkv, convdim, ly->wqkv,
+             m->xb, xdim, m->n_embd, convdim, NULL, n);
+    matvec_b(m->tp, m->ssm_z, inner, ly->wq_gate,
+             m->xb, xdim, m->n_embd, inner, NULL, n);
+    // beta and alpha are small per-head projections.
+    matvec_b(m->tp, m->q_gate, nh, ly->ssm_beta,
+             m->xb, xdim, m->n_embd, nh, NULL, n);
+    float *alphas = m->ssm_aux + (size_t)n * convdim;
+    matvec_b(m->tp, alphas, nh, ly->ssm_alpha,
+             m->xb, xdim, m->n_embd, nh, NULL, n);
+
+    float *hist = m->ssm_conv_state + (size_t)layer * histn * convdim;
+    float *states = m->ssm_state_mem + (size_t)layer * nh * hv * hv;
+    size_t wrs = ggml_row_size(ly->ssm_conv->type, m->ssm_conv_kernel);
+    float *cw = malloc(sizeof(float) * m->ssm_conv_kernel);
+    for (int b = 0; b < n; b++) {
+        float *mix = m->ssm_qkv + (size_t)b * convdim;
+        // Causal depthwise convolution over the persistent history and input.
+        for (int c = 0; c < convdim; c++) {
+            dequant_row(ly->ssm_conv->type,
+                        (const uint8_t *)ly->ssm_conv->data + (size_t)c * wrs,
+                        cw, m->ssm_conv_kernel);
+            float sum = cw[histn] * mix[c];
+            for (int k = 0; k < histn; k++)
+                sum += cw[k] * hist[(size_t)k * convdim + c];
+            m->ssm_aux[(size_t)b * convdim + c] =
+                sum / (1.0f + expf(-sum));
+        }
+        if (histn) {
+            memmove(hist, hist + convdim,
+                    sizeof(float) * (size_t)(histn - 1) * convdim);
+            memcpy(hist + (size_t)(histn - 1) * convdim, mix,
+                   sizeof(float) * convdim);
+        }
+        float *cv = m->ssm_aux + (size_t)b * convdim;
+        // Q and K use L2 norm (not RMS norm).
+        for (int g = 0; g < ng; g++) {
+            float *q = cv + g * sk;
+            float *k = cv + keydim + g * sk;
+            float qs = m->rms_eps, ks = m->rms_eps;
+            for (int j = 0; j < sk; j++) {
+                qs += q[j] * q[j]; ks += k[j] * k[j];
+            }
+            qs = 1.0f / sqrtf(qs); ks = 1.0f / sqrtf(ks);
+            for (int j = 0; j < sk; j++) { q[j] *= qs; k[j] *= ks; }
+        }
+        const float *vv = cv + 2 * keydim;
+        float *out = m->xb2 + (size_t)b * xdim;
+        for (int h = 0; h < nh; h++) {
+            // llama.cpp's Qwen3.5 GDN kernel tiles the key-head axis across
+            // value heads (0..G-1, 0..G-1).
+            int group = h % ng;
+            const float *q = cv + group * sk;
+            const float *k = cv + keydim + group * sk;
+            const float *v = vv + h * hv;
+            float *st = states + (size_t)h * hv * hv;
+            float beta = 1.0f / (1.0f + expf(-m->q_gate[(size_t)b * nh + h]));
+            float a = alphas[(size_t)b * nh + h] + ly->ssm_dt[h];
+            float softplus = a > 20.0f ? a : log1pf(expf(a));
+            float decay = expf(ly->ssm_a[h] * softplus);
+            for (int j = 0; j < hv; j++)
+                for (int i = 0; i < hv; i++) st[j * hv + i] *= decay;
+            for (int j = 0; j < hv; j++) {
+                float pred = 0;
+                for (int i = 0; i < hv; i++) pred += st[j * hv + i] * k[i];
+                float delta = (v[j] - pred) * beta;
+                for (int i = 0; i < hv; i++) st[j * hv + i] += delta * k[i];
+                float y = 0;
+                for (int i = 0; i < hv; i++) y += st[j * hv + i] * q[i];
+                // The DeltaNet recurrence uses normalized Q/K and applies the
+                // conventional 1/sqrt(key_dim) query scale.
+                out[h * hv + j] = y / sqrtf((float)sk);
+            }
+            rmsnorm(out + h * hv, out + h * hv, ly->ssm_norm_w,
+                    hv, m->rms_eps);
+            for (int j = 0; j < hv; j++) {
+                float z = m->ssm_z[(size_t)b * inner + h * hv + j];
+                out[h * hv + j] *= z / (1.0f + expf(-z));
+            }
+        }
+    }
+    free(cw);
+    matvec_b(m->tp, m->xb, xdim, ly->ssm_out, m->xb2, xdim,
+             inner, m->n_embd, NULL, n);
+}
+
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
+    if (m->qwen35 && pos == 0) {
+        int convdim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
+        int hv = m->ssm_inner / m->ssm_v_heads;
+        memset(m->ssm_conv_state, 0, sizeof(float) * (size_t)m->n_layer *
+               (m->ssm_conv_kernel - 1) * convdim);
+        memset(m->ssm_state_mem, 0, sizeof(float) * (size_t)m->n_layer *
+               m->ssm_v_heads * hv * hv);
+    }
     // GPU handles the leading gpu_layers. A full split (gpu_layers == n_layer)
     // returns logits directly; a partial split runs [0, gpu_layers) on the GPU,
     // leaves the boundary activation in the host x buffer + the offloaded
@@ -847,7 +1024,25 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             fprintf(stderr, "%.4g\n", a);
             dbg_stat("post-attn-norm", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         }
-        matvec_b(m->tp, m->q,     q_dim,  ly->wq, m->xb, xdim, n_embd, q_dim,  ly->bq, n);
+        if (ly->recurrent) {
+            qwen35_linear(m, ly, l, n, xdim);
+        } else {
+        if (m->qwen35) {
+            matvec_b(m->tp, m->ssm_qkv, 2 * q_dim, ly->wq,
+                     m->xb, xdim, n_embd, 2 * q_dim, ly->bq, n);
+            for (int b = 0; b < n; b++)
+                for (int h = 0; h < m->n_head; h++) {
+                    memcpy(m->q + (size_t)b * q_dim + h * hd,
+                           m->ssm_qkv + (size_t)b * 2 * q_dim + h * 2 * hd,
+                           sizeof(float) * hd);
+                    memcpy(m->q_gate + (size_t)b * q_dim + h * hd,
+                           m->ssm_qkv + (size_t)b * 2 * q_dim + h * 2 * hd + hd,
+                           sizeof(float) * hd);
+                }
+        } else {
+            matvec_b(m->tp, m->q, q_dim, ly->wq, m->xb, xdim,
+                     n_embd, q_dim, ly->bq, n);
+        }
         matvec_b(m->tp, m->k_tmp, kv_dim, ly->wk, m->xb, xdim, n_embd, kv_dim, ly->bk, n);
         if (ly->wv)
             matvec_b(m->tp, m->v_tmp, kv_dim, ly->wv, m->xb, xdim, n_embd, kv_dim, ly->bv, n);
@@ -902,9 +1097,15 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                             m->xb2 + (size_t)b * xdim, p, t0, hd, kv_dim,
                             row_b, m->kv_q8, scale };
             tpool_run(m->tp, attn_heads, &aj, m->n_head);
+            if (m->qwen35)
+                for (int i = 0; i < q_dim; i++) {
+                    float g = m->q_gate[(size_t)b * q_dim + i];
+                    m->xb2[(size_t)b * xdim + i] *= 1.0f / (1.0f + expf(-g));
+                }
         }
         if (dbg) dbg_stat("attn-out", l, m->xb2 + (size_t)(n - 1) * xdim, q_dim);
         matvec_b(m->tp, m->xb, xdim, ly->wo, m->xb2, xdim, q_dim, n_embd, ly->bo, n);
+        }
         if (dbg) dbg_stat("wo-out", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         if (ly->post_attn_norm_w)
             for (int b = 0; b < n; b++)
