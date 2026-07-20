@@ -6,6 +6,8 @@
       "index": "<number>"
     }
   ],
+  "created": "<redacted>",
   "id": "<redacted>",
+  "model": "<redacted>",
   "object": "chat.completion.chunk"
 }

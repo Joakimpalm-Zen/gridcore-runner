@@ -378,7 +378,32 @@ typedef struct {
     int   n_stop;
     sbuf  hold;         // held-back tail that may still begin a stop match
     bool  stopped;      // a stop sequence matched; excluded from output
+    long  created;      // stamped once: every chunk of a stream reports the
+                        // same creation time, as the buffered body does
+    bool  role_sent;    // "role":"assistant" is emitted on the first delta only
 } gen_ctx;
+
+// common prefix of every streamed chunk. `created` and `model` are required by
+// the ChatCompletionChunk schema and strictly-validating SDKs reject a chunk
+// without them, so they are written here rather than per call site.
+static void chunk_open(gen_ctx *g, sbuf *c) {
+    sb_fmt(c, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"",
+           g->id, g->chat ? "chat.completion.chunk" : "text_completion",
+           g->created);
+    sb_esc(c, SV.model_name, strlen(SV.model_name));
+    sb_lit(c, "\",\"choices\":[{\"index\":0,");
+}
+
+// frame one built chunk body as an SSE event and push it; a failed send marks
+// the client gone, which is what aborts generation upstream
+static int chunk_send(gen_ctx *g, sbuf *c) {
+    sbuf sse = {0};
+    sb_fmt(&sse, "data: %s\n\n", c->s ? c->s : "");
+    if (c->failed || sse.failed || !send_all(g->fd, sse.s, sse.n)) g->dead = true;
+    free(c->s);
+    free(sse.s);
+    return g->dead ? 1 : 0;
+}
 
 static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
     e->schema = NULL;
@@ -396,24 +421,28 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
 
 // emit one section of split output: reasoning goes to the OpenAI-style
 // reasoning_content field, everything else to content
+// one text delta on the named chat channel (or the legacy completion "text")
+static int send_text_delta(gen_ctx *g, int reasoning, const char *bytes, int n) {
+    if (!g->stream || g->dead) return g->dead ? 1 : 0;
+    sbuf c = {0};
+    chunk_open(g, &c);
+    if (g->chat) {
+        sb_lit(&c, "\"delta\":{");
+        if (!g->role_sent) { sb_lit(&c, "\"role\":\"assistant\","); g->role_sent = true; }
+        sb_fmt(&c, "\"%s\":\"", reasoning ? "reasoning_content" : "content");
+    } else {
+        sb_lit(&c, "\"text\":\"");
+    }
+    sb_esc(&c, bytes, n);
+    sb_lit(&c, g->chat ? "\"},\"finish_reason\":null}]}"
+                       : "\",\"finish_reason\":null}]}");
+    return chunk_send(g, &c);
+}
+
 static int emit_channel(gen_ctx *g, int reasoning, const char *bytes, int n) {
     sb_put(reasoning ? &g->reason : &g->out, bytes, n);
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
-    sbuf chunk = {0};
-    sb_fmt(&chunk, "{\"id\":\"%s\",\"object\":\"%s\",\"choices\":[{\"index\":0,",
-           g->id, g->chat ? "chat.completion.chunk" : "text_completion");
-    if (g->chat) sb_fmt(&chunk, "\"delta\":{\"%s\":\"",
-                        reasoning ? "reasoning_content" : "content");
-    else         sb_lit(&chunk, "\"text\":\"");
-    sb_esc(&chunk, bytes, n);
-    if (g->chat) sb_lit(&chunk, "\"},\"finish_reason\":null}]}");
-    else         sb_lit(&chunk, "\",\"finish_reason\":null}]}");
-    sbuf sse = {0};
-    sb_fmt(&sse, "data: %s\n\n", chunk.s);
-    if (sse.failed || !send_all(g->fd, sse.s, sse.n)) g->dead = true;
-    free(chunk.s);
-    free(sse.s);
-    return g->dead ? 1 : 0;
+    return send_text_delta(g, reasoning, bytes, n);
 }
 
 // content-channel filter for user stop sequences: bytes are staged in
@@ -733,7 +762,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     }
 
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .chat = chat,
-                  .stop_strs = stops, .n_stop = n_stops };
+                  .stop_strs = stops, .n_stop = n_stops,
+                  .created = (long)time(NULL) };
     snprintf(g.id, sizeof(g.id), "%s-%d", chat ? "chatcmpl" : "cmpl",
              atomic_fetch_add(&SV.req_counter, 1));
     // split thinking channels out of chat responses; raw completions stay raw
@@ -745,6 +775,17 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         if (!send_all(fd, hdr, strlen(hdr))) {
             completion_cleanup(e, schema, &g);
             return;
+        }
+        // OpenAI opens a chat stream with a role-only delta. Emitting it up
+        // front rather than folding the role into whatever the first text
+        // delta happens to be keeps the contract independent of what the
+        // model generates — including generating nothing at all.
+        if (chat) {
+            sbuf c = {0};
+            chunk_open(&g, &c);
+            sb_lit(&c, "\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}");
+            g.role_sent = true;
+            chunk_send(&g, &c);
         }
     }
 
@@ -761,25 +802,27 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
 
     if (stream) {
         if (!g.dead) {
-            char fin[384];
-            int fn = snprintf(fin, sizeof(fin),
-                "data: {\"id\":\"%s\",\"object\":\"%s\",\"choices\":[{\"index\":0,"
-                "%s,\"finish_reason\":\"%s\"}]}\n\n",
-                g.id, chat ? "chat.completion.chunk" : "text_completion",
-                chat ? "\"delta\":{}" : "\"text\":\"\"", finish);
-            bool ok = send_all(fd, fin, fn);
+            sbuf c = {0};
+            chunk_open(&g, &c);
+            sb_fmt(&c, "%s,\"finish_reason\":\"%s\"}]}",
+                   chat ? "\"delta\":{}" : "\"text\":\"\"", finish);
+            bool ok = chunk_send(&g, &c) == 0;
             // OpenAI stream_options {"include_usage": true}: one extra chunk
             // with empty choices and the request's token accounting — AI-SDK
             // clients (Cline et al.) request this on every stream
             if (ok && jv_bool(jv_get(jv_get(req, "stream_options"),
                                      "include_usage"), false)) {
-                fn = snprintf(fin, sizeof(fin),
-                    "data: {\"id\":\"%s\",\"object\":\"%s\",\"choices\":[],"
-                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
-                    "\"total_tokens\":%d}}\n\n",
-                    g.id, chat ? "chat.completion.chunk" : "text_completion",
-                    n_prompt, n_gen, n_prompt + n_gen);
-                ok = send_all(fd, fin, fn);
+                sbuf u = {0};
+                sb_fmt(&u, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,"
+                           "\"model\":\"", g.id,
+                       chat ? "chat.completion.chunk" : "text_completion",
+                       g.created);
+                sb_esc(&u, SV.model_name, strlen(SV.model_name));
+                sb_fmt(&u, "\",\"choices\":[],"
+                           "\"usage\":{\"prompt_tokens\":%d,"
+                           "\"completion_tokens\":%d,\"total_tokens\":%d}}",
+                       n_prompt, n_gen, n_prompt + n_gen);
+                ok = chunk_send(&g, &u) == 0;
             }
             if (ok) send_all(fd, "data: [DONE]\n\n", 14);
         }

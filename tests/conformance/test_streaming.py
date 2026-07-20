@@ -200,32 +200,33 @@ def test_known_gap_no_tool_calls_in_stream(client, report):
                         finish_reason=st.finish_reason)
 
 
-@pytest.mark.known_gap("phase-2", "streaming chunks omit created/model, first delta omits role")
-def test_known_gap_stream_chunk_omits_created_model_and_role(client):
-    """KNOWN GAP — pins today's behaviour, do not read as desired.
+def test_stream_chunk_carries_created_model_and_role(client):
+    """Phase 2 (was a known gap).
 
     OpenAI's chat.completion.chunk carries ``created`` and ``model`` on every
-    chunk and ``role: "assistant"`` on the first delta. Runner emits none of
-    the three. SDKs that key off the first delta's role (or that echo the model
-    back) see a chunk they consider malformed.
-
-    WHEN THIS IS FIXED: flip each assertion below to require the field, and
-    re-record fixtures/chat_stream_chunk.json.
-    """
+    chunk and ``role: "assistant"`` on the first delta. SDKs that key off the
+    first delta's role (or that echo the model back) reject a stream without
+    them, so all three are required here rather than merely tolerated."""
+    buffered = client.chat(dict(BASE), name="stream-chunk-fields-b")
     st = client.chat_stream(dict(BASE), name="stream-chunk-fields").expect_sse()
-    first = st.chunks[0]
-    for field in ("created", "model"):
-        if field in first:
-            pytest.fail(f"streamed chunk now carries {field!r} — the gap is "
-                        f"closed, update this test and re-record the fixture")
-    role = first["choices"][0].get("delta", {}).get("role")
-    if role is not None:
-        pytest.fail(f"first delta now carries role={role!r} — the gap is "
-                    f"closed, update this test and re-record the fixture")
-    # what IS guaranteed today, so a regression below this line is a real one
-    if "content" not in first["choices"][0].get("delta", {}):
-        raise ProtocolError("first delta carries neither role nor content",
-                            chunk=first)
+    for c in st.chunks:
+        if not isinstance(c.get("created"), int) or c["created"] <= 0:
+            raise ProtocolError("streamed chunk has no usable created",
+                                got=c.get("created"), chunk=c)
+        if not isinstance(c.get("model"), str) or not c["model"]:
+            raise ProtocolError("streamed chunk has no model", chunk=c)
+        if c["model"] != buffered.json["model"]:
+            raise ProtocolError("streamed model differs from the buffered one",
+                                buffered=buffered.json["model"],
+                                streamed=c["model"])
+    role = st.chunks[0]["choices"][0].get("delta", {}).get("role")
+    if role != "assistant":
+        raise ProtocolError("first delta must carry role \"assistant\"",
+                            got=role, chunk=st.chunks[0])
+    # ...and only the first: a repeated role confuses accumulating clients
+    later = [i for i, d in enumerate(st.deltas()[1:], 1) if "role" in d]
+    if later:
+        raise ProtocolError("role repeated after the first delta", at=later)
 
 
 def test_stream_flag_must_be_boolean(client):
