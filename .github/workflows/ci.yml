@@ -36,6 +36,10 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer.c \
             src/gguf.c src/tokenizer.c src/compat.c src/quants.c -o test-tokenizer -lm
           ./test-tokenizer
+          cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_template.c \
+            src/gguf.c src/tokenizer.c src/template.c src/json.c src/compat.c src/quants.c \
+            -o test-template -lm
+          ./test-template
       - name: python client tests
         # PEP 668: the macOS runner's Homebrew python is externally managed and
         # refuses a bare pip install, so install into a venv instead
@@ -403,6 +407,10 @@ jobs:
           gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_tokenizer.c \
             src/gguf.c src/tokenizer.c src/compat.c src/quants.c -o test-tokenizer.exe -lm
           ./test-tokenizer.exe
+          gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_template.c \
+            src/gguf.c src/tokenizer.c src/template.c src/json.c src/compat.c src/quants.c \
+            -o test-template.exe -lm
+          ./test-template.exe
       - name: python client tests
         run: PYTHONPATH=python/src python3 -m pytest python/tests/test_client.py
       - name: smoke test (completion)

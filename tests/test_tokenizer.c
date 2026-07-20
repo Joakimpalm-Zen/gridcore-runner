@@ -188,6 +188,28 @@ static void test_bpe_roundtrip_is_exact(tokenizer *t) {
     }
 }
 
+// Under the original GPT-2 rules a leading non-letter does NOT join the word,
+// so "/end" splits apart and "end" falls back to its byte pieces. This is the
+// direct counterpart of test_bpe_punct_leads_letters on identical vocabulary.
+static void test_bpe_punct_stays_split(tokenizer *t) {
+    static const char *const want[] = { "tokenization", "/", "e", "n", "d", "." };
+    expect_pieces(t, "tokenization/end.", want, 6);
+}
+
+// smollm keeps the original GPT-2 whitespace rules, so a newline run is not
+// glued into one pre-token the way llama-bpe's \s*[\r\n]+ does.
+static void test_bpe_newline_run_stays_split(tokenizer *t) {
+    static const char *const want[] = { "a", "\xC4\x8A", "\xC4\x8A", "b" };
+    expect_pieces(t, "a\n\nb", want, 4);
+}
+
+// Its Digits pass also bounds the whitespace rule: the run ends at the digit,
+// so both spaces stay together where "  leading" would give one back.
+static void test_bpe_digits_bound_whitespace(tokenizer *t) {
+    static const char *const want[] = { "\xC4\xA0\xC4\xA0", "1", "2" };
+    expect_pieces(t, "  12", want, 3);
+}
+
 static void run_bpe_fixture(const char *path, int pre, void (*digits)(tokenizer *)) {
     current = path;
     gguf_file g;
@@ -203,8 +225,15 @@ static void run_bpe_fixture(const char *path, int pre, void (*digits)(tokenizer 
     assert(t.model == TOK_BPE);
     assert(t.pre == pre);
 
-    test_bpe_punct_leads_letters(&t);
-    test_bpe_newline_run_is_one_token(&t);
+    if (pre == TOK_PRE_SMOLLM) {
+        // smollm keeps the original GPT-2 rules; the others use the newer regex
+        test_bpe_punct_stays_split(&t);
+        test_bpe_newline_run_stays_split(&t);
+        test_bpe_digits_bound_whitespace(&t);
+    } else {
+        test_bpe_punct_leads_letters(&t);
+        test_bpe_newline_run_is_one_token(&t);
+    }
     test_bpe_contraction_and_space(&t);
     test_bpe_roundtrip_is_exact(&t);
     digits(&t);
@@ -247,6 +276,8 @@ int main(void) {
                     TOK_PRE_LLAMA3, test_bpe_digit_grouping_llama3);
     run_bpe_fixture("tests/fixtures/vocab-bpe-qwen2.gguf",
                     TOK_PRE_QWEN2, test_bpe_digit_grouping_qwen2);
+    run_bpe_fixture("tests/fixtures/vocab-bpe-smollm.gguf",
+                    TOK_PRE_SMOLLM, test_bpe_digit_grouping_qwen2);
 
     puts("tokenizer tests ok");
     return 0;

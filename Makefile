@@ -16,18 +16,21 @@ GPU_SRC  = src/cuda.c
 RUNNER_EXE = runner.exe
 TEST_JSON_SCHEMA = test-json-schema.exe
 TEST_TOKENIZER = test-tokenizer.exe
+TEST_TEMPLATE = test-template.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
 RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
+TEST_TEMPLATE = test-template
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
 RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
+TEST_TEMPLATE = test-template
 endif
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
@@ -49,12 +52,18 @@ TEST_TOK_SRC = tests/test_tokenizer.c src/gguf.c src/tokenizer.c src/compat.c sr
 $(TEST_TOKENIZER): $(TEST_TOK_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_SRC) -o $@ -lm
 
+TEST_TMPL_SRC = tests/test_template.c src/gguf.c src/tokenizer.c src/template.c \
+                src/json.c src/compat.c src/quants.c
+$(TEST_TEMPLATE): $(TEST_TMPL_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_TMPL_SRC) -o $@ -lm
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
-test: $(TEST_JSON_SCHEMA) $(TEST_TOKENIZER) test.gguf
+test: $(TEST_JSON_SCHEMA) $(TEST_TOKENIZER) $(TEST_TEMPLATE) test.gguf
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_TOKENIZER)
+	./$(TEST_TEMPLATE)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 	else \
@@ -68,7 +77,7 @@ smoke: runner test.gguf
 	./$(RUNNER_EXE) -m test.gguf -p "hi" -n 24 --temp 0 --json --gpu off 2>/dev/null | $(PYTHON) -c "import json,sys; json.load(sys.stdin); print('valid json')"
 
 clean:
-	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_TOKENIZER)
+	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_TOKENIZER) $(TEST_TEMPLATE)
 
 # regenerate the committed PTX header (dev machines only: needs nvcc + a host
 # compiler). Normal builds and CI use the committed src/kernels_ptx.h.

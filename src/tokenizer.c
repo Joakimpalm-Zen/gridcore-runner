@@ -163,6 +163,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     const char *pre = gguf_get_str(g, "tokenizer.ggml.pre", "");
     if (strcmp(pre, "llama-bpe") == 0)   t->pre = TOK_PRE_LLAMA3;
     else if (strcmp(pre, "qwen2") == 0)  t->pre = TOK_PRE_QWEN2;
+    else if (strcmp(pre, "smollm") == 0) t->pre = TOK_PRE_SMOLLM;
     else                                 t->pre = TOK_PRE_GPT2;
 
     gguf_kv *toks = gguf_get(g, "tokenizer.ggml.tokens");
@@ -409,6 +410,44 @@ static int pre_split_next(const uint32_t *cp, int i, int ncp, int max_digits) {
     }
 }
 
+// One pre-token of the original GPT-2 regex, bounded by end so a caller can
+// restrict it to a segment:
+//   's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
+// The contractions are case-sensitive here, unlike the newer (?i:...) regexes.
+static int gpt2_split_next(const uint32_t *cp, int i, int end) {
+    if (cp[i] == '\'' && i + 1 < end) {
+        uint32_t a = cp[i + 1], b = (i + 2 < end) ? cp[i + 2] : 0;
+        if (a == 's' || a == 't' || a == 'm' || a == 'd') return i + 2;
+        if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') ||
+            (a == 'l' && b == 'l')) return i + 3;
+    }
+    // an optional leading space joins a run of a single class
+    int j = (cp[i] == ' ' && i + 1 < end && cp_class(cp[i + 1]) != 3) ? i + 1 : i;
+    if (cp_class(cp[j]) != 3) {
+        int cls = cp_class(cp[j]);
+        int k = j;
+        while (k < end && cp_class(cp[k]) == cls) k++;
+        return k;
+    }
+    // \s+(?!\S) hands the final whitespace character to the next pre-token,
+    // whatever that character is: "\t\tx" is "\t", "\t", "x", not "\t\t", "x"
+    int k = i;
+    while (k < end && cp_class(cp[k]) == 3) k++;
+    if (k < end && k - i > 1) k--;
+    return k;
+}
+
+// smollm runs a Digits(individual_digits) pass before the GPT-2 regex, so every
+// digit stands alone and never takes a leading space. Splitting first also
+// bounds the regex: in "  12" the space run ends at the digit and stays whole,
+// where "  leading" gives a space back to the word.
+static int smollm_split_next(const uint32_t *cp, int i, int ncp) {
+    if (cp_digit(cp[i])) return i + 1;
+    int seg = i;
+    while (seg < ncp && !cp_digit(cp[seg])) seg++;
+    return gpt2_split_next(cp, i, seg);
+}
+
 // BPE merge within one pre-token (already byte->unicode mapped, utf8 string)
 static int bpe_word(tokenizer *t, const char *w, int n, int32_t *out, int cap, int n_out) {
     int max_sym = n + 1;
@@ -474,63 +513,21 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
 
     char *word = malloc(n * 2 + 8); // byte->unicode expands ascii <0x80 to <=2 bytes
 
-    // Newer families declare their split rules in tokenizer.ggml.pre; anything
-    // unrecognised keeps the original GPT-2 pre-tokenizer below.
+    // The split rules come from tokenizer.ggml.pre; anything unrecognised keeps
+    // the original GPT-2 regex it has always used.
     int max_digits = t->pre == TOK_PRE_LLAMA3 ? 3 : t->pre == TOK_PRE_QWEN2 ? 1 : 0;
-    if (max_digits) {
-        for (int i = 0; i < ncp; ) {
-            int end = pre_split_next(cp, i, ncp, max_digits);
-            if (end <= i) end = i + 1; // never stall
-            size_t b0 = off[i], b1 = off[end];
-            int wl = 0;
-            for (size_t b = b0; b < b1; b++)
-                wl += u8_encode((uint32_t)t->b2u[(uint8_t)text[b]], word + wl);
-            n_out = bpe_word(t, word, wl, out, cap, n_out);
-            i = end;
-        }
-        free(cp); free(off); free(word);
-        return n_out;
-    }
-
-    // simplified GPT-2 pre-tokenizer
-    int i = 0;
-    while (i < ncp) {
-        int start = i;
-        // contractions: 's 't 'm 'd 're 've 'll
-        if (cp[i] == '\'' && i + 1 < ncp) {
-            uint32_t a = cp[i + 1], b = i + 2 < ncp ? cp[i + 2] : 0;
-            int adv = 0;
-            if (a == 's' || a == 't' || a == 'm' || a == 'd') adv = 2;
-            else if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') ||
-                     (a == 'l' && b == 'l')) adv = 3;
-            if (adv) { i += adv; goto emit; }
-        }
-        {
-            // optional single leading space attached to a letter/digit/other run
-            int j = (cp[i] == ' ' && i + 1 < ncp && cp_class(cp[i + 1]) != 3) ? i + 1 : i;
-            if (cp_class(cp[j]) != 3) {
-                int cls = cp_class(cp[j]);
-                i = j;
-                while (i < ncp && cp_class(cp[i]) == cls) i++;
-                goto emit;
-            }
-            // whitespace run
-            int k = i;
-            while (k < ncp && cp_class(cp[k]) == 3) k++;
-            if (k < ncp && k - i > 1 && cp[k - 1] == ' ') k--; // leave one ' ' for next word
-            i = k;
-        }
-    emit:
-        if (i > start) {
-            // map original bytes through byte->unicode
-            size_t b0 = off[start], b1 = off[i];
-            int wl = 0;
-            for (size_t b = b0; b < b1; b++)
-                wl += u8_encode((uint32_t)t->b2u[(uint8_t)text[b]], word + wl);
-            n_out = bpe_word(t, word, wl, out, cap, n_out);
-        } else {
-            i++; // safety
-        }
+    for (int i = 0; i < ncp; ) {
+        int end = max_digits                  ? pre_split_next(cp, i, ncp, max_digits)
+                : t->pre == TOK_PRE_SMOLLM    ? smollm_split_next(cp, i, ncp)
+                                              : gpt2_split_next(cp, i, ncp);
+        if (end <= i) end = i + 1; // never stall
+        // map the original bytes of this pre-token through byte->unicode
+        size_t b0 = off[i], b1 = off[end];
+        int wl = 0;
+        for (size_t b = b0; b < b1; b++)
+            wl += u8_encode((uint32_t)t->b2u[(uint8_t)text[b]], word + wl);
+        n_out = bpe_word(t, word, wl, out, cap, n_out);
+        i = end;
     }
     free(cp); free(off); free(word);
     return n_out;

@@ -15,7 +15,8 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         if (strstr(meta_tmpl, "<|user|>"))            return TMPL_ZEPHYR;
         if (strstr(meta_tmpl, "<|turn>"))             return TMPL_GEMMA4;
         if (strstr(meta_tmpl, "<start_of_turn>"))     return TMPL_GEMMA;
-        if (strstr(meta_tmpl, "[INST]"))              return TMPL_LLAMA2;
+        if (strstr(meta_tmpl, "[INST]"))
+            return strstr(meta_tmpl, "<<SYS>>") ? TMPL_LLAMA2 : TMPL_MISTRAL;
     }
     if (tok_find(tok, "<|im_start|>") >= 0)        return TMPL_CHATML;
     if (tok_find(tok, "<|start_header_id|>") >= 0) return TMPL_LLAMA3;
@@ -32,6 +33,7 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "zephyr")) return TMPL_ZEPHYR;
     if (!strcmp(name, "gemma"))  return TMPL_GEMMA;
     if (!strcmp(name, "gemma4")) return TMPL_GEMMA4;
+    if (!strcmp(name, "mistral")) return TMPL_MISTRAL;
     if (!strcmp(name, "raw"))    return TMPL_RAW;
     return -1;
 }
@@ -42,6 +44,7 @@ const char *template_name(int t) {
         case TMPL_LLAMA3: return "llama3";  case TMPL_ZEPHYR: return "zephyr";
         case TMPL_GEMMA:  return "gemma";
         case TMPL_GEMMA4: return "gemma4";
+        case TMPL_MISTRAL: return "mistral";
         default: return "raw";
     }
 }
@@ -115,7 +118,8 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<start_of_turn>model\n", NULL, NULL);
         break;
     }
-    case TMPL_LLAMA2: {
+    case TMPL_LLAMA2:
+    case TMPL_MISTRAL: {
         // fold an initial system message into the first user turn
         const char *sys = NULL;
         for (int i = 0; i < n_msgs; i++) {
@@ -123,7 +127,11 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             if (!strcmp(m->role, "system")) { sys = m->content; continue; }
             if (!strcmp(m->role, "user")) {
                 if (sys) {
-                    off = emit(out, cap, off, "[INST] <<SYS>>\n%s\n<</SYS>>\n\n", sys, NULL);
+                    // mistral has no <<SYS>> block; its template accepts only
+                    // user and assistant, so the system text leads the turn
+                    off = tmpl == TMPL_MISTRAL
+                        ? emit(out, cap, off, "[INST] %s\n\n", sys, NULL)
+                        : emit(out, cap, off, "[INST] <<SYS>>\n%s\n<</SYS>>\n\n", sys, NULL);
                     off = emit(out, cap, off, "%s [/INST]", m->content, NULL);
                     sys = NULL;
                 } else {
