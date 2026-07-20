@@ -694,7 +694,10 @@ Status is tracked here; nothing is removed when finished, only marked.
 6. Shared CUDA weights.
 7. Continuous batching.
 8. Persistent/forkable KV prefixes.
-9. GPU Q8 KV cache. **IN PROGRESS**
+9. GPU Q8 KV cache. **PARTIAL** — Q8 KV works on CUDA, 1.88x context where
+   VRAM binds, fp16 still the default. Metal is a fallback stub (unverified),
+   and the retrieval/tool-selection quality gate is NOT met: we measured how
+   often output changes, not whether it gets worse.
 10. Public comparative torture suite and ongoing compatibility releases.
 
 The first public traction milestone is Phase 3. The largest serving-performance
