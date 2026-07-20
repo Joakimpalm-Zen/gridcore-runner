@@ -381,6 +381,12 @@ typedef struct {
     long  created;      // stamped once: every chunk of a stream reports the
                         // same creation time, as the buffered body does
     bool  role_sent;    // "role":"assistant" is emitted on the first delta only
+    // strict tool envelope, streaming: the generated document is demuxed into
+    // content and tool_calls deltas as it arrives, so the envelope itself is
+    // never what the client receives
+    tool_stream tsx;
+    bool  tsx_on;
+    int   tool_index;   // OpenAI tool_calls[].index; one call per turn for now
 } gen_ctx;
 
 // common prefix of every streamed chunk. `created` and `model` are required by
@@ -409,6 +415,7 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
     e->schema = NULL;
     schema_free(schema);
     if (g) {
+        tool_stream_free(&g->tsx);
         think_free(&g->ts);
         free(g->hold.s);
         free(g->reason.s);
@@ -439,9 +446,46 @@ static int send_text_delta(gen_ctx *g, int reasoning, const char *bytes, int n) 
     return chunk_send(g, &c);
 }
 
+// ---- tool_stream sinks: the demuxed envelope, as OpenAI streaming events
+
+static int sink_content(void *ud, const char *b, int n) {
+    return send_text_delta(ud, 0, b, n);
+}
+
+// the opening event of a call carries everything that identifies it; the
+// deltas that follow carry argument text only, keyed by the same index
+static int sink_call_begin(void *ud, const char *name) {
+    gen_ctx *g = ud;
+    if (g->dead) return 1;
+    sbuf c = {0};
+    chunk_open(g, &c);
+    sb_lit(&c, "\"delta\":{");
+    if (!g->role_sent) { sb_lit(&c, "\"role\":\"assistant\","); g->role_sent = true; }
+    sb_fmt(&c, "\"tool_calls\":[{\"index\":%d,\"id\":\"call_%d\","
+               "\"type\":\"function\",\"function\":{\"name\":\"",
+           g->tool_index, g->tool_index);
+    sb_esc(&c, name, strlen(name));
+    sb_lit(&c, "\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}");
+    return chunk_send(g, &c);
+}
+
+static int sink_call_args(void *ud, const char *b, int n) {
+    gen_ctx *g = ud;
+    if (g->dead) return 1;
+    sbuf c = {0};
+    chunk_open(g, &c);
+    sb_fmt(&c, "\"delta\":{\"tool_calls\":[{\"index\":%d,\"function\":"
+               "{\"arguments\":\"", g->tool_index);
+    sb_esc(&c, b, n);
+    sb_lit(&c, "\"}}]},\"finish_reason\":null}]}");
+    return chunk_send(g, &c);
+}
+
 static int emit_channel(gen_ctx *g, int reasoning, const char *bytes, int n) {
     sb_put(reasoning ? &g->reason : &g->out, bytes, n);
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
+    // reasoning is its own channel and never part of the envelope document
+    if (!reasoning && g->tsx_on) return tool_stream_feed(&g->tsx, bytes, n);
     return send_text_delta(g, reasoning, bytes, n);
 }
 
@@ -768,6 +812,12 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
              atomic_fetch_add(&SV.req_counter, 1));
     // split thinking channels out of chat responses; raw completions stay raw
     think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);
+    if (stream && env) {
+        tool_stream_sink sink = { &g, sink_content, sink_call_begin,
+                                  sink_call_args };
+        tool_stream_init(&g.tsx, env, &sink);
+        g.tsx_on = true;
+    }
 
     if (stream) {
         const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -799,6 +849,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         g.hold.n = 0;
     }
     const char *finish = g.stopped || e->hit_stop ? "stop" : "length";
+    // a streamed call reports the same terminal reason a buffered one does
+    if (g.tsx_on && tool_stream_called(&g.tsx)) finish = "tool_calls";
 
     if (stream) {
         if (!g.dead) {
@@ -971,21 +1023,17 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
     //
     // Strict mode compiles them into a discriminated union that constrains
     // sampling, so the model cannot name an undeclared tool or malform its
-    // arguments. It applies to buffered requests only: a stream would send
-    // the envelope to the client as raw content, and streaming tool calls
-    // are Phase 2. Streams therefore keep the legacy declare-and-parse path,
-    // unchanged.
+    // arguments. It applies to streamed requests too: the envelope is
+    // demultiplexed as it is generated (tool_stream) rather than parsed
+    // afterward, so both paths reach the same call from the same guarantee.
     jv *tools = jv_get(req, "tools");
     tool_envelope env = {0};
-    bool strict = false;
-    if (!jv_bool(jv_get(req, "stream"), false)) {
-        char terr[224];
-        int rc = tool_envelope_build(tools, jv_get(req, "tool_choice"),
-                                     request_schema(req), &env,
-                                     terr, sizeof(terr));
-        if (rc < 0) { send_error(fd, 400, terr); return; }
-        strict = rc == 1;
-    }
+    char terr[224];
+    int rc = tool_envelope_build(tools, jv_get(req, "tool_choice"),
+                                 request_schema(req), &env,
+                                 terr, sizeof(terr));
+    if (rc < 0) { send_error(fd, 400, terr); return; }
+    bool strict = rc == 1;
     if (strict) {
         // one call per turn for now; silently ignoring a request for
         // several would leave the caller expecting calls it never gets

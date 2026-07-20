@@ -7,8 +7,10 @@ never promise against a random-weight test model: the tool name is always one
 that was declared, the arguments always parse, and they always conform to the
 declared parameter schema — even when ``max_tokens`` cuts generation short.
 
-Buffered requests only. Streaming tool calls are Phase 2 and are pinned by
-test_known_gap_no_tool_calls_in_stream in test_streaming.py.
+Phase 2 added the streaming counterpart: the same envelope is demultiplexed
+as it is generated. The event-level contract lives in test_streaming.py; what
+is asserted here is that the two paths agree, which is the property that makes
+"stream=True" a transport choice rather than a behaviour change.
 """
 
 import json
@@ -16,6 +18,7 @@ import json
 import pytest
 
 from harness import ProtocolError, SchemaError, validate_against_schema
+from test_streaming import collect_tool_calls
 
 BASE = {"messages": [{"role": "user", "content": "what is the weather?"}],
         "temperature": 0}
@@ -203,6 +206,64 @@ def test_a_parameterless_tool_is_callable(client):
     if name != "ping":
         raise ProtocolError("wrong tool called", request=r.name, got=name)
     json.loads(arguments)
+
+
+# -------------------------------------------------- buffered vs streamed
+# Phase 2 exit criterion. Both paths are driven by the same constrained
+# envelope, so a difference here means one of them is mapping it wrong —
+# which is exactly the class of bug that only shows up in production, where
+# clients stream and tests buffer.
+
+@pytest.mark.parametrize("choice,label", [
+    ("required", "required"),
+    ({"type": "function", "function": {"name": "add"}}, "named-add"),
+])
+def test_streamed_and_buffered_calls_are_equivalent(client, choice, label):
+    payload = dict(BASE, max_tokens=64, tools=TOOLS, tool_choice=choice)
+    b = client.chat(dict(payload), name=f"equiv-buffered-{label}")
+    b.expect_status(200)
+    st = client.chat_stream(dict(payload), name=f"equiv-stream-{label}")
+    st.expect_sse()
+
+    if st.finish_reason != b.finish_reason:
+        raise ProtocolError("finish_reason differs between the two paths",
+                            buffered=b.finish_reason, streamed=st.finish_reason)
+    _, bname, bargs = _only_call(b)
+    calls = collect_tool_calls(st)
+    if len(calls) != 1:
+        raise ProtocolError("streamed path produced a different number of "
+                            "calls", buffered=1, streamed=len(calls))
+    if calls[0]["name"] != bname:
+        raise ProtocolError("the two paths called different tools",
+                            buffered=bname, streamed=calls[0]["name"])
+    if calls[0]["id"] != _only_call(b)[0]:
+        raise ProtocolError("call id differs between the two paths",
+                            buffered=_only_call(b)[0], streamed=calls[0]["id"])
+    # arguments are compared as JSON, not as bytes: both are the same
+    # document, and only the document is what the caller executes
+    if json.loads(calls[0]["arguments"]) != json.loads(bargs):
+        raise ProtocolError("the two paths produced different arguments",
+                            buffered=bargs, streamed=calls[0]["arguments"])
+    _assert_conforms(b, calls[0]["name"], calls[0]["arguments"])
+
+
+def test_streamed_final_branch_matches_the_buffered_answer(client):
+    """The other half of the union: when the model answers instead of calling,
+    the streamed text must be the buffered text — unescaped, with no envelope
+    around it."""
+    payload = dict(BASE, max_tokens=48, tools=TOOLS, tool_choice="auto")
+    b = client.chat(dict(payload), name="equiv-buffered-auto")
+    b.expect_status(200)
+    st = client.chat_stream(dict(payload), name="equiv-stream-auto")
+    st.expect_sse()
+    if st.finish_reason != b.finish_reason:
+        raise ProtocolError("finish_reason differs between the two paths",
+                            buffered=b.finish_reason, streamed=st.finish_reason)
+    if b.finish_reason == "tool_calls":
+        return  # covered by the parametrized equivalence test above
+    if st.text != b.content:
+        raise ProtocolError("streamed final-branch text differs from buffered",
+                            buffered=b.content, streamed=st.text)
 
 
 # ------------------------------------------------------------ rejections

@@ -29,6 +29,14 @@ bool        jv_bool(jv *v, bool dflt);
 // returns bytes written, always NUL-terminates within cap
 size_t json_escape(const char *s, size_t n, char *out, size_t cap);
 
+// Inverse of one escape sequence, for callers decoding a JSON string as it
+// arrives rather than from a complete document. `s` points at the backslash
+// and `n` is how many bytes are readable from there. Decoded UTF-8 goes to
+// `out` (at most 4 bytes) with its length in *outn. Returns the input bytes
+// consumed, 0 when the sequence is incomplete and more input would settle it,
+// or -1 when it can never be valid.
+int json_unescape(const char *s, size_t n, char out[4], int *outn);
+
 // Growable string builder for assembling JSON/HTTP bodies.
 //
 // `failed` latches on allocation failure and every sb_* call then becomes a

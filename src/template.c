@@ -495,6 +495,263 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
     return 1;
 }
 
+// ------------------------------------- streaming envelope demultiplexer
+//
+// The buffered mapper above parses a finished document. A stream has no
+// finished document to parse, so the same decision is made incrementally:
+// hold bytes back until the discriminator is known, then forward everything
+// after it to the channel that branch selected. Holding back is what keeps
+// envelope syntax out of the client's `content` — by the time a byte is
+// forwarded, it is already known to be assistant text or tool arguments.
+
+enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_DONE };
+
+static void head_put(tool_stream *s, const char *b, size_t n) {
+    if (s->head_n + n + 1 > s->head_cap) {
+        size_t cap = s->head_cap ? s->head_cap * 2 : 128;
+        while (cap < s->head_n + n + 1) cap *= 2;
+        char *tmp = realloc(s->head, cap);
+        if (!tmp) { s->state = TS_DONE; return; }
+        s->head = tmp;
+        s->head_cap = cap;
+    }
+    memcpy(s->head + s->head_n, b, n);
+    s->head_n += n;
+    s->head[s->head_n] = 0;
+}
+
+static void head_drop(tool_stream *s, size_t upto) {
+    memmove(s->head, s->head + upto, s->head_n - upto);
+    s->head_n -= upto;
+    if (s->head) s->head[s->head_n] = 0;
+}
+
+static bool ts_ws(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+// index just past `"key" :` within head, or -1 while it has not arrived
+static long head_after_key(const tool_stream *s, const char *quoted_key) {
+    if (!s->head) return -1;
+    const char *at = strstr(s->head, quoted_key);
+    if (!at) return -1;
+    size_t i = (size_t)(at - s->head) + strlen(quoted_key);
+    while (i < s->head_n && ts_ws(s->head[i])) i++;
+    if (i >= s->head_n) return -1;
+    if (s->head[i] != ':') return -1;
+    return (long)(i + 1);
+}
+
+// with head[i] at an opening quote, the index just past the closing one
+static long head_str_end(const tool_stream *s, size_t i) {
+    for (size_t j = i + 1; j < s->head_n; j++) {
+        if (s->head[j] == '\\') { j++; continue; }
+        if (s->head[j] == '"') return (long)(j + 1);
+    }
+    return -1;
+}
+
+// forward raw JSON text of the selected value, dropping insignificant
+// whitespace so the concatenated deltas are the same document the buffered
+// path re-serializes
+static int ts_value(tool_stream *s, const char *b, int n) {
+    int rc = 0, run = -1;
+    int (*emit)(void *, const char *, int) =
+        s->called ? s->sink.call_args : s->sink.content;
+    #define TS_FLUSH(upto) do { \
+        if (run >= 0 && (upto) > run && emit) \
+            rc = emit(s->sink.ud, b + run, (upto) - run); \
+        run = -1; \
+    } while (0)
+
+    for (int i = 0; i < n && !rc; i++) {
+        char c = b[i];
+        if (s->in_str) {
+            if (s->esc)            s->esc = false;
+            else if (c == '\\')    s->esc = true;
+            else if (c == '"') {
+                s->in_str = false;
+                if (s->depth == 0) { // a bare string value ends here
+                    if (run < 0) run = i;
+                    TS_FLUSH(i + 1);
+                    s->state = TS_DONE;
+                    return rc;
+                }
+            }
+            if (run < 0) run = i;
+            continue;
+        }
+        if (ts_ws(c)) { TS_FLUSH(i); continue; }
+        if (s->depth == 0 && s->started) {
+            // a scalar value has begun and this byte closes our parent
+            if (c == ',' || c == '}' || c == ']') {
+                TS_FLUSH(i);
+                s->state = TS_DONE;
+                return rc;
+            }
+        }
+        s->started = true;
+        if (c == '"')                    s->in_str = true;
+        else if (c == '{' || c == '[')   s->depth++;
+        else if (c == '}' || c == ']') {
+            if (--s->depth <= 0) {
+                if (run < 0) run = i;
+                TS_FLUSH(i + 1);
+                s->state = TS_DONE;
+                return rc;
+            }
+        }
+        if (run < 0) run = i;
+    }
+    TS_FLUSH(n);
+    #undef TS_FLUSH
+    return rc;
+}
+
+// forward the `final` branch's content string, unescaped, so a streamed
+// answer is byte-identical to the buffered one
+static int ts_final_str(tool_stream *s, const char *b, int n) {
+    int rc = 0;
+    for (int i = 0; i < n && !rc; i++) {
+        char c = b[i];
+        if (s->n_pend) {
+            if (s->n_pend < (int)sizeof(s->pend)) s->pend[s->n_pend++] = c;
+            char out[4];
+            int outn = 0;
+            int used = json_unescape(s->pend, (size_t)s->n_pend, out, &outn);
+            if (used == 0) continue;             // still ambiguous
+            if (used < 0) { s->n_pend = 0; continue; }  // drop a bad escape
+            if (outn && s->sink.content)
+                rc = s->sink.content(s->sink.ud, out, outn);
+            // json_unescape may have declined a trailing byte (the lookahead
+            // that proved there was no surrogate pair): replay it
+            int left = s->n_pend - used;
+            memmove(s->pend, s->pend + used, (size_t)left);
+            s->n_pend = 0;
+            if (left > 0 && !rc) {
+                char tail[sizeof(s->pend)];
+                memcpy(tail, s->pend, (size_t)left);
+                rc = ts_final_str(s, tail, left);
+                if (s->state != TS_FINAL_STR) return rc;
+            }
+            continue;
+        }
+        if (c == '"') { s->state = TS_DONE; return rc; }
+        if (c == '\\') { s->pend[0] = c; s->n_pend = 1; continue; }
+        int run = i;
+        while (i < n && b[i] != '"' && b[i] != '\\') i++;
+        if (s->sink.content) rc = s->sink.content(s->sink.ud, b + run, i - run);
+        i--;
+    }
+    return rc;
+}
+
+// advance through the undecided prefix; returns non-zero when a sink asked to
+// stop. Runs until it needs more input or the branch has been resolved.
+static int ts_resolve(tool_stream *s) {
+    for (;;) {
+        switch (s->state) {
+        case TS_TOOL: {
+            long p = head_after_key(s, "\"tool\"");
+            if (p < 0) return 0;
+            size_t i = (size_t)p;
+            while (i < s->head_n && ts_ws(s->head[i])) i++;
+            if (i >= s->head_n) return 0;
+            if (s->head[i] != '"') { s->state = TS_DONE; return 0; }
+            long e = head_str_end(s, i);
+            if (e < 0) return 0;
+            size_t len = (size_t)e - i - 2;
+            s->name = malloc(len + 1);
+            if (!s->name) { s->state = TS_DONE; return 0; }
+            memcpy(s->name, s->head + i + 1, len);
+            s->name[len] = 0;
+            s->called = strcmp(s->name, FINAL_BRANCH) != 0;
+            head_drop(s, (size_t)e);
+            s->state = TS_ARGS;
+            // announce the call the moment the discriminator resolves: that
+            // is the earliest point at which it is known, and telling the
+            // client early is the reason to stream at all
+            if (s->called && s->sink.call_begin) {
+                int rc = s->sink.call_begin(s->sink.ud, s->name);
+                if (rc) return rc;
+            }
+            break;
+        }
+        case TS_ARGS: {
+            long p = head_after_key(s, "\"args\"");
+            if (p < 0) return 0;
+            size_t i = (size_t)p;
+            while (i < s->head_n && ts_ws(s->head[i])) i++;
+            if (i >= s->head_n) return 0;   // wait for the first value byte
+            head_drop(s, i);
+            if (s->called) {
+                s->state = TS_VALUE;
+            } else if (s->env && s->env->final_is_text) {
+                s->state = TS_FINAL_KEY;
+            } else {
+                // the caller asked for a schema-shaped answer: its own
+                // document is the reply, forwarded verbatim
+                s->state = TS_VALUE;
+            }
+            break;
+        }
+        case TS_FINAL_KEY: {
+            long p = head_after_key(s, "\"content\"");
+            if (p < 0) return 0;
+            size_t i = (size_t)p;
+            while (i < s->head_n && ts_ws(s->head[i])) i++;
+            if (i >= s->head_n) return 0;
+            if (s->head[i] != '"') { s->state = TS_DONE; return 0; }
+            head_drop(s, i + 1);
+            s->state = TS_FINAL_STR;
+            break;
+        }
+        default: {
+            // a streaming state: drain whatever is still buffered into it
+            if (!s->head_n) return 0;
+            char *buf = s->head;
+            size_t n = s->head_n;
+            s->head = NULL;
+            s->head_n = s->head_cap = 0;
+            int rc = tool_stream_feed(s, buf, (int)n);
+            free(buf);
+            return rc;
+        }
+        }
+    }
+}
+
+void tool_stream_init(tool_stream *s, const tool_envelope *e,
+                      const tool_stream_sink *sink) {
+    memset(s, 0, sizeof(*s));
+    s->env = e;
+    if (sink) s->sink = *sink;
+    s->state = TS_TOOL;
+}
+
+int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
+    if (n <= 0) return 0;
+    switch (s->state) {
+    case TS_DONE:      return 0;   // trailing envelope syntax: not the client's
+    case TS_VALUE:     return ts_value(s, bytes, n);
+    case TS_FINAL_STR: return ts_final_str(s, bytes, n);
+    default:
+        head_put(s, bytes, (size_t)n);
+        return ts_resolve(s);
+    }
+}
+
+bool tool_stream_called(const tool_stream *s) { return s->called; }
+
+void tool_stream_free(tool_stream *s) {
+    if (!s) return;
+    free(s->head);
+    free(s->name);
+    s->head = NULL;
+    s->name = NULL;
+    s->head_n = s->head_cap = 0;
+}
+
 int tool_calls_parse(sbuf *content, sbuf *tc) {
     if (!content->s) return 0;
     static const char OPEN[] = "<|tool_call>call:";
