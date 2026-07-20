@@ -74,12 +74,45 @@ def test_unsupported_schema_construct_is_rejected(client):
     ("min_p", 5, "sampling"),
     ("keep_alive", 1e300, "keep_alive"),
     ("top_logprobs", 999, "top_logprobs"),
+    # Wrong TYPE is rejected for the same reason wrong RANGE is: a value the
+    # server cannot use must not be replaced by a default the caller never
+    # asked for. Several HTTP layers stringify numbers out of form or
+    # env-derived config, so this is the common shape of the mistake.
+    ("temperature", "hot", "sampling"),
+    ("temperature", "0.7", "sampling"),
+    ("top_p", "0.9", "sampling"),
+    ("top_k", True, "sampling"),
+    ("min_p", [], "sampling"),
+    ("repeat_penalty", "1.1", "sampling"),
+    ("seed", "1234", "sampling"),
+    ("max_tokens", "eight", "max_tokens"),
+    ("max_completion_tokens", "eight", "max_tokens"),
+    ("keep_alive", "300", "keep_alive"),
+    ("top_logprobs", "2", "top_logprobs"),
+    ("logprobs", "true", "logprobs"),
 ])
 def test_out_of_range_scalar_is_rejected(client, field, value, contains):
     payload = dict(CHAT, **{field: value})
     if field == "top_logprobs":
         payload["logprobs"] = True
-    client.expect_400(payload, name=f"bad-{field}", contains=contains)
+    if field == "max_completion_tokens":
+        # max_tokens wins when both are present, so the alias is only
+        # reachable once the primary name is gone
+        payload.pop("max_tokens")
+    client.expect_400(payload, name=f"bad-{field}-{value!r}", contains=contains)
+
+
+@pytest.mark.parametrize("field", ["temperature", "top_p", "min_p", "top_k",
+                                   "seed", "repeat_penalty", "max_tokens",
+                                   "max_completion_tokens", "keep_alive",
+                                   "stop", "logprobs"])
+def test_explicit_null_scalar_reads_as_absent(client, field):
+    """The boundary of the rule above. Every mainstream OpenAI SDK serialises
+    an unset optional field as ``null`` rather than omitting it, so ``null``
+    must mean "absent" and take the default. Treating it as a wrong type
+    would 400 on ordinary traffic from an unmodified client."""
+    r = client.chat(dict(CHAT, **{field: None}), name=f"null-{field}")
+    r.expect_status(200)
 
 
 @pytest.mark.parametrize("stop,label", [
@@ -206,39 +239,14 @@ def test_extra_unknown_top_level_fields_are_tolerated(client):
 
 
 # ---------------------------------------------------------- known gaps
-# Both of the following are the *opposite* of the "reject, never ignore"
-# invariant above. They are pinned as-is because changing them is a src/
-# decision, and because an unpinned silent-ignore is exactly the kind of thing
-# that quietly widens.
-
-@pytest.mark.known_gap("unscheduled", "wrong-typed scalars fall back to the default silently")
-def test_known_gap_wrong_typed_scalar_is_ignored_not_rejected(client):
-    """KNOWN GAP — pins today's behaviour, do not read as desired.
-
-    ``request_number`` / ``request_max_tokens`` read a field only when it is
-    already J_NUM; any other type takes the server default. So an out-of-RANGE
-    number is a 400 while a wrong-TYPE value is silently ignored:
-
-        {"temperature": 1e300}   -> 400   (checked above)
-        {"temperature": "hot"}   -> 200, server default used
-
-    A client that sends a stringified number — which several HTTP layers
-    produce from form or env-derived config — gets a response generated with
-    settings it did not ask for and has no way to detect.
-
-    WHEN THIS IS FIXED: move these cases into the parametrized
-    test_out_of_range_scalar_is_rejected list above and delete this test.
-    """
-    for field, value in (("temperature", "hot"), ("top_p", "0.9"),
-                         ("top_k", True), ("max_tokens", "eight"),
-                         ("seed", "1234")):
-        r = client.chat(dict(CHAT, **{field: value}),
-                        name=f"wrong-typed-{field}")
-        if r.status == 400:
-            pytest.fail(f"{field}={value!r} is now rejected — the gap is closed, "
-                        f"move this case into test_out_of_range_scalar_is_rejected")
-        r.expect_status(200)
-
+# The following is the *opposite* of the "reject, never ignore" invariant
+# above. It is pinned as-is because changing it is a src/ decision, and
+# because an unpinned silent-ignore is exactly the kind of thing that quietly
+# widens.
+#
+# The wrong-typed-scalar gap that used to live here is CLOSED: those cases now
+# assert 400 in test_out_of_range_scalar_is_rejected, with the null-means-
+# absent boundary pinned by test_explicit_null_scalar_reads_as_absent.
 
 @pytest.mark.known_gap("unscheduled", "\"model\" is unvalidated unless the server is in registry mode")
 def test_known_gap_model_field_unvalidated_on_single_model_server(client):

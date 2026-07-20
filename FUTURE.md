@@ -209,48 +209,75 @@ hopeful model output afterward.
 
 ## Work
 
-- Compile OpenAI `tools[].function.parameters` into Runner schemas.
-- Synthesize a discriminated union containing one branch per tool.
-- Add a `final` branch for ordinary or schema-constrained final responses.
-- Support `tool_choice`: `auto`, `required`, `none`, and named function.
-- Reject unknown tools and arguments during token sampling.
-- Guarantee valid arguments when `max_tokens` truncates generation.
-- Map the generated envelope back into standard OpenAI `tool_calls`.
-- Initially support one call with `parallel_tool_calls:false`.
+- **DONE** Compile OpenAI `tools[].function.parameters` into Runner schemas.
+- **DONE** Synthesize a discriminated union containing one branch per tool.
+- **DONE** Add a `final` branch for ordinary or schema-constrained final
+  responses. A `response_format` schema in the same request becomes the shape
+  of that branch, so tools and structured output compile to one union.
+- **DONE** Support `tool_choice`: `auto`, `required`, `none`, and named
+  function. `none` declines strict mode rather than inventing a constraint.
+- **DONE** Reject unknown tools and arguments during token sampling.
+- **DONE** Guarantee valid arguments when `max_tokens` truncates generation
+  (`sval_close` completes the envelope to the schema's minimum).
+- **DONE** Map the generated envelope back into standard OpenAI `tool_calls`.
+- **DONE** Initially support one call with `parallel_tool_calls:false`;
+  `parallel_tool_calls:true` is rejected rather than silently ignored.
 - Add bounded multi-call arrays for `parallel_tool_calls:true`.
-- Remove dependence on post-generation tag parsing for strict requests while
-  retaining the existing parser as a compatibility fallback.
+- **PARTIAL** Remove dependence on post-generation tag parsing for strict
+  requests while retaining the existing parser as a compatibility fallback.
+  Done on the buffered path. Streaming requests still take the legacy
+  declare-and-parse path, because emitting the envelope as `tool_calls`
+  deltas is Phase 2 work; until then a stream would send the envelope to the
+  client as raw content.
 
 ## Exit Criteria
 
-- Tool arguments always conform to their declared JSON Schema.
-- The model cannot invent a tool name.
-- `finish_reason:"tool_calls"` is emitted correctly.
-- Truncated tool calls remain valid and executable.
-- Tools and `response_format` work in the same request.
+- **DONE (buffered)** Tool arguments always conform to their declared JSON
+  Schema.
+- **DONE (buffered)** The model cannot invent a tool name.
+- **DONE (buffered)** `finish_reason:"tool_calls"` is emitted correctly.
+- **DONE (buffered)** Truncated tool calls remain valid and executable.
+- **DONE (buffered)** Tools and `response_format` work in the same request.
+
+All five hold on the buffered path and are covered by
+`tests/test_tools.c` (envelope compiled and driven through the real `sval`
+validator) and `tests/conformance/test_tool_calls.py` (the same guarantees
+asserted over HTTP). The streaming path is Phase 2 and is unchanged.
 
 ## [carried over] Conformance holes to close here
 
 A review of the current surface against the "never silently ignore" invariant
-found these. The two response_format holes and the non-boolean `stream` are
-already fixed; the rest remain:
+found these. The two response_format holes and the non-boolean `stream` were
+already fixed; the two marked DONE below closed with this phase; the rest
+remain:
 
-- **~20 JSON Schema keywords are accepted and ignored**, including `pattern`,
-  `minimum`/`maximum`, `additionalProperties`, `allOf`, `$ref` and `format`.
-  Two are actively wrong rather than merely absent: `pattern` is dropped, so a
-  constrained string is unconstrained in exactly the way the caller asked it not
-  to be; and `additionalProperties: true` is dropped while the compiled object
-  enforces a *closed* property set, making output stricter than the schema
-  permits. An object schema with `required` but no `properties` silently drops
-  `required` entirely. Rejecting unknown keywords is the invariant-compliant
-  behaviour and belongs with the tool-schema compiler.
-- **Wrong-typed request values fall back to defaults instead of erroring.**
-  `request_number` cannot distinguish absent from wrong-typed, so
-  `"temperature": "0.7"` silently becomes the server default.
+- **DONE — ~20 JSON Schema keywords are accepted and ignored**, including
+  `pattern`, `minimum`/`maximum`, `additionalProperties`, `allOf`, `$ref` and
+  `format`. Two were actively wrong rather than merely absent: `pattern` was
+  dropped, so a constrained string was unconstrained in exactly the way the
+  caller asked it not to be; and `additionalProperties: true` was dropped
+  while the compiled object enforces a *closed* property set, making output
+  stricter than the schema permits. An object schema with `required` but no
+  `properties` silently dropped `required` entirely.
+  `schema.c` now checks every node against a type-aware allow-list and
+  rejects anything it cannot enforce. Pure annotations (`title`,
+  `description`, `default`, `examples`, ...) stay legal because they carry no
+  constraint. `additionalProperties: false` alongside declared properties is
+  accepted, being exactly what the compiled machine already does.
+- **DONE — Wrong-typed request values fall back to defaults instead of
+  erroring.** `request_number` could not distinguish absent from wrong-typed,
+  so `"temperature": "0.7"` silently became the server default. It, plus
+  `request_max_tokens`, `request_keep_alive` and the `stream` / `logprobs`
+  flags, now reject a value of the wrong type. `null` deliberately still
+  reads as absent, because mainstream OpenAI SDKs serialise unset optional
+  fields that way.
 - **Silently ignored fields**: `n`, `frequency_penalty`, `presence_penalty`,
-  `logit_bias`, `tool_choice`, `parallel_tool_calls`, `user`, and on embeddings
-  `encoding_format` and `dimensions`. (`repeat_penalty` was on this list and
-  is now an honoured request field.)
+  `logit_bias`, `user`, and on embeddings `encoding_format` and `dimensions`.
+  (`repeat_penalty` was on this list and is now an honoured request field.
+  `tool_choice` and `parallel_tool_calls` are now honoured on the buffered
+  path — `parallel_tool_calls:true` is rejected rather than ignored — but are
+  still ignored on the streaming path, which keeps the legacy tool handling
+  until Phase 2.)
 - **`logprobs` is honoured only on non-streaming chat**, silently dropped on
   streaming and on `/v1/completions`, and `top_logprobs` is not range-checked
   unless `logprobs` is set.

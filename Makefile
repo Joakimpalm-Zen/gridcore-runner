@@ -17,6 +17,7 @@ RUNNER_EXE = runner.exe
 TEST_JSON_SCHEMA = test-json-schema.exe
 TEST_TOKENIZER = test-tokenizer.exe
 TEST_TEMPLATE = test-template.exe
+TEST_TOOLS = test-tools.exe
 TEST_JSON_OOM = test-json-oom.exe
 TEST_TOKENIZER_OOM = test-tokenizer-oom.exe
 TEST_SCHEMA_OOM = test-schema-oom.exe
@@ -28,6 +29,7 @@ RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
 TEST_TEMPLATE = test-template
+TEST_TOOLS = test-tools
 TEST_JSON_OOM = test-json-oom
 TEST_TOKENIZER_OOM = test-tokenizer-oom
 TEST_SCHEMA_OOM = test-schema-oom
@@ -39,6 +41,7 @@ RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
 TEST_TEMPLATE = test-template
+TEST_TOOLS = test-tools
 TEST_JSON_OOM = test-json-oom
 TEST_TOKENIZER_OOM = test-tokenizer-oom
 TEST_SCHEMA_OOM = test-schema-oom
@@ -69,6 +72,13 @@ TEST_TMPL_SRC = tests/test_template.c src/gguf.c src/tokenizer.c src/template.c 
 $(TEST_TEMPLATE): $(TEST_TMPL_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_TMPL_SRC) -o $@ -lm
 
+# the strict tool envelope is only meaningful if the schema engine enforces
+# it, so schema.c/jsonmode.c compile in and the tests drive the real validator
+TEST_TOOLS_SRC = tests/test_tools.c src/gguf.c src/tokenizer.c src/template.c \
+                 src/schema.c src/jsonmode.c src/json.c src/compat.c src/quants.c
+$(TEST_TOOLS): $(TEST_TOOLS_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_TOOLS_SRC) -o $@ -lm
+
 # sampler presets and the greedy/penalty contract need no model, so the test
 # links src/sample.c alone
 $(TEST_SAMPLER): tests/test_sampler.c src/sample.c src/runner.h
@@ -93,7 +103,8 @@ test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
-      $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) test.gguf
+      $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
+      $(TEST_TOOLS) test.gguf
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)
 	./$(TEST_SCHEMA_OOM)
@@ -101,6 +112,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TOKENIZER)
 	./$(TEST_TOKENIZER_OOM)
 	./$(TEST_TEMPLATE)
+	./$(TEST_TOOLS)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 	else \

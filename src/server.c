@@ -469,36 +469,84 @@ static int gen_collect(void *ud, const char *bytes, int n) {
     return think_feed(&g->ts, bytes, n, gen_emit, g);
 }
 
+// A request field the server cannot use must be an error, never a silent
+// fallback to the default: the caller then gets a response generated with
+// settings it did not ask for and no way to detect it. Stringified numbers
+// are the common shape of the mistake — several HTTP layers produce them
+// from form or env-derived config.
+//
+// `null` is the deliberate exception and reads as absent. Every mainstream
+// OpenAI SDK serialises an unset optional field as null rather than omitting
+// it, so treating null as a wrong type would 400 on ordinary traffic from an
+// unmodified client.
+static bool absent(const jv *v) { return !v || v->type == J_NULL; }
+
 static bool request_number(jv *req, const char *key, double dflt,
                            double min, double max, double *out) {
     jv *v = jv_get(req, key);
-    double n = v && v->type == J_NUM ? v->num : dflt;
+    if (!absent(v) && v->type != J_NUM) return false;
+    double n = absent(v) ? dflt : v->num;
     if (!isfinite(n) || n < min || n > max) return false;
     *out = n;
     return true;
 }
 
+// negative sentinels: MT_UNLIMITED clamps to the context window later,
+// the other two are request errors with distinct messages
+enum { MT_BAD_TYPE = -3, MT_NON_FINITE = -2, MT_UNLIMITED = -1 };
+
 static int request_max_tokens(jv *req, int dflt) {
-    double v = jv_num(jv_get(req, "max_tokens"),
-               jv_num(jv_get(req, "max_completion_tokens"), dflt));
-    if (!isfinite(v)) return -2;
-    if (v < 0) return -1;
-    if (v > INT_MAX) return INT_MAX;
-    return (int)v;
+    jv *v = jv_get(req, "max_tokens");
+    if (absent(v)) v = jv_get(req, "max_completion_tokens");
+    if (absent(v)) return dflt;
+    if (v->type != J_NUM) return MT_BAD_TYPE;
+    if (!isfinite(v->num)) return MT_NON_FINITE;
+    if (v->num < 0) return MT_UNLIMITED;
+    if (v->num > INT_MAX) return INT_MAX;
+    return (int)v->num;
 }
 
 static bool request_keep_alive(jv *req, bool *present, int *seconds) {
     jv *v = jv_get(req, "keep_alive");
-    *present = v && v->type == J_NUM;
+    if (!absent(v) && v->type != J_NUM) return false;
+    *present = !absent(v);
     if (!*present) return true;
     if (!isfinite(v->num) || v->num > INT_MAX) return false;
     *seconds = v->num < 0 ? -1 : (int)v->num;
     return true;
 }
 
-// run one completion on a slot and write the HTTP response
+// a boolean request flag: absent takes the default, a non-boolean is an
+// error rather than a silent `false`
+static bool request_bool(jv *req, const char *key, bool dflt, bool *out) {
+    jv *v = jv_get(req, key);
+    if (absent(v)) { *out = dflt; return true; }
+    if (v->type != J_BOOL) return false;
+    *out = v->b;
+    return true;
+}
+
+// the caller's schema-constrained-output request: OpenAI response_format
+// {type:"json_schema", json_schema:{schema:{...}}} or an Ollama-style
+// "format" object. NULL when the request asked for no schema.
+static jv *request_schema(jv *req) {
+    jv *rf = jv_get(req, "response_format");
+    jv *sch = NULL;
+    if (rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_schema") == 0) {
+        jv *js = jv_get(rf, "json_schema");
+        sch = js ? (jv_get(js, "schema") ? jv_get(js, "schema") : js) : NULL;
+    }
+    jv *fmt = jv_get(req, "format");
+    if (!sch && fmt && fmt->type == J_OBJ) sch = fmt;
+    return sch;
+}
+
+// run one completion on a slot and write the HTTP response.
+// `env` is the strict tool-call envelope when the request opted into one; it
+// replaces the response_format schema, having already absorbed it as the
+// shape of its `final` branch.
 static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
-                           jv *req) {
+                           jv *req, const tool_envelope *env) {
     model_t *m = s->m;
     engine *e = &s->e;
 
@@ -529,21 +577,31 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
     s->smp.repeat_penalty = (float)repeat_penalty;
     if (seed > 0) s->smp.rng = (uint64_t)seed;
     int max_tokens = request_max_tokens(req, SV.n_predict_cap);
-    if (max_tokens == -2) {
+    if (max_tokens == MT_NON_FINITE) {
         send_error(fd, 400, "max_tokens out of range");
         return;
     }
-    jv *stream_v = jv_get(req, "stream");
-    if (stream_v && stream_v->type != J_BOOL) {
-        // "stream":"true" used to read as false and answer with a buffered
-        // body, leaving a client that expected SSE waiting on events that
-        // would never arrive
+    if (max_tokens == MT_BAD_TYPE) {
+        send_error(fd, 400, "max_tokens must be a number");
+        return;
+    }
+    // "stream":"true" used to read as false and answer with a buffered
+    // body, leaving a client that expected SSE waiting on events that
+    // would never arrive
+    bool stream = false;
+    if (!request_bool(req, "stream", false, &stream)) {
         send_error(fd, 400, "stream must be a boolean");
         return;
     }
-    bool stream = jv_bool(stream_v, false);
     // OpenAI logprobs (chat, buffered responses only)
-    bool want_lp = chat && !stream && jv_bool(jv_get(req, "logprobs"), false);
+    // chat only: on /v1/completions OpenAI defines logprobs as an integer
+    // count, so a number there is not a type error
+    bool lp_on = false;
+    if (chat && !request_bool(req, "logprobs", false, &lp_on)) {
+        send_error(fd, 400, "logprobs must be a boolean");
+        return;
+    }
+    bool want_lp = chat && !stream && lp_on;
     double lp_num = 0;
     if (want_lp && !request_number(req, "top_logprobs", 0, 0, 20, &lp_num)) {
         send_error(fd, 400, "top_logprobs out of range");
@@ -609,17 +667,23 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         }
     }
     e->json_mode = rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_object") == 0;
-    // schema-constrained decoding: OpenAI response_format {type:"json_schema",
-    // json_schema:{schema:{...}}} or an Ollama-style "format" schema object
+    // Constrained decoding. The tool envelope wins when present: it already
+    // contains the caller's response_format schema as its `final` branch, so
+    // compiling that separately would drop the tool branches.
     snode *schema = NULL;
-    jv *sch = NULL;
-    if (rf && strcmp(jv_str(jv_get(rf, "type"), ""), "json_schema") == 0) {
-        jv *js = jv_get(rf, "json_schema");
-        sch = js ? (jv_get(js, "schema") ? jv_get(js, "schema") : js) : NULL;
-    }
-    jv *fmt = jv_get(req, "format");
-    if (!sch && fmt && fmt->type == J_OBJ) sch = fmt;
-    if (sch) {
+    jv *sch = env ? NULL : request_schema(req);
+    if (env) {
+        char serr[128] = "envelope did not parse";
+        jv *ej = json_parse(env->schema_src, strlen(env->schema_src));
+        schema = ej ? schema_compile(ej, serr, sizeof(serr)) : NULL;
+        jv_free(ej);
+        if (!schema) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "unsupported tool schema: %s", serr);
+            send_error(fd, 400, msg);
+            return;
+        }
+    } else if (sch) {
         char serr[128];
         schema = schema_compile(sch, serr, sizeof(serr));
         if (!schema) {
@@ -721,11 +785,34 @@ static void run_completion(slot_t *s, int fd, const char *prompt, bool chat,
         }
     } else {
         sbuf tc = {0};
-        int n_tc = chat ? tool_calls_parse(&g.out, &tc) : 0;
-        if (n_tc) {
-            finish = "tool_calls";
-            g.out.n = 0; // OpenAI convention: no content alongside tool_calls
-                         // (whatever followed was the model faking a result)
+        int n_tc = 0;
+        if (env) {
+            // Strict mode: the whole response IS the envelope, guaranteed by
+            // the schema rather than fished out of free text. A truncated
+            // call was closed to a legal document by sval_close, so it is
+            // still executable and still reports "tool_calls".
+            sbuf mapped = {0};
+            int rc = tool_envelope_map(env, g.out.s ? g.out.s : "", g.out.n,
+                                       &mapped, &tc);
+            if (rc == 1) {
+                n_tc = 1;
+                finish = "tool_calls";
+                g.out.n = 0;
+                free(mapped.s);
+            } else if (rc == 0) {
+                free(g.out.s);
+                g.out = mapped;      // the final branch's payload is the reply
+            } else {
+                free(mapped.s);      // unparseable: hand back what was generated
+            }
+        } else if (chat) {
+            n_tc = tool_calls_parse(&g.out, &tc);
+            if (n_tc) {
+                finish = "tool_calls";
+                g.out.n = 0; // OpenAI convention: no content alongside
+                             // tool_calls (whatever followed was the model
+                             // faking a result)
+            }
         }
         sbuf r = {0};
         sb_fmt(&r, "{\"id\":\"%s\",\"object\":\"%s\",\"created\":%ld,\"model\":\"", g.id,
@@ -837,9 +924,45 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
         send_error(fd, 400, "missing messages");
         return;
     }
-    // OpenAI "tools" become a leading system turn (template.c owns the syntax)
+    // OpenAI "tools" become a leading system turn (template.c owns the syntax).
+    //
+    // Strict mode compiles them into a discriminated union that constrains
+    // sampling, so the model cannot name an undeclared tool or malform its
+    // arguments. It applies to buffered requests only: a stream would send
+    // the envelope to the client as raw content, and streaming tool calls
+    // are Phase 2. Streams therefore keep the legacy declare-and-parse path,
+    // unchanged.
+    jv *tools = jv_get(req, "tools");
+    tool_envelope env = {0};
+    bool strict = false;
+    if (!jv_bool(jv_get(req, "stream"), false)) {
+        char terr[224];
+        int rc = tool_envelope_build(tools, jv_get(req, "tool_choice"),
+                                     request_schema(req), &env,
+                                     terr, sizeof(terr));
+        if (rc < 0) { send_error(fd, 400, terr); return; }
+        strict = rc == 1;
+    }
+    if (strict) {
+        // one call per turn for now; silently ignoring a request for
+        // several would leave the caller expecting calls it never gets
+        bool parallel = false;
+        if (!request_bool(req, "parallel_tool_calls", false, &parallel)) {
+            tool_envelope_free(&env);
+            send_error(fd, 400, "parallel_tool_calls must be a boolean");
+            return;
+        }
+        if (parallel) {
+            tool_envelope_free(&env);
+            send_error(fd, 400,
+                       "parallel_tool_calls:true is not supported yet; "
+                       "one call per turn");
+            return;
+        }
+    }
     sbuf ts = {0};
-    tools_render(jv_get(req, "tools"), &ts);
+    if (strict) sb_put(&ts, env.system_turn, strlen(env.system_turn));
+    else        tools_render(tools, &ts);
     chat_msg *cm = malloc(sizeof(chat_msg) * (msgs->n + 1));
     char **owned = malloc(sizeof(char *) * msgs->n);
     size_t total = ts.n + 64;
@@ -857,23 +980,25 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
         free(owned);
         free(cm);
         free(ts.s);
+        tool_envelope_free(&env);
         send_error(fd, 400, "no message content");
         return;
     }
     char *prompt = malloc(total + 256);
     render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
-    run_completion(s, fd, prompt, true, req);
+    run_completion(s, fd, prompt, true, req, strict ? &env : NULL);
     free(prompt);
     for (int i = 0; i < n_own; i++) free(owned[i]);
     free(owned);
     free(cm);
     free(ts.s);
+    tool_envelope_free(&env);
 }
 
 static void handle_completion(slot_t *s, int fd, jv *req) {
     const char *prompt = jv_str(jv_get(req, "prompt"), NULL);
     if (!prompt) { send_error(fd, 400, "missing prompt"); return; }
-    run_completion(s, fd, prompt, false, req);
+    run_completion(s, fd, prompt, false, req, NULL);
 }
 
 static void handle_embeddings(slot_t *s, int fd, jv *req) {

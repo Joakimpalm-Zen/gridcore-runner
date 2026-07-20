@@ -263,6 +263,238 @@ void tools_render(const jv *tools, sbuf *out) {
     jv_dump(tools, out);
 }
 
+// ------------------------------------------- strict tool-call envelope
+
+// The discriminator value of the no-call branch. It shares a namespace with
+// the declared tool names, so a tool actually called "final" is rejected
+// rather than silently shadowed.
+#define FINAL_BRANCH "final"
+
+// what the final branch accepts when the caller asked for plain text
+#define FINAL_TEXT_SCHEMA \
+    "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"}}," \
+    "\"required\":[\"content\"]}"
+
+static void envelope_branch(sbuf *s, bool first, const char *name,
+                            const jv *args_schema, const char *args_literal) {
+    if (!first) sb_lit(s, ",");
+    // property order matters: schema.c dispatches the union on `tool`, so the
+    // discriminator must be decided before `args` is sampled
+    sb_lit(s, "{\"type\":\"object\",\"properties\":{\"tool\":{\"const\":\"");
+    sb_esc(s, name, strlen(name));
+    sb_lit(s, "\"},\"args\":");
+    if (args_schema) jv_dump(args_schema, s);
+    else             sb_lit(s, args_literal);
+    sb_lit(s, "},\"required\":[\"tool\",\"args\"]}");
+}
+
+// tools[i].function.name, or NULL when the declaration is unusable
+static const char *tool_name_of(jv *tool, char *err, int errcap) {
+    if (!tool || tool->type != J_OBJ) {
+        snprintf(err, errcap, "each tools[] entry must be an object");
+        return NULL;
+    }
+    const char *type = jv_str(jv_get(tool, "type"), "function");
+    if (strcmp(type, "function") != 0) {
+        snprintf(err, errcap, "tools[].type must be \"function\"");
+        return NULL;
+    }
+    jv *fn = jv_get(tool, "function");
+    if (!fn || fn->type != J_OBJ) {
+        snprintf(err, errcap, "tools[].function must be an object");
+        return NULL;
+    }
+    const char *name = jv_str(jv_get(fn, "name"), NULL);
+    if (!name || !name[0]) {
+        snprintf(err, errcap, "tools[].function.name must be a non-empty string");
+        return NULL;
+    }
+    if (!strcmp(name, FINAL_BRANCH)) {
+        snprintf(err, errcap,
+                 "tool name \"" FINAL_BRANCH "\" is reserved for the no-call branch");
+        return NULL;
+    }
+    return name;
+}
+
+static int tool_choice_kind(jv *choice, const char **named, char *err, int errcap) {
+    *named = NULL;
+    if (!choice || choice->type == J_NULL) return TCH_AUTO;
+    if (choice->type == J_STR) {
+        if (!strcmp(choice->str, "auto"))     return TCH_AUTO;
+        if (!strcmp(choice->str, "none"))     return TCH_NONE;
+        if (!strcmp(choice->str, "required")) return TCH_REQUIRED;
+    } else if (choice->type == J_OBJ) {
+        const char *type = jv_str(jv_get(choice, "type"), "function");
+        const char *name = jv_str(jv_get(jv_get(choice, "function"), "name"), NULL);
+        if (!strcmp(type, "function") && name && name[0]) {
+            *named = name;
+            return TCH_NAMED;
+        }
+    }
+    snprintf(err, errcap, "tool_choice must be \"auto\", \"none\", \"required\" "
+                          "or {\"type\":\"function\",\"function\":{\"name\":...}}");
+    return -1;
+}
+
+int tool_envelope_build(jv *tools, jv *choice, jv *final_schema,
+                        tool_envelope *out, char *err, int errcap) {
+    memset(out, 0, sizeof(*out));
+    err[0] = 0;
+
+    const char *named = NULL;
+    int kind = tool_choice_kind(choice, &named, err, errcap);
+    if (kind < 0) return -1;
+
+    bool have_tools = tools && tools->type == J_ARR && tools->n > 0;
+    if (!have_tools && tools && tools->type != J_ARR && tools->type != J_NULL) {
+        snprintf(err, errcap, "tools must be an array");
+        return -1;
+    }
+    if (!have_tools) {
+        // asking for a tool call with nothing to call is a contradiction, not
+        // a request to answer normally
+        if (kind == TCH_REQUIRED || kind == TCH_NAMED) {
+            snprintf(err, errcap, "tool_choice requires a non-empty tools array");
+            return -1;
+        }
+        return 0;
+    }
+    if (kind == TCH_NONE) return 0;   // not a union this engine can express
+    // schema.c caps a discriminated union at 60 branches; the final branch
+    // takes one of them under "auto"
+    if (tools->n > 59) {
+        snprintf(err, errcap, "too many tools (max 59)");
+        return -1;
+    }
+
+    out->kind = kind;
+    out->final_is_text = final_schema == NULL;
+
+    sbuf schema = { 0 }, turn = { 0 };
+    sb_lit(&schema, "{\"oneOf\":[");
+    // The wording matters as much as the schema: sampling is constrained to
+    // the union either way, but a model that does not understand the choice
+    // spends its one branch on a tool call for a question that needed none.
+    // So the no-call branch is stated FIRST and named as the default.
+    sb_lit(&turn, "Reply with exactly one JSON object and nothing else.\n");
+    if (kind == TCH_AUTO) {
+        sb_lit(&turn, "To answer the user directly, reply:\n");
+        if (out->final_is_text)
+            sb_lit(&turn, "  {\"tool\": \"" FINAL_BRANCH "\", "
+                          "\"args\": {\"content\": \"<your answer>\"}}\n");
+        else
+            sb_lit(&turn, "  {\"tool\": \"" FINAL_BRANCH "\", "
+                          "\"args\": <the JSON object you were asked for>}\n");
+        sb_lit(&turn, "To call a tool instead, reply:\n"
+                      "  {\"tool\": \"<tool name>\", \"args\": {<arguments>}}\n"
+                      "Call a tool only when it is needed to answer; "
+                      "otherwise answer directly.\n");
+    } else {
+        sb_lit(&turn, "You must call a tool. Reply:\n"
+                      "  {\"tool\": \"<tool name>\", \"args\": {<arguments>}}\n");
+        if (kind == TCH_NAMED)
+            sb_lit(&turn, "You must call the tool named below.\n");
+    }
+    sb_lit(&turn, "Available tools:\n");
+
+    int emitted = 0;
+    for (int i = 0; i < tools->n; i++) {
+        const char *name = tool_name_of(tools->items[i], err, errcap);
+        if (!name) goto bad;
+        for (int j = 0; j < i; j++) {
+            const char *prev = jv_str(jv_get(jv_get(tools->items[j], "function"),
+                                             "name"), NULL);
+            if (prev && !strcmp(prev, name)) {
+                snprintf(err, errcap, "duplicate tool name '%.60s'", name);
+                goto bad;
+            }
+        }
+        if (kind == TCH_NAMED && strcmp(name, named) != 0) continue;
+
+        jv *fn = jv_get(tools->items[i], "function");
+        jv *params = jv_get(fn, "parameters");
+        if (params && params->type != J_OBJ && params->type != J_NULL) {
+            snprintf(err, errcap, "tools[].function.parameters must be an object");
+            goto bad;
+        }
+        // no parameters declared: any object, which is as tight as this
+        // compiler can express without a properties map
+        envelope_branch(&schema, emitted == 0, name,
+                        params && params->type == J_OBJ ? params : NULL,
+                        "{\"type\":\"object\"}");
+        emitted++;
+
+        jv_dump(tools->items[i], &turn);
+        sb_lit(&turn, "\n");
+    }
+    if (kind == TCH_NAMED && emitted == 0) {
+        snprintf(err, errcap, "tool_choice names a tool that is not declared");
+        goto bad;
+    }
+    if (kind == TCH_AUTO)
+        envelope_branch(&schema, emitted == 0, FINAL_BRANCH, final_schema,
+                        FINAL_TEXT_SCHEMA);
+    sb_lit(&schema, "]}");
+
+    if (schema.failed || turn.failed || !schema.s || !turn.s) {
+        snprintf(err, errcap, "out of memory building the tool envelope");
+        goto bad;
+    }
+    out->schema_src = schema.s;
+    out->system_turn = turn.s;
+    return 1;
+bad:
+    free(schema.s);
+    free(turn.s);
+    memset(out, 0, sizeof(*out));
+    return -1;
+}
+
+void tool_envelope_free(tool_envelope *e) {
+    if (!e) return;
+    free(e->schema_src);
+    free(e->system_turn);
+    e->schema_src = e->system_turn = NULL;
+}
+
+int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
+                      sbuf *content, sbuf *tc) {
+    jv *v = json_parse(doc, n);
+    if (!v || v->type != J_OBJ) { jv_free(v); return -1; }
+    const char *tool = jv_str(jv_get(v, "tool"), NULL);
+    jv *args = jv_get(v, "args");
+    if (!tool) { jv_free(v); return -1; }
+
+    if (!strcmp(tool, FINAL_BRANCH)) {
+        if (e->final_is_text) {
+            const char *text = jv_str(jv_get(args, "content"), "");
+            sb_put(content, text, strlen(text));
+        } else if (args) {
+            // the caller asked for a schema-shaped answer: hand back its own
+            // document verbatim, not a field lifted out of it
+            jv_dump(args, content);
+        }
+        jv_free(v);
+        return 0;
+    }
+
+    // OpenAI carries arguments as a JSON *string*, so the document is dumped
+    // and then escaped into the field
+    sbuf a = { 0 };
+    if (args) jv_dump(args, &a);
+    else      sb_lit(&a, "{}");
+    sb_lit(tc, "{\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"");
+    sb_esc(tc, tool, strlen(tool));
+    sb_lit(tc, "\",\"arguments\":\"");
+    sb_esc(tc, a.s ? a.s : "{}", a.s ? a.n : 2);
+    sb_lit(tc, "\"}}");
+    if (a.failed) tc->failed = true;
+    free(a.s);
+    jv_free(v);
+    return 1;
+}
+
 int tool_calls_parse(sbuf *content, sbuf *tc) {
     if (!content->s) return 0;
     static const char OPEN[] = "<|tool_call>call:";

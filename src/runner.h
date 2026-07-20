@@ -489,6 +489,47 @@ void tools_render(const struct jv *tools, struct sbuf *out);
 // returns the call count, content is compacted in place
 int  tool_calls_parse(struct sbuf *content, struct sbuf *tc);
 
+// ------------------------------------------- strict tool-call envelope
+//
+// OpenAI tools[] compiled into a discriminated union — one branch per tool
+// plus a `final` branch for an ordinary or schema-constrained answer:
+//
+//   {"tool":"get_weather","args":{"city":"Oslo"}}
+//   {"tool":"final","args":{"content":"it is cold"}}
+//
+// Constraining sampling to that union is what makes the guarantee: the model
+// cannot name a tool that was not declared, cannot invent an argument key or
+// get its type wrong, and a max_tokens truncation closes to a document that
+// is still a legal call. That replaces parsing hopeful output afterward,
+// which is what tool_calls_parse above does and remains as the fallback for
+// requests that do not opt in.
+enum { TCH_AUTO, TCH_REQUIRED, TCH_NONE, TCH_NAMED };
+
+typedef struct {
+    int   kind;           // TCH_*
+    char *schema_src;     // envelope JSON schema, for schema_compile (owned)
+    char *system_turn;    // system message teaching the envelope (owned)
+    bool  final_is_text;  // final branch is {"content": "..."} rather than
+                          // the caller's own response_format schema
+} tool_envelope;
+
+// Build the envelope for one request. `final_schema` is the caller's
+// response_format schema, or NULL for a plain text answer. Returns
+//    1  strict mode applies; free with tool_envelope_free
+//    0  strict mode does not apply (no tools, or tool_choice "none")
+//   -1  malformed tools / tool_choice; err holds the client-facing reason
+int  tool_envelope_build(struct jv *tools, struct jv *tool_choice,
+                         struct jv *final_schema, tool_envelope *out,
+                         char *err, int errcap);
+void tool_envelope_free(tool_envelope *e);
+
+// Map a generated envelope document back to the OpenAI response shape.
+// Returns 1 for a tool call (one tool_calls[] item appended to tc), 0 for
+// the final branch (assistant content appended to content), -1 when doc is
+// not a well-formed envelope.
+int  tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
+                       struct sbuf *content, struct sbuf *tc);
+
 // streaming splitter for thinking-tag models: bytes between
 // open and close tags, including architectures that interleave them with
 // plain text — reach the callback as reasoning (reasoning=1), the rest as

@@ -161,6 +161,107 @@ static void test_schema_rejects_escaped_keys(void) {
     jv_free(schema_json);
 }
 
+// A keyword the compiler cannot enforce must be a compile error, not a
+// silently weaker constraint. `pattern` is the headline case: dropping it
+// leaves a string unconstrained in exactly the way the caller asked it not
+// to be.
+static void test_schema_rejects_unenforceable_keywords(void) {
+    static const char *const bad[] = {
+        "{\"type\":\"string\",\"pattern\":\"^[a-z]+$\"}",
+        "{\"type\":\"string\",\"format\":\"date-time\"}",
+        "{\"type\":\"integer\",\"minimum\":0}",
+        "{\"type\":\"integer\",\"maximum\":10}",
+        "{\"type\":\"integer\",\"multipleOf\":2}",
+        "{\"allOf\":[{\"type\":\"string\"}]}",
+        "{\"not\":{\"type\":\"string\"}}",
+        "{\"$ref\":\"#/$defs/x\"}",
+        "{\"type\":\"array\",\"uniqueItems\":true}",
+        "{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\"}]}",
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
+            "\"patternProperties\":{\"^x\":{\"type\":\"string\"}}}",
+        // nested: the check must run at every depth, not just the root
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\","
+            "\"pattern\":\"x\"}}}",
+        // keyword that belongs to a different type than the one declared
+        "{\"type\":\"string\",\"minItems\":2}",
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
+            "\"maxLength\":3}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        jv *schema_json = json_parse(bad[i], strlen(bad[i]));
+        assert(schema_json != NULL);
+        char err[128];
+        snode *schema = schema_compile(schema_json, err, sizeof(err));
+        assert(schema == NULL);
+        assert(strstr(err, "keyword") != NULL);
+        jv_free(schema_json);
+    }
+}
+
+// The other half of the invariant: keywords that are pure annotations carry
+// no constraint, so ignoring them ignores nothing. Real OpenAI tool payloads
+// are full of them and must keep compiling.
+static void test_schema_accepts_annotation_keywords(void) {
+    const char *src =
+        "{\"type\":\"object\",\"title\":\"T\",\"description\":\"d\","
+        "\"$schema\":\"https://json-schema.org/draft/2020-12/schema\","
+        "\"properties\":{\"a\":{\"type\":\"string\",\"description\":\"d\","
+        "\"default\":\"x\",\"examples\":[\"y\"]}},\"required\":[\"a\"],"
+        "\"additionalProperties\":false}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
+// The compiled object enforces a CLOSED property set. `false` asks for
+// exactly that and compiles; `true` asks for the opposite and used to be
+// dropped, making the output STRICTER than the schema permitted.
+static void test_schema_additional_properties(void) {
+    static const char *const bad[] = {
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
+            "\"additionalProperties\":true}",
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
+            "\"additionalProperties\":{\"type\":\"string\"}}",
+        // no properties: the generic any-object machine cannot close the set
+        "{\"type\":\"object\",\"additionalProperties\":false}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        jv *schema_json = json_parse(bad[i], strlen(bad[i]));
+        assert(schema_json != NULL);
+        char err[128];
+        snode *schema = schema_compile(schema_json, err, sizeof(err));
+        assert(schema == NULL);
+        assert(strstr(err, "additionalProperties") != NULL);
+        jv_free(schema_json);
+    }
+}
+
+// `required` with no `properties` compiled to the open any-object machine,
+// which enforces no key at all — the requirement vanished silently.
+static void test_schema_rejects_required_without_properties(void) {
+    const char *src = "{\"type\":\"object\",\"required\":[\"a\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema == NULL);
+    assert(strstr(err, "required") != NULL);
+    jv_free(schema_json);
+
+    // an empty required list asks for nothing, so it stays legal
+    const char *ok = "{\"type\":\"object\",\"required\":[]}";
+    schema_json = json_parse(ok, strlen(ok));
+    assert(schema_json != NULL);
+    schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 static void test_schema_oneof_const_scalars(void) {
     const char *src =
         "{\"oneOf\":[{\"const\":\"read_file\"},{\"const\":\"done\"}]}";
@@ -563,6 +664,10 @@ int main(void) {
     test_schema_rejects_bad_bounds();
     test_schema_rejects_non_integer_or_huge_bounds();
     test_schema_rejects_escaped_keys();
+    test_schema_rejects_unenforceable_keywords();
+    test_schema_additional_properties();
+    test_schema_rejects_required_without_properties();
+    test_schema_accepts_annotation_keywords();
     test_schema_oneof_const_scalars();
     test_schema_oneof_const_numeric_prefixes();
     test_schema_rejects_oversized_oneof_const_scalars();
