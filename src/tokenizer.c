@@ -175,7 +175,8 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     // than being silently retokenized by rules it was not checked against.
     const char *pre = gguf_get_str(g, "tokenizer.ggml.pre", "");
     if (strcmp(pre, "llama-bpe") == 0)   t->pre = TOK_PRE_LLAMA3;
-    else if (strcmp(pre, "qwen2") == 0)  t->pre = TOK_PRE_QWEN2;
+    else if (strcmp(pre, "qwen2") == 0 ||
+             strcmp(pre, "qwen35") == 0) t->pre = TOK_PRE_QWEN2;
     else if (strcmp(pre, "smollm") == 0) t->pre = TOK_PRE_SMOLLM;
     else if (strcmp(pre, "tekken") == 0) t->pre = TOK_PRE_TEKKEN;
     else                                 t->pre = TOK_PRE_GPT2;
@@ -372,10 +373,26 @@ static bool cp_symbol(uint32_t c) {
            (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0x1F000 && c <= 0x1FAFF);
 }
 
+// Combining marks are Unicode category M, not L. Treating every non-symbol
+// codepoint above ASCII as a letter incorrectly glued Indic/Thai vowel signs
+// and viramas into \p{L}+ runs. These are the mark blocks exercised by the
+// supported tokenizer corpus; expand alongside differential fixtures when a
+// new script is admitted.
+static bool cp_mark(uint32_t c) {
+    return (c >= 0x0300 && c <= 0x036F) || // Combining Diacritical Marks
+           (c >= 0x0900 && c <= 0x0903) || // Devanagari signs
+           (c >= 0x093A && c <= 0x094F) ||
+           (c >= 0x0951 && c <= 0x0957) ||
+           (c >= 0x0962 && c <= 0x0963) ||
+           c == 0x0E31 ||                  // Thai combining vowels/tones
+           (c >= 0x0E34 && c <= 0x0E3A) ||
+           (c >= 0x0E47 && c <= 0x0E4E);
+}
+
 static bool cp_letter(uint32_t c) {
     if (cp_class(c) == 3) return false;
     return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            (c >= 0x80 && !cp_symbol(c)));
+            (c >= 0x80 && !cp_symbol(c) && !cp_mark(c)));
 }
 
 static bool cp_digit(uint32_t c)  { return c >= '0' && c <= '9'; }

@@ -98,6 +98,44 @@ static void test_detect_by_marker(tokenizer *t) {
     assert(template_detect("<|user|>", t) == TMPL_ZEPHYR);
 }
 
+static void test_detect_and_render_ornith(tokenizer *t) {
+    const char *ornith =
+        "{% if tools %}<tools>{% endif %}"
+        "<tool_call>\\n<function=example_function_name>"
+        "{% if add_generation_prompt %}<think>\\n{% endif %}"
+        "<|im_start|>";
+    assert(template_detect(ornith, t) == TMPL_ORNITH);
+
+    const chat_msg msgs[] = {
+        { "system", "SYS" },
+        { "user", "HI" },
+        { "assistant", "<think>\nPLAN\n</think>\n\nANSWER" },
+    };
+    char out[1024];
+    render_messages(TMPL_ORNITH, msgs, 3, true, out, sizeof(out));
+    assert(strcmp(out,
+        "<|im_start|>system\nSYS<|im_end|>\n"
+        "<|im_start|>user\nHI<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\nPLAN\n</think>\n\nANSWER<|im_end|>\n"
+        "<|im_start|>assistant\n") == 0);
+}
+
+static void test_ornith_groups_consecutive_tool_responses(void) {
+    const chat_msg msgs[] = {
+        { "user", "HI" },
+        { "assistant", "<think>\nPLAN\n</think>\n\n<tool_call>x</tool_call>" },
+        { "user", "<tool_response>\nONE\n</tool_response>" },
+        { "user", "<tool_response>\nTWO\n</tool_response>" },
+    };
+    char out[1024];
+    render_messages(TMPL_ORNITH, msgs, 4, true, out, sizeof(out));
+    assert(strstr(out,
+        "<|im_start|>user\n"
+        "<tool_response>\nONE\n</tool_response>\n"
+        "<tool_response>\nTWO\n</tool_response><|im_end|>\n"
+        "<|im_start|>assistant\n"));
+}
+
 // The system prompt is folded into the first user turn either way; only the
 // framing differs.
 static void test_render_system_prompt(void) {
@@ -125,7 +163,7 @@ static void test_render_without_system(void) {
 static void test_name_roundtrip(void) {
     static const char *const names[] = {
         "chatml", "llama2", "llama3", "zephyr", "gemma", "gemma4", "mistral",
-        "phi3", "apertus", "raw",
+        "phi3", "apertus", "ornith", "raw",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
         int id = template_from_name(names[i]);
@@ -150,6 +188,8 @@ int main(void) {
     test_detect_llama2_vs_mistral(&t);
     test_detect_zephyr_vs_phi3(&t);
     test_detect_by_marker(&t);
+    test_detect_and_render_ornith(&t);
+    test_ornith_groups_consecutive_tool_responses();
     test_detect_and_render_apertus(&t);
     test_render_apertus_without_system();
     test_render_system_prompt();

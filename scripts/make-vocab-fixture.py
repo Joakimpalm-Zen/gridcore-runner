@@ -162,6 +162,7 @@ def make_bpe_fixtures():
     ]
     for name, pre in [("vocab-bpe-llama3.gguf", "llama-bpe"),
                       ("vocab-bpe-qwen2.gguf", "qwen2"),
+                      ("vocab-bpe-qwen35.gguf", "qwen35"),
                       ("vocab-bpe-smollm.gguf", "smollm")]:
         write_gguf(os.path.join(OUTDIR, name),
                    common + [kv_str("tokenizer.ggml.pre", pre)])

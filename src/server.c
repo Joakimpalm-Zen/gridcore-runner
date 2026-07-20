@@ -1878,7 +1878,7 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
                 free(mapped.s);      // unparseable: hand back what was generated
             }
         } else if (chat) {
-            n_tc = tool_calls_parse(&g.out, &tc);
+            n_tc = tool_calls_parse_for(s->tmpl, &g.out, &tc);
             if (n_tc) {
                 finish = "tool_calls";
                 g.out.n = 0; // OpenAI convention: no content alongside
@@ -2018,9 +2018,16 @@ done:
 // assistant tool_calls render in runner's own call syntax so replayed
 // history reads like what the model actually emitted. Returns a heap
 // string, or NULL when the message carries nothing usable.
-static char *message_text(jv *msg) {
+static char *message_text(jv *msg, int tmpl) {
     jv *content = jv_get(msg, "content");
     sbuf b = {0};
+    const char *role = jv_str(jv_get(msg, "role"), "user");
+    const char *reason = jv_str(jv_get(msg, "reasoning_content"), NULL);
+    if (tmpl == TMPL_ORNITH && !strcmp(role, "assistant")) {
+        sb_lit(&b, "<think>\n");
+        if (reason) sb_put(&b, reason, strlen(reason));
+        sb_lit(&b, "\n</think>\n\n");
+    }
     if (content && content->type == J_STR) {
         sb_put(&b, content->str, strlen(content->str));
     } else if (content && content->type == J_ARR) {
@@ -2033,14 +2040,14 @@ static char *message_text(jv *msg) {
         }
     }
     jv *calls = jv_get(msg, "tool_calls");
-    if (calls && calls->type == J_ARR) {
-        for (int i = 0; i < calls->n; i++) {
-            jv *fn = jv_get(calls->items[i], "function");
-            const char *name = jv_str(jv_get(fn, "name"), NULL);
-            const char *args = jv_str(jv_get(fn, "arguments"), "{}");
-            if (!name) continue;
-            sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", name, args);
-        }
+    tool_history_render_for(tmpl, calls, &b);
+    if (tmpl == TMPL_ORNITH && !strcmp(role, "tool")) {
+        sbuf wrapped = {0};
+        sb_lit(&wrapped, "<tool_response>\n");
+        if (b.s) sb_put(&wrapped, b.s, b.n);
+        sb_lit(&wrapped, "\n</tool_response>");
+        free(b.s);
+        b = wrapped;
     }
     return b.s;
 }
@@ -2065,7 +2072,9 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
                                  request_schema(req), &env,
                                  terr, sizeof(terr));
     if (rc < 0) { send_error(fd, 400, terr); return; }
-    bool strict = rc == 1;
+    // Ornith is specifically trained on qwen3_xml. Keep its native protocol
+    // instead of forcing the model into runner's generic JSON envelope.
+    bool strict = rc == 1 && s->tmpl != TMPL_ORNITH;
     if (strict) {
         // one call per turn for now; silently ignoring a request for
         // several would leave the caller expecting calls it never gets
@@ -2085,17 +2094,30 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
     }
     sbuf ts = {0};
     if (strict) sb_put(&ts, env.system_turn, strlen(env.system_turn));
-    else        tools_render(tools, &ts);
+    else        tools_render_for(s->tmpl, tools, &ts);
+    bool ornith_merged_system = false;
+    if (s->tmpl == TMPL_ORNITH && ts.n && msgs->n > 0 &&
+        !strcmp(jv_str(jv_get(msgs->items[0], "role"), ""), "system")) {
+        char *system = message_text(msgs->items[0], s->tmpl);
+        if (system && system[0]) {
+            sb_lit(&ts, "\n\n");
+            sb_put(&ts, system, strlen(system));
+        }
+        free(system);
+        ornith_merged_system = true;
+    }
     chat_msg *cm = malloc(sizeof(chat_msg) * (msgs->n + 1));
     char **owned = malloc(sizeof(char *) * msgs->n);
     size_t total = ts.n + 64;
     int n_cm = 0, n_own = 0;
     if (ts.n) cm[n_cm++] = (chat_msg){ "system", ts.s };
     for (int i = 0; i < msgs->n; i++) {
+        if (i == 0 && ornith_merged_system) continue;
         const char *role = jv_str(jv_get(msgs->items[i], "role"), "user");
-        char *content = message_text(msgs->items[i]);
+        char *content = message_text(msgs->items[i], s->tmpl);
         if (!content) continue;
         owned[n_own++] = content;
+        if (s->tmpl == TMPL_ORNITH && !strcmp(role, "tool")) role = "user";
         cm[n_cm++] = (chat_msg){ role, content };
         total += strlen(role) + strlen(content) + 64;
     }

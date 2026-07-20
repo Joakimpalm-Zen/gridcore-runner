@@ -198,6 +198,11 @@ typedef struct {
     float       *qnorm_w, *knorm_w;      // per-head Q/K norms (qwen3, gemma3/4)
     float       *post_attn_norm_w, *post_ffn_norm_w; // gemma sandwich norms
     float        out_scale;              // whole-layer output scalar (gemma4; 1.0 = off)
+    // Qwen3.5 hybrid layers. Full-attention layers keep using the fields
+    // above; recurrent layers use this compact Gated DeltaNet weight set.
+    bool         recurrent;
+    gguf_tensor *wqkv, *wq_gate, *ssm_conv, *ssm_beta, *ssm_alpha, *ssm_out;
+    float       *ssm_dt, *ssm_a, *ssm_norm_w;
 } layer_t;
 
 // One model_t is one *sequence*: a set of weights plus the mutable state
@@ -241,6 +246,9 @@ typedef struct {
     float     attn_scale;    // 0 = default 1/sqrt(head_dim(l)), else fixed
     int       ffn_act;       // ACT_SILU (default) or ACT_GELU (gemma)
     bool      v_rmsnorm;     // weightless per-head RMS norm on V (gemma4)
+    bool      qwen35;
+    int       full_attn_interval;
+    int       ssm_conv_kernel, ssm_inner, ssm_state, ssm_v_heads, ssm_groups;
     float     logit_softcap; // final logits = c*tanh(x/c) when > 0
     int32_t  *suppress;      // token ids forced to -inf in the logits
     int       n_suppress;    // (tokenizer.ggml.suppress_tokens)
@@ -263,6 +271,9 @@ typedef struct {
     bool   kv_q8;            // KV rows stored as q8_0 blocks (CPU and CUDA)
     float *x, *xb, *xb2, *q, *hb, *hb2;   // [n_batch][dim] activations
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
+    float *q_gate;                        // qwen35 full-attention output gate
+    float *ssm_qkv, *ssm_z, *ssm_aux;     // qwen35 recurrent scratch
+    float *ssm_conv_state, *ssm_state_mem; // qwen35 per-sequence recurrent state
     float *att, *logits;
     float *all_logits;       // lazy [spec_batch][n_vocab] (speculative verify)
     int    spec_batch;       // rows all_logits can hold
@@ -551,7 +562,8 @@ int  sval_close(sval *v, char *out, int cap);
 // template rejects a system role outright, so the text is folded into the
 // first user turn rather than wrapped in markers it never saw in training.
 enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
-       TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_APERTUS, TMPL_RAW };
+       TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_APERTUS, TMPL_ORNITH,
+       TMPL_RAW };
 
 enum { ACT_SILU = 0, ACT_GELU = 1 };
 
@@ -605,9 +617,12 @@ struct sbuf;
 struct jv;
 // render OpenAI "tools" declarations as a system turn (no-op when absent)
 void tools_render(const struct jv *tools, struct sbuf *out);
+void tools_render_for(int tmpl, const struct jv *tools, struct sbuf *out);
+void tool_history_render_for(int tmpl, const struct jv *calls, struct sbuf *out);
 // parse tool-call blocks out of content into OpenAI tool_calls items;
 // returns the call count, content is compacted in place
 int  tool_calls_parse(struct sbuf *content, struct sbuf *tc);
+int  tool_calls_parse_for(int tmpl, struct sbuf *content, struct sbuf *tc);
 
 // ------------------------------------------- strict tool-call envelope
 //

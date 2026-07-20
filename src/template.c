@@ -13,6 +13,9 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         // apertus first: its vocabulary inherits Mistral's [INST]/[/INST]
         // tokens, so the [INST] branch below would otherwise claim it
         if (strstr(meta_tmpl, "<|assistant_start|>")) return TMPL_APERTUS;
+        if (strstr(meta_tmpl, "<function=example_function_name>") &&
+            strstr(meta_tmpl, "<think>"))
+            return TMPL_ORNITH;
         if (strstr(meta_tmpl, "<|im_start|>"))        return TMPL_CHATML;
         if (strstr(meta_tmpl, "<|start_header_id|>")) return TMPL_LLAMA3;
         if (strstr(meta_tmpl, "<|user|>"))
@@ -42,6 +45,7 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "mistral")) return TMPL_MISTRAL;
     if (!strcmp(name, "phi3"))    return TMPL_PHI3;
     if (!strcmp(name, "apertus")) return TMPL_APERTUS;
+    if (!strcmp(name, "ornith")) return TMPL_ORNITH;
     if (!strcmp(name, "raw"))    return TMPL_RAW;
     return -1;
 }
@@ -55,6 +59,7 @@ const char *template_name(int t) {
         case TMPL_MISTRAL: return "mistral";
         case TMPL_PHI3:    return "phi3";
         case TMPL_APERTUS: return "apertus";
+        case TMPL_ORNITH: return "ornith";
         default: return "raw";
     }
 }
@@ -71,6 +76,41 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
     size_t off = 0;
     out[0] = 0;
     switch (tmpl) {
+    case TMPL_ORNITH:
+        for (int i = 0; i < n_msgs; i++) {
+            bool tool_response =
+                !strcmp(msgs[i].role, "user") &&
+                !strncmp(msgs[i].content, "<tool_response>",
+                         strlen("<tool_response>"));
+            bool prev_tool_response = i > 0 &&
+                !strcmp(msgs[i - 1].role, "user") &&
+                !strncmp(msgs[i - 1].content, "<tool_response>",
+                         strlen("<tool_response>"));
+            bool next_tool_response = i + 1 < n_msgs &&
+                !strcmp(msgs[i + 1].role, "user") &&
+                !strncmp(msgs[i + 1].content, "<tool_response>",
+                         strlen("<tool_response>"));
+            if (tool_response) {
+                if (!prev_tool_response)
+                    off = emit(out, cap, off, "<|im_start|>user\n", NULL, NULL);
+                else
+                    off = emit(out, cap, off, "\n", NULL, NULL);
+                off = emit(out, cap, off, "%s", msgs[i].content, NULL);
+                if (!next_tool_response)
+                    off = emit(out, cap, off, "<|im_end|>\n", NULL, NULL);
+            } else {
+                off = emit(out, cap, off, "<|im_start|>%s\n%s<|im_end|>\n",
+                           msgs[i].role, msgs[i].content);
+            }
+        }
+        // The official Jinja appends "<think>\n" here. Runner's engine owns
+        // that same prelude: it constrains and emits model.think_open before
+        // free sampling, allowing the streaming splitter to put the following
+        // bytes on reasoning_content. Spelling it into the prompt as well
+        // would produce two opening tags.
+        if (add_assistant)
+            off = emit(out, cap, off, "<|im_start|>assistant\n", NULL, NULL);
+        break;
     case TMPL_CHATML:
         for (int i = 0; i < n_msgs; i++)
             off = emit(out, cap, off, "<|im_start|>%s\n%s<|im_end|>\n",
@@ -304,6 +344,57 @@ void tools_render(const jv *tools, sbuf *out) {
                 "exactly <|tool_call>call:NAME{json arguments}<tool_call|> "
                 "and nothing else. Tools:\n");
     jv_dump(tools, out);
+}
+
+void tools_render_for(int tmpl, const jv *tools, sbuf *out) {
+    if (tmpl != TMPL_ORNITH) {
+        tools_render(tools, out);
+        return;
+    }
+    if (!tools || tools->type != J_ARR || tools->n == 0) return;
+    sb_lit(out, "# Tools\n\nYou have access to the following functions:\n\n<tools>");
+    for (int i = 0; i < tools->n; i++) {
+        sb_lit(out, "\n");
+        jv_dump(tools->items[i], out);
+    }
+    sb_lit(out,
+        "\n</tools>\n\nIf you choose to call a function ONLY reply in the "
+        "following format with NO suffix:\n\n<tool_call>\n"
+        "<function=example_function_name>\n"
+        "<parameter=example_parameter_1>\nvalue_1\n</parameter>\n"
+        "<parameter=example_parameter_2>\nvalue_2\n</parameter>\n"
+        "</function>\n</tool_call>\n\n<IMPORTANT>\n"
+        "Function calls MUST use a function block nested inside tool_call. "
+        "Required parameters MUST be specified. Reasoning may precede the "
+        "tool call, but no text may follow it.\n</IMPORTANT>");
+}
+
+void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
+    if (!calls || calls->type != J_ARR) return;
+    for (int i = 0; i < calls->n; i++) {
+        jv *fn = jv_get(calls->items[i], "function");
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        const char *args = jv_str(jv_get(fn, "arguments"), "{}");
+        if (!name) continue;
+        if (tmpl != TMPL_ORNITH) {
+            sb_fmt(out, "<|tool_call>call:%s%s<tool_call|>", name, args);
+            continue;
+        }
+        jv *obj = json_parse(args, strlen(args));
+        sb_fmt(out, "<tool_call>\n<function=%s>\n", name);
+        if (obj && obj->type == J_OBJ) {
+            for (int k = 0; k < obj->n; k++) {
+                sb_fmt(out, "<parameter=%s>\n", obj->keys[k]);
+                if (obj->items[k]->type == J_STR)
+                    sb_put(out, obj->items[k]->str, strlen(obj->items[k]->str));
+                else
+                    jv_dump(obj->items[k], out);
+                sb_lit(out, "\n</parameter>\n");
+            }
+        }
+        sb_lit(out, "</function>\n</tool_call>");
+        jv_free(obj);
+    }
 }
 
 // ------------------------------------------- strict tool-call envelope
@@ -843,4 +934,103 @@ int tool_calls_parse(sbuf *content, sbuf *tc) {
     }
     if (n_calls) content->n = (int)(w - content->s);
     return n_calls;
+}
+
+static const char *trim_left(const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+    return p;
+}
+
+static const char *trim_right(const char *p, const char *end) {
+    while (end > p && (end[-1] == ' ' || end[-1] == '\t' ||
+                       end[-1] == '\r' || end[-1] == '\n')) end--;
+    return end;
+}
+
+// Qwen3.5/Ornith's qwen3_xml dialect. Parameter bodies are JSON when they
+// parse as JSON; ordinary text is preserved as a JSON string.
+static int ornith_tool_calls_parse(sbuf *content, sbuf *tc) {
+    if (!content->s) return 0;
+    static const char OPEN[] = "<tool_call>";
+    static const char FN[] = "<function=";
+    static const char FN_END[] = "</function>";
+    static const char CLOSE[] = "</tool_call>";
+    static const char PARAM[] = "<parameter=";
+    static const char PARAM_END[] = "</parameter>";
+    char *w = content->s;
+    const char *p = content->s, *end = content->s + content->n;
+    int n_calls = 0;
+    while (p < end) {
+        const char *o = strstr(p, OPEN);
+        if (!o || o >= end) {
+            memmove(w, p, (size_t)(end - p));
+            w += end - p;
+            break;
+        }
+        const char *f = trim_left(o + sizeof(OPEN) - 1, end);
+        if (end - f < (int)sizeof(FN) - 1 ||
+            memcmp(f, FN, sizeof(FN) - 1) != 0) {
+            memmove(w, p, (size_t)(o + 1 - p));
+            w += o + 1 - p;
+            p = o + 1;
+            continue;
+        }
+        const char *name = f + sizeof(FN) - 1;
+        const char *name_end = memchr(name, '>', (size_t)(end - name));
+        const char *fn_end = name_end ? strstr(name_end + 1, FN_END) : NULL;
+        const char *close = fn_end ? trim_left(fn_end + sizeof(FN_END) - 1, end) : NULL;
+        if (!name_end || !fn_end || !close ||
+            end - close < (int)sizeof(CLOSE) - 1 ||
+            memcmp(close, CLOSE, sizeof(CLOSE) - 1) != 0) {
+            memmove(w, p, (size_t)(o + 1 - p));
+            w += o + 1 - p;
+            p = o + 1;
+            continue;
+        }
+        memmove(w, p, (size_t)(o - p));
+        w += o - p;
+        sb_fmt(tc, "%s{\"id\":\"call_%d\",\"type\":\"function\",\"function\":"
+                   "{\"name\":\"", n_calls ? "," : "", n_calls);
+        sb_esc(tc, name, (int)(name_end - name));
+        sb_lit(tc, "\",\"arguments\":\"{");
+        const char *a = name_end + 1;
+        bool first = true;
+        while (a < fn_end) {
+            const char *po = strstr(a, PARAM);
+            if (!po || po >= fn_end) break;
+            const char *pn = po + sizeof(PARAM) - 1;
+            const char *pn_end = memchr(pn, '>', (size_t)(fn_end - pn));
+            const char *pv_end = pn_end ? strstr(pn_end + 1, PARAM_END) : NULL;
+            if (!pn_end || !pv_end || pv_end > fn_end) break;
+            const char *pv = trim_left(pn_end + 1, pv_end);
+            const char *pe = trim_right(pv, pv_end);
+            sb_lit(tc, first ? "\\\"" : ",\\\"");
+            sb_esc(tc, pn, (int)(pn_end - pn));
+            sb_lit(tc, "\\\":");
+            jv *value = json_parse(pv, (size_t)(pe - pv));
+            sbuf encoded = {0};
+            if (value) {
+                jv_dump(value, &encoded);
+                jv_free(value);
+            } else {
+                sb_lit(&encoded, "\"");
+                sb_esc(&encoded, pv, (int)(pe - pv));
+                sb_lit(&encoded, "\"");
+            }
+            sb_esc(tc, encoded.s, encoded.n);
+            free(encoded.s);
+            first = false;
+            a = pv_end + sizeof(PARAM_END) - 1;
+        }
+        sb_lit(tc, "}\"}}");
+        n_calls++;
+        p = close + sizeof(CLOSE) - 1;
+    }
+    if (n_calls) content->n = (int)(w - content->s);
+    return n_calls;
+}
+
+int tool_calls_parse_for(int tmpl, sbuf *content, sbuf *tc) {
+    return tmpl == TMPL_ORNITH ? ornith_tool_calls_parse(content, tc)
+                               : tool_calls_parse(content, tc);
 }

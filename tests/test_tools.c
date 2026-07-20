@@ -47,7 +47,57 @@ static const char *TOOLS =
      "{\"type\":\"function\",\"function\":{\"name\":\"add\","
       "\"parameters\":{\"type\":\"object\","
       "\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"}},"
-      "\"required\":[\"a\",\"b\"]}}}]";
+     "\"required\":[\"a\",\"b\"]}}}]";
+
+static void test_ornith_native_tool_protocol(void) {
+    jv *tools = parse(TOOLS);
+    sbuf prompt = {0};
+    tools_render_for(TMPL_ORNITH, tools, &prompt);
+    assert(prompt.s != NULL);
+    assert(strstr(prompt.s, "# Tools\n"));
+    assert(strstr(prompt.s, "<tools>\n"));
+    assert(strstr(prompt.s, "\"name\":\"get_weather\""));
+    assert(strstr(prompt.s, "<function=example_function_name>"));
+    assert(strstr(prompt.s, "<parameter=example_parameter_1>"));
+
+    jv *history = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\",\\\"days\\\":2}\"}}]");
+    sbuf replay = {0};
+    tool_history_render_for(TMPL_ORNITH, history, &replay);
+    assert(!strcmp(replay.s,
+        "<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nOslo\n</parameter>\n"
+        "<parameter=days>\n2\n</parameter>\n"
+        "</function>\n</tool_call>"));
+
+    sbuf content = {0}, calls = {0};
+    sb_lit(&content,
+        "checking\n<tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nOslo\n</parameter>\n"
+        "<parameter=units>\n\"c\"\n</parameter>\n"
+        "</function>\n</tool_call>");
+    assert(tool_calls_parse_for(TMPL_ORNITH, &content, &calls) == 1);
+    assert(content.n == strlen("checking\n"));
+
+    char wrapped[1024];
+    snprintf(wrapped, sizeof(wrapped), "[%.*s]", (int)calls.n, calls.s);
+    jv *arr = parse(wrapped);
+    jv *fn = jv_get(arr->items[0], "function");
+    assert(!strcmp(jv_str(jv_get(fn, "name"), ""), "get_weather"));
+    jv *args = parse(jv_str(jv_get(fn, "arguments"), ""));
+    assert(!strcmp(jv_str(jv_get(args, "city"), ""), "Oslo"));
+    assert(!strcmp(jv_str(jv_get(args, "units"), ""), "c"));
+
+    jv_free(args);
+    jv_free(arr);
+    free(content.s);
+    free(calls.s);
+    free(prompt.s);
+    free(replay.s);
+    jv_free(history);
+    jv_free(tools);
+}
 
 // The headline guarantee: the model cannot invent a tool name, cannot invent
 // an argument key, and cannot get an argument's type wrong — the union is
@@ -535,6 +585,7 @@ static void test_system_turn_teaches_the_envelope(void) {
 }
 
 int main(void) {
+    test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();
     test_tool_choice_required_removes_the_final_branch();

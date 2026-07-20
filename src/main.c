@@ -113,7 +113,7 @@ static void usage(const char *prog) {
         "  --rope-scale F force linear rope position scaling by F\n"
         "  --rope-base F  override rope frequency base\n"
         "  --system TEXT  system prompt for chat mode\n"
-        "  --chat-template chatml|llama2|llama3|mistral|zephyr|phi3|gemma|gemma4|raw\n"
+        "  --chat-template chatml|llama2|llama3|mistral|zephyr|phi3|gemma|gemma4|ornith|raw\n"
         "                 (default: auto)\n"
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
