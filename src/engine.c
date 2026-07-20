@@ -4,6 +4,7 @@
 
 #include "compat.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,10 @@
 double now_s(void) { return plat_now(); }
 
 enum { CP_PROBE, CP_THINK, CP_OUTPUT };
+
+// everything that decides what this engine's KV bytes mean; see the shared
+// prefix cache below, which is the only thing that consumes it
+static uint64_t model_identity(const model_t *m, const tokenizer *tok);
 
 static void constraint_reset(engine *e) {
     e->constraint_phase = e->m && e->m->think_open && e->m->think_close
@@ -55,6 +60,7 @@ void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     jsonv_init(&e->jv);
     constraint_reset(e);
     e->hist = malloc(sizeof(int32_t) * m->n_ctx);
+    e->model_key = model_identity(m, tok);
 }
 
 void engine_reset(engine *e) {
@@ -92,6 +98,387 @@ int engine_rewind(engine *e, const int32_t *toks, int n) {
     if (e->schema) sval_init(&e->sv, e->schema);
     constraint_reset(e);
     return keep;
+}
+
+// ==================================================== shared KV prefix cache
+//
+// Correctness here rests on two facts and one hazard.
+//
+//   Fact 1 — attention is causal, so KV row i is a function of tokens [0, i]
+//   only. Any prefix of a snapshot is therefore itself a valid snapshot, which
+//   is what lets one stored prompt serve every later prompt that shares any
+//   leading run of tokens with it, rather than only exact repeats.
+//
+//   Fact 2 — on every backend the host kcache/vcache is the authoritative
+//   copy. CUDA keeps a device mirror and resyncs it from the host whenever a
+//   forward's position is not the previous one plus 1 (see kv_upload in
+//   cuda.c); Metal's unified buffer *is* the host cache. So a snapshot is a
+//   plain memcpy in both directions, with one caveat handled at the install.
+//
+//   Hazard — a fork that does not match the new prompt's true prefix silently
+//   conditions generation on another request's context. It does not fail; it
+//   answers, plausibly, from the wrong premises. Nothing below hashes token
+//   ids into a bucket and trusts the bucket: candidates keep their whole token
+//   vector and it is compared element by element with the prompt, so only the
+//   run that demonstrably matches is ever installed. Hashing is used solely
+//   for the things that are *not* tokens — the weights, the geometry, the
+//   tokenizer, the cache element type — and a hash miss there costs a prefill,
+//   never a wrong answer.
+
+static uint64_t h64(uint64_t h, const void *p, size_t n) {
+    const uint8_t *b = (const uint8_t *)p;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+static uint64_t h64s(uint64_t h, const char *s) {
+    return s ? h64(h, s, strlen(s) + 1) : h64(h, "\xff", 1);
+}
+static uint64_t h64i(uint64_t h, long long v) { return h64(h, &v, sizeof v); }
+static uint64_t h64f(uint64_t h, double v) { return h64(h, &v, sizeof v); }
+
+// The carried-over cache-key hazard, answered.
+//
+// A prefix key must cover everything that changes the tokens or the cache
+// bytes, not just the prompt text. `tokenizer.ggml.pre` selects between
+// distinct BPE split rules and SPM scores may be rebuilt from merge ranks at
+// load, so two models with identical system prompts and different `pre` values
+// must never share a prefix. Rather than enumerate the metadata that has
+// mattered so far, this digests the tokenizer that was actually built —
+// every vocabulary string, every score, every token type, the split rule and
+// the BOS/space flags — so a tokenizer that behaves differently keys
+// differently whatever the metadata said.
+//
+// The weights are sampled rather than digested whole: two finetunes of one
+// architecture share every tensor name, dtype and shape, so the table alone
+// would collide. A slice of each layer's Q and down projections separates them
+// at a cost that does not scale with model size.
+static uint64_t model_identity(const model_t *m, const tokenizer *tok) {
+    uint64_t h = 0xCBF29CE484222325ull;
+    h = h64s(h, "runner.prefix.v1");
+    h = h64s(h, m->path);
+    h = h64s(h, m->arch);
+    const long long geo[] = {
+        m->n_layer, m->n_embd, m->n_head, m->n_head_kv, m->head_dim, m->n_ff,
+        m->n_vocab, m->n_ctx_train, m->rope_dim, m->rope_neox, m->swa_window,
+        m->ffn_act, m->v_rmsnorm, m->n_suppress,
+        // context geometry and KV element type: both change what a row means
+        // and where it lives (--kv f16|q8 is a real axis, not a hint)
+        m->n_ctx, m->kv_q8,
+    };
+    h = h64(h, geo, sizeof geo);
+    h = h64f(h, m->rms_eps);       h = h64f(h, m->rope_base);
+    h = h64f(h, m->rope_mscale);   h = h64f(h, m->embd_scale);
+    h = h64f(h, m->attn_scale);    h = h64f(h, m->logit_softcap);
+    for (int l = 0; l < m->n_layer; l++) {
+        h = h64i(h, model_kv_dim(m, l));
+        h = h64i(h, model_rope_dim(m, l));
+        h = h64i(h, model_is_swa(m, l));
+        h = h64i(h, (long long)model_kv_row_bytes(m, l));
+        const gguf_tensor *sample[2] = { m->layers[l].wq, m->layers[l].w_down };
+        for (int k = 0; k < 2; k++) {
+            if (!sample[k] || !sample[k]->data) { h = h64s(h, NULL); continue; }
+            h = h64i(h, (long long)sample[k]->nbytes);
+            h = h64(h, sample[k]->data,
+                    sample[k]->nbytes < 64 ? (size_t)sample[k]->nbytes : 64);
+        }
+    }
+    if (m->tok_embd && m->tok_embd->data) {
+        h = h64i(h, (long long)m->tok_embd->nbytes);
+        h = h64(h, m->tok_embd->data,
+                m->tok_embd->nbytes < 256 ? (size_t)m->tok_embd->nbytes : 256);
+    }
+    if (!tok) return h64s(h, "no-tokenizer");
+    h = h64i(h, tok->model); h = h64i(h, tok->pre);
+    h = h64i(h, tok->n_vocab);
+    h = h64i(h, tok->bos_id); h = h64i(h, tok->eos_id); h = h64i(h, tok->unk_id);
+    h = h64i(h, tok->add_bos); h = h64i(h, tok->add_space_prefix);
+    h = h64i(h, tok->scores != NULL); h = h64i(h, tok->ttype != NULL);
+    for (int i = 0; i < tok->n_vocab; i++) {
+        if (tok->tokens && tok->tokens[i].s)
+            h = h64(h, tok->tokens[i].s, (size_t)tok->tokens[i].n);
+        else
+            h = h64s(h, NULL);
+        if (tok->scores) h = h64(h, &tok->scores[i], sizeof(float));
+        if (tok->ttype)  h = h64(h, &tok->ttype[i], sizeof(int32_t));
+    }
+    return h;
+}
+
+// Snapshots are packed per layer as { K[n][row_bytes] , V[n][row_bytes] }.
+// The n-major layout is what makes a partial restore a straight memcpy of the
+// first c rows of each block, which is Fact 1 turned into code.
+size_t prefix_cache_entry_bytes(const model_t *m, int n) {
+    size_t t = 0;
+    for (int l = 0; l < m->n_layer; l++)
+        t += 2 * (size_t)n * model_kv_row_bytes(m, l);
+    return t;
+}
+
+static void pfx_save(const model_t *m, uint8_t *dst, int n) {
+    size_t off = 0;
+    for (int l = 0; l < m->n_layer; l++) {
+        size_t blk = (size_t)n * model_kv_row_bytes(m, l);
+        size_t lo  = model_kv_byte_off(m, l);
+        memcpy(dst + off,       (const uint8_t *)m->kcache + lo, blk);
+        memcpy(dst + off + blk, (const uint8_t *)m->vcache + lo, blk);
+        off += 2 * blk;
+    }
+}
+
+// install the first `n` rows of a snapshot taken over `stride` rows
+static void pfx_load(const model_t *m, const uint8_t *src, int stride, int n) {
+    size_t off = 0;
+    for (int l = 0; l < m->n_layer; l++) {
+        size_t row = model_kv_row_bytes(m, l);
+        size_t blk = (size_t)stride * row, take = (size_t)n * row;
+        size_t lo  = model_kv_byte_off(m, l);
+        memcpy((uint8_t *)m->kcache + lo, src + off, take);
+        memcpy((uint8_t *)m->vcache + lo, src + off + blk, take);
+        off += 2 * blk;
+    }
+}
+
+// A prefix shorter than this is not worth a snapshot: the copy costs more than
+// the prefill it saves, and it must be at least 2 for the GPU resync argument
+// at the install site to hold.
+#define PFX_MIN_TOKENS  16
+#define PFX_MAX_ENTRIES 64
+
+typedef struct pfx_entry {
+    struct pfx_entry *next;
+    uint64_t  key;
+    int32_t  *toks;
+    int       n;
+    uint8_t  *kv;
+    size_t    bytes;
+    double    used;
+    uint64_t  hits;
+} pfx_entry;
+
+static struct {
+    pfx_entry      *head;
+    size_t          bytes, budget;
+    double          ttl;
+    bool            configured;
+    uint64_t        hits, misses, stores, evictions, tokens_reused;
+    double          saved_s, cost_per_tok;
+    pthread_mutex_t mu;
+} PFX = { NULL, 0, 0, 600.0, false, 0, 0, 0, 0, 0, 0.0, 0.0,
+          PTHREAD_MUTEX_INITIALIZER };
+
+// caller holds mu
+static void pfx_defaults(void) {
+    if (PFX.configured) return;
+    PFX.configured = true;
+    const char *mb = getenv("RUNNER_PREFIX_CACHE_MB");
+    const char *tl = getenv("RUNNER_PREFIX_CACHE_TTL");
+    PFX.budget = (size_t)(mb ? strtoull(mb, NULL, 10) : 512) * 1024 * 1024;
+    PFX.ttl    = tl ? strtod(tl, NULL) : 600.0;
+}
+
+static void pfx_drop(pfx_entry **pp) {
+    pfx_entry *e = *pp;
+    *pp = e->next;
+    PFX.bytes -= e->bytes;
+    free(e->toks); free(e->kv); free(e);
+}
+
+static void pfx_expire(double now) {
+    for (pfx_entry **pp = &PFX.head; *pp; ) {
+        if (now - (*pp)->used > PFX.ttl) { PFX.evictions++; pfx_drop(pp); }
+        else pp = &(*pp)->next;
+    }
+}
+
+static int pfx_count(void) {
+    int n = 0;
+    for (pfx_entry *p = PFX.head; p; p = p->next) n++;
+    return n;
+}
+
+// Evict until `need` more bytes fit — least-recently-used, but *unproven*
+// entries first.
+//
+// Plain LRU is the wrong policy here and it fails in the exact case this
+// cache exists for. Publishing stores the whole prompt, so every one-shot
+// request leaves a large entry behind, and a run of unrelated traffic is
+// enough to push out the shared system/tool/schema block that a dozen agent
+// requests were about to hit — the newest entry is always the one nobody has
+// used yet. Measured: a 2900-token shared prefix was evicted by two 800-token
+// one-shot prompts between the request that stored it and the request that
+// wanted it, on the 512 MB default.
+//
+// So an entry that has been forked at least once has proved it is shared, and
+// is only evicted once nothing unproven is left. Within each class the order
+// is still least-recently-used.
+static void pfx_trim(size_t need) {
+    while (PFX.head && (PFX.bytes + need > PFX.budget ||
+                        pfx_count() >= PFX_MAX_ENTRIES)) {
+        pfx_entry **victim = NULL;
+        for (int proven = 0; proven <= 1 && !victim; proven++)
+            for (pfx_entry **pp = &PFX.head; *pp; pp = &(*pp)->next) {
+                if (((*pp)->hits > 0) != (proven == 1)) continue;
+                if (!victim || (*pp)->used < (*victim)->used) victim = pp;
+            }
+        PFX.evictions++;
+        pfx_drop(victim);
+    }
+}
+
+void prefix_cache_configure(size_t budget_bytes, double ttl_s) {
+    pthread_mutex_lock(&PFX.mu);
+    PFX.configured = true;
+    PFX.budget = budget_bytes;
+    PFX.ttl    = ttl_s;
+    pfx_trim(0);
+    pthread_mutex_unlock(&PFX.mu);
+}
+
+void prefix_cache_clear(void) {
+    pthread_mutex_lock(&PFX.mu);
+    while (PFX.head) pfx_drop(&PFX.head);
+    PFX.bytes = 0;
+    PFX.hits = PFX.misses = PFX.stores = PFX.evictions = PFX.tokens_reused = 0;
+    PFX.saved_s = 0;
+    pthread_mutex_unlock(&PFX.mu);
+}
+
+void prefix_cache_stats_get(prefix_cache_stats *out) {
+    pthread_mutex_lock(&PFX.mu);
+    pfx_defaults();
+    out->hits = PFX.hits; out->misses = PFX.misses;
+    out->stores = PFX.stores; out->evictions = PFX.evictions;
+    out->tokens_reused = PFX.tokens_reused;
+    out->saved_prefill_s = PFX.saved_s;
+    out->cost_per_token_s = PFX.cost_per_tok;
+    out->bytes = PFX.bytes; out->budget = PFX.budget;
+    out->entries = pfx_count();
+    out->ttl = PFX.ttl;
+    pthread_mutex_unlock(&PFX.mu);
+}
+
+prefix_reuse engine_prefix_reuse(engine *e, const int32_t *toks, int n) {
+    prefix_reuse r = { 0, 0, 0.0 };
+    // the slot's own KV first: it is already in place and costs nothing
+    r.keep = engine_rewind(e, toks, n);
+    if (!e->hist || n < 2) return r;
+
+    pthread_mutex_lock(&PFX.mu);
+    pfx_defaults();
+    double now = now_s();
+    pfx_expire(now);
+
+    // n - 1: at least one prompt token must still be fed, or there are no
+    // logits to sample the first output token from
+    int best = 0;
+    pfx_entry *hit = NULL;
+    for (pfx_entry *p = PFX.head; p; p = p->next) {
+        if (p->key != e->model_key) continue;
+        if (p->bytes != prefix_cache_entry_bytes(e->m, p->n)) continue; // stale layout
+        int c = 0;
+        while (c < p->n && c < n - 1 && p->toks[c] == toks[c]) c++;
+        if (c > best) { best = c; hit = p; }
+    }
+    if (hit && best >= PFX_MIN_TOKENS && best > r.keep) {
+        // CUDA's device KV is a mirror that only resyncs when a forward's
+        // position is not the previous one plus 1. A fork writes host rows
+        // behind the device's back, so it has to *create* that discontinuity
+        // rather than hope for one: without this, a slot whose previous
+        // generation happened to stop at position best-1 would keep decoding
+        // against the previous request's device rows. One forward of toks[0]
+        // at position 0 recomputes a row the snapshot overwrites with
+        // identical bytes a moment later and leaves the mirror at position 0,
+        // so the next forward at `best` (>= PFX_MIN_TOKENS) always uploads.
+        if (e->m->gpu) model_forward_batch(e->m, toks, 1, 0, false);
+        pfx_load(e->m, hit->kv, hit->n, best);
+        memcpy(e->hist, toks, sizeof(int32_t) * (size_t)best);
+        e->pos = best;
+        e->dpos = 0;          // the draft model's KV was not forked
+        e->hit_stop = false;
+        sampler_reset(e->smp);
+        for (int i = 0; i < best; i++) sampler_accept(e->smp, toks[i]);
+        jsonv_init(&e->jv);
+        if (e->schema) sval_init(&e->sv, e->schema);
+        constraint_reset(e);
+
+        hit->used = now;
+        hit->hits++;
+        r.keep    = best;
+        r.forked  = best;
+        r.saved_s = PFX.cost_per_tok * best;
+        PFX.hits++;
+        PFX.tokens_reused += (uint64_t)best;
+        PFX.saved_s += r.saved_s;
+    } else {
+        PFX.misses++;
+    }
+    pthread_mutex_unlock(&PFX.mu);
+    return r;
+}
+
+void engine_prefix_publish(engine *e, const int32_t *toks, int n,
+                           int fed, double prefill_s) {
+    if (!e->hist || n < PFX_MIN_TOKENS || e->pos < n) return;
+
+    pthread_mutex_lock(&PFX.mu);
+    pfx_defaults();
+    // price future hits off real measured prefill, smoothed: one request's
+    // wall clock on a shared box is noise, the running average is not
+    if (fed >= PFX_MIN_TOKENS && prefill_s > 0) {
+        double c = prefill_s / fed;
+        PFX.cost_per_tok = PFX.cost_per_tok > 0
+                             ? 0.8 * PFX.cost_per_tok + 0.2 * c : c;
+    }
+    if (PFX.budget == 0) { pthread_mutex_unlock(&PFX.mu); return; }
+
+    double now = now_s();
+    pfx_expire(now);
+
+    // A snapshot may not eat more than half the budget on its own, or one
+    // long prompt evicts everything worth keeping. Truncating it is free:
+    // a prefix of a prefix is still a valid prefix (Fact 1).
+    size_t per_tok = prefix_cache_entry_bytes(e->m, 1);
+    int store_n = n;
+    if (per_tok > 0 && prefix_cache_entry_bytes(e->m, store_n) > PFX.budget / 2)
+        store_n = (int)((PFX.budget / 2) / per_tok);
+    if (store_n < PFX_MIN_TOKENS) { pthread_mutex_unlock(&PFX.mu); return; }
+
+    // Already covered? Refresh it. A strict extension of an existing entry
+    // replaces it rather than sitting beside it.
+    for (pfx_entry **pp = &PFX.head; *pp; ) {
+        pfx_entry *p = *pp;
+        int lim = p->n < store_n ? p->n : store_n, c = 0;
+        if (p->key != e->model_key) { pp = &p->next; continue; }
+        while (c < lim && p->toks[c] == toks[c]) c++;
+        if (c == lim && p->n >= store_n) {   // nothing new to say
+            p->used = now;
+            pthread_mutex_unlock(&PFX.mu);
+            return;
+        }
+        if (c == lim) pfx_drop(pp);          // ours strictly extends p
+        else pp = &p->next;
+    }
+
+    size_t need = prefix_cache_entry_bytes(e->m, store_n);
+    pfx_trim(need);
+    if (PFX.bytes + need > PFX.budget) { pthread_mutex_unlock(&PFX.mu); return; }
+
+    pfx_entry *ne = calloc(1, sizeof(*ne));
+    int32_t *nt = malloc(sizeof(int32_t) * (size_t)store_n);
+    uint8_t *kv = malloc(need);
+    if (!ne || !nt || !kv) {
+        free(ne); free(nt); free(kv);
+        pthread_mutex_unlock(&PFX.mu);
+        return;
+    }
+    memcpy(nt, toks, sizeof(int32_t) * (size_t)store_n);
+    pfx_save(e->m, kv, store_n);
+    ne->key = e->model_key; ne->toks = nt; ne->n = store_n;
+    ne->kv = kv; ne->bytes = need; ne->used = now;
+    ne->next = PFX.head; PFX.head = ne;
+    PFX.bytes += need;
+    PFX.stores++;
+    pthread_mutex_unlock(&PFX.mu);
 }
 
 // load a draft model for speculative decoding, with the same gates in CLI
@@ -133,22 +520,31 @@ static bool is_stop(engine *e, int id) {
     return false;
 }
 
+// hist, pos and the sampler's penalty window advance together, one batch at a
+// time, because everything downstream reads hist as the answer to "which
+// tokens produced the KV in [0, pos)?".
+//
+// Writing hist up front instead used to break that on exactly one path: a run
+// too long for the remaining context skipped the write altogether (the guard
+// was `pos + n <= n_ctx`) while the loop below still fed and counted every
+// batch that did fit. pos then pointed past rows belonging to this request
+// over hist entries belonging to the *previous* one, and the next request's
+// engine_rewind happily "kept" a prefix that matched nothing in the cache.
 float *engine_feed(engine *e, const int32_t *toks, int n) {
     float *logits = NULL;
     model_t *m = e->m;
-    if (e->hist && e->pos + n <= m->n_ctx)
-        memcpy(e->hist + e->pos, toks, sizeof(int32_t) * n);
     for (int i = 0; i < n; ) {
         int chunk = n - i < m->n_batch ? n - i : m->n_batch;
         if (e->pos + chunk > m->n_ctx) return NULL;
         bool last = (i + chunk == n);
+        if (e->hist) memcpy(e->hist + e->pos, toks + i, sizeof(int32_t) * chunk);
         logits = model_forward_batch(m, toks + i, chunk, e->pos, last);
+        for (int j = 0; j < chunk; j++) sampler_accept(e->smp, toks[i + j]);
         e->pos += chunk;
         i += chunk;
         if (e->progress && n > 512 && (i % 512 < m->n_batch || last))
             fprintf(stderr, "\rprompt: %d/%d tokens%s", i, n, last ? "\n" : "");
     }
-    for (int i = 0; i < n; i++) sampler_accept(e->smp, toks[i]);
     return logits;
 }
 
