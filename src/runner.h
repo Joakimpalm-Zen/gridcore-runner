@@ -286,12 +286,64 @@ typedef struct {
     void  *gpu;              // GPU backend context (NULL = CPU only). Per
                              // sequence: it owns this stream's KV and
                              // activations and points at the shared weights.
+    struct vram_lease *vram; // this instance's entry in the cross-process VRAM
+                             // registry (NULL on CPU-only runs, which are never
+                             // accounted and never refused)
 } model_t;
+
+// ------------------------------------------------- vram reservation registry
+//
+// A cross-process ledger of who is holding GPU memory, keyed by GPU device
+// identity, living in $XDG_RUNTIME_DIR (else the temp dir). It is NOT a
+// single-instance lock: several runners on one GPU are legitimate and the test
+// suite depends on it. It exists so that when memory does run out, the refusal
+// can name the holders instead of reporting a bare out-of-memory — and so that
+// a runner killed with SIGKILL cannot leave a reservation poisoning the box.
+//
+// Entries owned by dead pids are reaped on every claim. CPU-only runs never
+// claim, and so are never refused.
+typedef struct vram_lease vram_lease;
+
+// how much the device reports free, right now; the registry re-reads it while
+// waiting. Callers on a real GPU pass a gpu_mem_info wrapper.
+typedef uint64_t (*vram_free_fn)(void *ud);
+
+// What the ledger looked like at the moment of the decision. `holders` is the
+// count of *other* live runners registered on this GPU; a shortfall with zero
+// holders is memory held by something outside runner's accounting, which is not
+// a reason to refuse — there would be nobody to name and no orphan to blame.
+typedef struct {
+    int      holders;      // other live runners registered on this GPU
+    uint64_t held_bytes;   // what they hold between them
+    uint64_t available;    // free VRAM, less claims not yet allocated
+} vram_status;
+
+// Claim `need_bytes` on the GPU named by `gpu_id` (a UUID where the backend can
+// supply one — a MIG slice must not share a ledger with its parent card).
+//
+// Returns a lease, or NULL when the request does not fit, in which case `err`
+// holds a message naming every live holder: pid, model, bytes, uptime.
+// wait_secs > 0 queues and retries until the deadline instead of refusing.
+// `st` (nullable) reports the ledger state behind the decision.
+vram_lease *vram_claim(const char *gpu_id, const char *model_path,
+                       uint64_t need_bytes, vram_free_fn free_fn, void *free_ud,
+                       int wait_secs, vram_status *st, char *err, size_t err_cap);
+
+// The allocation happened: `actual_bytes` is now real device memory, visible to
+// the driver's free figure, and stops being subtracted from it.
+void        vram_commit(vram_lease *l, uint64_t actual_bytes);
+// Clean exit. Unclean exits are covered by dead-pid reaping instead.
+void        vram_release(vram_lease *l);
 
 // ---------------------------------------------------------------- gpu
 
 enum { GPU_AUTO = 0, GPU_OFF = 1 };
 bool   gpu_available(char *name, int name_cap);
+// Stable identity of the GPU this backend would use, preferring a UUID: on a
+// MIG box the parent card's UUID is the same for every slice, so an identity
+// that cannot tell slices apart is worse than useless for VRAM accounting.
+// Falls back to a bus id, then to "cuda:0". false when there is no GPU.
+bool   gpu_device_id(char *id, int id_cap);
 // dedicated GPU memory in bytes; false when there is no discrete GPU
 // (Metal's unified memory is governed by the RAM reservation instead)
 bool   gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
@@ -355,6 +407,9 @@ typedef struct {
     // grow their context into the reserved room, capped at the train ctx.
     int   reserve_vram_pct;
     int   reserve_ram_pct;
+    // --wait-for-vram: seconds to queue behind other registered runners rather
+    // than refusing outright. 0 = refuse immediately (the default).
+    int   vram_wait_secs;
     // store the KV cache as q8_0 instead of fp16: halves cache bytes, so it
     // roughly doubles the context that fits a given VRAM/RAM reservation.
     // Lossy — output is NOT token-identical to an fp16 cache — so f16 stays

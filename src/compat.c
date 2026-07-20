@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef _WIN32
 
@@ -65,6 +66,90 @@ static DWORD WINAPI parent_wait(LPVOID h) {
     return 0; // unreachable: the process is gone by the time we'd get here
 }
 
+void plat_sleep_ms(int ms) {
+    if (ms > 0) Sleep((DWORD)ms);
+}
+
+long plat_pid_self(void) {
+    return (long)GetCurrentProcessId();
+}
+
+bool plat_pid_alive(long pid) {
+    if (pid <= 0) return false;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    // ERROR_ACCESS_DENIED means the process exists but belongs to someone else:
+    // still alive, and its reservation is still real
+    if (!h) return GetLastError() == ERROR_ACCESS_DENIED;
+    DWORD code = 0;
+    bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+    CloseHandle(h);
+    return alive;
+}
+
+bool plat_pid_start_time(long pid, uint64_t *out) {
+    if (pid <= 0) return false;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!h) return false;
+    FILETIME create, exit_t, kern, user;
+    bool ok = GetProcessTimes(h, &create, &exit_t, &kern, &user);
+    CloseHandle(h);
+    if (!ok) return false;
+    // FILETIME is 100ns ticks since 1601-01-01; 11644473600 seconds to Unix
+    uint64_t ticks = ((uint64_t)create.dwHighDateTime << 32) | create.dwLowDateTime;
+    *out = ticks / 10000000ull - 11644473600ull;
+    return true;
+}
+
+const char *plat_runtime_dir(void) {
+    const char *d = getenv("XDG_RUNTIME_DIR");
+    if (d && *d) return d;
+    if ((d = getenv("TEMP")) && *d) return d;
+    if ((d = getenv("TMP")) && *d) return d;
+    return ".";
+}
+
+bool plat_file_rmw(const char *path, plat_rmw_fn fn, void *ud) {
+    HANDLE f = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return false;
+
+    OVERLAPPED ov = {0};
+    // LockFileEx is advisory-by-convention here: every writer of this file goes
+    // through plat_file_rmw. A failure is not fatal — see the header note.
+    bool locked = LockFileEx(f, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &ov);
+
+    char *buf = NULL;
+    size_t len = 0;
+    LARGE_INTEGER sz;
+    if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (1 << 20)) {
+        len = (size_t)sz.QuadPart;
+        buf = malloc(len + 1);
+        DWORD got = 0;
+        if (!buf || !ReadFile(f, buf, (DWORD)len, &got, NULL)) { free(buf); buf = NULL; len = 0; }
+        else { len = got; buf[len] = 0; }
+    }
+
+    char *out = fn(buf ? buf : "", len, ud);
+    free(buf);
+
+    if (out) {
+        LARGE_INTEGER zero = {0};
+        SetFilePointerEx(f, zero, NULL, FILE_BEGIN);
+        SetEndOfFile(f);
+        DWORD wrote = 0;
+        WriteFile(f, out, (DWORD)strlen(out), &wrote, NULL);
+        free(out);
+    }
+
+    if (locked) {
+        OVERLAPPED uo = {0};
+        UnlockFileEx(f, 0, MAXDWORD, MAXDWORD, &uo);
+    }
+    CloseHandle(f);
+    return true;
+}
+
 void plat_parent_watch(long pid) {
     if (pid <= 0) return;
     HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
@@ -96,6 +181,7 @@ void plat_parent_watch(long pid) {
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
@@ -141,6 +227,101 @@ double plat_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+void plat_sleep_ms(int ms) {
+    if (ms <= 0) return;
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+long plat_pid_self(void) {
+    return (long)getpid();
+}
+
+bool plat_pid_alive(long pid) {
+    if (pid <= 0) return false;
+    // EPERM means the process exists but is owned by another user: alive, and
+    // its reservation is still real. Only ESRCH proves it is gone.
+    return kill((pid_t)pid, 0) == 0 || errno != ESRCH;
+}
+
+bool plat_pid_start_time(long pid, uint64_t *out) {
+#ifdef __linux__
+    if (pid <= 0) return false;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char buf[2048];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return false;
+    buf[n] = 0;
+    // field 22 is starttime in clock ticks since boot. comm (field 2) is
+    // parenthesised and may itself contain spaces, so scan from the LAST ')'.
+    char *p = strrchr(buf, ')');
+    if (!p) return false;
+    p++;
+    for (int field = 3; field <= 21; field++) {
+        while (*p == ' ') p++;
+        while (*p && *p != ' ') p++;
+        if (!*p) return false;
+    }
+    unsigned long long ticks = strtoull(p, NULL, 10);
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0) return false;
+    // relative to boot is enough: entries only ever compare against themselves
+    *out = (uint64_t)(ticks / (unsigned long long)hz);
+    return true;
+#else
+    (void)pid; (void)out;
+    return false;   // macOS/BSD: pid liveness alone (see plat_pid_alive)
+#endif
+}
+
+const char *plat_runtime_dir(void) {
+    const char *d = getenv("XDG_RUNTIME_DIR");
+    if (d && *d) return d;
+    if ((d = getenv("TMPDIR")) && *d) return d;
+    return "/tmp";
+}
+
+bool plat_file_rmw(const char *path, plat_rmw_fn fn, void *ud) {
+    int fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) return false;
+
+    // flock is advisory-by-convention here: every writer of this file goes
+    // through plat_file_rmw. Some network filesystems refuse it; a failure is
+    // not fatal, because an unlockable filesystem must not stop a runner.
+    bool locked = flock(fd, LOCK_EX) == 0;
+
+    char *buf = NULL;
+    size_t len = 0;
+    struct stat st;
+    if (fstat(fd, &st) == 0 && st.st_size > 0 && st.st_size < (1 << 20)) {
+        len = (size_t)st.st_size;
+        buf = malloc(len + 1);
+        ssize_t got = buf ? pread(fd, buf, len, 0) : -1;
+        if (got < 0) { free(buf); buf = NULL; len = 0; }
+        else { len = (size_t)got; buf[len] = 0; }
+    }
+
+    char *out = fn(buf ? buf : "", len, ud);
+    free(buf);
+
+    if (out) {
+        size_t n = strlen(out);
+        if (ftruncate(fd, 0) == 0) {
+            ssize_t w = pwrite(fd, out, n, 0);
+            (void)w;
+        }
+        free(out);
+    }
+
+    if (locked) flock(fd, LOCK_UN);
+    close(fd);
+    return true;
 }
 
 static void *parent_poll(void *arg) {

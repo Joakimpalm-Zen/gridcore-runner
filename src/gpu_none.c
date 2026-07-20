@@ -7,6 +7,11 @@ bool gpu_available(char *name, int cap) {
     return false;
 }
 
+bool gpu_device_id(char *id, int cap) {
+    (void)id; (void)cap;
+    return false;   // no GPU, so nothing to account for and nothing to name
+}
+
 bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
     (void)free_bytes; (void)total_bytes;
     return false;

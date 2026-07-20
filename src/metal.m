@@ -42,6 +42,25 @@ bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
     return false;
 }
 
+// UNVERIFIED — written without a macOS machine to run it on. Nobody on this
+// project has executed this function.
+//
+// Returning false disables the VRAM registry on Metal, which is the correct
+// behaviour anyway rather than a placeholder: Apple GPUs share one unified
+// memory pool with the CPU, gpu_mem_info already declines to report a separate
+// VRAM figure, and the registry's whole arithmetic is "device free bytes minus
+// pending claims". With no device-private pool there is no VRAM to account for
+// and the RAM reservation (--reserve-ram) governs instead.
+//
+// If a Metal build ever does want registry accounting, the identity to return
+// is [MTLDevice registryID] rendered as a string, and gpu_mem_info would have
+// to start reporting recommendedMaxWorkingSetSize / currentAllocatedSize. Both
+// need a real Mac to verify before anyone trusts them.
+bool gpu_device_id(char *id, int cap) {
+    (void)id; (void)cap;
+    return false;
+}
+
 static bool gpu_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:

@@ -118,6 +118,10 @@ static void usage(const char *prog) {
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
+        "  --wait-for-vram [S]  when another registered runner is holding the\n"
+        "                 GPU, queue for up to S seconds (default 300) instead\n"
+        "                 of refusing. Without it a runner that does not fit\n"
+        "                 fails immediately, naming who holds what.\n"
         "  --kv f16|q8    KV cache storage (default f16). q8 roughly halves the\n"
         "                 cache, so it about doubles the context that fits, but\n"
         "                 it is lossy: output differs from an f16 cache\n"
@@ -235,6 +239,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = (int)int_arg(a, NEXT, 0, 100);
+        else if (!strcmp(a, "--wait-for-vram")) {
+            // optional argument: a bare --wait-for-vram waits the default, and
+            // anything that is not a number is left for the next iteration to
+            // parse as its own flag
+            mp.vram_wait_secs = 300;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
+                mp.vram_wait_secs = (int)int_arg(a, argv[++i], 1, 86400);
+        }
         else if (!strcmp(a, "--parent-pid")) parent_pid = (long)int_arg(a, NEXT, 1, LONG_MAX);
         else if (!strcmp(a, "--caps")) caps = true;
         else if (!strcmp(a, "--version")) { printf("runner %s\n", RUNNER_VERSION); return 0; }

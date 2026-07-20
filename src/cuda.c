@@ -61,6 +61,11 @@ static struct {
     CUresult (*DeviceGetCount)(int *);
     CUresult (*DeviceGet)(CUdevice *, int);
     CUresult (*DeviceGetName)(char *, int, CUdevice);
+    // _v2 is the one that reports a MIG *instance* UUID; the v1 entry point
+    // reports the parent card, which is identical for every slice on it.
+    CUresult (*DeviceGetUuid_v2)(unsigned char *, CUdevice);
+    CUresult (*DeviceGetUuid)(unsigned char *, CUdevice);
+    CUresult (*DeviceGetPCIBusId)(char *, int, CUdevice);
     CUresult (*PrimaryCtxRetain)(CUcontext *, CUdevice);
     CUresult (*PrimaryCtxRelease)(CUdevice);
     CUresult (*CtxSetCurrent)(CUcontext);
@@ -153,6 +158,11 @@ static bool cu_load(void) {
     cu.DeviceGetCount    = dl_sym(cu.lib, "cuDeviceGetCount");
     cu.DeviceGet         = dl_sym(cu.lib, "cuDeviceGet");
     cu.DeviceGetName     = dl_sym(cu.lib, "cuDeviceGetName");
+    // all three optional: without them gpu_device_id falls back a step at a
+    // time, and an unidentifiable GPU still gets a (coarser) registry
+    cu.DeviceGetUuid_v2  = dl_sym(cu.lib, "cuDeviceGetUuid_v2");
+    cu.DeviceGetUuid     = dl_sym(cu.lib, "cuDeviceGetUuid");
+    cu.DeviceGetPCIBusId = dl_sym(cu.lib, "cuDeviceGetPCIBusId");
     cu.PrimaryCtxRetain  = dl_sym(cu.lib, "cuDevicePrimaryCtxRetain");
     cu.PrimaryCtxRelease = sym2("cuDevicePrimaryCtxRelease");
     cu.CtxSetCurrent     = dl_sym(cu.lib, "cuCtxSetCurrent");
@@ -309,6 +319,42 @@ bool gpu_available(char *name, int cap) {
         if (cu.DeviceGet(&d, 0) != 0 || cu.DeviceGetName(name, cap, d) != 0)
             snprintf(name, cap, "CUDA GPU");
     }
+    return true;
+}
+
+// Stable identity for the VRAM registry. On this project's dev box the GPU is a
+// 1g.24gb MIG slice: `nvidia-smi -L` shows one card UUID and a separate
+// MIG-<uuid> for the slice, and only the latter distinguishes slices. So the
+// _v2 UUID entry point comes first, the v1 one (parent card) second, the PCI
+// bus id third, and a bare device index last.
+bool gpu_device_id(char *id, int cap) {
+    if (!id || cap <= 0) return false;
+    if (!cu_load() || cu.Init(0) != 0) return false;
+    int n = 0;
+    if (cu.DeviceGetCount(&n) != 0 || n < 1) return false;
+    CUdevice d;
+    if (cu.DeviceGet(&d, 0) != 0) return false;
+
+    unsigned char u[16];
+    CUresult r = cu.DeviceGetUuid_v2 ? cu.DeviceGetUuid_v2(u, d)
+               : cu.DeviceGetUuid    ? cu.DeviceGetUuid(u, d)
+                                     : (CUresult)1;
+    if (r == 0) {
+        // the canonical 8-4-4-4-12 rendering, so the string matches what
+        // nvidia-smi prints and a human can grep the registry filename for it
+        snprintf(id, cap,
+                 "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
+                 "%02x%02x%02x%02x%02x%02x",
+                 u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+                 u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+        return true;
+    }
+    char bus[64];
+    if (cu.DeviceGetPCIBusId && cu.DeviceGetPCIBusId(bus, sizeof(bus), d) == 0) {
+        snprintf(id, cap, "%s", bus);
+        return true;
+    }
+    snprintf(id, cap, "cuda:0");
     return true;
 }
 

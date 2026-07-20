@@ -63,8 +63,10 @@ endif
 # same .exe suffix rule as every other test binary, without repeating the
 # three-way platform branch above
 TEST_PREFIX = $(TEST_BATCH:test-batch=test-prefix)
+TEST_VRAMREG = $(TEST_BATCH:test-batch=test-vram-registry)
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
+      src/vramreg.c \
       src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/server.c \
       src/main.c $(GPU_SRC)
 
@@ -125,7 +127,7 @@ $(TEST_SCHEMA_OOM): tests/test_schema_oom.c src/schema.c src/json.c src/jsonmode
 # shared model weights: needs the real model + backend, so it links the same
 # sources the runner does minus the CLI/server front end
 TEST_SHARED_SRC = tests/test_shared_weights.c src/gguf.c src/compat.c \
-                  src/quants.c src/model.c $(GPU_SRC)
+                  src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_SHARED): $(TEST_SHARED_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_SHARED_SRC) -o $@ $(LDFLAGS)
 
@@ -139,7 +141,7 @@ test-shared-asan: $(TEST_SHARED_SRC) src/runner.h test.gguf
 # batched decode: same sources as the shared-weights test (real model +
 # backend), because the property under test is a backend property
 TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
-                 src/quants.c src/model.c $(GPU_SRC)
+                 src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_BATCH): $(TEST_BATCH_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_BATCH_SRC) -o $@ $(LDFLAGS)
 
@@ -155,9 +157,16 @@ $(TEST_BIND): tests/test_bind.c src/server.c src/main.c
 # same logits the model would have produced by prefilling
 TEST_PREFIX_SRC = tests/test_prefix.c src/gguf.c src/compat.c src/quants.c \
                   src/tokenizer.c src/model.c src/sample.c src/jsonmode.c \
-                  src/schema.c src/json.c src/engine.c $(GPU_SRC)
+                  src/schema.c src/json.c src/engine.c src/vramreg.c $(GPU_SRC)
 $(TEST_PREFIX): $(TEST_PREFIX_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_PREFIX_SRC) -o $@ $(LDFLAGS)
+
+# the cross-process VRAM registry. Links only vramreg.c and compat.c: the
+# free-VRAM figure arrives through a callback, so the whole module is drivable
+# with synthetic numbers and the test needs no GPU, no model and no driver --
+# which is what lets it run in CI.
+$(TEST_VRAMREG): tests/test_vram_registry.c src/vramreg.c src/compat.c src/runner.h
+	$(CC) $(CFLAGS) -I src tests/test_vram_registry.c src/vramreg.c src/compat.c -o $@ $(LDFLAGS)
 
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
@@ -170,8 +179,9 @@ test-ornith-cpu: runner
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
-      $(TEST_PREFIX) runner test.gguf
+      $(TEST_PREFIX) $(TEST_VRAMREG) runner test.gguf
 	./$(TEST_BIND)
+	./$(TEST_VRAMREG)
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)
 	./$(TEST_SCHEMA_OOM)
@@ -284,7 +294,7 @@ clean:
 	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
-	      $(TEST_BATCH) $(TEST_BIND) test-shared-asan-bin
+	      $(TEST_BATCH) $(TEST_BIND) $(TEST_VRAMREG) test-shared-asan-bin
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 

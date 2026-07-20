@@ -167,6 +167,74 @@ static void rope_setup(model_t *m, gguf_file *g, const char *arch,
 
 // ---------------------------------------------------------------- load
 
+// ------------------------------------------------- vram registry integration
+//
+// The registry needs three things this file already knows: which GPU, how much
+// this instance intends to hold, and what it ended up holding.
+
+static uint64_t vram_free_now(void *ud) {
+    (void)ud;
+    size_t f = 0, t = 0;
+    return gpu_mem_info(&f, &t) ? (uint64_t)f : 0;
+}
+
+// Register the intended footprint before a byte of it is allocated.
+//
+// Returns false only to abort the load: that happens when the request does not
+// fit AND the registry can name who is holding the memory. An unattributable
+// shortfall is left to the backend's existing adaptive split, which trims
+// layers onto the CPU — refusing there would regress every legitimate
+// partial-offload run on a small GPU into a hard failure.
+static bool model_vram_claim(model_t *m, const model_params *p, size_t kv_bytes) {
+    char gpu_id[128];
+    if (!gpu_device_id(gpu_id, sizeof(gpu_id))) return true;   // no GPU: nothing to account
+    size_t vfree = 0, vtotal = 0;
+    if (!gpu_mem_info(&vfree, &vtotal)) return true;           // unified memory (Metal)
+
+    // What a full offload would hold: the weights, this instance's KV cache,
+    // and the same fixed margin cuda.c budgets for context + JIT + activations.
+    // An estimate is the right resolution here — it decides fit, and the exact
+    // figure replaces it at commit time.
+    uint64_t need = (uint64_t)m->gf.map_size + (uint64_t)kv_bytes * 2 + (512ull << 20);
+    if (p->reserve_vram_pct > 0) {
+        uint64_t cap = (uint64_t)vtotal / 100 * (uint64_t)p->reserve_vram_pct;
+        if (cap < need) need = cap;   // --reserve-vram already caps the ask
+    }
+
+    char err[1024];
+    vram_status st = {0};
+    m->vram = vram_claim(gpu_id, m->path, need, vram_free_now, NULL,
+                         p->vram_wait_secs, &st, err, sizeof(err));
+    if (m->vram) return true;
+
+    if (st.holders > 0) {
+        fprintf(stderr, "error: %s\n", err);
+        return false;
+    }
+    // Nobody to blame: claim what is actually available so the next runner can
+    // still see this instance, and let the adaptive split size itself down.
+    m->vram = vram_claim(gpu_id, m->path, st.available, vram_free_now, NULL,
+                         0, NULL, NULL, 0);
+    return true;
+}
+
+// The split is decided and uploaded: replace the estimate with what the device
+// really lost, measured rather than predicted. `before` is the free figure from
+// immediately before gpu_init.
+//
+// Measuring the delta is what keeps this honest across every path at once — a
+// full offload, a partial offload that trimmed layers onto the CPU, a backend
+// that declined the model entirely, and the shared-weights case where a second
+// instance of the same file uploads nothing because the first already did. All
+// four report the truth without this file knowing which one happened.
+static void model_vram_commit(model_t *m, size_t before) {
+    if (!m->vram) return;
+    size_t vfree = 0, vtotal = 0;
+    if (!gpu_mem_info(&vfree, &vtotal)) { vram_commit(m->vram, 0); return; }
+    // A load that freed memory nets to zero rather than underflowing.
+    vram_commit(m->vram, before > vfree ? (uint64_t)(before - vfree) : 0);
+}
+
 bool model_load(model_t *m, const char *path, const model_params *p) {
     memset(m, 0, sizeof(*m));
     if (!gguf_open(&m->gf, path)) return false;
@@ -569,7 +637,17 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 
     // The existing GPU backends implement KV attention only. Keep Qwen3.5 on
     // the correct CPU path until a native recurrent backend is available.
-    if (p->gpu_mode == GPU_AUTO && !m->qwen35) gpu_init(m); // sets m->gpu on success
+    if (p->gpu_mode == GPU_AUTO && !m->qwen35) {
+        // Register the intended VRAM footprint before allocating any of it, so
+        // a concurrent runner sees this claim rather than discovering it as a
+        // mysteriously shrunken free figure. CPU-only runs never get here, so
+        // they are never accounted and never refused.
+        if (!model_vram_claim(m, p, kv_bytes)) return false;
+        size_t vfree_before = 0, vtotal_before = 0;
+        gpu_mem_info(&vfree_before, &vtotal_before);
+        gpu_init(m);                        // sets m->gpu on success
+        model_vram_commit(m, vfree_before);
+    }
 
     if (p->verbose) {
         fprintf(stderr, "%-24s %s\n", "architecture", m->arch);
@@ -593,6 +671,11 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 
 void model_free(model_t *m) {
     gpu_free(m); // nulls kcache/vcache if the GPU owned them
+    // Deregister on the clean path. The unclean paths (SIGKILL, crash) are
+    // covered by dead-pid reaping in the next runner's claim, which is how the
+    // orphans that motivated the registry would have been cleared.
+    vram_release(m->vram);
+    m->vram = NULL;
     // partial load: n_layer is read from GGUF metadata long before m->layers
     // is allocated, so a load that fails in between (unsupported tensor
     // type, missing token_embd/output_norm, etc.) reaches here with
