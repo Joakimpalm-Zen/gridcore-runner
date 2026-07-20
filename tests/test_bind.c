@@ -160,7 +160,15 @@ static void test_no_option_reaches_the_bind_address(void) {
 // a notice when the binary is absent — `make test` and both CI jobs build it
 // first, so in practice this always runs.
 static const char *find_runner(void) {
+    // No "./" prefix on Windows: _popen routes through cmd.exe, where a
+    // leading forward slash reads as an option marker rather than a path, so
+    // `./runner.exe --help` captures nothing and the check silently vacuously
+    // failed. Plain "runner.exe" resolves from the working directory there.
+#ifdef _WIN32
+    static const char *candidates[] = { "runner.exe", "runner" };
+#else
     static const char *candidates[] = { "./runner", "./runner.exe" };
+#endif
     for (size_t i = 0; i < sizeof candidates / sizeof *candidates; i++) {
         FILE *f = fopen(candidates[i], "rb");
         if (f) { fclose(f); return candidates[i]; }
