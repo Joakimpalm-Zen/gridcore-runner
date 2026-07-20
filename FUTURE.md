@@ -754,10 +754,10 @@ Increase completed agent tasks per second without weakening schema guarantees.
 
 ## Work
 
-- Add a scheduler that gathers ready sequences into decode microbatches.
-  **NOT DONE** — this is the server half and is specified below under
-  "The server integration this needs next", precisely enough to wire without
-  redesign. The primitive it schedules onto exists and is verified.
+- **DONE** — Add a scheduler that gathers ready sequences into decode
+  microbatches. One decode thread in src/server.c owns every batched forward;
+  slot threads keep the whole per-request path including the per-token
+  sampler/schema/stop/stream work. See "What landed: the scheduler" below.
 - **DONE** — Pass sequence IDs and positions through batched CUDA kernels.
   `model_batch_decode` (src/runner.h, src/model.c) advances N independent
   sequences by one token in one pass over the weights; the backend half is
@@ -766,24 +766,48 @@ Increase completed agent tasks per second without weakening schema guarantees.
   streaming state per sequence. The batch never touches any of it: sequences
   are the caller's own `model_t` values, named per call rather than enrolled,
   and the primitive returns per-sequence logits and nothing else.
-- **PARTIAL** — Add prompt-prefill scheduling separately from decode
-  scheduling. The separation exists at the API — prefill stays on
-  `model_forward_batch` per sequence, decode goes through `model_batch_decode`
-  — because a prefill tile and a decode microbatch are different kernel
-  shapes. Deciding *when* to run each is the missing scheduler.
-- Add fairness, cancellation, queue limits, and per-request deadlines.
-  **NOT DONE** — scheduler-side, see below.
+- **DONE** — Add prompt-prefill scheduling separately from decode scheduling.
+  Prefill stays per sequence on `model_forward_batch` and takes the scheduler's
+  *device turn* (`SCH.dev_mu`), which decode also takes. They interleave rather
+  than overlap, and this turned out to be required for correctness, not just
+  for throughput: a microbatch captures a CUDA graph on its lead sequence's
+  stream, and a prefill launching kernels in the same context while that
+  capture is open makes it fail. Before the turn existed the backend logged
+  "batch graph capture failed" and fell back to CPU under concurrency.
+- **DONE** — Add fairness, cancellation, queue limits, and per-request
+  deadlines.
+  - *Fairness*: every sequence in SEQ_WAIT joins the next batch, and lists
+    longer than `model_batch_max()` are split into consecutive microbatches
+    inside one call — so no ready sequence is ever passed over for another.
+  - *Cancellation*: a disconnect makes the streaming callback return nonzero,
+    `engine_gen_step` reports DONE, and the slot simply stops appearing in
+    `idx[]`. Nothing is torn down.
+  - *Queue limits*: `SV.q.limit` (env `RUNNER_MAX_QUEUE`), and a shed request
+    now gets a 503 instead of having its socket dropped without a response.
+  - *Per-request deadlines*: request field `"timeout"` (seconds), default from
+    env `RUNNER_REQUEST_TIMEOUT`, 0 = none. Expiry is a *truncation*, not an
+    error: generation stops, `engine_gen_end` still runs, so `finish_reason` is
+    "length" and a constrained document is closed to something valid.
 - **DONE** — Keep single-request latency as a first-class metric. A microbatch
   of one delegates to the existing solo decode path, and `scripts/kernel-bench.py`
   measures 60.33 tok/s decode against the baseline's 60.24 on Qwen3-4B — the
-  single-request path is untouched.
+  single-request path is untouched. With the scheduler in place this still
+  holds end to end: the decode thread never waits for sequences that do not
+  exist, so a lone request is never delayed to fill a batch. Measured over
+  HTTP: 64.8 tok/s batched-server vs 65.2 baseline (0.99x), and kernel-bench
+  60.38 vs 60.45.
 
 ## Exit Criteria
 
-- **DONE (decode primitive)** — Concurrent throughput materially exceeds
-  independent-slot execution: 2.3-2.6x at 4 and 8 sequences, on six
-  architectures. Numbers below. The end-to-end server figure waits on the
-  scheduler.
+- **DONE** — Concurrent throughput materially exceeds independent-slot
+  execution. Primitive: 2.3-2.6x at 4 and 8 sequences on six architectures.
+  End to end over real concurrent HTTP (`scripts/batch-bench.py`, Qwen3-4B):
+  134.0 tok/s aggregate at 4 concurrent and 145.6 at 8, against 64.8 tok/s
+  single-stream on the same binary — 2.07x and 2.24x. Against the pre-Phase-6
+  binary serving the same `--parallel` it is 6.4-6.7x, but see the honesty
+  note under "What landed: the scheduler": most of the extra is a *pre-existing*
+  concurrency pathology in independent-slot execution that the device turn
+  also happens to fix.
 - **DONE** — No additional model-weight copies are created. The batch holds a
   borrowed pointer to the Phase 5 shared `gpu_weights` and allocates only
   three MVB-element device arrays (positions, two KV base-pointer tables) plus
@@ -791,9 +815,13 @@ Increase completed agent tasks per second without weakening schema guarantees.
 - **DONE** — Batched and unbatched greedy output remain identical. Stronger
   than required: the logits are *bitwise* equal, not merely argmax-equal, and
   that is what `tests/test_batch.c` asserts.
-- Every sequence retains valid structured output under cancellation/truncation.
-  **NOT DONE** — needs the scheduler; the primitive makes it reachable, since
-  a cancelled sequence is simply not listed in the next step.
+- **DONE** — Every sequence retains valid structured output under
+  cancellation/truncation. All three cut paths — token ceiling, client
+  disconnect, deadline expiry — leave the loop and land on `engine_gen_end`,
+  which is where `constraint_close` completes a half-written document.
+  `tests/conformance/test_continuous_batching.py` pins this concurrently for
+  truncation and deadlines, and pins that a neighbour's cancellation changes
+  neither the survivors' output nor their availability.
 
 ## What landed: the batched decode primitive
 
@@ -888,12 +916,156 @@ brings fused QKV, qwen3 brings per-head Q/K norms. All bitwise identical.
 
 ### Known pre-existing issue, not introduced here
 
+Independent slots contend badly on CUDA. Serving `--parallel 4` on the
+pre-Phase-6 binary logs `gpu: graph capture failed — plain launches` and two of
+the four slots collapse to 6.0 tok/s while the others hold ~39, so aggregate
+throughput at 4 concurrent (20.9 tok/s) is *below* that binary's own
+single-stream rate (65.2). The scheduler's device turn incidentally removes
+this by serializing device access, but the underlying issue — concurrent
+per-slot CUDA graph capture in one context — predates Phase 6 and would still
+bite any future path that runs slot forwards concurrently. Worth its own
+investigation rather than leaving it papered over by the turn.
+
 CPU-vs-GPU on Qwen3-4B diverges on one of the five kernel-verify prompts
 (`"1 2 3 4 5 6 7 8"`, at the 24th generated token). The **baseline binary
 built from HEAD produces the byte-identical divergence**, so this predates
 Phase 6 and is unrelated to batching, but the project invariant says GPU
 output is token-identical to the CPU reference and on this model it currently
 is not. Worth its own investigation.
+
+## What landed: the scheduler
+
+The server half. `src/server.c` gained one decode thread and a small state
+machine; `src/engine.c` was split at the seam between "per-sequence work" and
+"the forward", so both halves share one copy of the generation logic.
+
+### The engine split
+
+`engine_generate`'s loop body did two things: the per-token work (sample,
+constrain, stop-check, capture logprobs, stream) and the `model_forward` that
+produced the next step's logits. Batching needs the second hoisted out, because
+one thread has to issue every batched forward. So the loop became three public
+calls (src/runner.h):
+
+```c
+engine_gen_begin(e, max_new);
+while (engine_gen_step(e, logits, cb, ud, &tok, &pos) == ENGINE_STEP_MORE)
+    logits = <forward tok at pos — batched or solo>;
+n = engine_gen_end(e, cb, ud, &secs);
+```
+
+`engine_generate` is now written on exactly those three calls. That is the
+point: there is no second batched generation loop that could drift from the
+solo one, and the scheduler reimplements none of the sampler, schema, stop or
+streaming logic — it only chooses where the forward happens.
+
+A caller that abandons the loop early still calls `engine_gen_end`, which is
+where a truncated constrained document gets closed. Cancellation, deadline
+expiry and the token ceiling therefore all leave valid structured output by
+construction rather than by three separate code paths remembering to.
+
+### The scheduler
+
+- One decode thread. Slot threads keep HTTP, prompt building, prefill, and the
+  per-token work; they hand over only the forward, via `sched_forward`.
+- A sequence is named per step, never enrolled. Admitting, finishing,
+  cancelling or timing one out is only a change to which slots are in
+  `SEQ_WAIT` when the next batch is cut.
+- Per-token work runs on the slot threads, concurrently, while the decode
+  thread is already gathering the next microbatch. A slow client blocking on a
+  socket write stalls its own request, not everyone's.
+- Each batch member's logit row is copied into a slot-owned buffer before the
+  decode thread proceeds, because `out[i]` is only valid until the next call.
+- Gathering waits for stragglers **only when they exist**: the wait condition
+  is "every currently-generating sequence is here", never a fixed timer, so a
+  lone request is never delayed to fill a batch. `SCHED_GATHER_S` (2 ms) is a
+  safety net for a slot stuck on a socket write, not the normal path.
+- Batching is enabled only for plain multi-slot serving (`--parallel N`, no
+  swap registry). Swap mode reloads slot 0's model underneath the batch's
+  borrowed pointers, and a single slot has nothing to batch with; both keep the
+  untouched solo path. This is also why the single-slot behaviour that most of
+  the conformance suite exercises could not regress.
+
+### The device turn — the one thing the contract did not predict
+
+FUTURE.md's integration contract said not to run a slot's own `model_forward*`
+concurrently with a batch *containing it*. That is necessary but not
+sufficient. The microbatch captures a CUDA graph on its lead sequence's stream,
+and graph capture fails if *any* kernel is launched in the context while the
+capture is open — including a different slot's prefill on a different stream.
+
+The symptom was `gpu: batch graph capture failed — plain launches` followed by
+`gpu: kernel launch failed — falling back to CPU`, and requests dying without a
+response, the first time real concurrent HTTP hit the server.
+
+So prefill and decode take turns on `SCH.dev_mu`. This costs nothing real —
+both saturate the device, so overlapping them only trades one's latency for the
+other's — and it is what makes "prefill scheduling separate from decode
+scheduling" an actual mechanism rather than just an API distinction.
+
+### Measured (24 GB MIG slice of an RTX PRO 6000, Qwen3-4B Q4_K_M, `-c 1024`)
+
+Real concurrent HTTP requests via `scripts/batch-bench.py`, greedy, 64 new
+tokens each, `cache_prompt:false` so no request rides another's prefix.
+
+| | single-request | 4 concurrent | 8 concurrent |
+| --- | --- | --- | --- |
+| this build | 64.8 tok/s | 134.0 tok/s | 145.6 tok/s |
+| pre-Phase-6 binary, same `--parallel` | 65.2 tok/s | 20.9 tok/s | 21.8 tok/s |
+
+**Read the baseline row with suspicion, and here is why.** 20.9 tok/s
+aggregate is *worse than that same binary's own single-stream rate*, which is
+not what "no batching" should cost. Running it directly shows why: four
+independent slots on this GPU log `gpu: graph capture failed — plain launches`
+and two of the four collapse to 6.0 tok/s while the other two hold ~39. So the
+6.4x ratio is batching plus the incidental repair of a pre-existing
+independent-slot pathology, and it should not be quoted as the batching win.
+
+The number to trust is against this build's own single-stream rate: **2.07x at
+4 concurrent, 2.24x at 8**, which sits just under the primitive's measured
+2.31x/2.53x — the gap being prefill, HTTP and the per-token CPU work that the
+primitive's microbenchmark does not pay. That N=8 adds so little over N=4 is
+the expected shape: the cost model is flat within a width class and the x-traffic
+limit described under "Remaining" bites past 4.
+
+Single-request latency is unmoved (0.99x over HTTP; `scripts/kernel-bench.py`
+60.38 tok/s decode / 140.63 prefill against the baseline's 60.45 / 140.62).
+
+### How it was verified
+
+- `scripts/kernel-verify.py` against a baseline binary built from the previous
+  HEAD: token-identical on all 5 prompts on Qwen3-4B, Gemma-3-4B, Phi-3.5-mini
+  and Llama-3.2-3B. The engine split is the risk here, and this is what covers
+  it — the CLI path runs `engine_generate`, which is now the stepper.
+- `scripts/conformance.sh`: 228 passed (the 221 that existed, plus 7 new). The
+  suite's server fixture runs `--parallel 2`, so every streaming, disconnect
+  and structured-output test in it already goes through the scheduler. Run
+  three times for flakiness; stable.
+- `tests/conformance/test_continuous_batching.py` (new): batched output equals
+  solo output on the wire; distinct prompts do not bleed between slots;
+  structured output stays valid under concurrency and under truncation;
+  cancelling one sequence changes neither its neighbours' output nor their
+  availability; a deadline truncates to a valid document rather than erroring.
+- `scripts/batch-bench.py` (new): the throughput and single-request-latency
+  gate above, driven by real concurrent HTTP against a real server rather than
+  a synthetic harness. It also byte-compares every concurrent response against
+  the same prompt run alone, and against the unbatched baseline binary.
+- Deadline behaviour checked on the real model: 400 requested tokens cut at
+  1.02 s after 67, `finish_reason` "length", body still valid JSON against the
+  requested schema.
+- A mixed stress run — 30 requests over 5 staggered rounds, a third of them
+  disconnected mid-stream, a third under a JSON schema — left every completed
+  document valid, the server healthy, and no fallback or capture failure in the
+  log.
+- `make test` and `make smoke` green.
+
+### No additional weight copies
+
+Unchanged from the primitive, and the scheduler adds none: it allocates the
+`model_batch` over the slot models the server already owns, plus one
+`n_vocab`-float logit buffer per slot (~0.6 MB each on Qwen3-4B). The startup
+log still reports `gpu: reusing resident weights (2.5 GB, now shared by N
+instances)`.
 
 ## The server integration this needs next
 
@@ -965,7 +1137,24 @@ ceiling.
 
 ## Remaining for Phase 6
 
-- The scheduler above: it is the other half of this phase.
+- ~~The scheduler above: it is the other half of this phase.~~ **DONE**, see
+  "What landed: the scheduler".
+- Prefill is not chunked against decode. The device turn is taken for a whole
+  `engine_feed`, so one long prompt delays every decode step behind it by its
+  full prefill time. Splitting prefill into `n_batch` tiles that each take the
+  turn separately would bound that; it needs an `engine_feed` that can be
+  resumed the way `engine_gen_step` can.
+- The scheduler's fairness is "every ready sequence joins the next batch",
+  which is fair per step but has no notion of priority or of a request that
+  has been waiting longer. Fine at `--parallel <= 16`; a real admission policy
+  would want request age in it.
+- `model_batch_free` is never called: the server exits by process teardown and
+  never frees slots either. Harmless today, wrong the moment the server gains
+  a clean shutdown path.
+- Speculative decoding (`--draft`) opts out of batching entirely and takes the
+  device turn as one solo generation, so a draft-enabled slot serializes the
+  whole server. Acceptable because the two do not compose yet (see below), but
+  it should at least not block other slots.
 - Throughput leaves a lot on the table. The batched matvec tiles only the
   output rows, so every block re-stages the whole x for all its columns —
   x traffic exceeds weight traffic and the step is no longer weight-bandwidth

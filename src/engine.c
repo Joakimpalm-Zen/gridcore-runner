@@ -494,52 +494,85 @@ done:
     return n_gen;
 }
 
+// ------------------------------------------------- the generation step
+//
+// engine_generate used to own both halves of a decode step: the per-sequence
+// work (sample, constrain, stop-check, stream) and the forward that produces
+// the next step's logits. Continuous batching needs to keep the first half and
+// take the second away, because one thread has to issue every batched forward
+// (see model_batch_decode). So the loop is split at exactly that seam.
+//
+// engine_generate below is written on the same three calls the scheduler uses,
+// which is the point: there is one copy of the sampler/schema/stop/stream
+// logic, not a solo one and a batched one that can drift apart.
+
+void engine_gen_begin(engine *e, int max_new) {
+    e->hit_stop  = false;
+    e->lp_count  = 0;
+    e->gen_max   = max_new;
+    e->gen_count = 0;
+    e->gen_t0    = now_s();
+}
+
+int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
+                    int32_t *next_tok, int *next_pos) {
+    char buf[512];
+    if (!((e->gen_max < 0 || e->gen_count < e->gen_max) && e->pos < e->m->n_ctx))
+        return ENGINE_STEP_DONE;
+    lp_pre pre;
+    pre.lse = 0; pre.n_snap = 0;
+    bool want_lp = e->lp_cap && e->lp_count < e->lp_cap;
+    if (want_lp) lp_capture_pre(e, logits, &pre);
+    int tok = sample_pick(e->smp, (float *)logits, e->m->n_vocab,
+                          e->schema ? schema_ok :
+                          e->json_mode ? json_ok : NULL, e);
+    if (tok < 0) { e->hit_stop = true; return ENGINE_STEP_DONE; } // no continuation
+    sampler_accept(e->smp, tok);
+    if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
+    if (is_stop(e, tok) && !e->ignore_eos) {
+        e->hit_stop = true;
+        return ENGINE_STEP_DONE;
+    }
+    if (want_lp) {
+        float raw = logits[tok]; // unmutated unless in the penalty window
+        for (int i = 0; i < pre.n_snap; i++)
+            if (pre.snap_ids[i] == tok) { raw = pre.snap[i]; break; }
+        e->lp_ids[e->lp_count]    = tok;
+        e->lp_chosen[e->lp_count] = raw - pre.lse;
+        e->lp_count++;
+    }
+    int n = tok_decode(e->tok, tok, buf, sizeof(buf));
+    int rc = e->schema && n > 0
+               ? constraint_accept(e, true, buf, n, cb, ud)
+           : e->json_mode && n > 0
+               ? constraint_accept(e, false, buf, n, cb, ud)
+           : cb && n > 0 ? cb(ud, buf, n) : 0;
+    if (rc != 0) { e->gen_count++; return ENGINE_STEP_DONE; } // client gone
+    e->gen_count++;
+    if ((e->schema && constraint_done(e, true)) ||
+        (!e->schema && e->json_mode && constraint_done(e, false))) {
+        e->hit_stop = true;
+        return ENGINE_STEP_DONE;
+    }
+    if (e->hist && e->pos < e->m->n_ctx) e->hist[e->pos] = tok;
+    *next_tok = (int32_t)tok;
+    *next_pos = e->pos++;
+    return ENGINE_STEP_MORE;
+}
+
+int engine_gen_end(engine *e, gen_cb cb, void *ud, double *gen_time) {
+    constraint_close(e, cb, ud);
+    if (gen_time) *gen_time = now_s() - e->gen_t0;
+    return e->gen_count;
+}
+
 int engine_generate(engine *e, float *logits, int max_new,
                     gen_cb cb, void *ud, double *gen_time) {
-    char buf[512];
-    int n_gen = 0;
     if (e->dm && e->lp_cap == 0)
         return engine_generate_spec(e, logits, max_new, cb, ud, gen_time);
-    e->hit_stop = false;
-    e->lp_count = 0;
-    double t0 = now_s();
-    while ((max_new < 0 || n_gen < max_new) && e->pos < e->m->n_ctx) {
-        lp_pre pre;
-        pre.lse = 0; pre.n_snap = 0;
-        bool want_lp = e->lp_cap && e->lp_count < e->lp_cap;
-        if (want_lp) lp_capture_pre(e, logits, &pre);
-        int tok = sample_pick(e->smp, logits, e->m->n_vocab,
-                              e->schema ? schema_ok :
-                              e->json_mode ? json_ok : NULL, e);
-        if (tok < 0) { e->hit_stop = true; break; } // no valid continuation
-        sampler_accept(e->smp, tok);
-        if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
-        if (is_stop(e, tok) && !e->ignore_eos) { e->hit_stop = true; break; }
-        if (want_lp) {
-            float raw = logits[tok]; // unmutated unless in the penalty window
-            for (int i = 0; i < pre.n_snap; i++)
-                if (pre.snap_ids[i] == tok) { raw = pre.snap[i]; break; }
-            e->lp_ids[e->lp_count]    = tok;
-            e->lp_chosen[e->lp_count] = raw - pre.lse;
-            e->lp_count++;
-        }
-        int n = tok_decode(e->tok, tok, buf, sizeof(buf));
-        int rc = e->schema && n > 0
-                   ? constraint_accept(e, true, buf, n, cb, ud)
-               : e->json_mode && n > 0
-                   ? constraint_accept(e, false, buf, n, cb, ud)
-               : cb && n > 0 ? cb(ud, buf, n) : 0;
-        if (rc != 0) { n_gen++; break; }
-        n_gen++;
-        if ((e->schema && constraint_done(e, true)) ||
-            (!e->schema && e->json_mode && constraint_done(e, false))) {
-            e->hit_stop = true;
-            break;
-        }
-        if (e->hist && e->pos < e->m->n_ctx) e->hist[e->pos] = tok;
-        logits = model_forward(e->m, tok, e->pos++);
-    }
-    constraint_close(e, cb, ud);
-    if (gen_time) *gen_time = now_s() - t0;
-    return n_gen;
+    engine_gen_begin(e, max_new);
+    int32_t tok; int pos;
+    while (engine_gen_step(e, logits, cb, ud, &tok, &pos) == ENGINE_STEP_MORE)
+        logits = model_forward(e->m, tok, pos);
+    return engine_gen_end(e, cb, ud, gen_time);
 }

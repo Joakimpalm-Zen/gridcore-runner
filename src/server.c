@@ -150,7 +150,7 @@ typedef struct {
 
 typedef struct {
     int  fds[512];
-    int  head, tail, count;
+    int  head, tail, count, limit;
     bool shutdown;
     pthread_mutex_t mu;
     pthread_cond_t cv;
@@ -190,6 +190,8 @@ static struct {
     // overrides are kept so a swapped-in model can be re-resolved against them
     sampler_override ov;
     const char *preset_name;
+    // default wall-clock ceiling per generation, 0 = none (RUNNER_REQUEST_TIMEOUT)
+    double      req_timeout;
 } SV;
 
 static int resident_load(void) {
@@ -334,17 +336,24 @@ static bool init_swap_runtime(const model_params *mp, int n_threads, int ttl) {
     return true;
 }
 
+// Admission. The queue is the server's backpressure: past its limit a client
+// is told it was shed rather than having its connection dropped silently,
+// because "503, retry" is something an agent runtime can act on and an
+// unexplained EOF is not.
 static void q_push(int fd) {
     pthread_mutex_lock(&SV.q.mu);
-    if (SV.q.count < (int)(sizeof(SV.q.fds) / sizeof(int))) {
+    bool room = SV.q.count < SV.q.limit;
+    if (room) {
         SV.q.fds[SV.q.tail] = fd;
         SV.q.tail = (SV.q.tail + 1) % (int)(sizeof(SV.q.fds) / sizeof(int));
         SV.q.count++;
         pthread_cond_signal(&SV.q.cv);
-    } else {
-        sock_close(fd); // overloaded
     }
     pthread_mutex_unlock(&SV.q.mu);
+    if (!room) {
+        send_error(fd, 503, "server queue full");
+        sock_close(fd);
+    }
 }
 
 static int q_pop(void) {
@@ -359,6 +368,274 @@ static int q_pop(void) {
     }
     pthread_mutex_unlock(&SV.q.mu);
     return fd;
+}
+
+// ------------------------------------------------- continuous batching
+//
+// Throughput problem: a decode step is weight-bandwidth bound, so N slots
+// decoding independently read the same 2.5 GB of weights N times to produce N
+// tokens. model_batch_decode reads them once for all N. The scheduler's whole
+// job is to arrange for as many sequences as possible to be at the same point
+// — "needs one token" — at the same instant, and hand them over together.
+//
+// The shape is forced by one constraint: a microbatch borrows its lead
+// sequence's activation scratch and CUDA stream, so no slot may run its own
+// model_forward while a batch containing it is in flight. Hence ONE decode
+// thread issuing one step at a time, rather than a thread per slot.
+//
+// What stays on the slot threads is everything else: HTTP, prompt building,
+// prefill, and — critically — the per-token sampler / schema / stop /
+// streaming work, which is pure CPU and touches no shared model state. Slot
+// threads run that concurrently while the decode thread is already gathering
+// the next microbatch, and a slow client blocking on a socket write therefore
+// stalls its own request instead of everyone's.
+//
+// A sequence is named per step, never enrolled (see model_batch_decode), so
+// admitting, finishing, cancelling or timing one out is only ever a change to
+// which slots are in SEQ_WAIT when the next batch is cut. Nothing is torn down.
+
+enum {
+    SEQ_OFF = 0,   // slot is not generating
+    SEQ_WAIT,      // has a token to forward, waiting to be picked up
+    SEQ_INFLIGHT,  // in the microbatch the decode thread is running now
+    SEQ_READY      // its logits have been copied back; slot thread's turn
+};
+
+typedef struct {
+    int      state;
+    int32_t  tok;
+    int      pos;
+    float   *logits;   // slot-owned copy of this sequence's last logit row
+    bool     ok;       // last forward succeeded
+} seq_t;
+
+// How long the decode thread will wait for a straggler before cutting the
+// batch anyway. The cost model says a step is flat within a width class, so
+// waiting for a sequence that is *already generating* is nearly free — but
+// waiting for one that does not exist is pure added latency, which is why the
+// wait condition below is "every active sequence is here", not a fixed timer.
+// This is only the safety net for a slot thread stuck on a slow socket write.
+#define SCHED_GATHER_S 0.002
+
+static struct {
+    model_batch    *batch;
+    seq_t          *seq;        // [n_slots]
+    int             n_wait;     // sequences in SEQ_WAIT
+    int             n_active;   // sequences inside a generate loop
+    bool            stop, running;
+    pthread_mutex_t mu;
+    pthread_cond_t  dec_cv;     // decode thread waits for work
+    pthread_cond_t  slot_cv;    // slot threads wait for their logits
+    pthread_t       th;
+    // The device turn. Prefill is scheduled separately from decode — different
+    // kernel shapes — but the two must INTERLEAVE, not overlap: a microbatch
+    // captures a CUDA graph on its lead sequence's stream, and graph capture
+    // fails if any other kernel is launched in the context while it is open.
+    // A slot prefilling on its own stream is exactly such a launch, and the
+    // backend then reports "batch graph capture failed" and degrades to plain
+    // launches or a CPU fallback. So prefill and decode take turns here.
+    //
+    // Serializing them costs nothing real anyway: both saturate the device,
+    // so overlapping them only trades one's latency for the other's.
+    pthread_mutex_t dev_mu;
+    // metrics
+    atomic_long steps, seqs_batched;
+} SCH;
+
+static bool sched_on(void) { return SCH.running; }
+
+// Absolute deadline for pthread_cond_timedwait, which measures against
+// CLOCK_REALTIME — deliberately not now_s(), which is monotonic.
+static void ts_in(struct timespec *ts, double secs) {
+    timespec_get(ts, TIME_UTC);
+    long ns = ts->tv_nsec + (long)(secs * 1e9);
+    ts->tv_sec  += ns / 1000000000L;
+    ts->tv_nsec  = ns % 1000000000L;
+}
+
+static void *decode_worker(void *unused) {
+    (void)unused;
+    int n = SV.n_slots;
+    int     *idx = malloc(sizeof(int) * (size_t)n);
+    int32_t *tk  = malloc(sizeof(int32_t) * (size_t)n);
+    int     *ps  = malloc(sizeof(int) * (size_t)n);
+    float  **out = malloc(sizeof(float *) * (size_t)n);
+    if (!idx || !tk || !ps || !out) { free(idx); free(tk); free(ps); free(out); return NULL; }
+    int n_vocab = SV.slots[0].m->n_vocab;
+
+    pthread_mutex_lock(&SCH.mu);
+    for (;;) {
+        while (!SCH.stop && SCH.n_wait == 0)
+            pthread_cond_wait(&SCH.dec_cv, &SCH.mu);
+        if (SCH.stop) break;
+
+        // Fill the microbatch before cutting it, but only ever wait on
+        // sequences that actually exist: if everyone active is already here,
+        // this loop does not run at all and a lone request pays nothing.
+        int cap = model_batch_max();
+        for (;;) {
+            int want = SCH.n_active < cap ? SCH.n_active : cap;
+            if (SCH.stop || SCH.n_wait >= want) break;
+            struct timespec ts;
+            ts_in(&ts, SCHED_GATHER_S);
+            if (pthread_cond_timedwait(&SCH.dec_cv, &SCH.mu, &ts) == ETIMEDOUT)
+                break;
+        }
+
+        int nb = 0;
+        for (int i = 0; i < n; i++) {
+            if (SCH.seq[i].state != SEQ_WAIT) continue;
+            SCH.seq[i].state = SEQ_INFLIGHT;
+            idx[nb] = i;
+            tk[nb]  = SCH.seq[i].tok;
+            ps[nb]  = SCH.seq[i].pos;
+            nb++;
+        }
+        SCH.n_wait -= nb;
+        if (nb == 0) continue;
+        pthread_mutex_unlock(&SCH.mu);
+
+        // Take the device turn. SCH.mu is deliberately released first: these
+        // two locks are never held together, in either order.
+        pthread_mutex_lock(&SCH.dev_mu);
+        bool ok = model_batch_decode(SCH.batch, idx, tk, ps, nb, out);
+        // out[i] is only valid until the next decode, and the slot threads
+        // read it after this one returns — so each row is copied home first.
+        if (ok)
+            for (int i = 0; i < nb; i++)
+                memcpy(SCH.seq[idx[i]].logits, out[i],
+                       sizeof(float) * (size_t)n_vocab);
+        pthread_mutex_unlock(&SCH.dev_mu);
+        atomic_fetch_add(&SCH.steps, 1);
+        atomic_fetch_add(&SCH.seqs_batched, nb);
+
+        pthread_mutex_lock(&SCH.mu);
+        for (int i = 0; i < nb; i++) {
+            SCH.seq[idx[i]].ok    = ok;
+            SCH.seq[idx[i]].state = SEQ_READY;
+        }
+        pthread_cond_broadcast(&SCH.slot_cv);
+    }
+    pthread_mutex_unlock(&SCH.mu);
+    free(idx); free(tk); free(ps); free(out);
+    return NULL;
+}
+
+// Batching is enabled only for plain multi-slot serving. Swap mode reloads
+// slot 0's model underneath the batch's borrowed pointers, and a single slot
+// has nothing to batch with, so both keep the untouched solo path.
+static bool sched_start(void) {
+    if (SV.n_slots < 2 || SV.n_reg > 0) return false;
+    model_t **ms = malloc(sizeof(model_t *) * (size_t)SV.n_slots);
+    SCH.seq = calloc((size_t)SV.n_slots, sizeof(seq_t));
+    if (!ms || !SCH.seq) { free(ms); free(SCH.seq); SCH.seq = NULL; return false; }
+    for (int i = 0; i < SV.n_slots; i++) ms[i] = SV.slots[i].m;
+    int n_vocab = SV.slots[0].m->n_vocab;
+    for (int i = 0; i < SV.n_slots; i++) {
+        SCH.seq[i].logits = malloc(sizeof(float) * (size_t)n_vocab);
+        if (!SCH.seq[i].logits) { free(ms); return false; }
+    }
+    SCH.batch = model_batch_create(ms, SV.n_slots);
+    free(ms);
+    if (!SCH.batch) return false;
+    if (pthread_mutex_init(&SCH.mu, NULL) != 0) return false;
+    if (pthread_mutex_init(&SCH.dev_mu, NULL) != 0) return false;
+    if (pthread_cond_init(&SCH.dec_cv, NULL) != 0) return false;
+    if (pthread_cond_init(&SCH.slot_cv, NULL) != 0) return false;
+    SCH.running = true;
+    if (pthread_create(&SCH.th, NULL, decode_worker, NULL) != 0) {
+        SCH.running = false;
+        return false;
+    }
+    return true;
+}
+
+// Prefill runs per sequence on model_forward_batch, interleaved between decode
+// steps rather than inside them: a prefill tile and a decode microbatch are
+// different kernel shapes. The sequence is simply absent from the batch while
+// this is held, which costs nothing — it is named per step, not enrolled.
+static void sched_prefill_begin(void) {
+    if (sched_on()) pthread_mutex_lock(&SCH.dev_mu);
+}
+
+static void sched_prefill_end(void) {
+    if (sched_on()) pthread_mutex_unlock(&SCH.dev_mu);
+}
+
+// Hand one forward to the decode thread and wait for this sequence's logits.
+// Returns NULL if the sequence should stop: the batch failed, the server is
+// shutting down, or this request ran out its deadline while queued.
+static const float *sched_forward(int id, int32_t tok, int pos, double deadline) {
+    seq_t *q = &SCH.seq[id];
+    pthread_mutex_lock(&SCH.mu);
+    q->tok   = tok;
+    q->pos   = pos;
+    q->state = SEQ_WAIT;
+    SCH.n_wait++;
+    pthread_cond_signal(&SCH.dec_cv);
+    while (q->state != SEQ_READY && !SCH.stop) {
+        if (deadline > 0 && q->state == SEQ_WAIT && now_s() >= deadline) {
+            // Still only queued, so dropping it is free: take it back out of
+            // the pending count and let the caller close its document. A
+            // sequence already INFLIGHT is waited out instead — abandoning a
+            // buffer the decode thread is about to write is not free.
+            q->state = SEQ_OFF;
+            SCH.n_wait--;
+            pthread_mutex_unlock(&SCH.mu);
+            return NULL;
+        }
+        struct timespec ts;
+        ts_in(&ts, deadline > 0 ? SCHED_GATHER_S : 0.5);
+        pthread_cond_timedwait(&SCH.slot_cv, &SCH.mu, &ts);
+    }
+    bool ok = q->state == SEQ_READY && q->ok;
+    q->state = SEQ_OFF;
+    pthread_mutex_unlock(&SCH.mu);
+    return ok ? q->logits : NULL;
+}
+
+// engine_generate's contract, served out of shared microbatches.
+//
+// The per-token work is the engine's own — the same engine_gen_step the solo
+// path runs — so a request's tokens cannot depend on how busy the server was.
+// All this adds is where the forward happens.
+static int sched_generate(slot_t *s, float *logits, int max_new,
+                          gen_cb cb, void *ud, double *gen_time,
+                          double deadline) {
+    engine *e = &s->e;
+    // Speculative decoding drives its own batched forwards for one sequence,
+    // which is the tile shape and not the microbatch shape; it stays solo.
+    if (!sched_on() || e->dm) {
+        // A solo generation on a batching server still has to take the device
+        // turn: its model_forward launches would break a concurrent
+        // microbatch's graph capture just as a prefill would.
+        if (!sched_on())
+            return engine_generate(e, logits, max_new, cb, ud, gen_time);
+        pthread_mutex_lock(&SCH.dev_mu);
+        int n = engine_generate(e, logits, max_new, cb, ud, gen_time);
+        pthread_mutex_unlock(&SCH.dev_mu);
+        return n;
+    }
+
+    pthread_mutex_lock(&SCH.mu);
+    SCH.n_active++;
+    pthread_mutex_unlock(&SCH.mu);
+
+    const float *lg = logits;
+    engine_gen_begin(e, max_new);
+    int32_t tok; int pos;
+    while (engine_gen_step(e, lg, cb, ud, &tok, &pos) == ENGINE_STEP_MORE) {
+        if (deadline > 0 && now_s() >= deadline) break;
+        if (!(lg = sched_forward(s->id, tok, pos, deadline))) break;
+    }
+    int n = engine_gen_end(e, cb, ud, gen_time);
+
+    pthread_mutex_lock(&SCH.mu);
+    SCH.n_active--;
+    // one fewer sequence to wait for: whoever is gathering should stop holding
+    pthread_cond_signal(&SCH.dec_cv);
+    pthread_mutex_unlock(&SCH.mu);
+    return n;
 }
 
 // ---------------------------------------------------------------- generation
@@ -1209,6 +1486,22 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
     model_t *m = s->m;
     engine *e = &s->e;
 
+    // Per-request deadline. A wall-clock bound is what a batching server owes
+    // its clients that a serial one does not: your latency now depends on who
+    // else is on the box, so there has to be a point past which you get your
+    // (still valid, still schema-conforming) answer regardless. Expiry is a
+    // truncation, not an error — it ends the generation and lets the normal
+    // close path run, so finish_reason is "length" and constrained output is
+    // closed to a legal document exactly as a token-ceiling hit would be.
+    double req_timeout = SV.req_timeout;
+    double rt;
+    if (!request_number(req, "timeout", req_timeout, 0, 86400.0, &rt)) {
+        send_error(fd, 400, "timeout out of range");
+        return;
+    }
+    req_timeout = rt;
+    double req_deadline = req_timeout > 0 ? now_s() + req_timeout : 0;
+
     // per-request sampling params start from the server defaults every time —
     // one request's overrides must not leak into the next on this slot; only
     // the rng STATE carries across so sampling sequences stay diverse
@@ -1387,7 +1680,13 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
     int keep = 0;
     if (cache_prompt) keep = engine_rewind(e, toks, n_prompt);
     else              engine_reset(e);
+    // Prefill is scheduled apart from decode: different kernel shape, and it
+    // is this slot's own model_forward_batch, so it must not overlap a
+    // microbatch containing this sequence. It cannot — the sequence only joins
+    // a batch below, after prefill has returned.
+    sched_prefill_begin();
     float *logits = engine_feed(e, toks + keep, n_prompt - keep);
+    sched_prefill_end();
     free(toks);
     if (!logits) {
         completion_cleanup(e, schema, NULL);
@@ -1457,7 +1756,8 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
     }
 
     double gtime;
-    int n_gen = engine_generate(e, logits, max_tokens, gen_collect, &g, &gtime);
+    int n_gen = sched_generate(s, logits, max_tokens, gen_collect, &g, &gtime,
+                               req_deadline);
     think_finish(&g.ts, gen_emit, &g);
     // generation ended without a stop match: the withheld partial-match
     // tail was ordinary output after all
@@ -3116,6 +3416,13 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     if (bsname && (!name || bsname > name)) name = bsname;
     SV.model_name = SV.n_reg > 0 ? SV.reg[0].name : (name ? name + 1 : model_path);
     SV.n_predict_cap = 1024;
+    SV.q.limit = (int)(sizeof(SV.q.fds) / sizeof(int));
+    if (getenv("RUNNER_MAX_QUEUE")) {
+        int lim = atoi(getenv("RUNNER_MAX_QUEUE"));
+        if (lim > 0 && lim < SV.q.limit) SV.q.limit = lim;
+    }
+    if (getenv("RUNNER_REQUEST_TIMEOUT"))
+        SV.req_timeout = atof(getenv("RUNNER_REQUEST_TIMEOUT"));
     context_store(base ? base->n_ctx : mp->n_ctx);
     SV.n_slots = parallel;
     SV.slots = calloc(parallel, sizeof(slot_t));
@@ -3226,6 +3533,12 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         return 1;
     }
 
+    // Every slot's model exists now, which is the only precondition the batch
+    // has. Declining is not an error: sched_generate then runs the untouched
+    // solo path, which is what a single slot, swap mode, or a backend without
+    // batched kernels all get.
+    bool batched = sched_start();
+
     for (int i = 0; i < parallel; i++) {
         if (pthread_create(&SV.slots[i].th, NULL, slot_worker, &SV.slots[i]) != 0) {
             fprintf(stderr, "error: cannot start server slot %d\n", i);
@@ -3243,10 +3556,11 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                 port, SV.n_reg, SV.ttl);
     else
         fprintf(stderr,
-                "server listening on http://127.0.0.1:%d — %d slot%s x %d threads\n"
+                "server listening on http://127.0.0.1:%d — %d slot%s x %d threads%s\n"
                 "  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions\n"
                 "  GET /v1/models | GET /v1/capabilities | GET /health\n",
-                port, parallel, parallel > 1 ? "s" : "", threads_per_slot);
+                port, parallel, parallel > 1 ? "s" : "", threads_per_slot,
+                batched ? ", continuous batching" : "");
 
     for (;;) {
         int cfd = (int)accept(lfd, NULL, NULL);

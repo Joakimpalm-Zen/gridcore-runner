@@ -750,6 +750,9 @@ typedef struct {
     model_t *dm;           // draft model (NULL = off)
     int      dpos;         // draft KV position (may trail pos)
     int      draft_k;      // drafts per round
+    // in-flight generation budget, owned by engine_gen_begin/step/end
+    int      gen_max, gen_count;
+    double   gen_t0;
 } engine;
 
 void   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
@@ -762,6 +765,29 @@ float *engine_feed(engine *e, const int32_t *toks, int n);
 // sample until stop/limit, streaming decoded bytes to cb; returns token count
 int    engine_generate(engine *e, float *logits, int max_new,
                        gen_cb cb, void *ud, double *gen_time);
+
+// The same generation, one step at a time, for a caller that owns the forward.
+//
+// Continuous batching needs the forward hoisted out of the loop: one thread
+// must issue every model_batch_decode, while the sampler, schema validator,
+// stop check, logprob capture and streaming callback stay per-sequence and run
+// wherever the caller likes. Splitting engine_generate at that seam — rather
+// than writing a second batched generation loop — is what keeps a batched
+// request's output identical to a solo one by construction.
+//
+//   engine_gen_begin(e, max_new);
+//   while (engine_gen_step(e, logits, cb, ud, &tok, &pos) == ENGINE_STEP_MORE)
+//       logits = <forward tok at pos, batched or not>;
+//   n = engine_gen_end(e, cb, ud, &secs);
+//
+// A caller that abandons the loop early (deadline, cancellation) must still
+// call engine_gen_end: that is where a truncated constrained document is
+// closed to something valid.
+enum { ENGINE_STEP_DONE = 0, ENGINE_STEP_MORE = 1 };
+void   engine_gen_begin(engine *e, int max_new);
+int    engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
+                       int32_t *next_tok, int *next_pos);
+int    engine_gen_end(engine *e, gen_cb cb, void *ud, double *gen_time);
 // load a draft model for speculative decoding (shared by CLI and server);
 // see engine.c for the gates. NULL = speculation could not be enabled.
 model_t *spec_draft_load(const char *path, const model_t *target,
