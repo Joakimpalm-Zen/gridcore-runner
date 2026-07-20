@@ -61,6 +61,52 @@ static void test_spm_byte_fallback(tokenizer *t) {
     expect_ids(t, "\xF0\x9F\xA6\x99 llama", want, 8);
 }
 
+// A control token in the input text is matched as that single id only when
+// parse_special is on; otherwise its characters are ordinary text.
+static void test_special_token_needs_parse_special(tokenizer *t) {
+    int32_t ids[16];
+    int n = tok_encode(t, "</s>", ids, 16, false, true);
+    assert(n == 1 && ids[0] == 2);
+
+    n = tok_encode(t, "</s>", ids, 16, false, false);
+    assert(n > 1);          // spelled out rather than matched
+    assert(ids[0] != 2);
+}
+
+// Control tokens decode to nothing, so they never reach the output stream,
+// but tok_raw still exposes their text for stop-sequence matching.
+static void test_control_token_decodes_empty(tokenizer *t) {
+    char buf[64];
+    assert(tok_is_control(t, 2));
+    assert(tok_decode(t, 2, buf, sizeof(buf)) == 0);
+    assert(strcmp(tok_raw(t, 2), "</s>") == 0);
+}
+
+// Round-trip: decoding what was encoded returns the input, except that SPM
+// prepends U+2581 to the first segment, which decodes back to a space.
+static void test_spm_roundtrip_adds_space_prefix(tokenizer *t) {
+    static const char *const texts[] = {
+        "hello", "The quick brown fox.", "tokenization", "café", "\xF0\x9F\xA6\x99 llama",
+    };
+    for (size_t i = 0; i < sizeof(texts) / sizeof(*texts); i++) {
+        int32_t ids[128];
+        int n = tok_encode(t, texts[i], ids, 128, false, true);
+        char out[512];
+        int m = 0;
+        for (int k = 0; k < n; k++)
+            m += tok_decode(t, ids[k], out + m, (int)sizeof(out) - m);
+        out[m] = 0;
+
+        char want[512];
+        snprintf(want, sizeof(want), " %s", texts[i]);
+        if (strcmp(out, want) != 0) {
+            fprintf(stderr, "%s: roundtrip(\"%s\") -> \"%s\", want \"%s\"\n",
+                    current, texts[i], out, want);
+            abort();
+        }
+    }
+}
+
 // ------------------------------------------------------------------ BPE
 
 // Assert the pre-token split by naming the pieces the text must break into.
@@ -121,6 +167,27 @@ static void test_bpe_digit_grouping_qwen2(tokenizer *t) {
     expect_pieces(t, "1234567890", want, 10);
 }
 
+// BPE has no space prefix, so the round-trip is byte-exact. The byte-level
+// alphabet covers any input, including the whitespace the split rules key on.
+static void test_bpe_roundtrip_is_exact(tokenizer *t) {
+    static const char *const texts[] = {
+        "tokenization/end.", "I'll go", "a\n\nb", "1234567890", "x\ty  z",
+    };
+    for (size_t i = 0; i < sizeof(texts) / sizeof(*texts); i++) {
+        int32_t ids[128];
+        int n = tok_encode(t, texts[i], ids, 128, false, true);
+        char out[512];
+        int m = 0;
+        for (int k = 0; k < n; k++)
+            m += tok_decode(t, ids[k], out + m, (int)sizeof(out) - m);
+        out[m] = 0;
+        if (strcmp(out, texts[i]) != 0) {
+            fprintf(stderr, "%s: roundtrip mismatch: got \"%s\"\n", current, out);
+            abort();
+        }
+    }
+}
+
 static void run_bpe_fixture(const char *path, int pre, void (*digits)(tokenizer *)) {
     current = path;
     gguf_file g;
@@ -139,6 +206,7 @@ static void run_bpe_fixture(const char *path, int pre, void (*digits)(tokenizer 
     test_bpe_punct_leads_letters(&t);
     test_bpe_newline_run_is_one_token(&t);
     test_bpe_contraction_and_space(&t);
+    test_bpe_roundtrip_is_exact(&t);
     digits(&t);
 
     tokenizer_free(&t);
@@ -167,6 +235,9 @@ int main(void) {
         test_spm_merges_whole_words(&t);
         test_spm_merge_order_beats_position(&t);
         test_spm_byte_fallback(&t);
+        test_special_token_needs_parse_special(&t);
+        test_control_token_decodes_empty(&t);
+        test_spm_roundtrip_adds_space_prefix(&t);
 
         tokenizer_free(&t);
         gguf_close(&g);
