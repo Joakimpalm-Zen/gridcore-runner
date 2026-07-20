@@ -46,3 +46,6 @@ bench-err.*.txt
 tests/conformance/out/
 __pycache__/
 *.pyc
+
+# reference tokenizers fetched for differential testing (vendor files, not ours)
+models/.ref/
