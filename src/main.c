@@ -118,7 +118,9 @@ static void usage(const char *prog) {
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
-        "  --kv f16|q8    KV cache storage; q8 halves it again (needs --gpu off)\n"
+        "  --kv f16|q8    KV cache storage (default f16). q8 roughly halves the\n"
+        "                 cache, so it about doubles the context that fits, but\n"
+        "                 it is lossy: output differs from an f16 cache\n"
         "  --draft PATH   small same-vocab GGUF for speculative decoding\n"
         "                 (one-shot, chat, and single-model --serve)\n"
         "  --draft-k N    draft tokens per round (default 4)\n"
@@ -297,6 +299,11 @@ int main(int argc, char **argv) {
                    esc_src);
         }
         printf("]");
+        // KV cache formats this build can store. Both are available on every
+        // backend (CPU and CUDA); q8 needs head_dim % 32 == 0, which is a
+        // per-model property and so is reported at load, not here. f16 is the
+        // default because q8 is lossy — it does not reproduce f16 output.
+        printf(",\"kv_types\":[\"f16\",\"q8\"],\"kv_type_default\":\"f16\"");
         printf(",\"quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
                "\"Q5_0\",\"Q5_1\",\"Q2_K\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
                "\"IQ4_NL\",\"IQ4_XS\"],"

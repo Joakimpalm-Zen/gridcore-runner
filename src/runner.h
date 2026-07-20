@@ -238,7 +238,7 @@ typedef struct {
     int    n_ctx, n_batch;
     f16_t *kcache, *vcache;  // [n_layer][n_ctx][kv_dim], fp16 (or q8_0 blocks
                              // when kv_q8 — treated as raw bytes then)
-    bool   kv_q8;            // KV rows stored as q8_0 blocks (CPU path only)
+    bool   kv_q8;            // KV rows stored as q8_0 blocks (CPU and CUDA)
     float *x, *xb, *xb2, *q, *hb, *hb2;   // [n_batch][dim] activations
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
     float *att, *logits;
@@ -257,6 +257,10 @@ bool   gpu_available(char *name, int name_cap);
 // dedicated GPU memory in bytes; false when there is no discrete GPU
 // (Metal's unified memory is governed by the RAM reservation instead)
 bool   gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
+// does this backend's attention read a q8_0 KV cache? The CPU path always
+// can; a backend that cannot forces the cache back to f16 rather than
+// handing q8_0 blocks to kernels that would read them as fp16.
+bool   gpu_kv_q8_ok(void);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 // process n tokens starting at pos (prompt batches); on success returns true
 // and sets *logits to the last token's logits when want_logits (else NULL).
@@ -280,7 +284,11 @@ typedef struct {
     // grow their context into the reserved room, capped at the train ctx.
     int   reserve_vram_pct;
     int   reserve_ram_pct;
-    bool  kv_q8;       // store the KV cache as q8_0 (CPU only, needs --gpu off)
+    // store the KV cache as q8_0 instead of fp16: halves cache bytes, so it
+    // roughly doubles the context that fits a given VRAM/RAM reservation.
+    // Lossy — output is NOT token-identical to an fp16 cache — so f16 stays
+    // the default. Requires every layer's head_dim to be a multiple of 32.
+    bool  kv_q8;
 } model_params;
 
 bool   model_load(model_t *m, const char *path, const model_params *p);

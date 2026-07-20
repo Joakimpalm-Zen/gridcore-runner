@@ -22,10 +22,11 @@ PROMPTS = [
 ]
 
 
-def generate(binary: str, model: str, prompt: str, n: int, ctx: int) -> str:
+def generate(binary: str, model: str, prompt: str, n: int, ctx: int,
+             extra: list) -> str:
     proc = subprocess.run(
         [str(Path(binary).resolve()), "-m", model, "-p", prompt,
-         "-n", str(n), "-c", str(ctx), "--temp", "0"],
+         "-n", str(n), "-c", str(ctx), "--temp", "0"] + extra,
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=900)
     if proc.returncode != 0:
@@ -40,12 +41,23 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--gen", type=int, default=48)
     parser.add_argument("--ctx", type=int, default=2048)
+    # Extra flags per side. The same binary run two ways is a valid gate: it is
+    # how the CPU reference is compared against the GPU backend, and how one
+    # KV cache format is compared against another.
+    parser.add_argument("--baseline-args", default="",
+                        help="extra CLI flags for the baseline run")
+    parser.add_argument("--candidate-args", default="",
+                        help="extra CLI flags for the candidate run")
     args = parser.parse_args()
+    base_extra = args.baseline_args.split()
+    cand_extra = args.candidate_args.split()
 
     failures = 0
     for prompt in PROMPTS:
-        base = generate(args.baseline, args.model, prompt, args.gen, args.ctx)
-        cand = generate(args.candidate, args.model, prompt, args.gen, args.ctx)
+        base = generate(args.baseline, args.model, prompt, args.gen, args.ctx,
+                        base_extra)
+        cand = generate(args.candidate, args.model, prompt, args.gen, args.ctx,
+                        cand_extra)
         if base == cand:
             print(f"ok   {prompt[:40]!r}")
         else:

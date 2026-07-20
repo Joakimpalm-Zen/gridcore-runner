@@ -488,17 +488,128 @@ Strengthen Runner's large-context-on-small-hardware specialization.
 
 ## Work
 
-- Port Q8 KV storage and attention reads to CUDA and Metal.
-- Support configurable K/V cache types.
-- Measure quality against fp16 using retrieval and structured-agent workloads.
-- Include quantized KV in reservation and auto-fit calculations.
-- Investigate mixed/per-phase precision only after Q8 is stable.
+- **DONE (CUDA) / NOT DONE (Metal)** — Port Q8 KV storage and attention reads
+  to CUDA and Metal. CUDA is done: `k_store_kv` quantizes rows on device and
+  `k_attn` / `k_attn_dec` read q8_0 blocks (`src/kernels.cu`, regenerated into
+  `src/kernels_ptx.h`). All KV offsets in `cuda.c` are now byte offsets from
+  `model_kv_row_bytes` / `model_kv_byte_off`, so host and device share one
+  layout and the hybrid CPU/GPU split works unchanged. Metal is **not** ported:
+  `metal.m` gained only `gpu_kv_q8_ok()` returning false, which makes `--kv q8`
+  fall back to f16 (with a stderr note) rather than hand q8_0 blocks to an fp16
+  reader. This was not compiled or run — no macOS here.
+- **DONE** — Support configurable K/V cache types. `--kv f16|q8` now applies to
+  the CUDA backend too (it previously required `--gpu off`), and `--caps`
+  publishes `"kv_types":["f16","q8"]` with `"kv_type_default":"f16"`. Guarded
+  by a `make smoke` assertion so the default cannot drift silently.
+- **PARTIAL** — Measure quality against fp16. Measured with the committed
+  deterministic gates (`scripts/kernel-verify.py`, extended with
+  `--baseline-args` / `--candidate-args` so one binary can be compared against
+  itself in two configurations) over 7 models x 20 prompts x 48 greedy tokens.
+  Retrieval and structured-agent workloads were **not** run — see Remaining.
+- **DONE** — Include quantized KV in reservation and auto-fit calculations.
+  The `-c 0 --reserve*` auto-fit and the CUDA layer-split budget both size the
+  cache with `model_kv_row_bytes`, so q8 buys context and offloaded layers.
+- **NOT DONE** — Investigate mixed/per-phase precision. Not started; Q8 is only
+  just stable.
+
+## Measured results (24 GB MIG slice of an RTX PRO 6000, CUDA)
+
+Context gained where VRAM is the binding constraint (`-c 0 --reserve-vram P`).
+q8_0 stores 32 values in 34 bytes = 53.1% of fp16, so the ceiling is 1.88x:
+
+| model | reserve | f16 ctx | q8 ctx | gain |
+|---|---|---|---|---|
+| Llama-3.2-3B | 20% | 24288 | 45719 | 1.88x |
+| Llama-3.2-3B | 30% | 46407 | 87354 | 1.88x |
+| Llama-3.1-8B | 40% | 37824 | 71198 | 1.88x |
+| Llama-3.1-8B | 60% | 76531 | 131072 (train cap) | >=1.71x |
+| Mistral-7B | 30% | 22650 | 32768 (train cap) | >=1.45x |
+
+Cache bytes at a fixed context are 53.1% of fp16 in every case measured
+(e.g. Llama-3.1-8B at 131072: 17179.9 MB -> 9126.8 MB).
+
+Throughput: prefill is consistently 2-4% slower with q8 (Llama-3.2-3B
+145.4 -> 142.4 tok/s, Mistral-7B 81.5 -> 79.2, three runs each). Decode could
+**not** be separated from run-to-run noise on this shared MIG slice: repeated
+identical f16 runs ranged 26.8-65.8 tok/s. Decode cost of q8 KV is therefore
+UNMEASURED here and needs an uncontended GPU.
+
+## Quality delta (honest)
+
+Divergence over 20 prompts x 48 greedy tokens, per model:
+
+| model | f16 CPU vs f16 GPU | q8 CPU vs q8 GPU | f16 GPU vs q8 GPU |
+|---|---|---|---|
+| TinyLlama-1.1B | 0/20 | 0/20 | 4/20 |
+| SmolLM2-1.7B | 0/20 | 0/20 | 1/20 |
+| Llama-3.2-3B | 0/20 | 1/20 | 3/20 |
+| Qwen3-4B | 1/20 (pre-existing) | 4/20 | 4/20 |
+| gemma-3-4b | 0/20 | 1/20 | 3/20 |
+| Phi-3.5-mini | 0/20 | 4/20 | 2/20 |
+| Mistral-7B | 0/20 | 0/20 | 0/20 |
+
+Readings:
+
+- **The project invariant holds.** fp16 GPU is still token-identical to fp16
+  CPU everywhere it was before. The single Qwen3-4B exception reproduces
+  identically on the pre-change binary, so it is pre-existing, not a
+  regression — but it means the fp16 invariant is already only gate-tight at
+  the committed 5-prompt x 48-token gate, not universally.
+- **Q8-KV GPU vs Q8-KV CPU is not a stable invariant, and cannot be made one.**
+  Every divergence is a single late branch point (typically 25+ tokens in) with
+  both continuations fluent — a greedy near-tie, not a broken kernel. Three
+  independent lines of evidence:
+  1. On gemma-3-4b the exact same divergence is reproducible with **no GPU
+     involved at all**: CPU-only, `-b 64` vs `-b 1` (a mathematically
+     equivalent reassociation) flips the same prompt under `--kv q8` and does
+     not under `--kv f16`.
+  2. A 6/34-layer hybrid split under q8 produces the *identical* alternative
+     continuation as a full GPU offload. A layout or scale bug in 6 GPU layers
+     could not yield a fluent alternative through 28 CPU layers.
+  3. Divergent positions largely correlate across columns — Llama-3.2-3B
+     offset 157, gemma-3-4b offset 73, Qwen3-4B offsets 154/23 and Phi-3.5
+     offset 119 each appear in both the CPU-vs-GPU and the f16-vs-q8 column.
+     The same positions are fragile under any perturbation. The correlation is
+     not total (Phi-3.5 offsets 105/144/70 appear only in the CPU-vs-GPU
+     column), which is expected: the two perturbations are different, so they
+     tip different subsets of the near-ties, and Phi-3.5 is the one model whose
+     CPU-vs-GPU rate (4/20) exceeds its f16-vs-q8 rate (2/20). Phi-3.5 is
+     therefore the weakest case in this evidence set and the first place to
+     look if a real q8 kernel bug is ever suspected.
+  Root cause: q8_0's quantization step is ~1/127 of each 32-value block's
+  absmax, roughly 15x coarser than fp16 near the same magnitude. Last-ulp FP
+  differences that fp16 absorbs can flip a whole quant level under q8, so
+  ordinary reassociation noise reaches the logits. The device-side
+  quantization arithmetic itself mirrors `q8_quant_row()` exactly (amax/127,
+  `roundf`, RN fp16 scale), so identical inputs give bit-identical blocks.
 
 ## Exit Criteria
 
-- Q8 KV substantially increases usable context on limited VRAM.
-- Retrieval and tool-selection regressions are measured and documented.
-- GPU and CPU implementations pass deterministic correctness gates.
+- **MET** — Q8 KV substantially increases usable context on limited VRAM:
+  1.88x measured on CUDA, and it is wired into both auto-fit and the layer
+  split.
+- **NOT MET** — Retrieval and tool-selection regressions are measured and
+  documented. Only greedy token divergence was measured. No needle-in-haystack
+  retrieval run and no tool-selection accuracy run; the numbers above say how
+  *often* output changes, not whether it gets *worse*.
+- **PARTIALLY MET** — GPU and CPU implementations pass deterministic
+  correctness gates. fp16 GPU == fp16 CPU still passes everywhere. Q8 GPU ==
+  Q8 CPU passes on 5 of 7 models at the committed 5-prompt gate but is not a
+  sound gate in principle (see above); it needs a tolerance-based gate rather
+  than a token-identity one.
+
+## Remaining for Phase 8
+
+1. Metal port of q8 KV storage and attention (`metal.m`, `kernels_metal.h`).
+   Currently stubbed off, untested, no hardware here.
+2. A quality gate appropriate to a lossy cache: retrieval (needle-in-haystack
+   at 32k+) and tool-selection accuracy, f16 vs q8, reporting task success
+   rather than token identity.
+3. Uncontended decode benchmark for the q8 attention read path.
+4. Mixed/per-phase precision (e.g. q8 K with f16 V), untouched.
+5. `spec_draft_load()` in `engine.c` still forces `kv_q8 = false` for the draft
+   model. That was required when q8 implied CPU-only; it is now merely
+   conservative and could be revisited.
 
 ## Release
 

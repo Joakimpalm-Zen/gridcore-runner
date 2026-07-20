@@ -12,6 +12,10 @@ bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
     return false;
 }
 
+bool gpu_kv_q8_ok(void) {
+    return false;   // no backend here; the CPU path handles q8 on its own
+}
+
 bool gpu_init(model_t *m) {
     (void)m;
     return false;
