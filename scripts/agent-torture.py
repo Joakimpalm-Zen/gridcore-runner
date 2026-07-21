@@ -281,13 +281,20 @@ def _version(exe):
     return proc.stdout.strip() or f"exit {proc.returncode}"
 
 
-def run(target, runtime_name, version, model_label, out, count):
+def run(target, runtime_name, version, model_label, out, count,
+        request_model=None):
     """Run the matrix against ``target`` (a spawned RunnerServer or a
     RemoteTarget) and write report.json + raw.jsonl. Runtime-labeled so
-    reports from different runtimes compare directly."""
+    reports from different runtimes compare directly. ``request_model`` sets
+    the OpenAI ``model`` field on every request — Runner and llama.cpp serve
+    one model and ignore it, but Ollama routes on it, so it is required there.
+    It is recorded verbatim in raw.jsonl, so the request stays reproducible."""
     out.mkdir(parents=True, exist_ok=True)
     sink = _MetricsSink()
     cases = build_cases(count)
+    if request_model:
+        for case in cases:
+            case["request"] = dict(case["request"], model=request_model)
     results = []
     artifacts = []
     started = time.monotonic()
@@ -345,6 +352,10 @@ def main(argv=None):
                         help="version string for the report when --endpoint "
                              "is used")
     parser.add_argument("--runner", type=Path)
+    parser.add_argument("--model-name", dest="model_name",
+                        help="OpenAI `model` field to set on every request "
+                             "(required for Ollama, which routes on it; Runner "
+                             "and llama.cpp ignore it)")
     parser.add_argument("--model", type=Path, default=ROOT / "test.gguf")
     parser.add_argument("--out", type=Path,
                         default=ROOT / "tests" / "torture" / "out")
@@ -372,7 +383,8 @@ def main(argv=None):
         version = _version(exe)
         model_label = str(args.model)
 
-    report = run(target, runtime_name, version, model_label, args.out, args.cases)
+    report = run(target, runtime_name, version, model_label, args.out,
+                 args.cases, request_model=args.model_name)
     print(f"report: {args.out / 'report.json'}")
     print(f"raw: {args.out / 'raw.jsonl'}")
     print(f"runtime={report['runtime']['name']} "

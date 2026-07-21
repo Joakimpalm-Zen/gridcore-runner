@@ -75,6 +75,18 @@ is a diff between two runtimes — not two random samples. To publish a
 comparison, run the same `--cases N` against each runtime on the same machine
 and commit all four `out/` directories side by side.
 
+Ollama routes on the OpenAI `model` field, so pass `--model-name <name>` (the
+name you gave `ollama create`); Runner and llama.cpp ignore it. The flag is
+recorded in `raw.jsonl` so the request stays reproducible.
+
+## Published comparisons
+
+- [2026-07-21 — Runner vs llama.cpp vs Ollama, Llama-3.2-3B, CPU](../tests/torture/results/2026-07-21-llama-3.2-3b-cpu/README.md):
+  Runner 12/12, llama.cpp 5/12, Ollama 5/12. The split is exactly the schema
+  cases — Runner wins `nested_arguments` and `forced_truncation` 3/3 vs 0/3;
+  the rest are close. (llama.cpp is far faster on raw CPU throughput — that is
+  the other axis, and the readout is honest about it.)
+
 ## Submit a result
 
 Bring your nastiest tool schema and your hardware. Open an

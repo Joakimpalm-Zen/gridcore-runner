@@ -1,0 +1,142 @@
+{
+  "cases": [
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "schema",
+        "message": "[schema] required property missing\n    at = '$'\n    key = 'notify'\n    got = ['job']"
+      },
+      "id": "runner-000-nested_arguments",
+      "latency_ms": 1429.42,
+      "ordinal": 0,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-001-tool_selection",
+      "latency_ms": 481.58,
+      "ordinal": 1,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-002-forced_truncation",
+      "latency_ms": 47.46,
+      "ordinal": 2,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-003-stream_normalization",
+      "latency_ms": 114.91,
+      "ordinal": 3,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "schema",
+        "message": "[schema] required property missing\n    at = '$'\n    key = 'notify'\n    got = ['job']"
+      },
+      "id": "runner-004-nested_arguments",
+      "latency_ms": 1231.27,
+      "ordinal": 4,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] wrong tool selected\n    expected = 'sum_values'\n    got = 'lookup_weather'"
+      },
+      "id": "runner-005-tool_selection",
+      "latency_ms": 370.71,
+      "ordinal": 5,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-006-forced_truncation",
+      "latency_ms": 66.48,
+      "ordinal": 6,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-007-stream_normalization",
+      "latency_ms": 113.07,
+      "ordinal": 7,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "schema",
+        "message": "[schema] required property missing\n    at = '$'\n    key = 'notify'\n    got = ['job']"
+      },
+      "id": "runner-008-nested_arguments",
+      "latency_ms": 1231.22,
+      "ordinal": 8,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-009-tool_selection",
+      "latency_ms": 370.68,
+      "ordinal": 9,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-010-forced_truncation",
+      "latency_ms": 84.72,
+      "ordinal": 10,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-011-stream_normalization",
+      "latency_ms": 131.69,
+      "ordinal": 11,
+      "status": "passed"
+    }
+  ],
+  "configuration": {
+    "model": "Llama-3.2-3B-Q4_K_M",
+    "temperature": 0
+  },
+  "metrics": {
+    "elapsed_ms": 5674.03,
+    "valid_structured_tasks_per_second": 0.881
+  },
+  "resources": {
+    "peak_rss_kb": null,
+    "peak_rss_kind": "peak"
+  },
+  "runtime": {
+    "name": "llama.cpp",
+    "version": "b10076"
+  },
+  "schema_version": "gridcore.agent-torture.v1",
+  "totals": {
+    "failed": 7,
+    "failures_by_category": {
+      "protocol": 4,
+      "schema": 3
+    },
+    "passed": 5,
+    "requests": 12
+  }
+}
