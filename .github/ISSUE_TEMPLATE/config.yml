@@ -1,1 +1,5 @@
 blank_issues_enabled: true
+contact_links:
+  - name: Agent torture suite — bring your nastiest tool schema
+    url: https://github.com/Joakimpalm-Zen/gridcore-runner/blob/main/docs/agent-torture.md
+    about: Run the cross-runtime tool-call conformance matrix and share results (Runner, llama.cpp, Ollama, vLLM).

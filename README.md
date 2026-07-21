@@ -57,7 +57,11 @@ model's format failures are structurally impossible and only content quality
 remains. llama.cpp's GBNF grammars can express JSON, but this contract —
 declared order, always-parses-on-length, OpenAI `response_format` wiring —
 would then live in someone else's engine, free to drift under two projects
-that depend on its details.
+that depend on its details. The claim is falsifiable: the
+[agent torture suite](docs/agent-torture.md) runs one adversarial tool-call
+matrix against Runner *and* llama.cpp / Ollama / vLLM on identical hardware,
+labels each report by runtime, and preserves every request and raw response so
+any verdict can be audited or contested.
 
 **Deployment is one static file.** CUDA goes through the driver API with
 embedded PTX: no CUDA toolkit at build or run time, no cuBLAS, no DLLs.

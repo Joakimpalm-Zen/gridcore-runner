@@ -1,0 +1,67 @@
+name: Agent torture result
+description: Share a torture-suite run — a new runtime, model, quant, or hardware, or a schema that broke something
+labels: [agent-torture]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Bring your nastiest tool schema and your hardware. See
+        `docs/agent-torture.md` to run the suite. Everything below comes
+        straight from your run — paste it, don't summarize it.
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime and version
+      description: e.g. runner 0.1.1-alpha, llama.cpp b3200, ollama 0.3.x, vllm 0.6.x
+      placeholder: llama.cpp b3200
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and quant
+      placeholder: Qwen2.5-7B-Instruct Q4_K_M
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: CPU/GPU, VRAM, OS — enough to reproduce the numbers.
+      placeholder: RTX 4090 24GB, Ryzen 7950X, Linux
+    validations:
+      required: true
+  - type: textarea
+    id: totals
+    attributes:
+      label: report.json totals
+      description: The `runtime`, `configuration`, `totals`, and `metrics` blocks.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: failing
+    attributes:
+      label: Failing raw.jsonl line(s), if any
+      description: >
+        For any failure, paste its full line from `raw.jsonl` — the request,
+        the base64 response, and the failure category. This is what makes a
+        report reproducible instead of anecdotal.
+      render: json
+    validations:
+      required: false
+  - type: textarea
+    id: schema
+    attributes:
+      label: A tool schema that broke something (optional)
+      description: The nastier the better. We add reproducers to the matrix.
+      render: json
+    validations:
+      required: false
+  - type: input
+    id: caps
+    attributes:
+      label: Server --caps or /v1/capabilities (if applicable)
+      description: For Runner or any server that exposes a capability document.
+    validations:
+      required: false
