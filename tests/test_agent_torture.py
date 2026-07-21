@@ -34,7 +34,8 @@ def test_report_schema_and_totals(tmp_path):
         MOD.result_for(cases[3], "failed", 4.0,
                        failure={"category": "protocol", "message": "bad"}),
     ]
-    report = MOD.make_report(results, "runner test", "fixture.gguf", 123, 456)
+    report = MOD.make_report(results, "runner", "runner test", "fixture.gguf",
+                             123, 456)
     path = tmp_path / "report.json"
     MOD.write_json(path, report)
     decoded = json.loads(path.read_text())
@@ -49,6 +50,36 @@ def test_report_schema_and_totals(tmp_path):
     assert decoded["metrics"]["valid_structured_tasks_per_second"] == 16.26
     assert decoded["resources"]["peak_rss_kb"] == 456
     assert [c["id"] for c in decoded["cases"]] == [c["id"] for c in cases]
+
+
+def test_report_is_labeled_with_the_runtime_under_test():
+    # the whole point of cross-runtime: a report names which runtime produced
+    # it, so llama.cpp / ollama / vllm results compare directly
+    report = MOD.make_report([], "llama.cpp", "b3200", "qwen2.5-7b", 1000, None)
+    assert report["runtime"] == {"name": "llama.cpp", "version": "b3200"}
+    assert report["resources"]["peak_rss_kb"] is None  # foreign process
+
+
+def test_endpoint_parsing_accepts_host_port_and_urls_rejects_remote():
+    assert MOD._parse_endpoint("127.0.0.1:8080") == 8080
+    assert MOD._parse_endpoint("http://localhost:11434/") == 11434
+    assert MOD._parse_endpoint("localhost:8000") == 8000
+    for bad in ("127.0.0.1", "10.0.0.5:8080", "example.com:8080"):
+        try:
+            MOD._parse_endpoint(bad)
+            assert False, f"{bad} should be rejected"
+        except ValueError:
+            pass
+
+
+def test_remote_target_exposes_the_client_contract():
+    # the harness Client drives a target through .port / assert_alive /
+    # sample_rss — a RemoteTarget provides exactly that, so the same matrix
+    # runs against any local OpenAI-compatible server
+    target = MOD.RemoteTarget(65535)
+    assert target.port == 65535
+    assert target.peak_rss_kb is None
+    assert target.sample_rss() is None
 
 
 def test_stream_normalization_is_independent_of_tcp_chunks():

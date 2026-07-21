@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
-"""Deterministic Runner-only tracer for the public agent torture suite.
+"""The public agent torture suite driver.
 
-The command intentionally has one narrow job: execute a repeatable request
-matrix against a locally started Runner and preserve enough evidence to audit
-every verdict.  It is a tracer bullet, not yet a cross-runtime leaderboard.
+Executes one repeatable, adversarial request matrix and preserves enough
+evidence to audit every verdict. It runs against Runner (spawned locally) OR
+any OpenAI-compatible endpoint — llama.cpp's server, Ollama, vLLM — so the
+same matrix produces comparable, runtime-labeled reports on identical
+hardware. The verdicts (valid tool call, correct tool selection, schema
+conformance, transport-invariant streaming) are the same across runtimes;
+only the target changes.
+
+  # Runner (default): spawn it and run the matrix on the CPU
+  agent-torture.py --model test.gguf
+
+  # Any OpenAI-compatible server already listening locally:
+  agent-torture.py --endpoint 127.0.0.1:8080 --runtime llama.cpp \\
+      --runtime-version b3200 --model qwen2.5-7b
+  agent-torture.py --endpoint 127.0.0.1:11434 --runtime ollama --model qwen2.5
+  agent-torture.py --endpoint 127.0.0.1:8000  --runtime vllm --model ...
 """
 
 import argparse
@@ -11,6 +24,7 @@ import base64
 from collections import Counter
 import json
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import time
@@ -24,6 +38,52 @@ from harness import (Client, ProtocolError, RunnerServer,  # noqa: E402
                      rss_kind, validate_against_schema)
 
 SCHEMA_VERSION = "gridcore.agent-torture.v1"
+
+
+class RemoteTarget:
+    """A stand-in the harness Client can drive like a spawned RunnerServer, but
+    pointing at an already-running local OpenAI-compatible server (Runner,
+    llama.cpp, Ollama, vLLM). The Client only needs ``port`` + ``assert_alive``
+    + ``sample_rss`` from its target, so this is all it takes to run the whole
+    matrix against any of them. Localhost only: the runtimes under comparison
+    run on the same box (identical-hardware is the point); a remote host wants
+    an SSH tunnel to a local port."""
+
+    def __init__(self, port: int):
+        self.port = int(port)
+        self.peak_rss_kb = None   # cannot read a foreign process's RSS
+
+    def assert_alive(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=2):
+            pass
+
+    def sample_rss(self):
+        return None
+
+    def __enter__(self):
+        self.assert_alive()
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _parse_endpoint(value: str) -> int:
+    """Accept host:port or a full URL; return the local port. Non-loopback
+    hosts are rejected — tunnel them to a local port first."""
+    text = value.strip()
+    for prefix in ("http://", "https://"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    text = text.rstrip("/")
+    host, _, port = text.rpartition(":")
+    host = host or "127.0.0.1"
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError(f"endpoint must be loopback (got {host!r}); "
+                         "tunnel a remote runtime to a local port")
+    if not port.isdigit():
+        raise ValueError(f"endpoint needs a port (got {value!r})")
+    return int(port)
 
 NESTED_SCHEMA = {
     "type": "object",
@@ -190,14 +250,14 @@ def result_for(case, status, latency_ms, failure=None):
     return result
 
 
-def make_report(results, version, model, elapsed_ms, peak_kb):
+def make_report(results, runtime_name, version, model, elapsed_ms, peak_kb):
     failures = Counter(r["failure"]["category"] for r in results
                        if r["status"] == "failed")
     passed = sum(r["status"] == "passed" for r in results)
     seconds = max(elapsed_ms / 1000, 1e-9)
     return {
         "schema_version": SCHEMA_VERSION,
-        "runtime": {"name": "runner", "version": version},
+        "runtime": {"name": runtime_name, "version": version},
         "configuration": {"model": model, "temperature": 0},
         "totals": {"requests": len(results), "passed": passed,
                    "failed": len(results) - passed,
@@ -221,17 +281,17 @@ def _version(exe):
     return proc.stdout.strip() or f"exit {proc.returncode}"
 
 
-def run(exe, model, out, count):
+def run(target, runtime_name, version, model_label, out, count):
+    """Run the matrix against ``target`` (a spawned RunnerServer or a
+    RemoteTarget) and write report.json + raw.jsonl. Runtime-labeled so
+    reports from different runtimes compare directly."""
     out.mkdir(parents=True, exist_ok=True)
     sink = _MetricsSink()
     cases = build_cases(count)
     results = []
     artifacts = []
     started = time.monotonic()
-    server = RunnerServer(str(exe), str(model), ctx=1024, parallel=2,
-                          extra_args=["--gpu", "off"],
-                          log_path=str(out / "runner.log"))
-    with server:
+    with target as server:
         client = Client(server, sink)
         for case in cases:
             t0 = time.monotonic()
@@ -261,8 +321,8 @@ def run(exe, model, out, count):
                                       latency, failure))
             artifacts.append(artifact)
     elapsed = round((time.monotonic() - started) * 1000, 2)
-    report = make_report(results, _version(exe), str(model), elapsed,
-                         server.peak_rss_kb)
+    report = make_report(results, runtime_name, version, model_label, elapsed,
+                         getattr(target, "peak_rss_kb", None))
     write_json(out / "report.json", report)
     with (out / "raw.jsonl").open("w") as raw:
         for artifact in artifacts:
@@ -271,20 +331,52 @@ def run(exe, model, out, count):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--endpoint",
+                        help="target an already-running OpenAI-compatible "
+                             "server (host:port or URL) instead of spawning "
+                             "Runner; use with --runtime")
+    parser.add_argument("--runtime",
+                        help="runtime label for the report (e.g. llama.cpp, "
+                             "ollama, vllm). Defaults to 'runner'.")
+    parser.add_argument("--runtime-version", default="unknown",
+                        help="version string for the report when --endpoint "
+                             "is used")
     parser.add_argument("--runner", type=Path)
     parser.add_argument("--model", type=Path, default=ROOT / "test.gguf")
     parser.add_argument("--out", type=Path,
                         default=ROOT / "tests" / "torture" / "out")
     parser.add_argument("--cases", type=int, default=100)
     args = parser.parse_args(argv)
-    exe = args.runner or Path(find_runner(str(ROOT)))
-    if not args.model.is_file():
-        parser.error(f"model not found: {args.model}")
-    report = run(exe, args.model, args.out, args.cases)
+
+    if args.endpoint:
+        try:
+            port = _parse_endpoint(args.endpoint)
+        except ValueError as exc:
+            parser.error(str(exc))
+        target = RemoteTarget(port)
+        runtime_name = args.runtime or "openai-compatible"
+        version = args.runtime_version
+        model_label = str(args.model)
+    else:
+        exe = args.runner or Path(find_runner(str(ROOT)))
+        if not args.model.is_file():
+            parser.error(f"model not found: {args.model}")
+        target = RunnerServer(str(exe), str(args.model), ctx=1024, parallel=2,
+                              extra_args=["--gpu", "off"],
+                              log_path=str(args.out / "runner.log"))
+        args.out.mkdir(parents=True, exist_ok=True)
+        runtime_name = args.runtime or "runner"
+        version = _version(exe)
+        model_label = str(args.model)
+
+    report = run(target, runtime_name, version, model_label, args.out, args.cases)
     print(f"report: {args.out / 'report.json'}")
     print(f"raw: {args.out / 'raw.jsonl'}")
-    print(f"requests={report['totals']['requests']} "
+    print(f"runtime={report['runtime']['name']} "
+          f"requests={report['totals']['requests']} "
           f"passed={report['totals']['passed']} failed={report['totals']['failed']}")
     return 1 if report["totals"]["failed"] else 0
 
