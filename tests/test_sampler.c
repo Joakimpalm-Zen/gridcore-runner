@@ -51,6 +51,14 @@ static void test_preset_selection(void) {
     p = sampler_preset_for("llama", "Smollm2 1.7B 8k Mix7 Ep2 v2");
     assert(!strcmp(p->name, "smollm2"));
     assert(EQ(p->temp, 0.2f) && EQ(p->top_p, 0.9f));
+
+    // Gridcore Syntetik declares arch "llama", name "gridcore-<size>"; the
+    // suite-native contract compiler resolves to a deterministic preset, not
+    // a vendor one, and greedy is the point (temp 0, no penalty).
+    p = sampler_preset_for("llama", "gridcore-10m");
+    assert(!strcmp(p->name, "gridcore"));
+    assert(EQ(p->temp, 0.0f) && EQ(p->repeat_penalty, 1.0f) && p->top_k == 0);
+    assert(!strcmp(sampler_preset_for("llama", "Syntetik 350M")->name, "gridcore"));
 }
 
 // A model nobody published numbers for must not silently borrow another

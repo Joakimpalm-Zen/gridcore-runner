@@ -253,6 +253,17 @@ static const sampler_preset PRESETS[] = {
     // top_p=0.9".
     { "smollm2", "SmolLM2-Instruct model card suggestion",
       0.20f, 0.90f, 0.00f, 1.10f, 0 },
+
+    // Gridcore Syntetik (gridcore-model): the suite's own from-scratch
+    // decoder that compiles requests into auditable execution contracts.
+    // A contract compiler wants deterministic, reproducible output under
+    // schema enforcement — not creative sampling — so the preset is greedy
+    // with no repeat penalty (a penalty on a constrained JSON grammar only
+    // distorts a distribution the schema already pins). PROVISIONAL: aligned
+    // to Syntetik's stated "auditable/deterministic" design; the model team
+    // (gridcore-model) should confirm or override once training settles.
+    { "gridcore", "Gridcore Syntetik contract compiler (deterministic)",
+      0.00f, 1.00f, 0.00f, 1.00f, 0 },
 };
 #define N_PRESETS ((int)(sizeof(PRESETS) / sizeof(PRESETS[0])))
 
@@ -279,6 +290,14 @@ const sampler_preset *sampler_preset_for(const char *arch, const char *name) {
     lname[n] = 0;
 
     if (!arch) arch = "";
+    // Gridcore Syntetik declares general.architecture "llama" (it is a
+    // llama-shaped decoder) and general.name "gridcore-<size>", so the name
+    // is what identifies it. Checked first: a suite-native model should never
+    // fall through to a vendor preset. "syntetik" is accepted too in case the
+    // published name changes to the product name.
+    if (has(lname, "gridcore-") || has(lname, "syntetik"))
+        return by_name("gridcore");
+
     // Architectures that name exactly one family.
     if (!strcmp(arch, "qwen3"))  return by_name("qwen3");
     if (!strcmp(arch, "qwen2"))  return by_name("qwen2.5");
