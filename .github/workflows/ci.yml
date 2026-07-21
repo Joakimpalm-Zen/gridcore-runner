@@ -616,8 +616,24 @@ jobs:
           print('peak_rss_kb', d['resources'])
           for n in d['model_quality_notes']: print('quality:', n['test'], '-', n['message'])
           "
+      # The agent torture matrix against Runner itself: schema enforcement makes
+      # even the tiny test fixture pass every adversarial case, so ANY failure
+      # is a Runner conformance regression, not a weak model. Standing guard on
+      # the exact claim the cross-runtime leaderboard makes.
+      - name: agent torture (self-conformance)
+        run: |
+          python3 scripts/agent-torture.py --cases 40 --out tests/torture/out
+          python3 -c "
+          import json, sys
+          d = json.load(open('tests/torture/out/report.json'))
+          t = d['totals']
+          print('agent-torture', json.dumps(t))
+          sys.exit(1 if t['failed'] else 0)
+          "
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: conformance-report
-          path: tests/conformance/out/
+          path: |
+            tests/conformance/out/
+            tests/torture/out/

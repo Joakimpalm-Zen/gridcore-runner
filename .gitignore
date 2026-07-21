@@ -56,6 +56,7 @@ bench-err.*.txt
 .claude/worktrees/
 # conformance harness run artifacts (report + recorded fixtures)
 tests/conformance/out/
+tests/torture/out/
 __pycache__/
 *.pyc
 
