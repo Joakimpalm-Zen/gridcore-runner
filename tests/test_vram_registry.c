@@ -15,12 +15,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <direct.h>
 #include <process.h>
 #else
+#include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -31,6 +34,21 @@
 
 // A fixed free-VRAM reading. Real callers hand in gpu_mem_info.
 static uint64_t fixed_free(void *ud) { return *(uint64_t *)ud; }
+
+// Registry file for a gpu id inside the scratch dir, matching registry_path()
+// in vramreg.c. Tests that pre-seed or inspect the ledger need the real path.
+static void reg_file(const char *dir, const char *gpu_id, char *out, size_t cap) {
+    snprintf(out, cap, "%s/gridcore-vram-%s.reg", dir, gpu_id);
+}
+
+static long file_size(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fclose(f);
+    return n;
+}
 
 // Point the registry at a scratch directory so a test run never touches the
 // real one in $XDG_RUNTIME_DIR, and so each test starts from empty.
@@ -80,7 +98,155 @@ static void test_second_runner_refuses_naming_the_holder(void) {
     vram_release(first);
 }
 
+// A registry the rmw cannot read back — here, one grown past the 1MB read cap
+// — must fail the whole rmw, not run against an empty view. Proceeding used to
+// truncate the file on write-back, destroying every other process's entries.
+// Accounting is best-effort, so the claim itself still goes through.
+static void test_unreadable_registry_is_not_truncated(void) {
+    const char *dir = scratch_dir();
+    char path[600];
+    reg_file(dir, "bigfile-test", path, sizeof(path));
+
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fprintf(f, "%ld\t1\t0\t%llu\tC\t5200000000\t/models/other-holder.gguf\n",
+            (long)getpid(), (unsigned long long)time(NULL));
+    for (int i = 0; i < (1 << 20) / 32 + 8; i++)
+        fprintf(f, "# padding line, 32 bytes long .\n");
+    fclose(f);
+    long before = file_size(path);
+    assert(before >= (1 << 20));
+
+    uint64_t free_all = 24 * GB;
+    vram_lease *l = vram_claim("bigfile-test", "/models/mine.gguf", 1 * GB,
+                               fixed_free, &free_all, 0, NULL, NULL, 0);
+    assert(l && "an unreadable registry must not stop a runner (best-effort)");
+    assert(file_size(path) == before &&
+           "a claim that could not read the registry must not truncate it");
+
+    vram_release(l);
+    assert(file_size(path) == before &&
+           "a release that could not read the registry must not truncate it");
+    remove(path);
+}
+
 #ifndef _WIN32
+// The registry can fall back to a world-writable directory (/tmp), where its
+// path is predictable: another local user can plant a symlink there and a
+// naive O_CREAT open would write registry content wherever it points. The
+// open must refuse to follow; the claim still proceeds unaccounted.
+static void test_symlinked_registry_is_refused(void) {
+    const char *dir = scratch_dir();
+    char victim[600], link_path[600];
+    snprintf(victim, sizeof(victim), "%s/victim", dir);
+    FILE *f = fopen(victim, "w");
+    assert(f);
+    fputs("precious\n", f);
+    fclose(f);
+    reg_file(dir, "symlink-test", link_path, sizeof(link_path));
+    remove(link_path);
+    assert(symlink("victim", link_path) == 0);
+
+    uint64_t free_all = 24 * GB;
+    vram_lease *l = vram_claim("symlink-test", "/models/mine.gguf", 1 * GB,
+                               fixed_free, &free_all, 0, NULL, NULL, 0);
+    assert(l && "a hijacked registry path must not stop a runner (best-effort)");
+    vram_release(l);
+
+    char buf[64] = {0};
+    f = fopen(victim, "r");
+    assert(f);
+    assert(fgets(buf, sizeof(buf), f) && !strcmp(buf, "precious\n") &&
+           "the registry open must not follow a planted symlink");
+    fclose(f);
+}
+
+// Several claims from one process are told apart by seq alone; two concurrent
+// claims minting the same seq would make vram_release remove the wrong entry.
+// Hammer vram_claim from several threads and demand every ledger line carries
+// a distinct seq.
+#define SEQ_THREADS 8
+#define SEQ_CLAIMS  8
+static vram_lease *seq_leases[SEQ_THREADS][SEQ_CLAIMS];
+
+static void *seq_claimer(void *arg) {
+    long t = (long)(intptr_t)arg;
+    uint64_t free_all = 24 * GB;
+    for (int i = 0; i < SEQ_CLAIMS; i++)
+        seq_leases[t][i] = vram_claim("seq-test", "/models/tiny.gguf",
+                                      1024 * 1024, fixed_free, &free_all, 0,
+                                      NULL, NULL, 0);
+    return NULL;
+}
+
+static void test_concurrent_claims_mint_distinct_seqs(void) {
+    const char *dir = scratch_dir();
+    pthread_t th[SEQ_THREADS];
+    for (long t = 0; t < SEQ_THREADS; t++)
+        assert(pthread_create(&th[t], NULL, seq_claimer, (void *)(intptr_t)t) == 0);
+    for (int t = 0; t < SEQ_THREADS; t++) pthread_join(th[t], NULL);
+
+    char path[600];
+    reg_file(dir, "seq-test", path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    assert(f);
+    long seqs[SEQ_THREADS * SEQ_CLAIMS];
+    int n = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), f) && n < SEQ_THREADS * SEQ_CLAIMS) {
+        long pid = 0, seq = -1;
+        assert(sscanf(line, "%ld %ld", &pid, &seq) == 2);
+        for (int i = 0; i < n; i++)
+            assert(seqs[i] != seq && "two concurrent claims minted one seq");
+        seqs[n++] = seq;
+    }
+    fclose(f);
+    assert(n == SEQ_THREADS * SEQ_CLAIMS && "every claim must be in the ledger");
+
+    for (int t = 0; t < SEQ_THREADS; t++)
+        for (int i = 0; i < SEQ_CLAIMS; i++) {
+            assert(seq_leases[t][i]);
+            vram_release(seq_leases[t][i]);
+        }
+    assert(file_size(path) == 0 && "releasing every claim must empty the ledger");
+}
+
+// Where the platform cannot report process start times (procstart 0 in the
+// ledger), the pid-reuse guard is blind: a recycled pid adopts a dead runner's
+// 'P' entry and its phantom bytes pin the GPU forever. The mitigation is age:
+// no real load is still pending after an hour, so reap() drops it. A fresh
+// guardless 'P' entry must still count — it is somebody's live load.
+static void test_stale_guardless_pending_is_reaped(void) {
+    const char *dir = scratch_dir();
+    char path[600];
+    reg_file(dir, "stale-pending-test", path, sizeof(path));
+    uint64_t now = (uint64_t)time(NULL);
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fprintf(f, "%ld\t7\t0\t%llu\tP\t%llu\t/models/stale-loader.gguf\n",
+            (long)getpid(), (unsigned long long)(now - 2 * 3600),
+            (unsigned long long)(20 * GB));
+    fprintf(f, "%ld\t8\t0\t%llu\tP\t%llu\t/models/fresh-loader.gguf\n",
+            (long)getpid(), (unsigned long long)now,
+            (unsigned long long)(3 * GB));
+    fclose(f);
+
+    // the fresh 3GB pending still counts, so 22GB of 24GB must be refused —
+    // and the refusal names the live loader, not the reaped orphan
+    uint64_t free_all = 24 * GB;
+    char err[1024] = {0};
+    assert(!vram_claim("stale-pending-test", "/models/mine.gguf", 22 * GB,
+                       fixed_free, &free_all, 0, NULL, err, sizeof(err)));
+    assert(strstr(err, "fresh-loader") && "a fresh guardless entry must survive");
+    assert(!strstr(err, "stale-loader") && "the stale guardless entry must be gone");
+
+    // with the stale 20GB dropped, a 20GB ask fits
+    vram_lease *l = vram_claim("stale-pending-test", "/models/mine.gguf",
+                               20 * GB, fixed_free, &free_all, 0, NULL, NULL, 0);
+    assert(l && "a stale guardless pending entry must not pin phantom bytes");
+    vram_release(l);
+}
+
 // The orphan case, reproduced. A runner that dies without deregistering — a
 // SIGKILL, a crash, an OOM kill — must not leave its reservation behind. This
 // is exactly how six runners came to be holding a 24GB slice with nothing
@@ -247,7 +413,11 @@ static void test_wait_timeout_still_names_the_holder(void) {
 
 int main(void) {
     test_second_runner_refuses_naming_the_holder();
+    test_unreadable_registry_is_not_truncated();
 #ifndef _WIN32
+    test_symlinked_registry_is_refused();
+    test_concurrent_claims_mint_distinct_seqs();
+    test_stale_guardless_pending_is_reaped();
     test_dead_pid_reservation_is_reclaimed();
     test_reaping_keeps_live_neighbours();
     test_wait_for_vram_queues_then_proceeds();

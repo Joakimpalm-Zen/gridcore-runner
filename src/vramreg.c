@@ -26,6 +26,7 @@
 #include "runner.h"
 #include "compat.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -143,6 +144,7 @@ static int parse(const char *in, reg_entry *out, int cap) {
 // the machine until reboot if nobody reaped it. Reaping happens on every claim,
 // under the lock, before any arithmetic.
 static int reap(reg_entry *e, int n) {
+    uint64_t now = (uint64_t)time(NULL);
     int keep = 0;
     for (int i = 0; i < n; i++) {
         if (!plat_pid_alive(e[i].pid)) continue;
@@ -152,6 +154,12 @@ static int reap(reg_entry *e, int n) {
         uint64_t start = 0;
         if (e[i].procstart && plat_pid_start_time(e[i].pid, &start) &&
             start != e[i].procstart) continue;
+        // procstart 0 means no pid-reuse guard at all, so a recycled pid can
+        // adopt a dead runner's pending entry and pin phantom bytes forever.
+        // Age is the mitigation: no load — even one queued behind
+        // --wait-for-vram — is still pending after an hour.
+        if (e[i].procstart == 0 && e[i].state == 'P' &&
+            now > e[i].since && now - e[i].since > 3600) continue;
         e[keep++] = e[i];
     }
     return keep;
@@ -275,12 +283,16 @@ static char *claim_rmw(const char *in, size_t in_len, void *ud) {
 vram_lease *vram_claim(const char *gpu_id, const char *model_path,
                        uint64_t need_bytes, vram_free_fn free_fn, void *free_ud,
                        int wait_secs, vram_status *st, char *err, size_t err_cap) {
-    static long next_seq = 1;
+    // atomic: two slots claiming concurrently must not mint one seq, or
+    // vram_release later removes the wrong entry
+    static atomic_long next_seq = 1;
     if (err && err_cap) err[0] = 0;
 
     claim_ctx c = { .gpu_id = gpu_id, .model = model_path, .need = need_bytes,
                     .free_fn = free_fn, .free_ud = free_ud,
-                    .pid = plat_pid_self(), .seq = next_seq++,
+                    .pid = plat_pid_self(),
+                    .seq = atomic_fetch_add_explicit(&next_seq, 1,
+                                                     memory_order_relaxed),
                     .st = st, .err = err, .err_cap = err_cap };
     if (st) { st->holders = 0; st->held_bytes = 0; st->available = 0; }
     if (!plat_pid_start_time(c.pid, &c.procstart)) c.procstart = 0;
@@ -304,7 +316,7 @@ vram_lease *vram_claim(const char *gpu_id, const char *model_path,
         if (c.admitted) break;
         if (plat_now() >= deadline) return NULL;
         plat_sleep_ms(1000);
-        c.seq = next_seq++;
+        c.seq = atomic_fetch_add_explicit(&next_seq, 1, memory_order_relaxed);
     }
 
     vram_lease *l = calloc(1, sizeof(*l));

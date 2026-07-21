@@ -41,10 +41,12 @@ long        plat_pid_self(void);
 // runners that died without deregistering (SIGKILL, crash, OOM killer).
 bool        plat_pid_alive(long pid);
 
-// Process creation time in seconds since the epoch, false when the platform
-// cannot report it. Pids are recycled, so an entry whose pid is alive but whose
-// creation time has moved belongs to an unrelated process and is still dead for
-// reaping purposes.
+// Opaque process-creation stamp, false when the platform cannot report one.
+// The unit is per-platform (Linux: seconds since boot; Windows/macOS: seconds
+// since the epoch): values are only ever compared for equality against stamps
+// recorded on the same machine, so files that store them must not outlive a
+// boot. Pids are recycled, so an entry whose pid is alive but whose stamp has
+// moved belongs to an unrelated process and is still dead for reaping purposes.
 bool        plat_pid_start_time(long pid, uint64_t *out);
 
 // Durable-but-transient scratch directory: $XDG_RUNTIME_DIR, else the platform

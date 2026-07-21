@@ -119,15 +119,28 @@ bool plat_file_rmw(const char *path, plat_rmw_fn fn, void *ud) {
     // through plat_file_rmw. A failure is not fatal — see the header note.
     bool locked = LockFileEx(f, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &ov);
 
+    // A file that exists but cannot be read back — oversized, unreadable, or
+    // malloc failed — fails the whole rmw. Running fn against an empty view
+    // and writing that back would truncate every other process's entries.
     char *buf = NULL;
     size_t len = 0;
     LARGE_INTEGER sz;
-    if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart < (1 << 20)) {
+    bool readable = GetFileSizeEx(f, &sz) && sz.QuadPart < (1 << 20);
+    if (readable && sz.QuadPart > 0) {
         len = (size_t)sz.QuadPart;
         buf = malloc(len + 1);
         DWORD got = 0;
-        if (!buf || !ReadFile(f, buf, (DWORD)len, &got, NULL)) { free(buf); buf = NULL; len = 0; }
+        if (!buf || !ReadFile(f, buf, (DWORD)len, &got, NULL)) { readable = false; len = 0; }
         else { len = got; buf[len] = 0; }
+    }
+    if (!readable) {
+        free(buf);
+        if (locked) {
+            OVERLAPPED uo = {0};
+            UnlockFileEx(f, 0, MAXDWORD, MAXDWORD, &uo);
+        }
+        CloseHandle(f);
+        return false;
     }
 
     char *out = fn(buf ? buf : "", len, ud);
@@ -187,6 +200,10 @@ void plat_parent_watch(long pid) {
 
 #ifdef __linux__
 #include <sys/prctl.h>
+#endif
+
+#ifdef __APPLE__
+#include <sys/sysctl.h>
 #endif
 
 void *plat_mmap_ro(const char *path, size_t *size) {
@@ -274,9 +291,17 @@ bool plat_pid_start_time(long pid, uint64_t *out) {
     // relative to boot is enough: entries only ever compare against themselves
     *out = (uint64_t)(ticks / (unsigned long long)hz);
     return true;
+#elif defined(__APPLE__)
+    if (pid <= 0) return false;
+    struct kinfo_proc kp;
+    size_t len = sizeof(kp);
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+    if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len < sizeof(kp)) return false;
+    *out = (uint64_t)kp.kp_proc.p_starttime.tv_sec;
+    return true;
 #else
     (void)pid; (void)out;
-    return false;   // macOS/BSD: pid liveness alone (see plat_pid_alive)
+    return false;   // other BSDs: pid liveness alone (see plat_pid_alive)
 #endif
 }
 
@@ -288,7 +313,10 @@ const char *plat_runtime_dir(void) {
 }
 
 bool plat_file_rmw(const char *path, plat_rmw_fn fn, void *ud) {
-    int fd = open(path, O_RDWR | O_CREAT, 0600);
+    // O_NOFOLLOW: the path can live in a world-writable fallback dir (/tmp)
+    // under a predictable name, so a planted symlink must not redirect the
+    // write. Refusing (best-effort accounting) beats following it.
+    int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return false;
 
     // flock is advisory-by-convention here: every writer of this file goes
@@ -296,15 +324,25 @@ bool plat_file_rmw(const char *path, plat_rmw_fn fn, void *ud) {
     // not fatal, because an unlockable filesystem must not stop a runner.
     bool locked = flock(fd, LOCK_EX) == 0;
 
+    // A file that exists but cannot be read back — oversized, unreadable, or
+    // malloc failed — fails the whole rmw. Running fn against an empty view
+    // and writing that back would truncate every other process's entries.
     char *buf = NULL;
     size_t len = 0;
     struct stat st;
-    if (fstat(fd, &st) == 0 && st.st_size > 0 && st.st_size < (1 << 20)) {
+    bool readable = fstat(fd, &st) == 0 && st.st_size < (1 << 20);
+    if (readable && st.st_size > 0) {
         len = (size_t)st.st_size;
         buf = malloc(len + 1);
         ssize_t got = buf ? pread(fd, buf, len, 0) : -1;
-        if (got < 0) { free(buf); buf = NULL; len = 0; }
+        if (got < 0) { readable = false; len = 0; }
         else { len = (size_t)got; buf[len] = 0; }
+    }
+    if (!readable) {
+        free(buf);
+        if (locked) flock(fd, LOCK_UN);
+        close(fd);
+        return false;
     }
 
     char *out = fn(buf ? buf : "", len, ud);
