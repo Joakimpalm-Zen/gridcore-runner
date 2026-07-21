@@ -283,13 +283,23 @@ def test_streamed_final_branch_matches_the_buffered_answer(client):
       {"type": "function", "function": {"name": "a"}}], "duplicate", "duplicate"),
     ([{"type": "function", "function": {"name": "final"}}], "reserved", "reserved"),
     # a parameter schema the compiler cannot enforce: silently approximating
-    # it would mean guaranteeing a constraint that is not there
+    # it would mean guaranteeing a constraint that is not there. pattern is
+    # now PARTIALLY supported (anchored prefix + repeated ASCII class), so an
+    # out-of-subset pattern rejects with its own named reason...
     ([{"type": "function",
        "function": {"name": "a",
                     "parameters": {"type": "object",
                                    "properties": {"p": {"type": "string",
                                                         "pattern": "^x$"}}}}}],
-     "unenforceable-parameters", "keyword"),
+     "unenforceable-pattern", "pattern"),
+    # ...while a keyword the compiler does not know at all still names itself
+    ([{"type": "function",
+       "function": {"name": "a",
+                    "parameters": {"type": "object",
+                                   "properties": {"p": {"type": "array",
+                                                        "items": {"type": "string"},
+                                                        "uniqueItems": True}}}}}],
+     "unenforceable-keyword", "keyword"),
 ])
 def test_malformed_tools_are_rejected(client, tools, label, contains):
     client.expect_400(dict(BASE, max_tokens=8, tools=tools,

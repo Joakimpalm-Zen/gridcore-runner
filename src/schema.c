@@ -181,7 +181,19 @@ static bool compile_bound(jv *v, int dflt, int *out) {
 }
 
 /* Compile the anchored prefix + ASCII class form used by coding-agent IDs,
-   e.g. ^wf_[a-z0-9-]{6,}$. Other regex forms remain explicit errors. */
+   e.g. ^wf_[a-z0-9-]{6,}$. Other regex forms remain explicit errors.
+
+   Both halves are matched LITERALLY at runtime, so any regex syntax we would
+   silently reinterpret must be a compile error instead: a metacharacter in
+   the prefix (`.` `\` `$` ...) or an escape/negation in the class (`\d`,
+   `[^a]`) would make the enforced language differ from the declared pattern
+   — and a constraint that differs from the one the caller declared is the
+   exact failure this compiler exists to prevent. */
+static bool pattern_prefix_char_ok(unsigned char c) {
+    if (c >= 128) return false;
+    return strchr(".\\*+?()|{}$^", (char)c) == NULL;
+}
+
 static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
     jv *pv = jv_get(s, "pattern");
     if (!pv) return true;
@@ -201,13 +213,21 @@ static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
         min = strtol(rb + 2, &end, 10);
         if (min < 0 || min > INT_MAX || !end || strcmp(end, ",}$")) goto bad;
     }
+    for (const char *q = p; q < lb; q++)
+        if (!pattern_prefix_char_ok((unsigned char)*q)) goto bad;
+    if (lb[1] == '^') goto bad;  // negated class: not literally matchable
     n->pattern_prefix_len = (int)(lb - p);
     n->pattern_prefix = strndup(p, (size_t)n->pattern_prefix_len);
     if (!n->pattern_prefix) return false;
     n->pattern_min_tail = (int)min;
     for (const char *q = lb + 1; q < rb; q++) {
+        if (*q == '\\') goto bad;  // class escapes (\d, \-, \]) are regex syntax
         unsigned char lo = (unsigned char)*q, hi = lo;
-        if (q + 2 < rb && q[1] == '-') { hi = (unsigned char)q[2]; q += 2; }
+        if (q + 2 < rb && q[1] == '-') {
+            if (q[2] == '\\') goto bad;
+            hi = (unsigned char)q[2];
+            q += 2;
+        }
         if (lo >= 128 || hi >= 128 || lo > hi) goto bad;
         for (unsigned c = lo; c <= hi; c++) n->pattern_ascii[c] = true;
     }
@@ -1131,6 +1151,11 @@ static int feed_byte(sval *v, uint8_t c) {
             f->phase = P_NUM; f->sub = N_START; f->lit_pos = 0; f->num_abs = 0;
             f->num_len = 0;
             if (n->kind == SN_INT) return integer_take_byte(n, f, c) ? 0 : -1;
+            // a minus under a non-negative minimum is a dead prefix: no
+            // suffix can ever satisfy the bound, and the only exit would be
+            // an all-tokens-masked stall — reject it up front (the integer
+            // path already does)
+            if (c == '-' && n->has_real_min && n->real_min >= 0) return -1;
             if (num_byte(c, &f->sub, false) != 0 || !number_put(f, c)) return -1;
             return 0;
         case SN_OBJ:
@@ -1405,7 +1430,18 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
         case SN_ANY:  eq_put(q, n->min_items ? "{}" : "null"); break;
         case SN_NULL: eq_put(q, "null"); break;
         case SN_BOOL: eq_put(q, "false"); break;
-        case SN_NUM: eq_putc(q, '0'); break;
+        case SN_NUM: {
+            // minimal value respects the declared bounds — a bounded number
+            // filled in by force-close must still satisfy its own schema
+            double v = 0.0;
+            if (n->has_real_min && v < n->real_min) v = n->real_min;
+            if (n->has_real_max && v > n->real_max) v = n->real_max;
+            if (v == 0.0) { eq_putc(q, '0'); break; }
+            char b[40];
+            snprintf(b, sizeof(b), "%.17g", v);
+            eq_put(q, b);
+            break;
+        }
         case SN_INT: emit_integer(q, integer_minimal_value(n)); break;
         case SN_STR:
             eq_putc(q, '"');
@@ -1564,7 +1600,20 @@ int sval_close(sval *v, char *out, int cap) {
         }
         case P_NUM:
             if (n->kind == SN_INT) close_integer(&q, n, f);
-            else if (!num_complete(f->sub)) eq_putc(&q, '0');
+            else if (!num_complete(f->sub)) {
+                if (f->num_len == 0 && (n->has_real_min || n->has_real_max)) {
+                    // an untouched bounded number closes to an in-bounds
+                    // value, not a blind zero
+                    double v = 0.0;
+                    if (n->has_real_min && v < n->real_min) v = n->real_min;
+                    if (n->has_real_max && v > n->real_max) v = n->real_max;
+                    char b[40];
+                    snprintf(b, sizeof(b), "%.17g", v);
+                    eq_put(&q, b);
+                } else {
+                    eq_putc(&q, '0');
+                }
+            }
             break;
         case P_OBJ_KEY1:
             close_obj(&q, n, f->idx, false, false, choice);

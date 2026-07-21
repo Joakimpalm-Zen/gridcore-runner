@@ -12,6 +12,7 @@
     "request_telemetry": true,
     "responses_api": true,
     "schema_conditionals": true,
+    "schema_integer_bounds": true,
     "schema_string_bounds": true,
     "shared_prefix_cache": true,
     "stop_sequences": true

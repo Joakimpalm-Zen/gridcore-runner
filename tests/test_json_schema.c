@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void test_strict_bounded_numbers(void) {
@@ -334,6 +335,80 @@ static void test_schema_agent_id_pattern_is_enforced(void) {
     assert(schema != NULL);
     sval protocol; sval_init(&protocol, schema);
     assert(sval_feed(&protocol, "\"proto-1\"", 9) && protocol.done);
+    schema_free(schema); jv_free(j);
+}
+
+static void test_schema_pattern_regex_syntax_is_rejected_not_reinterpreted(void) {
+    // the compiler matches prefix and class LITERALLY; regex syntax it would
+    // silently reinterpret (escapes, negation, prefix metacharacters) must be
+    // a compile error — otherwise the enforced language differs from the
+    // declared pattern (e.g. [\d] would accept a literal backslash the
+    // declared regex forbids)
+    const char *bad_patterns[] = {
+        "{\"type\":\"string\",\"pattern\":\"^x[\\\\d]{2,}$\"}",   // class escape
+        "{\"type\":\"string\",\"pattern\":\"^x[^a]+$\"}",         // negated class
+        "{\"type\":\"string\",\"pattern\":\"^a.b[a-z]+$\"}",      // prefix metachar
+        "{\"type\":\"string\",\"pattern\":\"^a\\\\.b[a-z]+$\"}",  // prefix escape
+    };
+    for (size_t i = 0; i < sizeof(bad_patterns) / sizeof(*bad_patterns); i++) {
+        jv *j = json_parse(bad_patterns[i], strlen(bad_patterns[i]));
+        assert(j != NULL);
+        char err[128];
+        snode *schema = schema_compile(j, err, sizeof(err));
+        assert(schema == NULL);
+        assert(strstr(err, "pattern") != NULL);
+        jv_free(j);
+    }
+    // literal-safe specials INSIDE the class stay supported (regex treats
+    // them as literals there, so literal matching agrees with the pattern)
+    const char *ok_src =
+        "{\"type\":\"string\",\"pattern\":\"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$\"}";
+    jv *j = json_parse(ok_src, strlen(ok_src));
+    char err[128];
+    snode *schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    schema_free(schema); jv_free(j);
+}
+
+static void test_schema_number_bounds_reject_dead_minus_and_close_in_bounds(void) {
+    // minus under a non-negative minimum is a dead prefix: no suffix can ever
+    // satisfy the bound, so the first byte must be refused (the integer path
+    // already does) instead of stalling with every token masked at the end
+    const char *src = "{\"type\":\"number\",\"minimum\":0}";
+    jv *j = json_parse(src, strlen(src));
+    char err[128];
+    snode *schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    sval v; sval_init(&v, schema);
+    assert(!sval_feed(&v, "-", 1));
+    sval ok; sval_init(&ok, schema);
+    assert(sval_feed(&ok, "3.5", 3));
+    schema_free(schema); jv_free(j);
+
+    // a bounded number filled in by force-close stays INSIDE its bounds —
+    // both the untouched-value close path and the required-property
+    // minimal-emission path
+    src = "{\"type\":\"object\",\"properties\":{"
+          "\"a\":{\"type\":\"number\",\"minimum\":5}},"
+          "\"required\":[\"a\"]}";
+    j = json_parse(src, strlen(src));
+    schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    const char *starts[] = { "{", "{\"a\":" };
+    for (size_t i = 0; i < sizeof(starts) / sizeof(*starts); i++) {
+        sval closing; sval_init(&closing, schema);
+        assert(sval_feed(&closing, starts[i], (int)strlen(starts[i])));
+        char suffix[64];
+        int n = sval_close(&closing, suffix, sizeof(suffix));
+        assert(n > 0);
+        char full[128];
+        snprintf(full, sizeof(full), "%s%s", starts[i], suffix);
+        jv *parsed = json_parse(full, strlen(full));
+        assert(parsed != NULL);
+        jv *a = jv_get(parsed, "a");
+        assert(a != NULL && a->type == J_NUM && a->num >= 5.0);
+        jv_free(parsed);
+    }
     schema_free(schema); jv_free(j);
 }
 
@@ -977,6 +1052,8 @@ int main(void) {
     test_schema_rejects_escaped_keys();
     test_schema_rejects_unenforceable_keywords();
     test_schema_agent_id_pattern_is_enforced();
+    test_schema_pattern_regex_syntax_is_rejected_not_reinterpreted();
+    test_schema_number_bounds_reject_dead_minus_and_close_in_bounds();
     test_schema_merges_enum_and_const_anyof();
     test_schema_integer_bounds_are_enforced();
     test_schema_integer_bounds_complete_truncation();
