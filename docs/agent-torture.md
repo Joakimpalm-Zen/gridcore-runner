@@ -79,6 +79,14 @@ Ollama routes on the OpenAI `model` field, so pass `--model-name <name>` (the
 name you gave `ollama create`); Runner and llama.cpp ignore it. The flag is
 recorded in `raw.jsonl` so the request stays reproducible.
 
+Summarize any set of reports into one leaderboard (ordered best-first, each
+column labeled by the report's own runtime):
+
+```bash
+python3 scripts/torture-compare.py results/*/report.json          # text
+python3 scripts/torture-compare.py --md results/*/report.json     # Markdown
+```
+
 ## Published comparisons
 
 - [2026-07-21 — Runner vs llama.cpp vs Ollama, Llama-3.2-3B, CPU](../tests/torture/results/2026-07-21-llama-3.2-3b-cpu/README.md):
