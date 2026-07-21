@@ -305,6 +305,12 @@ declarations now pass Runner's schema compiler; end-to-end client status is
 listed separately below so schema acceptance is not overstated as a completed
 agent task.
 
+Cline CLI 3.0.46 is verified end to end with its `openai-compatible` provider,
+not only by replaying the captured declaration. Against Qwen3-4B it selected
+the built-in `read_files` tool, consumed the tool result on turn two, and
+finished with the exact fixture sentinel. The test used Cline's real streaming
+AI-SDK request and its complete normal tool set.
+
 Buffered completion responses include `runner_telemetry` with cached prompt
 tokens, prompt tokens evaluated this request, generation timing, and whether
 JSON/schema/speculative decoding was active.
