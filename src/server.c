@@ -258,6 +258,9 @@ static struct {
     bool        reaper_started;
     model_t    *draft;        // per-slot draft would be plural; single-model
     int         draft_k;      // serve has exactly one slot (see swap_to)
+    // the --draft argv string, kept only when its startup load succeeded, so
+    // a swap_to() after /unload can bring the draft back with the target
+    const char *draft_path;
     // sampling defaults come from the served model's family preset; the CLI
     // overrides are kept so a swapped-in model can be re-resolved against them
     sampler_override ov;
@@ -362,6 +365,13 @@ static int swap_to(const char *want) {
         fprintf(stderr, "sampling: %s\n", sdesc);
         engine_init(&s->e, s->m, s->tok, &s->smp);
         context_store(s->m->n_ctx);
+        if (SV.single && !SV.draft && SV.draft_path) {
+            // /unload freed the draft with the target; a draft configured at
+            // startup comes back with the reload rather than staying silently
+            // disabled. spec_draft_load re-runs the same gates and VRAM
+            // claim the startup load did (model_free released that claim).
+            SV.draft = spec_draft_load(SV.draft_path, s->m, &SV.mp);
+        }
         if (SV.single && SV.draft) {
             // engine_init memsets the engine; the draft (own KV, own pool)
             // survives target unload/reload and is re-attached here
@@ -3564,6 +3574,10 @@ static volatile sig_atomic_t listener_fd = -1;
 
 static void stop_handler(int sig) {
     (void)sig;
+    // A second signal is the operator overruling the drain: exit now. _exit is
+    // async-signal-safe (128+SIGINT — the shell's convention for a Ctrl-C kill),
+    // where the alternative on a pinned drain was reaching for SIGKILL.
+    if (stop_requested) _exit(130);
     stop_requested = 1;
     int fd = (int)listener_fd;
     if (fd >= 0) {
@@ -3579,8 +3593,14 @@ static void install_stop_handlers(void) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 }
+
+// Between the handlers installing and the listener publishing there is nothing
+// a signal can close, so startup polls this at its long stops (model loads)
+// and abandons the launch instead of serving a request nobody wants anymore.
+static bool stop_was_requested(void) { return stop_requested != 0; }
 #else
 static void install_stop_handlers(void) { }
+static bool stop_was_requested(void) { return false; }
 #endif
 
 static void queue_shutdown(void) {
@@ -3728,6 +3748,12 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         slot_mp.n_threads = threads_per_slot;
 
         for (int i = 0; i < parallel; i++) {
+            // a Ctrl-C during a multi-slot load means "don't start": honour it
+            // between loads rather than serving with the flag silently set
+            if (stop_was_requested()) {
+                fprintf(stderr, "shutdown requested during startup — exiting\n");
+                return 0;
+            }
             slot_t *s = &SV.slots[i];
             s->id = i;
             s->tok = tok;
@@ -3780,8 +3806,18 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             SV.last_used = now_s();
             SV.draft = SV.slots[0].e.dm;
             SV.draft_k = draft_k;
+            // a draft the gates rejected at startup stays rejected: only a
+            // draft that actually served is worth reloading after /unload
+            if (SV.draft) SV.draft_path = draft_path;
             if (!init_swap_runtime(mp, threads_per_slot, ttl)) return 1;
         }
+    }
+
+    // last long stop is behind us; a signal from here on is either caught
+    // right now or by the published listener below
+    if (stop_was_requested()) {
+        fprintf(stderr, "shutdown requested during startup — exiting\n");
+        return 0;
     }
 
     int lfd = (int)socket(AF_INET, SOCK_STREAM, 0);
@@ -3839,6 +3875,12 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                 batched ? ", continuous batching" : "");
 
     for (;;) {
+        // covers the race where the signal landed after the socket-creation
+        // check but before listener_fd published: the handler had no fd to
+        // close, so accept() would block forever with the flag already set.
+        // A signal landing after this check finds listener_fd published and
+        // closes it, so accept() fails; no window remains.
+        if (stop_was_requested()) break;
         int cfd = (int)accept(lfd, NULL, NULL);
         if (cfd < 0) {
 #ifndef _WIN32
