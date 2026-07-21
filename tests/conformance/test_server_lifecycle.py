@@ -115,6 +115,56 @@ def test_draft_model_survives_unload():
         assert _chat(srv.base_url)["runner_telemetry"]["speculative"] is True
 
 
+def test_unload_answers_promptly_and_defers_under_active_generation():
+    """GET /unload during a generation must answer now and free at the boundary.
+
+    /unload used to queue behind the busy slot, so an operator reclaiming
+    memory waited out whatever generation (or --wait-for-vram load) was in
+    flight — exactly the moment /unload matters. It is now answered from the
+    accept loop: a busy server records the wish, leaves the in-flight work
+    untouched, and unloads when the last request finishes. The stalled reader
+    below pins the generation mid-stream to hold that window open."""
+    import socket
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))
+    with RunnerServer(find_runner(root), model, ctx=1024, parallel=1,
+                      extra_args=["--gpu", "off"]) as srv:
+        conn = socket.create_connection(("127.0.0.1", srv.port), timeout=30)
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}],
+                           "max_tokens": 900, "stream": True}).encode()
+        conn.sendall(b"POST /v1/chat/completions HTTP/1.1\r\n"
+                     b"Content-Type: application/json\r\n" +
+                     ("Content-Length: %d\r\n\r\n" % len(body)).encode() + body)
+        assert conn.recv(1), "generation never started"   # stream is live
+        started = time.time()
+        with urllib.request.urlopen(srv.base_url + "/unload", timeout=5) as r:
+            payload = json.load(r)
+        assert payload["status"] == "ok"
+        assert time.time() - started < 2.0, "/unload must not queue behind the busy slot"
+        # the in-flight generation is untouched: drain it to its normal end
+        conn.settimeout(60)
+        data = b""
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        conn.close()
+        assert b"finish_reason" in data or b"[DONE]" in data, \
+            "the deferred unload must not cut the active stream short"
+        # and the model is gone at the request boundary
+        deadline = time.time() + 10
+        resident = "unchecked"
+        while time.time() < deadline:
+            with urllib.request.urlopen(srv.base_url + "/v1/capabilities",
+                                        timeout=5) as r:
+                resident = json.load(r)["resident"]
+            if resident is None:
+                break
+            time.sleep(0.2)
+        assert resident is None, "pending unload must fire once the slot is idle"
+
+
 def test_unload_clears_reported_model_context():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))

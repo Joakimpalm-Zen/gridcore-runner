@@ -204,7 +204,7 @@ static bool model_vram_claim(model_t *m, const model_params *p, size_t kv_bytes)
     char err[1024];
     vram_status st = {0};
     m->vram = vram_claim(gpu_id, m->path, need, vram_free_now, NULL,
-                         p->vram_wait_secs, &st, err, sizeof(err));
+                         p->vram_wait_secs, p->load_cancel, &st, err, sizeof(err));
     if (m->vram) return true;
 
     if (st.holders > 0) {
@@ -214,7 +214,7 @@ static bool model_vram_claim(model_t *m, const model_params *p, size_t kv_bytes)
     // Nobody to blame: claim what is actually available so the next runner can
     // still see this instance, and let the adaptive split size itself down.
     m->vram = vram_claim(gpu_id, m->path, st.available, vram_free_now, NULL,
-                         0, NULL, NULL, 0);
+                         0, NULL, NULL, NULL, 0);
     return true;
 }
 

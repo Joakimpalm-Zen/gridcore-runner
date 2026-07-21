@@ -282,7 +282,8 @@ static char *claim_rmw(const char *in, size_t in_len, void *ud) {
 
 vram_lease *vram_claim(const char *gpu_id, const char *model_path,
                        uint64_t need_bytes, vram_free_fn free_fn, void *free_ud,
-                       int wait_secs, vram_status *st, char *err, size_t err_cap) {
+                       int wait_secs, const volatile int *cancel,
+                       vram_status *st, char *err, size_t err_cap) {
     // atomic: two slots claiming concurrently must not mint one seq, or
     // vram_release later removes the wrong entry
     static atomic_long next_seq = 1;
@@ -314,8 +315,14 @@ vram_lease *vram_claim(const char *gpu_id, const char *model_path,
             if (err && err_cap) err[0] = 0;
         }
         if (c.admitted) break;
+        if (cancel && *cancel) {
+            if (err && err_cap) snprintf(err, err_cap, "vram wait cancelled");
+            return NULL;
+        }
         if (plat_now() >= deadline) return NULL;
-        plat_sleep_ms(1000);
+        // sleep in short slices so a cancellation (an /unload or a shutdown
+        // that wants this wait gone) is honoured within ~100ms, not a second
+        for (int i = 0; i < 10 && !(cancel && *cancel); i++) plat_sleep_ms(100);
         c.seq = atomic_fetch_add_explicit(&next_seq, 1, memory_order_relaxed);
     }
 

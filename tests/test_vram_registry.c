@@ -75,7 +75,7 @@ static void test_second_runner_refuses_naming_the_holder(void) {
     uint64_t free_before = 24 * GB;
     vram_lease *first = vram_claim(gpu, "/models/Qwen3-4B-Q4_K_M.gguf",
                                    5200000000ull /* 5.2GB */,
-                                   fixed_free, &free_before, 0, NULL, NULL, 0);
+                                   fixed_free, &free_before, 0, NULL, NULL, NULL, 0);
     assert(first && "the first runner on an idle GPU must be admitted");
     vram_commit(first, 5200000000ull);
 
@@ -83,7 +83,7 @@ static void test_second_runner_refuses_naming_the_holder(void) {
     uint64_t free_now = 24 * GB - 5200000000ull;   // what the driver now reports
     char err[1024] = {0};
     vram_lease *second = vram_claim(gpu, "/models/gemma-4-12B-it-Q4_K_M.gguf",
-                                    20 * GB, fixed_free, &free_now, 0,
+                                    20 * GB, fixed_free, &free_now, 0, NULL,
                                     NULL, err, sizeof(err));
     assert(!second && "a request that does not fit must be refused, not queued");
 
@@ -119,7 +119,7 @@ static void test_unreadable_registry_is_not_truncated(void) {
 
     uint64_t free_all = 24 * GB;
     vram_lease *l = vram_claim("bigfile-test", "/models/mine.gguf", 1 * GB,
-                               fixed_free, &free_all, 0, NULL, NULL, 0);
+                               fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(l && "an unreadable registry must not stop a runner (best-effort)");
     assert(file_size(path) == before &&
            "a claim that could not read the registry must not truncate it");
@@ -149,7 +149,7 @@ static void test_symlinked_registry_is_refused(void) {
 
     uint64_t free_all = 24 * GB;
     vram_lease *l = vram_claim("symlink-test", "/models/mine.gguf", 1 * GB,
-                               fixed_free, &free_all, 0, NULL, NULL, 0);
+                               fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(l && "a hijacked registry path must not stop a runner (best-effort)");
     vram_release(l);
 
@@ -174,7 +174,7 @@ static void *seq_claimer(void *arg) {
     uint64_t free_all = 24 * GB;
     for (int i = 0; i < SEQ_CLAIMS; i++)
         seq_leases[t][i] = vram_claim("seq-test", "/models/tiny.gguf",
-                                      1024 * 1024, fixed_free, &free_all, 0,
+                                      1024 * 1024, fixed_free, &free_all, 0, NULL,
                                       NULL, NULL, 0);
     return NULL;
 }
@@ -236,13 +236,13 @@ static void test_stale_guardless_pending_is_reaped(void) {
     uint64_t free_all = 24 * GB;
     char err[1024] = {0};
     assert(!vram_claim("stale-pending-test", "/models/mine.gguf", 22 * GB,
-                       fixed_free, &free_all, 0, NULL, err, sizeof(err)));
+                       fixed_free, &free_all, 0, NULL, NULL, err, sizeof(err)));
     assert(strstr(err, "fresh-loader") && "a fresh guardless entry must survive");
     assert(!strstr(err, "stale-loader") && "the stale guardless entry must be gone");
 
     // with the stale 20GB dropped, a 20GB ask fits
     vram_lease *l = vram_claim("stale-pending-test", "/models/mine.gguf",
-                               20 * GB, fixed_free, &free_all, 0, NULL, NULL, 0);
+                               20 * GB, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(l && "a stale guardless pending entry must not pin phantom bytes");
     vram_release(l);
 }
@@ -264,7 +264,7 @@ static void test_dead_pid_reservation_is_reclaimed(void) {
     if (child == 0) {
         close(ready[0]);
         vram_lease *l = vram_claim(gpu, "/models/orphan-Q4_K_M.gguf", 20 * GB,
-                                   fixed_free, &free_all, 0, NULL, NULL, 0);
+                                   fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
         char ok = l ? 'y' : 'n';
         ssize_t w = write(ready[1], &ok, 1);
         (void)w;
@@ -279,7 +279,7 @@ static void test_dead_pid_reservation_is_reclaimed(void) {
     // and the refusal names it.
     char err[1024] = {0};
     assert(!vram_claim(gpu, "/models/mine.gguf", 20 * GB, fixed_free, &free_all,
-                       0, NULL, err, sizeof(err)));
+                       0, NULL, NULL, err, sizeof(err)));
     char pidstr[32];
     snprintf(pidstr, sizeof(pidstr), "pid %ld", (long)child);
     assert(strstr(err, pidstr) && strstr(err, "orphan-Q4_K_M"));
@@ -292,7 +292,7 @@ static void test_dead_pid_reservation_is_reclaimed(void) {
     // sweeper, no timeout and no reboot: the next claim reaps it.
     err[0] = 0;
     vram_lease *mine = vram_claim(gpu, "/models/mine.gguf", 20 * GB,
-                                  fixed_free, &free_all, 0, NULL, err, sizeof(err));
+                                  fixed_free, &free_all, 0, NULL, NULL, err, sizeof(err));
     assert(mine && "a dead process's reservation must not poison the GPU");
     vram_release(mine);
 }
@@ -312,7 +312,7 @@ static void test_reaping_keeps_live_neighbours(void) {
     if (child == 0) {
         close(ready[0]);
         vram_claim(gpu, "/models/doomed.gguf", 1 * GB, fixed_free, &free_all,
-                   0, NULL, NULL, 0);
+                   0, NULL, NULL, NULL, 0);
         char c = 'y';
         ssize_t w = write(ready[1], &c, 1);
         (void)w;
@@ -324,7 +324,7 @@ static void test_reaping_keeps_live_neighbours(void) {
     close(ready[0]);
 
     vram_lease *survivor = vram_claim(gpu, "/models/survivor.gguf", 2 * GB,
-                                      fixed_free, &free_all, 0, NULL, NULL, 0);
+                                      fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(survivor);
     vram_commit(survivor, 2 * GB);
     free_all -= 2 * GB;   // the allocation really happened: the driver sees it
@@ -338,7 +338,7 @@ static void test_reaping_keeps_live_neighbours(void) {
     // child.
     char err[1024] = {0};
     assert(!vram_claim(gpu, "/models/huge.gguf", 23 * GB, fixed_free, &free_all,
-                       0, NULL, err, sizeof(err)));
+                       0, NULL, NULL, err, sizeof(err)));
     assert(strstr(err, "survivor") && "the live holder must survive reaping");
     assert(!strstr(err, "doomed") && "the dead holder must be gone");
 
@@ -360,7 +360,7 @@ static void test_wait_for_vram_queues_then_proceeds(void) {
     if (child == 0) {
         close(ready[0]);
         vram_lease *l = vram_claim(gpu, "/models/holder.gguf", 20 * GB,
-                                   fixed_free, &free_all, 0, NULL, NULL, 0);
+                                   fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
         char c = l ? 'y' : 'n';
         ssize_t w = write(ready[1], &c, 1);
         (void)w;
@@ -375,12 +375,12 @@ static void test_wait_for_vram_queues_then_proceeds(void) {
 
     // without waiting this is an immediate refusal
     assert(!vram_claim(gpu, "/models/queued.gguf", 20 * GB, fixed_free,
-                       &free_all, 0, NULL, NULL, 0));
+                       &free_all, 0, NULL, NULL, NULL, 0));
 
     // with waiting it blocks until the holder releases, then proceeds
     double t0 = plat_now();
     vram_lease *queued = vram_claim(gpu, "/models/queued.gguf", 20 * GB,
-                                    fixed_free, &free_all, 30, NULL, NULL, 0);
+                                    fixed_free, &free_all, 30, NULL, NULL, NULL, 0);
     double waited = plat_now() - t0;
     assert(queued && "--wait-for-vram must queue, not fail");
     assert(waited >= 1.0 && "it must actually have waited for the holder");
@@ -391,6 +391,44 @@ static void test_wait_for_vram_queues_then_proceeds(void) {
     vram_release(queued);
 }
 
+// A queued wait must be interruptible: /unload and shutdown point the claim's
+// cancel flag at their intent, and a wait that ignored it would pin the swap
+// path (and a joining shutdown) for the full --wait-for-vram budget.
+static volatile int cancel_flag;
+
+static void *cancel_setter(void *arg) {
+    (void)arg;
+    plat_sleep_ms(300);
+    cancel_flag = 1;
+    return NULL;
+}
+
+static void test_cancelled_wait_gives_up_promptly(void) {
+    scratch_dir();
+    const char *gpu = "MIG-wait-cancel-test";
+    uint64_t free_all = 24 * GB;
+
+    vram_lease *hog = vram_claim(gpu, "/models/holder.gguf", 20 * GB,
+                                 fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+    assert(hog);
+
+    cancel_flag = 0;
+    pthread_t th;
+    assert(pthread_create(&th, NULL, cancel_setter, NULL) == 0);
+    double t0 = plat_now();
+    char err[1024] = {0};
+    vram_lease *queued = vram_claim(gpu, "/models/queued.gguf", 20 * GB,
+                                    fixed_free, &free_all, 30, &cancel_flag,
+                                    NULL, err, sizeof(err));
+    double waited = plat_now() - t0;
+    pthread_join(th, NULL);
+    assert(!queued && "a cancelled wait must fail the claim, not admit it");
+    assert(waited < 5.0 && "cancellation must cut a 30s wait short");
+    assert(strstr(err, "cancel") && "the error must say the wait was cancelled");
+
+    vram_release(hog);
+}
+
 // A wait that runs out still has to explain itself: the timeout path produces
 // the same named-holder message the immediate refusal does, not a bare timeout.
 static void test_wait_timeout_still_names_the_holder(void) {
@@ -399,12 +437,12 @@ static void test_wait_timeout_still_names_the_holder(void) {
     uint64_t free_all = 24 * GB;
 
     vram_lease *hog = vram_claim(gpu, "/models/stubborn-Q4_K_M.gguf", 20 * GB,
-                                 fixed_free, &free_all, 0, NULL, NULL, 0);
+                                 fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(hog);
 
     char err[1024] = {0};
     assert(!vram_claim(gpu, "/models/queued.gguf", 20 * GB, fixed_free,
-                       &free_all, 1, NULL, err, sizeof(err)));
+                       &free_all, 1, NULL, NULL, err, sizeof(err)));
     assert(strstr(err, "stubborn-Q4_K_M") && "a timed-out wait must still name the holder");
 
     vram_release(hog);
@@ -421,6 +459,7 @@ int main(void) {
     test_dead_pid_reservation_is_reclaimed();
     test_reaping_keeps_live_neighbours();
     test_wait_for_vram_queues_then_proceeds();
+    test_cancelled_wait_gives_up_promptly();
     test_wait_timeout_still_names_the_holder();
 #else
     puts("vram registry: cross-process reaping tests need fork(); skipped on Windows");

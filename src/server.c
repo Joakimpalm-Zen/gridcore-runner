@@ -253,6 +253,14 @@ static struct {
     model_params mp;
     pthread_mutex_t swap_mu;
     atomic_int  active_requests;
+    // Loading state machine: swap_to releases swap_mu for the duration of the
+    // actual model load (minutes for big files, up to --wait-for-vram longer),
+    // so /unload and shutdown are never blocked behind a load. `loading` and
+    // `pending_unload` are protected by swap_mu; `load_cancel` is a plain
+    // flag the vram wait polls without any lock.
+    bool         loading;         // a swap_to load is in flight, lock released
+    bool         pending_unload;  // /unload arrived while busy; honoured at the next safe point
+    volatile int load_cancel;     // aborts a --wait-for-vram queue wait
     atomic_bool shutdown;
     pthread_t   reaper_th;
     bool        reaper_started;
@@ -312,11 +320,45 @@ static void unload_draft(void) {
     for (int i = 0; i < SV.n_slots; i++) SV.slots[i].e.dm = NULL;
 }
 
+// Answer GET /unload from any thread. The memory is given back immediately
+// when the server is idle; when a load or a generation is in flight the wish
+// is recorded and honoured at the next safe boundary instead of blocking the
+// caller — /unload exists so an operator can reclaim memory, and "scheduled"
+// answered now beats "done" answered after a 300s --wait-for-vram queue. An
+// in-flight load is additionally cancelled at its next wait poll.
+static void handle_unload(int fd) {
+    bool deferred = false;
+    if (SV.n_reg > 0) {
+        pthread_mutex_lock(&SV.swap_mu);
+        if (SV.loading) {
+            SV.pending_unload = true;
+            SV.load_cancel = 1;   // a queued --wait-for-vram load gives up now
+            deferred = true;
+        } else if (atomic_load(&SV.active_requests) > 0) {
+            SV.pending_unload = true;   // freed when the last request finishes
+            deferred = true;
+        } else {
+            unload_draft();
+            unload_resident();
+        }
+        pthread_mutex_unlock(&SV.swap_mu);
+    }
+    // /unload means "give the memory back now", so the snapshots go too.
+    // A model *swap* deliberately keeps them: surviving a swap is the
+    // whole point of snapshotting a prefix instead of holding a slot.
+    prefix_cache_clear();
+    const char *b = deferred ? "{\"status\":\"ok\",\"deferred\":true}"
+                             : "{\"status\":\"ok\"}";
+    send_response(fd, 200, "application/json", b, strlen(b));
+}
+
 // swap_to results below 0: the name matched no registry entry (a caller
 // typo — 400) vs the entry exists but its model failed to load (a broken
-// model — 5xx). Callers must tell them apart.
+// model — 5xx) vs the load was discarded because /unload or shutdown arrived
+// while it ran (nobody's fault — 503). Callers must tell them apart.
 #define SWAP_UNKNOWN     (-1)
 #define SWAP_LOAD_FAILED (-2)
+#define SWAP_ABORTED     (-3)
 
 // resolve + load the requested model; returns entry index or SWAP_*
 static int swap_to(const char *want) {
@@ -332,24 +374,47 @@ static int swap_to(const char *want) {
         if (idx < 0) return SWAP_UNKNOWN;
     }
     pthread_mutex_lock(&SV.swap_mu);
+    // A request supersedes any unload that was still pending: it is about to
+    // (re)load a model on purpose.
+    SV.pending_unload = false;
     if (resident_load() != idx) {
         unload_resident();
-        slot_t *s = &SV.slots[0];
+        // The load itself runs WITHOUT swap_mu: a multi-GB mmap+upload — or a
+        // --wait-for-vram queue wait of minutes — must never hold the lock
+        // /unload and shutdown need. While `loading` is set, the resident is
+        // -1 and slot 0 has no model, so nothing else touches engine state;
+        // the load builds into locals and installs under the lock at the end.
+        SV.loading = true;
+        SV.load_cancel = 0;
+        pthread_mutex_unlock(&SV.swap_mu);
+
         fprintf(stderr, "swap: loading %s (%s)\n",
                 SV.reg[idx].name, SV.reg[idx].path);
-        s->m = calloc(1, sizeof(model_t));
-        s->tok = calloc(1, sizeof(tokenizer));
-        bool model_ok = s->m && model_load(s->m, SV.reg[idx].path, &SV.mp);
-        bool tok_ok = model_ok && s->tok && tokenizer_init(s->tok, &s->m->gf);
-        if (!model_ok || !tok_ok) {
-            fprintf(stderr, "swap: failed to load %s\n", SV.reg[idx].name);
-            if (s->tok) tokenizer_free(s->tok);
-            if (s->m) model_free(s->m);
-            free(s->m); free(s->tok);
-            s->m = NULL; s->tok = NULL;
+        model_t *m = calloc(1, sizeof(model_t));
+        tokenizer *tok = calloc(1, sizeof(tokenizer));
+        bool model_ok = m && model_load(m, SV.reg[idx].path, &SV.mp);
+        bool tok_ok = model_ok && tok && tokenizer_init(tok, &m->gf);
+
+        pthread_mutex_lock(&SV.swap_mu);
+        SV.loading = false;
+        bool discard = SV.pending_unload || SV.load_cancel;
+        SV.pending_unload = false;
+        if (!model_ok || !tok_ok || discard) {
+            if (discard)
+                fprintf(stderr, "swap: load of %s discarded (%s)\n",
+                        SV.reg[idx].name, model_ok ? "unloaded while loading"
+                                                   : "wait cancelled");
+            else
+                fprintf(stderr, "swap: failed to load %s\n", SV.reg[idx].name);
+            if (tok_ok) tokenizer_free(tok);
+            if (model_ok) model_free(m);
+            free(m); free(tok);
             pthread_mutex_unlock(&SV.swap_mu);
-            return SWAP_LOAD_FAILED;
+            return discard ? SWAP_ABORTED : SWAP_LOAD_FAILED;
         }
+        slot_t *s = &SV.slots[0];
+        s->m = m;
+        s->tok = tok;
         s->tmpl = SV.reg[idx].tmpl =
             template_detect(gguf_get_str(&s->m->gf, "tokenizer.chat_template", NULL),
                             s->tok);
@@ -413,6 +478,9 @@ static bool init_swap_runtime(const model_params *mp, int n_threads, int ttl) {
     SV.mp = *mp;
     SV.mp.verbose = false;
     SV.mp.n_threads = n_threads;
+    // swap loads run without swap_mu; /unload and shutdown cancel a queued
+    // --wait-for-vram wait through this flag
+    SV.mp.load_cancel = &SV.load_cancel;
     if (pthread_mutex_init(&SV.swap_mu, NULL) != 0) {
         fprintf(stderr, "error: cannot initialize model swap mutex\n");
         return false;
@@ -3386,19 +3454,10 @@ static void handle_conn(slot_t *s, int fd) {
     }
 
     if (!strcmp(method, "GET") && !strcmp(path, "/unload")) {
-        // llama-swap-compatible: free the resident model's memory now
-        if (SV.n_reg > 0) {
-            pthread_mutex_lock(&SV.swap_mu);
-            unload_draft();
-            unload_resident();
-            pthread_mutex_unlock(&SV.swap_mu);
-        }
-        // /unload means "give the memory back now", so the snapshots go too.
-        // A model *swap* deliberately keeps them: surviving a swap is the
-        // whole point of snapshotting a prefix instead of holding a slot.
-        prefix_cache_clear();
-        const char *b = "{\"status\":\"ok\"}";
-        send_response(fd, 200, "application/json", b, strlen(b));
+        // llama-swap-compatible: free the resident model's memory. Normally
+        // answered straight from the accept loop (see accept_fastpath); this
+        // path still serves a request that slipped past it.
+        handle_unload(fd);
     } else if (!strcmp(method, "GET") &&
                !strcmp(path, "/v1/runner/prefix-cache")) {
         send_prefix_cache(fd);
@@ -3441,6 +3500,10 @@ static void handle_conn(slot_t *s, int fd) {
                     send_error(fd, 500,
                                "model failed to load (registered but broken; see server log)");
                     ok = false;
+                } else if (sw == SWAP_ABORTED) {
+                    send_error(fd, 503,
+                               "model load abandoned (unload or shutdown requested; retry)");
+                    ok = false;
                 } else if (sw < 0) {
                     send_error(fd, 400, "unknown model (see /v1/models)");
                     ok = false;
@@ -3463,12 +3526,24 @@ static void handle_conn(slot_t *s, int fd) {
                     pthread_mutex_unlock(&SV.swap_mu);
                 }
             }
+            // Drop the request from the count BEFORE the bookkeeping lock:
+            // an /unload that saw this request active left pending_unload for
+            // us, and the count must already be zero when we honour it.
+            atomic_fetch_sub(&SV.active_requests, 1);
             if (SV.n_reg > 0) {
+                bool unloaded = false;
                 pthread_mutex_lock(&SV.swap_mu);
                 SV.last_used = now_s();
+                if (SV.pending_unload && !SV.loading &&
+                    !atomic_load(&SV.active_requests)) {
+                    unload_draft();
+                    unload_resident();
+                    SV.pending_unload = false;
+                    unloaded = true;
+                }
                 pthread_mutex_unlock(&SV.swap_mu);
+                if (unloaded) prefix_cache_clear();
             }
-            atomic_fetch_sub(&SV.active_requests, 1);
             jv_free(req);
         }
     } else {
@@ -3487,11 +3562,12 @@ static void *slot_worker(void *arg) {
     }
 }
 
-// answer tiny read-only GETs from the accept loop: single-slot serving means
-// one long generation used to block /health until the gridcore watchdog
-// declared a live runner "unhealthy: timed out". POSTs (and /unload, which
-// frees the resident model and must stay serialized with generation) are
-// handed to a slot untouched.
+// answer tiny GETs from the accept loop: single-slot serving means one long
+// generation used to block /health until the gridcore watchdog declared a
+// live runner "unhealthy: timed out". /unload is answered here too — it never
+// frees anything a slot is using (handle_unload defers under an active load
+// or generation), and an operator reclaiming memory must not queue behind
+// the very work that holds it. POSTs are handed to a slot untouched.
 static bool accept_fastpath(int fd) {
 #ifndef _WIN32
     // POSIX fd_set is a fixed-size bitmask indexed by fd value; FD_SET on an
@@ -3516,7 +3592,8 @@ static bool accept_fastpath(int fd) {
     bool health = !strncmp(hdr, "GET /health ", 12);
     bool models = !strncmp(hdr, "GET /v1/models ", 15);
     bool caps = !strncmp(hdr, "GET /v1/capabilities ", 21);
-    if (!health && !models && !caps) return false;
+    bool unload = !strncmp(hdr, "GET /unload ", 12);
+    if (!health && !models && !caps && !unload) return false;
     // Drain the request before replying: closing with unread bytes can RST
     // the connection and discard our response. But the accept thread must
     // never block indefinitely on a single connection — it's the only thing
@@ -3561,6 +3638,7 @@ static bool accept_fastpath(int fd) {
     }
     if (health) send_health(fd);
     else if (models) send_models(fd);
+    else if (unload) handle_unload(fd);
     else        send_capabilities(fd);
     sock_close(fd);
     return true;
@@ -3902,6 +3980,9 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     sock_close(lfd);
 #endif
     queue_shutdown();
+    // A worker parked in a --wait-for-vram queue would pin the joins below
+    // for up to the full wait; the load gives up at its next poll instead.
+    SV.load_cancel = 1;
     for (int i = 0; i < parallel; i++) pthread_join(SV.slots[i].th, NULL);
     sched_shutdown();
     atomic_store(&SV.shutdown, true);
