@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -212,8 +213,18 @@ class EndpointTests(unittest.TestCase):
             endpoint.stream_chat({"messages": []}, stall_seconds=0.1)
 
         message = str(caught.exception)
-        self.assertIn("no stream data for 0.2", message)
-        self.assertIn("0.1", message)
+        match = re.search(
+            r"no stream data for ([0-9.]+)s \(stall window 0\.1s\)", message
+        )
+        self.assertIsNotNone(match, message)
+        # The measured figure, not an exact one: sleep(0.2) guarantees at
+        # least 0.2s of silence, but CI schedulers overshoot it (macOS
+        # runners measured 0.3s). What the old bug reported was the 0.1s
+        # window itself; any genuinely measured value clears 0.15 and stays
+        # far under the seconds a wall-clock-vs-monotonic mixup would show.
+        idle = float(match.group(1))
+        self.assertGreaterEqual(idle, 0.15)
+        self.assertLess(idle, 2.0)
 
     def test_a_gap_between_events_is_a_stall_even_when_bytes_resume(self):
         """A real inactivity watchdog fires on the gap itself. urllib's
