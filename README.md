@@ -57,11 +57,31 @@ model's format failures are structurally impossible and only content quality
 remains. llama.cpp's GBNF grammars can express JSON, but this contract —
 declared order, always-parses-on-length, OpenAI `response_format` wiring —
 would then live in someone else's engine, free to drift under two projects
-that depend on its details. The claim is falsifiable: the
-[agent torture suite](docs/agent-torture.md) runs one adversarial tool-call
-matrix against Runner *and* llama.cpp / Ollama / vLLM on identical hardware,
-labels each report by runtime, and preserves every request and raw response so
-any verdict can be audited or contested.
+that depend on its details.
+
+This is the difference that justifies runner's existence, and it is measured,
+not asserted. The [agent torture suite](docs/agent-torture.md) runs one
+adversarial tool-call matrix against Runner *and* llama.cpp / Ollama / vLLM on
+identical hardware and preserves every request and raw response so any verdict
+can be audited or contested. The
+[first published run](tests/torture/results/2026-07-21-llama-3.2-3b-cpu/README.md)
+— same Llama-3.2-3B GGUF, same box, all on CPU:
+
+| category | **Runner** | llama.cpp | Ollama |
+|---|---|---|---|
+| nested tool arguments | **3/3** | 0/3 | 0/3 |
+| tool selection | **3/3** | 2/3 | 2/3 |
+| truncation mid-call | **3/3** | 0/3 | 0/3 |
+| stream normalization | 3/3 | 3/3 | 3/3 |
+| **valid structured calls** | **12/12** | 5/12 | 5/12 |
+
+The split is exactly the schema cases: with a deep nested argument schema, or
+when the token budget dies inside the call, the same model free-generating on
+llama.cpp or Ollama produces invalid or unparseable tool calls — Runner's
+schema-driven sampling and always-parses-on-length contract do not. (llama.cpp
+is far faster on raw CPU throughput — a different axis, and the readout says
+so plainly.) Bring your own model and your nastiest schema; the suite is built
+to be reproduced and contested.
 
 **Deployment is one static file.** CUDA goes through the driver API with
 embedded PTX: no CUDA toolkit at build or run time, no cuBLAS, no DLLs.
