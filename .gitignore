@@ -31,6 +31,10 @@ test-batch
 test-batch.exe
 test-kv-tol
 test-kv-tol.exe
+test-vram-registry
+test-vram-registry.exe
+# per-PID scratch registries left by tests/test_vram_registry.c
+vramreg-test-*/
 runner-baseline
 *.gguf
 # committed vocabulary fixtures for the tokenizer tests
