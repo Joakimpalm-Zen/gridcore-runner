@@ -305,6 +305,12 @@ declarations now pass Runner's schema compiler; end-to-end client status is
 listed separately below so schema acceptance is not overstated as a completed
 agent task.
 
+OpenCode 1.18.4 is verified end to end with its AI-SDK
+`@ai-sdk/openai-compatible` provider. Its real plan agent selected the built-in
+Read tool, Runner streamed the constrained call, and OpenCode executed it and
+returned `ORANGE-7319` on the second turn. The configured model limits for the
+Qwen3-4B validation were 16,384 context and 2,048 output tokens.
+
 Cline CLI 3.0.46 is verified end to end with its `openai-compatible` provider,
 not only by replaying the captured declaration. Against Qwen3-4B it selected
 the built-in `read_files` tool, consumed the tool result on turn two, and
