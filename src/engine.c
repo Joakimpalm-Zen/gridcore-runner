@@ -700,6 +700,13 @@ static int constraint_accept(engine *e, bool schema, const char *bytes, int n,
                              gen_cb cb, void *ud) {
     int visible;
     if (!constraint_feed(e, schema, bytes, n, &visible)) return 1;
+    // the hidden span is the thinking prelude (tags included); chat serving
+    // opts in to receive it so its splitter can surface the reasoning
+    int hidden = visible >= 0 ? visible : n;
+    if (hidden > 0 && e->emit_think_prelude && cb) {
+        int rc = cb(ud, bytes, hidden);
+        if (rc) return rc;
+    }
     return cb && visible >= 0 && visible < n
              ? cb(ud, bytes + visible, n - visible) : 0;
 }

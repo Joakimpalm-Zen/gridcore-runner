@@ -348,6 +348,11 @@ int main(int argc, char **argv) {
     if (n_threads <= 0) {
         int nc = plat_cpu_count();
         n_threads = nc > 8 ? 8 : nc;
+        // If the model turns out to be CPU-forced (recurrent qwen3.5 path),
+        // model_load may raise a defaulted count to this cap; a pinned -t
+        // or CPU reservation leaves it 0 and is never overridden.
+        int cap = nc / 2 < 64 ? nc / 2 : 64;
+        mp.cpu_fallback_threads = cap > n_threads ? cap : n_threads;
     }
     mp.verbose = verbose;
     mp.n_threads = serve ? 1 : n_threads; // server slots create their own pools
@@ -374,7 +379,8 @@ int main(int argc, char **argv) {
         if (!model_load(&m, model_path, &mp)) return 1;
         if (!tokenizer_init(&tok, &m.gf)) return 1;
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
-                model_path, m.arch, m.n_layer, m.n_ctx, n_threads, now_s() - t1);
+                model_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
+                now_s() - t1);
         const sampler_preset *sp =
             sampler_resolve(&smp, m.arch,
                             gguf_get_str(&m.gf, "general.name", NULL), &ov);
@@ -429,6 +435,10 @@ int main(int argc, char **argv) {
     int n_prompt, n_gen;
 
     if (bench_json) {
+        // A bench that stops at EOS measures the model's chattiness, not the
+        // engine: instruct models that answer a bare prompt with instant EOS
+        // reported "0.0 tok/s". Decode every requested token.
+        e.ignore_eos = true;
         const char *bench_prompt = prompt ? prompt :
             "Write a short story about a lighthouse keeper.";
         char *p = unescape(bench_prompt);

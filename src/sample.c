@@ -31,67 +31,20 @@ void sampler_accept(sampler *s, int tok) {
 
 typedef struct { float p; int id; } cand_t;
 static int cand_cmp(const void *a, const void *b) {
-    float d = ((const cand_t *)b)->p - ((const cand_t *)a)->p;
-    return d > 0 ? 1 : d < 0 ? -1 : 0;
+    const cand_t *x = a, *y = b;
+    if (x->p != y->p) return y->p > x->p ? 1 : -1;
+    return x->id - y->id;   // deterministic order among exact ties
 }
 
-int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *ud) {
-    // Greedy is a determinism request: return the model's argmax, unmodified.
-    // The repeat penalty exists to add variety to *sampled* output and has no
-    // meaning when the caller asked for the single most likely token, so it
-    // does not run here. (It used to, which meant `--temp 0` could return a
-    // token that was not the argmax — and made an exempt-list necessary just
-    // to let a penalised model emit its own stop token.)
-    if (s->temp > 0 && s->repeat_penalty != 1.0f) {
-        for (int i = 0; i < s->n_recent; i++) {
-            int tok = s->recent[i];
-            bool exempt = false;
-            for (int k = 0; k < s->n_no_penalty; k++)
-                if (s->no_penalty[k] == tok) { exempt = true; break; }
-            if (exempt) continue;
-            if (logits[tok] > 0) logits[tok] /= s->repeat_penalty;
-            else                 logits[tok] *= s->repeat_penalty;
-        }
-    }
-
-    // fast paths that avoid sorting the whole vocabulary
-    if (s->temp <= 0) {
-        int best = 0;
-        for (int i = 1; i < n_vocab; i++) if (logits[i] > logits[best]) best = i;
-        if (!ok || ok(ud, best)) return best;
-    } else if (ok) {
-        // constrained + sampled: quick check whether the unconstrained flow
-        // would need filtering at all is not worth it; fall through
-    }
-
-    cand_t *c = malloc(sizeof(cand_t) * n_vocab);
-    float temp = s->temp > 0 ? s->temp : 1.0f;
-    for (int i = 0; i < n_vocab; i++) c[i] = (cand_t){ logits[i] / temp, i };
-    qsort(c, n_vocab, sizeof(cand_t), cand_cmp);
-
-    if (s->temp <= 0) {
-        // greedy constrained: first valid candidate in probability order
-        for (int i = 0; i < n_vocab; i++) {
-            if (ok(ud, c[i].id)) { int r = c[i].id; free(c); return r; }
-        }
-        free(c);
-        return -1;
-    }
-
-    int want = (s->top_k > 0 && s->top_k < n_vocab) ? s->top_k : n_vocab;
-    int k = 0;
-    if (ok) {
-        // keep the `want` most likely *valid* candidates, in order
-        for (int i = 0; i < n_vocab && k < want; i++)
-            if (ok(ud, c[i].id)) c[k++] = c[i];
-        if (k == 0) { free(c); return -1; }
-    } else {
-        k = want;
-    }
-
-    // softmax over survivors
+// Sample from `k` candidates carrying temperature-scaled logits in descending
+// order: softmax, top-p, min-p, then the roulette pick. `norm_sum` > 0 uses a
+// caller-computed softmax denominator (the head fast path passes the whole
+// vocabulary's mass so truncation does not change any candidate's share);
+// 0 computes it over the k candidates, the historical behavior.
+static int pick_scaled(sampler *s, cand_t *c, int k, float norm_sum) {
     float mx = c[0].p, sum = 0;
     for (int i = 0; i < k; i++) { c[i].p = expf(c[i].p - mx); sum += c[i].p; }
+    if (norm_sum > 0) sum = norm_sum;
     for (int i = 0; i < k; i++) c[i].p /= sum;
     // top-p
     if (s->top_p < 1.0f) {
@@ -125,6 +78,121 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
         cum += c[i].p;
         if (r < cum) { pick = c[i].id; break; }
     }
+    return pick;
+}
+
+// Head cap for the large-vocab fast path: distributions whose top-k/top-p
+// survivors exceed this fall back to the exact full sort.
+#define HEAD_CAP 4096
+
+int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *ud) {
+    // Greedy is a determinism request: return the model's argmax, unmodified.
+    // The repeat penalty exists to add variety to *sampled* output and has no
+    // meaning when the caller asked for the single most likely token, so it
+    // does not run here. (It used to, which meant `--temp 0` could return a
+    // token that was not the argmax — and made an exempt-list necessary just
+    // to let a penalised model emit its own stop token.)
+    if (s->temp > 0 && s->repeat_penalty != 1.0f) {
+        for (int i = 0; i < s->n_recent; i++) {
+            int tok = s->recent[i];
+            bool exempt = false;
+            for (int k = 0; k < s->n_no_penalty; k++)
+                if (s->no_penalty[k] == tok) { exempt = true; break; }
+            if (exempt) continue;
+            if (logits[tok] > 0) logits[tok] /= s->repeat_penalty;
+            else                 logits[tok] *= s->repeat_penalty;
+        }
+    }
+
+    // fast paths that avoid sorting the whole vocabulary
+    if (s->temp <= 0) {
+        int best = 0;
+        for (int i = 1; i < n_vocab; i++) if (logits[i] > logits[best]) best = i;
+        if (!ok || ok(ud, best)) return best;
+    } else if (ok) {
+        // constrained + sampled: quick check whether the unconstrained flow
+        // would need filtering at all is not worth it; fall through
+    }
+
+    float temp = s->temp > 0 ? s->temp : 1.0f;
+    int want_k = (s->top_k > 0 && s->top_k < n_vocab) ? s->top_k : n_vocab;
+
+    // Large-vocab fast path: sorting a 128k-entry vocabulary costs ~12ms per
+    // token — it halved Llama-3.2's measured decode rate. Everything top-k /
+    // top-p can keep lives in a small head of the distribution, so find that
+    // head with counting passes and sort only it. Exactness: the head holds
+    // every token above a logit threshold; it is used only once it provably
+    // contains the whole surviving set (>= top_k candidates, or at least
+    // top_p of the total mass, whose cutoff prefix then lies inside). The
+    // whole-vocabulary softmax denominator is passed through, so each
+    // candidate's probability is what the full sort would have given it.
+    if (!ok && s->temp > 0 && n_vocab >= 4096 &&
+        (want_k < n_vocab || s->top_p < 1.0f)) {
+        float mx = logits[0] / temp;
+        for (int i = 1; i < n_vocab; i++) {
+            float v = logits[i] / temp;
+            if (v > mx) mx = v;
+        }
+        double total = 0;
+        for (int i = 0; i < n_vocab; i++)
+            total += expf(logits[i] / temp - mx);
+        cand_t *h = malloc(sizeof(cand_t) * HEAD_CAP);
+        if (h) {
+            float t_log = logf(1.0f / 1024.0f);   // head: p >= p_max/1024
+            for (int loosen = 0; loosen < 6; loosen++, t_log *= 4) {
+                int m = 0;
+                bool overflow = false;
+                double head_mass = 0;
+                for (int i = 0; i < n_vocab; i++) {
+                    float v = logits[i] / temp;
+                    if (v - mx >= t_log) {
+                        if (m == HEAD_CAP) { overflow = true; break; }
+                        h[m++] = (cand_t){ v, i };
+                        head_mass += expf(v - mx);
+                    }
+                }
+                if (overflow) break;   // head too broad: full sort below
+                bool enough = (want_k < n_vocab)
+                                  ? m >= want_k
+                                  : head_mass >= (double)s->top_p * total;
+                if (!enough) continue; // loosen the threshold and retry
+                qsort(h, m, sizeof(cand_t), cand_cmp);
+                int k = m < want_k ? m : want_k;
+                // top_k active: softmax over the k survivors (historical
+                // semantics); top_k off: normalize by the whole vocabulary
+                int pick = pick_scaled(s, h, k,
+                                       want_k < n_vocab ? 0 : (float)total);
+                free(h);
+                return pick;
+            }
+            free(h);
+        }
+    }
+
+    cand_t *c = malloc(sizeof(cand_t) * n_vocab);
+    for (int i = 0; i < n_vocab; i++) c[i] = (cand_t){ logits[i] / temp, i };
+    qsort(c, n_vocab, sizeof(cand_t), cand_cmp);
+
+    if (s->temp <= 0) {
+        // greedy constrained: first valid candidate in probability order
+        for (int i = 0; i < n_vocab; i++) {
+            if (ok(ud, c[i].id)) { int r = c[i].id; free(c); return r; }
+        }
+        free(c);
+        return -1;
+    }
+
+    int k = 0;
+    if (ok) {
+        // keep the `want_k` most likely *valid* candidates, in order
+        for (int i = 0; i < n_vocab && k < want_k; i++)
+            if (ok(ud, c[i].id)) c[k++] = c[i];
+        if (k == 0) { free(c); return -1; }
+    } else {
+        k = want_k;
+    }
+
+    int pick = pick_scaled(s, c, k, 0);
     free(c);
     return pick;
 }

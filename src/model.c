@@ -628,7 +628,15 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         return false; // caller owns cleanup: every load failure ends in model_free
     }
 
-    m->tp = tpool_create(p->n_threads > 0 ? p->n_threads : 1);
+    int pool_threads = p->n_threads > 0 ? p->n_threads : 1;
+    if (m->qwen35 && p->cpu_fallback_threads > pool_threads) {
+        // This architecture decodes on the CPU alone (no recurrent GPU
+        // kernels, below); the defaulted thread count is sized for a
+        // GPU-fed workload and starves it — measured on a 128-cpu host,
+        // 8 threads gave 1.7 tok/s where 64 gave 5.1.
+        pool_threads = p->cpu_fallback_threads;
+    }
+    m->tp = tpool_create(pool_threads);
     if (!m->tp) {
         fprintf(stderr, "error: cannot create thread pool\n");
         return false;
@@ -636,7 +644,15 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     rope_setup(m, g, arch, p->rope_base, p->rope_scale);
 
     // The existing GPU backends implement KV attention only. Keep Qwen3.5 on
-    // the correct CPU path until a native recurrent backend is available.
+    // the correct CPU path until a native recurrent backend is available —
+    // and say so: a silent fallback reads as a mysteriously slow GPU run.
+    if (p->gpu_mode == GPU_AUTO && m->qwen35) {
+        char gname[128];
+        if (gpu_available(gname, sizeof(gname)))
+            fprintf(stderr, "gpu: %s has no kernels for the recurrent '%s' "
+                    "path — inference runs on the CPU (%d threads)\n",
+                    gname, m->arch, pool_threads);
+    }
     if (p->gpu_mode == GPU_AUTO && !m->qwen35) {
         // Register the intended VRAM footprint before allocating any of it, so
         // a concurrent runner sees this claim rather than discovering it as a

@@ -142,6 +142,7 @@ typedef struct tpool tpool;
 tpool *tpool_create(int n_threads);
 void   tpool_run(tpool *tp, tp_fn fn, void *ctx, int n_items);
 void   tpool_destroy(tpool *tp);
+int    tpool_size(const tpool *tp);  // workers incl. the calling thread
 
 // ---------------------------------------------------------------- tokenizer
 
@@ -397,6 +398,11 @@ bool       gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
 typedef struct {
     int   gpu_mode;    // GPU_AUTO | GPU_OFF
     int   n_threads;   // worker threads for this instance (0 = 1)
+    // When the count above came from the small "GPU does the math" default
+    // and the architecture turns out to be CPU-forced (the recurrent qwen3.5
+    // path has no GPU kernels), model_load raises the pool to this cap
+    // instead. 0 = the user pinned -t or a CPU reservation; never raise.
+    int   cpu_fallback_threads;
     int   n_ctx;       // 0 = default (min(train ctx, 4096)), or reservation
                        // auto-fit when a reservation is set
     int   n_batch;     // prompt batch size, 0 = default 64
@@ -809,6 +815,13 @@ typedef struct {
     bool hit_stop;         // last generate ended on a stop token / json done
     bool json_mode;        // constrain output to a single JSON object
     const snode *schema;   // constrain output to a JSON schema (overrides json_mode)
+    // Constrained mode hides the thinking prelude from the output callback by
+    // default (a raw completion's contract is "constrained payload only").
+    // Chat serving sets this so the prelude reaches the callback too, where
+    // the server's thinking-tag splitter routes it to the reasoning channel —
+    // without it, a thinking model's schema call that exhausts max_tokens
+    // mid-think returns empty content AND empty reasoning: undiagnosable.
+    bool emit_think_prelude;
     sval  sv;
     jsonv jv;
     // constrained thinking-tag prelude: probe for think_open, sample freely

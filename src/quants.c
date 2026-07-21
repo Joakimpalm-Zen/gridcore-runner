@@ -964,6 +964,8 @@ static void *tp_worker(void *argp) {
     }
 }
 
+int tpool_size(const tpool *tp) { return tp ? tp->n_threads : 0; }
+
 tpool *tpool_create(int n_threads) {
     if (n_threads < 1) n_threads = 1;
     if (n_threads > TP_MAX) n_threads = TP_MAX;

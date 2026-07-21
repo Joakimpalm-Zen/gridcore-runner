@@ -875,6 +875,7 @@ static int chunk_send(gen_ctx *g, sbuf *c) {
 
 static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
     e->schema = NULL;
+    e->emit_think_prelude = false;
     schema_free(schema);
     if (g) {
         tool_stream_free(&g->tsx);
@@ -1816,6 +1817,10 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
         }
     }
     e->schema = schema;
+    // chat responses split a thinking prelude into the reasoning channel;
+    // constrained generation forwards it only when asked (raw completions
+    // keep the payload-only contract)
+    e->emit_think_prelude = chat && m->think_open != NULL;
 
     size_t cap = strlen(prompt) + 16;
     int32_t *toks = malloc(sizeof(int32_t) * cap);
@@ -3824,6 +3829,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         model_params slot_mp = *mp;
         slot_mp.verbose = false;
         slot_mp.n_threads = threads_per_slot;
+        // each slot gets its share of the CPU-forced fallback cap too
+        slot_mp.cpu_fallback_threads = mp->cpu_fallback_threads / parallel;
 
         for (int i = 0; i < parallel; i++) {
             // a Ctrl-C during a multi-slot load means "don't start": honour it
@@ -3841,7 +3848,13 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             s->smp_base = s->smp;
             if (i == 0) {
                 s->m = base;
-                tpool *replacement = tpool_create(threads_per_slot);
+                // mirror model_load's CPU-forced bump: this replacement pool
+                // would otherwise silently undo it for slot 0
+                int slot_threads = threads_per_slot;
+                if (base->qwen35 &&
+                    slot_mp.cpu_fallback_threads > slot_threads)
+                    slot_threads = slot_mp.cpu_fallback_threads;
+                tpool *replacement = tpool_create(slot_threads);
                 if (!replacement) {
                     fprintf(stderr, "error: cannot create pool for slot 0\n");
                     return 1;
