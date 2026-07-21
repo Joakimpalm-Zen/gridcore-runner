@@ -3033,9 +3033,11 @@ static bool anth_reject_unsupported(slot_t *s, int fd, jv *req) {
             return true;
         }
         const char *type = jv_str(jv_get(v, "type"), NULL);
-        if (!type || (strcmp(type, "enabled") && strcmp(type, "disabled"))) {
+        if (!type || (strcmp(type, "enabled") && strcmp(type, "disabled") &&
+                      strcmp(type, "adaptive"))) {
             send_error(fd, 400,
-                       "thinking.type must be \"enabled\" or \"disabled\"");
+                       "thinking.type must be \"enabled\", \"disabled\" or "
+                       "\"adaptive\"");
             return true;
         }
         if (!strcmp(type, "enabled") && !s->m->think_open) {
@@ -3130,9 +3132,11 @@ static char *messages_prompt(slot_t *s, int fd, jv *req, tool_envelope *env,
     for (int i = 0; ok && i < msgs->n; i++) {
         jv *msg = msgs->items[i];
         const char *role = jv_str(jv_get(msg, "role"), NULL);
-        if (!role || (strcmp(role, "user") && strcmp(role, "assistant"))) {
+        if (!role || (strcmp(role, "user") && strcmp(role, "assistant") &&
+                      strcmp(role, "system"))) {
             snprintf(terr, sizeof(terr),
-                     "messages[].role must be \"user\" or \"assistant\"");
+                     "messages[].role must be \"user\", \"assistant\" or "
+                     "\"system\"");
             ok = false;
             break;
         }
@@ -3422,6 +3426,12 @@ static void handle_conn(slot_t *s, int fd) {
         send_error(fd, 400, "malformed request line");
         return;
     }
+    // Route on the path component. SDKs use query parameters for protocol
+    // feature selection — Claude Code, for example, sends
+    // `/v1/messages?beta=true`. The query does not rename the resource and is
+    // deliberately not interpreted by this stateless inference boundary.
+    char *query = strchr(path, '?');
+    if (query) *query = 0;
 
     size_t content_length = 0;
     if (!parse_request_framing(first_header, header_end, &content_length)) {

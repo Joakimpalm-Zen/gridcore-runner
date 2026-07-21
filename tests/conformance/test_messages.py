@@ -500,8 +500,6 @@ def test_unsupported_features_are_refused(client, field, value, explains):
 @pytest.mark.parametrize("payload,contains", [
     ({"max_tokens": 8}, "messages"),
     ({"messages": [], "max_tokens": 8}, "messages"),
-    ({"messages": [{"role": "system", "content": "x"}], "max_tokens": 8},
-     "role"),
     ({"messages": [{"role": "user", "content": 7}], "max_tokens": 8},
      "content"),
     ({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8,
@@ -679,3 +677,35 @@ def test_messages_and_chat_agree_on_the_same_turn(client):
         raise ProtocolError("the two surfaces reported different terminations",
                             anthropic=anth["stop_reason"],
                             chat=chat["choices"][0]["finish_reason"])
+
+
+def test_messages_accepts_claude_code_beta_query(client):
+    """Claude Code appends `?beta=true` to the Messages request target."""
+    payload = {"model": "runner", "max_tokens": 8,
+               "messages": [{"role": "user", "content": "say hi"}]}
+    r = client.raw("messages-beta-query", "POST", "/v1/messages?beta=true", payload)
+    r.expect_status(200)
+    assert r.json["type"] == "message"
+
+
+def test_messages_accepts_claude_code_adaptive_thinking(client):
+    """Adaptive thinking is a hint, not a promise that every model thinks."""
+    payload = {"model": "runner", "max_tokens": 8,
+               "thinking": {"type": "adaptive", "display": "omitted"},
+               "messages": [{"role": "user", "content": "say hi"}]}
+    r = client.messages(payload, name="messages-adaptive-thinking")
+    r.expect_status(200)
+    assert r.json["type"] == "message"
+
+
+def test_messages_accepts_claude_code_system_turn(client):
+    payload = {"model": "runner", "max_tokens": 8,
+               "system": "provider system",
+               "messages": [
+                   {"role": "user", "content": "say hi"},
+                   {"role": "system", "content": [
+                       {"type": "text", "text": "client harness context"}]},
+               ]}
+    r = client.messages(payload, name="messages-system-turn")
+    r.expect_status(200)
+    assert r.json["type"] == "message"

@@ -39,6 +39,7 @@ void schema_free(snode *n) {
     if (!n) return;
     for (int i = 0; i < n->n_lits; i++) free(n->lits[i]);
     free(n->lits);
+    free(n->pattern_prefix);
     for (int i = 0; i < n->n_props; i++) { free(n->keys[i]); schema_free(n->props[i]); }
     free(n->keys); free(n->key_len); free(n->props); free(n->req);
     schema_free(n->items);
@@ -67,12 +68,13 @@ static bool kw_in(const char *k, const char *const *list) {
 
 static const char *const KW_ANNOTATION[] = {
     "title", "description", "$comment", "$schema", "$id", "examples",
-    "default", "deprecated", "readOnly", "writeOnly", NULL
+    "default", "deprecated", "readOnly", "writeOnly", "format", NULL
 };
-static const char *const KW_STRING[] = { "minLength", "maxLength", NULL };
+static const char *const KW_STRING[] = { "minLength", "maxLength", "pattern", NULL };
 static const char *const KW_ARRAY[]  = { "items", "minItems", "maxItems", NULL };
 static const char *const KW_OBJECT[] = { "properties", "required",
-                                         "additionalProperties", NULL };
+                                         "additionalProperties", "propertyNames",
+                                         NULL };
 static const char *const KW_INTEGER[] = { "minimum", "maximum",
                                           "exclusiveMinimum", "exclusiveMaximum",
                                           NULL };
@@ -112,6 +114,7 @@ static bool check_keywords(jv *s, char *err, int errcap) {
         else ok = (declares_type(s, "string")  && kw_in(k, KW_STRING)) ||
                   (declares_type(s, "array")   && kw_in(k, KW_ARRAY))  ||
                   (declares_type(s, "object")  && kw_in(k, KW_OBJECT)) ||
+                  (declares_type(s, "number")  && kw_in(k, KW_INTEGER)) ||
                   (declares_type(s, "integer") && kw_in(k, KW_INTEGER));
         if (!ok) {
             snprintf(err, errcap,
@@ -132,11 +135,26 @@ static bool check_object_rules(jv *s, char *err, int errcap) {
     bool has_props = props && props->type == J_OBJ && props->n > 0;
     jv *ap = jv_get(s, "additionalProperties");
     bool empty_closed = props && props->type == J_OBJ && props->n == 0;
-    if (ap && !(ap->type == J_BOOL && !ap->b && (has_props || empty_closed))) {
+    bool open_schema = !has_props &&
+                       ((ap && ap->type == J_BOOL && ap->b) ||
+                        (ap && ap->type == J_OBJ && ap->n == 0));
+    if (ap && !open_schema &&
+        !(ap->type == J_BOOL && !ap->b && (has_props || empty_closed))) {
         snprintf(err, errcap,
                  "additionalProperties is only supported as false alongside "
-                 "declared properties");
+                 "declared properties, or as an open schema without them");
         return false;
+    }
+    jv *pn = jv_get(s, "propertyNames");
+    if (pn) {
+        // JSON object member names are strings by construction, so this exact
+        // schema adds no constraint. Any narrower propertyNames schema would.
+        jv *ty = pn->type == J_OBJ ? jv_get(pn, "type") : NULL;
+        if (!ty || ty->type != J_STR || strcmp(ty->str, "string") || pn->n != 1) {
+            snprintf(err, errcap,
+                     "propertyNames is only supported as {\"type\":\"string\"}");
+            return false;
+        }
     }
     jv *req = jv_get(s, "required");
     if (req && req->type != J_ARR) {
@@ -160,6 +178,45 @@ static bool compile_bound(jv *v, int dflt, int *out) {
         return false;
     *out = (int)v->num;
     return true;
+}
+
+/* Compile the anchored prefix + ASCII class form used by coding-agent IDs,
+   e.g. ^wf_[a-z0-9-]{6,}$. Other regex forms remain explicit errors. */
+static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
+    jv *pv = jv_get(s, "pattern");
+    if (!pv) return true;
+    if (pv->type != J_STR) goto bad;
+    const char *p = pv->str;
+    if (*p++ != '^') goto bad;
+    const char *lb = strchr(p, '[');
+    if (!lb) goto bad;
+    const char *rb = strchr(lb + 1, ']');
+    if (!rb) goto bad;
+    long min;
+    if (!strcmp(rb + 1, "+$")) {
+        min = 1;
+    } else {
+        if (rb[1] != '{') goto bad;
+        char *end = NULL;
+        min = strtol(rb + 2, &end, 10);
+        if (min < 0 || min > INT_MAX || !end || strcmp(end, ",}$")) goto bad;
+    }
+    n->pattern_prefix_len = (int)(lb - p);
+    n->pattern_prefix = strndup(p, (size_t)n->pattern_prefix_len);
+    if (!n->pattern_prefix) return false;
+    n->pattern_min_tail = (int)min;
+    for (const char *q = lb + 1; q < rb; q++) {
+        unsigned char lo = (unsigned char)*q, hi = lo;
+        if (q + 2 < rb && q[1] == '-') { hi = (unsigned char)q[2]; q += 2; }
+        if (lo >= 128 || hi >= 128 || lo > hi) goto bad;
+        for (unsigned c = lo; c <= hi; c++) n->pattern_ascii[c] = true;
+    }
+    return true;
+bad:
+    snprintf(err, errcap,
+             "pattern only supports anchored prefix plus repeated ASCII class (got %.48s)",
+             pv && pv->type == J_STR ? pv->str : "non-string");
+    return false;
 }
 
 #define JSON_SAFE_INTEGER 9007199254740991LL
@@ -208,6 +265,36 @@ static bool compile_integer_bounds(jv *s, snode *n, char *err, int errcap) {
     return true;
 bad:
     snprintf(err, errcap, "integer bounds must be finite JSON-safe numbers");
+    return false;
+}
+
+static bool compile_number_bounds(jv *s, snode *n, char *err, int errcap) {
+    double x;
+    if (numeric_keyword(s, "minimum", &x)) {
+        if (!isfinite(x)) goto bad;
+        n->real_min = x; n->has_real_min = true;
+    }
+    if (numeric_keyword(s, "exclusiveMinimum", &x)) {
+        if (!isfinite(x)) goto bad;
+        n->real_min = x; n->has_real_min = true;
+        /* Preserve exclusivity by moving to the next representable value. */
+        n->real_min = nextafter(n->real_min, INFINITY);
+    }
+    if (numeric_keyword(s, "maximum", &x)) {
+        if (!isfinite(x)) goto bad;
+        n->real_max = x; n->has_real_max = true;
+    }
+    if (numeric_keyword(s, "exclusiveMaximum", &x)) {
+        if (!isfinite(x)) goto bad;
+        n->real_max = nextafter(x, -INFINITY); n->has_real_max = true;
+    }
+    if (n->has_real_min && n->has_real_max && n->real_min > n->real_max) {
+        snprintf(err, errcap, "empty number bounds");
+        return false;
+    }
+    return true;
+bad:
+    snprintf(err, errcap, "number bounds must be finite JSON-safe numbers");
     return false;
 }
 
@@ -383,9 +470,27 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
             schema_free(n);
             return NULL;
         }
+        if (!compile_ascii_pattern(s, n, err, errcap)) {
+            schema_free(n);
+            return NULL;
+        }
+        if (n->pattern_prefix && n->max_items >= 0 &&
+            n->pattern_prefix_len + n->pattern_min_tail > n->max_items) {
+            snprintf(err, errcap, "pattern cannot satisfy maxLength");
+            schema_free(n);
+            return NULL;
+        }
         return n;
     }
-    if (!strcmp(type, "number"))  return sn_new(SN_NUM);
+    if (!strcmp(type, "number")) {
+        snode *n = sn_new(SN_NUM);
+        if (!n) return NULL;
+        if (!compile_number_bounds(s, n, err, errcap)) {
+            schema_free(n);
+            return NULL;
+        }
+        return n;
+    }
     if (!strcmp(type, "integer")) {
         snode *n = sn_new(SN_INT);
         if (!n) return NULL;
@@ -544,6 +649,29 @@ static snode *compile_oneof(jv *alts, char *err, int errcap, int depth) {
         n->alts[n->n_alts] = compile_node(alts->items[i], err, errcap, depth + 1);
         if (!n->alts[n->n_alts]) { schema_free(n); return NULL; }
         n->n_alts++;
+    }
+    /* JSON-schema generators commonly spell a string enum plus one sentinel
+       const as anyOf. They are one literal language, not an ambiguous union. */
+    int literal_count = 0;
+    bool all_literals = true;
+    for (int i = 0; i < n->n_alts; i++) {
+        if (n->alts[i]->kind != SN_ENUM) { all_literals = false; break; }
+        literal_count += n->alts[i]->n_lits;
+    }
+    if (all_literals && literal_count > 0 && literal_count <= 60) {
+        snode *merged = sn_new(SN_ENUM);
+        if (!merged) { schema_free(n); return NULL; }
+        merged->lits = calloc((size_t)literal_count, sizeof(char *));
+        if (!merged->lits) { schema_free(merged); schema_free(n); return NULL; }
+        for (int i = 0; i < n->n_alts; i++) {
+            snode *a = n->alts[i];
+            for (int j = 0; j < a->n_lits; j++) {
+                merged->lits[merged->n_lits++] = a->lits[j];
+                a->lits[j] = NULL;
+            }
+        }
+        schema_free(n);
+        return merged;
     }
     // the validator dispatches a union on the first byte of the value —
     // alternatives it could never select must fail here, at request time,
@@ -834,6 +962,22 @@ static bool num_complete(uint8_t st) {
     return st == N_ZERO || st == N_INT || st == N_FRAC || st == N_EXP;
 }
 
+static bool number_put(sframe *f, uint8_t c) {
+    if ((size_t)f->num_len + 1 >= sizeof(f->num_text)) return false;
+    f->num_text[f->num_len++] = (char)c;
+    f->num_text[f->num_len] = 0;
+    return true;
+}
+
+static bool number_in_bounds(const snode *n, const sframe *f) {
+    if (!num_complete(f->sub) || !f->num_len) return false;
+    char *end = NULL;
+    double x = strtod(f->num_text, &end);
+    if (!end || *end || !isfinite(x)) return false;
+    return (!n->has_real_min || x >= n->real_min) &&
+           (!n->has_real_max || x <= n->real_max);
+}
+
 static bool integer_value(const sframe *f, int64_t *out) {
     if (!num_complete(f->sub) || f->sub == N_FRAC || f->sub == N_EXP) return false;
     if (f->num_abs > (uint64_t)JSON_SAFE_INTEGER) return false;
@@ -985,8 +1129,10 @@ static int feed_byte(sval *v, uint8_t c) {
         case SN_NUM:
         case SN_INT:
             f->phase = P_NUM; f->sub = N_START; f->lit_pos = 0; f->num_abs = 0;
+            f->num_len = 0;
             if (n->kind == SN_INT) return integer_take_byte(n, f, c) ? 0 : -1;
-            return num_byte(c, &f->sub, false) == 0 ? 0 : -1;
+            if (num_byte(c, &f->sub, false) != 0 || !number_put(f, c)) return -1;
+            return 0;
         case SN_OBJ:
             if (c != '{') return -1;
             f->phase = P_OBJ_KEY1; f->idx = 0;
@@ -1000,6 +1146,12 @@ static int feed_byte(sval *v, uint8_t c) {
         }
 
     case P_STR: {
+        if (n->pattern_prefix && f->sub == 0 && c != '"') {
+            if (c == '\\' || c >= 128) return -1;
+            if (f->lit_pos < n->pattern_prefix_len) {
+                if (c != (uint8_t)n->pattern_prefix[f->lit_pos]) return -1;
+            } else if (!n->pattern_ascii[c]) return -1;
+        }
         // a full string at maxLength admits only the closing quote — reject an
         // escape opener up front so a close() can never overrun the bound
         if (f->sub == 0 && c == '\\' &&
@@ -1009,6 +1161,8 @@ static int feed_byte(sval *v, uint8_t c) {
         if (r < 0) return -1;
         if (r == 1) {
             if (f->lit_pos < n->min_items ||
+                (n->pattern_prefix &&
+                 f->lit_pos < n->pattern_prefix_len + n->pattern_min_tail) ||
                 (n->max_items >= 0 && f->lit_pos > n->max_items))
                 return -1;
             frame_done(v);
@@ -1065,9 +1219,13 @@ static int feed_byte(sval *v, uint8_t c) {
             }
             return 0;
         }
-        int r = num_byte(c, &f->sub, n->kind == SN_INT);
+        int r = num_byte(c, &f->sub, false);
         if (r < 0) return -1;
-        if (r == 1) { frame_done(v); return 1; }
+        if (r == 1) {
+            if (!number_in_bounds(n, f)) return -1;
+            frame_done(v); return 1;
+        }
+        if (!number_put(f, c)) return -1;
         return 0;
     }
 
@@ -1251,7 +1409,17 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
         case SN_INT: emit_integer(q, integer_minimal_value(n)); break;
         case SN_STR:
             eq_putc(q, '"');
-            for (int i = 0; i < n->min_items && !eq_full(q); i++) eq_putc(q, ' ');
+            if (n->pattern_prefix) {
+                eq_put(q, n->pattern_prefix);
+                int need = n->pattern_min_tail;
+                if (n->min_items > n->pattern_prefix_len + need)
+                    need = n->min_items - n->pattern_prefix_len;
+                unsigned char fill = 0;
+                while (fill < 128 && !n->pattern_ascii[fill]) fill++;
+                for (int i = 0; i < need && !eq_full(q); i++) eq_putc(q, fill);
+            } else {
+                for (int i = 0; i < n->min_items && !eq_full(q); i++) eq_putc(q, ' ');
+            }
             eq_putc(q, '"');
             break;
         case SN_ENUM: eq_put(q, n->lits[0]); break;
@@ -1349,8 +1517,22 @@ int sval_close(sval *v, char *out, int cap) {
             if (f->sub == 1) eq_putc(&q, 'n');           // dangling backslash
             while (f->sub >= 2) { eq_putc(&q, '0');       // partial \uXXXX
                                   f->sub = f->sub == 5 ? 0 : f->sub + 1; }
-            while (f->lit_pos < n->min_items && !eq_full(&q)) {
-                eq_putc(&q, ' ');
+            while (n->pattern_prefix &&
+                   f->lit_pos < n->pattern_prefix_len && !eq_full(&q)) {
+                eq_putc(&q, n->pattern_prefix[f->lit_pos]);
+                f->lit_pos++;
+            }
+            int string_min = n->min_items;
+            if (n->pattern_prefix &&
+                string_min < n->pattern_prefix_len + n->pattern_min_tail)
+                string_min = n->pattern_prefix_len + n->pattern_min_tail;
+            while (f->lit_pos < string_min && !eq_full(&q)) {
+                unsigned char fill = ' ';
+                if (n->pattern_prefix) {
+                    fill = 0;
+                    while (fill < 128 && !n->pattern_ascii[fill]) fill++;
+                }
+                eq_putc(&q, fill);
                 f->lit_pos++;
             }
             eq_putc(&q, '"');

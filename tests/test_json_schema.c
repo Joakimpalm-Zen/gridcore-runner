@@ -273,13 +273,9 @@ static void test_schema_rejects_escaped_keys(void) {
 }
 
 // A keyword the compiler cannot enforce must be a compile error, not a
-// silently weaker constraint. `pattern` is the headline case: dropping it
-// leaves a string unconstrained in exactly the way the caller asked it not
-// to be.
+// silently weaker constraint.
 static void test_schema_rejects_unenforceable_keywords(void) {
     static const char *const bad[] = {
-        "{\"type\":\"string\",\"pattern\":\"^[a-z]+$\"}",
-        "{\"type\":\"string\",\"format\":\"date-time\"}",
         "{\"type\":\"integer\",\"multipleOf\":2}",
         "{\"allOf\":[{\"type\":\"string\"}]}",
         "{\"not\":{\"type\":\"string\"}}",
@@ -288,9 +284,6 @@ static void test_schema_rejects_unenforceable_keywords(void) {
         "{\"type\":\"array\",\"prefixItems\":[{\"type\":\"string\"}]}",
         "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
             "\"patternProperties\":{\"^x\":{\"type\":\"string\"}}}",
-        // nested: the check must run at every depth, not just the root
-        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\","
-            "\"pattern\":\"x\"}}}",
         // keyword that belongs to a different type than the one declared
         "{\"type\":\"string\",\"minItems\":2}",
         "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
@@ -305,6 +298,59 @@ static void test_schema_rejects_unenforceable_keywords(void) {
         assert(strstr(err, "keyword") != NULL);
         jv_free(schema_json);
     }
+}
+
+static void test_schema_agent_id_pattern_is_enforced(void) {
+    const char *src =
+        "{\"type\":\"string\",\"pattern\":\"^wf_[a-z0-9-]{6,}$\"}";
+    jv *j = json_parse(src, strlen(src));
+    char err[128];
+    snode *schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    const char *good[] = { "\"wf_abc-19\"", "\"wf_123456\"" };
+    for (size_t i = 0; i < sizeof(good) / sizeof(*good); i++) {
+        sval v; sval_init(&v, schema);
+        assert(sval_feed(&v, good[i], (int)strlen(good[i])) && v.done);
+    }
+    const char *bad[] = { "\"xx_abc123\"", "\"wf_abc\"", "\"wf_ABC123\"" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        sval v; sval_init(&v, schema);
+        assert(!sval_feed(&v, bad[i], (int)strlen(bad[i])));
+    }
+    sval partial; sval_init(&partial, schema);
+    assert(sval_feed(&partial, "\"wf_a", 5));
+    char suffix[32];
+    int n = sval_close(&partial, suffix, sizeof(suffix));
+    assert(n > 0);
+    char full[64]; snprintf(full, sizeof(full), "\"wf_a%s", suffix);
+    sval check; sval_init(&check, schema);
+    assert(sval_feed(&check, full, (int)strlen(full)) && check.done);
+    schema_free(schema); jv_free(j);
+
+    src = "{\"type\":\"string\","
+          "\"pattern\":\"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$\"}";
+    j = json_parse(src, strlen(src));
+    schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    sval protocol; sval_init(&protocol, schema);
+    assert(sval_feed(&protocol, "\"proto-1\"", 9) && protocol.done);
+    schema_free(schema); jv_free(j);
+}
+
+static void test_schema_merges_enum_and_const_anyof(void) {
+    const char *src = "{\"anyOf\":["
+        "{\"type\":\"string\",\"enum\":[\"pending\",\"completed\"]},"
+        "{\"type\":\"string\",\"const\":\"deleted\"}]}";
+    jv *j = json_parse(src, strlen(src));
+    char err[128];
+    snode *schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    const char *good[] = { "\"pending\"", "\"completed\"", "\"deleted\"" };
+    for (size_t i = 0; i < sizeof(good) / sizeof(*good); i++) {
+        sval v; sval_init(&v, schema);
+        assert(sval_feed(&v, good[i], (int)strlen(good[i])) && v.done);
+    }
+    schema_free(schema); jv_free(j);
 }
 
 static void test_schema_integer_bounds_are_enforced(void) {
@@ -371,6 +417,35 @@ static void test_schema_integer_bounds_complete_truncation(void) {
     jv_free(schema_json);
 }
 
+static void test_schema_number_bounds_are_enforced(void) {
+    const char *src = "{\"type\":\"object\",\"properties\":{"
+        "\"timeout\":{\"type\":\"number\",\"minimum\":0,"
+        "\"maximum\":600000}},\"required\":[\"timeout\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    const char *good[] = { "{\"timeout\":0}", "{\"timeout\":1.5}",
+                           "{\"timeout\":6e5}" };
+    for (size_t i = 0; i < sizeof(good) / sizeof(*good); i++) {
+        sval v; sval_init(&v, schema);
+        assert(sval_feed(&v, good[i], (int)strlen(good[i])));
+        assert(v.done);
+    }
+    const char *bad[] = { "{\"timeout\":-0.1}",
+                          "{\"timeout\":600000.1}",
+                          "{\"timeout\":7e5}" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        sval v; sval_init(&v, schema);
+        assert(!sval_feed(&v, bad[i], (int)strlen(bad[i])));
+    }
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 // The other half of the invariant: keywords that are pure annotations carry
 // no constraint, so ignoring them ignores nothing. Real OpenAI tool payloads
 // are full of them and must keep compiling.
@@ -379,13 +454,32 @@ static void test_schema_accepts_annotation_keywords(void) {
         "{\"type\":\"object\",\"title\":\"T\",\"description\":\"d\","
         "\"$schema\":\"https://json-schema.org/draft/2020-12/schema\","
         "\"properties\":{\"a\":{\"type\":\"string\",\"description\":\"d\","
-        "\"default\":\"x\",\"examples\":[\"y\"]}},\"required\":[\"a\"],"
+        "\"default\":\"x\",\"examples\":[\"y\"],\"format\":\"uri\"}},"
+        "\"required\":[\"a\"],"
         "\"additionalProperties\":false}";
     jv *schema_json = json_parse(src, strlen(src));
     assert(schema_json != NULL);
     char err[128];
     snode *schema = schema_compile(schema_json, err, sizeof(err));
     assert(schema != NULL);
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
+static void test_schema_accepts_claude_open_metadata_object(void) {
+    const char *src =
+        "{\"type\":\"object\",\"propertyNames\":{\"type\":\"string\"},"
+        "\"additionalProperties\":{}}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+    sval v;
+    sval_init(&v, schema);
+    const char *doc = "{\"owner\":\"agent\",\"deleted\":null}";
+    assert(sval_feed(&v, doc, (int)strlen(doc)));
+    assert(v.done);
     schema_free(schema);
     jv_free(schema_json);
 }
@@ -882,12 +976,16 @@ int main(void) {
     test_schema_rejects_non_integer_or_huge_bounds();
     test_schema_rejects_escaped_keys();
     test_schema_rejects_unenforceable_keywords();
+    test_schema_agent_id_pattern_is_enforced();
+    test_schema_merges_enum_and_const_anyof();
     test_schema_integer_bounds_are_enforced();
     test_schema_integer_bounds_complete_truncation();
+    test_schema_number_bounds_are_enforced();
     test_schema_additional_properties();
     test_schema_empty_closed_object();
     test_schema_rejects_required_without_properties();
     test_schema_accepts_annotation_keywords();
+    test_schema_accepts_claude_open_metadata_object();
     test_schema_oneof_const_scalars();
     test_schema_oneof_const_numeric_prefixes();
     test_schema_rejects_oversized_oneof_const_scalars();

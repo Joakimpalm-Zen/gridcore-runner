@@ -470,6 +470,18 @@ with a `ToolUseBlock`, and the follow-up turn answers *"The weather in Oslo is
 typed class and `get_final_message()` returns the parsed turn, including its
 tool call and, on a thinking-tagged model, its `ThinkingBlock`.
 
+Claude Code is also verified end to end, rather than inferred from SDK
+compatibility. Claude Code 2.1.217, pointed directly at Runner with
+`ANTHROPIC_BASE_URL`, completed a two-turn built-in `Read` tool loop against
+Qwen3-4B and returned the fixture sentinel. The validation used `--tools Read`
+to make the model-quality test deterministic. Separately, a captured request
+containing Claude Code's full built-in tool declaration set compiles without
+schema weakening. Runner accepts its `/v1/messages?beta=true` target,
+`thinking.type: "adaptive"`, client-inserted system turn, open metadata object,
+bounded `number`, enum-plus-const `anyOf`, and the anchored ASCII identifier
+patterns used by its Workflow and Monitor tools. `format` remains annotation
+behavior under the request's declared JSON Schema 2020-12 dialect.
+
 Supported: `system` as a string or block list, `content` as a string or a
 block list, `tool_use` / `tool_result` blocks, all four `tool_choice` forms,
 `stop_sequences` (reported back by name in `stop_sequence`), `temperature`,

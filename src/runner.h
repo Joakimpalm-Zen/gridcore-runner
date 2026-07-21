@@ -598,6 +598,10 @@ struct snode {
     snode **alts; int n_alts;                       // type unions
     int64_t num_min, num_max;                       // enforced integer interval
     bool    has_num_min, has_num_max;
+    double  real_min, real_max;                     // enforced number interval
+    bool    has_real_min, has_real_max;
+    char   *pattern_prefix; int pattern_prefix_len, pattern_min_tail;
+    bool    pattern_ascii[128];
 };
 
 struct jv;
@@ -613,6 +617,8 @@ typedef struct {
     uint16_t disc;      // this object's discriminator choice + 1; 0 = not chosen yet
     uint64_t alive;
     uint64_t num_abs;  // integer magnitude accumulated so far
+    char     num_text[96]; // number spelling for bounded-number validation
+    uint8_t  num_len;
 } sframe;
 
 typedef struct {
