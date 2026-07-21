@@ -320,6 +320,36 @@ AI-SDK request and its complete normal tool set.
 Buffered completion responses include `runner_telemetry` with cached prompt
 tokens, prompt tokens evaluated this request, generation timing, and whether
 JSON/schema/speculative decoding was active.
+
+### Verified coding-agent compatibility
+
+These are executable client results, not claims inferred from a shared API
+name. Each PASS used the published client binary, Runner 0.1.1-alpha and
+Qwen3-4B against a local fixture; schema replay and full agent loops are called
+out separately where they prove different things.
+
+| Client tested | Result | Verified behavior |
+|---|---|---|
+| OpenCode 1.18.4 | PASS | Normal Plan agent, complete built-in Read call and tool-result turn over streaming Chat Completions |
+| Cline CLI 3.0.46 | PASS | Normal 24-tool Plan request, `read_files` call, tool result and final answer over streaming Chat Completions |
+| pi 0.81.1 | PASS | Complete Read loop on each of Chat Completions, Responses and Anthropic Messages |
+| Continue CLI 1.5.47 | PASS | Read-only CLI, ten declared tools, tool-result history and final answer over Chat Completions |
+| Claude Code 2.1.217 | PASS | Complete two-turn built-in Read loop over Anthropic Messages; its separately captured full built-in schema set also compiles |
+| Aider 0.86.2 | PASS, model profile required | OpenAI-compatible inference and fixture result under `--dry-run`; unknown local models fall back to Aider's `whole` edit format, which is model/edit-protocol behavior rather than HTTP tool calling |
+| Codex CLI 0.144.6 | CONDITIONAL | A lean Responses tool set completes a real `exec_command` loop. Feature-rich installations can expand tool namespaces beyond Runner's current 59-tool envelope; disable unused apps/multi-agent tools or provide a smaller tool set |
+
+The installed-client sweep also considered Roo Code, but did not label it
+verified: its supported surface is an editor extension and this repository's
+headless fixture does not exercise the editor host. The selected terminal
+clients correspond to their maintained public surfaces: [OpenCode](https://opencode.ai/docs/),
+[pi](https://pi.dev/docs/latest), [Cline](https://www.npmjs.com/package/cline),
+[Continue CLI](https://continue-docs.mintlify.app/cli/quickstart),
+[Aider](https://aider.chat/docs/), [Claude Code](https://docs.anthropic.com/en/docs/claude-code/cli-usage),
+and Codex CLI.
+
+Exact versions, configuration-sensitive base URLs, test scope and the
+client-derived regression inventory are recorded in
+[`docs/agent-compatibility.md`](docs/agent-compatibility.md).
 Set `"cache_prompt": false` on a request to bypass prefix KV reuse and force
 the full prompt to be evaluated.
 
@@ -420,7 +450,10 @@ codex "list the files here"
 
 Verified against `codex-cli` 0.144.6 driving Qwen3-4B: Codex emits an
 `exec_command` function call, runs it, feeds the `function_call_output` back,
-and runner answers the follow-up turn.
+and runner answers the follow-up turn. That verification uses a lean local
+tool set. The same CLI version with apps and multi-agent namespaces enabled
+can flatten to more than Runner's 59-tool constrained envelope and is refused
+explicitly; it is not currently an as-is PASS for every Codex installation.
 
 Notes from running it for real:
 
@@ -434,6 +467,10 @@ Notes from running it for real:
   Under `--dangerously-bypass-approvals-and-sandbox` Codex *enables*
   `web_search`, and runner refuses the request rather than pretend to offer a
   tool it cannot run.
+- If the installation injects large app or multi-agent namespaces, start a
+  local-model session with unused features disabled (for example `--disable
+  apps --disable multi_agent`) and `web_search = "disabled"`. This is a
+  current compatibility limit, not a context-window tuning problem.
 - Use a model instruction-tuned for tool use — the strict envelope guarantees
   a *well-formed* call, not a well-*chosen* one.
 - `--parallel 1` is fine; Codex issues one request at a time.
