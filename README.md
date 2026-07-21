@@ -295,6 +295,16 @@ part-array message content is flattened, assistant `tool_calls` history and
 (gemma4) get their reasoning channels split into `reasoning_content` instead
 of leaking channel tags into content. Works with any OpenAI client:
 
+The schema compiler enforces integer `minimum`, `maximum`,
+`exclusiveMinimum`, and `exclusiveMaximum` bounds while sampling, including
+when a truncated document has to be completed. These are not compatibility
+annotations: out-of-range prefixes are refused. The support was added from
+captured OpenCode 1.18.4 and Cline CLI 3.0.46 requests, whose ordinary `read`
+and `bash` tools use these bounds. Both real clients' full built-in tool
+declarations now pass Runner's schema compiler; end-to-end client status is
+listed separately below so schema acceptance is not overstated as a completed
+agent task.
+
 Buffered completion responses include `runner_telemetry` with cached prompt
 tokens, prompt tokens evaluated this request, generation timing, and whether
 JSON/schema/speculative decoding was active.

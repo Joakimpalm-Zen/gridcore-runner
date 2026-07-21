@@ -3371,6 +3371,7 @@ static void send_capabilities(int fd) {
                "\"stop_sequences\":true,"
                "\"schema_conditionals\":true,"
                "\"schema_string_bounds\":true,"
+               "\"schema_integer_bounds\":true,"
                "\"request_telemetry\":true,"
                "\"prefix_cache\":true,"
                "\"prefix_cache_controls\":true,"

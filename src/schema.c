@@ -73,6 +73,9 @@ static const char *const KW_STRING[] = { "minLength", "maxLength", NULL };
 static const char *const KW_ARRAY[]  = { "items", "minItems", "maxItems", NULL };
 static const char *const KW_OBJECT[] = { "properties", "required",
                                          "additionalProperties", NULL };
+static const char *const KW_INTEGER[] = { "minimum", "maximum",
+                                          "exclusiveMinimum", "exclusiveMaximum",
+                                          NULL };
 
 // does `s` declare (or imply) type `want`? mirrors compile_node's dispatch
 static bool declares_type(jv *s, const char *want) {
@@ -108,7 +111,8 @@ static bool check_keywords(jv *s, char *err, int errcap) {
         else if (literal) ok = !strcmp(k, "enum") || !strcmp(k, "const");
         else ok = (declares_type(s, "string")  && kw_in(k, KW_STRING)) ||
                   (declares_type(s, "array")   && kw_in(k, KW_ARRAY))  ||
-                  (declares_type(s, "object")  && kw_in(k, KW_OBJECT));
+                  (declares_type(s, "object")  && kw_in(k, KW_OBJECT)) ||
+                  (declares_type(s, "integer") && kw_in(k, KW_INTEGER));
         if (!ok) {
             snprintf(err, errcap,
                      "unsupported schema keyword '%.40s'", k);
@@ -156,6 +160,55 @@ static bool compile_bound(jv *v, int dflt, int *out) {
         return false;
     *out = (int)v->num;
     return true;
+}
+
+#define JSON_SAFE_INTEGER 9007199254740991LL
+
+static bool numeric_keyword(jv *s, const char *key, double *out) {
+    jv *v = jv_get(s, key);
+    if (!v) return false;
+    if (v->type != J_NUM || !isfinite(v->num) ||
+        v->num < -(double)JSON_SAFE_INTEGER ||
+        v->num >  (double)JSON_SAFE_INTEGER) {
+        *out = NAN;
+        return true;
+    }
+    *out = v->num;
+    return true;
+}
+
+static bool compile_integer_bounds(jv *s, snode *n, char *err, int errcap) {
+    double x;
+    if (numeric_keyword(s, "minimum", &x)) {
+        if (!isfinite(x)) goto bad;
+        n->num_min = (int64_t)ceil(x);
+        n->has_num_min = true;
+    }
+    if (numeric_keyword(s, "exclusiveMinimum", &x)) {
+        if (!isfinite(x)) goto bad;
+        int64_t v = (int64_t)floor(x) + 1;
+        if (!n->has_num_min || v > n->num_min) n->num_min = v;
+        n->has_num_min = true;
+    }
+    if (numeric_keyword(s, "maximum", &x)) {
+        if (!isfinite(x)) goto bad;
+        n->num_max = (int64_t)floor(x);
+        n->has_num_max = true;
+    }
+    if (numeric_keyword(s, "exclusiveMaximum", &x)) {
+        if (!isfinite(x)) goto bad;
+        int64_t v = (int64_t)ceil(x) - 1;
+        if (!n->has_num_max || v < n->num_max) n->num_max = v;
+        n->has_num_max = true;
+    }
+    if (n->has_num_min && n->has_num_max && n->num_min > n->num_max) {
+        snprintf(err, errcap, "empty integer bounds");
+        return false;
+    }
+    return true;
+bad:
+    snprintf(err, errcap, "integer bounds must be finite JSON-safe numbers");
+    return false;
 }
 
 static bool plain_key(const char *s) {
@@ -333,7 +386,15 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
         return n;
     }
     if (!strcmp(type, "number"))  return sn_new(SN_NUM);
-    if (!strcmp(type, "integer")) return sn_new(SN_INT);
+    if (!strcmp(type, "integer")) {
+        snode *n = sn_new(SN_INT);
+        if (!n) return NULL;
+        if (!compile_integer_bounds(s, n, err, errcap)) {
+            schema_free(n);
+            return NULL;
+        }
+        return n;
+    }
     if (!strcmp(type, "boolean")) return sn_new(SN_BOOL);
     if (!strcmp(type, "null"))    return sn_new(SN_NULL);
     if (!strcmp(type, "array")) {
@@ -773,6 +834,76 @@ static bool num_complete(uint8_t st) {
     return st == N_ZERO || st == N_INT || st == N_FRAC || st == N_EXP;
 }
 
+static bool integer_value(const sframe *f, int64_t *out) {
+    if (!num_complete(f->sub) || f->sub == N_FRAC || f->sub == N_EXP) return false;
+    if (f->num_abs > (uint64_t)JSON_SAFE_INTEGER) return false;
+    // The sign is retained in lit_pos: -1 after a leading minus, +1 otherwise.
+    bool neg = f->lit_pos < 0;
+    *out = neg ? -(int64_t)f->num_abs : (int64_t)f->num_abs;
+    return true;
+}
+
+static bool integer_in_bounds(const snode *n, const sframe *f) {
+    int64_t v;
+    if (!integer_value(f, &v)) return false;
+    return (!n->has_num_min || v >= n->num_min) &&
+           (!n->has_num_max || v <= n->num_max);
+}
+
+static bool ranges_intersect(int64_t lo, int64_t hi, int64_t want_lo,
+                             int64_t want_hi) {
+    return lo <= want_hi && hi >= want_lo;
+}
+
+// Is the integer prefix still capable of becoming a value in the interval?
+// This is what lets constrained sampling reject `56` for maximum 55 before
+// the model commits to a prefix no delimiter could make valid.
+static bool integer_prefix_viable(const snode *n, const sframe *f) {
+    if (!n->has_num_min && !n->has_num_max) return true;
+    int64_t want_lo = n->has_num_min ? n->num_min : -JSON_SAFE_INTEGER;
+    int64_t want_hi = n->has_num_max ? n->num_max :  JSON_SAFE_INTEGER;
+    bool neg = f->lit_pos < 0;
+    uint64_t p = f->num_abs;
+    if (p > (uint64_t)JSON_SAFE_INTEGER) return false;
+    if (f->sub == N_ZERO) {
+        int64_t v = neg ? 0 : (int64_t)p;
+        return v >= want_lo && v <= want_hi;
+    }
+    uint64_t scale = 1;
+    for (;;) {
+        uint64_t low_abs = p * scale;
+        uint64_t high_abs = low_abs + scale - 1;
+        if (high_abs > (uint64_t)JSON_SAFE_INTEGER)
+            high_abs = (uint64_t)JSON_SAFE_INTEGER;
+        int64_t lo = neg ? -(int64_t)high_abs : (int64_t)low_abs;
+        int64_t hi = neg ? -(int64_t)low_abs  : (int64_t)high_abs;
+        if (ranges_intersect(lo, hi, want_lo, want_hi)) return true;
+        if (scale > (uint64_t)JSON_SAFE_INTEGER / 10 ||
+            p > (uint64_t)JSON_SAFE_INTEGER / (scale * 10))
+            break;
+        scale *= 10;
+    }
+    return false;
+}
+
+static bool integer_take_byte(const snode *n, sframe *f, uint8_t c) {
+    uint8_t before = f->sub;
+    int r = num_byte(c, &f->sub, true);
+    if (r != 0) return r > 0 && integer_in_bounds(n, f);
+    if (before == N_START && c == '-') {
+        f->lit_pos = -1;
+        return !n->has_num_min || n->num_min < 0;
+    }
+    if (c >= '0' && c <= '9') {
+        if (f->num_abs > (uint64_t)JSON_SAFE_INTEGER / 10) return false;
+        f->num_abs = f->num_abs * 10 + (uint64_t)(c - '0');
+        if (f->num_abs > (uint64_t)JSON_SAFE_INTEGER) return false;
+        if (f->lit_pos == 0) f->lit_pos = 1;
+        return integer_prefix_viable(n, f);
+    }
+    return true;
+}
+
 // A constrained document must begin with its opening token: whitespace before
 // the root value opens is refused (-1), whitespace before any nested value is
 // consumed as usual (0).
@@ -853,8 +984,9 @@ static int feed_byte(sval *v, uint8_t c) {
             return feed_byte(v, c) == -1 ? -1 : 0;
         case SN_NUM:
         case SN_INT:
-            f->phase = P_NUM; f->sub = N_START;
-            return num_byte(c, &f->sub, n->kind == SN_INT) == 0 ? 0 : -1;
+            f->phase = P_NUM; f->sub = N_START; f->lit_pos = 0; f->num_abs = 0;
+            if (n->kind == SN_INT) return integer_take_byte(n, f, c) ? 0 : -1;
+            return num_byte(c, &f->sub, false) == 0 ? 0 : -1;
         case SN_OBJ:
             if (c != '{') return -1;
             f->phase = P_OBJ_KEY1; f->idx = 0;
@@ -925,6 +1057,14 @@ static int feed_byte(sval *v, uint8_t c) {
     }
 
     case P_NUM: {
+        if (n->kind == SN_INT) {
+            uint8_t before = f->sub;
+            if (!integer_take_byte(n, f, c)) return -1;
+            if (before == N_ZERO || before == N_INT) {
+                if (!(c >= '0' && c <= '9')) { frame_done(v); return 1; }
+            }
+            return 0;
+        }
         int r = num_byte(c, &f->sub, n->kind == SN_INT);
         if (r < 0) return -1;
         if (r == 1) { frame_done(v); return 1; }
@@ -1048,6 +1188,52 @@ static void eq_putc(emitq *q, char c) {
 // while a slot is held.
 static bool eq_full(const emitq *q) { return q->n >= q->cap - 1; }
 
+static int64_t integer_minimal_value(const snode *n) {
+    if ((!n->has_num_min || n->num_min <= 0) &&
+        (!n->has_num_max || n->num_max >= 0)) return 0;
+    if (n->has_num_min && n->num_min > 0) return n->num_min;
+    return n->num_max;
+}
+
+static void emit_integer(emitq *q, int64_t value) {
+    char b[32];
+    snprintf(b, sizeof(b), "%lld", (long long)value);
+    eq_put(q, b);
+}
+
+// Complete an already-emitted integer prefix with the shortest suffix that
+// lands inside the compiled interval. Prefix viability guarantees one exists.
+static void close_integer(emitq *q, const snode *n, const sframe *f) {
+    if (integer_in_bounds(n, f)) return;
+    bool neg = f->lit_pos < 0;
+    uint64_t prefix = f->num_abs;
+    int64_t want_lo = n->has_num_min ? n->num_min : -JSON_SAFE_INTEGER;
+    int64_t want_hi = n->has_num_max ? n->num_max :  JSON_SAFE_INTEGER;
+    uint64_t scale = 10;
+    for (int digits = 1; digits < 19; digits++) {
+        if (prefix > (uint64_t)JSON_SAFE_INTEGER / scale) break;
+        uint64_t low_abs = prefix * scale;
+        uint64_t high_abs = low_abs + scale - 1;
+        if (high_abs > (uint64_t)JSON_SAFE_INTEGER)
+            high_abs = (uint64_t)JSON_SAFE_INTEGER;
+        int64_t lo = neg ? -(int64_t)high_abs : (int64_t)low_abs;
+        int64_t hi = neg ? -(int64_t)low_abs  : (int64_t)high_abs;
+        if (ranges_intersect(lo, hi, want_lo, want_hi)) {
+            int64_t target = lo < want_lo ? want_lo : lo;
+            if (target > hi) target = hi;
+            uint64_t target_abs = target < 0 ? (uint64_t)(-target) : (uint64_t)target;
+            uint64_t suffix = target_abs - low_abs;
+            char fmt[16], b[32];
+            snprintf(fmt, sizeof(fmt), "%%0%dllu", digits);
+            snprintf(b, sizeof(b), fmt, (unsigned long long)suffix);
+            eq_put(q, b);
+            return;
+        }
+        if (scale > (uint64_t)JSON_SAFE_INTEGER / 10) break;
+        scale *= 10;
+    }
+}
+
 // minimal complete value for a schema node
 static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
     if (depth > 24) { eq_put(q, "null"); return; }
@@ -1061,7 +1247,8 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
         case SN_ANY:  eq_put(q, n->min_items ? "{}" : "null"); break;
         case SN_NULL: eq_put(q, "null"); break;
         case SN_BOOL: eq_put(q, "false"); break;
-        case SN_NUM: case SN_INT: eq_putc(q, '0'); break;
+        case SN_NUM: eq_putc(q, '0'); break;
+        case SN_INT: emit_integer(q, integer_minimal_value(n)); break;
         case SN_STR:
             eq_putc(q, '"');
             for (int i = 0; i < n->min_items && !eq_full(q); i++) eq_putc(q, ' ');
@@ -1194,7 +1381,8 @@ int sval_close(sval *v, char *out, int cap) {
             break;
         }
         case P_NUM:
-            if (!num_complete(f->sub)) eq_putc(&q, '0');
+            if (n->kind == SN_INT) close_integer(&q, n, f);
+            else if (!num_complete(f->sub)) eq_putc(&q, '0');
             break;
         case P_OBJ_KEY1:
             close_obj(&q, n, f->idx, false, false, choice);

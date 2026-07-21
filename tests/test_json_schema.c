@@ -280,8 +280,6 @@ static void test_schema_rejects_unenforceable_keywords(void) {
     static const char *const bad[] = {
         "{\"type\":\"string\",\"pattern\":\"^[a-z]+$\"}",
         "{\"type\":\"string\",\"format\":\"date-time\"}",
-        "{\"type\":\"integer\",\"minimum\":0}",
-        "{\"type\":\"integer\",\"maximum\":10}",
         "{\"type\":\"integer\",\"multipleOf\":2}",
         "{\"allOf\":[{\"type\":\"string\"}]}",
         "{\"not\":{\"type\":\"string\"}}",
@@ -307,6 +305,70 @@ static void test_schema_rejects_unenforceable_keywords(void) {
         assert(strstr(err, "keyword") != NULL);
         jv_free(schema_json);
     }
+}
+
+static void test_schema_integer_bounds_are_enforced(void) {
+    const char *src =
+        "{\"type\":\"integer\",\"minimum\":0,"
+        "\"exclusiveMinimum\":3,\"maximum\":55}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    const char *good[] = { "4", "10", "55" };
+    for (size_t i = 0; i < sizeof(good) / sizeof(*good); i++) {
+        sval v;
+        sval_init(&v, schema);
+        assert(sval_feed(&v, good[i], (int)strlen(good[i])));
+        char out[32];
+        int n = sval_close(&v, out, sizeof(out));
+        assert(n == 0);
+    }
+
+    const char *bad[] = { "-1", "0", "3", "56", "999" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        sval v;
+        sval_init(&v, schema);
+        bool prefix_ok = sval_feed(&v, bad[i], (int)strlen(bad[i]));
+        // A delimiter is the observable attempt to finish the out-of-range
+        // number; an impossible prefix may be refused even earlier.
+        assert(!prefix_ok || !sval_feed(&v, " ", 1));
+    }
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
+static void test_schema_integer_bounds_complete_truncation(void) {
+    const char *src =
+        "{\"type\":\"object\",\"properties\":{"
+        "\"line\":{\"type\":\"integer\",\"minimum\":50,\"maximum\":55}"
+        "},\"required\":[\"line\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    sval v;
+    sval_init(&v, schema);
+    const char *partial = "{\"line\":5";
+    assert(sval_feed(&v, partial, (int)strlen(partial)));
+    char suffix[64];
+    int n = sval_close(&v, suffix, sizeof(suffix));
+    assert(n > 0);
+    char full[128];
+    snprintf(full, sizeof(full), "%s%s", partial, suffix);
+    jv *parsed = json_parse(full, strlen(full));
+    assert(parsed != NULL);
+    jv *line = jv_get(parsed, "line");
+    assert(line && line->type == J_NUM && line->num >= 50 && line->num <= 55);
+
+    jv_free(parsed);
+    schema_free(schema);
+    jv_free(schema_json);
 }
 
 // The other half of the invariant: keywords that are pure annotations carry
@@ -820,6 +882,8 @@ int main(void) {
     test_schema_rejects_non_integer_or_huge_bounds();
     test_schema_rejects_escaped_keys();
     test_schema_rejects_unenforceable_keywords();
+    test_schema_integer_bounds_are_enforced();
+    test_schema_integer_bounds_complete_truncation();
     test_schema_additional_properties();
     test_schema_empty_closed_object();
     test_schema_rejects_required_without_properties();

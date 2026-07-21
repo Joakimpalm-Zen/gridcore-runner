@@ -596,6 +596,8 @@ struct snode {
     bool   *req;  int n_props;                      //   (declared order)
     snode  *items; int min_items, max_items;        // array
     snode **alts; int n_alts;                       // type unions
+    int64_t num_min, num_max;                       // enforced integer interval
+    bool    has_num_min, has_num_max;
 };
 
 struct jv;
@@ -610,6 +612,7 @@ typedef struct {
     int32_t  lit_pos;   // string chars / literal bytes seen (int32: file-sized strings)
     uint16_t disc;      // this object's discriminator choice + 1; 0 = not chosen yet
     uint64_t alive;
+    uint64_t num_abs;  // integer magnitude accumulated so far
 } sframe;
 
 typedef struct {
