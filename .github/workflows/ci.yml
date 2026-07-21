@@ -32,6 +32,14 @@ jobs:
           cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src tests/test_bind.c \
             -o test-bind
           ./test-bind
+      - name: vram registry tests
+        # on macos-latest this is the only place plat_pid_start_time's sysctl
+        # path executes on real Apple hardware (PID-reuse guard)
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
+            tests/test_vram_registry.c src/vramreg.c src/compat.c \
+            -o test-vram-registry -lm -lpthread
+          ./test-vram-registry
       - name: make test model
         run: python3 scripts/make-test-model.py test.gguf
       - name: focused json/schema tests
