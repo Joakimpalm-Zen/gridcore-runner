@@ -24,6 +24,19 @@ run verified hashes and inference loads for all eight architecture targets and
 CPU/CUDA token identity for all seven GPU-capable targets. Qwen3.5/Ornith is
 CPU-only by design.
 
+Tokenizer references are exercised with the pinned `tokenizers` package and
+the committed 721-string corpus. Install
+`tests/compatibility/tokenizer-requirements.txt`, then run `scripts/difftok.py`
+with the GGUF and immutable reference revision from the published report.
+
+`scripts/reference_compare.py` gives Runner and llama.cpp equivalent raw
+`/v1/completions` requests and compares exact generated UTF-8 at temperature
+zero. This avoids CLI banners, prompt echo, ANSI output and chat-template
+differences. The initial eight-token sweep is evidence, not a universal
+equivalence claim: four architecture targets matched all five prompts, while
+Llama 3, Qwen 3, Phi 3 and Gemma 4 had at least one divergence. Per-prompt
+outputs are committed under `tests/compatibility/out/reference-*.json`.
+
 The model manifest deliberately excludes Apertus from forward-pass coverage.
 Runner supports its `tekken` tokenizer and chat template, but not the Apertus
 tensor architecture; treating it as a Qwen2 model would be a false positive.

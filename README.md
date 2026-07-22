@@ -712,9 +712,10 @@ Tokenizer output is checked against each model's own HuggingFace reference
 tokenizer over the committed 721-string corpus in
 `tests/fixtures/tokenizer-corpus.txt` (regenerate with
 `scripts/tokenizer-corpus.py`, run with `scripts/difftok.py`). Exact for
-SmolLM2-1.7B, Qwen3-4B and gemma-4-12B; 1 of 721 for Llama-3.2-3B and
-gemma-3-4b, 2 of 721 for Phi-3.5-mini and 3 of 721 for Apertus-8B-Instruct,
-each a narrow, known divergence in the cases enumerated above.
+SmolLM2-1.7B, Qwen2.5-32B, Qwen3-4B, Ornith-1.0-9B and gemma-4-12B; 1 of 721
+for Llama-3.2-3B and gemma-3-4b, 2 of 721 for Phi-3.5-mini, and 3 of 721 for
+Apertus-8B-Instruct and TinyLlama-1.1B. TinyLlama's three are special-token
+literal/adjacency cases; the other narrow divergences are enumerated above.
 
 Mistral-7B-v0.3 differs on 44 of 721, all one known and accepted cause: its
 `Metaspace prepend_scheme=first` replaces a leading space with the U+2581 prefix

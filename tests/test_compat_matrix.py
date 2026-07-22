@@ -65,3 +65,19 @@ def test_consumer_gate_covers_requested_integration_layers():
         assert consumer["surface"] in {
             "chat_completions", "responses", "messages", "gateway"
         }
+
+
+def test_reference_comparator_normalizes_openai_completion_text():
+    spec = importlib.util.spec_from_file_location(
+        "reference_compare", ROOT / "scripts" / "reference_compare.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.completion_text({
+        "choices": [{"text": " alpha"}], "usage": {"completion_tokens": 1}
+    }) == " alpha"
+    try:
+        module.completion_text({"choices": []})
+    except ValueError as exc:
+        assert "completion text" in str(exc)
+    else:
+        raise AssertionError("malformed completion response was accepted")

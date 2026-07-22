@@ -42,12 +42,27 @@
       "excluded": {"ornith-1.0-9b-q4_k_m": "Runner qwen35 is CPU-only"}
     },
     "tokenizer": {
-      "status": "not_rerun",
-      "reason": "The existing committed 721-string Hugging Face differential evidence remains the current gate; transformers was not installed in this run."
+      "status": "complete",
+      "report": "tests/compatibility/out/tokenizers-2026-07-22.json",
+      "models": 11,
+      "exact": 5,
+      "known_narrow_divergence": 6
     },
     "llama_cpp_greedy_reference": {
-      "status": "not_run",
-      "reason": "The generic harness does not yet normalize prompt/template and token reporting across both CLIs; claiming equality from rendered text would be weaker than the existing family-specific reference gates."
+      "status": "complete_with_divergences",
+      "comparison": "exact generated UTF-8 text from equivalent /v1/completions requests, raw prompts, CPU, temperature 0, 8 tokens",
+      "reference": "llama.cpp b10076 (305ba519a)",
+      "results": {
+        "mistral": "5/5",
+        "qwen2": "5/5",
+        "qwen35_ornith": "5/5",
+        "gemma3": "5/5",
+        "qwen3": "4/5",
+        "phi3": "4/5",
+        "llama3": "3/5",
+        "gemma4": "0/5"
+      },
+      "reports": "tests/compatibility/out/reference-*.json"
     }
   },
   "library_consumers": {

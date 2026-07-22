@@ -1,0 +1,45 @@
+{
+  "schema_version": "gridcore.runner.greedy-reference.v1",
+  "generated_utc": "2026-07-22T22:45:20Z",
+  "runner": "runner 0.1.2-alpha",
+  "reference": "version: 10076 (305ba519a)",
+  "model": "models/gemma-4-12B-it-Q4_K_M.gguf",
+  "tokens": 8,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " a apple\n<|channel>thought\n<channel|>That",
+      "reference": " a<|channel>thought\n<channel|>The capital of",
+      "status": "fail"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": "\n<|channel>thought\n<channel|>It looks like",
+      "reference": "\n<|channel>thought\n<channel|>The **Fib",
+      "status": "fail"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": "\nthought\n<channel|>The sequence you provided",
+      "reference": "\nthought\n<|channel>thought\n<channel|>The",
+      "status": "fail"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " in a land far away,\n<|channel>",
+      "reference": "",
+      "status": "fail"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"<|channel>thought\n<channel|>I cannot fulfill",
+      "reference": " \"<|channel>thought\n<channel|>It looks like",
+      "status": "fail"
+    }
+  ],
+  "totals": {
+    "passed": 0,
+    "failed": 5
+  }
+}

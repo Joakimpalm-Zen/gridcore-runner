@@ -1,0 +1,45 @@
+{
+  "schema_version": "gridcore.runner.greedy-reference.v1",
+  "generated_utc": "2026-07-22T22:45:04Z",
+  "runner": "runner 0.1.2-alpha",
+  "reference": "version: 10076 (305ba519a)",
+  "model": "models/google_gemma-3-4b-it-Q4_K_M.gguf",
+  "tokens": 8,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris.\n\nParis is located in the",
+      "reference": " Paris.\n\nParis is located in the",
+      "status": "pass"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": "\n    \"\"\"\n    Calculates the",
+      "reference": "\n    \"\"\"\n    Calculates the",
+      "status": "pass"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10 11",
+      "reference": " 9 10 11",
+      "status": "pass"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " there lived a young woman named Elara",
+      "reference": " there lived a young woman named Elara",
+      "status": "pass"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John Doe\", \"age\": ",
+      "reference": " \"John Doe\", \"age\": ",
+      "status": "pass"
+    }
+  ],
+  "totals": {
+    "passed": 5,
+    "failed": 0
+  }
+}

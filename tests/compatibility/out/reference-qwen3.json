@@ -1,0 +1,45 @@
+{
+  "schema_version": "gridcore.runner.greedy-reference.v1",
+  "generated_utc": "2026-07-22T22:44:39Z",
+  "runner": "runner 0.1.2-alpha",
+  "reference": "version: 10076 (305ba519a)",
+  "model": "models/Qwen3-4B-Q4_K_M.gguf",
+  "tokens": 8,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris. The capital of Germany is Berlin",
+      "reference": " Paris. The capital of Germany is Berlin",
+      "status": "pass"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": "\n    if n < 0:\n",
+      "reference": "\n    if n < 0:\n",
+      "status": "pass"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10 11",
+      "reference": " 9 10 11",
+      "status": "pass"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " there was a king who had three daughters",
+      "reference": " there was a king who had a problem",
+      "status": "fail"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John\", \"age\": 3",
+      "reference": " \"John\", \"age\": 3",
+      "status": "pass"
+    }
+  ],
+  "totals": {
+    "passed": 4,
+    "failed": 1
+  }
+}

@@ -13,6 +13,8 @@ runner; several are load-bearing gates for changing it.
   load/inference evidence without committing the GGUFs.
 - **`consumer_compat.py`** — run pinned OpenAI/Anthropic SDK, LiteLLM and
   LangChain clients against one live Runner and emit a JSON report.
+- **`reference_compare.py`** — compare Runner and llama.cpp exact greedy text
+  through equivalent raw OpenAI Completions requests.
 - **`kv-quality.py`** — KV-cache quality gate: compares q8 KV against f16 on
   teacher-forced logits (the deeper version of `tests/test_kv_tol.c`'s gate).
 - **`verify-gguf.py`** — structural sanity check of a GGUF file (metadata,
