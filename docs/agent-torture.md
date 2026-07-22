@@ -102,6 +102,12 @@ python3 scripts/torture-compare.py --md results/*/report.json     # Markdown
   cases — Runner wins `nested_arguments` and `forced_truncation` 3/3 vs 0/3;
   the rest are close. (llama.cpp is far faster on raw CPU throughput — that is
   the other axis, and the readout is honest about it.)
+- [2026-07-22 — Runner vs llama.cpp, SmolLM2-1.7B, CPU](../tests/torture/results/2026-07-22-smollm2-1.7b-cpu/README.md):
+  Runner 12/12, llama.cpp 3/12. On a model this small, llama.cpp's Jinja
+  template path emits no parseable tool call at all (all 9 failures are
+  "got None"), while Runner's schema-constrained sampling — template-independent
+  — still lands every call. The wedge widens as the model weakens; the readout
+  is explicit that this is a mechanism difference, not the model reasoning better.
 
 ## Submit a result
 

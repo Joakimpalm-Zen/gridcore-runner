@@ -1,0 +1,149 @@
+{
+  "cases": [
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-000-nested_arguments",
+      "latency_ms": 645.24,
+      "ordinal": 0,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-001-tool_selection",
+      "latency_ms": 628.37,
+      "ordinal": 1,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-002-forced_truncation",
+      "latency_ms": 40.41,
+      "ordinal": 2,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-003-stream_normalization",
+      "latency_ms": 49.65,
+      "ordinal": 3,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-004-nested_arguments",
+      "latency_ms": 548.46,
+      "ordinal": 4,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-005-tool_selection",
+      "latency_ms": 609.46,
+      "ordinal": 5,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-006-forced_truncation",
+      "latency_ms": 32.9,
+      "ordinal": 6,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-007-stream_normalization",
+      "latency_ms": 56.98,
+      "ordinal": 7,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-008-nested_arguments",
+      "latency_ms": 606.3,
+      "ordinal": 8,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-009-tool_selection",
+      "latency_ms": 611.12,
+      "ordinal": 9,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-010-forced_truncation",
+      "latency_ms": 43.88,
+      "ordinal": 10,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-011-stream_normalization",
+      "latency_ms": 66.63,
+      "ordinal": 11,
+      "status": "passed"
+    }
+  ],
+  "configuration": {
+    "model": "SmolLM2-1.7B-Q4_K_M",
+    "temperature": 0
+  },
+  "metrics": {
+    "elapsed_ms": 3940.2,
+    "valid_structured_tasks_per_second": 0.761
+  },
+  "resources": {
+    "peak_rss_kb": null,
+    "peak_rss_kind": "peak"
+  },
+  "runtime": {
+    "name": "llama.cpp",
+    "version": "b10076"
+  },
+  "schema_version": "gridcore.agent-torture.v1",
+  "totals": {
+    "failed": 9,
+    "failures_by_category": {
+      "protocol": 9
+    },
+    "passed": 3,
+    "requests": 12
+  }
+}

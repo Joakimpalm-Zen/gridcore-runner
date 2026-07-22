@@ -83,8 +83,11 @@ when the token budget dies inside the call, the same model free-generating on
 llama.cpp or Ollama produces invalid or unparseable tool calls — Runner's
 schema-driven sampling and always-parses-on-length contract do not. (llama.cpp
 is far faster on raw CPU throughput — a different axis, and the readout says
-so plainly.) Bring your own model and your nastiest schema; the suite is built
-to be reproduced and contested.
+so plainly.) A [second run on SmolLM2-1.7B](tests/torture/results/2026-07-22-smollm2-1.7b-cpu/README.md)
+sharpens the boundary: on a model that small, llama.cpp's template path emits no
+parseable tool call at all (3/12), while Runner's schema-constrained sampling —
+which needs no tool template — still lands 12/12. Bring your own model and your
+nastiest schema; the suite is built to be reproduced and contested.
 
 **Deployment is one static file.** CUDA goes through the driver API with
 embedded PTX: no CUDA toolkit at build or run time, no cuBLAS, no DLLs.
