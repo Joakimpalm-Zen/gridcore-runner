@@ -1,0 +1,314 @@
+{
+ "Llama-3.2-3B-Instruct-Q4_K_M.gguf": {
+  "train_ctx": 131072,
+  "ctx": 8192,
+  "runs": {
+   "f16": [
+    {
+     "suite": "retrieval",
+     "id": "len4096/d050/Zurich",
+     "target_len": 4096,
+     "prompt_tokens": 4040,
+     "depth": 0.5,
+     "ok": true,
+     "reply": "74921"
+    },
+    {
+     "suite": "tools",
+     "id": "pad0/case00",
+     "pad_turns": 0,
+     "prompt_tokens": 884,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\",\"units\":\"celsius\"}"
+    },
+    {
+     "suite": "tools",
+     "id": "pad24/case00",
+     "pad_turns": 24,
+     "prompt_tokens": 2384,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\",\"units\":\"celsius\"}"
+    }
+   ]
+  }
+ },
+ "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf": {
+  "train_ctx": 32768,
+  "ctx": 8192,
+  "runs": {
+   "f16": [
+    {
+     "suite": "retrieval",
+     "id": "len4096/d050/Zurich",
+     "target_len": 4096,
+     "prompt_tokens": 4093,
+     "depth": 0.5,
+     "ok": true,
+     "reply": " 74921"
+    },
+    {
+     "suite": "tools",
+     "id": "pad0/case00",
+     "pad_turns": 0,
+     "prompt_tokens": 1059,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\"}"
+    },
+    {
+     "suite": "tools",
+     "id": "pad24/case00",
+     "pad_turns": 24,
+     "prompt_tokens": 2548,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\",\"units\":\"celsius\"}"
+    }
+   ]
+  }
+ },
+ "Qwen2.5-32B-Instruct-Q3_K_S.gguf": {
+  "train_ctx": 32768,
+  "ctx": 8192,
+  "runs": {
+   "f16": [
+    {
+     "suite": "retrieval",
+     "id": "len4096/d050/Zurich",
+     "target_len": 4096,
+     "prompt_tokens": 4068,
+     "depth": 0.5,
+     "ok": true,
+     "reply": "74921"
+    },
+    {
+     "suite": "tools",
+     "id": "pad0/case00",
+     "pad_turns": 0,
+     "prompt_tokens": 883,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\",\"units\":\"celsius\"}"
+    },
+    {
+     "suite": "tools",
+     "id": "pad24/case00",
+     "pad_turns": 24,
+     "prompt_tokens": 2413,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\",\"units\":\"celsius\"}"
+    }
+   ]
+  }
+ },
+ "Qwen3-4B-Q4_K_M.gguf": {
+  "train_ctx": 40960,
+  "ctx": 8192,
+  "runs": {
+   "f16": [
+    {
+     "suite": "retrieval",
+     "id": "len4096/d050/Zurich",
+     "target_len": 4096,
+     "prompt_tokens": 4068,
+     "depth": 0.5,
+     "ok": false,
+     "reply": ""
+    },
+    {
+     "suite": "tools",
+     "id": "pad0/case00",
+     "pad_turns": 0,
+     "prompt_tokens": 883,
+     "ok": false,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reyk\"}"
+    },
+    {
+     "suite": "tools",
+     "id": "pad24/case00",
+     "pad_turns": 24,
+     "prompt_tokens": 2413,
+     "ok": false,
+     "name_ok": false,
+     "want": "get_weather",
+     "got": null,
+     "reply": ""
+    }
+   ]
+  }
+ },
+ "ornith-1.0-9b-Q4_K_M.gguf": {
+  "train_ctx": 262144,
+  "ctx": 8192,
+  "runs": {
+   "f16": [
+    {
+     "suite": "retrieval",
+     "id": "len4096/d050/Zurich",
+     "target_len": 4096,
+     "prompt_tokens": 4062,
+     "depth": 0.5,
+     "ok": false,
+     "reply": ""
+    },
+    {
+     "suite": "tools",
+     "id": "pad0/case00",
+     "pad_turns": 0,
+     "prompt_tokens": 937,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\"}"
+    },
+    {
+     "suite": "tools",
+     "id": "pad24/case00",
+     "pad_turns": 24,
+     "prompt_tokens": 2563,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\"}"
+    }
+   ]
+  }
+ },
+ "Phi-3.5-mini-instruct-Q4_K_M.gguf": {
+  "train_ctx": 131072,
+  "ctx": 8192,
+  "runs": {
+   "f16": [
+    {
+     "suite": "retrieval",
+     "id": "len4096/d050/Zurich",
+     "target_len": 4096,
+     "prompt_tokens": 4018,
+     "depth": 0.5,
+     "ok": true,
+     "reply": "74921"
+    },
+    {
+     "suite": "tools",
+     "id": "pad0/case00",
+     "pad_turns": 0,
+     "prompt_tokens": 991,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\",\"units\":\"celsius\"}"
+    },
+    {
+     "suite": "tools",
+     "id": "pad24/case00",
+     "pad_turns": 24,
+     "prompt_tokens": 2595,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\",\"units\":\"celsius\"}"
+    }
+   ]
+  }
+ },
+ "google_gemma-3-4b-it-Q4_K_M.gguf": {
+  "train_ctx": 131072,
+  "ctx": 8192,
+  "runs": {
+   "f16": [
+    {
+     "suite": "retrieval",
+     "id": "len4096/d050/Zurich",
+     "target_len": 4096,
+     "prompt_tokens": 4081,
+     "depth": 0.5,
+     "ok": true,
+     "reply": "74921\n"
+    },
+    {
+     "suite": "tools",
+     "id": "pad0/case00",
+     "pad_turns": 0,
+     "prompt_tokens": 941,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\",\"units\":\"celsius\"}"
+    },
+    {
+     "suite": "tools",
+     "id": "pad24/case00",
+     "pad_turns": 24,
+     "prompt_tokens": 2465,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\"}"
+    }
+   ]
+  }
+ },
+ "gemma-4-12B-it-Q4_K_M.gguf": {
+  "train_ctx": 262144,
+  "ctx": 8192,
+  "runs": {
+   "f16": [
+    {
+     "suite": "retrieval",
+     "id": "len4096/d050/Zurich",
+     "target_len": 4096,
+     "prompt_tokens": 4081,
+     "depth": 0.5,
+     "ok": true,
+     "reply": "74921"
+    },
+    {
+     "suite": "tools",
+     "id": "pad0/case00",
+     "pad_turns": 0,
+     "prompt_tokens": 946,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\"}"
+    },
+    {
+     "suite": "tools",
+     "id": "pad24/case00",
+     "pad_turns": 24,
+     "prompt_tokens": 2470,
+     "ok": true,
+     "name_ok": true,
+     "want": "get_weather",
+     "got": "get_weather",
+     "reply": "{\"city\":\"Reykjavik\"}"
+    }
+   ]
+  }
+ }
+}

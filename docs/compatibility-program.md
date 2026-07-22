@@ -41,6 +41,18 @@ The model manifest deliberately excludes Apertus from forward-pass coverage.
 Runner supports its `tekken` tokenizer and chat template, but not the Apertus
 tensor architecture; treating it as a Qwen2 model would be a false positive.
 
+The remaining chat/tool and long-context checks were run on 2026-07-23 through
+the real `/v1/chat/completions` surface with fp16 KV.  Each pinned model saw a
+needle near the middle of a measured 4K-token document and the same weather
+tool request both without history and after 24 padded turns.  Six of eight
+models passed all three assertions.  Ornith made both tool calls but emitted no
+retrieval answer; Qwen 3 emitted a truncated short-tool argument and no answer
+for the padded-tool or retrieval cases.  All 24 requests completed without a
+server, protocol, schema or inference failure.  These are model-behavior
+results, so successful execution is not reported as a quality pass.  Raw
+prompts, token counts, replies and scores are committed in
+`tests/compatibility/out/chat-tool-long-context-2026-07-23.json`.
+
 ## Library consumers
 
 The optional gate starts one real Runner and exercises response parsing through

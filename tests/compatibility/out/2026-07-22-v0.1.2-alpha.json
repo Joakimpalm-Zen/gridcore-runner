@@ -63,6 +63,28 @@
         "gemma4": "0/5"
       },
       "reports": "tests/compatibility/out/reference-*.json"
+    },
+    "chat_tool_long_context_followup": {
+      "generated_utc": "2026-07-23",
+      "status": "complete_with_behavior_failures",
+      "report": "tests/compatibility/out/chat-tool-long-context-2026-07-23.json",
+      "method": "fp16 KV; one measured 4K-token midpoint retrieval; one weather tool request with 0 and 24 padded turns",
+      "requests_completed": 24,
+      "behavior_assertions_passed": 19,
+      "behavior_assertions_failed": 5,
+      "models_all_assertions_passed": [
+        "llama-3.2-3b-instruct-q4_k_m",
+        "mistral-7b-instruct-v0.3-q4_k_m",
+        "qwen2.5-32b-instruct-q3_k_s",
+        "phi-3.5-mini-instruct-q4_k_m",
+        "gemma-3-4b-it-q4_k_m",
+        "gemma-4-12b-it-q4_k_m"
+      ],
+      "partial": {
+        "ornith-1.0-9b-q4_k_m": "tool 2/2, long-context retrieval 0/1",
+        "qwen3-4b-q4_k_m": "tool 0/2, long-context retrieval 0/1"
+      },
+      "execution": "all requests completed without server, HTTP, schema or inference failure"
     }
   },
   "library_consumers": {
