@@ -53,8 +53,15 @@ The embedded PTX targets `compute_75` (Turing). The GPU is Blackwell
 SASS at load either way, and Runner's hand-written matvec kernels use no
 features (tensor cores, async copy) that a newer *virtual* arch would unlock.
 Bumping would only cost portability (`compute_75` JITs to any ≥Turing GPU).
-**Kept at `compute_75`.** The real GPU lever is tensor-core matmul, not the arch
-string.
+**Kept at `compute_75`.**
+
+> **Update (later 2026-07-22):** the tensor-core lever was then built and
+> measured — and **lost at the runner's batch width**. A correct WMMA Q4_K GEMM
+> (token-identical, opt-in `RUNNER_CUDA_TC`) is ~7× *slower* than the scalar
+> kernel at N=8; TC needs N≥16 plus a batch-widening rewrite first, for a
+> prefill-only ~3× ceiling. Full analysis:
+> `docs/specs/2026-07-22-tensor-core-gemm-scope.md`. Lever 2 below is therefore
+> a measured go/no-go, not a live next step.
 
 ## The levers that remain (bigger, and deliberately not rushed)
 
@@ -70,9 +77,11 @@ are the honest next steps, scoped here rather than half-landed.
    would use the AVX-512 + VNNI silicon this box has and the current kernels
    ignore. Large rewrite of the matvec path; must stay token-identical.
 
-2. **GPU: tensor-core matmul.** The matvec kernels are scalar-FMA per element.
-   Blackwell's tensor cores (WGMMA) do the GEMM/GEMV far faster; this is where
-   the arch actually matters. Also a substantial kernel rewrite.
+2. **GPU: tensor-core matmul — measured, currently a no-go at N=8.** Phase 1
+   (WMMA `k_gemm_q4_K_tc`) was correct but ~7× slower than scalar at the
+   runner's 8-token batch; the prerequisite is widening the batch tile to ≥16,
+   with a prefill-only ~3× ceiling. See the TC scope spec for the evidence and
+   the go/no-go framing.
 
 Widening the *existing* f32 dot to `__m512` was considered and de-prioritized:
 the decode matvec is largely memory-bandwidth bound (dequantized weights), so

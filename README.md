@@ -640,7 +640,7 @@ runner -m model [options]
   -c N           context length (default: min(model max, 4096));
                  beyond the training context, YaRN is applied automatically
   -b N           prompt batch size (default 64)
-  -t N           threads (default: min(8, cpus))
+  -t N           threads (default: physical cores, capped at 64)
   -s N           RNG seed
   --temp F       temperature (0 = greedy: the model's argmax, with no
                  repeat penalty applied)
@@ -661,12 +661,15 @@ runner -m model [options]
   --no-bos       don't prepend BOS
   --ignore-eos   keep generating past end-of-text tokens
   --gpu auto|off GPU offload if a backend is available (default auto)
+  --wait-for-vram [S]  queue up to S seconds (default 300) when another
+                 registered runner holds the GPU, instead of refusing
   --kv f16|q8    KV cache storage (default f16); q8 halves it, CPU and CUDA
   --draft PATH   small same-vocab GGUF for speculative decoding
   --draft-k N    draft tokens per round (default 4)
   --bench-json   run a small decode benchmark and print JSON metrics
   --caps         print machine capabilities as JSON and exit
   --version      print the runner version and exit
+  --parent-pid N exit when process N dies (supervisor cleanup)
   -v             print model hyperparameters and memory use
 ```
 
@@ -694,7 +697,7 @@ system/template prefixes skip prompt evaluation entirely.
 | Sampling | temperature, top-k, top-p, min-p, repeat penalty, greedy; suppress-token bias; JSON and JSON-Schema constrained decoding; speculative decoding with a draft model |
 | Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots, multi-model swap with idle TTL + keep_alive, prompt-prefix KV reuse, embeddings, logprobs, tool calls |
 | GPU | CUDA (NVIDIA): full + partial (layer-split) offload; Metal (Apple Silicon): full forward pass, zero-copy weights — both CPU-identical output |
-| CPU | AVX2/FMA dot kernels for every hot quant format (~3x scalar generation) |
+| CPU | AVX2/FMA dot kernels for every hot quant format (measured 1.7x scalar end-to-end on a 3B Q4 at 64 threads; see docs/performance.md) |
 | Threading | persistent pthread pool; matmul rows and attention heads run in parallel |
 
 Verified end-to-end with: SmolLM2-135M (Q8_0, Q4_K_M, Q3_K_M/IQ4_NL),
@@ -749,6 +752,9 @@ src/engine.c     prompt feeding + generation loop (incl. speculative decoding)
                  shared by CLI and server, prompt-prefix KV reuse
 src/json.c       JSON parser/escaper/serializer + string builder for the API
 src/server.c     HTTP server, OpenAI-compatible routes, parallel slots, swap
+src/vramreg.c    cross-process VRAM registry — a second runner on the same GPU
+                 is refused (or queues with --wait-for-vram) with a message
+                 naming who holds what, instead of a bare CUDA OOM
 src/metal.m      Metal GPU backend (kernels.metal: the forward pass in MSL)
 src/cuda.c       CUDA GPU backend via the driver API (kernels.cu -> embedded
                  PTX; full and partial layer-split offload)

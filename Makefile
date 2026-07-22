@@ -219,7 +219,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_KV_TOL)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
-		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py; \
+		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py; \
 	else \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
 	fi
@@ -249,10 +249,10 @@ FUZZ_RSS_MB  ?= 2048
 FUZZ_TARGETS = json_parse schema_compile sval_feed jsonv_feed gguf_open
 # TODO: tok_encode (src/tokenizer.c) is deliberately absent. It needs a loaded
 # tokenizer rather than a bare buffer, so the harness has to stand up a vocab
-# first -- and tokenizer.c was rewritten substantially after the design in
-# HANDOVER.md sec.2 was written, so it needs re-reading before a harness is
-# worth trusting. The committed tests/fixtures/vocab-*.gguf are the natural
-# fixture when someone picks this up.
+# first -- and tokenizer.c has been rewritten substantially since the original
+# fuzz plan was drafted, so re-read the current code before trusting a harness.
+# The committed tests/fixtures/vocab-*.gguf are the natural fixture when
+# someone picks this up.
 
 # -O1 -g: libFuzzer wants speed but ASan reports want frames.
 # No -march=native and no -ffast-math: the point here is defined behaviour,
