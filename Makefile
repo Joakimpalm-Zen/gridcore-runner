@@ -17,9 +17,11 @@ CFLAGS  ?= -O3 -ffast-math -std=gnu11 -Wall -Wextra -Wno-unused-parameter -march
 # and the conda clobber is undone, but it is ignored for a *command-line* CFLAGS
 # so the release build's portable `make CFLAGS="... -march=x86-64-v3"` pin is
 # preserved (a release must not bake in the build host's -march=native).
-# Cross-compile a local build with RUNNER_ARCH=-march=<target>.
-RUNNER_ARCH ?= -march=native
-CFLAGS += -O3 -ffast-math -std=gnu11 $(RUNNER_ARCH)
+# Cross-compile a local build with ARCH_FLAGS=-march=<target>. NB: do NOT name
+# this RUNNER_ARCH — GitHub Actions sets RUNNER_ARCH=X64/ARM64 in the build
+# environment, which a `?=` inherits and then leaks as a bogus bare compiler arg.
+ARCH_FLAGS ?= -march=native
+CFLAGS += -O3 -ffast-math -std=gnu11 $(ARCH_FLAGS)
 LDFLAGS  = -lm -lpthread
 ifeq ($(OS),Windows_NT)
 # -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
