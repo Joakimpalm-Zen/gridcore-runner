@@ -19,8 +19,10 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <io.h>
 #include <process.h>
 #else
+#include <dirent.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -50,6 +52,49 @@ static long file_size(const char *path) {
     return n;
 }
 
+// Remove the scratch directory at process exit so runs stop littering the
+// repo root with vramreg-test-<pid>/ debris (26 had accumulated). Registered
+// via atexit from the PARENT only; forked children either _exit() or die by
+// signal, neither of which runs atexit handlers, and the pid guard makes the
+// handler a no-op anywhere else regardless.
+static long scratch_owner_pid = 0;
+static char scratch_path[512];
+
+static void scratch_cleanup(void) {
+    if ((long)getpid() != scratch_owner_pid || !scratch_path[0]) return;
+#ifdef _WIN32
+    char pattern[600];
+    struct _finddata_t fd;
+    snprintf(pattern, sizeof(pattern), "%s\\*", scratch_path);
+    intptr_t h = _findfirst(pattern, &fd);
+    if (h != -1) {
+        do {
+            if (strcmp(fd.name, ".") && strcmp(fd.name, "..")) {
+                char p[1200];
+                snprintf(p, sizeof(p), "%s\\%s", scratch_path, fd.name);
+                remove(p);
+            }
+        } while (_findnext(h, &fd) == 0);
+        _findclose(h);
+    }
+    _rmdir(scratch_path);
+#else
+    DIR *d = opendir(scratch_path);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
+                char p[1200];
+                snprintf(p, sizeof(p), "%s/%s", scratch_path, e->d_name);
+                remove(p);
+            }
+        }
+        closedir(d);
+    }
+    rmdir(scratch_path);
+#endif
+}
+
 // Point the registry at a scratch directory so a test run never touches the
 // real one in $XDG_RUNTIME_DIR, and so each test starts from empty.
 static const char *scratch_dir(void) {
@@ -61,6 +106,11 @@ static const char *scratch_dir(void) {
     mkdir(dir, 0700);
 #endif
     setenv("RUNNER_VRAM_REGISTRY_DIR", dir, 1);
+    if (scratch_owner_pid == 0) {
+        scratch_owner_pid = (long)getpid();
+        snprintf(scratch_path, sizeof(scratch_path), "%s", dir);
+        atexit(scratch_cleanup);
+    }
     return dir;
 }
 
