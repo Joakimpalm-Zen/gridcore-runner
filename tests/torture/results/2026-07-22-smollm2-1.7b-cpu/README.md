@@ -69,3 +69,13 @@ llama.cpp's 3.9s. The same two things as the Llama run inflate the gap:
 llama.cpp wins on raw CPU throughput — a different axis, stated plainly. The
 point of this run is the tool-call correctness column, and there the small model
 makes the boundary sharper than the 3B did.
+
+> **Update 2026-07-22 (after this run):** most of that CPU speed gap was two
+> fixable defaults, now fixed (`40bf1b9`, see [`docs/performance.md`](../../../../docs/performance.md)):
+> the build silently shipped a **scalar** binary (a conda `CFLAGS` clobber
+> disabled every AVX2/AVX-512 kernel), and the thread default was 8 on a 64-core
+> box. Fixing both is a measured **6.1x** end-to-end on a 3B Q4 — so the ~100s
+> Runner time above would now be roughly a sixth. The tool-call correctness
+> columns are unaffected (schema enforcement, not speed). This run's raw numbers
+> are left as recorded; a re-run on the fixed binary would show a much smaller
+> speed gap.
