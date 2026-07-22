@@ -1,10 +1,20 @@
 # Coding-agent compatibility evidence
 
-Validated 2026-07-21 with Runner 0.1.1-alpha, Qwen3-4B Q4_K_M,
+The original broad sweep below was validated 2026-07-21 with Runner
+0.1.1-alpha, Qwen3-4B Q4_K_M,
 `--parallel 1`, a 16,384-token context unless noted, and an isolated fixture
 whose sentinel was `ORANGE-7319`. Test credentials were the literal `none`.
 The versions and outcomes below are observations from installed clients, not
 API-shape guesses.
+
+A targeted 0.1.2-alpha rerun on 2026-07-22 covered the consumers still
+installed in the test environment: Clu passed 36 runner-client/gateway/CLI
+integration tests; Claude Code 2.1.217 and OpenCode 1.18.3 completed real Read
+loops; Codex CLI 0.144.6 completed its Responses/`exec_command` loop with a
+non-fatal model-metadata warning. Exact results, packaging warnings and
+unavailable clients are recorded in
+`tests/compatibility/out/2026-07-22-v0.1.2-alpha.json`. The reproducible SDK,
+gateway and framework gates are described in `docs/compatibility-program.md`.
 
 | Client | Version | Surface | Result |
 |---|---:|---|---|

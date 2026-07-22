@@ -1,6 +1,6 @@
 {
   "schema_version": "gridcore.runner.consumer-compat-report.v1",
-  "generated_utc": "2026-07-22T22:19:37Z",
+  "generated_utc": "2026-07-22T22:33:16Z",
   "runner": "runner 0.1.2-alpha",
   "python": "3.13.14",
   "packages": {
@@ -17,43 +17,43 @@
     {
       "id": "openai-python-chat",
       "status": "pass",
-      "elapsed_ms": 331.7,
+      "elapsed_ms": 295.2,
       "error": null
     },
     {
       "id": "openai-python-stream",
       "status": "pass",
-      "elapsed_ms": 7.2,
+      "elapsed_ms": 7.6,
       "error": null
     },
     {
       "id": "openai-python-responses",
       "status": "pass",
-      "elapsed_ms": 89.5,
+      "elapsed_ms": 84.5,
       "error": null
     },
     {
       "id": "anthropic-python",
       "status": "pass",
-      "elapsed_ms": 20.2,
+      "elapsed_ms": 18.3,
       "error": null
     },
     {
       "id": "litellm",
       "status": "pass",
-      "elapsed_ms": 26.6,
+      "elapsed_ms": 25.5,
       "error": null
     },
     {
       "id": "langchain-openai",
       "status": "pass",
-      "elapsed_ms": 10.9,
+      "elapsed_ms": 10.0,
       "error": null
     },
     {
       "id": "openai-and-anthropic-node",
       "status": "pass",
-      "elapsed_ms": 104.7,
+      "elapsed_ms": 103.4,
       "error": null
     }
   ],

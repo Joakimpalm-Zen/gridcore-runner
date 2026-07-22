@@ -1,0 +1,95 @@
+{
+  "schema_version": "gridcore.runner.compatibility-evidence.v1",
+  "generated_utc": "2026-07-22T22:25:00Z",
+  "runner": {"version": "0.1.2-alpha", "commit": "184bcca999fc657f46dd731cca081c607a25fbbd"},
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "cpu_cores": 128,
+    "ram_bytes": 268744679424,
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb",
+    "vram_bytes": 25367150592
+  },
+  "model_evidence": {
+    "manifest": "tests/compatibility/models.json",
+    "reference": "llama.cpp b10076 (305ba519a)",
+    "hash_and_load": {
+      "status": "pass",
+      "models": [
+        "llama-3.2-3b-instruct-q4_k_m",
+        "mistral-7b-instruct-v0.3-q4_k_m",
+        "qwen2.5-32b-instruct-q3_k_s",
+        "qwen3-4b-q4_k_m",
+        "ornith-1.0-9b-q4_k_m",
+        "phi-3.5-mini-instruct-q4_k_m",
+        "gemma-3-4b-it-q4_k_m",
+        "gemma-4-12b-it-q4_k_m"
+      ]
+    },
+    "cpu_cuda_token_identity": {
+      "status": "pass",
+      "prompts_per_model": 5,
+      "generated_tokens_per_prompt": 8,
+      "models": [
+        "llama-3.2-3b-instruct-q4_k_m",
+        "mistral-7b-instruct-v0.3-q4_k_m",
+        "qwen2.5-32b-instruct-q3_k_s",
+        "qwen3-4b-q4_k_m",
+        "phi-3.5-mini-instruct-q4_k_m",
+        "gemma-3-4b-it-q4_k_m",
+        "gemma-4-12b-it-q4_k_m"
+      ],
+      "excluded": {"ornith-1.0-9b-q4_k_m": "Runner qwen35 is CPU-only"}
+    },
+    "tokenizer": {
+      "status": "not_rerun",
+      "reason": "The existing committed 721-string Hugging Face differential evidence remains the current gate; transformers was not installed in this run."
+    },
+    "llama_cpp_greedy_reference": {
+      "status": "not_run",
+      "reason": "The generic harness does not yet normalize prompt/template and token reporting across both CLIs; claiming equality from rendered text would be weaker than the existing family-specific reference gates."
+    }
+  },
+  "library_consumers": {
+    "report": "tests/compatibility/out/consumers.json",
+    "status": "pass",
+    "passed": 7
+  },
+  "installed_agent_rerun": [
+    {
+      "consumer": "Gridcore Clu",
+      "version": "0.1.0",
+      "surface": "Runner Python client / Chat Completions",
+      "result": "pass_with_warning",
+      "behavior": "36 runner-client, gateway and CLI integration tests passed",
+      "warning": "Clu's locked aggregate pip install reported conflicting transitive direct-URL requirements; installing the same local pinned components without dependency resolution allowed the compatibility suite to run"
+    },
+    {
+      "consumer": "Claude Code",
+      "version": "2.1.217",
+      "surface": "Anthropic Messages",
+      "result": "pass",
+      "behavior": "Read tool returned ORANGE-7319 from the isolated fixture"
+    },
+    {
+      "consumer": "OpenCode",
+      "version": "1.18.3",
+      "surface": "AI-SDK Chat Completions",
+      "result": "pass",
+      "behavior": "Read tool returned ORANGE-7319 from the isolated fixture"
+    },
+    {
+      "consumer": "Codex CLI",
+      "version": "0.144.6",
+      "surface": "Responses",
+      "result": "pass_with_warning",
+      "behavior": "exec_command returned ORANGE-7319 from the isolated fixture",
+      "warning": "Optional model-metadata refresh expected a Codex-specific models field, rejected Runner's standard OpenAI data[] list, then used fallback metadata and completed the loop"
+    },
+    {"consumer": "pi coding agent", "result": "not_run", "reason": "not installed"},
+    {"consumer": "Cline CLI", "result": "not_run", "reason": "not installed"},
+    {"consumer": "Continue CLI", "result": "not_run", "reason": "not installed"},
+    {"consumer": "Aider", "result": "not_run", "reason": "not installed"},
+    {"consumer": "Roo Code", "result": "not_run", "reason": "no representative VS Code-compatible editor host was available"}
+  ]
+}

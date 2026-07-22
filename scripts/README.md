@@ -9,6 +9,10 @@ runner; several are load-bearing gates for changing it.
   baseline and a candidate binary on 5 prompts. A faster binary that changes
   tokens is a regression, not a win.
 - **`kernel-bench.py`** — prefill/decode tok/s as JSON for one binary+model.
+- **`compat_matrix.py`** — verify pinned real-model hashes and emit architecture
+  load/inference evidence without committing the GGUFs.
+- **`consumer_compat.py`** — run pinned OpenAI/Anthropic SDK, LiteLLM and
+  LangChain clients against one live Runner and emit a JSON report.
 - **`kv-quality.py`** — KV-cache quality gate: compares q8 KV against f16 on
   teacher-forced logits (the deeper version of `tests/test_kv_tol.c`'s gate).
 - **`verify-gguf.py`** — structural sanity check of a GGUF file (metadata,

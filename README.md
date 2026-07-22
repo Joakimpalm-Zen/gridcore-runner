@@ -355,7 +355,10 @@ and Codex CLI.
 
 Exact versions, configuration-sensitive base URLs, test scope and the
 client-derived regression inventory are recorded in
-[`docs/agent-compatibility.md`](docs/agent-compatibility.md).
+[`docs/agent-compatibility.md`](docs/agent-compatibility.md). The pinned
+real-model, SDK, gateway and framework gates—and their machine-readable
+evidence—are documented in
+[`docs/compatibility-program.md`](docs/compatibility-program.md).
 Set `"cache_prompt": false` on a request to bypass prefix KV reuse and force
 the full prompt to be evaluated.
 
