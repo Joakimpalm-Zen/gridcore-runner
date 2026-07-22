@@ -2,7 +2,7 @@
 #ifndef RUNNER_H
 #define RUNNER_H
 
-#define RUNNER_VERSION "0.1.1-alpha"
+#define RUNNER_VERSION "0.1.2-alpha"
 
 #include <stdint.h>
 #include <stddef.h>

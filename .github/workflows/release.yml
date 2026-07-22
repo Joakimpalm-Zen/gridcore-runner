@@ -1,6 +1,6 @@
 name: release
 
-# Tag a version (git tag v0.1.1-alpha && git push origin v0.1.1-alpha) and
+# Tag a version (git tag v0.1.2-alpha && git push origin v0.1.2-alpha) and
 # this builds the three platform binaries and attaches them to a GitHub
 # Release draft — publish it after a once-over.
 
