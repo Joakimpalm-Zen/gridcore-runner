@@ -61,24 +61,56 @@ pattern vLLM/llama.cpp use.
 
 **Phase 0 — this doc.** Profiling + scope. Done.
 
-**Phase 1 — one kernel, portable, measured.** A tensor-core `k_gemm_q4_K` using the
-**WMMA** API (works on sm_70+, i.e. every GPU ≥ Turing including Blackvell via the
-existing `compute_75` PTX — no portability change yet). Dequantize a Q4_K weight
-tile + the x tile into fp16 in shared memory, `wmma::mma_sync` into fp32
-accumulators. Bench vs the scalar kernel on prefill; target approaching the ~1.1
-ms/token floor. If WMMA on `compute_75` PTX JITs to Blackwell tensor cores and
-wins, ship it behind the existing kernel-selection with a tolerance gate.
+**Phase 1 — one kernel, portable, measured. DONE 2026-07-22 — decisive NEGATIVE
+result that re-scopes the rest.** A tensor-core `k_gemm_q4_K_tc` (WMMA m32n8k16,
+fp16 inputs, fp32 accumulate; `kernels.cu`, opt-in via `RUNNER_CUDA_TC`, off by
+default) was implemented, verified **token-identical** to the scalar kernel on
+four prompts (the dequant is factored to be bit-exact up to fp16 rounding), and
+benchmarked against it on the profiling workload.
 
-**Phase 2 — Blackwell-native, multi-arch PTX.** Add a `compute_120` (WGMMA / 5th-gen
-tensor core, fp8) kernel variant, embed BOTH PTX blobs, and select at runtime by
-detected SM — preserving the `compute_75` baseline for older nodes (the "one binary,
-any node" promise). This is where the arch string finally matters (Phase-0 measured
-a bare `compute_75→120` PTX bump as within noise precisely because the *kernels* used
-no TC features; WGMMA is the feature that makes a newer arch pay).
+**It is ~7× SLOWER: prefill matvec 3.25 → 22.66 ms/token.** The mechanism is
+fundamental, not a tuning miss:
 
-**Phase 3 — coverage + integration.** Extend TC-GEMM to the other common quant types
-(q8_0, q6_K, q5_K) and wire it into the batched-decode / speculative path so
-concurrent serving gets the compute win, not just prefill.
+- **The runner's batch width is N = MVB = 8.** WMMA's fp16 tiles want N ≥ 16;
+  m32n8k16 half-utilizes the tensor core at N=8.
+- **At N=8 the FMA is not the bottleneck** — each dequantized weight feeds only 8
+  MACs. The scalar kernel dequantizes into registers and FMAs immediately.
+- **Portable WMMA forces a shared-memory round-trip:** fragments can only be
+  filled via `load_matrix_sync` from memory, so every dequantized fp16 weight
+  must be written to shared and read back. Trading a cheap register FMA for
+  TC + a shared round-trip, at a batch too narrow to amortize it, is a net loss.
+
+**Conclusion: tensor cores are the wrong lever at N ≤ 8, which is every batched
+path the runner has today.** The batched GEMM at N=8 is dequant/bandwidth-bound,
+not FMA-bound; TC only accelerates the FMA. The prerequisite for *any* TC win is
+widening the batch tile to N ≥ 16 — a large, invasive change (MVB is baked into
+every `_b` kernel and every activation buffer), and even fully realized the
+ceiling is **prefill-only ~3×**, because single-stream decode stays
+memory-bandwidth bound and TC-immune on this MIG slice.
+
+**Phase 2 (re-scoped) — batch-tile widening is the real prerequisite, not WGMMA.**
+Before any WGMMA/arch work, MVB must widen to ≥16 and the scalar batched kernels
+must stay correct/fast at that width. Only *then* does a TC kernel have enough N
+to amortize the shared round-trip. This is where the effort and risk actually
+are; WGMMA (below) is downstream of it. Given the prefill-only ~3× ceiling vs the
+size of the change, this needs a deliberate go/no-go — the CPU fix already landed
+6.1× across the board at a fraction of the risk.
+
+**Phase 3 — Blackwell-native WGMMA + coverage, only if Phase 2 pays.** A
+`compute_120` WGMMA variant (5th-gen tensor core, fp8; register-operand `mma` that
+avoids the shared round-trip), multi-arch PTX + runtime SM dispatch (preserving the
+`compute_75` baseline), extended to q8_0/q6_K/q5_K and the concurrent-decode path.
+Only worth building once a widened batch has shown TC beats scalar.
+
+### Honest recommendation
+
+The profiling + Phase 1 empirics say the GPU is already near-optimal for
+single-stream inference on this MIG slice (decode is at the bandwidth ceiling), and
+the tensor-core lever pays only on prefill/concurrent serving *after* a large
+batch-widening rewrite, for a ~3× prefill-only ceiling. That is a real option for a
+serving-throughput push, but it is a multi-day, higher-risk change with a bounded
+payoff — a deliberate decision, not an automatic next step. The correct kernel and
+this measurement are committed so the decision is made on evidence.
 
 ## Correctness & portability constraints (non-negotiable)
 
@@ -95,7 +127,14 @@ concurrent serving gets the compute win, not just prefill.
 - **Fallback stays.** The scalar kernels remain the default/fallback; TC is a
   measured, gated opt-in per (quant type, arch).
 
-## First measurable step
+## Reproducing the Phase 1 result
 
-Implement Phase 1 (`k_gemm_q4_K` WMMA variant) + a TC tolerance gate, and bench
-prefill matvec ms/token against the scalar 3.25 ms/token → target ~1.1–1.5.
+`make ptx && make` (with nvcc), then compare on a long prompt:
+
+    RUNNER_CUDA_PROFILE=1              ./runner -m <q4_K.gguf> -p "<long>" -n 1 --gpu auto   # scalar
+    RUNNER_CUDA_TC=1 RUNNER_CUDA_PROFILE=1 ./runner -m <q4_K.gguf> -p "<long>" -n 1 --gpu auto   # TC
+
+Correctness: `RUNNER_CUDA_TC=1` produces token-identical greedy output to the
+scalar path. Speed: the TC `matvec` line is ~7× the scalar one. The kernel is
+kept, off by default, as the correct foundation for the widened-batch work Phase 2
+would need — not as a shipped win.

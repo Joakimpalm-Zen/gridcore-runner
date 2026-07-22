@@ -256,6 +256,7 @@ typedef struct gpu_weights {
     CUfunction  f_attn_dec, f_attn_merge;   // flash-decoding attention (decode)
     CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
     CUfunction  f_gemm[32];             // prefill tiled-GEMM variants (Q8_0/Q4_K)
+    CUfunction  f_gemm_tc[32];          // tensor-core prefill GEMM (opt-in, Q4_K)
     CUfunction  f_gemv[32];             // decode coalesced GEMV variants (Q8_0/Q4_K)
     // cross-sequence decode microbatch (Phase 6): per-column position and KV
     CUfunction  f_rope_seq, f_store_seq, f_attn_dec_seq;
@@ -302,6 +303,7 @@ typedef struct {
 
 // output rows per batched-matvec block — must match GEMM_WARPS in kernels.cu
 #define GEMM_WARPS 8
+#define TC_WPB     4   // tensor-core GEMM warps per block (match kernels.cu)
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, neox; float mscale; } rope_args;
@@ -645,6 +647,9 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         };
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
             CK(cu.ModuleGetFunction(fns[i].f, w->mod, fns[i].name));
+        // Tensor-core kernels: resolved non-fatally so an older embedded PTX
+        // (without them) still loads — TC just stays unavailable there.
+        cu.ModuleGetFunction(&w->f_gemm_tc[T_Q4_K], w->mod, "k_gemm_q4_K_tc");
 
         // weights: the file bytes the offloaded layers reference (whole file
         // for a full split, a prefix for partial) so byte offsets stay valid.
@@ -895,6 +900,14 @@ static bool enc_rmsnorm(gpu_t *g, CUdeviceptr x, CUdeviceptr y, CUdeviceptr w,
     return launch(g, g->sw->f_rmsnorm, 1, batch, 1, 256, p);
 }
 
+// Tensor-core GEMM opt-in (RUNNER_CUDA_TC). Read once. Phase 1 of the TC plan;
+// stays off by default until the tolerance gate promotes it per (type, arch).
+static bool tc_on(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("RUNNER_CUDA_TC") != NULL;
+    return v != 0;
+}
+
 static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
                    CUdeviceptr y, int n_in, int n_out, CUdeviceptr bias,
                    int batch, int xs, int ys) {
@@ -903,6 +916,11 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
                   bias != 0, batch, xs, ys };
     CUdeviceptr b = bias ? bias : g->sw->dummy;
     void *p[] = { &g->sw->weights, &x, &y, &a, &b };
+    // Prefill (batch>1), tensor-core GEMM when enabled and available: one warp
+    // per 32-row tile, TC_WPB warps per block.
+    if (batch > 1 && tc_on() && g->sw->f_gemm_tc[w->type])
+        return launch(g, g->sw->f_gemm_tc[w->type],
+                      (n_out + 32 * TC_WPB - 1) / (32 * TC_WPB), 1, 1, 32 * TC_WPB, p);
     // Prefill (batch>1) uses the tiled-GEMM variant where available (Q8_0/Q4_K):
     // GEMM_WARPS(=8) rows per block, 256 threads, x staged in shared memory.
     if (batch > 1 && g->sw->f_gemm[w->type])

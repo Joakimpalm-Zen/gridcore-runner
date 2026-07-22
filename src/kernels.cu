@@ -10,6 +10,7 @@
 // Compiled to PTX at development time (make ptx) and embedded via
 // kernels_ptx.h; the driver JIT-compiles for the resident GPU.
 #include <cuda_fp16.h>
+#include <mma.h>
 
 typedef unsigned char  uchar;
 typedef unsigned int   uint;
@@ -574,6 +575,91 @@ extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
         for (int t = 0; t < a.batch; t++) {
             float r = warp_sum(s[t]);
             if (lane == 0) y[(ulong64)t * a.ys + row] = a.has_bias ? r + bias[row] : r;
+        }
+    }
+}
+
+// ---------------------------------------------------- tensor-core Q4_K GEMM
+// Phase 1 of the tensor-core plan (docs/specs/2026-07-22-tensor-core-gemm-scope.md).
+// Same math as k_gemm_q4_K, but the scalar-FMA accumulation is replaced by WMMA
+// (m32n8k16, fp16 inputs, fp32 accumulate). One warp produces a 32-row x MVB(8)
+// -token output tile. Q4_K's per-group scales are applied during dequant to fp16
+// BEFORE the MMA (WMMA cannot apply per-group scales), so the fp16 tile already
+// holds the true weight value. Portable: WMMA compiles into compute_75 PTX and
+// JITs onto any tensor-core GPU (>= Turing), Blackwell included.
+//
+// q4k_w() reproduces k_gemm_q4_K's per-element dequant EXACTLY (verified index by
+// index), so the only numeric departure from the scalar kernel is fp16 rounding of
+// the two operands plus the WMMA accumulation order — bounded by the tolerance gate.
+static __device__ __forceinline__ float q4k_w(const uchar *blk, float dd,
+                                               float dmin, int e) {
+    int g = e >> 5;              // group 0..7 (32 elems each)
+    int ji = e >> 6;             // 32-byte quant segment 0..3
+    int l = e >> 3, k = e & 7;   // scalar kernel's (lane, k) for this element
+    uchar sg, mg;
+    get_scale_min_k4(g, blk + 4, &sg, &mg);
+    const uchar *q = blk + 16 + ji * 32;
+    uchar byte = q[(l & 3) * 8 + k];
+    int nib = ((g & 1) == 0) ? (byte & 0xF) : (byte >> 4);
+    return dd * (float)sg * (float)nib - dmin * (float)mg;
+}
+
+#define TC_WPB 4   // warps per block; each warp owns a 32-row output tile
+extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
+    using namespace nvcuda::wmma;
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const int row0 = (blockIdx.x * TC_WPB + warp) * 32;   // first of this warp's 32 rows
+    __shared__ __half sh_w[TC_WPB][32 * 16];              // 32 rows x 16 K, row-major
+    __shared__ __half sh_x[TC_WPB][16 * 8];               // 16 K x 8 tokens, col-major
+    __shared__ float  sh_c[TC_WPB][32 * 8];               // 32 rows x 8 tokens, row-major
+    __half *wt = sh_w[warp];
+    __half *xt = sh_x[warp];
+
+    fragment<matrix_a, 32, 8, 16, __half, row_major> fa;
+    fragment<matrix_b, 32, 8, 16, __half, col_major> fb;
+    fragment<accumulator, 32, 8, 16, float> fc;
+    fill_fragment(fc, 0.0f);
+
+    int nb = a.n_in / 256;
+    for (int b = 0; b < nb; b++) {
+        int base_e = b * 256;
+        for (int j = 0; j < 16; j++) {          // 16 K-steps of 16 elems per 256-block
+            int e0 = j * 16;
+            // stage 32x16 dequantized weights -> fp16 (32 lanes cover 512 values)
+            for (int idx = lane; idx < 32 * 16; idx += 32) {
+                int rr = idx >> 4, ee = idx & 15;
+                unsigned gr = row0 + rr;
+                float wv = 0.0f;
+                if (gr < (unsigned)a.n_out) {
+                    const uchar *blk = wb + a.w_off +
+                                       (ulong64)gr * nb * 144 + (ulong64)b * 144;
+                    wv = q4k_w(blk, f16f(blk), f16f(blk + 2), e0 + ee);
+                }
+                wt[rr * 16 + ee] = __float2half(wv);
+            }
+            // stage 16x8 activations -> fp16, col-major (element (k,t) at xt[t*16+k])
+            for (int idx = lane; idx < 16 * 8; idx += 32) {
+                int ee = idx & 15, tt = idx >> 4;
+                float xv = (tt < a.batch)
+                           ? x[(ulong64)tt * a.xs + base_e + e0 + ee] : 0.0f;
+                xt[tt * 16 + ee] = __float2half(xv);
+            }
+            __syncwarp();
+            load_matrix_sync(fa, wt, 16);
+            load_matrix_sync(fb, xt, 16);
+            mma_sync(fc, fa, fb, fc);
+            __syncwarp();
+        }
+    }
+    store_matrix_sync(sh_c[warp], fc, 8, mem_row_major);   // sh_c[rr*8 + tt]
+    __syncwarp();
+    for (int idx = lane; idx < 32 * 8; idx += 32) {
+        int rr = idx >> 3, tt = idx & 7;
+        unsigned gr = row0 + rr;
+        if (gr < (unsigned)a.n_out && tt < a.batch) {
+            float r = sh_c[warp][rr * 8 + tt];
+            y[(ulong64)tt * a.ys + gr] = a.has_bias ? r + bias[gr] : r;
         }
     }
 }
