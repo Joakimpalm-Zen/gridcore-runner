@@ -3693,8 +3693,47 @@ static void install_stop_handlers(void) {
 // and abandons the launch instead of serving a request nobody wants anymore.
 static bool stop_was_requested(void) { return stop_requested != 0; }
 #else
-static void install_stop_handlers(void) { }
-static bool stop_was_requested(void) { return false; }
+// Windows port of the same design: stop flag + listener close + drain +
+// second-signal escalation, via SetConsoleCtrlHandler. The handler runs on
+// its own thread (not an async-signal context), so plain volatile stores and
+// closesocket() are safe here.
+static volatile LONG win_stop_requested;
+static volatile SOCKET win_listener_socket = INVALID_SOCKET;
+
+static BOOL WINAPI win_stop_handler(DWORD ctrl_type) {
+    switch (ctrl_type) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_SHUTDOWN_EVENT: {
+        // A second Ctrl-C is the operator overruling the drain: exit now,
+        // with the shell's 128+SIGINT convention for parity with POSIX.
+        if (InterlockedExchange(&win_stop_requested, 1)) _exit(130);
+        SOCKET s = win_listener_socket;
+        if (s != INVALID_SOCKET) {
+            win_listener_socket = INVALID_SOCKET;
+            closesocket(s); // wakes accept()
+        }
+        if (ctrl_type == CTRL_CLOSE_EVENT || ctrl_type == CTRL_SHUTDOWN_EVENT) {
+            // Returning from these lets Windows terminate the process
+            // immediately; hold the handler thread briefly so the drain in
+            // main gets its window (Windows grants ~5s on close).
+            Sleep(4000);
+        }
+        return TRUE; // handled: keep running so the drain can finish
+    }
+    default:
+        return FALSE;
+    }
+}
+
+static void install_stop_handlers(void) {
+    win_stop_requested = 0;
+    win_listener_socket = INVALID_SOCKET;
+    SetConsoleCtrlHandler(win_stop_handler, TRUE);
+}
+
+static bool stop_was_requested(void) { return win_stop_requested != 0; }
 #endif
 
 static void queue_shutdown(void) {
@@ -3741,7 +3780,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     stop_requested = 0;
     listener_fd = -1;
 #endif
-    install_stop_handlers();
+    install_stop_handlers(); // resets the stop flag + listener on both platforms
     if (ov) SV.ov = *ov;
     // `defaults` arrives already resolved against the preloaded model; in swap
     // mode there is no model yet and swap_to resolves per load
@@ -3945,6 +3984,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     }
 #ifndef _WIN32
     listener_fd = lfd;
+#else
+    win_listener_socket = (SOCKET)lfd;
 #endif
 
     // Every slot's model exists now, which is the only precondition the batch
@@ -3987,6 +4028,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         if (cfd < 0) {
 #ifndef _WIN32
             if (stop_requested) break;
+#else
+            if (win_stop_requested) break;
 #endif
             if (errno == EINTR) continue;
             break;
@@ -4001,7 +4044,10 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         sock_close(lfd);
     }
 #else
-    sock_close(lfd);
+    if (win_listener_socket != INVALID_SOCKET) {
+        win_listener_socket = INVALID_SOCKET;
+        sock_close(lfd);
+    }
 #endif
     queue_shutdown();
     // A worker parked in a --wait-for-vram queue would pin the joins below
