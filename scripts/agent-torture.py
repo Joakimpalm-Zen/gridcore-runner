@@ -347,7 +347,8 @@ def main(argv=None):
                              "Runner; use with --runtime")
     parser.add_argument("--runtime",
                         help="runtime label for the report (e.g. llama.cpp, "
-                             "ollama, vllm). Defaults to 'runner'.")
+                             "ollama, vllm, lmstudio). Any OpenAI-compatible "
+                             "server works. Defaults to 'runner'.")
     parser.add_argument("--runtime-version", default="unknown",
                         help="version string for the report when --endpoint "
                              "is used")

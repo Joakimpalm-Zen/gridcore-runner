@@ -61,11 +61,14 @@ that depend on its details.
 
 This is the difference that justifies runner's existence, and it is measured,
 not asserted. The [agent torture suite](docs/agent-torture.md) runs one
-adversarial tool-call matrix against Runner *and* llama.cpp / Ollama / vLLM on
-identical hardware and preserves every request and raw response so any verdict
-can be audited or contested. The
+adversarial tool-call matrix against Runner and any other OpenAI-compatible
+server — llama.cpp, Ollama, vLLM, and LM Studio are all supported `--runtime`
+targets — on identical hardware, preserving every request and raw response so
+any verdict can be audited or contested. The
 [first published run](tests/torture/results/2026-07-21-llama-3.2-3b-cpu/README.md)
-— same Llama-3.2-3B GGUF, same box, all on CPU:
+compares Runner against llama.cpp and Ollama (vLLM and LM Studio are supported
+but not yet on the published bench) — same Llama-3.2-3B GGUF, same box, all on
+CPU:
 
 | category | **Runner** | llama.cpp | Ollama |
 |---|---|---|---|

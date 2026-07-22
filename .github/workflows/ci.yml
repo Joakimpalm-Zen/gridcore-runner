@@ -82,6 +82,12 @@ jobs:
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet pytest
           PYTHONPATH=python/src .venv/bin/python -m pytest python/tests/test_client.py
+      - name: torture harness unit tests
+        # The scoring + cross-runtime comparison math the published matrix rests
+        # on, gated offline: these exercise the harness itself (case generation,
+        # verdict scoring, report diffing) with no live model. The self-conformance
+        # run against Runner is a separate step below.
+        run: .venv/bin/python -m pytest tests/test_agent_torture.py tests/test_torture_compare.py
       - name: smoke test (completion)
         run: ./runner -m test.gguf -p "hello" -n 8 --temp 0
       - name: reject malformed tensor metadata

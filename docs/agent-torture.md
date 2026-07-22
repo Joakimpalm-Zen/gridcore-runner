@@ -52,7 +52,15 @@ ollama serve                # then: ollama pull qwen2.5 ; it serves on 11434
 
 # vLLM
 vllm serve Qwen/Qwen2.5-7B-Instruct --host 127.0.0.1 --port 8000
+
+# LM Studio (its OpenAI-compatible server; start it from the app or the CLI)
+lms server start --port 1234    # then: agent-torture.py --endpoint 127.0.0.1:1234 \
+#                                        --runtime lmstudio --model <loaded-model>
 ```
+
+Any OpenAI-compatible server works the same way — point `--endpoint` at its
+loopback port and label it with `--runtime`. The four above are the ones the
+positioning matrix names; the harness does not special-case any of them.
 
 ## What you get
 
