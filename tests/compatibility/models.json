@@ -1,0 +1,87 @@
+{
+  "schema_version": "gridcore.runner.model-compat.v1",
+  "reference_revision": "llama.cpp b10076 (305ba519a)",
+  "models": [
+    {
+      "id": "llama-3.2-3b-instruct-q4_k_m",
+      "architecture": "llama",
+      "family": "Llama 3",
+      "file": "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "tokenizer_reference": "meta-llama/Llama-3.2-3B-Instruct",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "tokenizer", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    },
+    {
+      "id": "mistral-7b-instruct-v0.3-q4_k_m",
+      "architecture": "llama",
+      "family": "Mistral",
+      "file": "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+      "tokenizer_reference": "mistralai/Mistral-7B-Instruct-v0.3",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "tokenizer", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    },
+    {
+      "id": "qwen2.5-32b-instruct-q3_k_s",
+      "architecture": "qwen2",
+      "family": "Qwen 2.5",
+      "file": "models/Qwen2.5-32B-Instruct-Q3_K_S.gguf",
+      "sha256": "a1aefda97dc4641598db576edf61b7b5f70f40abab33fbea39fb84fcaa9be44e",
+      "tokenizer_reference": "Qwen/Qwen2.5-32B-Instruct",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "tokenizer", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    },
+    {
+      "id": "qwen3-4b-q4_k_m",
+      "architecture": "qwen3",
+      "family": "Qwen 3",
+      "file": "models/Qwen3-4B-Q4_K_M.gguf",
+      "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "tokenizer_reference": "Qwen/Qwen3-4B",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "tokenizer", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    },
+    {
+      "id": "ornith-1.0-9b-q4_k_m",
+      "architecture": "qwen35",
+      "family": "Qwen 3.5 / Ornith",
+      "file": "models/ornith-1.0-9b-Q4_K_M.gguf",
+      "sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
+      "tokenizer_reference": "deepreinforce-ai/Ornith-1.0-9B",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "tokenizer", "greedy_reference", "chat", "tool", "long_context"],
+      "notes": "CPU-only in Runner"
+    },
+    {
+      "id": "phi-3.5-mini-instruct-q4_k_m",
+      "architecture": "phi3",
+      "family": "Phi 3",
+      "file": "models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
+      "sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
+      "tokenizer_reference": "microsoft/Phi-3.5-mini-instruct",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "tokenizer", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    },
+    {
+      "id": "gemma-3-4b-it-q4_k_m",
+      "architecture": "gemma3",
+      "family": "Gemma 3",
+      "file": "models/google_gemma-3-4b-it-Q4_K_M.gguf",
+      "sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+      "tokenizer_reference": "google/gemma-3-4b-it",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "tokenizer", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    },
+    {
+      "id": "gemma-4-12b-it-q4_k_m",
+      "architecture": "gemma4",
+      "family": "Gemma 4",
+      "file": "models/gemma-4-12B-it-Q4_K_M.gguf",
+      "sha256": "e4db6f8c1e48f7297069fa23ca3ff34e0b0155f8de5485498ed9a0e59944bc8c",
+      "tokenizer_reference": "google/gemma-4-12b-it",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "tokenizer", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    }
+  ]
+}

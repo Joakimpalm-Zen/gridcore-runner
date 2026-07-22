@@ -1,0 +1,146 @@
+{
+  "schema_version": "gridcore.runner.model-compat-report.v1",
+  "generated_utc": "2026-07-22T22:17:14Z",
+  "host": {
+    "os": "Linux",
+    "machine": "x86_64"
+  },
+  "runner": {
+    "path": "/home/lab/workspace/Gridcore/gridcore-runner/runner",
+    "version": "runner 0.1.2-alpha"
+  },
+  "reference": {
+    "path": "/home/lab/agent-torture-tools/llama/llama-b10076/llama-cli",
+    "version": "version: 10076 (305ba519a)"
+  },
+  "models": [
+    {
+      "id": "llama-3.2-3b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "expected_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 817.6,
+          "stderr_tail": "rope: using model frequency factors (rope_freqs.weight)\ngpu-split: budget=25.13GB fixed=0.86GB G=28/28 full=1 used=3.02GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (2.0 GB weights in VRAM)\ngpu: VRAM 22.63 GB free of 25.37 GB after init (kv 0.47 GB + scratch 0.00 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf | llama | 28 layers | ctx 4096 | 64 threads | 0.69s\nsampling: llama3 (temp 0.00, top_p 0.90, top_k 0, min_p 0.00, repeat_penalty 1.10)\n\nprompt: 3 tok, 91.31 tok/s | gen: 1 tok, 79.78 tok/s\n"
+        }
+      },
+      "actual_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "file_status": "pass"
+    },
+    {
+      "id": "mistral-7b-instruct-v0.3-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "expected_sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 935.0,
+          "stderr_tail": "gpu-split: budget=25.13GB fixed=0.62GB G=32/32 full=1 used=5.34GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (4.4 GB weights in VRAM)\ngpu: VRAM 20.21 GB free of 25.37 GB after init (kv 0.54 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf | llama | 32 layers | ctx 4096 | 64 threads | 0.75s\nsampling: mistral (temp 0.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.10)\n\nprompt: 6 tok, 78.68 tok/s | gen: 1 tok, 41.45 tok/s\n"
+        }
+      },
+      "actual_sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+      "file_status": "pass"
+    },
+    {
+      "id": "qwen2.5-32b-instruct-q3_k_s",
+      "architecture": "qwen2",
+      "file": "models/Qwen2.5-32B-Instruct-Q3_K_S.gguf",
+      "expected_sha256": "a1aefda97dc4641598db576edf61b7b5f70f40abab33fbea39fb84fcaa9be44e",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 2028.3,
+          "stderr_tail": "gpu: model uses a quant type without a CUDA kernel \u2014 using CPU\nloaded /home/lab/models/Qwen2.5-32B-Instruct-Q3_K_S.gguf | qwen2 | 64 layers | ctx 4096 | 64 threads | 0.64s\nsampling: qwen2.5 (temp 0.00, top_p 0.80, top_k 20, min_p 0.00, repeat_penalty 1.05)\n\nprompt: 3 tok, 3.91 tok/s | gen: 1 tok, 1.71 tok/s\n"
+        }
+      },
+      "actual_sha256": "a1aefda97dc4641598db576edf61b7b5f70f40abab33fbea39fb84fcaa9be44e",
+      "file_status": "pass"
+    },
+    {
+      "id": "qwen3-4b-q4_k_m",
+      "architecture": "qwen3",
+      "file": "models/Qwen3-4B-Q4_K_M.gguf",
+      "expected_sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 840.4,
+          "stderr_tail": "gpu-split: budget=25.13GB fixed=0.86GB G=36/36 full=1 used=3.64GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (2.5 GB weights in VRAM)\ngpu: VRAM 22.02 GB free of 25.37 GB after init (kv 0.60 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/Qwen3-4B-Q4_K_M.gguf | qwen3 | 36 layers | ctx 4096 | 64 threads | 0.70s\nsampling: qwen3 (temp 0.00, top_p 0.95, top_k 20, min_p 0.00, repeat_penalty 1.00)\n\nprompt: 3 tok, 68.45 tok/s | gen: 1 tok, 63.84 tok/s\n"
+        }
+      },
+      "actual_sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "file_status": "pass"
+    },
+    {
+      "id": "ornith-1.0-9b-q4_k_m",
+      "architecture": "qwen35",
+      "file": "models/ornith-1.0-9b-Q4_K_M.gguf",
+      "expected_sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 506.0,
+          "stderr_tail": "gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb has no kernels for the recurrent 'qwen35' path \u2014 inference runs on the CPU (64 threads)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/ornith-1.0-9b-Q4_K_M.gguf | qwen35 | 32 layers | ctx 4096 | 64 threads | 0.18s\nsampling: generic (temp 0.00, top_p 0.95, top_k 40, min_p 0.05, repeat_penalty 1.10)\n\nprompt: 3 tok, 23.60 tok/s | gen: 1 tok, 13.01 tok/s\n"
+        }
+      },
+      "actual_sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
+      "file_status": "pass"
+    },
+    {
+      "id": "phi-3.5-mini-instruct-q4_k_m",
+      "architecture": "phi3",
+      "file": "models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
+      "expected_sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 742.2,
+          "stderr_tail": "rope: phi3 LongRoPE short factors, mscale 1.1902\ngpu-split: budget=25.13GB fixed=0.60GB G=32/32 full=1 used=4.46GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (2.4 GB weights in VRAM)\ngpu: VRAM 21.11 GB free of 25.37 GB after init (kv 1.61 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/Phi-3.5-mini-instruct-Q4_K_M.gguf | phi3 | 32 layers | ctx 4096 | 64 threads | 0.60s\nsampling: phi3 (temp 0.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.03)\n\nprompt: 6 tok, 123.27 tok/s | gen: 1 tok, 69.90 tok/s\n"
+        }
+      },
+      "actual_sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
+      "file_status": "pass"
+    },
+    {
+      "id": "gemma-3-4b-it-q4_k_m",
+      "architecture": "gemma3",
+      "file": "models/google_gemma-3-4b-it-Q4_K_M.gguf",
+      "expected_sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 740.7,
+          "stderr_tail": "rope: linear scaling x8.00 (model metadata)\ngpu-split: budget=25.13GB fixed=1.09GB G=34/34 full=1 used=3.59GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (2.5 GB weights in VRAM)\ngpu: VRAM 22.06 GB free of 25.37 GB after init (kv 0.57 GB + scratch 0.00 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/google_gemma-3-4b-it-Q4_K_M.gguf | gemma3 | 34 layers | ctx 4096 | 64 threads | 0.59s\nsampling: gemma3 (temp 0.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)\n\nprompt: 4 tok, 92.37 tok/s | gen: 1 tok, 62.85 tok/s\n"
+        }
+      },
+      "actual_sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+      "file_status": "pass"
+    },
+    {
+      "id": "gemma-4-12b-it-q4_k_m",
+      "architecture": "gemma4",
+      "file": "models/gemma-4-12B-it-Q4_K_M.gguf",
+      "expected_sha256": "e4db6f8c1e48f7297069fa23ca3ff34e0b0155f8de5485498ed9a0e59944bc8c",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 1542.6,
+          "stderr_tail": "gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage \u2014 prefer official files\nrope: using model frequency factors (rope_freqs.weight)\ngpu-split: budget=25.13GB fixed=1.37GB G=48/48 full=1 used=9.31GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (7.4 GB weights in VRAM)\ngpu: VRAM 16.32 GB free of 25.37 GB after init (kv 1.41 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/gemma-4-12B-it-Q4_K_M.gguf | gemma4 | 48 layers | ctx 4096 | 64 threads | 1.21s\nsampling: gemma3 (temp 0.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)\n\nprompt: 4 tok, 33.94 tok/s | gen: 1 tok, 23.48 tok/s\n"
+        }
+      },
+      "actual_sha256": "e4db6f8c1e48f7297069fa23ca3ff34e0b0155f8de5485498ed9a0e59944bc8c",
+      "file_status": "pass"
+    }
+  ]
+}

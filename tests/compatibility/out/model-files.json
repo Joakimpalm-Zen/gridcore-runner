@@ -1,0 +1,90 @@
+{
+  "schema_version": "gridcore.runner.model-compat-report.v1",
+  "generated_utc": "2026-07-22T22:16:51Z",
+  "host": {
+    "os": "Linux",
+    "machine": "x86_64"
+  },
+  "runner": {
+    "path": "/home/lab/workspace/Gridcore/gridcore-runner/runner",
+    "version": "runner 0.1.2-alpha"
+  },
+  "reference": {
+    "path": null,
+    "version": null
+  },
+  "models": [
+    {
+      "id": "llama-3.2-3b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "expected_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "checks": {},
+      "actual_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "file_status": "pass"
+    },
+    {
+      "id": "mistral-7b-instruct-v0.3-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "expected_sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+      "checks": {},
+      "actual_sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+      "file_status": "pass"
+    },
+    {
+      "id": "qwen2.5-32b-instruct-q3_k_s",
+      "architecture": "qwen2",
+      "file": "models/Qwen2.5-32B-Instruct-Q3_K_S.gguf",
+      "expected_sha256": "a1aefda97dc4641598db576edf61b7b5f70f40abab33fbea39fb84fcaa9be44e",
+      "checks": {},
+      "actual_sha256": "a1aefda97dc4641598db576edf61b7b5f70f40abab33fbea39fb84fcaa9be44e",
+      "file_status": "pass"
+    },
+    {
+      "id": "qwen3-4b-q4_k_m",
+      "architecture": "qwen3",
+      "file": "models/Qwen3-4B-Q4_K_M.gguf",
+      "expected_sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "checks": {},
+      "actual_sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "file_status": "pass"
+    },
+    {
+      "id": "ornith-1.0-9b-q4_k_m",
+      "architecture": "qwen35",
+      "file": "models/ornith-1.0-9b-Q4_K_M.gguf",
+      "expected_sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
+      "checks": {},
+      "actual_sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
+      "file_status": "pass"
+    },
+    {
+      "id": "phi-3.5-mini-instruct-q4_k_m",
+      "architecture": "phi3",
+      "file": "models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
+      "expected_sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
+      "checks": {},
+      "actual_sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
+      "file_status": "pass"
+    },
+    {
+      "id": "gemma-3-4b-it-q4_k_m",
+      "architecture": "gemma3",
+      "file": "models/google_gemma-3-4b-it-Q4_K_M.gguf",
+      "expected_sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+      "checks": {},
+      "actual_sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+      "file_status": "pass"
+    },
+    {
+      "id": "gemma-4-12b-it-q4_k_m",
+      "architecture": "gemma4",
+      "file": "models/gemma-4-12B-it-Q4_K_M.gguf",
+      "expected_sha256": "e4db6f8c1e48f7297069fa23ca3ff34e0b0155f8de5485498ed9a0e59944bc8c",
+      "checks": {},
+      "actual_sha256": "e4db6f8c1e48f7297069fa23ca3ff34e0b0155f8de5485498ed9a0e59944bc8c",
+      "file_status": "pass"
+    }
+  ]
+}
