@@ -100,7 +100,7 @@ static void usage(const char *prog) {
         "                 beyond the training context, YaRN rope scaling is\n"
         "                 applied automatically\n"
         "  -b N           prompt batch size (default 64)\n"
-        "  -t N           threads (default: min(8, cpus))\n"
+        "  -t N           threads (default: physical cores, capped at 64)\n"
         "  -s N           RNG seed (default: time)\n"
         "  --temp F       temperature (0 = greedy: returns the model's argmax\n"
         "                 with no repeat penalty applied)\n"
@@ -347,7 +347,18 @@ int main(int argc, char **argv) {
 
     if (n_threads <= 0) {
         int nc = plat_cpu_count();
-        n_threads = nc > 8 ? 8 : nc;
+        // Default to a physical-core proxy (nc/2 under the near-universal 2-way
+        // SMT of the many-core x86 boxes this targets), capped so a very large
+        // box does not over-spawn. SMT siblings add nothing to a compute-bound
+        // decode — measured: throughput plateaus at physical cores and SMT gives
+        // no gain. The old min(8,nc) default left big boxes badly underused
+        // (measured 32.2s -> 9.9s, a 3.2x speedup, at -t 64 vs -t 8 on a 3B Q4,
+        // 64-core box; token-identical across thread counts). Scope a shared box
+        // with --reserve-cpu, or pin exactly with -t. This mirrors the physical-
+        // core cap already used below for the CPU-forced fallback path.
+        n_threads = nc >= 4 ? nc / 2 : nc;
+        if (n_threads > 64) n_threads = 64;
+        if (n_threads < 1) n_threads = 1;
         // If the model turns out to be CPU-forced (recurrent qwen3.5 path),
         // model_load may raise a defaulted count to this cap; a pinned -t
         // or CPU reservation leaves it 0 and is never overridden.

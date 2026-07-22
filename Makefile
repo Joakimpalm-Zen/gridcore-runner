@@ -7,6 +7,19 @@ PYTHON  ?= $(shell python3 -c "" >/dev/null 2>&1 && echo python3 || echo python)
 # -march=native unlocks the AVX2/FMA/F16C dot kernels in quants.c on x86;
 # other ISAs (ARM macs) compile the scalar fallbacks
 CFLAGS  ?= -O3 -ffast-math -std=gnu11 -Wall -Wextra -Wno-unused-parameter -march=native
+# Mandatory engine codegen, appended so it survives a hostile *environment*
+# CFLAGS. A conda/distro toolchain that exports CFLAGS=-march=nocona -O2
+# otherwise silently defeats the `?=` default above: __AVX2__ goes undefined,
+# every AVX2/FMA/F16C dot kernel in quants.c is `#if`-compiled out, and the
+# runner ships a SCALAR binary on AVX-512 hardware (measured: zero ymm/zmm
+# instructions, ~6x slower end-to-end). Plain `+=` (NOT `override`) is exactly
+# right here: it appends to an environment-set CFLAGS so the last -O/-march wins
+# and the conda clobber is undone, but it is ignored for a *command-line* CFLAGS
+# so the release build's portable `make CFLAGS="... -march=x86-64-v3"` pin is
+# preserved (a release must not bake in the build host's -march=native).
+# Cross-compile a local build with RUNNER_ARCH=-march=<target>.
+RUNNER_ARCH ?= -march=native
+CFLAGS += -O3 -ffast-math -std=gnu11 $(RUNNER_ARCH)
 LDFLAGS  = -lm -lpthread
 ifeq ($(OS),Windows_NT)
 # -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
