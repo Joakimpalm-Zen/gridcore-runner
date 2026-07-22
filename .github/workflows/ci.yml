@@ -643,3 +643,31 @@ jobs:
           path: |
             tests/conformance/out/
             tests/torture/out/
+
+  # Real SDK/gateway/framework parsers catch integration assumptions that raw
+  # JSON fixtures cannot. Dependencies are pinned and isolated from Runner.
+  consumer-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/compatibility/node/package-lock.json
+      - name: build and make test model
+        run: |
+          make
+          python3 scripts/make-test-model.py test.gguf
+      - name: install pinned consumers
+        run: |
+          python3 -m venv .compat-venv
+          .compat-venv/bin/pip install --quiet -r tests/compatibility/requirements.txt
+          npm ci --ignore-scripts --prefix tests/compatibility/node
+      - name: official SDK, LiteLLM and LangChain compatibility
+        run: .compat-venv/bin/python scripts/consumer_compat.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: consumer-compatibility-report
+          path: tests/compatibility/out/consumers.json

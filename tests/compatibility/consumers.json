@@ -1,0 +1,11 @@
+{
+  "schema_version": "gridcore.runner.consumer-compat.v1",
+  "consumers": [
+    {"id": "openai-python", "version": "2.47.0", "surface": "responses"},
+    {"id": "openai-node", "version": "6.48.0", "surface": "responses"},
+    {"id": "anthropic-python", "version": "0.118.0", "surface": "messages"},
+    {"id": "anthropic-node", "version": "0.78.0", "surface": "messages"},
+    {"id": "litellm", "version": "1.93.0", "surface": "gateway"},
+    {"id": "langchain-openai", "version": "1.4.0", "surface": "chat_completions"}
+  ]
+}

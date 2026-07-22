@@ -47,6 +47,7 @@ fuzz-sval_feed
 fuzz-jsonv_feed
 fuzz-gguf_open
 fuzz-corpus/
+tests/compatibility/out/*.runner.log
 src/kernels.ptx
 src/kernels-*.ptx.tmp
 bench-out.*.txt

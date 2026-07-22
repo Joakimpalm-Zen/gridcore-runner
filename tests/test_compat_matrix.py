@@ -50,3 +50,18 @@ def test_manifest_validation_rejects_duplicate_ids(tmp_path):
         assert "duplicate model id" in str(exc)
     else:
         raise AssertionError("duplicate IDs were accepted")
+
+
+def test_consumer_gate_covers_requested_integration_layers():
+    data = json.loads(
+        (ROOT / "tests" / "compatibility" / "consumers.json").read_text())
+    assert data["schema_version"] == "gridcore.runner.consumer-compat.v1"
+    assert {consumer["id"] for consumer in data["consumers"]} >= {
+        "openai-python", "openai-node", "anthropic-python",
+        "anthropic-node", "litellm", "langchain-openai",
+    }
+    for consumer in data["consumers"]:
+        assert consumer["version"]
+        assert consumer["surface"] in {
+            "chat_completions", "responses", "messages", "gateway"
+        }

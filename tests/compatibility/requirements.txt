@@ -1,0 +1,4 @@
+anthropic==0.118.0
+langchain-openai==1.4.0
+litellm==1.93.0
+openai==2.47.0

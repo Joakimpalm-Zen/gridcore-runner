@@ -1,0 +1,9 @@
+{
+  "name": "gridcore-runner-consumer-compat",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.78.0",
+    "openai": "6.48.0"
+  }
+}
