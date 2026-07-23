@@ -506,6 +506,56 @@ static void shared_release(gpu_weights *w) {
 // Upload one model's immutable device data and decide the CPU/GPU layer split.
 // act_bytes/max_hd describe the *per-sequence* scratch one instance needs; they
 // only feed the fitting decision, they are not allocated here.
+// Total weight bytes of one layer — attention plus the FFN, handling both a
+// dense FFN and a sparse-MoE layer (router + every expert, fused or split).
+// The dense w_gate/w_up/w_down are NULL on a MoE layer, so accounting only
+// those undercounts a MoE layer by ~all of its weight (the experts).
+static size_t layer_weight_bytes(const layer_t *ly, int n_expert) {
+    size_t wb = 0;
+    gguf_tensor *att[] = { ly->wq, ly->wk, ly->wv, ly->wo };
+    for (int i = 0; i < 4; i++) if (att[i]) wb += att[i]->nbytes;
+    if (ly->is_moe) {
+        if (ly->ffn_gate_inp) wb += ly->ffn_gate_inp->nbytes;
+        if (ly->moe_split) {
+            for (int e = 0; e < n_expert; e++)
+                wb += ly->moe_g[e]->nbytes + ly->moe_u[e]->nbytes + ly->moe_d[e]->nbytes;
+        } else {
+            if (ly->ffn_gate_exps) wb += ly->ffn_gate_exps->nbytes;
+            if (ly->ffn_up_exps)   wb += ly->ffn_up_exps->nbytes;
+            if (ly->ffn_down_exps) wb += ly->ffn_down_exps->nbytes;
+        }
+    } else {
+        gguf_tensor *ffn[] = { ly->w_gate, ly->w_up, ly->w_down };
+        for (int i = 0; i < 3; i++) if (ffn[i]) wb += ffn[i]->nbytes;
+    }
+    return wb;
+}
+
+// Highest file offset (data end) touched by any of a layer's weight tensors —
+// the partial-offload upload must reach this so a GPU MoE layer's expert slices
+// are all inside the uploaded prefix.
+static size_t layer_weight_end(const layer_t *ly, int n_expert, const uint8_t *map) {
+    size_t end = 0;
+#define WEND(t) do { gguf_tensor *_t = (t); if (_t) { \
+        size_t _e = (size_t)((uint8_t *)_t->data - map) + _t->nbytes; \
+        if (_e > end) end = _e; } } while (0)
+    WEND(ly->wq); WEND(ly->wk); WEND(ly->wv); WEND(ly->wo);
+    if (ly->is_moe) {
+        WEND(ly->ffn_gate_inp);
+        if (ly->moe_split) {
+            for (int e = 0; e < n_expert; e++) {
+                WEND(ly->moe_g[e]); WEND(ly->moe_u[e]); WEND(ly->moe_d[e]);
+            }
+        } else {
+            WEND(ly->ffn_gate_exps); WEND(ly->ffn_up_exps); WEND(ly->ffn_down_exps);
+        }
+    } else {
+        WEND(ly->w_gate); WEND(ly->w_up); WEND(ly->w_down);
+    }
+#undef WEND
+    return end;
+}
+
 static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                                  uint64_t fsize, uint64_t fino, int64_t fmtime) {
     gpu_weights *w = calloc(1, sizeof(gpu_weights));
@@ -560,10 +610,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         size_t used = fixed;
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
-            gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
-                                  ly->w_gate, ly->w_up, ly->w_down };
-            size_t wb = 0;
-            for (int i = 0; i < 7; i++) if (ws[i]) wb += ws[i]->nbytes;
+            size_t wb = layer_weight_bytes(ly, m->n_expert);
             // KV bytes honour the cache format: a q8_0 cache is ~53% of fp16,
             // so quantized KV directly buys more offloaded layers here
             size_t kv = 2 * (size_t)m->n_ctx * model_kv_row_bytes(m, l);
@@ -589,15 +636,9 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             upload_len = (size_t)((uint8_t *)m->tok_embd->data - (uint8_t *)m->gf.map)
                        + m->tok_embd->nbytes;
             for (int l = 0; l < G; l++) {
-                layer_t *ly = &m->layers[l];
-                gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
-                                      ly->w_gate, ly->w_up, ly->w_down };
-                for (int i = 0; i < 7; i++) {
-                    if (!ws[i]) continue;
-                    size_t end = (size_t)((uint8_t *)ws[i]->data - (uint8_t *)m->gf.map)
-                               + ws[i]->nbytes;
-                    if (end > upload_len) upload_len = end;
-                }
+                size_t end = layer_weight_end(&m->layers[l], m->n_expert,
+                                              (const uint8_t *)m->gf.map);
+                if (end > upload_len) upload_len = end;
             }
         }
         w->weights_len = upload_len;
