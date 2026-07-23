@@ -8,7 +8,10 @@ and CI need no CUDA toolkit.
 import os
 
 src = os.path.join(os.path.dirname(__file__), "..", "src", "kernels.ptx")
-dst = os.path.join(os.path.dirname(__file__), "..", "src", "kernels_ptx.h")
+# EMBED_OUT redirects the output (used by the drift check to generate to a temp
+# without touching the committed header).
+dst = os.environ.get("EMBED_OUT") or os.path.join(
+    os.path.dirname(__file__), "..", "src", "kernels_ptx.h")
 
 with open(src) as f:
     lines = f.read().split("\n")
