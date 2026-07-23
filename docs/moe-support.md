@@ -8,11 +8,14 @@ CPU fallback on the same host (64 threads).
 ## Summary
 
 The runner runs real sparse **mixture-of-experts** models — the class the field
-converges on for modest-VRAM hardware — both on CPU and on the GPU, within a
-24 GB budget. The headline result: **Qwen3-30B-A3B (Q4_K_M, 128 experts,
-top-8) loads in 18.6 GB, fits a 24 GB card with 6 GB free, produces correct
-output, and generates at ~55 tok/s on the GPU**, token-identical to the CPU
-reference.
+converges on for modest-VRAM hardware — on CPU, fully on the GPU, and with
+**partial CPU offload for cards smaller than the model** (8–16 GB). Headline
+results: **Qwen3-30B-A3B (Q4_K_M, 128 experts, top-8) loads in 18.6 GB, fits a
+24 GB card with 6 GB free, and generates at ~55 tok/s on the GPU**, token-
+identical to the CPU reference; on simulated 8/12/16 GB cards it partially
+offloads (19/29/39 of 48 layers on GPU) with identical output. Both supported
+MoE families (qwen3moe fused, Mixtral/llama split) and both expert layouts are
+covered.
 
 ## What is supported
 
@@ -72,21 +75,39 @@ miscompute:
 
   Decode is the interactive number; it is stable across runs (55–56 tok/s).
 
-### Mixtral-8x7B-Instruct — Q3_K_M, `llama`, split layout, CPU
+### Mixtral-8x7B-Instruct — `llama`, split layout
 
-- Source: `TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF` →
-  `mixtral-8x7b-instruct-v0.1.Q3_K_M.gguf` (20.36 GB).
+- Source: `TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF` (Q4_K_M 26.44 GB, and
+  Q3_K_M 20.36 GB).
 - Geometry: 32 layers, 8 experts, top-2, **legacy split per-expert tensors**.
-- **Correctness:** loads and produces correct output, e.g.
-  `The capital of France is` → ` a city that is known for its beauty, culture,
-  and history. Paris is …`.
-- **Why CPU, not GPU:** this GGUF is Q3_K, and the runner's GPU kernels cover
-  Q8_0 / Q4_K, not Q3_K → it runs on CPU (~4 tok/s). A Q4_K Mixtral would use
-  the GPU kernels but is ~26 GB, over the 24 GB budget; Q3_K fits VRAM but has
-  no GPU kernel. **Mixtral-8x7B therefore does not fit a 24 GB card at a
-  GPU-supported quant** — Qwen3-30B-A3B (Q4_K, 18 GB) is the ≤24 GB GPU MoE.
-  This validates the split-layout loader and the CPU MoE forward on a real
-  model.
+- **Correctness:** correct output, e.g. `The three primary colors are` →
+  ` red, yellow, and blue. These colors are considered primary because they …`.
+- Q4_K_M (26 GB) exceeds a 24 GB card, so on this hardware it always runs with
+  **partial CPU offload** (see below); it is the GPU-kernel-supported quant.
+  Q3_K_M fits VRAM but Q3_K has no GPU kernel, so it runs on CPU (~4 tok/s).
+
+## Partial CPU offload (8–16 GB cards)
+
+MoE models larger than the card run with the leading layers on the GPU and the
+rest on the CPU. This needed a fix: the gpu-split accounted only the dense FFN
+tensors, which are NULL on a MoE layer, so it undercounted each MoE layer by
+its experts (~all of its weight) and never offloaded. The split now accounts
+the full per-layer weight (attention + router + every expert, fused or split).
+
+VRAM budgets were simulated on the 24 GB slice with `--reserve-vram PCT` (caps
+usage to PCT% of total). **Every partial-offload configuration is token-
+identical to the full-precision reference** (full-GPU for Qwen3; CPU for the
+26 GB Mixtral that cannot fully fit), so offload is transparent to output.
+
+| Model | ~8 GB | ~12 GB | ~16 GB | full |
+|---|---|---|---|---|
+| **Qwen3-30B-A3B** Q4_K (fused, 48 layers) | 19/48 layers, 6.7 tok/s | 29/48, 9.6 | 39/48, 16.4 | 48/48, 55.3 |
+| **Mixtral-8x7B** Q4_K (split, 32 layers) | 9/32 layers, 11.6 tok/s | 13/32, 12.7 | 18/32, 14.4 | — (26 GB, never full on 24 GB) |
+
+Decode throughput scales with the fraction of layers on the GPU. Both MoE
+families (qwen3moe fused, llama split) and both expert layouts are covered.
+Nothing special is required to use it — the runner fits as many leading layers
+as the available (or `--reserve`-capped) VRAM allows and runs the rest on CPU.
 
 ### Synthetic equivalence tests (`tests/test_moe.py`, in CI)
 
