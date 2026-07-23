@@ -74,6 +74,7 @@ static struct {
     CUresult (*MemFree)(CUdeviceptr);
     CUresult (*MemcpyHtoD)(CUdeviceptr, const void *, size_t);
     CUresult (*MemcpyDtoH)(void *, CUdeviceptr, size_t);
+    CUresult (*MemcpyDtoD)(CUdeviceptr, CUdeviceptr, size_t);
     CUresult (*MemsetD8)(CUdeviceptr, unsigned char, size_t);
     CUresult (*ModuleLoadData)(CUmodule *, const void *);
     CUresult (*ModuleUnload)(CUmodule);
@@ -171,6 +172,7 @@ static bool cu_load(void) {
     cu.MemFree           = sym2("cuMemFree");
     cu.MemcpyHtoD        = sym2("cuMemcpyHtoD");
     cu.MemcpyDtoH        = sym2("cuMemcpyDtoH");
+    cu.MemcpyDtoD        = sym2("cuMemcpyDtoD");
     cu.MemsetD8          = sym2("cuMemsetD8");
     cu.ModuleLoadData    = dl_sym(cu.lib, "cuModuleLoadData");
     cu.ModuleUnload      = dl_sym(cu.lib, "cuModuleUnload");
@@ -196,7 +198,7 @@ static bool cu_load(void) {
     return cu.Init && cu.DeviceGetCount && cu.DeviceGet && cu.DeviceGetName &&
            cu.PrimaryCtxRetain && cu.PrimaryCtxRelease && cu.CtxSetCurrent &&
            cu.MemGetInfo && cu.MemAlloc && cu.MemFree && cu.MemcpyHtoD &&
-           cu.MemcpyDtoH && cu.MemsetD8 && cu.ModuleLoadData && cu.ModuleUnload &&
+           cu.MemcpyDtoH && cu.MemcpyDtoD && cu.MemsetD8 && cu.ModuleLoadData && cu.ModuleUnload &&
            cu.ModuleGetFunction && cu.LaunchKernel && cu.CtxSynchronize;
 }
 
@@ -283,7 +285,8 @@ typedef struct {
     gpu_weights *sw;                    // shared weights, refcounted
     CUdeviceptr kc, vc;
     CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, attn_part, logits;
-    float       *h_x, *h_logits;        // host staging
+    CUdeviceptr moe_logits, moe_eout;   // sparse-MoE: router logits, expert down-out
+    float       *h_x, *h_logits, *h_moe_logits; // host staging
     int          last_pos;              // -2 = nothing synced yet
     // CUDA graphs for the single-token decode path (Experiment A)
     CUstream     stream;
@@ -801,15 +804,23 @@ bool gpu_init(model_t *m) {
                                       ATTN_SPLITS * (max_hd + 2)));
         CK(cu.MemAlloc(&g->logits, sizeof(float) * m->n_vocab));
         CK(cu.MemAlloc(&g->pos_dev, sizeof(int)));
+        if (m->n_expert > 0) {
+            // sparse-MoE router logits + one expert's down output
+            CK(cu.MemAlloc(&g->moe_logits, sizeof(float) * (size_t)m->n_expert));
+            CK(cu.MemAlloc(&g->moe_eout, sizeof(float) * (size_t)m->n_embd));
+        }
         if (cu_graphs_ok() && cu.StreamCreate(&g->stream, 0) != 0)
             g->stream = NULL;
         // gemma4's V-copy path (ly->wv == NULL) uses a synchronous MemsetD8
-        // that cannot be captured into a CUDA graph
+        // that cannot be captured into a CUDA graph; MoE routing reads router
+        // logits back to the host mid-forward, which likewise cannot be captured
         for (int l = 0; l < m->gpu_layers; l++)
-            if (!m->layers[l].wv) g->graph_bad = true;
+            if (!m->layers[l].wv || m->layers[l].is_moe) g->graph_bad = true;
 
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
+        if (m->n_expert > 0)
+            g->h_moe_logits = malloc(sizeof(float) * (size_t)m->n_expert);
         if (!g->h_x || !g->h_logits) goto fail;
 
         char name[128] = "CUDA GPU";
@@ -984,10 +995,11 @@ static void gpu_ctx_free(model_t *m, gpu_t *g) {
     if (g->stream && cu.StreamDestroy) cu.StreamDestroy(g->stream);
     CUdeviceptr bufs[] = { g->kc, g->vc, g->x, g->xb, g->xb2,
                            g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
-                           g->attn_part, g->logits, g->pos_dev };
+                           g->attn_part, g->logits, g->pos_dev,
+                           g->moe_logits, g->moe_eout };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
-    free(g->h_x); free(g->h_logits);
+    free(g->h_x); free(g->h_logits); free(g->h_moe_logits);
     shared_release(g->sw);
     free(g);
 }
@@ -1103,6 +1115,77 @@ static bool stage_x(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
 // vocab-logits matvec (the single most expensive launch) runs only when the
 // caller wants logits, and only for the tile's last token. The caller stages
 // x (and, for graph capture, uploads pos) before calling this.
+// Sparse-MoE FFN on the GPU for `tn` tokens. Reads the RMS-normed input from
+// g->xb (stride xdim) and writes the FFN output back into g->xb. Routing —
+// softmax over ALL experts, top-k, renormalize (Mixtral/Qwen3) — runs on the
+// host from router logits read back per token; the per-expert SwiGLU matmuls
+// run on the GPU by pointing enc_mv at each expert's slice of the fused 3D
+// tensors. The whole model file is uploaded as one buffer, so a slice's mmap
+// offset IS its device offset (that is what enc_mv keys on). Host-dependent
+// routing is why MoE layers force the eager path (graph_bad).
+static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdim) {
+    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used, nff = m->n_ff_exp;
+    size_t gate_rs = ggml_row_size(ly->ffn_gate_exps->type, n_embd);
+    size_t up_rs   = ggml_row_size(ly->ffn_up_exps->type, n_embd);
+    size_t down_rs = ggml_row_size(ly->ffn_down_exps->type, nff);
+    for (int t = 0; t < tn; t++) {
+        CUdeviceptr xin  = g->xb  + (size_t)t * xdim * sizeof(float);
+        CUdeviceptr aout = g->xb2 + (size_t)t * xdim * sizeof(float);
+        if (!enc_mv(g, m, ly->ffn_gate_inp, xin, g->moe_logits, n_embd, ne, 0, 1, xdim, ne))
+            return false;
+        if (cu.StreamSynchronize(g->stream) != 0) return false;
+        if (cu.MemcpyDtoH(g->h_moe_logits, g->moe_logits, sizeof(float) * (size_t)ne) != 0)
+            return false;
+        // softmax over all experts, then top-k with renormalized weights
+        float *lg = g->h_moe_logits;
+        float mx = lg[0];
+        for (int e = 1; e < ne; e++)
+            if (lg[e] > mx) mx = lg[e];
+        float ssum = 0.0f;
+        for (int e = 0; e < ne; e++) { float p = expf(lg[e] - mx); lg[e] = p; ssum += p; }
+        for (int e = 0; e < ne; e++) lg[e] /= ssum;
+        int sel[256];
+        float selw[256], denom = 0.0f;
+        for (int s = 0; s < used; s++) {
+            int best = 0;
+            float bp = -1.0f;
+            for (int e = 0; e < ne; e++)
+                if (lg[e] > bp) { bp = lg[e]; best = e; }
+            sel[s] = best;
+            selw[s] = bp;
+            denom += bp;
+            lg[best] = -1.0f;
+        }
+        for (int s = 0; s < used; s++) {
+            int e = sel[s];
+            float w = selw[s] / denom;
+            gguf_tensor gv = *ly->ffn_gate_exps;
+            gv.data = (uint8_t *)ly->ffn_gate_exps->data + (size_t)e * nff * gate_rs;
+            gguf_tensor uv = *ly->ffn_up_exps;
+            uv.data = (uint8_t *)ly->ffn_up_exps->data + (size_t)e * nff * up_rs;
+            gguf_tensor dv = *ly->ffn_down_exps;
+            dv.data = (uint8_t *)ly->ffn_down_exps->data + (size_t)e * n_embd * down_rs;
+            bool ok = enc_mv(g, m, &gv, xin, g->hb, n_embd, nff, 0, 1, xdim, nff)
+                   && enc_mv(g, m, &uv, xin, g->hb2, n_embd, nff, 0, 1, xdim, nff)
+                   && enc_actmul(g, m, g->hb, g->hb2, nff)
+                   && enc_scale(g, g->hb, w, nff, 1, nff);       // fold weight into the hidden
+            if (!ok) return false;
+            if (s == 0) {
+                if (!enc_mv(g, m, &dv, g->hb, aout, nff, n_embd, 0, 1, nff, n_embd))
+                    return false;
+            } else {
+                if (!enc_mv(g, m, &dv, g->hb, g->moe_eout, nff, n_embd, 0, 1, nff, n_embd) ||
+                    !enc_add(g, aout, g->moe_eout, n_embd, 1, n_embd, n_embd))
+                    return false;
+            }
+        }
+    }
+    // move the accumulated per-token outputs (in xb2) back into xb for the
+    // residual add; sync first so the expert kernels have completed
+    if (cu.StreamSynchronize(g->stream) != 0) return false;
+    return cu.MemcpyDtoD(g->xb, g->xb2, (size_t)tn * xdim * sizeof(float)) == 0;
+}
+
 static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                      int pos, bool want_logits, int l0, int l1) {
     (void)tokens; (void)pos;
@@ -1193,6 +1276,10 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->ffn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
         prof_mark(g, PH_NORM);
+        if (ly->is_moe) {
+            ok = ok && gpu_moe_ffn(g, m, ly, tn, xdim);  // writes FFN output into g->xb
+            prof_mark(g, PH_MATVEC);
+        } else {
         ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
         ok = ok && enc_mv(g, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
         prof_mark(g, PH_MATVEC);
@@ -1200,6 +1287,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         prof_mark(g, PH_ELEM);
         ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
         prof_mark(g, PH_MATVEC);
+        }
         if (g->sw->pfn[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);

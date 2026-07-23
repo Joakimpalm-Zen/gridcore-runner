@@ -268,6 +268,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     }
     if (strcmp(arch, "llama") != 0 && strcmp(arch, "qwen2") != 0 &&
         strcmp(arch, "qwen3") != 0 && strcmp(arch, "qwen35") != 0 &&
+        strcmp(arch, "qwen3moe") != 0 &&
         strcmp(arch, "mistral") != 0 &&
         strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0 &&
         strcmp(arch, "gemma3") != 0 && strcmp(arch, "gemma4") != 0 &&
@@ -324,9 +325,11 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         for (int i = 0; i < m->n_layer; i++)
             m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % pattern) != 0;
     }
-    if (strcmp(arch, "qwen3") == 0) {
-        // Thinking-tuned Qwen3 responses wrap hidden reasoning before the
-        // visible answer; shared CLI/server output handling splits this pair.
+    if (strcmp(arch, "qwen3") == 0 || strcmp(arch, "qwen3moe") == 0) {
+        // Thinking-tuned Qwen3 (dense and sparse-MoE) responses wrap hidden
+        // reasoning before the visible answer; shared CLI/server output
+        // handling splits this pair. qwen3moe = qwen3 attention (qk-norm, GQA,
+        // NeoX rope) with a sparse-MoE FFN, handled by the is_moe layer path.
         m->think_open  = "<think>";
         m->think_close = "</think>";
     }
