@@ -263,7 +263,23 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0 &&
         strcmp(arch, "gemma3") != 0 && strcmp(arch, "gemma4") != 0 &&
         strcmp(arch, "phi3") != 0) {
-        fprintf(stderr, "warning: architecture '%s' untested, attempting llama-style load\n", arch);
+        // Admission is an allowlist: tensor-name compatibility is not proof of
+        // mathematical compatibility (Q/K layout, norms, rope, activations,
+        // softcapping all vary per family). Running an unknown architecture
+        // through llama-style math produces plausible-looking WRONG output —
+        // worse than a clear refusal, especially under an agent. Experimental
+        // llama-style loading stays available behind an explicit opt-in that
+        // is never represented as supported.
+        if (!getenv("RUNNER_ALLOW_UNKNOWN_ARCH")) {
+            fprintf(stderr, "error: unsupported architecture '%s' — refusing "
+                    "to run it through llama-style math (set "
+                    "RUNNER_ALLOW_UNKNOWN_ARCH=1 to try anyway, EXPERIMENTAL: "
+                    "output may be silently wrong)\n", arch);
+            return false;
+        }
+        fprintf(stderr, "warning: architecture '%s' is UNSUPPORTED; "
+                "RUNNER_ALLOW_UNKNOWN_ARCH is set — attempting llama-style "
+                "load, output may be silently wrong\n", arch);
     }
     char key[128];
     #define AK(fmt) (snprintf(key, sizeof(key), "%s." fmt, arch), key)

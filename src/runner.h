@@ -127,6 +127,10 @@ static inline size_t ggml_row_size(int type, int64_t n) {
 
 // dequantize a full row of n elements
 void  dequant_row(int type, const void *src, float *dst, int n);
+// Requantize a GGUF at in_path to out_path (written beside + atomically
+// renamed). Returns 0 on success, nonzero on failure with the destination
+// left untouched. Declared here so tests can drive it without main.c.
+int   quantize_gguf(const char *in_path, const char *out_path, int target);
 // dot(row, x) over n elements
 float vec_dot(int type, const void *row, const float *x, int n);
 // out[b] = dot(w, x + b*x_stride) for nb columns sharing one weight row
@@ -523,6 +527,9 @@ void sampler_accept(sampler *s, int tok);
 // argmax order when constrained). The repeat penalty is a diversity knob and
 // is not applied there — greedy decoding is a determinism request, and a
 // caller who wants the most likely token does not want a different one back.
+// Returns the chosen token id, -1 when no candidate is valid (a clean stop),
+// or -2 on an allocation failure (the caller must treat this as an error, not
+// a stop).
 int  sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *ud);
 
 // -------------------------------------------------- per-family sampling presets
@@ -822,6 +829,8 @@ typedef struct {
     int  n_stop;
     bool ignore_eos;
     bool hit_stop;         // last generate ended on a stop token / json done
+    bool oom;              // generation aborted on an allocation failure — the
+                           // finish reason is "error", never a silent "stop"
     bool json_mode;        // constrain output to a single JSON object
     const snode *schema;   // constrain output to a JSON schema (overrides json_mode)
     // Constrained mode hides the thinking prelude from the output callback by

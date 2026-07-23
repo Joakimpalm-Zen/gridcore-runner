@@ -777,6 +777,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
     char buf[512];
     int n_gen = 0;
     e->hit_stop = false;
+    e->oom = false;
     e->lp_count = 0;
     double t0 = now_s();
     model_t *m = e->m, *dm = e->dm;
@@ -829,6 +830,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             float *ti = i == 0 ? logits : model_spec_row_logits(m, i - 1);
             int tok = sample_pick(e->smp, ti, m->n_vocab, ok, e);
             if (tok < 0) {
+                if (tok == -2) e->oom = true;  // error, not a clean stop
                 e->hit_stop = true;
                 e->pos += i; // keep the accepted drafts' KV
                 if (e->dpos > e->pos) e->dpos = e->pos;
@@ -919,6 +921,7 @@ done:
 
 void engine_gen_begin(engine *e, int max_new) {
     e->hit_stop  = false;
+    e->oom       = false;
     e->lp_count  = 0;
     e->gen_max   = max_new;
     e->gen_count = 0;
@@ -937,7 +940,11 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
     int tok = sample_pick(e->smp, (float *)logits, e->m->n_vocab,
                           e->schema ? schema_ok :
                           e->json_mode ? json_ok : NULL, e);
-    if (tok < 0) { e->hit_stop = true; return ENGINE_STEP_DONE; } // no continuation
+    if (tok < 0) { // -1: no valid continuation (clean stop); -2: allocation error
+        if (tok == -2) e->oom = true;
+        e->hit_stop = true;
+        return ENGINE_STEP_DONE;
+    }
     sampler_accept(e->smp, tok);
     if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
     if (is_stop(e, tok) && !e->ignore_eos) {

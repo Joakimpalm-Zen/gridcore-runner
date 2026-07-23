@@ -12,15 +12,23 @@ OUT = "test.gguf"
 SUPPRESS_ALL_BUT_EOS = False
 ZERO_FIRST_DIM = False
 WRAP_FIRST_OFFSET = False
-for a in sys.argv[1:]:
+ARCH = "llama"
+args = sys.argv[1:]
+i = 0
+while i < len(args):
+    a = args[i]
     if a == "--suppress-all-but-eos":
         SUPPRESS_ALL_BUT_EOS = True
     elif a == "--zero-first-dim":
         ZERO_FIRST_DIM = True
     elif a == "--wrap-first-offset":
         WRAP_FIRST_OFFSET = True
+    elif a == "--arch":
+        i += 1
+        ARCH = args[i]
     else:
         OUT = a
+    i += 1
 
 N_EMBD, N_HEAD, N_KV, N_FF, N_LAYER = 64, 4, 2, 128, 2
 VOCAB = ["<unk>", "<s>", "</s>"] + [f"<0x{i:02X}>" for i in range(256)]
@@ -93,15 +101,15 @@ for i in range(N_LAYER):
     ]
 
 meta_kvs = [
-    kv_str("general.architecture", "llama"),
-    kv_u32("llama.block_count", N_LAYER),
-    kv_u32("llama.context_length", 256),
-    kv_u32("llama.embedding_length", N_EMBD),
-    kv_u32("llama.feed_forward_length", N_FF),
-    kv_u32("llama.attention.head_count", N_HEAD),
-    kv_u32("llama.attention.head_count_kv", N_KV),
-    kv_f32("llama.attention.layer_norm_rms_epsilon", 1e-5),
-    kv_f32("llama.rope.freq_base", 10000.0),
+    kv_str("general.architecture", ARCH),
+    kv_u32(f"{ARCH}.block_count", N_LAYER),
+    kv_u32(f"{ARCH}.context_length", 256),
+    kv_u32(f"{ARCH}.embedding_length", N_EMBD),
+    kv_u32(f"{ARCH}.feed_forward_length", N_FF),
+    kv_u32(f"{ARCH}.attention.head_count", N_HEAD),
+    kv_u32(f"{ARCH}.attention.head_count_kv", N_KV),
+    kv_f32(f"{ARCH}.attention.layer_norm_rms_epsilon", 1e-5),
+    kv_f32(f"{ARCH}.rope.freq_base", 10000.0),
     kv_str("tokenizer.ggml.model", "llama"),
     kv_arr_str("tokenizer.ggml.tokens", VOCAB),
     kv_arr_f32("tokenizer.ggml.scores", [0.0] * N_VOCAB),

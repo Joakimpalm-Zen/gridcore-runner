@@ -1960,7 +1960,10 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
         emit_channel(&g, 0, g.hold.s, (int)g.hold.n);
         g.hold.n = 0;
     }
-    const char *finish = g.stopped || e->hit_stop ? "stop" : "length";
+    // e->oom: generation hit an allocation failure — report it truthfully as
+    // "error", never let it masquerade as a clean "stop".
+    const char *finish = e->oom ? "error"
+                       : g.stopped || e->hit_stop ? "stop" : "length";
     // a streamed call reports the same terminal reason a buffered one does
     if (g.tsx_on && tool_stream_called(&g.tsx)) finish = "tool_calls";
 

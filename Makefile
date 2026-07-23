@@ -80,6 +80,7 @@ endif
 TEST_PREFIX = $(TEST_BATCH:test-batch=test-prefix)
 TEST_VRAMREG = $(TEST_BATCH:test-batch=test-vram-registry)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
+TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
@@ -191,6 +192,11 @@ TEST_KV_TOL_SRC = tests/test_kv_tol.c src/gguf.c src/compat.c src/quants.c \
 $(TEST_KV_TOL): $(TEST_KV_TOL_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_KV_TOL_SRC) -o $@ $(LDFLAGS)
 
+TEST_QUANTIZE_SRC = tests/test_quantize.c src/quantize.c src/gguf.c \
+                    src/compat.c src/quants.c
+$(TEST_QUANTIZE): $(TEST_QUANTIZE_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_QUANTIZE_SRC) -o $@ $(LDFLAGS)
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
@@ -202,7 +208,7 @@ test-ornith-cpu: runner
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
-      $(TEST_PREFIX) $(TEST_VRAMREG) $(TEST_KV_TOL) runner test.gguf
+      $(TEST_PREFIX) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_QUANTIZE) runner test.gguf
 	./$(TEST_BIND)
 	./$(TEST_VRAMREG)
 	./$(TEST_JSON_SCHEMA)
@@ -217,6 +223,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_BATCH)
 	./$(TEST_PREFIX)
 	./$(TEST_KV_TOL)
+	./$(TEST_QUANTIZE)
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py; \

@@ -17,7 +17,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults,
                const sampler_override *ov, int port, int parallel,
                int n_threads, int ttl, const char *draft_path, int draft_k);
-int quantize_gguf(const char *in_path, const char *out_path, int target);
+// quantize_gguf is declared in runner.h
 
 // ---------------------------------------------------------------- misc
 

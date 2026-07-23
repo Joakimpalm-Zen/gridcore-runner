@@ -170,6 +170,7 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
     }
 
     cand_t *c = malloc(sizeof(cand_t) * n_vocab);
+    if (!c) return -2;  // allocation failure — an error, not a stop
     for (int i = 0; i < n_vocab; i++) c[i] = (cand_t){ logits[i] / temp, i };
     qsort(c, n_vocab, sizeof(cand_t), cand_cmp);
 

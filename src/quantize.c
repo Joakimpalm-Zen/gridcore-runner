@@ -186,9 +186,34 @@ int quantize_gguf(const char *in_path, const char *out_path, int target) {
         }
     }
 
-    FILE *f = fopen(out_path, "wb");
+    // Honor the file's declared data alignment. The reader derives every
+    // tensor's data offset from general.alignment (gguf.c), and we copy that
+    // KV verbatim — so the data MUST be laid out at the same alignment, or
+    // every offset past the first misaligned tensor is read at the wrong
+    // address. (RNR-002: hardcoding 32 silently corrupts any model that
+    // declares 64/128.)
+    uint64_t align = gguf_get_u32(&g, "general.alignment", 32);
+    if (align == 0 || (align & (align - 1))) {
+        fprintf(stderr, "error: general.alignment=%llu is not a power of two\n",
+                (unsigned long long)align);
+        gguf_close(&g);
+        return 1;
+    }
+    uint64_t amask = align - 1;
+
+    // Write beside the destination and rename on success, so a failed or
+    // interrupted requant never destroys an existing good model — and an
+    // in-place requant (in_path == out_path) no longer truncates its own
+    // input. (RNR-015.)
+    size_t tlen = strlen(out_path) + sizeof(".partial");
+    char *tmp_path = malloc(tlen);
+    if (!tmp_path) { gguf_close(&g); return 1; }
+    snprintf(tmp_path, tlen, "%s.partial", out_path);
+
+    FILE *f = fopen(tmp_path, "wb");
     if (!f) {
-        fprintf(stderr, "error: cannot write %s\n", out_path);
+        fprintf(stderr, "error: cannot write %s\n", tmp_path);
+        free(tmp_path);
         gguf_close(&g);
         return 1;
     }
@@ -200,7 +225,7 @@ int quantize_gguf(const char *in_path, const char *out_path, int target) {
     wr_u64(&w, g.n_kv);
     for (uint64_t i = 0; i < g.n_kv; i++) wr_kv(&w, &g.kv[i]);
 
-    // tensor table with new types/offsets (alignment 32)
+    // tensor table with new types/offsets (data alignment `align`)
     uint64_t off = 0;
     int *out_type = malloc(sizeof(int) * g.n_tensors);
     uint64_t *out_off = malloc(sizeof(uint64_t) * g.n_tensors);
@@ -229,12 +254,12 @@ int quantize_gguf(const char *in_path, const char *out_path, int target) {
             !checked_u64_mul(rows, t->ne[3], &rows) ||
             !checked_u64_mul(ggml_row_size(out_type[i], t->ne[0]), rows, &bytes) ||
             !checked_u64_add(off, bytes, &end) ||
-            !checked_u64_add(end, 31, &end)) {
+            !checked_u64_add(end, amask, &end)) {
             w.ok = false;
             break;
         }
         out_off[i] = off;
-        off = end & ~31ull;
+        off = end & ~amask;
 
         wr_str(&w, t->name, strlen(t->name));
         wr_u32(&w, t->n_dims);
@@ -244,7 +269,7 @@ int quantize_gguf(const char *in_path, const char *out_path, int target) {
     }
     // pad to data section
     int64_t hdr_end = wr_tell(&w);
-    uint64_t data_start = hdr_end >= 0 ? ((uint64_t)hdr_end + 31) & ~31ull : 0;
+    uint64_t data_start = hdr_end >= 0 ? ((uint64_t)hdr_end + amask) & ~amask : 0;
     if (hdr_end >= 0 && data_start < (uint64_t)hdr_end) w.ok = false;
     wr_pad_to(&w, data_start);
 
@@ -296,9 +321,28 @@ int quantize_gguf(const char *in_path, const char *out_path, int target) {
     gguf_close(&g);
 
     if (!write_ok) {
-        fprintf(stderr, "error: failed writing quantized model %s\n", out_path);
+        remove(tmp_path);
+        fprintf(stderr, "error: failed writing quantized model %s "
+                "(destination left untouched)\n", out_path);
+        free(tmp_path);
         return 1;
     }
+
+    // Install the finished file. On POSIX rename() atomically replaces an
+    // existing destination; Windows rename() refuses one, so remove first
+    // (the temp is already complete, so the worst case is a crash between the
+    // two leaving only the temp — never a truncated destination).
+#ifdef _WIN32
+    remove(out_path);
+#endif
+    if (rename(tmp_path, out_path) != 0) {
+        remove(tmp_path);
+        fprintf(stderr, "error: wrote %s but could not install it as %s "
+                "(destination unchanged)\n", tmp_path, out_path);
+        free(tmp_path);
+        return 1;
+    }
+    free(tmp_path);
 
     fprintf(stderr, "quantize: %s -> %s (%s): %llu tensors converted, %llu kept\n",
             in_path, out_path, ggml_type_name(target),
