@@ -280,6 +280,11 @@ static char *claim_rmw(const char *in, size_t in_len, void *ud) {
     return serialise(e, n);
 }
 
+// Remove an already-committed (pid, seq) entry — used to roll a claim back when
+// the lease handle cannot be allocated after admission (RNR-013). Defined via
+// the shared edit_rmw in the commit/release section below.
+static void registry_rollback(const char *path, long pid, long seq);
+
 vram_lease *vram_claim(const char *gpu_id, const char *model_path,
                        uint64_t need_bytes, vram_free_fn free_fn, void *free_ud,
                        int wait_secs, const volatile int *cancel,
@@ -327,7 +332,15 @@ vram_lease *vram_claim(const char *gpu_id, const char *model_path,
     }
 
     vram_lease *l = calloc(1, sizeof(*l));
-    if (!l) return NULL;
+    if (!l) {
+        // The (pid, seq) entry is already committed but we have no handle to
+        // release it later, and this live process will never be dead-PID
+        // reaped — so roll the exact entry back now, or it would refuse future
+        // runners against a reservation that never became real (RNR-013).
+        registry_rollback(path, c.pid, c.seq);
+        if (err && err_cap) snprintf(err, err_cap, "out of memory creating vram lease");
+        return NULL;
+    }
     snprintf(l->path, sizeof(l->path), "%s", path);
     l->pid = c.pid;
     l->seq = c.seq;
@@ -374,4 +387,9 @@ void vram_release(vram_lease *l) {
     edit_ctx x = { .pid = l->pid, .seq = l->seq, .remove = true };
     plat_file_rmw(l->path, edit_rmw, &x);
     free(l);
+}
+
+static void registry_rollback(const char *path, long pid, long seq) {
+    edit_ctx x = { .pid = pid, .seq = seq, .remove = true };
+    plat_file_rmw(path, edit_rmw, &x);
 }
