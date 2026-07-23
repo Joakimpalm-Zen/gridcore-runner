@@ -603,6 +603,12 @@ static struct {
     // Serializing them costs nothing real anyway: both saturate the device,
     // so overlapping them only trades one's latency for the other's.
     pthread_mutex_t dev_mu;
+    // decode worker's microbatch scratch [n_slots], owned by sched_start so the
+    // worker never allocates and can never fail startup (RNR-005)
+    int    *w_idx;
+    int32_t *w_tk;
+    int    *w_ps;
+    float  **w_out;
     // metrics
     atomic_long steps, seqs_batched;
 } SCH;
@@ -621,11 +627,13 @@ static void ts_in(struct timespec *ts, double secs) {
 static void *decode_worker(void *unused) {
     (void)unused;
     int n = SV.n_slots;
-    int     *idx = malloc(sizeof(int) * (size_t)n);
-    int32_t *tk  = malloc(sizeof(int32_t) * (size_t)n);
-    int     *ps  = malloc(sizeof(int) * (size_t)n);
-    float  **out = malloc(sizeof(float *) * (size_t)n);
-    if (!idx || !tk || !ps || !out) { free(idx); free(tk); free(ps); free(out); return NULL; }
+    // scratch is preallocated and owned by sched_start (see RNR-005): the
+    // worker cannot fail here, so it can never exit leaving slot threads
+    // waiting forever for logits it was going to produce
+    int     *idx = SCH.w_idx;
+    int32_t *tk  = SCH.w_tk;
+    int     *ps  = SCH.w_ps;
+    float  **out = SCH.w_out;
     int n_vocab = SV.slots[0].m->n_vocab;
 
     pthread_mutex_lock(&SCH.mu);
@@ -682,34 +690,75 @@ static void *decode_worker(void *unused) {
         pthread_cond_broadcast(&SCH.slot_cv);
     }
     pthread_mutex_unlock(&SCH.mu);
-    free(idx); free(tk); free(ps); free(out);
-    return NULL;
+    return NULL;   // scratch is owned and freed by sched_shutdown
 }
 
 // Batching is enabled only for plain multi-slot serving. Swap mode reloads
 // slot 0's model underneath the batch's borrowed pointers, and a single slot
 // has nothing to batch with, so both keep the untouched solo path.
+// Free every memory buffer SCH may hold. Idempotent and safe on partial state:
+// unset pointers are NULL. Does not touch sync primitives — those have their
+// own staged teardown, since destroying an uninitialized one is undefined.
+static void sched_free_buffers(void) {
+    if (SCH.seq)
+        for (int i = 0; i < SV.n_slots; i++) free(SCH.seq[i].logits);
+    free(SCH.seq);   SCH.seq   = NULL;
+    model_batch_free(SCH.batch); SCH.batch = NULL;
+    free(SCH.w_idx); SCH.w_idx = NULL;
+    free(SCH.w_tk);  SCH.w_tk  = NULL;
+    free(SCH.w_ps);  SCH.w_ps  = NULL;
+    free(SCH.w_out); SCH.w_out = NULL;
+}
+
 static bool sched_start(void) {
     if (SV.n_slots < 2 || SV.n_reg > 0) return false;
-    model_t **ms = malloc(sizeof(model_t *) * (size_t)SV.n_slots);
-    SCH.seq = calloc((size_t)SV.n_slots, sizeof(seq_t));
-    if (!ms || !SCH.seq) { free(ms); free(SCH.seq); SCH.seq = NULL; return false; }
-    for (int i = 0; i < SV.n_slots; i++) ms[i] = SV.slots[i].m;
-    int n_vocab = SV.slots[0].m->n_vocab;
-    for (int i = 0; i < SV.n_slots; i++) {
-        SCH.seq[i].logits = malloc(sizeof(float) * (size_t)n_vocab);
-        if (!SCH.seq[i].logits) { free(ms); return false; }
+    int n = SV.n_slots;
+    model_t **ms = malloc(sizeof(model_t *) * (size_t)n);
+    SCH.seq   = calloc((size_t)n, sizeof(seq_t));
+    // the decode worker's microbatch scratch lives here, not in the worker, so
+    // it is allocated (and checked) before "running" is ever published
+    SCH.w_idx = malloc(sizeof(int)     * (size_t)n);
+    SCH.w_tk  = malloc(sizeof(int32_t) * (size_t)n);
+    SCH.w_ps  = malloc(sizeof(int)     * (size_t)n);
+    SCH.w_out = malloc(sizeof(float *) * (size_t)n);
+    if (!ms || !SCH.seq || !SCH.w_idx || !SCH.w_tk || !SCH.w_ps || !SCH.w_out) {
+        free(ms); sched_free_buffers(); return false;
     }
-    SCH.batch = model_batch_create(ms, SV.n_slots);
+    for (int i = 0; i < n; i++) ms[i] = SV.slots[i].m;
+    int n_vocab = SV.slots[0].m->n_vocab;
+    for (int i = 0; i < n; i++) {
+        SCH.seq[i].logits = malloc(sizeof(float) * (size_t)n_vocab);
+        if (!SCH.seq[i].logits) { free(ms); sched_free_buffers(); return false; }
+    }
+    SCH.batch = model_batch_create(ms, n);
     free(ms);
-    if (!SCH.batch) return false;
-    if (pthread_mutex_init(&SCH.mu, NULL) != 0) return false;
-    if (pthread_mutex_init(&SCH.dev_mu, NULL) != 0) return false;
-    if (pthread_cond_init(&SCH.dec_cv, NULL) != 0) return false;
-    if (pthread_cond_init(&SCH.slot_cv, NULL) != 0) return false;
+    if (!SCH.batch) { sched_free_buffers(); return false; }
+
+    // sync primitives — torn down in reverse on any subsequent failure
+    if (pthread_mutex_init(&SCH.mu, NULL) != 0) { sched_free_buffers(); return false; }
+    if (pthread_mutex_init(&SCH.dev_mu, NULL) != 0) {
+        pthread_mutex_destroy(&SCH.mu);
+        sched_free_buffers(); return false;
+    }
+    if (pthread_cond_init(&SCH.dec_cv, NULL) != 0) {
+        pthread_mutex_destroy(&SCH.dev_mu); pthread_mutex_destroy(&SCH.mu);
+        sched_free_buffers(); return false;
+    }
+    if (pthread_cond_init(&SCH.slot_cv, NULL) != 0) {
+        pthread_cond_destroy(&SCH.dec_cv);
+        pthread_mutex_destroy(&SCH.dev_mu); pthread_mutex_destroy(&SCH.mu);
+        sched_free_buffers(); return false;
+    }
+
+    // Everything the worker needs now exists — only here is it safe to publish
+    // running and launch the worker. Because the worker allocates nothing, it
+    // cannot fail startup and strand slot threads on logits that never arrive.
     SCH.running = true;
     if (pthread_create(&SCH.th, NULL, decode_worker, NULL) != 0) {
         SCH.running = false;
+        pthread_cond_destroy(&SCH.slot_cv); pthread_cond_destroy(&SCH.dec_cv);
+        pthread_mutex_destroy(&SCH.dev_mu); pthread_mutex_destroy(&SCH.mu);
+        sched_free_buffers();
         return false;
     }
     return true;
@@ -3789,13 +3838,11 @@ static void sched_shutdown(void) {
     pthread_cond_broadcast(&SCH.slot_cv);
     pthread_mutex_unlock(&SCH.mu);
     pthread_join(SCH.th, NULL);
-    model_batch_free(SCH.batch);
-    for (int i = 0; i < SV.n_slots; i++) free(SCH.seq[i].logits);
-    free(SCH.seq);
     pthread_cond_destroy(&SCH.slot_cv);
     pthread_cond_destroy(&SCH.dec_cv);
     pthread_mutex_destroy(&SCH.dev_mu);
     pthread_mutex_destroy(&SCH.mu);
+    sched_free_buffers();
     memset(&SCH, 0, sizeof(SCH));
 }
 
