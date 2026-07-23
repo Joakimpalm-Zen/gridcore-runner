@@ -205,6 +205,46 @@ class EndpointTests(unittest.TestCase):
 
         self.assertEqual(result.text, "hello")
         self.assertEqual(seen, ["hel", "lo"])
+        self.assertEqual(result.finish_reason, "stop")
+
+    def test_stream_assembles_fragmented_tool_calls(self):
+        # id+name arrive first, then arguments stream in pieces across chunks —
+        # the client must assemble them by index (RNR-016).
+        lines = [
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+            b'"function":{"name":"get_weather","arguments":"{\\"ci"}}]}}]}\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            b'"function":{"arguments":"ty\\":\\"Paris\\"}"}}]}}]}\n',
+            b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n',
+        ]
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080", opener=lambda request, timeout: _Response(lines)
+        )
+
+        result = endpoint.stream_chat({"messages": []})
+
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(len(result.tool_calls), 1)
+        call = result.tool_calls[0]
+        self.assertEqual(call.id, "call_1")
+        self.assertEqual(call.name, "get_weather")
+        self.assertEqual(json.loads(call.arguments), {"city": "Paris"})
+
+    def test_stream_assembles_multiple_parallel_tool_calls(self):
+        lines = [
+            b'data: {"choices":[{"delta":{"tool_calls":['
+            b'{"index":0,"id":"a","function":{"name":"f","arguments":"{}"}},'
+            b'{"index":1,"id":"b","function":{"name":"g","arguments":"{}"}}]}}]}\n',
+            b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n',
+        ]
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080", opener=lambda request, timeout: _Response(lines)
+        )
+
+        result = endpoint.stream_chat({"messages": []})
+
+        self.assertEqual([c.name for c in result.tool_calls], ["f", "g"])
+        self.assertEqual([c.id for c in result.tool_calls], ["a", "b"])
 
     def test_stream_rejects_premature_eof_with_partial_text(self):
         endpoint = RunnerEndpoint(

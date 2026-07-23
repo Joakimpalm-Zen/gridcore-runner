@@ -5,6 +5,7 @@ from .endpoint import (
     RunnerProtocolError,
     RunnerStallError,
     StreamResult,
+    ToolCall,
 )
 from .process import (
     ManagedRunner,
@@ -25,6 +26,7 @@ __all__ = [
     "RunnerStallError",
     "ServerLaunch",
     "StreamResult",
+    "ToolCall",
     "StartupLease",
     "build_server_args",
     "model_registry_argument",

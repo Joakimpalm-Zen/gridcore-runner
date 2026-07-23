@@ -35,10 +35,22 @@ class RunnerCancelledError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ToolCall:
+    """One assembled streamed tool call. `arguments` is the concatenation of the
+    streamed argument fragments — a JSON string the caller parses."""
+    index: int
+    id: str | None
+    name: str | None
+    arguments: str
+
+
+@dataclass(frozen=True)
 class StreamResult:
     text: str
     reasoning: str
     estimated_tokens: int
+    tool_calls: tuple["ToolCall", ...] = ()
+    finish_reason: str | None = None
 
 
 class RunnerEndpoint:
@@ -105,6 +117,13 @@ class RunnerEndpoint:
 
         Genuine non-data SSE lines — comments, `event:`, `id:`, `retry:` —
         are ignored, and count as activity for the watchdog.
+
+        Scope: this parser treats each `data:` line as one complete JSON frame,
+        which matches Runner's one-line-per-event wire format. It does not join
+        multiple `data:` lines into a single SSE event, so it is Runner-wire-
+        specific rather than a general SSE client. Streamed `delta.tool_calls`
+        fragments ARE assembled by index into `StreamResult.tool_calls`, and the
+        terminal `finish_reason` is preserved on the result.
         """
         body = dict(payload)
         body["stream"] = True
@@ -112,6 +131,10 @@ class RunnerEndpoint:
         window = stall_seconds if stall_seconds is not None else self.timeout
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
+        # streamed tool calls arrive as fragments keyed by index: id/name early,
+        # arguments in pieces (RNR-016). Accumulate by index, assemble at the end.
+        tool_acc: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
         complete = False
         last_event = time.monotonic()
         if cancel_event is not None and cancel_event.is_set():
@@ -155,10 +178,22 @@ class RunnerEndpoint:
                         reasoning_parts.append(reasoning)
                         if on_reasoning_delta is not None:
                             on_reasoning_delta(reasoning)
+                    for frag in delta.get("tool_calls") or []:
+                        idx = frag.get("index", 0)
+                        acc = tool_acc.setdefault(
+                            idx, {"id": None, "name": None, "arguments": []})
+                        if frag.get("id"):
+                            acc["id"] = frag["id"]
+                        fn = frag.get("function") or {}
+                        if fn.get("name"):
+                            acc["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            acc["arguments"].append(fn["arguments"])
                     if cancel_event is not None and cancel_event.is_set():
                         raise RunnerCancelledError(partial="".join(text_parts))
                     if choice.get("finish_reason") is not None:
                         complete = True
+                        finish_reason = choice["finish_reason"]
         except (RunnerCancelledError, RunnerStallError, RunnerProtocolError):
             raise
         except (socket.timeout, TimeoutError) as error:
@@ -180,11 +215,19 @@ class RunnerEndpoint:
             raise RunnerProtocolError(
                 "runner stream ended before a terminal marker", partial=text
             )
-        generated_chars = len(text) + sum(len(item) for item in reasoning_parts)
+        tool_calls = tuple(
+            ToolCall(index=idx, id=acc["id"], name=acc["name"],
+                     arguments="".join(acc["arguments"]))
+            for idx, acc in sorted(tool_acc.items())
+        )
+        generated_chars = (len(text) + sum(len(item) for item in reasoning_parts)
+                           + sum(len(tc.arguments) for tc in tool_calls))
         return StreamResult(
             text=text,
             reasoning="".join(reasoning_parts),
             estimated_tokens=max(0, (generated_chars + 3) // 4),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
 
     @staticmethod
