@@ -278,6 +278,7 @@ typedef struct {
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
     float *q_gate;                        // qwen35 full-attention output gate
     float *ssm_qkv, *ssm_z, *ssm_aux;     // qwen35 recurrent scratch
+    float *ssm_cw;                         // qwen35 dequantized conv-kernel row
     float *ssm_conv_state, *ssm_state_mem; // qwen35 per-sequence recurrent state
     float *att, *logits;
     float *all_logits;       // lazy [spec_batch][n_vocab] (speculative verify)
@@ -869,7 +870,9 @@ typedef struct {
     uint64_t model_key;
 } engine;
 
-void   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
+// Returns false if the per-context history buffer could not be allocated;
+// the caller must not use the engine in that case.
+bool   engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp);
 void   engine_reset(engine *e); // clear KV position + sampler + json state
 void   engine_think_started(engine *e); // prompt already contains think_open
 // keep the KV for the longest common prefix of hist and toks, reset the rest

@@ -13,10 +13,16 @@
 
 // ---------------------------------------------------------------- helpers
 
-static float *tensor_to_f32(gguf_tensor *t) {
+// Materialize a tensor into a freshly-allocated f32 buffer. Returns NULL when
+// t is absent (a legitimate result for optional tensors). If t is present but
+// the allocation fails, sets *ok = false and returns NULL, so an out-of-memory
+// condition is never silently mistaken for an absent optional tensor (which
+// would change the forward-pass math without any error).
+static float *tensor_to_f32(gguf_tensor *t, bool *ok) {
     if (!t) return NULL;
     int64_t n = (int64_t)(t->ne[0] * t->ne[1] * t->ne[2] * t->ne[3]);
     float *out = malloc(sizeof(float) * n);
+    if (!out) { *ok = false; return NULL; }
     if (t->type == T_F32) {
         memcpy(out, t->data, sizeof(float) * n);
     } else {
@@ -70,7 +76,7 @@ static float yarn_corr_dim(int n_dims, int n_ctx_orig, float n_rot, float base) 
     return n_dims * logf(n_ctx_orig / (n_rot * 2 * (float)M_PI)) / (2 * logf(base));
 }
 
-static void rope_setup(model_t *m, gguf_file *g, const char *arch,
+static bool rope_setup(model_t *m, gguf_file *g, const char *arch,
                        float base_ovr, float scale_ovr) {
     char key[128];
     #define RK(fmt) (snprintf(key, sizeof(key), "%s." fmt, arch), key)
@@ -79,6 +85,7 @@ static void rope_setup(model_t *m, gguf_file *g, const char *arch,
 
     int half = m->rope_dim / 2;
     m->rope_inv_freq = malloc(sizeof(float) * half);
+    if (!m->rope_inv_freq) return false;
     for (int j = 0; j < half; j++)
         m->rope_inv_freq[j] = powf(m->rope_base, -2.0f * j / m->rope_dim);
 
@@ -142,6 +149,7 @@ static void rope_setup(model_t *m, gguf_file *g, const char *arch,
                            gguf_get_f32(g, RK("rope.freq_base_swa"), 10000.0f));
         int lhalf = m->rope_dim_local / 2;
         m->rope_inv_freq_local = malloc(sizeof(float) * lhalf);
+        if (!m->rope_inv_freq_local) return false;
         for (int j = 0; j < lhalf; j++)
             m->rope_inv_freq_local[j] = powf(local_base, -2.0f * j / m->rope_dim_local);
     }
@@ -163,6 +171,7 @@ static void rope_setup(model_t *m, gguf_file *g, const char *arch,
         m->rope_mscale = 1.0f + 0.1f * logf(factor);
     }
     #undef RK
+    return true;
 }
 
 // ---------------------------------------------------------------- load
@@ -311,6 +320,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         m->rope_base   = gguf_get_f32(g, AK("rope.freq_base"), 1000000.0f);
         int pattern    = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 6);
         m->l_is_swa    = calloc(m->n_layer, sizeof(bool));
+        if (!m->l_is_swa) return false;
         for (int i = 0; i < m->n_layer; i++)
             m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % pattern) != 0;
     }
@@ -384,6 +394,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         m->l_head_kv  = calloc(m->n_layer, sizeof(int));
         m->l_head_dim = calloc(m->n_layer, sizeof(int));
         m->l_rope_dim = calloc(m->n_layer, sizeof(int));
+        if (!m->l_is_swa || !m->l_head_kv || !m->l_head_dim || !m->l_rope_dim)
+            return false;
         gguf_kv *swa_arr = gguf_get(g, AK("attention.sliding_window_pattern"));
         gguf_kv *kv_arr  = gguf_get(g, AK("attention.head_count_kv"));
         // per-layer arrays must have the element width we index with — a
@@ -424,7 +436,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 
     gguf_tensor *out_norm = need_tensor(g, "output_norm.weight", 0, &ok);
     if (!ok) return false;
-    m->out_norm_w = tensor_to_f32(out_norm);
+    m->out_norm_w = tensor_to_f32(out_norm, &ok);
+    if (!ok) return false;
 
     m->output = gguf_find_tensor(g, "output.weight");
     if (!m->output) m->output = m->tok_embd; // tied embeddings
@@ -434,10 +447,14 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     }
 
     m->layers = calloc(m->n_layer, sizeof(layer_t));
+    if (!m->layers) return false;
     // phi3 fuses Q/K/V into attn_qkv and gate/up into ffn_up: five slice
     // descriptors per layer, pointing into the mmapped weights
     bool fused_qkv = strcmp(arch, "phi3") == 0;
-    if (fused_qkv) m->fused_splits = calloc((size_t)m->n_layer * 5, sizeof(gguf_tensor));
+    if (fused_qkv) {
+        m->fused_splits = calloc((size_t)m->n_layer * 5, sizeof(gguf_tensor));
+        if (!m->fused_splits) return false;
+    }
     for (int i = 0; i < m->n_layer; i++) {
         layer_t *l = &m->layers[i];
         gguf_tensor *an = need_tensor(g, "blk.%d.attn_norm.weight", i, &ok);
@@ -452,15 +469,16 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             l->ssm_beta  = need_tensor(g, "blk.%d.ssm_beta.weight", i, &ok);
             l->ssm_alpha = need_tensor(g, "blk.%d.ssm_alpha.weight", i, &ok);
             l->ssm_out   = need_tensor(g, "blk.%d.ssm_out.weight", i, &ok);
-            l->ssm_dt    = tensor_to_f32(need_tensor(g, "blk.%d.ssm_dt.bias", i, &ok));
-            l->ssm_a     = tensor_to_f32(need_tensor(g, "blk.%d.ssm_a", i, &ok));
-            l->ssm_norm_w = tensor_to_f32(need_tensor(g, "blk.%d.ssm_norm.weight", i, &ok));
+            l->ssm_dt    = tensor_to_f32(need_tensor(g, "blk.%d.ssm_dt.bias", i, &ok), &ok);
+            l->ssm_a     = tensor_to_f32(need_tensor(g, "blk.%d.ssm_a", i, &ok), &ok);
+            l->ssm_norm_w = tensor_to_f32(need_tensor(g, "blk.%d.ssm_norm.weight", i, &ok), &ok);
             l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
             l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
             l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
             if (!ok) return false;
-            l->attn_norm_w = tensor_to_f32(an);
-            l->ffn_norm_w = tensor_to_f32(fn);
+            l->attn_norm_w = tensor_to_f32(an, &ok);
+            l->ffn_norm_w = tensor_to_f32(fn, &ok);
+            if (!ok) return false;
             l->out_scale = 1.0f;
             continue;
         }
@@ -495,22 +513,23 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         l->wo     = need_tensor(g, "blk.%d.attn_output.weight", i, &ok);
         l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
         if (!ok) return false;
-        l->attn_norm_w = tensor_to_f32(an);
-        l->ffn_norm_w  = tensor_to_f32(fn);
-        l->bq = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q.bias", i));
-        l->bk = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k.bias", i));
-        l->bv = tensor_to_f32(opt_tensor(g, "blk.%d.attn_v.bias", i));
-        l->bo = tensor_to_f32(opt_tensor(g, "blk.%d.attn_output.bias", i));
-        l->qnorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q_norm.weight", i));
-        l->knorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k_norm.weight", i));
+        l->attn_norm_w = tensor_to_f32(an, &ok);
+        l->ffn_norm_w  = tensor_to_f32(fn, &ok);
+        l->bq = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q.bias", i), &ok);
+        l->bk = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k.bias", i), &ok);
+        l->bv = tensor_to_f32(opt_tensor(g, "blk.%d.attn_v.bias", i), &ok);
+        l->bo = tensor_to_f32(opt_tensor(g, "blk.%d.attn_output.bias", i), &ok);
+        l->qnorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q_norm.weight", i), &ok);
+        l->knorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k_norm.weight", i), &ok);
         // Qwen3.5's post_attention_norm is the FFN input norm (loaded as
         // ffn_norm_w above), not a sandwich norm on the attention projection.
         l->post_attn_norm_w = m->qwen35 ? NULL
-            : tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i));
-        l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i));
+            : tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i), &ok);
+        l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i), &ok);
         l->out_scale = 1.0f;
         gguf_tensor *osc = opt_tensor(g, "blk.%d.layer_output_scale.weight", i);
         if (osc && osc->type == T_F32) l->out_scale = ((const float *)osc->data)[0];
+        if (!ok) return false;  // a norm/bias materialization OOMed this layer
     }
 
     // gemma4 dropped the plus-one norm convention (unlike gemma1-3): its
@@ -521,7 +540,11 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     gguf_kv *sup = gguf_get(g, "tokenizer.ggml.suppress_tokens");
     if (sup && sup->arr_raw && sup->arr_type == GGUF_T_I32 && sup->arr_n > 0) {
         const int32_t *ids = (const int32_t *)sup->arr_raw;
+        // A failed suppress list is not optional to skip: these ids are tokens
+        // the checkpoint must never emit, so run without it would be silently
+        // wrong. Fail the load instead.
         m->suppress = malloc(sizeof(int32_t) * sup->arr_n);
+        if (!m->suppress) return false;
         for (uint64_t i = 0; i < sup->arr_n; i++)
             if (ids[i] >= 0 && ids[i] < m->n_vocab)
                 m->suppress[m->n_suppress++] = ids[i];
@@ -602,6 +625,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 
     // per-layer element offsets into the (possibly heterogeneous) KV cache
     m->kv_off = malloc(sizeof(size_t) * (m->n_layer + 1));
+    if (!m->kv_off) return false;
     m->kv_off[0] = 0;
     for (int l = 0; l < m->n_layer; l++)
         m->kv_off[l + 1] = m->kv_off[l] + (size_t)n_ctx * model_kv_dim(m, l);
@@ -627,6 +651,10 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
                                    sizeof(float));
         m->ssm_state_mem = calloc((size_t)m->n_layer * m->ssm_v_heads *
                                   hv * hv, sizeof(float));
+        // one dequantized conv-kernel row, reused every conv step (the forward
+        // pass is single-threaded here, so one buffer suffices) — preallocated
+        // so the hot path never mallocs and an OOM fails the load, not a token
+        m->ssm_cw = malloc(sizeof(float) * m->ssm_conv_kernel);
     }
     m->hb     = malloc(sizeof(float) * (size_t)B * m->n_ff);
     m->hb2    = malloc(sizeof(float) * (size_t)B * m->n_ff);
@@ -638,7 +666,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         !m->hb2 || !m->att || !m->logits ||
         (m->qwen35 && (!m->q_gate || !m->ssm_qkv || !m->ssm_z ||
                        !m->ssm_aux || !m->ssm_conv_state ||
-                       !m->ssm_state_mem))) {
+                       !m->ssm_state_mem || !m->ssm_cw))) {
         fprintf(stderr, "error: cannot allocate buffers (ctx %d needs %.1f MB KV cache)\n",
                 n_ctx, 2.0 * kv_bytes / 1e6);
         return false; // caller owns cleanup: every load failure ends in model_free
@@ -657,7 +685,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         fprintf(stderr, "error: cannot create thread pool\n");
         return false;
     }
-    rope_setup(m, g, arch, p->rope_base, p->rope_scale);
+    if (!rope_setup(m, g, arch, p->rope_base, p->rope_scale)) return false;
 
     // The existing GPU backends implement KV attention only. Keep Qwen3.5 on
     // the correct CPU path until a native recurrent backend is available —
@@ -732,6 +760,7 @@ void model_free(model_t *m) {
     free(m->x); free(m->xb); free(m->xb2); free(m->q);
     free(m->k_tmp); free(m->v_tmp);
     free(m->q_gate); free(m->ssm_qkv); free(m->ssm_z); free(m->ssm_aux);
+    free(m->ssm_cw);
     free(m->ssm_conv_state); free(m->ssm_state_mem);
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
     tpool_destroy(m->tp);
@@ -780,8 +809,23 @@ static void mv_rows(void *ctx, int i0, int i1) {
     // batched: dequantize each weight row once, reuse for every token; the
     // multi-column dot shares each weight load across 4 activation columns
     float *buf = type == T_F32 ? NULL : malloc(sizeof(float) * n_in);
+    // If that scratch could not be allocated (OOM mid-inference), fall back to
+    // the buffer-free fused dequant-and-dot used by the n_batch==1 path — one
+    // column at a time. Slower, but never a NULL write and never silently
+    // wrong output. This is the only in-band recovery a void thread-pool
+    // worker has.
+    bool no_scratch = type != T_F32 && !buf;
     float outs[64];
     for (int r = i0; r < i1; r++) {
+        float b0 = j->bias ? j->bias[r] : 0.0f;
+        if (no_scratch) {
+            for (int c = 0; c < j->n_batch; c++) {
+                float v = vec_dot(type, base + (size_t)r * j->rsz,
+                                  j->x + (size_t)c * j->x_stride, n_in);
+                j->y[(size_t)c * j->y_stride + r] = v + b0;
+            }
+            continue;
+        }
         const float *wrow;
         if (type == T_F32) {
             wrow = (const float *)(base + (size_t)r * j->rsz);
@@ -789,7 +833,6 @@ static void mv_rows(void *ctx, int i0, int i1) {
             dequant_row(type, base + (size_t)r * j->rsz, buf, n_in);
             wrow = buf;
         }
-        float b0 = j->bias ? j->bias[r] : 0.0f;
         for (int c = 0; c < j->n_batch; c += 64) {
             int nb = j->n_batch - c < 64 ? j->n_batch - c : 64;
             vec_dot_f32_multi(wrow, j->x + (size_t)c * j->x_stride,
@@ -975,7 +1018,7 @@ static void qwen35_linear(model_t *m, layer_t *ly, int layer, int n, int xdim) {
     float *hist = m->ssm_conv_state + (size_t)layer * histn * convdim;
     float *states = m->ssm_state_mem + (size_t)layer * nh * hv * hv;
     size_t wrs = ggml_row_size(ly->ssm_conv->type, m->ssm_conv_kernel);
-    float *cw = malloc(sizeof(float) * m->ssm_conv_kernel);
+    float *cw = m->ssm_cw;   // preallocated at load
     for (int b = 0; b < n; b++) {
         float *mix = m->ssm_qkv + (size_t)b * convdim;
         // Causal depthwise convolution over the persistent history and input.
@@ -1042,7 +1085,6 @@ static void qwen35_linear(model_t *m, layer_t *ly, int layer, int n, int xdim) {
             }
         }
     }
-    free(cw);
     matvec_b(m->tp, m->xb, xdim, ly->ssm_out, m->xb2, xdim,
              inner, m->n_embd, NULL, n);
 }
@@ -1419,6 +1461,7 @@ bool model_embed(model_t *m, const int32_t *toks, int n, float *out) {
         m->gpu = NULL; // full offload keeps hidden states on-device; go CPU
     memset(out, 0, sizeof(float) * m->n_embd);
     float *tmp = malloc(sizeof(float) * m->n_embd);
+    if (!tmp) { m->gpu = save_gpu; return false; }
     for (int i = 0; i < n; ) {
         int chunk = n - i < m->n_batch ? n - i : m->n_batch;
         model_forward_batch(m, toks + i, chunk, i, false);

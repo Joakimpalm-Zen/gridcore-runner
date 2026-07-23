@@ -409,7 +409,10 @@ int main(int argc, char **argv) {
                           ttl, draft_path, draft_k);
 
     engine e = {0};
-    engine_init(&e, &m, &tok, &smp); // e zero-initialized at declaration
+    if (!engine_init(&e, &m, &tok, &smp)) { // e zero-initialized at declaration
+        fprintf(stderr, "error: out of memory initializing engine\n");
+        return 1;
+    }
     e.ignore_eos = ignore_eos;
     e.json_mode = json_mode;
     e.progress = true;

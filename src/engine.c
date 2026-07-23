@@ -25,7 +25,7 @@ static void constraint_reset(engine *e) {
     e->constraint_close_match = 0;
 }
 
-void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
+bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     free(e->hist); // slot engines are re-inited on model swap; e must be zeroed
     memset(e, 0, sizeof(*e));
     e->m = m;
@@ -60,7 +60,9 @@ void engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     jsonv_init(&e->jv);
     constraint_reset(e);
     e->hist = malloc(sizeof(int32_t) * m->n_ctx);
+    if (!e->hist) return false;   // no history buffer: the engine is unusable
     e->model_key = model_identity(m, tok);
+    return true;
 }
 
 void engine_reset(engine *e) {
@@ -496,6 +498,10 @@ model_t *spec_draft_load(const char *path, const model_t *target,
     dmp.kv_q8 = false;
     dmp.gpu_mode = GPU_AUTO;   // a small draft usually fits VRAM whole
     model_t *dm = malloc(sizeof(model_t));
+    if (!dm) {
+        fprintf(stderr, "draft: out of memory — ignoring --draft\n");
+        return NULL;   // callers treat NULL as "run plain decoding"
+    }
     if (!model_load(dm, path, &dmp)) {
         // model_load memsets the struct on entry and may allocate before failing
         // (late load failures must free partial buffers to avoid leaks)

@@ -428,7 +428,16 @@ static int swap_to(const char *want) {
         char sdesc[256];
         sampler_describe(&s->smp, sp, sdesc, sizeof(sdesc));
         fprintf(stderr, "sampling: %s\n", sdesc);
-        engine_init(&s->e, s->m, s->tok, &s->smp);
+        if (!engine_init(&s->e, s->m, s->tok, &s->smp)) {
+            // mirror the failed-load cleanup: leave the slot empty and the
+            // resident unchanged rather than committing a half-built engine
+            fprintf(stderr, "swap: out of memory initializing engine for %s\n",
+                    SV.reg[idx].name);
+            model_free(s->m); free(s->m); s->m = NULL;
+            tokenizer_free(s->tok); free(s->tok); s->tok = NULL;
+            pthread_mutex_unlock(&SV.swap_mu);
+            return SWAP_LOAD_FAILED;
+        }
         context_store(s->m->n_ctx);
         if (SV.single && !SV.draft && SV.draft_path) {
             // /unload freed the draft with the target; a draft configured at
@@ -3925,7 +3934,10 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                     return 1;
                 }
             }
-            engine_init(&s->e, s->m, s->tok, &s->smp);
+            if (!engine_init(&s->e, s->m, s->tok, &s->smp)) {
+                fprintf(stderr, "error: out of memory initializing slot %d engine\n", i);
+                return 1;
+            }
             if (draft_path) {
                 // per-slot draft context: each slot owns a full draft KV;
                 // weights dedupe through the page cache like slot models
