@@ -82,6 +82,47 @@ class StartupLeaseTests(unittest.TestCase):
 
             self.assertTrue(path.exists())
 
+    def test_reused_pid_does_not_block_startup(self):
+        # A record naming a LIVE pid (our own) but a start time that does not
+        # match that process is a reused PID, not the real owner — the lease
+        # must be reclaimable rather than "live" forever (RNR-017).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runner.lease"
+            path.write_text(
+                json.dumps({"owner_pid": os.getpid(),
+                            "owner_start": "definitely-not-the-real-start",
+                            "token": "stale"}),
+                encoding="utf-8",
+            )
+            lease = StartupLease(path)
+            self.assertTrue(lease.acquire())
+            self.assertNotEqual(
+                json.loads((path / "owner.json").read_text())["token"], "stale")
+            lease.release()
+
+    def test_matching_start_time_still_blocks(self):
+        # The same live pid WITH the correct start time is a genuine owner.
+        from gridcore_runner.lease import _process_start_time
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runner.lease"
+            path.write_text(
+                json.dumps({"owner_pid": os.getpid(),
+                            "owner_start": _process_start_time(os.getpid()),
+                            "token": "held"}),
+                encoding="utf-8",
+            )
+            self.assertFalse(StartupLease(path).acquire())
+
+    def test_legacy_record_without_start_time_is_honoured(self):
+        # A pre-migration record (no owner_start) with a live pid stays PID-only.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runner.lease"
+            path.write_text(
+                json.dumps({"owner_pid": os.getpid(), "token": "legacy"}),
+                encoding="utf-8",
+            )
+            self.assertFalse(StartupLease(path).acquire())
+
 
 class _Response:
     def __init__(self, lines=(), payload=None):
