@@ -81,3 +81,64 @@ def test_reference_comparator_normalizes_openai_completion_text():
         assert "completion text" in str(exc)
     else:
         raise AssertionError("malformed completion response was accepted")
+
+
+# --- RNR-007: the gate refuses to mark unexecuted checks complete ----------
+
+def _write_manifest(tmp_path, checks):
+    model_file = tmp_path / "m.gguf"
+    model_file.write_bytes(b"not a real model")
+    import hashlib
+    digest = hashlib.sha256(model_file.read_bytes()).hexdigest()
+    manifest = {
+        "schema_version": "gridcore.runner.model-compat.v1",
+        "models": [{
+            "id": "m", "architecture": "llama", "file": str(model_file),
+            "sha256": digest, "checks": checks,
+        }],
+    }
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(manifest))
+    return path
+
+
+def test_declared_but_unexecuted_checks_are_recorded_not_omitted(tmp_path):
+    module = load_module()
+    manifest = _write_manifest(tmp_path, ["load", "tokenizer", "greedy_reference"])
+    out = tmp_path / "report.json"
+    # a files-only run executes none of the declared checks
+    rc = module.main(["--manifest", str(manifest), "--verify-files",
+                      "--out", str(out)])
+    report = json.loads(out.read_text())
+    model = report["models"][0]
+    # every declared check is present and explicitly not_executed — never omitted
+    for name in ("load", "tokenizer", "greedy_reference"):
+        assert model["checks"][name]["status"] == "not_executed"
+    assert model["complete"] is False
+    assert report["complete"] is False
+    # without --require-complete, a clean file hash is not itself a gate failure
+    assert rc == 0
+
+
+def test_require_complete_fails_an_incomplete_report(tmp_path):
+    module = load_module()
+    manifest = _write_manifest(tmp_path, ["load", "greedy_reference"])
+    out = tmp_path / "report.json"
+    rc = module.main(["--manifest", str(manifest), "--verify-files",
+                      "--require-complete", "--out", str(out)])
+    assert rc == 1, "an incomplete report must fail the gate under --require-complete"
+
+
+def test_reports_are_append_only(tmp_path):
+    module = load_module()
+    manifest = _write_manifest(tmp_path, ["load"])
+    out = tmp_path / "report.json"
+    assert module.main(["--manifest", str(manifest), "--verify-files",
+                        "--out", str(out)]) == 0
+    # a second run to the same path must refuse rather than clobber evidence
+    with __import__("pytest").raises(SystemExit):
+        module.main(["--manifest", str(manifest), "--verify-files",
+                     "--out", str(out)])
+    # ...unless explicitly forced
+    assert module.main(["--manifest", str(manifest), "--verify-files",
+                        "--out", str(out), "--force"]) == 0

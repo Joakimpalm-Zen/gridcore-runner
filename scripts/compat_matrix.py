@@ -76,7 +76,20 @@ def main(argv=None):
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--verify-files", action="store_true")
     parser.add_argument("--load", action="store_true")
+    # RNR-007: a report may only be called complete if every declared check
+    # actually ran and passed. --require-complete makes an incomplete report a
+    # gate failure; without it the report is still honest (unrun checks are
+    # recorded as not_executed) but the exit code reflects only what ran.
+    parser.add_argument("--require-complete", action="store_true")
+    # Evidence is append-only: refuse to clobber an existing report file.
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite an existing --out report (default: refuse)")
     args = parser.parse_args(argv)
+
+    if args.out and args.out.exists() and not args.force:
+        parser.error(
+            f"refusing to overwrite existing evidence {args.out} "
+            "(reports are append-only; write to a new name or pass --force)")
 
     manifest = load_manifest(args.manifest)
     selected = [m for m in manifest["models"]
@@ -115,14 +128,29 @@ def main(argv=None):
                 failed |= item["checks"]["load"]["status"] != "pass"
         else:
             item["file_status"] = "not_run"
+
+        # Never let a declared check be silently absent from the report — an
+        # omitted check reads as "fine". Every check the manifest declares but
+        # this run did not execute is recorded explicitly as not_executed, and
+        # the model is "complete" only when all of them ran and passed.
+        declared = entry.get("checks", [])
+        for name in declared:
+            item["checks"].setdefault(name, {"status": "not_executed"})
+        item["complete"] = bool(declared) and all(
+            item["checks"][name].get("status") == "pass" for name in declared)
         report["models"].append(item)
+
+    report["complete"] = bool(report["models"]) and all(
+        m.get("complete") for m in report["models"])
 
     rendered = json.dumps(report, indent=2) + "\n"
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(rendered)
     print(rendered, end="")
-    return 1 if failed else 0
+    # Executed-check failures always fail the gate; incompleteness fails it only
+    # when the caller demands a complete report.
+    return 1 if failed or (args.require_complete and not report["complete"]) else 0
 
 
 if __name__ == "__main__":
