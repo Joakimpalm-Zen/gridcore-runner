@@ -21,12 +21,13 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 
 // ---------------------------------------------------------------- misc
 
+// CLI flags share the one strict parser (compat.c) with the env overrides; the
+// only difference is a hard exit on a bad flag versus a warn-and-default on a
+// bad env var.
 static long long int_arg(const char *opt, const char *s, long long min,
                          long long max) {
-    char *end = NULL;
-    errno = 0;
-    long long v = strtoll(s, &end, 10);
-    if (errno || end == s || *end || v < min || v > max) {
+    long long v;
+    if (!parse_i64(s, min, max, &v)) {
         fprintf(stderr, "error: %s expects an integer in [%lld, %lld]\n",
                 opt, min, max);
         exit(1);
@@ -35,21 +36,17 @@ static long long int_arg(const char *opt, const char *s, long long min,
 }
 
 static uint64_t u64_arg(const char *opt, const char *s) {
-    char *end = NULL;
-    errno = 0;
-    unsigned long long v = strtoull(s, &end, 10);
-    if (errno || end == s || *end || *s == '-') {
+    uint64_t v;
+    if (!parse_u64(s, 0, UINT64_MAX, &v)) {
         fprintf(stderr, "error: %s expects an unsigned integer\n", opt);
         exit(1);
     }
-    return (uint64_t)v;
+    return v;
 }
 
 static double float_arg(const char *opt, const char *s, double min, double max) {
-    char *end = NULL;
-    errno = 0;
-    double v = strtod(s, &end);
-    if (errno || end == s || *end || !isfinite(v) || v < min || v > max) {
+    double v;
+    if (!parse_f64(s, min, max, &v)) {
         fprintf(stderr, "error: %s expects a finite number in [%g, %g]\n",
                 opt, min, max);
         exit(1);

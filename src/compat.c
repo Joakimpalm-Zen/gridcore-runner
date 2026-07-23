@@ -398,3 +398,86 @@ void plat_parent_watch(long pid) {
 }
 
 #endif
+
+// --------------------------------------------------------- strict numeric parse
+//
+// One strict parser shared by CLI flags and environment overrides (RNR-021):
+// rejects empty input, trailing garbage, overflow, sign errors, and (for
+// doubles) non-finite values, instead of the silent atoi/atof/strtoull=0 that
+// let a typo disable a deadline or overflow a byte budget. Finiteness is tested
+// on the IEEE bits, not isfinite(), because the build uses -ffast-math.
+#include <errno.h>
+
+bool parse_i64(const char *s, long long lo, long long hi, long long *out) {
+    if (!s || !*s) return false;
+    char *end = NULL;
+    errno = 0;
+    long long v = strtoll(s, &end, 10);
+    if (errno || end == s || *end || v < lo || v > hi) return false;
+    *out = v;
+    return true;
+}
+
+bool parse_u64(const char *s, uint64_t lo, uint64_t hi, uint64_t *out) {
+    if (!s || !*s || *s == '-') return false;   // strtoull silently negates '-'
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (errno || end == s || *end || v < lo || v > hi) return false;
+    *out = (uint64_t)v;
+    return true;
+}
+
+static bool d_finite(double d) {
+    uint64_t u;
+    memcpy(&u, &d, 8);
+    return (u & 0x7ff0000000000000ull) != 0x7ff0000000000000ull;
+}
+
+bool parse_f64(const char *s, double lo, double hi, double *out) {
+    if (!s || !*s) return false;
+    char *end = NULL;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (errno || end == s || *end || !d_finite(v) || v < lo || v > hi) return false;
+    *out = v;
+    return true;
+}
+
+// Environment overrides: an absent variable keeps `cur`; an invalid one warns
+// at startup and keeps `cur` — never a silent 0.
+long long env_i64(const char *name, long long lo, long long hi, long long cur) {
+    const char *s = getenv(name);
+    long long v;
+    if (!s) return cur;
+    if (!parse_i64(s, lo, hi, &v)) {
+        fprintf(stderr, "warning: %s='%s' is not an integer in [%lld, %lld] — ignoring\n",
+                name, s, lo, hi);
+        return cur;
+    }
+    return v;
+}
+
+uint64_t env_u64(const char *name, uint64_t lo, uint64_t hi, uint64_t cur) {
+    const char *s = getenv(name);
+    uint64_t v;
+    if (!s) return cur;
+    if (!parse_u64(s, lo, hi, &v)) {
+        fprintf(stderr, "warning: %s='%s' is not an unsigned integer in range — ignoring\n",
+                name, s);
+        return cur;
+    }
+    return v;
+}
+
+double env_f64(const char *name, double lo, double hi, double cur) {
+    const char *s = getenv(name);
+    double v;
+    if (!s) return cur;
+    if (!parse_f64(s, lo, hi, &v)) {
+        fprintf(stderr, "warning: %s='%s' is not a finite number in [%g, %g] — ignoring\n",
+                name, s, lo, hi);
+        return cur;
+    }
+    return v;
+}

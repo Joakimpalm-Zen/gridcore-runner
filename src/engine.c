@@ -272,10 +272,9 @@ static struct {
 static void pfx_defaults(void) {
     if (PFX.configured) return;
     PFX.configured = true;
-    const char *mb = getenv("RUNNER_PREFIX_CACHE_MB");
-    const char *tl = getenv("RUNNER_PREFIX_CACHE_TTL");
-    PFX.budget = (size_t)(mb ? strtoull(mb, NULL, 10) : 512) * 1024 * 1024;
-    PFX.ttl    = tl ? strtod(tl, NULL) : 600.0;
+    PFX.budget = (size_t)env_u64("RUNNER_PREFIX_CACHE_MB", 0, 1u << 20, 512)
+                 * 1024 * 1024;
+    PFX.ttl    = env_f64("RUNNER_PREFIX_CACHE_TTL", 0.0, 1e9, 600.0);
 }
 
 static void pfx_drop(pfx_entry **pp) {

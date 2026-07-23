@@ -66,4 +66,15 @@ const char *plat_runtime_dir(void);
 typedef char *(*plat_rmw_fn)(const char *in, size_t in_len, void *ud);
 bool        plat_file_rmw(const char *path, plat_rmw_fn fn, void *ud);
 
+// Strict numeric parsing shared by CLI flags and environment overrides.
+// parse_* return false (leaving *out untouched) on empty/garbage/overflow/sign/
+// non-finite input. env_* read getenv(name): absent keeps `cur`, invalid warns
+// to stderr and keeps `cur` — never a silent zero.
+bool      parse_i64(const char *s, long long lo, long long hi, long long *out);
+bool      parse_u64(const char *s, uint64_t lo, uint64_t hi, uint64_t *out);
+bool      parse_f64(const char *s, double lo, double hi, double *out);
+long long env_i64(const char *name, long long lo, long long hi, long long cur);
+uint64_t  env_u64(const char *name, uint64_t lo, uint64_t hi, uint64_t cur);
+double    env_f64(const char *name, double lo, double hi, double cur);
+
 #endif

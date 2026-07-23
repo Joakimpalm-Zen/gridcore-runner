@@ -3907,22 +3907,18 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     SV.model_name = SV.n_reg > 0 ? SV.reg[0].name : (name ? name + 1 : model_path);
     SV.n_predict_cap = 1024;
     SV.q.limit = (int)(sizeof(SV.q.fds) / sizeof(int));
-    if (getenv("RUNNER_MAX_QUEUE")) {
-        int lim = atoi(getenv("RUNNER_MAX_QUEUE"));
-        if (lim > 0 && lim < SV.q.limit) SV.q.limit = lim;
-    }
-    if (getenv("RUNNER_REQUEST_TIMEOUT"))
-        SV.req_timeout = atof(getenv("RUNNER_REQUEST_TIMEOUT"));
+    // a queue bound may only lower the fixed fd capacity, never raise it
+    SV.q.limit = (int)env_i64("RUNNER_MAX_QUEUE", 1, SV.q.limit, SV.q.limit);
+    // a bad timeout must not silently become 0 (which disables the deadline)
+    SV.req_timeout = env_f64("RUNNER_REQUEST_TIMEOUT", 0.0, 1e9, SV.req_timeout);
     // Shared, forkable prompt prefixes. Sized in host RAM rather than as a
     // fraction of anything, because it is the one cache whose useful size is
     // set by the *traffic* (how many distinct system/tool/schema blocks the
     // agents on this box use) and not by the model.
     {
-        const char *mb = getenv("RUNNER_PREFIX_CACHE_MB");
-        const char *tl = getenv("RUNNER_PREFIX_CACHE_TTL");
-        prefix_cache_configure((size_t)(mb ? strtoull(mb, NULL, 10) : 512)
-                                   * 1024 * 1024,
-                               tl ? atof(tl) : 600.0);
+        uint64_t mb  = env_u64("RUNNER_PREFIX_CACHE_MB", 0, 1u << 20, 512);
+        double   ttl = env_f64("RUNNER_PREFIX_CACHE_TTL", 0.0, 1e9, 600.0);
+        prefix_cache_configure((size_t)mb * 1024 * 1024, ttl);
     }
     context_store(base ? base->n_ctx : mp->n_ctx);
     SV.n_slots = parallel;
