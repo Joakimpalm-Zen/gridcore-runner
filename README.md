@@ -120,8 +120,9 @@ and `tests/conformance/test_loopback_bind.py` fails if the running server ever
 answers on a non-loopback address.
 
 The trade is explicit and deliberate: llama.cpp wins on raw speed, exotic
-quants, and new-architecture coverage (runner deliberately skips MoE and most
-SSM architectures, IQ2/IQ3 quants, and Vulkan). runner wins when the engine is a
+quants, and new-architecture coverage (runner supports Mixtral/Qwen3-style
+top-k MoE but skips shared-expert/GELU MoE and most SSM architectures, IQ2/IQ3
+quants, and Vulkan). runner wins when the engine is a
 load-bearing component of a larger system that has to trust it, extend it,
 and debug it to the last line. Correctness is held to the reference: GPU
 output is verified token-identical to the CPU path. gemma4 was verified
@@ -694,7 +695,7 @@ system/template prefixes skip prompt evaluation entirely.
 | Area | Support |
 |---|---|
 | File format | GGUF v2/v3, memory-mapped (weights are never copied) |
-| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it). Qwen3.5 is CPU-only; the transformer architectures support CPU + CUDA. |
+| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it), `qwen3moe` and Mixtral-style sparse **MoE** (top-k router, renormalized weights, per-expert SwiGLU; fused and legacy-split expert layouts; CPU + CUDA; verified on Qwen3-30B-A3B GPU-fitting in 24 GB at ~55 tok/s decode — see docs/moe-support.md). Qwen3.5 is CPU-only; the transformer architectures support CPU + CUDA. |
 | Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, `tekken` (Mistral Nemo/Small and Apertus: case-split letter runs, single digits), and the original GPT-2 regex as the default. gemma4 adds an SPM-style BPE: spaces normalize to U+2581 and merges run over raw UTF-8, with `<0xNN>` byte fallback for characters the vocabulary has no piece for |
 | Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
@@ -731,8 +732,10 @@ Greedy generation at temperature 0 is token-identical between CUDA and CPU for
 every model above that loads.
 
 Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
-MoE and unsupported hybrid-SSM architectures (Mamba/Jamba; dense Qwen3.5 is
-supported on CPU), gemma4's
+shared-expert MoE (Qwen2-MoE/DeepSeek) and GELU-gated (gemma) MoE — only
+Mixtral/Qwen3-style top-k SiLU MoE is supported (CPU + CUDA; both fused and
+legacy split expert layouts; see docs/moe-support.md) — unsupported hybrid-SSM
+architectures (Mamba/Jamba; dense Qwen3.5 is supported on CPU), gemma4's
 shared-KV E2B/E4B variants and MTP draft head, IQ2/IQ3 codebook quants, full
 GBNF grammar sampling (JSON mode only), TLS/auth on the server (bind it
 behind a reverse proxy if you need those).
