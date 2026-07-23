@@ -124,8 +124,11 @@ quants, and new-architecture coverage (runner deliberately skips MoE and most
 SSM architectures, IQ2/IQ3 quants, and Vulkan). runner wins when the engine is a
 load-bearing component of a larger system that has to trust it, extend it,
 and debug it to the last line. Correctness is held to the reference: GPU
-output is verified token-identical to the CPU path, and gemma4 is verified
-token-identical to llama.cpp itself.
+output is verified token-identical to the CPU path. gemma4 was verified
+token-identical to llama.cpp at reference b9964; the newer b10076 reference
+diverges (committed evidence: `tests/compatibility/out/reference-gemma4.json`)
+and reconciling claim vs current evidence is tracked in the July 2026 code
+review (`runner-codex-review-july.md`, RNR-007).
 
 ## Build
 
