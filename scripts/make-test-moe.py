@@ -140,6 +140,19 @@ def moe_ffn(i, n_expert, expert1_down):
     ]
 
 
+def moe_ffn_split(i, n_expert, expert1_down):
+    # legacy split layout: one 2D tensor per expert (older Mixtral GGUFs)
+    downs = [ffn[i]["down"], expert1_down]
+    tensors = [(f"blk.{i}.ffn_gate_inp.weight", [E, n_expert], zeros(E * n_expert))]
+    for e in range(n_expert):
+        tensors += [
+            (f"blk.{i}.ffn_gate.{e}.weight", [E, FF], pack(ffn[i]["gate"])),
+            (f"blk.{i}.ffn_up.{e}.weight", [E, FF], pack(ffn[i]["up"])),
+            (f"blk.{i}.ffn_down.{e}.weight", [FF, E], pack(downs[e])),
+        ]
+    return tensors
+
+
 dense = list(shared)
 for i in range(LAYERS):
     dense += dense_ffn(i)
@@ -158,3 +171,10 @@ for i in range(LAYERS):
     moe2 += moe_ffn(i, 2, ffn[i]["down"])
 write(f"{OUT}.moe2.gguf", moe2,
       base_meta("llama", [ku("llama.expert_count", 2), ku("llama.expert_used_count", 2)]))
+
+# moe3: legacy SPLIT per-expert layout, expert_used=1, expert 0 = dense (like moe1)
+moe3 = list(shared)
+for i in range(LAYERS):
+    moe3 += moe_ffn_split(i, 2, [0.0] * (FF * E))
+write(f"{OUT}.moe3.gguf", moe3,
+      base_meta("llama", [ku("llama.expert_count", 2), ku("llama.expert_used_count", 1)]))

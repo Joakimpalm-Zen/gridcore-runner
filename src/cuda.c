@@ -1125,9 +1125,6 @@ static bool stage_x(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
 // routing is why MoE layers force the eager path (graph_bad).
 static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used, nff = m->n_ff_exp;
-    size_t gate_rs = ggml_row_size(ly->ffn_gate_exps->type, n_embd);
-    size_t up_rs   = ggml_row_size(ly->ffn_up_exps->type, n_embd);
-    size_t down_rs = ggml_row_size(ly->ffn_down_exps->type, nff);
     for (int t = 0; t < tn; t++) {
         CUdeviceptr xin  = g->xb  + (size_t)t * xdim * sizeof(float);
         CUdeviceptr aout = g->xb2 + (size_t)t * xdim * sizeof(float);
@@ -1159,12 +1156,9 @@ static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdi
         for (int s = 0; s < used; s++) {
             int e = sel[s];
             float w = selw[s] / denom;
-            gguf_tensor gv = *ly->ffn_gate_exps;
-            gv.data = (uint8_t *)ly->ffn_gate_exps->data + (size_t)e * nff * gate_rs;
-            gguf_tensor uv = *ly->ffn_up_exps;
-            uv.data = (uint8_t *)ly->ffn_up_exps->data + (size_t)e * nff * up_rs;
-            gguf_tensor dv = *ly->ffn_down_exps;
-            dv.data = (uint8_t *)ly->ffn_down_exps->data + (size_t)e * n_embd * down_rs;
+            gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
+            gguf_tensor uv = moe_expert_weight(ly, 1, e, n_embd, nff);
+            gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
             bool ok = enc_mv(g, m, &gv, xin, g->hb, n_embd, nff, 0, 1, xdim, nff)
                    && enc_mv(g, m, &uv, xin, g->hb2, n_embd, nff, 0, 1, xdim, nff)
                    && enc_actmul(g, m, g->hb, g->hb2, nff)

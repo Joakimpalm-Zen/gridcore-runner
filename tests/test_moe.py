@@ -58,3 +58,11 @@ def test_moe_top2_renormalized_matches_the_dense_oracle(runner_bin, models):
     dense = _generate(runner_bin, f"{models}.dense.gguf")
     moe2 = _generate(runner_bin, f"{models}.moe2.gguf")
     assert moe2 == dense, "expert_used=2 (0.5/0.5) MoE must be token-identical to dense"
+
+
+def test_split_expert_layout_matches_the_dense_oracle(runner_bin, models):
+    # legacy split per-expert tensors (older Mixtral GGUFs) must produce the
+    # same result as the fused layout — validates the split loader path.
+    dense = _generate(runner_bin, f"{models}.dense.gguf")
+    moe3 = _generate(runner_bin, f"{models}.moe3.gguf")
+    assert moe3 == dense, "split-expert MoE must be token-identical to the dense FFN"

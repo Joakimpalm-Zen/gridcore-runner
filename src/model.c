@@ -549,9 +549,34 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             // dense gate/up/down for this layer
             l->is_moe = true;
             l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
-            l->ffn_gate_exps = need_tensor(g, "blk.%d.ffn_gate_exps.weight", i, &ok);
-            l->ffn_up_exps   = need_tensor(g, "blk.%d.ffn_up_exps.weight", i, &ok);
-            l->ffn_down_exps = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
+            l->ffn_gate_exps = opt_tensor(g, "blk.%d.ffn_gate_exps.weight", i);
+            if (l->ffn_gate_exps) {
+                // modern fused 3D expert tensors
+                l->ffn_up_exps   = need_tensor(g, "blk.%d.ffn_up_exps.weight", i, &ok);
+                l->ffn_down_exps = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
+            } else {
+                // legacy split layout: one 2D tensor per expert (older Mixtral)
+                l->moe_split = true;
+                l->moe_g = calloc((size_t)m->n_expert, sizeof(gguf_tensor *));
+                l->moe_u = calloc((size_t)m->n_expert, sizeof(gguf_tensor *));
+                l->moe_d = calloc((size_t)m->n_expert, sizeof(gguf_tensor *));
+                if (!l->moe_g || !l->moe_u || !l->moe_d) return false;
+                for (int e = 0; e < m->n_expert; e++) {
+                    char nm[128];
+                    snprintf(nm, sizeof(nm), "blk.%d.ffn_gate.%d.weight", i, e);
+                    l->moe_g[e] = gguf_find_tensor(g, nm);
+                    snprintf(nm, sizeof(nm), "blk.%d.ffn_up.%d.weight", i, e);
+                    l->moe_u[e] = gguf_find_tensor(g, nm);
+                    snprintf(nm, sizeof(nm), "blk.%d.ffn_down.%d.weight", i, e);
+                    l->moe_d[e] = gguf_find_tensor(g, nm);
+                    if (!l->moe_g[e] || !l->moe_u[e] || !l->moe_d[e]) {
+                        fprintf(stderr, "error: missing MoE expert tensor "
+                                "(neither fused ffn_gate_exps nor split "
+                                "ffn_gate.%d) in blk.%d\n", e, i);
+                        return false;
+                    }
+                }
+            }
         } else {
             l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
         }
@@ -800,6 +825,7 @@ void model_free(model_t *m) {
         free(l->qnorm_w); free(l->knorm_w);
         free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
         free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
+        free(l->moe_g); free(l->moe_u); free(l->moe_d);  // split-MoE pointer arrays
     }
     free(m->l_head_kv); free(m->l_head_dim); free(m->l_rope_dim);
     free(m->l_is_swa); free(m->kv_off); free(m->suppress);
@@ -1144,6 +1170,25 @@ static void qwen35_linear(model_t *m, layer_t *ly, int layer, int n, int xdim) {
              inner, m->n_embd, NULL, n);
 }
 
+gguf_tensor moe_expert_weight(const layer_t *ly, int which, int e,
+                              int n_embd, int n_ff_exp) {
+    if (ly->moe_split) {
+        gguf_tensor *t = which == 0 ? ly->moe_g[e]
+                       : which == 1 ? ly->moe_u[e] : ly->moe_d[e];
+        return *t;
+    }
+    gguf_tensor *base = which == 0 ? ly->ffn_gate_exps
+                      : which == 1 ? ly->ffn_up_exps : ly->ffn_down_exps;
+    // fused 3D: gate/up are {n_embd, n_ff_exp, n_expert}; down is
+    // {n_ff_exp, n_embd, n_expert}. Expert e is a contiguous 2D block.
+    int64_t rows = which == 2 ? n_embd : n_ff_exp;   // rows of this expert's block
+    int64_t rowlen = which == 2 ? n_ff_exp : n_embd; // ne[0] (row length)
+    size_t rs = ggml_row_size(base->type, rowlen);
+    gguf_tensor v = *base;
+    v.data = (uint8_t *)base->data + (size_t)e * rows * rs;
+    return v;
+}
+
 // Sparse-MoE FFN for one layer, per token: route -> softmax over all experts
 // -> top-k select -> renormalize the selected weights to sum to 1 (Mixtral /
 // Qwen3 convention) -> per-expert SwiGLU -> weighted sum. Reads the RMS-normed
@@ -1186,10 +1231,9 @@ static void moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
         for (int t = 0; t < used; t++) {
             int e = sel[t];
             float w = selw[t] / denom;
-            gguf_tensor gv, uv, dv;
-            slice_rows(ly->ffn_gate_exps, &gv, (int64_t)e * nff, nff);
-            slice_rows(ly->ffn_up_exps,   &uv, (int64_t)e * nff, nff);
-            slice_rows(ly->ffn_down_exps, &dv, (int64_t)e * n_embd, n_embd);
+            gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
+            gguf_tensor uv = moe_expert_weight(ly, 1, e, n_embd, nff);
+            gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
             matvec_b(m->tp, m->moe_gate, nff, &gv, xin, n_embd, n_embd, nff, NULL, 1);
             matvec_b(m->tp, m->moe_up,   nff, &uv, xin, n_embd, n_embd, nff, NULL, 1);
             for (int j = 0; j < nff; j++) {

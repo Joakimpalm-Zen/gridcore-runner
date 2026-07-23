@@ -208,9 +208,13 @@ typedef struct {
     // set these replace w_gate/w_up/w_down for this layer.
     bool         is_moe;
     gguf_tensor *ffn_gate_inp;   // router: n_embd -> n_expert logits (F32)
+    // modern fused 3D expert tensors ({.., n_expert}); NULL when split
     gguf_tensor *ffn_gate_exps;  // 3D {n_embd, n_ff, n_expert}
     gguf_tensor *ffn_up_exps;    // 3D {n_embd, n_ff, n_expert}
     gguf_tensor *ffn_down_exps;  // 3D {n_ff, n_embd, n_expert}
+    // legacy split layout: one 2D tensor per expert (older Mixtral GGUFs)
+    bool         moe_split;
+    gguf_tensor **moe_g, **moe_u, **moe_d;  // [n_expert] each, when moe_split
     float       *attn_norm_w, *ffn_norm_w; // norm weights as f32
     float       *qnorm_w, *knorm_w;      // per-head Q/K norms (qwen3, gemma3/4)
     float       *post_attn_norm_w, *post_ffn_norm_w; // gemma sandwich norms
@@ -221,6 +225,12 @@ typedef struct {
     gguf_tensor *wqkv, *wq_gate, *ssm_conv, *ssm_beta, *ssm_alpha, *ssm_out;
     float       *ssm_dt, *ssm_a, *ssm_norm_w;
 } layer_t;
+
+// Return expert `e`'s weight for one MoE FFN projection (which: 0=gate, 1=up,
+// 2=down) as a 2D tensor, handling both the fused 3D layout (a slice) and the
+// legacy split-per-expert layout. Shared by the CPU and GPU MoE forward paths.
+gguf_tensor moe_expert_weight(const layer_t *ly, int which, int e,
+                              int n_embd, int n_ff_exp);
 
 // One model_t is one *sequence*: a set of weights plus the mutable state
 // needed to decode one stream against them. The fields below are grouped by
