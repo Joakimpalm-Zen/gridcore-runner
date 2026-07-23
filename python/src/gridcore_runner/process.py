@@ -49,16 +49,33 @@ def query_system_capabilities(
     return data
 
 
+# Must match the native registry's fixed limits (reg_entry in server.c) so the
+# builder rejects a spec the server would truncate or drop rather than emitting
+# it (RNR-014).
+_MAX_MODELS = 16
+_MAX_NAME = 63
+_MAX_PATH = 1023
+
+
 def model_registry_argument(models: Mapping[str, str | Path]) -> str:
     if not models:
         raise ValueError("model registry must not be empty")
+    if len(models) > _MAX_MODELS:
+        raise ValueError(
+            f"too many models ({len(models)}); the server accepts at most {_MAX_MODELS}")
     entries: list[str] = []
     for name in sorted(models):
         path = str(models[name])
         if not name or any(char in name for char in ",="):
             raise ValueError(f"invalid model registry name: {name!r}")
+        if len(name) > _MAX_NAME:
+            raise ValueError(
+                f"model registry name too long ({len(name)} > {_MAX_NAME}): {name!r}")
         if not path or "," in path:
             raise ValueError(f"invalid model registry path: {path!r}")
+        if len(path) > _MAX_PATH:
+            raise ValueError(
+                f"model registry path too long ({len(path)} > {_MAX_PATH}) for {name!r}")
         entries.append(f"{name}={path}")
     return ",".join(entries)
 

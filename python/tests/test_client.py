@@ -476,6 +476,13 @@ class LaunchTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             model_registry_argument({"bad,name": "model.gguf"})
+        # match the native limits: reject what the server would truncate/drop
+        with self.assertRaises(ValueError):
+            model_registry_argument({"n" * 64: "model.gguf"})        # name too long
+        with self.assertRaises(ValueError):
+            model_registry_argument({"m": "p" * 1024})               # path too long
+        with self.assertRaises(ValueError):
+            model_registry_argument({f"m{i}": "x.gguf" for i in range(17)})  # too many
 
     def test_server_args_use_runner_owned_fit_and_parent_lifetime(self):
         launch = ServerLaunch(

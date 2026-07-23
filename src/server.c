@@ -3876,15 +3876,47 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     // "name=path,name2=path2" enables swap mode: one resident model,
     // loaded per request's "model" field, unloaded after ttl idle seconds
     if (strchr(model_path, '=')) {
+        // Validate every limit and reject the whole spec with an exact reason
+        // rather than silently truncating a name/path (which can collide or
+        // select the wrong file) or dropping entries past the cap (RNR-014).
+        const int max_reg = (int)(sizeof(SV.reg) / sizeof(SV.reg[0]));
         char tmp[4096];
+        if (strlen(model_path) >= sizeof(tmp)) {
+            fprintf(stderr, "error: -m registry spec is too long (max %zu bytes)\n",
+                    sizeof(tmp) - 1);
+            return 1;
+        }
         snprintf(tmp, sizeof(tmp), "%s", model_path);
-        for (char *tk = strtok(tmp, ","); tk && SV.n_reg < 16;
-             tk = strtok(NULL, ",")) {
+        for (char *tk = strtok(tmp, ","); tk; tk = strtok(NULL, ",")) {
+            if (SV.n_reg >= max_reg) {
+                fprintf(stderr, "error: too many models in -m (max %d)\n", max_reg);
+                return 1;
+            }
             char *eq = strchr(tk, '=');
-            if (!eq) { fprintf(stderr, "error: bad registry entry '%s'\n", tk); return 1; }
+            if (!eq) { fprintf(stderr, "error: bad registry entry '%s' (want name=path)\n", tk); return 1; }
             *eq = 0;
-            snprintf(SV.reg[SV.n_reg].name, sizeof(SV.reg[0].name), "%s", tk);
-            snprintf(SV.reg[SV.n_reg].path, sizeof(SV.reg[0].path), "%s", eq + 1);
+            const char *nm = tk, *pth = eq + 1;
+            if (!*nm || !*pth) {
+                fprintf(stderr, "error: registry entry '%s=%s' has an empty name or path\n", nm, pth);
+                return 1;
+            }
+            if (strlen(nm) >= sizeof(SV.reg[0].name)) {
+                fprintf(stderr, "error: model name '%s' is too long (max %zu chars)\n",
+                        nm, sizeof(SV.reg[0].name) - 1);
+                return 1;
+            }
+            if (strlen(pth) >= sizeof(SV.reg[0].path)) {
+                fprintf(stderr, "error: model path for '%s' is too long (max %zu chars)\n",
+                        nm, sizeof(SV.reg[0].path) - 1);
+                return 1;
+            }
+            for (int j = 0; j < SV.n_reg; j++)
+                if (!strcmp(SV.reg[j].name, nm)) {
+                    fprintf(stderr, "error: duplicate model name '%s' in -m\n", nm);
+                    return 1;
+                }
+            snprintf(SV.reg[SV.n_reg].name, sizeof(SV.reg[0].name), "%s", nm);
+            snprintf(SV.reg[SV.n_reg].path, sizeof(SV.reg[0].path), "%s", pth);
             if (!plat_file_readable(SV.reg[SV.n_reg].path)) {
                 fprintf(stderr, "error: cannot read %s\n", SV.reg[SV.n_reg].path);
                 return 1;
