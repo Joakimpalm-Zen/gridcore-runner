@@ -1833,7 +1833,16 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
 
     size_t cap = strlen(prompt) + 16;
     int32_t *toks = malloc(sizeof(int32_t) * cap);
-    int n_prompt = tok_encode(s->tok, prompt, toks, (int)cap, true, true);
+    // -1 from tok_encode is an allocation failure mid-encode (a dropped
+    // segment); a NULL toks is the same class. Both are 500s, never a prompt
+    // silently short by the missing piece.
+    int n_prompt = toks ? tok_encode(s->tok, prompt, toks, (int)cap, true, true) : -1;
+    if (n_prompt < 0) {
+        free(toks);
+        completion_cleanup(e, schema, NULL);
+        send_error(fd, 500, "out of memory tokenizing prompt");
+        return;
+    }
     if (n_prompt == 0 || n_prompt >= m->n_ctx) {
         free(toks);
         completion_cleanup(e, schema, NULL);
@@ -3211,11 +3220,12 @@ static void handle_count_tokens(slot_t *s, int fd, jv *req) {
     if (!prompt) return;
     size_t cap = strlen(prompt) + 16;
     int32_t *toks = malloc(sizeof(int32_t) * cap);
-    int n = toks ? tok_encode(s->tok, prompt, toks, (int)cap, true, true) : 0;
+    int n = toks ? tok_encode(s->tok, prompt, toks, (int)cap, true, true) : -1;
     free(toks);
     free(prompt);
     tool_envelope_free(&env);
-    if (!n) { send_error(fd, 400, "empty prompt"); return; }
+    if (n < 0) { send_error(fd, 500, "out of memory tokenizing prompt"); return; }
+    if (n == 0) { send_error(fd, 400, "empty prompt"); return; }
     sbuf r = {0};
     sb_fmt(&r, "{\"input_tokens\":%d}", n);
     send_built(fd, &r);
@@ -3245,7 +3255,13 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
         if (!txt) { send_error(fd, 400, "input must be strings"); ok = false; break; }
         size_t cap = strlen(txt) + 16;
         int32_t *toks = malloc(sizeof(int32_t) * cap);
-        int n = tok_encode(s->tok, txt, toks, (int)cap, true, true);
+        int n = toks ? tok_encode(s->tok, txt, toks, (int)cap, true, true) : -1;
+        if (n < 0) {
+            free(toks);
+            send_error(fd, 500, "out of memory tokenizing input");
+            ok = false;
+            break;
+        }
         if (n == 0 || !model_embed(m, toks, n, emb)) {
             free(toks);
             send_error(fd, 400, n == 0 ? "empty input" : "input exceeds context window");

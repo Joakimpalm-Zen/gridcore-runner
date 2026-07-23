@@ -128,11 +128,13 @@ static const char *const texts[] = {
     "  12",
 };
 
-// tok_encode returns a token count and has no error channel — every caller in
-// engine.c/server.c/main.c takes the count at face value. So on a failed
-// allocation it degrades: the affected segment contributes no tokens, and the
-// call returns what it had. It must not crash, and it must not strand the
-// buffers it did manage to allocate.
+// tok_encode's error channel (RNR-006): if an encode helper has to drop a text
+// segment because a temporary allocation failed, the whole call returns -1
+// rather than a silently-shorter token count that every caller would mistake
+// for a legitimately short prompt. So under injected allocation failure the
+// result must be EITHER the full clean count (the failed allocation did not
+// affect the encode) OR exactly -1 — never a positive partial. It must also
+// not crash or strand the buffers it did allocate.
 static void test_encode_survives_allocation_failure(void) {
     for (size_t i = 0; i < sizeof(fixtures) / sizeof(*fixtures); i++) {
         gguf_file g;
@@ -166,11 +168,11 @@ static void test_encode_survives_allocation_failure(void) {
                             texts[x], k, total, alloc_live - base_live);
                     abort();
                 }
-                if (n < 0 || n > want_n) {
+                if (n != want_n && n != -1) {
                     fprintf(stderr, "%s: encode(\"%s\"), failing allocation %ld of "
-                                    "%ld: produced %d tokens, more than the %d of a "
-                                    "clean encode\n", fixtures[i], texts[x], k, total,
-                            n, want_n);
+                                    "%ld: produced %d tokens — a silent partial; the "
+                                    "contract is the full %d or -1\n", fixtures[i],
+                            texts[x], k, total, n, want_n);
                     abort();
                 }
             }

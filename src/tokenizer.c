@@ -281,9 +281,9 @@ typedef struct { int start, len, prev, next; } sym_t;
 static int spm_encode(tokenizer *t, const char *text, size_t n,
                       int32_t *out, int cap, int n_out) {
     if (n == 0) return n_out;
-    if (n > SIZE_MAX / sizeof(sym_t) - 1) return n_out;
+    if (n > SIZE_MAX / sizeof(sym_t) - 1) { t->encode_oom = true; return n_out; }
     sym_t *sym = malloc(sizeof(sym_t) * (n + 1));
-    if (!sym) return n_out;   // no error channel: drop the segment, never write
+    if (!sym) { t->encode_oom = true; return n_out; }  // signalled via t; tok_encode returns -1
     int n_sym = 0;
     for (size_t i = 0; i < n; ) {
         int l = u8_len((uint8_t)text[i]);
@@ -334,9 +334,9 @@ static int spm_encode(tokenizer *t, const char *text, size_t n,
 static int spm_encode_text(tokenizer *t, const char *text, size_t n,
                            int32_t *out, int cap, int n_out, bool first_segment) {
     // replace ' ' with U+2581, optionally prefix a space
-    if (n > (SIZE_MAX - 4) / 3) return n_out;
+    if (n > (SIZE_MAX - 4) / 3) { t->encode_oom = true; return n_out; }
     char *buf = malloc(n * 3 + 4);
-    if (!buf) return n_out;
+    if (!buf) { t->encode_oom = true; return n_out; }
     size_t m = 0;
     if (t->add_space_prefix && first_segment && n > 0) {
         memcpy(buf + m, "\xE2\x96\x81", 3); m += 3;
@@ -625,7 +625,7 @@ static int bpe_word(tokenizer *t, const char *w, int n, int32_t *out, int cap, i
     if (n <= 0) return n_out;
     size_t max_sym = (size_t)n + 1;
     int *st = malloc(sizeof(int) * max_sym), *ln = malloc(sizeof(int) * max_sym);
-    if (!st || !ln) { free(st); free(ln); return n_out; }
+    if (!st || !ln) { free(st); free(ln); t->encode_oom = true; return n_out; }
     int ns = 0;
     for (int i = 0; i < n; ) {
         int l = u8_len((uint8_t)w[i]);
@@ -695,7 +695,7 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
     size_t *off = malloc(sizeof(size_t) * (n + 2));
     // byte->unicode expands ascii <0x80 to <=2 bytes
     char *word = malloc(n * 2 + 8);
-    if (!cp || !off || !word) { free(cp); free(off); free(word); return n_out; }
+    if (!cp || !off || !word) { free(cp); free(off); free(word); t->encode_oom = true; return n_out; }
     int ncp = 0;
     for (size_t i = 0; i < n; ) {
         int l = u8_len((uint8_t)text[i]);
@@ -733,9 +733,9 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
 static int bpe_spm_encode_text(tokenizer *t, const char *text, size_t n,
                                int32_t *out, int cap, int n_out) {
     if (n == 0) return n_out;
-    if (n > (SIZE_MAX - 4) / 3) return n_out;
+    if (n > (SIZE_MAX - 4) / 3) { t->encode_oom = true; return n_out; }
     char *buf = malloc(n * 3 + 4);
-    if (!buf) return n_out;
+    if (!buf) { t->encode_oom = true; return n_out; }
     size_t m = 0;
     for (size_t i = 0; i < n; i++) {
         if (text[i] == ' ') { memcpy(buf + m, "\xE2\x96\x81", 3); m += 3; }
@@ -758,6 +758,7 @@ static int bpe_spm_encode_text(tokenizer *t, const char *text, size_t n,
 int tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
                bool add_bos, bool parse_special) {
     int n_out = 0;
+    t->encode_oom = false;   // set by a helper that had to drop a segment
     if (add_bos && t->add_bos && t->bos_id >= 0 && n_out < cap)
         out[n_out++] = t->bos_id;
 
@@ -799,6 +800,9 @@ int tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
             ? bpe_spm_encode_text(t, text + seg, n - seg, out, cap, n_out)
             : bpe_encode_text(t, text + seg, n - seg, out, cap, n_out);
     }
+    // A dropped segment would look like a legitimately shorter prompt; refuse
+    // to return a silently truncated tokenization.
+    if (t->encode_oom) return -1;
     return n_out;
 }
 

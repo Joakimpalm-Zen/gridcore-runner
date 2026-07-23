@@ -179,6 +179,10 @@ typedef struct {
     int      n_special;
     int      b2u[256];      // BPE byte -> codepoint
     int      u2b[512];      // BPE codepoint -> byte (-1 = none)
+    // Set by an encode helper when it drops a text segment because a temporary
+    // allocation failed. tok_encode resets it per call and returns -1 when set,
+    // so an OOM is never mistaken for a legitimately shorter prompt.
+    bool     encode_oom;
 } tokenizer;
 
 bool tokenizer_init(tokenizer *t, gguf_file *g);

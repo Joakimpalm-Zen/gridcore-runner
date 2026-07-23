@@ -457,6 +457,11 @@ int main(int argc, char **argv) {
             "Write a short story about a lighthouse keeper.";
         char *p = unescape(bench_prompt);
         n_prompt = tok_encode(&tok, p, toks, (int)tok_cap, !no_bos, true);
+        if (n_prompt < 0) {
+            fprintf(stderr, "error: out of memory tokenizing benchmark prompt\n");
+            free(p);
+            return 1;
+        }
         if (n_prompt == 0 || n_prompt >= m.n_ctx) {
             fprintf(stderr, "error: benchmark prompt does not fit context\n");
             free(p);
@@ -489,6 +494,7 @@ int main(int argc, char **argv) {
         // one-shot completion
         char *p = unescape(prompt);
         n_prompt = tok_encode(&tok, p, toks, (int)tok_cap, !no_bos, true);
+        if (n_prompt < 0) { fprintf(stderr, "error: out of memory tokenizing prompt\n"); return 1; }
         if (n_prompt == 0) { fprintf(stderr, "error: empty prompt\n"); return 1; }
         if (n_prompt >= m.n_ctx) {
             fprintf(stderr, "error: prompt is %d tokens but context is %d — "
@@ -546,6 +552,10 @@ int main(int argc, char **argv) {
                               first_turn && !no_bos, true);
         first_turn = false;
 
+        if (n_prompt < 0) {
+            fprintf(stderr, "[out of memory tokenizing input — turn skipped]\n");
+            continue;
+        }
         if (e.pos + n_prompt >= m.n_ctx) {
             fprintf(stderr, "[context full — restart to continue]\n");
             break;
