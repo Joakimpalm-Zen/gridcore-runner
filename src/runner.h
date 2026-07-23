@@ -203,6 +203,14 @@ typedef struct {
     gguf_tensor *attn_norm, *wq, *wk, *wv, *wo;
     float       *bq, *bk, *bv, *bo;      // optional biases (f32, converted)
     gguf_tensor *ffn_norm, *w_gate, *w_up, *w_down;
+    // sparse-MoE FFN (Mixtral / Qwen3-MoE): a router picks expert_used of
+    // expert_count experts, each a SwiGLU FFN, weighted-summed. When is_moe is
+    // set these replace w_gate/w_up/w_down for this layer.
+    bool         is_moe;
+    gguf_tensor *ffn_gate_inp;   // router: n_embd -> n_expert logits (F32)
+    gguf_tensor *ffn_gate_exps;  // 3D {n_embd, n_ff, n_expert}
+    gguf_tensor *ffn_up_exps;    // 3D {n_embd, n_ff, n_expert}
+    gguf_tensor *ffn_down_exps;  // 3D {n_ff, n_embd, n_expert}
     float       *attn_norm_w, *ffn_norm_w; // norm weights as f32
     float       *qnorm_w, *knorm_w;      // per-head Q/K norms (qwen3, gemma3/4)
     float       *post_attn_norm_w, *post_ffn_norm_w; // gemma sandwich norms
@@ -240,6 +248,13 @@ typedef struct {
     char      arch[32];
     int       n_layer, n_embd, n_head, n_head_kv, head_dim, n_ff;
     int       n_vocab, n_ctx_train, rope_dim;
+    // sparse-MoE (0 = dense model). n_ff_exp is the per-expert FFN width.
+    int       n_expert, n_expert_used, n_ff_exp;
+    float    *moe_logits;  // [n_expert] router scratch (forward, single token)
+    float    *moe_gate;    // [n_ff_exp]
+    float    *moe_up;      // [n_ff_exp]
+    float    *moe_dexp;    // [n_embd] one expert's down output
+    float    *moe_out;     // [n_embd] weighted expert-sum accumulator
     bool      rope_neox;     // NeoX-style rotation (qwen2) vs adjacent pairs (llama)
     float     rms_eps, rope_base;
     float     rope_mscale;   // YaRN attention magnitude scale (1.0 = off)

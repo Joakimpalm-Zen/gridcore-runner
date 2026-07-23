@@ -415,9 +415,37 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
                                ? (int)((const uint32_t *)kv_arr->arr_raw)[i] : m->n_head_kv;
         }
     }
-    if (gguf_get_u32(g, AK("expert_count"), 0) > 0) {
-        fprintf(stderr, "error: MoE models are not supported\n");
-        return false;
+    m->n_expert = (int)gguf_get_u32(g, AK("expert_count"), 0);
+    if (m->n_expert > 0) {
+        // sparse-MoE (Mixtral / Qwen3-MoE): softmax-over-all router, top-k
+        // selection, renormalized weights, per-expert SwiGLU, weighted sum.
+        m->n_expert_used = (int)gguf_get_u32(g, AK("expert_used_count"), 0);
+        // Mixtral omits expert_feed_forward_length and uses feed_forward_length
+        m->n_ff_exp = (int)gguf_get_u32(g, AK("expert_feed_forward_length"), m->n_ff);
+        if (m->n_expert_used < 1 || m->n_expert_used > m->n_expert ||
+            m->n_ff_exp <= 0 || m->n_expert > 256) {
+            fprintf(stderr, "error: invalid MoE geometry (experts=%d used=%d ff_exp=%d)\n",
+                    m->n_expert, m->n_expert_used, m->n_ff_exp);
+            return false;
+        }
+        // Only the Mixtral/Qwen3 convention is implemented: softmax-over-all
+        // gating, top-k, renormalized weights, no shared expert. A shared-expert
+        // MoE (Qwen2-MoE / DeepSeek) would load its standard experts and
+        // silently ignore the shared expert — refuse rather than compute wrong.
+        if (gguf_get_u32(g, AK("expert_shared_count"), 0) > 0 ||
+            gguf_find_tensor(g, "blk.0.ffn_gate_inp_shexp.weight")) {
+            fprintf(stderr, "error: shared-expert MoE is not supported "
+                    "(only Mixtral/Qwen3-style top-k MoE)\n");
+            return false;
+        }
+        // the MoE expert FFN is implemented with SiLU gating (Mixtral/Qwen3);
+        // a GELU-activation family (gemma) would compute wrong, so refuse it
+        // rather than run unvalidated math
+        if (m->ffn_act != ACT_SILU) {
+            fprintf(stderr, "error: MoE is only supported with SiLU-gated "
+                    "experts (this model uses a different activation)\n");
+            return false;
+        }
     }
     if (!m->qwen35 && gguf_get(g, AK("ssm.conv_kernel"))) {
         fprintf(stderr, "error: '%s' is a hybrid SSM/attention architecture — "
@@ -507,11 +535,23 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             l->wk     = need_tensor(g, "blk.%d.attn_k.weight", i, &ok);
             l->wv     = m->v_rmsnorm ? opt_tensor(g, "blk.%d.attn_v.weight", i)
                                      : need_tensor(g, "blk.%d.attn_v.weight", i, &ok);
-            l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
-            l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
+            if (m->n_expert == 0) {
+                l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
+                l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
+            }
         }
         l->wo     = need_tensor(g, "blk.%d.attn_output.weight", i, &ok);
-        l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
+        if (m->n_expert > 0) {
+            // sparse-MoE FFN: a router plus fused 3D expert tensors replace the
+            // dense gate/up/down for this layer
+            l->is_moe = true;
+            l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
+            l->ffn_gate_exps = need_tensor(g, "blk.%d.ffn_gate_exps.weight", i, &ok);
+            l->ffn_up_exps   = need_tensor(g, "blk.%d.ffn_up_exps.weight", i, &ok);
+            l->ffn_down_exps = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
+        } else {
+            l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
+        }
         if (!ok) return false;
         l->attn_norm_w = tensor_to_f32(an, &ok);
         l->ffn_norm_w  = tensor_to_f32(fn, &ok);
@@ -661,9 +701,19 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->att    = malloc(sizeof(float) * (size_t)m->n_head * n_ctx);
     m->logits = malloc(sizeof(float) * m->n_vocab);
     m->spec_batch = 16; // all_logits rows, allocated lazily on first use
+    if (m->n_expert > 0) {
+        // per-token MoE scratch (the FFN routes each token independently)
+        m->moe_logits = malloc(sizeof(float) * (size_t)m->n_expert);
+        m->moe_gate   = malloc(sizeof(float) * (size_t)m->n_ff_exp);
+        m->moe_up     = malloc(sizeof(float) * (size_t)m->n_ff_exp);
+        m->moe_dexp   = malloc(sizeof(float) * (size_t)m->n_embd);
+        m->moe_out    = malloc(sizeof(float) * (size_t)m->n_embd);
+    }
     if (!m->kv_off || !m->kcache || !m->vcache || !m->x || !m->xb ||
         !m->xb2 || !m->q || !m->k_tmp || !m->v_tmp || !m->hb ||
         !m->hb2 || !m->att || !m->logits ||
+        (m->n_expert > 0 && (!m->moe_logits || !m->moe_gate || !m->moe_up ||
+                             !m->moe_dexp || !m->moe_out)) ||
         (m->qwen35 && (!m->q_gate || !m->ssm_qkv || !m->ssm_z ||
                        !m->ssm_aux || !m->ssm_conv_state ||
                        !m->ssm_state_mem || !m->ssm_cw))) {
@@ -763,6 +813,8 @@ void model_free(model_t *m) {
     free(m->ssm_cw);
     free(m->ssm_conv_state); free(m->ssm_state_mem);
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
+    free(m->moe_logits); free(m->moe_gate); free(m->moe_up);
+    free(m->moe_dexp); free(m->moe_out);
     tpool_destroy(m->tp);
     gguf_close(&m->gf);
     memset(m, 0, sizeof(*m));
@@ -1089,6 +1141,66 @@ static void qwen35_linear(model_t *m, layer_t *ly, int layer, int n, int xdim) {
              inner, m->n_embd, NULL, n);
 }
 
+// Sparse-MoE FFN for one layer, per token: route -> softmax over all experts
+// -> top-k select -> renormalize the selected weights to sum to 1 (Mixtral /
+// Qwen3 convention) -> per-expert SwiGLU -> weighted sum. Reads the RMS-normed
+// input from m->xb and writes the FFN output back into m->xb; each token is
+// independent, so the in-place read/write is safe.
+static void moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
+    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int nff = m->n_ff_exp;
+    for (int b = 0; b < n; b++) {
+        float *xin = m->xb + (size_t)b * xdim;          // this token's normed input
+        matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, xin,
+                 n_embd, n_embd, ne, NULL, 1);           // router logits
+        // softmax over ALL experts (before top-k)
+        float mx = m->moe_logits[0];
+        for (int e = 1; e < ne; e++)
+            if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
+        float ssum = 0.0f;
+        for (int e = 0; e < ne; e++) {
+            float p = expf(m->moe_logits[e] - mx);
+            m->moe_logits[e] = p;
+            ssum += p;
+        }
+        for (int e = 0; e < ne; e++) m->moe_logits[e] /= ssum;
+        // top-k selection (largest probs; ties resolve to the lowest index);
+        // denom renormalizes the selected weights to sum to 1
+        int   sel[256];
+        float selw[256];
+        float denom = 0.0f;
+        for (int t = 0; t < used; t++) {
+            int best = 0;
+            float bp = -1.0f;
+            for (int e = 0; e < ne; e++)
+                if (m->moe_logits[e] > bp) { bp = m->moe_logits[e]; best = e; }
+            sel[t] = best;
+            selw[t] = bp;
+            denom += bp;
+            m->moe_logits[best] = -1.0f;                 // exclude from next round
+        }
+        for (int i = 0; i < n_embd; i++) m->moe_out[i] = 0.0f;
+        for (int t = 0; t < used; t++) {
+            int e = sel[t];
+            float w = selw[t] / denom;
+            gguf_tensor gv, uv, dv;
+            slice_rows(ly->ffn_gate_exps, &gv, (int64_t)e * nff, nff);
+            slice_rows(ly->ffn_up_exps,   &uv, (int64_t)e * nff, nff);
+            slice_rows(ly->ffn_down_exps, &dv, (int64_t)e * n_embd, n_embd);
+            matvec_b(m->tp, m->moe_gate, nff, &gv, xin, n_embd, n_embd, nff, NULL, 1);
+            matvec_b(m->tp, m->moe_up,   nff, &uv, xin, n_embd, n_embd, nff, NULL, 1);
+            for (int j = 0; j < nff; j++) {
+                float g = m->moe_gate[j];
+                m->moe_gate[j] = (g / (1.0f + expf(-g))) * m->moe_up[j]; // silu(g)*up
+            }
+            matvec_b(m->tp, m->moe_dexp, n_embd, &dv, m->moe_gate,
+                     nff, nff, n_embd, NULL, 1);
+            for (int i = 0; i < n_embd; i++) m->moe_out[i] += w * m->moe_dexp[i];
+        }
+        for (int i = 0; i < n_embd; i++) xin[i] = m->moe_out[i]; // FFN output
+    }
+}
+
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
     if (m->qwen35 && pos == 0) {
@@ -1275,10 +1387,14 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             dbg_stat("post-attn-res", l, m->x + (size_t)(n - 1) * n_embd, n_embd);
         }
 
-        // feed-forward (gated: silu for llama-family, gelu for gemma)
+        // feed-forward (gated: silu for llama-family, gelu for gemma). MoE
+        // layers route each token to a few experts instead of one dense FFN.
         for (int b = 0; b < n; b++)
             rmsnorm(m->xb + (size_t)b * xdim, m->x + (size_t)b * n_embd,
                     ly->ffn_norm_w, n_embd, m->rms_eps);
+        if (ly->is_moe) {
+            moe_ffn(m, ly, n, xdim);   // reads normed m->xb, writes FFN out to m->xb
+        } else {
         matvec_b(m->tp, m->hb,  m->n_ff, ly->w_gate, m->xb, xdim, n_embd, m->n_ff, NULL, n);
         matvec_b(m->tp, m->hb2, m->n_ff, ly->w_up,   m->xb, xdim, n_embd, m->n_ff, NULL, n);
         if (m->ffn_act == ACT_GELU) {
@@ -1295,6 +1411,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         }
         if (dbg) dbg_stat("ffn-act", l, m->hb + (size_t)(n - 1) * m->n_ff, m->n_ff);
         matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, m->n_ff, m->n_ff, n_embd, NULL, n);
+        }
         if (dbg) dbg_stat("ffn-down", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         if (ly->post_ffn_norm_w)
             for (int b = 0; b < n; b++)
