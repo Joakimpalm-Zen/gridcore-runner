@@ -54,8 +54,35 @@ static double float_arg(const char *opt, const char *s, double min, double max) 
     return v;
 }
 
+// Read a whole file into a NUL-terminated malloc'd buffer, or NULL on any
+// error: open, seek, a negative or oversized length (ftell can return -1 and a
+// hostile/special file can be enormous), allocation, or a read error. The size
+// cap also keeps the later size arithmetic well clear of overflow. *out_len
+// gets the byte count (excluding the terminator).
+#define MAX_INPUT_FILE (256u * 1024u * 1024u)
+static char *read_file(const char *path, size_t *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    if (sz < 0 || (unsigned long)sz > MAX_INPUT_FILE || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    bool err = ferror(f) != 0;
+    fclose(f);
+    if (err) { free(buf); return NULL; }
+    buf[got] = 0;
+    if (out_len) *out_len = got;
+    return buf;
+}
+
 static char *unescape(const char *s) {
     char *out = malloc(strlen(s) + 1);
+    if (!out) { fprintf(stderr, "error: out of memory\n"); exit(1); }
     size_t m = 0;
     for (size_t i = 0; s[i]; i++) {
         if (s[i] == '\\' && s[i + 1]) {
@@ -322,17 +349,21 @@ int main(int argc, char **argv) {
     }
     if (!model_path) { usage(argv[0]); return 1; }
     if (prompt_file) {
-        FILE *pf = fopen(prompt_file, "rb");
-        if (!pf) { fprintf(stderr, "error: cannot open %s\n", prompt_file); return 1; }
-        fseek(pf, 0, SEEK_END);
-        long fsz = ftell(pf);
-        fseek(pf, 0, SEEK_SET);
-        char *fbuf = malloc((prompt ? strlen(prompt) : 0) + fsz + 2);
-        size_t off = 0;
-        if (prompt) { strcpy(fbuf, prompt); off = strlen(prompt); }
-        off += fread(fbuf + off, 1, fsz, pf);
-        fbuf[off] = 0;
-        fclose(pf);
+        size_t flen = 0;
+        char *fdata = read_file(prompt_file, &flen);
+        if (!fdata) { fprintf(stderr, "error: cannot read %s\n", prompt_file); return 1; }
+        size_t plen = prompt ? strlen(prompt) : 0;
+        if (flen > SIZE_MAX - plen - 1) {   // checked concat length
+            fprintf(stderr, "error: prompt is too large\n");
+            free(fdata);
+            return 1;
+        }
+        char *fbuf = malloc(plen + flen + 1);
+        if (!fbuf) { free(fdata); fprintf(stderr, "error: out of memory\n"); return 1; }
+        if (prompt) memcpy(fbuf, prompt, plen);
+        memcpy(fbuf + plen, fdata, flen);
+        fbuf[plen + flen] = 0;
+        free(fdata);
         prompt = fbuf;
     }
     if (!prompt && !interactive && !serve && !quant_out && !bench_json) {
@@ -421,15 +452,9 @@ int main(int argc, char **argv) {
         }
     }
     if (schema_file) {
-        FILE *sf = fopen(schema_file, "rb");
-        if (!sf) { fprintf(stderr, "error: cannot open %s\n", schema_file); return 1; }
-        fseek(sf, 0, SEEK_END);
-        long ssz = ftell(sf);
-        fseek(sf, 0, SEEK_SET);
-        char *sbuf = malloc(ssz + 1);
-        ssz = (long)fread(sbuf, 1, ssz, sf);
-        sbuf[ssz] = 0;
-        fclose(sf);
+        size_t ssz = 0;
+        char *sbuf = read_file(schema_file, &ssz);
+        if (!sbuf) { fprintf(stderr, "error: cannot read %s\n", schema_file); return 1; }
         struct jv *sj = json_parse(sbuf, ssz);
         free(sbuf);
         if (!sj) { fprintf(stderr, "error: %s is not valid JSON\n", schema_file); return 1; }
@@ -440,8 +465,11 @@ int main(int argc, char **argv) {
         sval_init(&e.sv, e.schema);
     }
 
-    size_t tok_cap = (prompt ? strlen(prompt) : 0) + m.n_ctx + 32;
+    size_t tok_cap = (prompt ? strlen(prompt) : 0) + (size_t)m.n_ctx + 32;
+    // tok_encode narrows the capacity to int, so keep it representable
+    if (tok_cap > INT_MAX) tok_cap = INT_MAX;
     int32_t *toks = malloc(sizeof(int32_t) * tok_cap);
+    if (!toks) { fprintf(stderr, "error: out of memory\n"); return 1; }
     double ptime, gtime, t0;
     int n_prompt, n_gen;
 
