@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <math.h>
 
 typedef struct {
     const uint8_t *p, *end;
@@ -89,6 +90,19 @@ static bool rd_kv_value(cursor *c, gguf_kv *kv, uint32_t type) {
     return c->ok;
 }
 
+static int cmp_cstr(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+// Sorts `s` in place and returns the first duplicated string, or NULL. O(n log n).
+static const char *first_duplicate_inplace(const char **s, uint64_t n) {
+    if (n < 2) return NULL;
+    qsort(s, n, sizeof(*s), cmp_cstr);
+    for (uint64_t i = 1; i < n; i++)
+        if (strcmp(s[i - 1], s[i]) == 0) return s[i];
+    return NULL;
+}
+
 bool gguf_open(gguf_file *g, const char *path) {
     memset(g, 0, sizeof(*g));
     g->map = plat_mmap_ro(path, &g->map_size);
@@ -149,6 +163,30 @@ bool gguf_open(gguf_file *g, const char *path) {
         t->data = (void *)(uintptr_t)off; // fixed up below
     }
     if (!c.ok) { fprintf(stderr, "error: truncated GGUF header\n"); goto fail; }
+
+    // Reject duplicate metadata keys and tensor names rather than silently
+    // resolving to the first entry — a crafted file could otherwise shadow a
+    // real geometry key or tensor with an earlier decoy (RNR-010).
+    if (g->n_kv > 1) {
+        const char **keys = malloc((size_t)g->n_kv * sizeof(*keys));
+        if (keys) {
+            for (uint64_t i = 0; i < g->n_kv; i++) keys[i] = g->kv[i].key;
+            const char *d = first_duplicate_inplace(keys, g->n_kv);
+            if (d) fprintf(stderr, "error: duplicate GGUF metadata key '%s'\n", d);
+            free(keys);
+            if (d) goto fail;
+        }
+    }
+    if (g->n_tensors > 1) {
+        const char **names = malloc((size_t)g->n_tensors * sizeof(*names));
+        if (names) {
+            for (uint64_t i = 0; i < g->n_tensors; i++) names[i] = g->tensors[i].name;
+            const char *d = first_duplicate_inplace(names, g->n_tensors);
+            if (d) fprintf(stderr, "error: duplicate GGUF tensor name '%s'\n", d);
+            free(names);
+            if (d) goto fail;
+        }
+    }
 
     uint64_t align = gguf_get_u32(g, "general.alignment", 32);
     if (align == 0 || (align & (align - 1))) align = 32;
@@ -217,25 +255,59 @@ gguf_kv *gguf_get(gguf_file *g, const char *key) {
     return NULL;
 }
 
+static bool kv_is_unsigned(uint32_t t) {
+    return t == GGUF_T_U8 || t == GGUF_T_U16 || t == GGUF_T_U32 || t == GGUF_T_U64;
+}
+static bool kv_is_signed(uint32_t t) {
+    return t == GGUF_T_I8 || t == GGUF_T_I16 || t == GGUF_T_I32 || t == GGUF_T_I64;
+}
+// Bit-pattern finiteness/sign checks: the engine builds with -ffast-math, which
+// lets the compiler assume no NaN/inf and fold float comparisons like `d>=0` or
+// isfinite() to constants — so those cannot be trusted for validating untrusted
+// metadata. Inspecting the IEEE bits directly is immune to that.
+static bool dbl_finite(double d)  { uint64_t u; memcpy(&u, &d, 8); return (u & 0x7ff0000000000000ull) != 0x7ff0000000000000ull; }
+static bool dbl_negative(double d){ uint64_t u; memcpy(&u, &d, 8); return (u >> 63) != 0; }
+static bool flt_finite(float f)   { uint32_t u; memcpy(&u, &f, 4); return (u & 0x7f800000u) != 0x7f800000u; }
+
+// Typed getters validate the source type, sign, range, and finiteness rather
+// than reinterpreting whatever the union happens to hold. A negative,
+// out-of-range, NaN, or type-confused metadata value from an untrusted GGUF
+// becomes the caller's default (i.e. "not usable"), never a huge or
+// implementation-defined geometry value that slips past a later sanity check
+// (RNR-010).
 uint32_t gguf_get_u32(gguf_file *g, const char *key, uint32_t dflt) {
     gguf_kv *kv = gguf_get(g, key);
-    // array/string-typed keys (gemma4 stores head_count_kv per layer) never
-    // fill v.u64 — treat them as absent instead of silently returning 0
-    if (!kv || kv->type == GGUF_T_ARR || kv->type == GGUF_T_STR) return dflt;
-    if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) return (uint32_t)kv->v.f64;
-    return (uint32_t)kv->v.u64;
+    if (!kv) return dflt;
+    if (kv_is_unsigned(kv->type))
+        return kv->v.u64 <= UINT32_MAX ? (uint32_t)kv->v.u64 : dflt;
+    if (kv_is_signed(kv->type))
+        return (kv->v.i64 >= 0 && kv->v.i64 <= (int64_t)UINT32_MAX)
+                 ? (uint32_t)kv->v.i64 : dflt;
+    if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) {
+        double d = kv->v.f64;   // must be a finite, non-negative, in-range integer
+        if (!dbl_finite(d) || dbl_negative(d) || d > (double)UINT32_MAX ||
+            d != (double)(uint32_t)d)
+            return dflt;
+        return (uint32_t)d;
+    }
+    return dflt;   // ARR, STR, BOOL are not a u32
 }
 
 float gguf_get_f32(gguf_file *g, const char *key, float dflt) {
     gguf_kv *kv = gguf_get(g, key);
-    if (!kv || kv->type == GGUF_T_ARR || kv->type == GGUF_T_STR) return dflt;
-    if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) return (float)kv->v.f64;
-    return (float)kv->v.u64;
+    if (!kv) return dflt;
+    if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) {
+        float f = (float)kv->v.f64;              // may overflow a huge double to inf
+        return flt_finite(f) ? f : dflt;         // rejects NaN input and overflow
+    }
+    if (kv_is_unsigned(kv->type)) return (float)kv->v.u64;
+    if (kv_is_signed(kv->type))   return (float)kv->v.i64;
+    return dflt;   // ARR, STR, BOOL are not a scalar number
 }
 
 bool gguf_get_bool(gguf_file *g, const char *key, bool dflt) {
     gguf_kv *kv = gguf_get(g, key);
-    return kv ? kv->v.b : dflt;
+    return (kv && kv->type == GGUF_T_BOOL) ? kv->v.b : dflt;
 }
 
 const char *gguf_get_str(gguf_file *g, const char *key, const char *dflt) {
