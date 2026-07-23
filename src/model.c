@@ -642,6 +642,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 
     // runtime buffers
     m->reserve_vram_pct = p->reserve_vram_pct;
+    m->gpu_layers_override = p->gpu_layers_override;
     int n_ctx = p->n_ctx;
     if (n_ctx <= 0 && (p->reserve_vram_pct > 0 || p->reserve_ram_pct > 0)) {
         // reservation auto-fit: size the context to fill whatever the

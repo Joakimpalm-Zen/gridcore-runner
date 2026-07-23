@@ -313,6 +313,7 @@ typedef struct {
     float *all_logits;       // lazy [spec_batch][n_vocab] (speculative verify)
     int    spec_batch;       // rows all_logits can hold
     int    reserve_vram_pct; // VRAM cap for the GPU backend (0 = free VRAM)
+    int    gpu_layers_override; // forced leading GPU layer count (0 = auto)
     int    gpu_layers;       // leading layers run on GPU (n_layer = full,
                              // <n_layer = partial offload, CPU finishes the rest).
                              // Decided by the first instance to upload a given
@@ -448,6 +449,9 @@ typedef struct {
     // fill whatever the reservation leaves after the weights — small models
     // grow their context into the reserved room, capped at the train ctx.
     int   reserve_vram_pct;
+    // force exactly this many leading layers onto the GPU (the rest run on the
+    // CPU); 0 = auto-fit to available/reserved VRAM. Like llama.cpp's -ngl.
+    int   gpu_layers_override;
     int   reserve_ram_pct;
     // --wait-for-vram: seconds to queue behind other registered runners rather
     // than refusing outright. 0 = refuse immediately (the default).

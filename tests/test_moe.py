@@ -39,11 +39,11 @@ def models(tmp_path_factory):
     return base
 
 
-def _generate(runner_bin, model, prompt="hello world", n=12):
+def _generate(runner_bin, model, prompt="hello world", n=12, extra=("--gpu", "off")):
     proc = subprocess.run(
         [runner_bin, "-m", str(model), "-p", prompt, "-n", str(n),
-         "--gpu", "off", "--temp", "0"],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+         "--temp", "0", *extra],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     assert proc.returncode == 0, proc.stderr.decode(errors="replace")
     return proc.stdout
 
@@ -66,3 +66,15 @@ def test_split_expert_layout_matches_the_dense_oracle(runner_bin, models):
     dense = _generate(runner_bin, f"{models}.dense.gguf")
     moe3 = _generate(runner_bin, f"{models}.moe3.gguf")
     assert moe3 == dense, "split-expert MoE must be token-identical to the dense FFN"
+
+
+def test_moe_partial_cpu_offload_matches_dense(runner_bin, models):
+    # `--gpu-layers 1` runs layer 0 on the GPU and layer 1 on the CPU (partial
+    # offload) when a GPU is present; on a GPU-less host it simply falls back to
+    # CPU. Either way the output must equal the dense oracle. Guards the MoE
+    # VRAM-accounting / partial-upload path (both fused and split layouts).
+    dense = _generate(runner_bin, f"{models}.dense.gguf")
+    fused = _generate(runner_bin, f"{models}.moe1.gguf", extra=("--gpu-layers", "1"))
+    split = _generate(runner_bin, f"{models}.moe3.gguf", extra=("--gpu-layers", "1"))
+    assert fused == dense, "fused MoE with partial offload must match dense"
+    assert split == dense, "split MoE with partial offload must match dense"

@@ -621,6 +621,15 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         // a full split also needs token_embd + output weights resident
         bool full = G == m->n_layer &&
                     used + m->tok_embd->nbytes + m->output->nbytes <= vram_budget;
+        // an explicit --gpu-layers overrides the budget-based fit (the user
+        // takes responsibility for VRAM; used for testing partial offload and
+        // for manual control). It can only lower the count below what fits, or
+        // request a specific split.
+        if (m->gpu_layers_override > 0) {
+            G = m->gpu_layers_override;
+            if (G > m->n_layer) G = m->n_layer;
+            full = (G == m->n_layer);
+        }
         if (G == 0) {
             fprintf(stderr,
                     "gpu: not even one layer fits %.1f GB %s VRAM — using CPU\n",

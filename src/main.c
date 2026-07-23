@@ -142,6 +142,7 @@ static void usage(const char *prog) {
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
+        "  --gpu-layers N force N leading layers on the GPU, rest on CPU (0=auto-fit)\n"
         "  --wait-for-vram [S]  when another registered runner is holding the\n"
         "                 GPU, queue for up to S seconds (default 300) instead\n"
         "                 of refusing. Without it a runner that does not fit\n"
@@ -261,6 +262,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--bench-json")) bench_json = true;
         else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = (int)int_arg(a, NEXT, 0, 100);
+        else if (!strcmp(a, "--gpu-layers")) mp.gpu_layers_override = (int)int_arg(a, NEXT, 0, 100000);
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--wait-for-vram")) {
