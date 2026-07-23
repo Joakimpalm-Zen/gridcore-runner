@@ -338,7 +338,7 @@ typedef struct {
 // `st` (nullable) reports the ledger state behind the decision.
 vram_lease *vram_claim(const char *gpu_id, const char *model_path,
                        uint64_t need_bytes, vram_free_fn free_fn, void *free_ud,
-                       int wait_secs, const volatile int *cancel,
+                       int wait_secs, const _Atomic int *cancel,
                        vram_status *st, char *err, size_t err_cap);
 
 // The allocation happened: `actual_bytes` is now real device memory, visible to
@@ -427,11 +427,11 @@ typedef struct {
     // --wait-for-vram: seconds to queue behind other registered runners rather
     // than refusing outright. 0 = refuse immediately (the default).
     int   vram_wait_secs;
-    // Load cancellation: when non-NULL and *load_cancel becomes nonzero, a
-    // load queued in the --wait-for-vram retry loop gives up promptly and the
-    // load fails. The serving layer points this at its unload/shutdown flag;
-    // standalone loads leave it NULL.
-    const volatile int *load_cancel;
+    // Load cancellation: when non-NULL and it becomes nonzero, a load queued in
+    // the --wait-for-vram retry loop gives up promptly and the load fails. A
+    // lock-free atomic, read across threads (RNR-008). The serving layer points
+    // this at its unload/shutdown flag; standalone loads leave it NULL.
+    const _Atomic int *load_cancel;
     // store the KV cache as q8_0 instead of fp16: halves cache bytes, so it
     // roughly doubles the context that fits a given VRAM/RAM reservation.
     // Lossy — output is NOT token-identical to an fp16 cache — so f16 stays

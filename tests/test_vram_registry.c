@@ -11,6 +11,8 @@
 #include "runner.h"
 #include "compat.h"
 
+#include <stdatomic.h>
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -444,12 +446,12 @@ static void test_wait_for_vram_queues_then_proceeds(void) {
 // A queued wait must be interruptible: /unload and shutdown point the claim's
 // cancel flag at their intent, and a wait that ignored it would pin the swap
 // path (and a joining shutdown) for the full --wait-for-vram budget.
-static volatile int cancel_flag;
+static atomic_int cancel_flag;
 
 static void *cancel_setter(void *arg) {
     (void)arg;
     plat_sleep_ms(300);
-    cancel_flag = 1;
+    atomic_store(&cancel_flag, 1);
     return NULL;
 }
 
@@ -462,7 +464,7 @@ static void test_cancelled_wait_gives_up_promptly(void) {
                                  fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(hog);
 
-    cancel_flag = 0;
+    atomic_store(&cancel_flag, 0);
     pthread_t th;
     assert(pthread_create(&th, NULL, cancel_setter, NULL) == 0);
     double t0 = plat_now();

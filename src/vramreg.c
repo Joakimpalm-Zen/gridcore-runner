@@ -287,7 +287,7 @@ static void registry_rollback(const char *path, long pid, long seq);
 
 vram_lease *vram_claim(const char *gpu_id, const char *model_path,
                        uint64_t need_bytes, vram_free_fn free_fn, void *free_ud,
-                       int wait_secs, const volatile int *cancel,
+                       int wait_secs, const _Atomic int *cancel,
                        vram_status *st, char *err, size_t err_cap) {
     // atomic: two slots claiming concurrently must not mint one seq, or
     // vram_release later removes the wrong entry
@@ -320,14 +320,14 @@ vram_lease *vram_claim(const char *gpu_id, const char *model_path,
             if (err && err_cap) err[0] = 0;
         }
         if (c.admitted) break;
-        if (cancel && *cancel) {
+        if (cancel && atomic_load(cancel)) {
             if (err && err_cap) snprintf(err, err_cap, "vram wait cancelled");
             return NULL;
         }
         if (plat_now() >= deadline) return NULL;
         // sleep in short slices so a cancellation (an /unload or a shutdown
         // that wants this wait gone) is honoured within ~100ms, not a second
-        for (int i = 0; i < 10 && !(cancel && *cancel); i++) plat_sleep_ms(100);
+        for (int i = 0; i < 10 && !(cancel && atomic_load(cancel)); i++) plat_sleep_ms(100);
         c.seq = atomic_fetch_add_explicit(&next_seq, 1, memory_order_relaxed);
     }
 

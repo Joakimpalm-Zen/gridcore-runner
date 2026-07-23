@@ -256,11 +256,12 @@ static struct {
     // Loading state machine: swap_to releases swap_mu for the duration of the
     // actual model load (minutes for big files, up to --wait-for-vram longer),
     // so /unload and shutdown are never blocked behind a load. `loading` and
-    // `pending_unload` are protected by swap_mu; `load_cancel` is a plain
-    // flag the vram wait polls without any lock.
+    // `pending_unload` are protected by swap_mu; `load_cancel` is a lock-free
+    // atomic flag the vram wait polls (volatile is not cross-thread
+    // synchronization — RNR-008).
     bool         loading;         // a swap_to load is in flight, lock released
     bool         pending_unload;  // /unload arrived while busy; honoured at the next safe point
-    volatile int load_cancel;     // aborts a --wait-for-vram queue wait
+    atomic_int   load_cancel;     // aborts a --wait-for-vram queue wait
     atomic_bool shutdown;
     pthread_t   reaper_th;
     bool        reaper_started;
@@ -332,7 +333,7 @@ static void handle_unload(int fd) {
         pthread_mutex_lock(&SV.swap_mu);
         if (SV.loading) {
             SV.pending_unload = true;
-            SV.load_cancel = 1;   // a queued --wait-for-vram load gives up now
+            atomic_store(&SV.load_cancel, 1);   // a queued --wait-for-vram load gives up now
             deferred = true;
         } else if (atomic_load(&SV.active_requests) > 0) {
             SV.pending_unload = true;   // freed when the last request finishes
@@ -385,7 +386,7 @@ static int swap_to(const char *want) {
         // -1 and slot 0 has no model, so nothing else touches engine state;
         // the load builds into locals and installs under the lock at the end.
         SV.loading = true;
-        SV.load_cancel = 0;
+        atomic_store(&SV.load_cancel, 0);
         pthread_mutex_unlock(&SV.swap_mu);
 
         fprintf(stderr, "swap: loading %s (%s)\n",
@@ -397,7 +398,7 @@ static int swap_to(const char *want) {
 
         pthread_mutex_lock(&SV.swap_mu);
         SV.loading = false;
-        bool discard = SV.pending_unload || SV.load_cancel;
+        bool discard = SV.pending_unload || atomic_load(&SV.load_cancel);
         SV.pending_unload = false;
         if (!model_ok || !tok_ok || discard) {
             if (discard)
@@ -4126,7 +4127,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     queue_shutdown();
     // A worker parked in a --wait-for-vram queue would pin the joins below
     // for up to the full wait; the load gives up at its next poll instead.
-    SV.load_cancel = 1;
+    atomic_store(&SV.load_cancel, 1);
     for (int i = 0; i < parallel; i++) pthread_join(SV.slots[i].th, NULL);
     sched_shutdown();
     atomic_store(&SV.shutdown, true);
