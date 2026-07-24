@@ -4,8 +4,7 @@
 shipped.** This file is now kept only for the durable operating notes at the
 bottom (the verification gates and the Windows/Makefile quirks), which are
 still true and save real time. The roadmap lives in
-`gridcore-main/docs/plans/runner.md`; open cross-repo findings in
-`gridcore-main/docs/known-issues.md`.
+`gridcore-main/docs/plans/suite-wide-plan.md`; open cross-repo findings are in the same file.
 
 ## What that session flagged, and where it landed
 
