@@ -666,7 +666,9 @@ void   schema_free(snode *n);
 typedef struct {
     const snode *node;
     uint8_t  phase, sub;
-    int16_t  idx;
+    int32_t  idx;       // array element / object key counter (int32: max/minItems
+                        // are bounded only by INT_MAX, so int16 could wrap and
+                        // silently drop maxItems enforcement past 32767)
     int32_t  lit_pos;   // string chars / literal bytes seen (int32: file-sized strings)
     uint16_t disc;      // this object's discriminator choice + 1; 0 = not chosen yet
     uint64_t alive;

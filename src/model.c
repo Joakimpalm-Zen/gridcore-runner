@@ -715,7 +715,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i), &ok);
         l->out_scale = 1.0f;
         gguf_tensor *osc = opt_tensor(g, "blk.%d.layer_output_scale.weight", i);
-        if (osc && osc->type == T_F32) l->out_scale = ((const float *)osc->data)[0];
+        if (osc && osc->type == T_F32 && osc->ne[0] >= 1)
+            l->out_scale = ((const float *)osc->data)[0];
         if (!ok) return false;  // a norm/bias materialization OOMed this layer
     }
 

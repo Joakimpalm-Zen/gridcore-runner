@@ -42,6 +42,9 @@ extern "C" __global__ void k_rmsnorm(const float *x, float *y, const float *w,
 }
 
 // per-head RMSNorm (qwen3 Q/K norm): one block per (head, token)
+// LAUNCH INVARIANT: the tree reduction below (off = tpg/2; off >>= 1) and the
+// red[] indexing require blockDim.x to be a power of two and <= 128 (red[]'s
+// size). Host launches this with 64 — do not exceed the buffer or break pow2.
 extern "C" __global__ void k_qknorm(float *v, const float *w, int hd, float eps,
                                     int vs) {
     __shared__ float red[128];
@@ -1401,6 +1404,8 @@ extern "C" __global__ void k_attn(const float *q, const unsigned char *kc,
 
 #define ATTN_SPLITS 8
 
+// LAUNCH INVARIANT: blockDim.x must be a power of two and <= 128 (red[]'s
+// size) for the tree reduction and shared indexing here. Host launches with 128.
 extern "C" __global__ void k_attn_dec(const float *q, const unsigned char *kc,
                                       const unsigned char *vc, float *att, float *part,
                                       attn_args a, const int *posp) {
@@ -1562,6 +1567,8 @@ extern "C" __global__ void k_store_kv_seq(const float *k, const float *v,
 // split count and the partial layout are untouched, so k_attn_merge (which
 // reads neither position nor cache) serves this path unchanged and each
 // column's result is bitwise what the unbatched decode produces.
+// LAUNCH INVARIANT: blockDim.x must be a power of two and <= 128 (red[]'s
+// size) for the tree reduction and shared indexing here. Host launches with 128.
 extern "C" __global__ void k_attn_dec_seq(const float *q, const ulong64 *kcp,
                                           const ulong64 *vcp, float *att,
                                           float *part, attn_args a,

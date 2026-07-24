@@ -407,7 +407,10 @@ static int swap_to(const char *want) {
                                                    : "wait cancelled");
             else
                 fprintf(stderr, "swap: failed to load %s\n", SV.reg[idx].name);
-            if (tok_ok) tokenizer_free(tok);
+            // tokenizer_init may have allocated buffers before failing (tok_ok
+            // false); tokenizer_free is safe on a calloc'd/partial tokenizer and
+            // frees them. Guard only against a NULL tok (calloc failure).
+            if (tok) tokenizer_free(tok);
             if (model_ok) model_free(m);
             free(m); free(tok);
             pthread_mutex_unlock(&SV.swap_mu);

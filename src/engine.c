@@ -733,7 +733,10 @@ static void lp_capture_pre(engine *e, const float *logits, lp_pre *p) {
     p->lse = mx + logf((float)sum);
     p->n_snap = 0;
     sampler *s = e->smp;
-    for (int i = 0; i < s->n_recent; i++) {
+    // n_recent is capped at 256 in sample.c (sampler.recent[256]); the extra
+    // bound keeps this copy in range even if that invariant ever changes.
+    int snap_cap = (int)(sizeof(p->snap) / sizeof(p->snap[0]));
+    for (int i = 0; i < s->n_recent && p->n_snap < snap_cap; i++) {
         p->snap_ids[p->n_snap] = s->recent[i];
         p->snap[p->n_snap++]   = logits[s->recent[i]];
     }

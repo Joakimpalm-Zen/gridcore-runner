@@ -108,6 +108,13 @@ static struct {
 // events recorded between kernel-group launches on the plain (non-graph)
 // path, so it perturbs neither correctness nor the default binary. See
 // prof_mark()/prof_flush() and the summary printed from gpu_free().
+//
+// THREAD SAFETY: the `prof` accumulator below is a single unsynchronized
+// global. It is a DEV-ONLY, SINGLE-THREAD instrument — enable it only when
+// driving the runner from one decode thread. Under a multi-threaded server
+// its counters/event pool would race; that is accepted because it is never on
+// in a shipped binary. Do not read prof.* outside that assumption; a lock
+// here would sit on the hot launch path for no production benefit.
 typedef void *CUevent;
 enum { PH_NORM = 0, PH_MATVEC, PH_ROPE, PH_ATTN, PH_ELEM, PH_LOGITS, PH_N };
 static const char *PH_NAME[PH_N] = {
@@ -951,7 +958,16 @@ static void prof_init(void) {
     prof.qpc_hz = 1.0;
 #endif
     for (int i = 0; i < 4096; i++)
-        if (cu.EventCreate(&prof.ev[i], 0) != 0) { prof.on = 0; return; }
+        if (cu.EventCreate(&prof.ev[i], 0) != 0) {
+            // free the events already created so a mid-loop failure doesn't
+            // orphan them (prof_report won't run: inited stays 0)
+            for (int j = 0; j < i; j++) {
+                if (cu.EventDestroy) cu.EventDestroy(prof.ev[j]);
+                prof.ev[j] = NULL;
+            }
+            prof.on = 0;
+            return;
+        }
     prof.inited = 1;
     atexit(prof_report);   // CLI mode returns without model_free/gpu_free
 }
@@ -1754,6 +1770,10 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     gpu_t *g = m->gpu;
     if (logits) *logits = NULL;
     if (n < 1) return true;
+    // A prior recoverable GPU failure runs gpu_disable(), which frees the
+    // context and clears m->gpu. Decline rather than deref a NULL g (the
+    // batch path re-checks m0->gpu for the same reason).
+    if (!g) return false;
 
     if (cu.CtxSetCurrent(g->sw->ctx) != 0) return false;
     if (prof.on && !prof.inited) prof_init();
