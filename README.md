@@ -1,30 +1,46 @@
 # Gridcore Runner
 
-> **Public alpha** (`0.1.2-alpha`). Runner is the inference engine of
-> Gridcore, a larger local-agent project whose other layers are not public
-> yet. The engine itself is complete, CI-tested on Linux/macOS/Windows, and
-> daily-driven by the rest of the stack — but it has met few machines other
-> than ours, which is exactly what an alpha is for. Run your GGUF models on
-> your hardware and [open an issue](../../issues) for anything that crashes,
-> misbehaves, or underperforms; `runner --version` and `runner --caps`
-> output make a bug report actionable. The threat model and security
-> policy live in [SECURITY.md](SECURITY.md); the correctness gates every
-> change must hold are in [CONTRIBUTING.md](CONTRIBUTING.md).
+A compact **local LLM inference engine written from scratch in plain C** — no
+dependencies beyond libc/pthreads, no ggml, one `make`, one binary. It loads
+standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
+an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-The inference engine of the Gridcore suite (repo: `gridcore-runner`,
-binary: `runner`). A compact local LLM inference engine, written from scratch in plain C
-(with no dependencies beyond libc/pthreads). It loads standard **GGUF**
-model files — the de-facto format for local models — and runs them on CPU
-(AVX2-accelerated) or GPU (CUDA, Metal), with a particular focus on squeezing
-**large contexts out of small models**.
+**New in 0.1.3 — sparse Mixture-of-Experts.** Qwen3-30B-A3B (128 experts,
+top-8) loads in 18.6 GB and decodes at **~55 tok/s on a 24 GB card**,
+token-identical CPU vs GPU; partial CPU offload for 8–16 GB cards; a new Q3_K
+GPU kernel (Mixtral-8x7B Q3_K_M now runs fully on the GPU). See
+[CHANGELOG.md](CHANGELOG.md) and [docs/moe-support.md](docs/moe-support.md).
+
+## Quick start
+
+Download a prebuilt binary from the [latest release](../../releases/latest)
+(Linux / macOS / Windows), **or** build from source — CUDA needs only the
+NVIDIA driver, no toolkit:
 
 ```
-./runner -m models/SmolLM2-135M-Instruct-Q8_0.gguf -i          # interactive chat
-./runner -m model.gguf -f big-document.txt -c 8192 -n 200      # 4x the training context
-./runner -m model.gguf --serve --parallel 2                    # OpenAI-compatible API server
-./runner -m model.gguf -p "..." --json                         # guaranteed-valid JSON output
-./runner -m big.gguf --draft small.gguf -p "..."               # speculative decoding
+git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
+make                 # produces ./runner (GPU auto-detected at runtime)
+./runner --version   # -> runner 0.1.3-alpha
 ```
+
+Then point it at any GGUF model:
+
+```
+./runner -m model.gguf -i                                   # interactive chat
+./runner -m Qwen3-30B-A3B-Q4_K_M.gguf -p "..." --gpu auto   # sparse MoE on the GPU
+./runner -m model.gguf --serve --parallel 2                 # OpenAI-compatible API server
+./runner -m model.gguf -p "..." --json                      # guaranteed-valid JSON output
+./runner -m model.gguf -f big-document.txt -c 8192 -n 200   # 4x the training context
+./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
+```
+
+> **Public alpha (`0.1.3-alpha`).** CI-tested on Linux/macOS/Windows and
+> daily-driven by the rest of the Gridcore stack, but it has met few machines
+> other than ours — which is what an alpha is for. Run your GGUF models and
+> [open an issue](../../issues) for anything that crashes, misbehaves, or
+> underperforms (`runner --version` and `runner --caps` make a report
+> actionable). Threat model: [SECURITY.md](SECURITY.md); the correctness gates
+> every change must hold: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Why not llama.cpp?
 
