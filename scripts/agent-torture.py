@@ -428,7 +428,12 @@ def main(argv=None):
         exe = args.runner or Path(find_runner(str(ROOT)))
         if not args.model.is_file():
             parser.error(f"model not found: {args.model}")
-        target = RunnerServer(str(exe), str(args.model), ctx=1024, parallel=2,
+        # 4096, not 1024: the large_enum_selection family carries a ~50-member
+        # enum whose tool schema, byte-fallback-tokenized by the tiny CI fixture
+        # (native ctx 256), pushes the rendered prompt past 1024. A bigger ctx
+        # on the spawned runner is free (the fixture is 2 layers) and keeps the
+        # torture matrix runnable against it.
+        target = RunnerServer(str(exe), str(args.model), ctx=4096, parallel=2,
                               extra_args=["--gpu", "off"],
                               log_path=str(args.out / "runner.log"))
         args.out.mkdir(parents=True, exist_ok=True)
