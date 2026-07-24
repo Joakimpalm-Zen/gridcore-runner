@@ -20,16 +20,31 @@
 // would change the forward-pass math without any error).
 static float *tensor_to_f32(gguf_tensor *t, bool *ok) {
     if (!t) return NULL;
-    int64_t n = (int64_t)(t->ne[0] * t->ne[1] * t->ne[2] * t->ne[3]);
-    float *out = malloc(sizeof(float) * n);
+    // The element count comes from untrusted GGUF dimensions. Compute it with
+    // overflow checks (a raw ne[0]*ne[1]*ne[2]*ne[3] can wrap) and make sure the
+    // f32 allocation size cannot overflow either. gguf_open already bounded
+    // t->nbytes to the mapping; cross-check that the bytes this dequant/copy
+    // will touch (rows * row_size) actually fit inside that mapped extent so a
+    // shape larger than the stored data can never be read past.
+    uint64_t n64, rows;
+    if (!checked_u64_mul(t->ne[0], t->ne[1], &n64) ||
+        !checked_u64_mul(n64, t->ne[2], &n64) ||
+        !checked_u64_mul(n64, t->ne[3], &n64) ||
+        n64 == 0 || n64 > SIZE_MAX / sizeof(float)) {
+        *ok = false; return NULL;
+    }
+    size_t rs = ggml_row_size(t->type, (int64_t)t->ne[0]);
+    rows = n64 / t->ne[0];
+    if (rs == 0 || rows > t->nbytes / rs) { *ok = false; return NULL; }
+    int64_t n = (int64_t)n64;
+    float *out = malloc(sizeof(float) * (size_t)n);
     if (!out) { *ok = false; return NULL; }
     if (t->type == T_F32) {
-        memcpy(out, t->data, sizeof(float) * n);
+        memcpy(out, t->data, sizeof(float) * (size_t)n);
     } else {
-        size_t rs = ggml_row_size(t->type, t->ne[0]);
-        int64_t rows = n / (int64_t)t->ne[0];
-        for (int64_t r = 0; r < rows; r++)
-            dequant_row(t->type, (uint8_t *)t->data + r * rs, out + r * (int64_t)t->ne[0], (int)t->ne[0]);
+        for (uint64_t r = 0; r < rows; r++)
+            dequant_row(t->type, (uint8_t *)t->data + r * rs,
+                        out + r * t->ne[0], (int)t->ne[0]);
     }
     return out;
 }
@@ -46,6 +61,25 @@ static gguf_tensor *need_tensor(gguf_file *g, const char *fmt, int i, bool *ok) 
         return NULL;
     }
     return t;
+}
+
+// Reject a weight tensor whose dimensions do not match the geometry the forward
+// pass will drive it with. matvec reads n_out rows of n_in elements each, at a
+// stride derived from n_in, so ne[0] must equal n_in exactly (a wrong row length
+// mis-strides every row) and ne[1] must cover the n_out rows that will be read
+// (a shorter tensor would be read past its mapped bytes). A NULL tensor is a
+// legitimately-absent optional weight (e.g. gemma4 V) and is accepted here.
+static bool check_shape(gguf_tensor *t, int n_in, int n_out,
+                        const char *what, int layer) {
+    if (!t) return true;
+    if ((int64_t)t->ne[0] != n_in || (int64_t)t->ne[1] < n_out) {
+        fprintf(stderr, "error: tensor %s in blk.%d has shape [%llu,%llu], "
+                "expected [%d,>=%d] for this model geometry\n",
+                what, layer, (unsigned long long)t->ne[0],
+                (unsigned long long)t->ne[1], n_in, n_out);
+        return false;
+    }
+    return true;
 }
 
 // Carve a row range out of a tensor without copying. A row is a whole number
@@ -416,6 +450,18 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             m->l_rope_dim[i] = swa ? m->rope_dim_local : m->rope_dim;
             m->l_head_kv[i]  = kv_arr && kv_arr->arr_raw && (uint64_t)i < kv_arr->arr_n
                                ? (int)((const uint32_t *)kv_arr->arr_raw)[i] : m->n_head_kv;
+            // Per-layer kv-head / head-dim come from untrusted per-layer arrays
+            // and feed the same attention divisors as the scalar path (kv_dim /
+            // hd and n_head / n_head_kv). A zero or non-dividing value would
+            // divide-by-zero on the first token — reject at load instead.
+            if (m->l_head_dim[i] < 1 || m->l_head_kv[i] < 1 ||
+                m->n_head < 1 || m->l_head_kv[i] > m->n_head ||
+                m->n_head % m->l_head_kv[i] != 0) {
+                fprintf(stderr, "error: invalid gemma4 per-layer geometry at "
+                        "blk.%d (head_dim=%d head_count_kv=%d, n_head=%d)\n",
+                        i, m->l_head_dim[i], m->l_head_kv[i], m->n_head);
+                return false;
+            }
         }
     }
     m->n_expert = (int)gguf_get_u32(g, AK("expert_count"), 0);
@@ -459,11 +505,46 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         fprintf(stderr, "error: missing model hyperparameters for arch '%s'\n", arch);
         return false;
     }
+    // Everything above is only checked for presence (> 0). These fields come
+    // straight from an untrusted GGUF and go on to drive allocation sizes, loop
+    // bounds and divisors in the forward pass, so bound them here — before any
+    // size math — against a generous ceiling (real models are far smaller) and
+    // enforce the GQA relationships attention divides by. head_dim == 0 or
+    // n_head_kv == 0 would divide-by-zero on the first token (kv_dim / hd and
+    // n_head / n_head_kv); n_head_kv > n_head makes kv_mul == 0; an oversized
+    // dim would overflow the byte products below. This gate closes those.
+    #define MDL_DIM_MAX 1048576   /* 2^20 elements per axis */
+    if (m->head_dim < 1        || m->head_dim > MDL_DIM_MAX ||
+        m->n_embd   > MDL_DIM_MAX || m->n_ff  > MDL_DIM_MAX ||
+        m->n_head   > MDL_DIM_MAX || m->n_layer > 100000 ||
+        m->rope_dim < 0        || m->rope_dim > m->head_dim ||
+        m->n_head_kv < 1       || m->n_head_kv > m->n_head ||
+        m->n_head % m->n_head_kv != 0) {
+        fprintf(stderr, "error: invalid model geometry for arch '%s' "
+                "(head_dim=%d rope_dim=%d n_head=%d n_head_kv=%d "
+                "n_embd=%d n_ff=%d n_layer=%d)\n",
+                arch, m->head_dim, m->rope_dim, m->n_head, m->n_head_kv,
+                m->n_embd, m->n_ff, m->n_layer);
+        return false;
+    }
+    #undef MDL_DIM_MAX
 
     bool ok = true;
     m->tok_embd = need_tensor(g, "token_embd.weight", 0, &ok);
     if (!ok) return false;
+    // The embedding table is [n_embd, n_vocab]; the forward pass dequantizes one
+    // row of n_embd per token, so ne[0] must be exactly n_embd or every row
+    // lands at the wrong offset. n_vocab is defined by this tensor and bounds
+    // every token-id index below, so it must be present and sane.
     m->n_vocab = (int)m->tok_embd->ne[1];
+    if ((int64_t)m->tok_embd->ne[0] != m->n_embd ||
+        m->n_vocab < 1 || (int64_t)m->tok_embd->ne[1] > INT_MAX) {
+        fprintf(stderr, "error: token_embd.weight shape [%llu,%llu] is "
+                "inconsistent with n_embd=%d / n_vocab\n",
+                (unsigned long long)m->tok_embd->ne[0],
+                (unsigned long long)m->tok_embd->ne[1], m->n_embd);
+        return false;
+    }
 
     gguf_tensor *out_norm = need_tensor(g, "output_norm.weight", 0, &ok);
     if (!ok) return false;
@@ -476,6 +557,14 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         fprintf(stderr, "error: output tensor type %s unsupported\n", ggml_type_name(m->output->type));
         return false;
     }
+    // The final projection reads n_vocab rows of n_embd from output.weight. A
+    // distinct output tensor with fewer than n_vocab rows (or a wrong row
+    // length) would be read past its mapped bytes at logit time. Tied
+    // embeddings reuse tok_embd, already shape-checked above, so this only
+    // needs to gate a separate output matrix.
+    if (m->output != m->tok_embd &&
+        !check_shape(m->output, m->n_embd, m->n_vocab, "output.weight", 0))
+        return false;
 
     m->layers = calloc(m->n_layer, sizeof(layer_t));
     if (!m->layers) return false;
@@ -521,8 +610,13 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             if (!ok) return false;
             int64_t q_rows = (int64_t)m->n_head * m->head_dim;
             int64_t kv_rows = (int64_t)m->n_head_kv * m->head_dim;
-            if ((int64_t)qkv->ne[1] != q_rows + 2 * kv_rows ||
-                (int64_t)gu->ne[1] % 2 != 0) {
+            // Both fused tensors project from n_embd, so ne[0] must be n_embd;
+            // the row counts must match the slice boundaries exactly (a short
+            // tensor would let the slices below point past the mapped bytes)
+            // and the gate/up half must be n_ff wide.
+            if ((int64_t)qkv->ne[0] != m->n_embd || (int64_t)gu->ne[0] != m->n_embd ||
+                (int64_t)qkv->ne[1] != q_rows + 2 * kv_rows ||
+                (int64_t)gu->ne[1] != 2 * (int64_t)m->n_ff) {
                 fprintf(stderr, "error: unexpected fused tensor shape in blk.%d\n", i);
                 return false;
             }
@@ -581,6 +675,31 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
         }
         if (!ok) return false;
+        // Validate the projection weights against the geometry the forward pass
+        // will drive them with, so a tensor smaller than the declared shape is
+        // rejected here rather than read past at decode time. attn_output and
+        // ffn_down share their layout across every dense variant; Q/K/V and
+        // gate/up are fused for phi3 (validated above) or doubled for qwen35,
+        // so shape-check those only for the plain llama-family layout.
+        {
+            int qd = model_q_dim(m, i);    // n_head * head_dim (per layer)
+            int kd = model_kv_dim(m, i);   // n_head_kv * head_dim (per layer)
+            if (!check_shape(l->wo, qd, m->n_embd, "attn_output", i))
+                return false;
+            if (!fused_qkv && !m->qwen35) {
+                if (!check_shape(l->wq, m->n_embd, qd, "attn_q", i) ||
+                    !check_shape(l->wk, m->n_embd, kd, "attn_k", i) ||
+                    !check_shape(l->wv, m->n_embd, kd, "attn_v", i))
+                    return false;
+                if (!l->is_moe &&
+                    (!check_shape(l->w_gate, m->n_embd, m->n_ff, "ffn_gate", i) ||
+                     !check_shape(l->w_up,   m->n_embd, m->n_ff, "ffn_up",   i)))
+                    return false;
+            }
+            if (!l->is_moe &&
+                !check_shape(l->w_down, m->n_ff, m->n_embd, "ffn_down", i))
+                return false;
+        }
         l->attn_norm_w = tensor_to_f32(an, &ok);
         l->ffn_norm_w  = tensor_to_f32(fn, &ok);
         l->bq = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q.bias", i), &ok);
@@ -1385,8 +1504,15 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     if (start == 0) {
         size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
         for (int b = 0; b < n; b++) {
+            // tokens[] is untrusted here (prompt ids, a corrupt cache, a
+            // mismatched tokenizer): an id outside [0, n_vocab) would index the
+            // embedding table out of its mapped rows. Clamp to 0 so a bad id
+            // degrades output rather than reading past the mapping. (The
+            // speculative path guards its drafted ids separately in engine.c.)
+            int32_t id = tokens[b];
+            if (id < 0 || id >= m->n_vocab) id = 0;
             dequant_row(m->tok_embd->type,
-                        (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
+                        (uint8_t *)m->tok_embd->data + (size_t)id * ers,
                         m->x + (size_t)b * n_embd, n_embd);
             if (m->embd_scale != 1.0f)
                 for (int i = 0; i < n_embd; i++)
