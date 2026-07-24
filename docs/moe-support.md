@@ -148,9 +148,14 @@ engine:
   previously it refused GPU offload and ran CPU-only.
 - **MXFP4 read — DONE.** OCP microscaling FP4 (GGML type 39) — the gpt-oss
   expert-tensor format — is read and dequantized (E8M0 block scale × E2M1 code),
-  admitted at load and usable through the CPU forward. (No GPU kernel yet, and
-  end-to-end on a real gpt-oss GGUF is unverified locally — the 20B/120B files
-  are not present; the dequant is unit-tested against the OCP spec.)
+  admitted at load and usable through the CPU forward. Unit-tested against the
+  OCP spec, and **validated on the real `gpt-oss-20b-MXFP4.gguf`**: the loader
+  identifies all 72 MXFP4 expert tensors and a real `ffn_down_exps` row
+  dequantizes to finite, sane weights (2527/2880 nonzero, ±0.09375 = 6·2⁻⁶,
+  mean ≈ 0). No MXFP4 **GPU** kernel yet, and gpt-oss's *architecture* (sliding-
+  window attention, attention sinks, its own MoE gating and tensor layout) is a
+  separate task — so gpt-oss does not yet *run*, but its MXFP4 tensors read
+  correctly.
 - **Advisor / runner-control — DONE.** The advisor scores MoE throughput by
   *active* params (a MoE decodes at the speed of its active experts, not its
   full resident weight) while VRAM fit stays by total size; it surfaces expert
@@ -158,8 +163,11 @@ engine:
 
 ## Known limitations / future work
 
-- **MXFP4 GPU kernel** absent → gpt-oss would run CPU-only; and no real gpt-oss
-  GGUF was available here to validate end-to-end.
+- **gpt-oss architecture** unsupported (distinct from MXFP4 read): the runner
+  refuses arch `gpt-oss`. Making gpt-oss actually run needs its attention
+  (sliding-window + sinks), MoE gating, and tensor-layout support — plus an
+  MXFP4 **GPU** kernel for VRAM speed. `gpt-oss-20b-MXFP4.gguf` is now on disk
+  for that work.
 - **Shared-expert / GELU MoE** refused (see above) — enabling them needs the
   shared-expert path and a GELU expert FFN, each behind its own validation.
 - **MoE GPU decode** still forces the eager path (host-side routing readback per
