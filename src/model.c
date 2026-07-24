@@ -731,18 +731,33 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     m->logits = malloc(sizeof(float) * m->n_vocab);
     m->spec_batch = 16; // all_logits rows, allocated lazily on first use
     if (m->n_expert > 0) {
-        // per-token MoE scratch (the FFN routes each token independently)
+        // per-token MoE scratch (decode routes each token independently)
         m->moe_logits = malloc(sizeof(float) * (size_t)m->n_expert);
         m->moe_gate   = malloc(sizeof(float) * (size_t)m->n_ff_exp);
         m->moe_up     = malloc(sizeof(float) * (size_t)m->n_ff_exp);
         m->moe_dexp   = malloc(sizeof(float) * (size_t)m->n_embd);
         m->moe_out    = malloc(sizeof(float) * (size_t)m->n_embd);
+        // grouped-by-expert prefill scratch (a whole batch at once)
+        size_t nb = (size_t)m->n_batch, ne = (size_t)m->n_embd;
+        size_t nf = (size_t)m->n_ff_exp, nu = (size_t)m->n_expert_used;
+        m->moe_out_b  = malloc(sizeof(float) * nb * ne);
+        m->moe_gath   = malloc(sizeof(float) * nb * ne);
+        m->moe_gate_b = malloc(sizeof(float) * nb * nf);
+        m->moe_up_b   = malloc(sizeof(float) * nb * nf);
+        m->moe_dexp_b = malloc(sizeof(float) * nb * ne);
+        m->moe_sel    = malloc(sizeof(int)   * nb * nu);
+        m->moe_selw   = malloc(sizeof(float) * nb * nu);
+        m->moe_gidx   = malloc(sizeof(int)   * nb);
+        m->moe_gw     = malloc(sizeof(float) * nb);
     }
     if (!m->kv_off || !m->kcache || !m->vcache || !m->x || !m->xb ||
         !m->xb2 || !m->q || !m->k_tmp || !m->v_tmp || !m->hb ||
         !m->hb2 || !m->att || !m->logits ||
         (m->n_expert > 0 && (!m->moe_logits || !m->moe_gate || !m->moe_up ||
-                             !m->moe_dexp || !m->moe_out)) ||
+                             !m->moe_dexp || !m->moe_out || !m->moe_out_b ||
+                             !m->moe_gath || !m->moe_gate_b || !m->moe_up_b ||
+                             !m->moe_dexp_b || !m->moe_sel || !m->moe_selw ||
+                             !m->moe_gidx || !m->moe_gw)) ||
         (m->qwen35 && (!m->q_gate || !m->ssm_qkv || !m->ssm_z ||
                        !m->ssm_aux || !m->ssm_conv_state ||
                        !m->ssm_state_mem || !m->ssm_cw))) {
@@ -845,6 +860,9 @@ void model_free(model_t *m) {
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
     free(m->moe_logits); free(m->moe_gate); free(m->moe_up);
     free(m->moe_dexp); free(m->moe_out);
+    free(m->moe_out_b); free(m->moe_gath); free(m->moe_gate_b);
+    free(m->moe_up_b); free(m->moe_dexp_b); free(m->moe_sel);
+    free(m->moe_selw); free(m->moe_gidx); free(m->moe_gw);
     tpool_destroy(m->tp);
     gguf_close(&m->gf);
     memset(m, 0, sizeof(*m));
@@ -1190,63 +1208,130 @@ gguf_tensor moe_expert_weight(const layer_t *ly, int which, int e,
     return v;
 }
 
-// Sparse-MoE FFN for one layer, per token: route -> softmax over all experts
-// -> top-k select -> renormalize the selected weights to sum to 1 (Mixtral /
-// Qwen3 convention) -> per-expert SwiGLU -> weighted sum. Reads the RMS-normed
-// input from m->xb and writes the FFN output back into m->xb; each token is
-// independent, so the in-place read/write is safe.
-static void moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
+// Route one token: router matvec -> softmax over ALL experts -> top-k select
+// (largest probs; ties to the lowest index) -> renormalize the selected weights
+// to sum to 1 (Mixtral / Qwen3 convention). Writes sel[used]/selw[used].
+static void moe_route(model_t *m, const layer_t *ly, const float *xin,
+                      int n_embd, int ne, int used, int *sel, float *selw) {
+    matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, xin,
+             n_embd, n_embd, ne, NULL, 1);
+    float mx = m->moe_logits[0];
+    for (int e = 1; e < ne; e++)
+        if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
+    float ssum = 0.0f;
+    for (int e = 0; e < ne; e++) {
+        float p = expf(m->moe_logits[e] - mx);
+        m->moe_logits[e] = p;
+        ssum += p;
+    }
+    for (int e = 0; e < ne; e++) m->moe_logits[e] /= ssum;
+    float denom = 0.0f;
+    for (int t = 0; t < used; t++) {
+        int best = 0;
+        float bp = -1.0f;
+        for (int e = 0; e < ne; e++)
+            if (m->moe_logits[e] > bp) { bp = m->moe_logits[e]; best = e; }
+        sel[t] = best;
+        selw[t] = bp;
+        denom += bp;
+        m->moe_logits[best] = -1.0f;                     // exclude from next round
+    }
+    for (int t = 0; t < used; t++) selw[t] /= denom;     // renormalized weight
+}
+
+// Decode path: one token, per selected expert SwiGLU -> weighted sum. Reads the
+// normed input from xin and writes the FFN output back in place.
+static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
+    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int nff = m->n_ff_exp;
+    int   sel[256];
+    float selw[256];
+    moe_route(m, ly, xin, n_embd, ne, used, sel, selw);
+    for (int i = 0; i < n_embd; i++) m->moe_out[i] = 0.0f;
+    for (int t = 0; t < used; t++) {
+        int e = sel[t];
+        float w = selw[t];
+        gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
+        gguf_tensor uv = moe_expert_weight(ly, 1, e, n_embd, nff);
+        gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
+        matvec_b(m->tp, m->moe_gate, nff, &gv, xin, n_embd, n_embd, nff, NULL, 1);
+        matvec_b(m->tp, m->moe_up,   nff, &uv, xin, n_embd, n_embd, nff, NULL, 1);
+        for (int j = 0; j < nff; j++) {
+            float g = m->moe_gate[j];
+            m->moe_gate[j] = (g / (1.0f + expf(-g))) * m->moe_up[j]; // silu(g)*up
+        }
+        matvec_b(m->tp, m->moe_dexp, n_embd, &dv, m->moe_gate,
+                 nff, nff, n_embd, NULL, 1);
+        for (int i = 0; i < n_embd; i++) m->moe_out[i] += w * m->moe_dexp[i];
+    }
+    for (int i = 0; i < n_embd; i++) xin[i] = m->moe_out[i];
+}
+
+// Prefill path: route every token, then run each expert ONCE over all the
+// tokens routed to it as a single batched matmul (the weight rows dequantize
+// once and stream across every token) instead of one token at a time. Same
+// math as the per-token path — the router, SwiGLU, and weights are identical,
+// and each token accumulates its selected experts in ascending-expert order,
+// which for the dense-oracle configs equals the per-token order — so greedy
+// output is preserved. Big prefill throughput win; decode is untouched.
+static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
     for (int b = 0; b < n; b++) {
-        float *xin = m->xb + (size_t)b * xdim;          // this token's normed input
-        matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, xin,
-                 n_embd, n_embd, ne, NULL, 1);           // router logits
-        // softmax over ALL experts (before top-k)
-        float mx = m->moe_logits[0];
-        for (int e = 1; e < ne; e++)
-            if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
-        float ssum = 0.0f;
-        for (int e = 0; e < ne; e++) {
-            float p = expf(m->moe_logits[e] - mx);
-            m->moe_logits[e] = p;
-            ssum += p;
-        }
-        for (int e = 0; e < ne; e++) m->moe_logits[e] /= ssum;
-        // top-k selection (largest probs; ties resolve to the lowest index);
-        // denom renormalizes the selected weights to sum to 1
-        int   sel[256];
-        float selw[256];
-        float denom = 0.0f;
-        for (int t = 0; t < used; t++) {
-            int best = 0;
-            float bp = -1.0f;
-            for (int e = 0; e < ne; e++)
-                if (m->moe_logits[e] > bp) { bp = m->moe_logits[e]; best = e; }
-            sel[t] = best;
-            selw[t] = bp;
-            denom += bp;
-            m->moe_logits[best] = -1.0f;                 // exclude from next round
-        }
-        for (int i = 0; i < n_embd; i++) m->moe_out[i] = 0.0f;
-        for (int t = 0; t < used; t++) {
-            int e = sel[t];
-            float w = selw[t] / denom;
-            gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
-            gguf_tensor uv = moe_expert_weight(ly, 1, e, n_embd, nff);
-            gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
-            matvec_b(m->tp, m->moe_gate, nff, &gv, xin, n_embd, n_embd, nff, NULL, 1);
-            matvec_b(m->tp, m->moe_up,   nff, &uv, xin, n_embd, n_embd, nff, NULL, 1);
-            for (int j = 0; j < nff; j++) {
-                float g = m->moe_gate[j];
-                m->moe_gate[j] = (g / (1.0f + expf(-g))) * m->moe_up[j]; // silu(g)*up
-            }
-            matvec_b(m->tp, m->moe_dexp, n_embd, &dv, m->moe_gate,
-                     nff, nff, n_embd, NULL, 1);
-            for (int i = 0; i < n_embd; i++) m->moe_out[i] += w * m->moe_dexp[i];
-        }
-        for (int i = 0; i < n_embd; i++) xin[i] = m->moe_out[i]; // FFN output
+        float *xin = m->xb + (size_t)b * xdim;
+        moe_route(m, ly, xin, n_embd, ne, used,
+                  m->moe_sel + (size_t)b * used, m->moe_selw + (size_t)b * used);
+        float *out = m->moe_out_b + (size_t)b * n_embd;
+        for (int i = 0; i < n_embd; i++) out[i] = 0.0f;
     }
+    for (int e = 0; e < ne; e++) {
+        int cnt = 0;
+        for (int b = 0; b < n; b++) {
+            const int   *sel  = m->moe_sel  + (size_t)b * used;
+            const float *selw = m->moe_selw + (size_t)b * used;
+            for (int t = 0; t < used; t++) {
+                if (sel[t] != e) continue;
+                m->moe_gidx[cnt] = b;
+                m->moe_gw[cnt]   = selw[t];
+                memcpy(m->moe_gath + (size_t)cnt * n_embd,
+                       m->xb + (size_t)b * xdim, (size_t)n_embd * sizeof(float));
+                cnt++;
+                break;                                   // top-k experts are distinct
+            }
+        }
+        if (cnt == 0) continue;
+        gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
+        gguf_tensor uv = moe_expert_weight(ly, 1, e, n_embd, nff);
+        gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
+        matvec_b(m->tp, m->moe_gate_b, nff, &gv, m->moe_gath,
+                 n_embd, n_embd, nff, NULL, cnt);
+        matvec_b(m->tp, m->moe_up_b,   nff, &uv, m->moe_gath,
+                 n_embd, n_embd, nff, NULL, cnt);
+        for (int c = 0; c < cnt; c++) {
+            float *g = m->moe_gate_b + (size_t)c * nff;
+            const float *u = m->moe_up_b + (size_t)c * nff;
+            for (int j = 0; j < nff; j++)
+                g[j] = (g[j] / (1.0f + expf(-g[j]))) * u[j];
+        }
+        matvec_b(m->tp, m->moe_dexp_b, n_embd, &dv, m->moe_gate_b,
+                 nff, nff, n_embd, NULL, cnt);
+        for (int c = 0; c < cnt; c++) {
+            float *out = m->moe_out_b + (size_t)m->moe_gidx[c] * n_embd;
+            const float *dx = m->moe_dexp_b + (size_t)c * n_embd;
+            float w = m->moe_gw[c];
+            for (int i = 0; i < n_embd; i++) out[i] += w * dx[i];
+        }
+    }
+    for (int b = 0; b < n; b++)
+        memcpy(m->xb + (size_t)b * xdim, m->moe_out_b + (size_t)b * n_embd,
+               (size_t)n_embd * sizeof(float));
+}
+
+// Sparse-MoE FFN for one layer. Decode (n==1) keeps the exact per-token path;
+// prefill (n>1) groups tokens by shared expert for throughput.
+static void moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
+    if (n <= 1) { moe_ffn_token(m, ly, m->xb); return; }
+    moe_ffn_grouped(m, ly, n, xdim);
 }
 
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,

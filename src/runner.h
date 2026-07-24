@@ -266,6 +266,18 @@ typedef struct {
     float    *moe_up;      // [n_ff_exp]
     float    *moe_dexp;    // [n_embd] one expert's down output
     float    *moe_out;     // [n_embd] weighted expert-sum accumulator
+    // Grouped-by-expert prefill scratch (sized for a full prompt batch): route
+    // all tokens, then run each expert once over ALL its routed tokens as a
+    // batched matmul instead of one-at-a-time. Decode (n==1) never uses these.
+    float    *moe_out_b;   // [n_batch][n_embd] per-token output accumulator
+    float    *moe_gath;    // [n_batch][n_embd] one expert's gathered inputs
+    float    *moe_gate_b;  // [n_batch][n_ff_exp] batched gate
+    float    *moe_up_b;    // [n_batch][n_ff_exp] batched up
+    float    *moe_dexp_b;  // [n_batch][n_embd] batched down output
+    int      *moe_sel;     // [n_batch][n_expert_used] per-token selected experts
+    float    *moe_selw;    // [n_batch][n_expert_used] per-token renormalized weights
+    int      *moe_gidx;    // [n_batch] current expert's token indices
+    float    *moe_gw;      // [n_batch] current expert's per-token weights
     bool      rope_neox;     // NeoX-style rotation (qwen2) vs adjacent pairs (llama)
     float     rms_eps, rope_base;
     float     rope_mscale;   // YaRN attention magnitude scale (1.0 = off)
