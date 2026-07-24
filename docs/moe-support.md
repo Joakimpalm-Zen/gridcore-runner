@@ -133,16 +133,34 @@ engine:
    long-validated path; the GPU MoE output is asserted to match it token-for-
    token on the real Qwen3-30B-A3B.
 
+## Follow-ups completed (2026-07-24)
+
+- **Prefill throughput — DONE.** MoE prefill now groups tokens by shared
+  expert: route the whole batch, then run each expert once over all its routed
+  tokens as a batched matmul (weight rows dequantize once and stream across
+  every token). Decode is untouched and bit-identical; prefill stays token-
+  identical (F32 dense-oracle byte-identical, and real Qwen3-30B CPU==GPU
+  preserved). Measured CPU prefill 21.6 tok/s vs 3.8 tok/s decode on a 128-token
+  prompt (~5.6x the per-token rate).
+- **Q3_K GPU kernel — DONE.** `k_mv_q3_K` / `k_mv_q3_K_b` (warp-per-row, dequant
+  fused into the dot). **Mixtral-8x7B-Instruct Q3_K_M (20.4 GB) now loads fully
+  on a 24 GB card and runs on the GPU**, token-identical to the CPU reference —
+  previously it refused GPU offload and ran CPU-only.
+- **MXFP4 read — DONE.** OCP microscaling FP4 (GGML type 39) — the gpt-oss
+  expert-tensor format — is read and dequantized (E8M0 block scale × E2M1 code),
+  admitted at load and usable through the CPU forward. (No GPU kernel yet, and
+  end-to-end on a real gpt-oss GGUF is unverified locally — the 20B/120B files
+  are not present; the dequant is unit-tested against the OCP spec.)
+- **Advisor / runner-control — DONE.** The advisor scores MoE throughput by
+  *active* params (a MoE decodes at the speed of its active experts, not its
+  full resident weight) while VRAM fit stays by total size; it surfaces expert
+  residency, and the catalog gained Qwen3-30B-A3B and Mixtral-8x7B entries.
+
 ## Known limitations / future work
 
-- **Prefill throughput** (~79 tok/s) is lower than a dense model of comparable
-  active size: the MoE FFN processes prefill tokens one at a time per expert
-  (routing differs per token). Grouping tokens by shared expert would speed
-  prefill; decode (the interactive path) is unaffected.
-- **Q3_K GPU kernel** absent → Q3_K MoE runs on CPU. Adding it would let
-  larger-but-lower-bit MoE models use the GPU.
-- **MXFP4** (gpt-oss family) not read.
+- **MXFP4 GPU kernel** absent → gpt-oss would run CPU-only; and no real gpt-oss
+  GGUF was available here to validate end-to-end.
 - **Shared-expert / GELU MoE** refused (see above) — enabling them needs the
   shared-expert path and a GELU expert FFN, each behind its own validation.
-- **Advisor / runner-control**: fit-by-active-params and catalog entries for
-  MoE are follow-ups; the sniffer already admits top-k MoE.
+- **MoE GPU decode** still forces the eager path (host-side routing readback per
+  token), so MoE GPU throughput trails a dense model of the same active size.
