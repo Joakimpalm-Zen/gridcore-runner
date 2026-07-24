@@ -438,6 +438,80 @@ static __device__ __forceinline__ void get_scale_min_k4(int j, const uchar *q,
     }
 }
 
+// Q3_K: 110-byte block, 256 elements. Layout: hmask[32] (one high bit per
+// weight), qs[64] (2-bit low bits), scales[12] (packed 16x 6-bit, bias -32),
+// d (f16 super-scale). Weight = d*(scale-32)*((2bit) - (highbit?0:4)). This
+// ports quants.c dq_q3_K into the warp-per-row dot (dequant fused into the
+// accumulate), matching the CPU reference bit-for-bit modulo reduction order.
+#define Q3K_UNPACK_SCALES \
+    const uint kmask1 = 0x03030303u, kmask2 = 0x0f0f0f0fu; \
+    const uchar *sc = blk + 96; \
+    uint a0 = sc[0] | (sc[1]<<8) | (sc[2]<<16) | ((uint)sc[3]<<24); \
+    uint a1 = sc[4] | (sc[5]<<8) | (sc[6]<<16) | ((uint)sc[7]<<24); \
+    uint a2 = sc[8] | (sc[9]<<8) | (sc[10]<<16) | ((uint)sc[11]<<24); \
+    uint xs[4]; \
+    xs[2] = ((a0 >> 4) & kmask2) | (((a2 >> 4) & kmask1) << 4); \
+    xs[3] = ((a1 >> 4) & kmask2) | (((a2 >> 6) & kmask1) << 4); \
+    xs[0] = ( a0       & kmask2) | (((a2 >> 0) & kmask1) << 4); \
+    xs[1] = ( a1       & kmask2) | (((a2 >> 2) & kmask1) << 4); \
+    const signed char *q3scales = (const signed char *)xs; \
+    float d_all = f16f(blk + 108); \
+    const uchar *hm = blk; \
+    const uchar *qbase = blk + 32;
+
+extern "C" __global__ void k_mv_q3_K(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 110;
+    float s = 0;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 110;
+        Q3K_UNPACK_SCALES;
+        const float *xp = x + (ulong64)b * 256;
+        int pos = 0, is = 0; uchar mbit = 1; const uchar *q = qbase;
+        for (int n = 0; n < 256; n += 128) {
+            int shift = 0;
+            for (int j = 0; j < 4; j++) {
+                float dl = d_all * (q3scales[is++] - 32);
+                for (int l = 0; l < 16; l++)
+                    s += dl * (float)(((q[l] >> shift) & 3) - ((hm[l] & mbit) ? 0 : 4)) * xp[pos++];
+                dl = d_all * (q3scales[is++] - 32);
+                for (int l = 0; l < 16; l++)
+                    s += dl * (float)(((q[l+16] >> shift) & 3) - ((hm[l+16] & mbit) ? 0 : 4)) * xp[pos++];
+                shift += 2; mbit <<= 1;
+            }
+            q += 32;
+        }
+    }
+    MV_TAIL;
+}
+
+extern "C" __global__ void k_mv_q3_K_b(MV_PARAMS) {
+    MV_HEAD_B;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 110;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 110;
+        Q3K_UNPACK_SCALES;
+        ulong64 base = (ulong64)b * 256;
+        int pos = 0, is = 0; uchar mbit = 1; const uchar *q = qbase;
+        for (int n = 0; n < 256; n += 128) {
+            int shift = 0;
+            for (int j = 0; j < 4; j++) {
+                float dl = d_all * (q3scales[is++] - 32);
+                for (int l = 0; l < 16; l++)
+                    MV_FMA(dl * (float)(((q[l] >> shift) & 3) - ((hm[l] & mbit) ? 0 : 4)), base + pos++);
+                dl = d_all * (q3scales[is++] - 32);
+                for (int l = 0; l < 16; l++)
+                    MV_FMA(dl * (float)(((q[l+16] >> shift) & 3) - ((hm[l+16] & mbit) ? 0 : 4)), base + pos++);
+                shift += 2; mbit <<= 1;
+            }
+            q += 32;
+        }
+    }
+    MV_TAIL_B;
+}
+
 extern "C" __global__ void k_mv_q4_K(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 256;
