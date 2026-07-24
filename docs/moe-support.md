@@ -1,7 +1,7 @@
 # Sparse-MoE support — implementation and test report
 
 Date: 2026-07-24
-Runner: commit `c610550`
+Runner: v0.1.3-alpha (core support plus the follow-ups at the end of this doc)
 Hardware: NVIDIA RTX PRO 6000 Blackwell, **24 GB MIG slice** (`MIG 1g.24gb`),
 CPU fallback on the same host (64 threads).
 
@@ -83,8 +83,10 @@ miscompute:
 - **Correctness:** correct output, e.g. `The three primary colors are` →
   ` red, yellow, and blue. These colors are considered primary because they …`.
 - Q4_K_M (26 GB) exceeds a 24 GB card, so on this hardware it always runs with
-  **partial CPU offload** (see below); it is the GPU-kernel-supported quant.
-  Q3_K_M fits VRAM but Q3_K has no GPU kernel, so it runs on CPU (~4 tok/s).
+  **partial CPU offload** (see below). Q3_K_M (20.4 GB) fits VRAM; once the Q3_K
+  GPU kernel landed (see Follow-ups, below) it runs **fully on the GPU**,
+  token-identical to CPU — it was CPU-only (~4 tok/s) when this section was
+  first written.
 
 ## Partial CPU offload (8–16 GB cards)
 

@@ -7,8 +7,8 @@ transport-invariant streaming — and reports a verdict per request with enough
 preserved evidence to audit every one.
 
 It is **runtime-agnostic**: the same matrix runs against Runner or any other
-OpenAI-compatible server (llama.cpp's server, Ollama, vLLM), so results
-compare directly on identical hardware. The bar is not "did it answer" — it is
+OpenAI-compatible server (llama.cpp's server, Ollama, vLLM, LM Studio), so
+results compare directly on identical hardware. The bar is not "did it answer" — it is
 "did it emit *exactly one* valid tool call, select the *right* tool, produce
 arguments that satisfy the schema, and stream in a way that does not depend on
 how the bytes were chunked."
@@ -97,6 +97,9 @@ python3 scripts/torture-compare.py --md results/*/report.json     # Markdown
 ```
 
 ## Published comparisons
+
+Both runs below predate the `large_enum_selection` category (added 2026-07-24),
+so their totals cover the four original categories.
 
 - [2026-07-21 — Runner vs llama.cpp vs Ollama, Llama-3.2-3B, CPU](../tests/torture/results/2026-07-21-llama-3.2-3b-cpu/README.md):
   Runner 12/12, llama.cpp 5/12, Ollama 5/12. The split is exactly the schema
