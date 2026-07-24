@@ -42,110 +42,58 @@ Then point it at any GGUF model:
 > actionable). Threat model: [SECURITY.md](SECURITY.md); the correctness gates
 > every change must hold: [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Why not llama.cpp?
+## Why runner
 
-llama.cpp is the reference implementation — broader architecture coverage,
-more quant formats, faster kernels, a huge community. runner exists because
-this stack needs something llama.cpp structurally cannot be: an engine small
-enough to own outright, whose serving contracts the projects above it (the
-Gridcore agent and task-interpreter layers, not yet public) can build
-against *exactly*.
-
-**The whole engine bends in an afternoon.** One compact C codebase, one
-`make`, no ggml split, no CMake, no submodules — one person holds all of it
-in their head. When the grid's watchdog kept declaring busy-but-healthy
-runners dead, `/health` moved into the accept loop the same day. When
-SIGKILLed supervisors leaked orphaned runners holding VRAM, `--parent-pid`
-landed the same day. Speculative decoding under `--serve`, CUDA graphs on
-the decode loop: hours each. Against a 300k-line upstream that moves daily,
-every one of those is a feature request and a wait — or a fork you now
-maintain anyway, without the small-codebase payoff.
+**Small enough to own outright, strict enough to build on.** llama.cpp is
+broader and faster; runner exists for the case llama.cpp structurally can't
+fill — an engine a larger system can trust to the last line, extend in an
+afternoon, and hold to an exact serving contract.
 
 **Schema conformance is the product, not a plugin.** runner compiles a JSON
-Schema into a streaming validator that *drives sampling*: properties emit in
-declared order, unknown keys are impossible, and when the token budget dies
-mid-document the output is minimally completed so it still parses. If the model
-never starts the document, runner returns no fabricated document. Those
-exact semantics are load-bearing upstream — clu streams its `thinking` field
-live *because* declared-order emission is guaranteed, and the interpreter's
-planner/worker handoffs assume every call returns conformant JSON, so a weak
-model's format failures are structurally impossible and only content quality
-remains. llama.cpp's GBNF grammars can express JSON, but this contract —
-declared order, always-parses-on-length, OpenAI `response_format` wiring —
-would then live in someone else's engine, free to drift under two projects
-that depend on its details.
+Schema into a validator that *drives sampling* — properties emit in declared
+order, unknown keys are impossible, and a call cut off by the token budget
+still parses. On the [agent-torture suite](docs/agent-torture.md) (same model,
+same box, every runtime a `--runtime` target) that reads out as **12/12 valid
+tool calls vs 5/12 for llama.cpp and Ollama** — and the gap is exactly the
+schema cases: deep nested arguments, or truncation mid-call, where free
+generation emits unparseable JSON and schema-driven sampling can't. On a model
+small enough that llama.cpp's template path lands *no* parseable call (3/12),
+runner still hits 12/12. Bring your nastiest schema; the suite is built to be
+reproduced and contested.
 
-This is the difference that justifies runner's existence, and it is measured,
-not asserted. The [agent torture suite](docs/agent-torture.md) runs one
-adversarial tool-call matrix against Runner and any other OpenAI-compatible
-server — llama.cpp, Ollama, vLLM, and LM Studio are all supported `--runtime`
-targets — on identical hardware, preserving every request and raw response so
-any verdict can be audited or contested. The
-[first published run](tests/torture/results/2026-07-21-llama-3.2-3b-cpu/README.md)
-compares Runner against llama.cpp and Ollama (vLLM and LM Studio are supported
-but not yet on the published bench) — same Llama-3.2-3B GGUF, same box, all on
-CPU:
+**The whole engine bends in an afternoon.** One C codebase, one `make`, no ggml
+split, no CMake, no submodules — one person holds all of it. `/health` in the
+accept loop, `--parent-pid` supervisor lifetime, speculative decoding under
+`--serve`: a same-day change here is a feature request and a wait against a
+300k-line upstream.
 
-| category | **Runner** | llama.cpp | Ollama |
-|---|---|---|---|
-| nested tool arguments | **3/3** | 0/3 | 0/3 |
-| tool selection | **3/3** | 2/3 | 2/3 |
-| truncation mid-call | **3/3** | 0/3 | 0/3 |
-| stream normalization | 3/3 | 3/3 | 3/3 |
-| **valid structured calls** | **12/12** | 5/12 | 5/12 |
-
-The split is exactly the schema cases: with a deep nested argument schema, or
-when the token budget dies inside the call, the same model free-generating on
-llama.cpp or Ollama produces invalid or unparseable tool calls — Runner's
-schema-driven sampling and always-parses-on-length contract do not. (llama.cpp
-is far faster on raw CPU throughput — a different axis, and the readout says
-so plainly.) A [second run on SmolLM2-1.7B](tests/torture/results/2026-07-22-smollm2-1.7b-cpu/README.md)
-sharpens the boundary: on a model that small, llama.cpp's template path emits no
-parseable tool call at all (3/12), while Runner's schema-constrained sampling —
-which needs no tool template — still lands 12/12. Bring your own model and your
-nastiest schema; the suite is built to be reproduced and contested.
-
-**Deployment is one static file.** CUDA goes through the driver API with
-embedded PTX: no CUDA toolkit at build or run time, no cuBLAS, no DLLs.
-Copy the binary to any node with an NVIDIA driver and it offloads; without
-one, it runs CPU. Fleet nodes don't get a build matrix.
+**Deployment is one static file.** CUDA rides the driver API with embedded
+PTX — no toolkit, no cuBLAS, no DLLs. Copy the binary to any node with an
+NVIDIA driver and it offloads; without one it runs CPU. No build matrix for a
+fleet.
 
 **Fleet primitives are built in, not bolted on.** Multi-model swap with
-per-request selection and idle TTL, `--caps` machine reports for the
-scheduler, `--reserve` budgeting with auto-fit context, `/unload`,
-`--parent-pid` supervisor lifetime. The equivalent llama.cpp deployment is
-llama-server + llama-swap + supervision scripts; this grid schedules whole
-machines, so the whole story lives in the one binary it already ships.
+per-request selection and idle TTL, `--caps` machine reports, `--reserve` VRAM
+budgeting with auto-fit context, `/unload`, `--parent-pid`. The llama.cpp
+equivalent is llama-server + llama-swap + supervision scripts; here it's the
+one binary you already shipped.
 
-**There is no `--host` flag to get wrong.** runner binds `127.0.0.1` and gives
-you no way to change it — no flag, no environment variable, no config key. The
-honest framing is not that runner is more secure: the *defaults* are identical,
-since llama-server and Ollama both bind loopback out of the box. The difference
-is that they kept the override and runner removed it. In January 2026
-SentinelLabs and Censys found ~175,000 exposed Ollama instances across 130
-countries, no auth, no firewall, and nearly half with tool calling enabled —
-which turns an open inference port into an open shell. Nobody set out to
-publish those; they set `0.0.0.0` for one afternoon's convenience and never got
-back to the firewall. runner has tool calling on three API surfaces too, so the
-blast radius would be the same; it just has no line to write. Reaching a runner
-from another machine is a reverse proxy, an SSH tunnel, or Tailscale, which is
-where authentication and TLS belong rather than hand-rolled inside an inference
-engine. And because it is a promise rather than an accident, it is a gate:
-`tests/test_bind.c` fails the build if the constant or the CLI surface moves,
-and `tests/conformance/test_loopback_bind.py` fails if the running server ever
-answers on a non-loopback address.
+**No `--host` flag to get wrong.** runner binds `127.0.0.1` with no override —
+no flag, no env var, no config key. The defaults match llama-server and
+Ollama; the difference is they kept the escape hatch. (In January 2026 ~175,000
+Ollama instances sat exposed — no auth, nearly half with tool calling on, i.e.
+an open shell — one afternoon's `0.0.0.0` at a time.) It's a gate, not a hope:
+`tests/test_bind.c` and `tests/conformance/test_loopback_bind.py` fail the build
+if the bind ever moves. Remote access belongs behind a reverse proxy, SSH
+tunnel, or Tailscale — where auth and TLS live, not hand-rolled in an inference
+engine.
 
-The trade is explicit and deliberate: llama.cpp wins on raw speed, exotic
-quants, and new-architecture coverage (runner supports Mixtral/Qwen3-style
-top-k MoE but skips shared-expert/GELU MoE and most SSM architectures, IQ2/IQ3
-quants, and Vulkan). runner wins when the engine is a
-load-bearing component of a larger system that has to trust it, extend it,
-and debug it to the last line. Correctness is held to the reference: GPU
-output is verified token-identical to the CPU path. gemma4 was verified
-token-identical to llama.cpp at reference b9964; the newer b10076 reference
-diverges (committed evidence: `tests/compatibility/out/reference-gemma4.json`)
-and reconciling claim vs current evidence is tracked in the July 2026 code
-review (`runner-codex-review-july.md`, RNR-007).
+**The trade is explicit.** llama.cpp wins on raw speed, exotic quants (IQ2/IQ3,
+Vulkan), and architecture breadth — runner does Mixtral/Qwen3 top-k MoE but
+skips shared-expert/GELU MoE and most SSMs. runner wins when the engine is a
+load-bearing part of a system that has to trust, extend, and debug it — and
+correctness is held to the reference: GPU output is verified token-identical to
+the CPU path.
 
 ## Build
 
@@ -173,7 +121,7 @@ little-endian; every mainstream x86/ARM/RISC-V system qualifies).
 
 Two backends implement the same small interface (`src/gpu_none.c` documents
 it); `--gpu auto` (the default) uses one whenever the model's quant formats
-have kernels (F32, F16, Q8_0, Q4_0/1, Q5_0/1, Q4_K, Q5_K, Q6_K, IQ4_NL,
+have kernels (F32, F16, Q8_0, Q4_0/1, Q5_0/1, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL,
 IQ4_XS); anything
 else falls back to CPU with a message, as does any GPU runtime failure or a
 model that does not fit. GPU output is verified token-identical to the CPU
