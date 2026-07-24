@@ -117,8 +117,8 @@ def decode_events(events):
     """Turn raw data payloads into (json_objects, saw_done).
 
     Malformed JSON in a ``data:`` line is a protocol error, never something to
-    skip — silently swallowing it is exactly the Python-client defect FUTURE.md
-    calls out under "Python client defects"."""
+    skip — silently swallowing it turns protocol corruption into output that
+    looks complete."""
     out, saw_done = [], False
     for ev in events:
         if ev == DONE:

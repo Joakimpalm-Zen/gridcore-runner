@@ -126,9 +126,8 @@ def test_partial_event_is_never_dispatched(recorded_stream):
 
 
 def test_malformed_sse_is_an_error_not_a_skip(recorded_stream):
-    """FUTURE.md, "Python client defects": swallowing a bad ``data:`` line
-    turns protocol corruption into output that looks complete. The harness
-    must raise instead."""
+    """Swallowing a bad ``data:`` line turns protocol corruption into output
+    that looks complete. The harness must raise instead."""
     corrupted = recorded_stream.replace(b"data: {", b"data: {,", 1)
     with pytest.raises(ProtocolError):
         decode_events(parse_stream(corrupted))

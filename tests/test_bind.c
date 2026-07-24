@@ -31,8 +31,8 @@
 // If you are here because you legitimately need remote access: the supported
 // answer is a reverse proxy, an SSH tunnel or Tailscale, which is where auth
 // and TLS belong. If you are here because you intend to add --host anyway,
-// read the "Non-Negotiable Invariants" section of FUTURE.md first: the flag
-// may not land before the HTTP framing strictness fixes and an auth story.
+// read SECURITY.md first: the flag may not land before the HTTP framing
+// strictness fixes and an auth story.
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,7 +75,7 @@ static void must_contain(const char *src, const char *path, const char *needle) 
         fprintf(stderr,
                 "test-bind: %s no longer contains `%s`.\n"
                 "  The loopback-only bind is a documented invariant, not an\n"
-                "  implementation detail. See FUTURE.md, Non-Negotiable Invariants.\n",
+                "  implementation detail. See SECURITY.md.\n",
                 path, needle);
         exit(1);
     }
@@ -88,8 +88,8 @@ static void must_not_contain(const char *src, const char *path, const char *need
                 "test-bind: %s contains `%s`.\n"
                 "  %s\n"
                 "  The loopback-only bind is a documented invariant. If you are\n"
-                "  adding remote listening on purpose, FUTURE.md's Non-Negotiable\n"
-                "  Invariants list the three things that must land with it.\n",
+                "  adding remote listening on purpose, SECURITY.md explains why\n"
+                "  the loopback-only bind is hardcoded.\n",
                 path, needle, why);
         exit(1);
     }
