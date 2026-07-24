@@ -830,7 +830,13 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         int conv_dim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
         int hv = m->ssm_inner / m->ssm_v_heads;
         m->q_gate = malloc(sizeof(float) * (size_t)B * q_dim);
-        m->ssm_qkv = malloc(sizeof(float) * (size_t)B * conv_dim);
+        // ssm_qkv is shared by two uses: recurrent layers write conv_dim floats
+        // per token, but full-attention layers write the fused Q/gate with stride
+        // 2*q_dim (model.c qwen35 attention path). Nothing relates conv_dim to
+        // 2*q_dim, so size for the larger of the two or the attention write
+        // overflows the buffer.
+        int qkv_dim = conv_dim > 2 * q_dim ? conv_dim : 2 * q_dim;
+        m->ssm_qkv = malloc(sizeof(float) * (size_t)B * qkv_dim);
         m->ssm_z = malloc(sizeof(float) * (size_t)B * m->ssm_inner);
         m->ssm_aux = malloc(sizeof(float) * (size_t)B *
                             (conv_dim + m->ssm_v_heads));

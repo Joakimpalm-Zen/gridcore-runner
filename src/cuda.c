@@ -804,6 +804,28 @@ bool gpu_init(model_t *m) {
         for (int i = 0; i < 7; i++)
             if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
     }
+    // MoE layers leave the dense gate/up/down NULL, so the loop above never
+    // checks the router or the per-expert weights — yet enc_mv indexes the
+    // 32-entry kernel tables (f_mv[]/f_mvb[]) by tensor type on exactly those.
+    // An out-of-range or unsupported type would read past the table (function-
+    // pointer type confusion) or launch a NULL fn at decode. Validate them here
+    // and fall back to CPU, matching how the dense path already rejects.
+    for (int l = 0; l < m->n_layer; l++) {
+        layer_t *ly = &m->layers[l];
+        if (!ly->is_moe) continue;
+        if (ly->ffn_gate_inp && !gpu_type_ok(ly->ffn_gate_inp->type)) goto unsupported;
+        if (ly->moe_split) {
+            for (int e = 0; e < m->n_expert; e++)
+                if (!gpu_type_ok(ly->moe_g[e]->type) ||
+                    !gpu_type_ok(ly->moe_u[e]->type) ||
+                    !gpu_type_ok(ly->moe_d[e]->type)) goto unsupported;
+        } else {
+            if ((ly->ffn_gate_exps && !gpu_type_ok(ly->ffn_gate_exps->type)) ||
+                (ly->ffn_up_exps   && !gpu_type_ok(ly->ffn_up_exps->type))   ||
+                (ly->ffn_down_exps && !gpu_type_ok(ly->ffn_down_exps->type)))
+                goto unsupported;
+        }
+    }
 
     if (!cu_load() || cu.Init(0) != 0) return false;
     prof.on = getenv("RUNNER_CUDA_PROFILE") != NULL;
@@ -1177,6 +1199,12 @@ static bool stage_x(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
 // routing is why MoE layers force the eager path (graph_bad).
 static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used, nff = m->n_ff_exp;
+    // belt-and-suspenders: sel[]/selw[] below are fixed MOE_MAX_USED wide. The
+    // loader already bounds n_expert_used <= n_expert <= 256 (model.c), but never
+    // let a rogue value walk these stack arrays even if a future path reaches here.
+    enum { MOE_MAX_USED = 256 };
+    if (used > MOE_MAX_USED) used = MOE_MAX_USED;
+    if (ne  > MOE_MAX_USED) ne  = MOE_MAX_USED;
     for (int t = 0; t < tn; t++) {
         CUdeviceptr xin  = g->xb  + (size_t)t * xdim * sizeof(float);
         CUdeviceptr aout = g->xb2 + (size_t)t * xdim * sizeof(float);
@@ -1193,8 +1221,8 @@ static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdi
         float ssum = 0.0f;
         for (int e = 0; e < ne; e++) { float p = expf(lg[e] - mx); lg[e] = p; ssum += p; }
         for (int e = 0; e < ne; e++) lg[e] /= ssum;
-        int sel[256];
-        float selw[256], denom = 0.0f;
+        int sel[MOE_MAX_USED];
+        float selw[MOE_MAX_USED], denom = 0.0f;
         for (int s = 0; s < used; s++) {
             int best = 0;
             float bp = -1.0f;
@@ -1614,6 +1642,11 @@ static bool stage_x_batch(gpu_batch *B, model_t *m, const int32_t *tok, int n) {
 bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
                       const int *pos, int n, float **out) {
     if (!b || n < 1 || n > MVB) return false;
+    // idx[] is caller-supplied and selects members of b->seqs[0, b->n): a bogus
+    // index would dereference a wild model_t* below. Reject the whole batch
+    // rather than launch against garbage — the caller then decodes sequentially.
+    for (int i = 0; i < n; i++)
+        if (idx[i] < 0 || idx[i] >= b->n) return false;
     // A microbatch of one is just a decode step with extra staging, and the
     // solo path is better at it: narrower matvec kernels, x straight from
     // global, and a graph that is already warm. Hand it over rather than

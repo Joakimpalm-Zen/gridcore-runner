@@ -285,8 +285,14 @@ int think_feed(think_split *t, const char *bytes, int n, think_cb cb, void *ud) 
     if (!t->open) return n > 0 ? cb(ud, 0, bytes, n) : 0;
 
     if (t->n + n > t->cap) {
-        t->cap = t->n + n + 64;
-        t->buf = realloc(t->buf, t->cap);
+        int ncap = t->n + n + 64;
+        // realloc into a temp: on failure the old buffer is still valid and must
+        // not be leaked or written through a NULL pointer. Abort cleanly (a
+        // nonzero return stops the generation stream, like the g->dead path).
+        char *nb = realloc(t->buf, (size_t)ncap);
+        if (!nb) return 1;
+        t->buf = nb;
+        t->cap = ncap;
     }
     memcpy(t->buf + t->n, bytes, n);
     t->n += n;

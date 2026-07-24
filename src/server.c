@@ -1909,6 +1909,15 @@ static void run_completion(slot_t *s, int fd, const char *prompt, int api,
         e->lp_chosen = malloc(sizeof(float) * max_tokens);
         e->lp_ids    = malloc(sizeof(int32_t) * max_tokens);
         e->lp_top    = lp_n ? malloc(sizeof(lp_alt) * (size_t)max_tokens * lp_n) : NULL;
+        // These scale with max_tokens * top_logprobs (tens of MB): a NULL here
+        // would be dereferenced while collecting logprobs. Fail the request
+        // cleanly instead. completion_cleanup frees whatever did allocate.
+        if (!e->lp_chosen || !e->lp_ids || (lp_n && !e->lp_top)) {
+            free(toks);
+            completion_cleanup(e, schema, NULL);
+            send_error(fd, 500, "out of memory allocating logprobs buffers");
+            return;
+        }
     }
 
     // Reuse the KV for whatever prefix this prompt shares with one already
@@ -2374,6 +2383,14 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
     }
     chat_msg *cm = malloc(sizeof(chat_msg) * (msgs->n + 1));
     char **owned = malloc(sizeof(char *) * msgs->n);
+    // client-controlled size (a 32MB body of tiny messages): a NULL here would
+    // be indexed below. Fail the request cleanly instead of crashing.
+    if (!cm || !owned) {
+        free(cm); free(owned); free(ts.s);
+        tool_envelope_free(&env);
+        send_error(fd, 500, "out of memory building chat prompt");
+        return;
+    }
     size_t total = ts.n + 64;
     int n_cm = 0, n_own = 0;
     if (ts.n) cm[n_cm++] = (chat_msg){ "system", ts.s };
@@ -2396,6 +2413,13 @@ static void handle_chat(slot_t *s, int fd, jv *req) {
         return;
     }
     char *prompt = malloc(total + 256);
+    if (!prompt) {
+        for (int i = 0; i < n_own; i++) free(owned[i]);
+        free(owned); free(cm); free(ts.s);
+        tool_envelope_free(&env);
+        send_error(fd, 500, "out of memory building chat prompt");
+        return;
+    }
     render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
     run_completion(s, fd, prompt, API_CHAT, req, strict ? &env : NULL);
     free(prompt);
@@ -2753,6 +2777,15 @@ static void handle_responses(slot_t *s, int fd, jv *req) {
     else        tools_render(tools, &ts);
     chat_msg *cm = malloc(sizeof(chat_msg) * (size_t)(n_items + 2));
     char **owned = malloc(sizeof(char *) * (size_t)n_items);
+    // client-controlled size: a NULL here would be indexed below. Fail cleanly.
+    if (!cm || !owned) {
+        free(cm); free(owned); free(ts.s);
+        tool_envelope_free(&env);
+        jv_free(tools);
+        jv_free(choice_owned);
+        send_error(fd, 500, "out of memory building responses prompt");
+        return;
+    }
     size_t total = ts.n + 128;
     int n_cm = 0, n_own = 0;
     if (ts.n) cm[n_cm++] = (chat_msg){ "system", ts.s };
@@ -2783,6 +2816,15 @@ static void handle_responses(slot_t *s, int fd, jv *req) {
         return;
     }
     char *prompt = malloc(total + 256);
+    if (!prompt) {
+        for (int i = 0; i < n_own; i++) free(owned[i]);
+        free(owned); free(cm); free(ts.s);
+        tool_envelope_free(&env);
+        jv_free(tools);
+        jv_free(choice_owned);
+        send_error(fd, 500, "out of memory building responses prompt");
+        return;
+    }
     render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
     run_completion(s, fd, prompt, API_RESPONSES, req, strict ? &env : NULL);
     free(prompt);
@@ -3300,6 +3342,13 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
     sb_lit(&r, "{\"object\":\"list\",\"data\":[");
     int total = 0;
     bool ok = true;
+    // model_embed launches kernels and engine_reset touches this slot's KV —
+    // the same device work every other handler serializes under dev_mu. Take the
+    // device turn so an embeddings request cannot launch while decode_worker is
+    // capturing a CUDA graph (hazard at dev_mu, ~line 596). Every exit from the
+    // loop below is a break, so the single sched_prefill_end() after the loop
+    // always runs — the lock is never left held.
+    sched_prefill_begin();
     for (int k = 0; k < n_in && ok; k++) {
         const char *txt = one ? one : jv_str(input->items[k], NULL);
         if (!txt) { send_error(fd, 400, "input must be strings"); ok = false; break; }
@@ -3329,6 +3378,7 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
     // model_embed overwrote this slot's KV cache — invalidate the prefix cache
     engine_reset(&s->e);
     s->e.pos = 0;
+    sched_prefill_end();
     if (ok) {
         sb_lit(&r, "],\"model\":\"");
         sb_esc(&r, SV.model_name, strlen(SV.model_name));
