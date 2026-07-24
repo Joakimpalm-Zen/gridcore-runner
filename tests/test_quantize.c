@@ -139,6 +139,31 @@ static void cp(const char *from, const char *to) {
     fclose(a); fclose(b);
 }
 
+// MXFP4 read support: a hand-built OCP microscaling FP4 block must dequantize
+// to (E8M0 block scale) x (E2M1 code). The expected magnitudes come from the
+// spec, an independent oracle — not a copy of the runner's internal table.
+static void check_mxfp4_dequant(void) {
+    const float mag[16] = {0, 0.5f, 1, 1.5f, 2, 3, 4, 6,
+                           0, -0.5f, -1, -1.5f, -2, -3, -4, -6};
+    unsigned char blk[17];
+    blk[0] = 129;  // E8M0 exponent byte -> 2^(129-127) = 4.0
+    for (int j = 0; j < 16; j++) {
+        int lo = j % 8;         // element j     -> positive magnitudes
+        int hi = 8 + (j % 8);   // element j+16  -> negative magnitudes
+        blk[1 + j] = (unsigned char)((hi << 4) | lo);
+    }
+    float out[32];
+    dequant_row(T_MXFP4, blk, out, 32);
+    for (int j = 0; j < 16; j++) {
+        assert(fabsf(out[j]      - mag[j % 8]       * 4.0f) < 1e-6f);
+        assert(fabsf(out[j + 16] - mag[8 + (j % 8)] * 4.0f) < 1e-6f);
+    }
+    assert(ggml_type_size(T_MXFP4) == 17);
+    assert(ggml_block_size(T_MXFP4) == 32);
+    assert(ggml_type_supported(T_MXFP4));
+    printf("ok: MXFP4 block dequantizes to spec (E8M0 scale x E2M1 code)\n");
+}
+
 int main(void) {
     f16_init();   // dequant_row's scale lookup table (unused by the quantizer
                   // itself, but the round-trip check below dequantizes)
@@ -171,6 +196,8 @@ int main(void) {
     char back[64]; size_t rn = fread(back, 1, sizeof(back), rf); fclose(rf);
     assert(rn == sizeof(sentinel) && memcmp(back, sentinel, rn) == 0);
     printf("ok: failed requant left the destination untouched\n");
+
+    check_mxfp4_dequant();
 
     remove(in); remove(out); remove(inplace); remove(dest); remove(bad);
     printf("all quantize tests passed\n");

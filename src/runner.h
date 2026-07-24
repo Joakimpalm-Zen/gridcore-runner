@@ -68,6 +68,7 @@ enum ggml_type {
     T_Q2_K = 10, T_Q3_K = 11, T_Q4_K = 12, T_Q5_K = 13, T_Q6_K = 14,
     T_IQ4_NL = 20, T_IQ4_XS = 23,
     T_BF16 = 30,
+    T_MXFP4 = 39,   // OCP microscaling FP4 (E2M1 codes + per-block E8M0 scale); gpt-oss
 };
 
 typedef struct {

@@ -55,16 +55,26 @@ typedef struct { f16_t d, dmin; uint8_t scales[12]; uint8_t qh[QK_K / 8]; uint8_
 typedef struct { uint8_t ql[QK_K / 2]; uint8_t qh[QK_K / 4]; int8_t scales[QK_K / 16]; f16_t d; } block_q6_K; // 210
 typedef struct { f16_t d; uint8_t qs[QK / 2]; }                  block_iq4_nl; // 18
 typedef struct { f16_t d; uint16_t scales_h; uint8_t scales_l[QK_K / 64]; uint8_t qs[QK_K / 2]; } block_iq4_xs; // 136
+// OCP microscaling FP4: one E8M0 (power-of-two) block scale byte + 32 packed
+// E2M1 4-bit codes (the gpt-oss expert-tensor format).
+typedef struct { uint8_t e; uint8_t qs[QK / 2]; }               block_mxfp4; // 17
 
 static const int8_t kvalues_iq4nl[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+};
+
+// E2M1 magnitudes {0,.5,1,1.5,2,3,4,6} with sign in the high nibble half;
+// numerically identical to ggml's integer table halved (matches gpt-oss GGUFs).
+static const float kvalues_mxfp4[16] = {
+     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+     0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
 };
 
 int ggml_block_size(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_BF16: return 1;
         case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1: case T_Q8_0:
-        case T_IQ4_NL: return QK;
+        case T_IQ4_NL: case T_MXFP4: return QK;
         case T_Q4_K: case T_Q5_K: case T_Q6_K: case T_Q2_K: case T_Q3_K:
         case T_IQ4_XS: return QK_K;
         default: return 1;
@@ -88,6 +98,7 @@ size_t ggml_type_size(int type) {
         case T_Q3_K: return sizeof(block_q3_K);
         case T_IQ4_NL: return sizeof(block_iq4_nl);
         case T_IQ4_XS: return sizeof(block_iq4_xs);
+        case T_MXFP4: return sizeof(block_mxfp4);
         default:     return 1;
     }
 }
@@ -101,6 +112,7 @@ const char *ggml_type_name(int type) {
         case T_Q4_K: return "Q4_K"; case T_Q5_K: return "Q5_K"; case T_Q6_K: return "Q6_K";
         case T_Q2_K: return "Q2_K"; case T_Q3_K: return "Q3_K";
         case T_IQ4_NL: return "IQ4_NL"; case T_IQ4_XS: return "IQ4_XS";
+        case T_MXFP4: return "MXFP4";
         default: return "?";
     }
 }
@@ -110,7 +122,7 @@ bool ggml_type_supported(int type) {
         case T_F32: case T_F16: case T_BF16:
         case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1: case T_Q8_0:
         case T_Q2_K: case T_Q3_K: case T_Q4_K: case T_Q5_K: case T_Q6_K:
-        case T_IQ4_NL: case T_IQ4_XS:
+        case T_IQ4_NL: case T_IQ4_XS: case T_MXFP4:
             return true;
         default:
             return false;
@@ -118,6 +130,15 @@ bool ggml_type_supported(int type) {
 }
 
 // ---------------------------------------------------------------- dequant
+
+static void dq_mxfp4(const block_mxfp4 *b, float *y) {
+    // E8M0 block scale: the byte is a biased power-of-two exponent, 2^(e-127).
+    float d = ldexpf(1.0f, (int)b->e - 127);
+    for (int j = 0; j < 16; j++) {
+        y[j]      = kvalues_mxfp4[b->qs[j] & 0xF] * d;
+        y[j + 16] = kvalues_mxfp4[b->qs[j] >> 4]  * d;
+    }
+}
 
 static void dq_q4_0(const block_q4_0 *b, float *y) {
     float d = f16_to_f32(b->d);
@@ -401,6 +422,7 @@ static void dequant_block(int type, const void *src, float *dst) {
         case T_Q6_K: dq_q6_K(src, dst); break;
         case T_IQ4_NL: dq_iq4_nl(src, dst); break;
         case T_IQ4_XS: dq_iq4_xs(src, dst); break;
+        case T_MXFP4: dq_mxfp4(src, dst); break;
     }
 }
 
