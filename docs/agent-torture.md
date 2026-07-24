@@ -21,6 +21,7 @@ how the bytes were chunked."
 | `tool_selection` | The right tool chosen from several, under a forced `tool_choice`. |
 | `forced_truncation` | A hard token ceiling landing *inside* a tool call — the arguments must still be valid JSON. |
 | `stream_normalization` | SSE that normalizes to the same result regardless of TCP segmentation, ends with `[DONE]`, and carries a real finish reason. |
+| `large_enum_selection` | A single-choice label from a ~50-member enum — the structured-labeling task small models fail by emitting a plausible near-miss outside the enum; schema-constrained decode must force an exact member. |
 
 ## Run it
 

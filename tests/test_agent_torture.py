@@ -18,10 +18,29 @@ def test_default_matrix_is_repeatable_and_covers_100_cases():
     assert len({case["id"] for case in first}) == 100
     assert {case["category"] for case in first} == {
         "nested_arguments", "tool_selection", "forced_truncation",
-        "stream_normalization",
+        "stream_normalization", "large_enum_selection",
     }
-    assert all(sum(c["category"] == category for c in first) == 25
+    assert all(sum(c["category"] == category for c in first) == 20
                for category in {c["category"] for c in first})
+
+
+def test_large_enum_case_constrains_to_an_exact_taxonomy_member():
+    cases = [c for c in MOD.build_cases(100)
+             if c["category"] == "large_enum_selection"]
+    assert cases, "the large-enum family must be present in the matrix"
+    case = cases[0]
+    tool = case["request"]["tools"][0]["function"]
+    assert tool["name"] == "classify_ticket"
+    enum = tool["parameters"]["properties"]["label"]["enum"]
+    assert len(enum) >= 50 and len(set(enum)) == len(enum)
+    # a valid member passes, a plausible near-miss fails — the exact behaviour
+    # the schema-constrained decoder must enforce on a small model
+    MOD.validate_against_schema({"label": enum[0]}, MOD.CLASSIFY_SCHEMA)
+    try:
+        MOD.validate_against_schema({"label": "billing_issue"}, MOD.CLASSIFY_SCHEMA)
+        assert False, "a non-member label must be rejected"
+    except Exception:
+        pass
 
 
 def test_report_schema_and_totals(tmp_path):

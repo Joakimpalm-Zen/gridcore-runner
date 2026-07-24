@@ -129,6 +129,40 @@ SELECT_TOOLS = [
                    "items": {"type": "integer"}}}, "required": ["values"]}),
 ]
 
+# A ~50-label single-choice taxonomy (a support-ticket routing set). Small models
+# fail this class of task by emitting a plausible near-miss ("billing_issue")
+# that is NOT an exact enum member; schema-constrained decoding must force one of
+# the exact labels. This is the structured-labeling failure the torture suite
+# now exercises directly.
+LARGE_ENUM_LABELS = [
+    "account_access", "account_deletion", "login_mfa", "password_reset",
+    "billing_charge_dispute", "billing_invoice_request", "billing_refund",
+    "billing_plan_change", "billing_tax_exemption", "payment_method_update",
+    "subscription_cancel", "subscription_renewal", "trial_extension",
+    "api_authentication", "api_rate_limit", "api_deprecation", "api_bug_report",
+    "api_feature_request", "webhook_delivery", "sdk_installation",
+    "data_export_request", "data_import_help", "data_privacy_gdpr",
+    "data_retention_policy", "data_breach_report", "security_vulnerability",
+    "permissions_roles", "sso_configuration", "audit_log_access",
+    "performance_degradation", "service_outage", "latency_complaint",
+    "integration_slack", "integration_github", "integration_salesforce",
+    "mobile_app_crash", "mobile_push_notifications", "desktop_app_update",
+    "ui_bug_report", "ui_accessibility", "localization_request",
+    "documentation_error", "documentation_request", "onboarding_help",
+    "feature_request_general", "product_feedback", "partnership_inquiry",
+    "reseller_program", "compliance_soc2", "general_question",
+]
+CLASSIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "enum": LARGE_ENUM_LABELS},
+    },
+    "required": ["label"],
+    "additionalProperties": False,
+}
+CLASSIFY_TOOL = _tool("classify_ticket", CLASSIFY_SCHEMA,
+                      "assign exactly one routing label from the fixed taxonomy")
+
 
 def build_cases(count=100):
     """Return the stable public request matrix (round-robin by category)."""
@@ -136,7 +170,7 @@ def build_cases(count=100):
         raise ValueError("count must be positive")
     cases = []
     categories = ("nested_arguments", "tool_selection", "forced_truncation",
-                  "stream_normalization")
+                  "stream_normalization", "large_enum_selection")
     ordinals = Counter()
     for index in range(count):
         category = categories[index % len(categories)]
@@ -159,6 +193,17 @@ def build_cases(count=100):
         elif category == "forced_truncation":
             payload = dict(base, max_tokens=(1, 2, 3, 5, 8)[ordinal % 5],
                            tools=[NESTED_TOOL], tool_choice="required")
+        elif category == "large_enum_selection":
+            # nudge the model toward a label that is a near-miss of an enum
+            # member; only schema-constrained decode guarantees an exact member
+            hint = LARGE_ENUM_LABELS[(ordinal * 7) % len(LARGE_ENUM_LABELS)]
+            payload = dict(
+                base, max_tokens=32, tools=[CLASSIFY_TOOL],
+                tool_choice={"type": "function",
+                             "function": {"name": "classify_ticket"}},
+                messages=[{"role": "user", "content":
+                           f"Route this ticket. It sounds like a '{hint}' "
+                           f"problem. torture case {index:03d}"}])
         else:
             payload = dict(base, max_tokens=4 + ordinal % 5, stream=True)
         cases.append({"id": f"runner-{index:03d}-{category}",
@@ -206,6 +251,13 @@ def _verify_buffered(case, response):
             raise ProtocolError("wrong tool selected", expected="dispatch_job",
                                 got=name)
         validate_against_schema(arguments, NESTED_SCHEMA)
+    elif case["category"] == "large_enum_selection":
+        if name != "classify_ticket":
+            raise ProtocolError("wrong tool selected", expected="classify_ticket",
+                                got=name)
+        # the whole point: the label must be an EXACT enum member, not a
+        # plausible near-miss the model would otherwise emit
+        validate_against_schema(arguments, CLASSIFY_SCHEMA)
     else:
         wanted = case["request"]["tool_choice"]["function"]["name"]
         if name != wanted:
