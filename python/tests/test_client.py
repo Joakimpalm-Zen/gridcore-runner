@@ -483,6 +483,12 @@ class LaunchTests(unittest.TestCase):
             model_registry_argument({"m": "p" * 1024})               # path too long
         with self.assertRaises(ValueError):
             model_registry_argument({f"m{i}": "x.gguf" for i in range(17)})  # too many
+        # aggregate spec must also fit the server's tmp[4096] (RNP-4): a dozen
+        # near-max entries pass every per-entry limit but overflow the joined
+        # string, which the server would drop.
+        with self.assertRaises(ValueError):
+            model_registry_argument(
+                {f"m{i}": "p" * 1000 for i in range(12)})
 
     def test_server_args_use_runner_owned_fit_and_parent_lifetime(self):
         launch = ServerLaunch(

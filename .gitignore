@@ -33,6 +33,14 @@ test-kv-tol
 test-kv-tol.exe
 test-vram-registry
 test-vram-registry.exe
+test-quantize
+test-quantize.exe
+test-vram-rollback
+test-vram-rollback.exe
+test-gguf-getters
+test-gguf-getters.exe
+test-parse
+test-parse.exe
 # per-PID scratch registries left by tests/test_vram_registry.c
 vramreg-test-*/
 runner-baseline

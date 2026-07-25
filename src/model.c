@@ -82,6 +82,27 @@ static bool check_shape(gguf_tensor *t, int n_in, int n_out,
     return true;
 }
 
+// A fused 3D MoE expert tensor: ne[0]/ne[1] must be EXACT (they are the row
+// length and per-expert row count the forward pass slices with — see
+// moe_expert_weight — so a mismatch drifts every expert's offset, not just the
+// last), and ne[2] must hold at least n_expert expert blocks. Without this a
+// crafted GGUF whose expert tensors are smaller than the declared geometry
+// loads clean and is then read out of bounds at decode time (RNC-1).
+static bool check_shape3(gguf_tensor *t, int ne0, int ne1, int n_expert,
+                         const char *what, int layer) {
+    if (!t) return true;
+    if ((int64_t)t->ne[0] != ne0 || (int64_t)t->ne[1] != ne1 ||
+        (int64_t)t->ne[2] < n_expert) {
+        fprintf(stderr, "error: MoE tensor %s in blk.%d has shape "
+                "[%llu,%llu,%llu], expected [%d,%d,>=%d]\n",
+                what, layer, (unsigned long long)t->ne[0],
+                (unsigned long long)t->ne[1], (unsigned long long)t->ne[2],
+                ne0, ne1, n_expert);
+        return false;
+    }
+    return true;
+}
+
 // Carve a row range out of a tensor without copying. A row is a whole number
 // of quantization blocks (row length is always a multiple of the block size),
 // so the slice starts at an exact byte offset into the same mmapped data.
@@ -699,6 +720,37 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             if (!l->is_moe &&
                 !check_shape(l->w_down, m->n_ff, m->n_embd, "ffn_down", i))
                 return false;
+            if (l->is_moe) {
+                // The MoE forward path slices each expert from the fused 3D
+                // tensors (or the array of 2D split tensors) using offsets
+                // computed from n_embd/n_ff_exp/n_expert metadata, NOT the
+                // tensors' own ne[]. Validate that geometry here so the offsets
+                // stay in bounds (RNC-1). The router reads n_expert rows of
+                // length n_embd; each expert's gate/up is {n_embd, n_ff_exp}
+                // and down is {n_ff_exp, n_embd}.
+                if (!check_shape(l->ffn_gate_inp, m->n_embd, m->n_expert,
+                                 "ffn_gate_inp", i))
+                    return false;
+                if (l->moe_split) {
+                    for (int e = 0; e < m->n_expert; e++) {
+                        if (!check_shape(l->moe_g[e], m->n_embd, m->n_ff_exp,
+                                         "ffn_gate.<e>", i) ||
+                            !check_shape(l->moe_u[e], m->n_embd, m->n_ff_exp,
+                                         "ffn_up.<e>", i) ||
+                            !check_shape(l->moe_d[e], m->n_ff_exp, m->n_embd,
+                                         "ffn_down.<e>", i))
+                            return false;
+                    }
+                } else {
+                    if (!check_shape3(l->ffn_gate_exps, m->n_embd, m->n_ff_exp,
+                                      m->n_expert, "ffn_gate_exps", i) ||
+                        !check_shape3(l->ffn_up_exps, m->n_embd, m->n_ff_exp,
+                                      m->n_expert, "ffn_up_exps", i) ||
+                        !check_shape3(l->ffn_down_exps, m->n_ff_exp, m->n_embd,
+                                      m->n_expert, "ffn_down_exps", i))
+                        return false;
+                }
+            }
         }
         l->attn_norm_w = tensor_to_f32(an, &ok);
         l->ffn_norm_w  = tensor_to_f32(fn, &ok);
@@ -810,6 +862,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         if (model_kv_dim(m, l) > kv_dim) kv_dim = model_kv_dim(m, l);
     }
     int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
+    m->xdim    = xdim;   // cached so the forward paths reuse it (RNC-3)
     int B      = m->n_batch;
 
     // per-layer element offsets into the (possibly heterogeneous) KV cache
@@ -1221,6 +1274,18 @@ static void suppress_logits(const model_t *m, float *logits) {
         logits[m->suppress[i]] = -1e30f;
 }
 
+// The output-head transforms every forward path applies to its logits, in one
+// place so a batched step and a solo step cannot drift apart (RNC-2): the
+// final-logit softcap (Gemma-style tanh squashing) then suppression of the
+// never-emit tokens. No-op on a NULL buffer (a want_logits==false step).
+static void apply_head_transforms(const model_t *m, float *logits) {
+    if (!logits) return;
+    if (m->logit_softcap > 0)
+        for (int i = 0; i < m->n_vocab; i++)
+            logits[i] = m->logit_softcap * tanhf(logits[i] / m->logit_softcap);
+    if (m->n_suppress) suppress_logits(m, logits);
+}
+
 // One CPU Gated DeltaNet layer for Qwen3.5. State is stored transposed
 // ([value_column][key_row]), matching the reference operator: decay, delta
 // correction, outer-product update, then query readout.
@@ -1487,10 +1552,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         if (m->gpu_layers >= m->n_layer) {
             float *lg = NULL;
             if (gpu_forward_batch(m, tokens, n, pos, want_logits, &lg)) {
-                if (lg && m->logit_softcap > 0)
-                    for (int i = 0; i < m->n_vocab; i++)
-                        lg[i] = m->logit_softcap * tanhf(lg[i] / m->logit_softcap);
-                if (lg && m->n_suppress) suppress_logits(m, lg);
+                apply_head_transforms(m, lg);
                 return lg;
             }
             // GPU failed at runtime: fall back to CPU permanently. Release the
@@ -1504,9 +1566,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         }
     }
     int n_embd = m->n_embd;
-    int xdim = n_embd;
-    for (int l = 0; l < m->n_layer; l++)
-        if (model_q_dim(m, l) > xdim) xdim = model_q_dim(m, l);
+    int xdim = m->xdim;   // cached at load (RNC-3)
 
     if (start == 0) {
         size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
@@ -1700,10 +1760,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     if (dbg) dbg_stat("final-norm", m->n_layer, m->xb, n_embd);
     matvec_b(m->tp, m->logits, m->n_vocab, m->output, m->xb, xdim, n_embd, m->n_vocab, NULL, 1);
     if (dbg) dbg_stat("logits-raw", m->n_layer, m->logits, m->n_vocab);
-    if (m->logit_softcap > 0)
-        for (int i = 0; i < m->n_vocab; i++)
-            m->logits[i] = m->logit_softcap * tanhf(m->logits[i] / m->logit_softcap);
-    if (m->n_suppress) suppress_logits(m, m->logits);
+    apply_head_transforms(m, m->logits);
     if (dbg) {
         dbg_stat("logits-final", m->n_layer, m->logits, m->n_vocab);
         int am = 0;
@@ -1730,17 +1787,12 @@ bool model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos)
 // lm_head is the single most expensive matvec in the model). Valid until
 // the next forward.
 float *model_spec_row_logits(model_t *m, int b) {
-    int n_embd = m->n_embd, xdim = n_embd;
-    for (int l = 0; l < m->n_layer; l++)
-        if (model_q_dim(m, l) > xdim) xdim = model_q_dim(m, l);
+    int n_embd = m->n_embd, xdim = m->xdim;   // cached at load (RNC-3)
     float *lg = m->all_logits + (size_t)b * m->n_vocab;
     rmsnorm(m->xb, m->x + (size_t)b * n_embd, m->out_norm_w, n_embd, m->rms_eps);
     matvec_b(m->tp, lg, m->n_vocab, m->output, m->xb, xdim, n_embd,
              m->n_vocab, NULL, 1);
-    if (m->logit_softcap > 0)
-        for (int i = 0; i < m->n_vocab; i++)
-            lg[i] = m->logit_softcap * tanhf(lg[i] / m->logit_softcap);
-    if (m->n_suppress) suppress_logits(m, lg);
+    apply_head_transforms(m, lg);
     return lg;
 }
 
@@ -1814,11 +1866,7 @@ bool model_batch_decode(model_batch *b, const int *idx, const int32_t *tok,
             // step and a solo step cannot drift apart on them.
             for (int i = done; i < done + take; i++) {
                 model_t *m = b->seqs[idx[i]];
-                float *lg = out[i];
-                if (m->logit_softcap > 0)
-                    for (int v = 0; v < m->n_vocab; v++)
-                        lg[v] = m->logit_softcap * tanhf(lg[v] / m->logit_softcap);
-                if (m->n_suppress) suppress_logits(m, lg);
+                apply_head_transforms(m, out[i]);
             }
         }
         if (!ok) {

@@ -695,6 +695,50 @@ after normalization.
 Greedy generation at temperature 0 is token-identical between CUDA and CPU for
 every model above that loads.
 
+## Certified architectures
+
+Runner runs a formal **compatibility program**, not just "it loaded." An
+architecture is *certified* only when it passes a versioned matrix of
+independent checks against a **real, SHA-256-pinned GGUF** — one per claimed
+architecture (`tests/compatibility/models.json`, run by
+`scripts/compat_matrix.py`; full write-up in `docs/compatibility-program.md`).
+
+**What "certified" entails** — each of these is recorded independently, and a
+report only marks the checks that actually ran:
+
+| Check | What it proves |
+|---|---|
+| **load** | the pinned file's SHA matches and the model loads (a filename is never taken as evidence) |
+| **tokenizer** | runner's tokenizer matches the model's own HuggingFace reference over the committed 721-string corpus |
+| **greedy_reference** | temperature-0 generation is compared token-for-token against a pinned **llama.cpp** revision via the shared `/v1/completions` API |
+| **cpu_cuda** | GPU and CPU produce identical greedy output |
+| **chat** | the model answers through the real `/v1/chat/completions` surface |
+| **tool** | a tool/function call round-trips as a well-formed `tool_calls` payload |
+| **long_context** | a needle placed mid-document is retrieved at length |
+
+Certification is **per architecture, not per model or brand** — a family is only
+certifiable if runner *implements its architecture* (see the by-design
+exclusions below); tensor-name compatibility is never treated as proof of
+mathematical compatibility.
+
+**Currently certified** (`load` + `cpu_cuda` for all; `chat`/`tool`/`long_context`
+and `greedy_reference` per the recorded reports):
+
+| Architecture | Family | Pinned model |
+|---|---|---|
+| `llama` | Llama 3 / Mistral | Llama-3.2-3B, Mistral-7B-v0.3 |
+| `qwen2` | Qwen 2.5 | Qwen2.5-32B-Instruct |
+| `qwen3` | Qwen 3 | Qwen3-4B |
+| `qwen35` | Qwen 3.5 / Ornith | Ornith-1.0-9B (CPU-only by design) |
+| `phi3` | Phi 3 | Phi-3.5-mini-instruct |
+| `gemma3` | Gemma 3 | gemma-3-4b-it |
+| `gemma4` | Gemma 4 (dense) | gemma-4-12B-it |
+| `qwen3moe` | Qwen 3 MoE / Mixtral-style | Qwen3-30B-A3B (greedy-identical to llama.cpp; 128 experts / 8 active) |
+
+`mistral`, `smollm` and `stablelm` ride the certified `llama` path. Unknown
+architectures are **refused**, not run through llama-style math — a clear
+refusal beats plausible, silently-wrong output.
+
 Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
 shared-expert MoE (Qwen2-MoE/DeepSeek) and GELU-gated (gemma) MoE — only
 Mixtral/Qwen3-style top-k SiLU MoE is supported (CPU + CUDA; both fused and

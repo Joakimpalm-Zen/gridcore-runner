@@ -32,6 +32,8 @@ runner; several are load-bearing gates for changing it.
 
 - **`make-test-model.py`** — builds `test.gguf`, the tiny CI fixture (plus
   malformed variants for the rejection tests).
+- **`make-test-moe.py`** — the dense + sparse-MoE GGUF trio for the MoE
+  equivalence test (`tests/test_moe.py`; see `docs/moe-support.md`).
 - **`make-test-ornith.py`** — tiny Qwen3.5/Ornith hybrid fixture
   (via `tests/test_ornith_cpu.py`).
 - **`make-vocab-fixture.py`** — tokenizer vocab fixtures in `tests/fixtures/`.

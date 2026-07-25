@@ -55,6 +55,11 @@ def query_system_capabilities(
 _MAX_MODELS = 16
 _MAX_NAME = 63
 _MAX_PATH = 1023
+# The server parses the whole joined "name=path,name2=path2,..." spec into a
+# fixed char tmp[4096] and rejects it if it does not fit, so the per-entry
+# limits above are not sufficient: 16 near-max entries sum to ~17 KB. Cap the
+# aggregate here too (RNP-4) so the builder never emits a spec the server drops.
+_MAX_SPEC = 4095
 
 
 def model_registry_argument(models: Mapping[str, str | Path]) -> str:
@@ -77,7 +82,12 @@ def model_registry_argument(models: Mapping[str, str | Path]) -> str:
             raise ValueError(
                 f"model registry path too long ({len(path)} > {_MAX_PATH}) for {name!r}")
         entries.append(f"{name}={path}")
-    return ",".join(entries)
+    spec = ",".join(entries)
+    if len(spec) > _MAX_SPEC:
+        raise ValueError(
+            f"model registry spec too long ({len(spec)} > {_MAX_SPEC} bytes); "
+            "the server would drop it")
+    return spec
 
 
 @dataclass(frozen=True)

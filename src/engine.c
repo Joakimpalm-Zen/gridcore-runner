@@ -789,10 +789,16 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
     e->lp_count = 0;
     double t0 = now_s();
     model_t *m = e->m, *dm = e->dm;
+    // Draft window size. Bounded below by 1, above by the model's spec_batch,
+    // and — defensively — by the fixed stack buffer d[] so a future spec_batch
+    // bump can never overflow it (RNC-4: d[] used to be a bare 16 unlinked to
+    // spec_batch).
+    enum { SPEC_DRAFT_MAX = 16 };  // capacity of d[]; must be >= any spec_batch
     int K = e->draft_k;
     if (K < 1) K = 1;
     if (K > m->spec_batch - 1) K = m->spec_batch - 1;
-    int32_t d[16];
+    if (K > SPEC_DRAFT_MAX - 1) K = SPEC_DRAFT_MAX - 1;
+    int32_t d[SPEC_DRAFT_MAX];
     float *dl = NULL; // draft logits for position dpos
     // Even under JSON/schema constraints, speculation stays target-exact:
     // the draft proposes, but only target-sampled tokens feed the validator.

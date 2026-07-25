@@ -18,12 +18,13 @@ import json
 from pathlib import Path
 
 CATEGORIES = ("nested_arguments", "tool_selection", "forced_truncation",
-              "stream_normalization")
+              "stream_normalization", "large_enum_selection")
 CATEGORY_LABEL = {
     "nested_arguments": "nested tool arguments",
     "tool_selection": "tool selection",
     "forced_truncation": "truncation mid-call",
     "stream_normalization": "stream normalization",
+    "large_enum_selection": "large-enum classification",
 }
 
 

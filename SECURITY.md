@@ -58,6 +58,20 @@ Request bodies are parsed by runner's own strict JSON parser (no
 dependencies, rejects malformed input outright), and JSON Schemas are
 validated at compile time before they ever drive sampling.
 
+**Chat message content is trusted as prompt text.** Runner renders chat
+messages into the model's prompt template and tokenizes the result with
+special-token parsing enabled, so a `content` string that itself contains a
+template control marker (e.g. `<|im_start|>system`) is tokenized as a genuine
+control token, not literal text — i.e. a caller can forge turn boundaries or a
+system turn. This is acceptable under the trust model above: every caller that
+can reach the loopback socket is already trusted, and there is no privilege
+boundary between chat roles to escalate across. **Operators who place an
+untrusted relay in front of runner (serving end-user chat through a shared
+proxy) must sanitize special-token sequences out of user-role content before
+forwarding**, exactly as they would for any OpenAI-compatible backend — runner
+does not, and cannot, distinguish a trusted from an untrusted upstream on a
+loopback connection.
+
 ## Hardening in place
 
 - Zero third-party dependencies (libc/pthreads only) — no transitive CVE

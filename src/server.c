@@ -3341,10 +3341,19 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
 
     model_t *m = s->m;
     float *emb = malloc(sizeof(float) * m->n_embd);
+    if (!emb) { send_error(fd, 500, "out of memory"); return; }  // RNS-3
     sbuf r = {0};
     sb_lit(&r, "{\"object\":\"list\",\"data\":[");
     int total = 0;
     bool ok = true;
+    // RNS-1: an error must be reported to the client only AFTER the device turn
+    // is released. send_error() does a blocking socket write bounded by the 30s
+    // SO_SNDTIMEO; doing it under dev_mu would stall decode_worker — and thereby
+    // every other in-flight generation — behind one slow/dead embeddings client.
+    // So the loop records (err_code, err_msg) and breaks; the send happens below,
+    // off-lock, mirroring run_completion.
+    int err_code = 0;
+    const char *err_msg = NULL;
     // model_embed launches kernels and engine_reset touches this slot's KV —
     // the same device work every other handler serializes under dev_mu. Take the
     // device turn so an embeddings request cannot launch while decode_worker is
@@ -3354,19 +3363,20 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
     sched_prefill_begin();
     for (int k = 0; k < n_in && ok; k++) {
         const char *txt = one ? one : jv_str(input->items[k], NULL);
-        if (!txt) { send_error(fd, 400, "input must be strings"); ok = false; break; }
+        if (!txt) { err_code = 400; err_msg = "input must be strings"; ok = false; break; }
         size_t cap = strlen(txt) + 16;
         int32_t *toks = malloc(sizeof(int32_t) * cap);
         int n = toks ? tok_encode(s->tok, txt, toks, (int)cap, true, true) : -1;
         if (n < 0) {
             free(toks);
-            send_error(fd, 500, "out of memory tokenizing input");
+            err_code = 500; err_msg = "out of memory tokenizing input";
             ok = false;
             break;
         }
         if (n == 0 || !model_embed(m, toks, n, emb)) {
             free(toks);
-            send_error(fd, 400, n == 0 ? "empty input" : "input exceeds context window");
+            err_code = 400;
+            err_msg = n == 0 ? "empty input" : "input exceeds context window";
             ok = false;
             break;
         }
@@ -3382,7 +3392,10 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
     engine_reset(&s->e);
     s->e.pos = 0;
     sched_prefill_end();
-    if (ok) {
+    if (!ok) {
+        // deferred from the loop — sent here, off the device lock (RNS-1)
+        send_error(fd, err_code, err_msg);
+    } else {
         sb_lit(&r, "],\"model\":\"");
         sb_esc(&r, SV.model_name, strlen(SV.model_name));
         sb_fmt(&r, "\",\"usage\":{\"prompt_tokens\":%d,\"total_tokens\":%d}}",

@@ -8,13 +8,13 @@
 //   1. There is no authentication on the API. Nothing in the server checks who
 //      the caller is, because the kernel already did: only this machine can
 //      reach the socket.
-//   2. The HTTP request framing is permissive in ways that would be a request
-//      smuggling primitive behind a keep-alive proxy — Content-Length is
-//      matched anywhere in the header block rather than at a line start, and
-//      Transfer-Encoding: chunked is ignored rather than rejected. That is
-//      assessed as not exploitable *because* the listener is loopback-only and
-//      serves one request per connection. Weaken the bind and that assessment
-//      is void.
+//   2. The HTTP request framing is now strict (parse_request_framing):
+//      Content-Length is matched only as a complete, line-anchored header,
+//      duplicate Content-Length is rejected, and Transfer-Encoding is rejected
+//      outright rather than ignored — so it is not a request-smuggling
+//      primitive even behind a keep-alive proxy. Here the loopback bind is
+//      defense-in-depth, not the sole mitigation; but it remains the reason
+//      (1) can skip authentication entirely.
 //
 // Since Phases 1-4 the server also does tool calling on three API surfaces,
 // which is precisely the capability that turned the ~175,000 exposed Ollama
