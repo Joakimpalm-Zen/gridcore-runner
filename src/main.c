@@ -342,6 +342,9 @@ int main(int argc, char **argv) {
         // per-model property and so is reported at load, not here. f16 is the
         // default because q8 is lossy — it does not reproduce f16 output.
         printf(",\"kv_types\":[\"f16\",\"q8\"],\"kv_type_default\":\"f16\"");
+        // the fixed -m swap-registry capacity, so a controller bounds the set of
+        // models it launches instead of overflowing it (see RUNNER_MAX_MODELS)
+        printf(",\"max_models\":%d", RUNNER_MAX_MODELS);
         printf(",\"quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
                "\"Q5_0\",\"Q5_1\",\"Q2_K\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
                "\"IQ4_NL\",\"IQ4_XS\"],"

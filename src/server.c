@@ -243,7 +243,7 @@ static struct {
     atomic_int ctx_size;
     atomic_int req_counter;
     // swap mode
-    reg_entry   reg[16];
+    reg_entry   reg[RUNNER_MAX_MODELS];
     int         n_reg;
     bool        single;        // single-model serve wrapped as a 1-entry registry
     bool        borrowed;      // slot 0's model/tok containers owned by the caller

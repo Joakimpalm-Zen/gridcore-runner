@@ -4,6 +4,11 @@
 
 #define RUNNER_VERSION "0.1.3-alpha"
 
+// Fixed size of the -m swap registry (server.c SV.reg). Published in --caps as
+// "max_models" so a controller can bound the working set it launches instead of
+// overflowing this cap. Keep one source of truth for the array and the report.
+#define RUNNER_MAX_MODELS 16
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
