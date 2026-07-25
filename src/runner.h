@@ -216,6 +216,15 @@ typedef struct {
     // legacy split layout: one 2D tensor per expert (older Mixtral GGUFs)
     bool         moe_split;
     gguf_tensor **moe_g, **moe_u, **moe_d;  // [n_expert] each, when moe_split
+    // gemma-4 MoE: gate and up fused in one 3D tensor {n_embd, 2*n_ff_exp,
+    // n_expert} (first half gate, second up); a per-expert down scale; a router
+    // input scale; and — every gemma-4 MoE layer ALSO runs a dense GELU FFN as a
+    // shared expert (w_gate/w_up/w_down), summed with the routed experts.
+    bool         moe_gemma;              // gemma-4 dual-branch (dense + routed) MoE layer
+    gguf_tensor *ffn_gate_up_exps;       // fused 3D {n_embd, 2*n_ff_exp, n_expert}
+    float       *down_exps_scale;        // [n_expert] per-expert down-projection scale
+    float       *gate_inp_scale;         // [n_embd] router-input scale (gemma-4)
+    float       *ffn_pre_norm2_w, *ffn_post_norm1_w, *ffn_post_norm2_w; // gemma-4 MoE branch norms
     float       *attn_norm_w, *ffn_norm_w; // norm weights as f32
     float       *qnorm_w, *knorm_w;      // per-head Q/K norms (qwen3, gemma3/4)
     float       *post_attn_norm_w, *post_ffn_norm_w; // gemma sandwich norms
@@ -294,6 +303,7 @@ typedef struct {
     int       ffn_act;       // ACT_SILU (default) or ACT_GELU (gemma)
     bool      v_rmsnorm;     // weightless per-head RMS norm on V (gemma4)
     bool      qwen35;
+    bool      moe_gemma;     // gemma-4 dual-branch MoE (CPU-only; no GPU dual-branch kernel yet)
     int       full_attn_interval;
     int       ssm_conv_kernel, ssm_inner, ssm_state, ssm_v_heads, ssm_groups;
     float     logit_softcap; // final logits = c*tanh(x/c) when > 0

@@ -508,10 +508,12 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
                     "(only Mixtral/Qwen3-style top-k MoE)\n");
             return false;
         }
-        // the MoE expert FFN is implemented with SiLU gating (Mixtral/Qwen3);
-        // a GELU-activation family (gemma) would compute wrong, so refuse it
-        // rather than run unvalidated math
-        if (m->ffn_act != ACT_SILU) {
+        // GELU-gated MoE is implemented only for gemma-4's dual-branch layout
+        // (fused gate_up experts + a dense shared FFN per layer). Any other
+        // non-SiLU MoE is refused rather than run through SiLU math.
+        bool gemma_moe = strcmp(arch, "gemma4") == 0 &&
+                         gguf_find_tensor(g, "blk.0.ffn_gate_up_exps.weight");
+        if (m->ffn_act != ACT_SILU && !gemma_moe) {
             fprintf(stderr, "error: MoE is only supported with SiLU-gated "
                     "experts (this model uses a different activation)\n");
             return false;
@@ -664,8 +666,23 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             // dense gate/up/down for this layer
             l->is_moe = true;
             l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
-            l->ffn_gate_exps = opt_tensor(g, "blk.%d.ffn_gate_exps.weight", i);
-            if (l->ffn_gate_exps) {
+            l->ffn_gate_up_exps = opt_tensor(g, "blk.%d.ffn_gate_up_exps.weight", i);
+            if (l->ffn_gate_up_exps) {
+                // gemma-4 dual-branch MoE: gate+up fused in one 3D tensor, a
+                // per-expert down scale, and — every MoE layer ALSO runs a dense
+                // GELU FFN as a shared expert, plus two branch sandwich norms.
+                l->moe_gemma = true;
+                m->moe_gemma = true;   // dual-branch: dense shared FFN + routed experts
+                l->ffn_down_exps   = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
+                l->down_exps_scale = tensor_to_f32(opt_tensor(g, "blk.%d.ffn_down_exps.scale", i), &ok);
+                l->gate_inp_scale  = tensor_to_f32(opt_tensor(g, "blk.%d.ffn_gate_inp.scale", i), &ok);
+                l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
+                l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight",   i, &ok);
+                l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
+                l->ffn_post_norm1_w = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm_1.weight", i), &ok);
+                l->ffn_pre_norm2_w  = tensor_to_f32(opt_tensor(g, "blk.%d.pre_ffw_norm_2.weight",  i), &ok);
+                l->ffn_post_norm2_w = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm_2.weight", i), &ok);
+            } else if ((l->ffn_gate_exps = opt_tensor(g, "blk.%d.ffn_gate_exps.weight", i))) {
                 // modern fused 3D expert tensors
                 l->ffn_up_exps   = need_tensor(g, "blk.%d.ffn_up_exps.weight", i, &ok);
                 l->ffn_down_exps = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
@@ -731,7 +748,15 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
                 if (!check_shape(l->ffn_gate_inp, m->n_embd, m->n_expert,
                                  "ffn_gate_inp", i))
                     return false;
-                if (l->moe_split) {
+                if (l->moe_gemma) {
+                    // gate and up are fused: {n_embd, 2*n_ff_exp, n_expert}
+                    if (!check_shape3(l->ffn_gate_up_exps, m->n_embd,
+                                      2 * m->n_ff_exp, m->n_expert,
+                                      "ffn_gate_up_exps", i) ||
+                        !check_shape3(l->ffn_down_exps, m->n_ff_exp, m->n_embd,
+                                      m->n_expert, "ffn_down_exps", i))
+                        return false;
+                } else if (l->moe_split) {
                     for (int e = 0; e < m->n_expert; e++) {
                         if (!check_shape(l->moe_g[e], m->n_embd, m->n_ff_exp,
                                          "ffn_gate.<e>", i) ||
@@ -904,8 +929,15 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         // so the hot path never mallocs and an OOM fails the load, not a token
         m->ssm_cw = malloc(sizeof(float) * m->ssm_conv_kernel);
     }
-    m->hb     = malloc(sizeof(float) * (size_t)B * m->n_ff);
-    m->hb2    = malloc(sizeof(float) * (size_t)B * m->n_ff);
+    // hb/hb2 hold the dense FFN's n_ff-wide output for B token columns; gemma-4
+    // MoE also reuses hb to hold one token's fused gate_up of width 2*n_ff_exp,
+    // so the buffer must cover both — otherwise --batch 1 with 2*n_ff_exp > n_ff
+    // overflows the heap.
+    size_t ff_scratch = (size_t)B * m->n_ff;
+    if (m->moe_gemma && 2 * (size_t)m->n_ff_exp > ff_scratch)
+        ff_scratch = 2 * (size_t)m->n_ff_exp;
+    m->hb     = malloc(sizeof(float) * ff_scratch);
+    m->hb2    = malloc(sizeof(float) * ff_scratch);
     m->att    = malloc(sizeof(float) * (size_t)m->n_head * n_ctx);
     m->logits = malloc(sizeof(float) * m->n_vocab);
     m->spec_batch = 16; // all_logits rows, allocated lazily on first use
@@ -963,12 +995,13 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     // The existing GPU backends implement KV attention only. Keep Qwen3.5 on
     // the correct CPU path until a native recurrent backend is available —
     // and say so: a silent fallback reads as a mysteriously slow GPU run.
+    // (gemma-4 MoE now has a GPU dual-branch kernel, so it offloads normally.)
     if (p->gpu_mode == GPU_AUTO && m->qwen35) {
         char gname[128];
         if (gpu_available(gname, sizeof(gname)))
-            fprintf(stderr, "gpu: %s has no kernels for the recurrent '%s' "
-                    "path — inference runs on the CPU (%d threads)\n",
-                    gname, m->arch, pool_threads);
+            fprintf(stderr, "gpu: %s has no kernels for the recurrent '%s' path — "
+                    "inference runs on the CPU (%d threads)\n", gname,
+                    m->arch, pool_threads);
     }
     if (p->gpu_mode == GPU_AUTO && !m->qwen35) {
         // Register the intended VRAM footprint before allocating any of it, so
@@ -1019,6 +1052,8 @@ void model_free(model_t *m) {
         free(l->bq); free(l->bk); free(l->bv); free(l->bo);
         free(l->qnorm_w); free(l->knorm_w);
         free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
+        free(l->down_exps_scale); free(l->gate_inp_scale);
+        free(l->ffn_pre_norm2_w); free(l->ffn_post_norm1_w); free(l->ffn_post_norm2_w);
         free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
         free(l->moe_g); free(l->moe_u); free(l->moe_d);  // split-MoE pointer arrays
     }
@@ -1432,6 +1467,19 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
 
 // Decode path: one token, per selected expert SwiGLU -> weighted sum. Reads the
 // normed input from xin and writes the FFN output back in place.
+// Gated activation for a (Sw|Ge)GLU FFN: act(g) * u. act is SiLU for the
+// llama family, the tanh-GELU approximation for gemma. One definition shared by
+// the dense FFN and both MoE expert-FFN paths so a gemma-style GELU MoE cannot
+// silently run SiLU math. The GPU path already selects f_gelu/f_silu the same
+// way (enc_actmul / dense f-select).
+static inline float gated_act(int act, float g, float u) {
+    if (act == ACT_GELU) {
+        float t = tanhf(0.7978845608f * (g + 0.044715f * g * g * g));
+        return 0.5f * g * (1.0f + t) * u;
+    }
+    return (g / (1.0f + expf(-g))) * u;
+}
+
 static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
@@ -1447,10 +1495,8 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
         gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
         matvec_b(m->tp, m->moe_gate, nff, &gv, xin, n_embd, n_embd, nff, NULL, 1);
         matvec_b(m->tp, m->moe_up,   nff, &uv, xin, n_embd, n_embd, nff, NULL, 1);
-        for (int j = 0; j < nff; j++) {
-            float g = m->moe_gate[j];
-            m->moe_gate[j] = (g / (1.0f + expf(-g))) * m->moe_up[j]; // silu(g)*up
-        }
+        for (int j = 0; j < nff; j++)
+            m->moe_gate[j] = gated_act(m->ffn_act, m->moe_gate[j], m->moe_up[j]);
         matvec_b(m->tp, m->moe_dexp, n_embd, &dv, m->moe_gate,
                  nff, nff, n_embd, NULL, 1);
         for (int i = 0; i < n_embd; i++) m->moe_out[i] += w * m->moe_dexp[i];
@@ -1502,7 +1548,7 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
             float *g = m->moe_gate_b + (size_t)c * nff;
             const float *u = m->moe_up_b + (size_t)c * nff;
             for (int j = 0; j < nff; j++)
-                g[j] = (g[j] / (1.0f + expf(-g[j]))) * u[j];
+                g[j] = gated_act(m->ffn_act, g[j], u[j]);
         }
         matvec_b(m->tp, m->moe_dexp_b, n_embd, &dv, m->moe_gate_b,
                  nff, nff, n_embd, NULL, cnt);
@@ -1516,6 +1562,79 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
     for (int b = 0; b < n; b++)
         memcpy(m->xb + (size_t)b * xdim, m->moe_out_b + (size_t)b * n_embd,
                (size_t)n_embd * sizeof(float));
+}
+
+// gemma-4 fused gate_up expert slice for expert e: {n_embd, 2*n_ff_exp} (first
+// n_ff_exp rows are gate, next n_ff_exp are up). Offset from n_embd/n_ff_exp/e
+// metadata (shape-validated at load, RNC-1).
+static gguf_tensor gemma_gate_up_weight(const layer_t *ly, int e, int n_embd,
+                                        int n_ff_exp) {
+    gguf_tensor *base = ly->ffn_gate_up_exps;
+    size_t rs = ggml_row_size(base->type, n_embd);
+    gguf_tensor v = *base;
+    v.data = (uint8_t *)base->data + (size_t)e * (2 * (size_t)n_ff_exp) * rs;
+    return v;
+}
+
+// gemma-4 dual-branch MoE FFN for one layer: a dense GELU shared expert AND a
+// routed top-k GELU expert set, each with its own pre/post RMSNorm sandwich,
+// summed. attn_out is m->x (post-attention residual); writes the sum to m->xb
+// (the caller then applies post_ffw_norm + the residual add). Per token; decode
+// is n==1. Verified token-identical to llama.cpp gemma4.cpp.
+static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
+    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int nff = m->n_ff_exp, dff = m->n_ff;           // dff = dense shared-FFN size
+    float inv = 1.0f / sqrtf((float)n_embd);
+    for (int b = 0; b < n; b++) {
+        const float *attn = m->x + (size_t)b * n_embd;
+        float xn[n_embd], mlp[n_embd], xn2[n_embd], rin[n_embd];
+        // --- dense shared MLP: rmsnorm(ffn_norm) -> GELU SwiGLU -> post_ffw_norm_1
+        rmsnorm(xn, attn, ly->ffn_norm_w, n_embd, m->rms_eps);
+        matvec_b(m->tp, m->hb,  dff, ly->w_gate, xn, n_embd, n_embd, dff, NULL, 1);
+        matvec_b(m->tp, m->hb2, dff, ly->w_up,   xn, n_embd, n_embd, dff, NULL, 1);
+        for (int j = 0; j < dff; j++) m->hb[j] = gated_act(ACT_GELU, m->hb[j], m->hb2[j]);
+        matvec_b(m->tp, mlp, n_embd, ly->w_down, m->hb, dff, dff, n_embd, NULL, 1);
+        rmsnorm(mlp, mlp, ly->ffn_post_norm1_w, n_embd, m->rms_eps);
+        // --- routed experts: pre-norm the branch input; router runs on a
+        //     SEPARATE weightless-rmsnorm(attn_out) * (1/sqrt(n_embd)) * gate_inp_scale
+        rmsnorm(xn2, attn, ly->ffn_pre_norm2_w, n_embd, m->rms_eps);
+        float rss = 0.0f;
+        for (int i = 0; i < n_embd; i++) rss += attn[i] * attn[i];
+        rss = 1.0f / sqrtf(rss / n_embd + m->rms_eps);
+        for (int i = 0; i < n_embd; i++)
+            rin[i] = attn[i] * rss * inv *
+                     (ly->gate_inp_scale ? ly->gate_inp_scale[i] : 1.0f);
+        matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, rin, n_embd, n_embd, ne, NULL, 1);
+        // softmax over all experts, top-k, renormalized (same as moe_route)
+        float mx = m->moe_logits[0];
+        for (int e = 1; e < ne; e++) if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
+        float ssum = 0.0f;
+        for (int e = 0; e < ne; e++) { float p = expf(m->moe_logits[e] - mx); m->moe_logits[e] = p; ssum += p; }
+        for (int e = 0; e < ne; e++) m->moe_logits[e] /= ssum;
+        int sel[256]; float selw[256], denom = 0.0f;
+        for (int t = 0; t < used; t++) {
+            int best = 0; float bp = -1.0f;
+            for (int e = 0; e < ne; e++) if (m->moe_logits[e] > bp) { bp = m->moe_logits[e]; best = e; }
+            sel[t] = best; selw[t] = bp; denom += bp; m->moe_logits[best] = -1.0f;
+        }
+        for (int t = 0; t < used; t++) selw[t] /= denom;
+        for (int i = 0; i < n_embd; i++) m->moe_out[i] = 0.0f;
+        for (int t = 0; t < used; t++) {
+            int e = sel[t];
+            gguf_tensor guv = gemma_gate_up_weight(ly, e, n_embd, nff);
+            matvec_b(m->tp, m->hb, 2 * nff, &guv, xn2, n_embd, n_embd, 2 * nff, NULL, 1);
+            for (int j = 0; j < nff; j++)
+                m->moe_gate[j] = gated_act(ACT_GELU, m->hb[j], m->hb[nff + j]);
+            gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
+            matvec_b(m->tp, m->moe_dexp, n_embd, &dv, m->moe_gate, nff, nff, n_embd, NULL, 1);
+            float sc = selw[t] * (ly->down_exps_scale ? ly->down_exps_scale[e] : 1.0f);
+            for (int i = 0; i < n_embd; i++) m->moe_out[i] += sc * m->moe_dexp[i];
+        }
+        rmsnorm(m->moe_out, m->moe_out, ly->ffn_post_norm2_w, n_embd, m->rms_eps);
+        // --- combine
+        float *out = m->xb + (size_t)b * xdim;
+        for (int i = 0; i < n_embd; i++) out[i] = mlp[i] + m->moe_out[i];
+    }
 }
 
 // Sparse-MoE FFN for one layer. Decode (n==1) keeps the exact per-token path;
@@ -1715,6 +1834,11 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
 
         // feed-forward (gated: silu for llama-family, gelu for gemma). MoE
         // layers route each token to a few experts instead of one dense FFN.
+        // gemma-4 MoE is a dual branch that does its own norms off m->x directly.
+        if (ly->moe_gemma) {
+            gemma_moe_ffn(m, ly, n, xdim);  // reads m->x, writes dense⊕routed to m->xb
+            goto ffn_done;
+        }
         for (int b = 0; b < n; b++)
             rmsnorm(m->xb + (size_t)b * xdim, m->x + (size_t)b * n_embd,
                     ly->ffn_norm_w, n_embd, m->rms_eps);
@@ -1723,21 +1847,12 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         } else {
         matvec_b(m->tp, m->hb,  m->n_ff, ly->w_gate, m->xb, xdim, n_embd, m->n_ff, NULL, n);
         matvec_b(m->tp, m->hb2, m->n_ff, ly->w_up,   m->xb, xdim, n_embd, m->n_ff, NULL, n);
-        if (m->ffn_act == ACT_GELU) {
-            for (size_t i = 0; i < (size_t)n * m->n_ff; i++) {
-                float g = m->hb[i];
-                float t = tanhf(0.7978845608f * (g + 0.044715f * g * g * g));
-                m->hb[i] = 0.5f * g * (1.0f + t) * m->hb2[i]; // gelu(g) * up
-            }
-        } else {
-            for (size_t i = 0; i < (size_t)n * m->n_ff; i++) {
-                float g = m->hb[i];
-                m->hb[i] = (g / (1.0f + expf(-g))) * m->hb2[i]; // silu(g) * up
-            }
-        }
+        for (size_t i = 0; i < (size_t)n * m->n_ff; i++)
+            m->hb[i] = gated_act(m->ffn_act, m->hb[i], m->hb2[i]);
         if (dbg) dbg_stat("ffn-act", l, m->hb + (size_t)(n - 1) * m->n_ff, m->n_ff);
         matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, m->n_ff, m->n_ff, n_embd, NULL, n);
         }
+        ffn_done:
         if (dbg) dbg_stat("ffn-down", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         if (ly->post_ffn_norm_w)
             for (int b = 0; b < n; b++)

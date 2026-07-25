@@ -82,6 +82,26 @@
       "tokenizer_reference": "google/gemma-4-12b-it",
       "reference": {"implementation": "llama.cpp", "revision": "b10076"},
       "checks": ["load", "tokenizer", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    },
+    {
+      "id": "qwen3-30b-a3b-q4_k_m",
+      "architecture": "qwen3moe",
+      "family": "Qwen 3 MoE",
+      "file": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+      "tokenizer_reference": "Qwen/Qwen3-30B-A3B",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "greedy_reference", "cpu_cuda", "chat", "tool", "long_context"]
+    },
+    {
+      "id": "gemma-4-26b-a4b-it-q4_0",
+      "architecture": "gemma4-moe",
+      "family": "Gemma 4 MoE",
+      "file": "models/gemma-4-26B-A4B-it-Q4_0.gguf",
+      "sha256": "d208665ab1cd3a69f7a9a4bc59430e8448c8093d9b06334f566ac59d6d504a03",
+      "tokenizer_reference": "google/gemma-4-26b-a4b-it",
+      "reference": {"implementation": "llama.cpp", "revision": "b10076"},
+      "checks": ["load", "greedy_reference", "cpu_cuda", "chat"]
     }
   ]
 }

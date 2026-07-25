@@ -281,6 +281,9 @@ typedef struct gpu_weights {
     CUdeviceptr *pan, *pfn;             // gemma3 sandwich norms, may be 0
     CUdeviceptr *bq, *bk, *bv, *bo;     // per layer, may be 0
     CUdeviceptr *qn, *kn;               // qwen3 per-head q/k norms
+    // gemma-4 MoE dual-branch: dense-post/moe-pre/moe-post norms + the router
+    // input scale (with 1/sqrt(n_embd) folded in), per MoE layer, may be 0
+    CUdeviceptr *g_pn1, *g_prn2, *g_pn2, *g_gis;
 } gpu_weights;
 
 // ------------------------------------------------ per-sequence backend state
@@ -293,6 +296,7 @@ typedef struct {
     CUdeviceptr kc, vc;
     CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, attn_part, logits;
     CUdeviceptr moe_logits, moe_eout;   // sparse-MoE: router logits, expert down-out
+    CUdeviceptr g_scr;                  // gemma-4-MoE dual-branch scratch: 5*n_embd
     float       *h_x, *h_logits, *h_moe_logits; // host staging
     int          last_pos;              // -2 = nothing synced yet
     // CUDA graphs for the single-token decode path (Experiment A)
@@ -412,6 +416,21 @@ static CUdeviceptr f32_dbuf(const float *src, size_t n) {
     return d;
 }
 
+// As f32_dbuf, but a NULL src uploads an all-ones buffer instead of returning 0.
+// The CPU rmsnorm() runs weightless (multiply by 1) when its weight is NULL, so
+// an optional gemma norm that a GGUF omits must become ones on the GPU — a null
+// device pointer would instead fault k_rmsnorm (no NULL guard in the kernel).
+static CUdeviceptr f32_dbuf_ones(const float *src, size_t n) {
+    if (src) return f32_dbuf(src, n);
+    if (n > SIZE_MAX / sizeof(float)) return 0;
+    float *ones = malloc(n * sizeof(float));
+    if (!ones) return 0;
+    for (size_t i = 0; i < n; i++) ones[i] = 1.0f;
+    CUdeviceptr d = f32_dbuf(ones, n);
+    free(ones);
+    return d;
+}
+
 bool gpu_kv_q8_ok(void) {
     return true;    // k_store_kv / k_attn / k_attn_dec all read q8_0 blocks
 }
@@ -478,6 +497,8 @@ static void shared_destroy(gpu_weights *w) {
             w->bv ? w->bv[l] : 0, w->bo ? w->bo[l] : 0,
             w->qn ? w->qn[l] : 0, w->kn ? w->kn[l] : 0,
             w->pan ? w->pan[l] : 0, w->pfn ? w->pfn[l] : 0,
+            w->g_pn1 ? w->g_pn1[l] : 0, w->g_prn2 ? w->g_prn2[l] : 0,
+            w->g_pn2 ? w->g_pn2[l] : 0, w->g_gis ? w->g_gis[l] : 0,
         };
         for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
             if (bufs[i]) cu.MemFree(bufs[i]);
@@ -486,6 +507,7 @@ static void shared_destroy(gpu_weights *w) {
     free(w->bq); free(w->bk); free(w->bv); free(w->bo);
     free(w->qn); free(w->kn);
     free(w->pan); free(w->pfn);
+    free(w->g_pn1); free(w->g_prn2); free(w->g_pn2); free(w->g_gis);
     CUdeviceptr bufs[] = { w->weights, w->inv_freq, w->inv_freq_local,
                            w->out_norm, w->dummy, w->ones };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
@@ -523,6 +545,7 @@ static size_t layer_weight_bytes(const layer_t *ly, int n_expert) {
     for (int i = 0; i < 4; i++) if (att[i]) wb += att[i]->nbytes;
     if (ly->is_moe) {
         if (ly->ffn_gate_inp) wb += ly->ffn_gate_inp->nbytes;
+        if (ly->ffn_gate_up_exps) wb += ly->ffn_gate_up_exps->nbytes;  // gemma-4 fused
         if (ly->moe_split) {
             for (int e = 0; e < n_expert; e++)
                 wb += ly->moe_g[e]->nbytes + ly->moe_u[e]->nbytes + ly->moe_d[e]->nbytes;
@@ -530,6 +553,11 @@ static size_t layer_weight_bytes(const layer_t *ly, int n_expert) {
             if (ly->ffn_gate_exps) wb += ly->ffn_gate_exps->nbytes;
             if (ly->ffn_up_exps)   wb += ly->ffn_up_exps->nbytes;
             if (ly->ffn_down_exps) wb += ly->ffn_down_exps->nbytes;
+        }
+        if (ly->moe_gemma) {  // gemma-4 also has a dense GELU shared expert
+            if (ly->w_gate) wb += ly->w_gate->nbytes;
+            if (ly->w_up)   wb += ly->w_up->nbytes;
+            if (ly->w_down) wb += ly->w_down->nbytes;
         }
     } else {
         gguf_tensor *ffn[] = { ly->w_gate, ly->w_up, ly->w_down };
@@ -549,6 +577,7 @@ static size_t layer_weight_end(const layer_t *ly, int n_expert, const uint8_t *m
     WEND(ly->wq); WEND(ly->wk); WEND(ly->wv); WEND(ly->wo);
     if (ly->is_moe) {
         WEND(ly->ffn_gate_inp);
+        WEND(ly->ffn_gate_up_exps);
         if (ly->moe_split) {
             for (int e = 0; e < n_expert; e++) {
                 WEND(ly->moe_g[e]); WEND(ly->moe_u[e]); WEND(ly->moe_d[e]);
@@ -556,6 +585,7 @@ static size_t layer_weight_end(const layer_t *ly, int n_expert, const uint8_t *m
         } else {
             WEND(ly->ffn_gate_exps); WEND(ly->ffn_up_exps); WEND(ly->ffn_down_exps);
         }
+        if (ly->moe_gemma) { WEND(ly->w_gate); WEND(ly->w_up); WEND(ly->w_down); }
     } else {
         WEND(ly->w_gate); WEND(ly->w_up); WEND(ly->w_down);
     }
@@ -744,8 +774,13 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         w->kn = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->pan = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->pfn = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->g_pn1  = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->g_prn2 = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->g_pn2  = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->g_gis  = calloc(m->n_layer, sizeof(CUdeviceptr));
         if (!w->attn_norm || !w->ffn_norm || !w->bq || !w->bk || !w->bv ||
-            !w->bo || !w->qn || !w->kn || !w->pan || !w->pfn)
+            !w->bo || !w->qn || !w->kn || !w->pan || !w->pfn ||
+            !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis)
             goto fail;
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
@@ -759,12 +794,33 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             w->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l));
             w->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
             w->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
+            if (ly->moe_gemma) {
+                // gemma-4 dual-branch norms + router scale. All are optional in
+                // the GGUF; the CPU path treats an absent norm as weightless and
+                // an absent gate_inp_scale as 1.0, so mirror that here (ones /
+                // 1.0-fold) rather than leave a null device ptr — k_rmsnorm has
+                // no NULL guard and would fault on device pointer 0.
+                w->g_pn1[l]  = f32_dbuf_ones(ly->ffn_post_norm1_w, m->n_embd);
+                w->g_prn2[l] = f32_dbuf_ones(ly->ffn_pre_norm2_w,  m->n_embd);
+                w->g_pn2[l]  = f32_dbuf_ones(ly->ffn_post_norm2_w, m->n_embd);
+                // fold the router's 1/sqrt(n_embd) into the uploaded scale so a
+                // plain weighted rmsnorm reproduces the CPU router input exactly
+                float inv = 1.0f / sqrtf((float)m->n_embd);
+                float *gs = malloc(sizeof(float) * m->n_embd);
+                if (!gs) goto fail;
+                for (int i = 0; i < m->n_embd; i++)
+                    gs[i] = (ly->gate_inp_scale ? ly->gate_inp_scale[i] : 1.0f) * inv;
+                w->g_gis[l] = f32_dbuf(gs, m->n_embd);
+                free(gs);
+            }
             if (!w->attn_norm[l] || !w->ffn_norm[l] ||
                 (ly->bq && !w->bq[l]) || (ly->bk && !w->bk[l]) ||
                 (ly->bv && !w->bv[l]) || (ly->bo && !w->bo[l]) ||
                 (ly->qnorm_w && !w->qn[l]) || (ly->knorm_w && !w->kn[l]) ||
                 (ly->post_attn_norm_w && !w->pan[l]) ||
-                (ly->post_ffn_norm_w && !w->pfn[l]))
+                (ly->post_ffn_norm_w && !w->pfn[l]) ||
+                (ly->moe_gemma && (!w->g_pn1[l] || !w->g_prn2[l] ||
+                                   !w->g_pn2[l] || !w->g_gis[l])))
                 goto fail;
         }
     }
@@ -877,8 +933,14 @@ bool gpu_init(model_t *m) {
         CK(cu.MemAlloc(&g->q,      sizeof(float) * MVB * q_dim));
         CK(cu.MemAlloc(&g->kt,     sizeof(float) * MVB * kv_dim));
         CK(cu.MemAlloc(&g->vt,     sizeof(float) * MVB * kv_dim));
-        CK(cu.MemAlloc(&g->hb,     sizeof(float) * MVB * m->n_ff));
-        CK(cu.MemAlloc(&g->hb2,    sizeof(float) * MVB * m->n_ff));
+        // hb/hb2 also hold gemma-4 MoE's fused gate_up (2*n_ff_exp) for one
+        // token; MVB*n_ff dwarfs that for real models, but size for the max so a
+        // pathological n_ff_exp can never overrun the buffer.
+        size_t hb_elems = (size_t)MVB * m->n_ff;
+        if (m->moe_gemma && 2 * (size_t)m->n_ff_exp > hb_elems)
+            hb_elems = 2 * (size_t)m->n_ff_exp;
+        CK(cu.MemAlloc(&g->hb,     sizeof(float) * hb_elems));
+        CK(cu.MemAlloc(&g->hb2,    sizeof(float) * hb_elems));
         CK(cu.MemAlloc(&g->att,    sizeof(float) * MVB * (size_t)m->n_head * m->n_ctx));
         // flash-decoding partials: per (token, head, split) -> hd weighted-V + max + sum
         CK(cu.MemAlloc(&g->attn_part, sizeof(float) * MVB * (size_t)m->n_head *
@@ -890,6 +952,9 @@ bool gpu_init(model_t *m) {
             CK(cu.MemAlloc(&g->moe_logits, sizeof(float) * (size_t)m->n_expert));
             CK(cu.MemAlloc(&g->moe_eout, sizeof(float) * (size_t)m->n_embd));
         }
+        if (m->moe_gemma)
+            // gemma-4-MoE dual-branch per-token scratch: xn, xn2, rin, mlp, moe_out
+            CK(cu.MemAlloc(&g->g_scr, sizeof(float) * 5 * (size_t)m->n_embd));
         if (cu_graphs_ok() && cu.StreamCreate(&g->stream, 0) != 0)
             g->stream = NULL;
         // gemma4's V-copy path (ly->wv == NULL) uses a synchronous MemsetD8
@@ -902,7 +967,8 @@ bool gpu_init(model_t *m) {
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
         if (m->n_expert > 0)
             g->h_moe_logits = malloc(sizeof(float) * (size_t)m->n_expert);
-        if (!g->h_x || !g->h_logits) goto fail;
+        if (!g->h_x || !g->h_logits ||
+            (m->n_expert > 0 && !g->h_moe_logits)) goto fail;
 
         char name[128] = "CUDA GPU";
         cu.DeviceGetName(name, sizeof(name), g->sw->dev);
@@ -1086,7 +1152,7 @@ static void gpu_ctx_free(model_t *m, gpu_t *g) {
     CUdeviceptr bufs[] = { g->kc, g->vc, g->x, g->xb, g->xb2,
                            g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                            g->attn_part, g->logits, g->pos_dev,
-                           g->moe_logits, g->moe_eout };
+                           g->moe_logits, g->moe_eout, g->g_scr };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
     free(g->h_x); free(g->h_logits); free(g->h_moe_logits);
@@ -1276,6 +1342,92 @@ static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdi
     return cu.MemcpyDtoD(g->xb, g->xb2, (size_t)tn * xdim * sizeof(float)) == 0;
 }
 
+// gemma-4-MoE dual-branch FFN on GPU: a dense GELU shared expert AND a routed
+// top-k GELU expert set, each with its own pre/post RMSNorm sandwich, summed.
+// Reads the post-attention residual from g->x (UN-normed — each branch norms it
+// itself), writes mlp+moe_out into g->xb; the caller then applies post_ffw_norm
+// (pfn) and the residual add. Mirrors the CPU gemma_moe_ffn token-for-token.
+static bool gpu_gemma_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int l,
+                              int tn, int xdim) {
+    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int nff = m->n_ff_exp, dff = m->n_ff;   // dff = dense shared-FFN size
+    enum { MOE_MAX_USED = 256 };
+    if (used > MOE_MAX_USED) used = MOE_MAX_USED;
+    if (ne  > MOE_MAX_USED) ne  = MOE_MAX_USED;
+    float eps = m->rms_eps;
+    CUdeviceptr xn   = g->g_scr + (size_t)0 * n_embd * sizeof(float);
+    CUdeviceptr xn2  = g->g_scr + (size_t)1 * n_embd * sizeof(float);
+    CUdeviceptr rin  = g->g_scr + (size_t)2 * n_embd * sizeof(float);
+    CUdeviceptr mout = g->g_scr + (size_t)3 * n_embd * sizeof(float);
+    for (int t = 0; t < tn; t++) {
+        // g->x (the residual stream) is n_embd-strided; g->xb is xdim-strided
+        CUdeviceptr attn = g->x  + (size_t)t * n_embd * sizeof(float);
+        CUdeviceptr out  = g->xb + (size_t)t * xdim   * sizeof(float);
+        // --- dense shared MLP: rmsnorm(ffn_norm) -> GELU SwiGLU -> post_ffw_norm_1.
+        //     Written straight into `out`; the routed branch is added on top below.
+        bool ok = enc_rmsnorm(g, attn, xn, g->sw->ffn_norm[l], n_embd, eps, 1, xdim, n_embd)
+               && enc_mv(g, m, ly->w_gate, xn, g->hb,  n_embd, dff, 0, 1, n_embd, dff)
+               && enc_mv(g, m, ly->w_up,   xn, g->hb2, n_embd, dff, 0, 1, n_embd, dff)
+               && enc_actmul(g, m, g->hb, g->hb2, dff)
+               && enc_mv(g, m, ly->w_down, g->hb, out, dff, n_embd, 0, 1, dff, xdim)
+               && enc_rmsnorm(g, out, out, g->sw->g_pn1[l], n_embd, eps, 1, xdim, xdim);
+        if (!ok) return false;
+        // --- routed experts: pre-norm the branch input (pre_norm2); the router
+        //     runs on a SEPARATE weightless-rmsnorm(attn) with (1/sqrt(n_embd) *
+        //     gate_inp_scale) folded into the uploaded g_gis weight
+        ok = enc_rmsnorm(g, attn, xn2, g->sw->g_prn2[l], n_embd, eps, 1, xdim, n_embd)
+          && enc_rmsnorm(g, attn, rin, g->sw->g_gis[l],  n_embd, eps, 1, xdim, n_embd)
+          && enc_mv(g, m, ly->ffn_gate_inp, rin, g->moe_logits, n_embd, ne, 0, 1, n_embd, ne);
+        if (!ok) return false;
+        if (cu.StreamSynchronize(g->stream) != 0) return false;
+        if (cu.MemcpyDtoH(g->h_moe_logits, g->moe_logits, sizeof(float) * (size_t)ne) != 0)
+            return false;
+        // softmax over all experts, then top-k with renormalized weights
+        float *lg = g->h_moe_logits;
+        float mx = lg[0];
+        for (int e = 1; e < ne; e++) if (lg[e] > mx) mx = lg[e];
+        float ssum = 0.0f;
+        for (int e = 0; e < ne; e++) { float p = expf(lg[e] - mx); lg[e] = p; ssum += p; }
+        for (int e = 0; e < ne; e++) lg[e] /= ssum;
+        int sel[MOE_MAX_USED];
+        float selw[MOE_MAX_USED], denom = 0.0f;
+        for (int s = 0; s < used; s++) {
+            int best = 0; float bp = -1.0f;
+            for (int e = 0; e < ne; e++) if (lg[e] > bp) { bp = lg[e]; best = e; }
+            sel[s] = best; selw[s] = bp; denom += bp; lg[best] = -1.0f;
+        }
+        for (int s = 0; s < used; s++) {
+            int e = sel[s];
+            float sc = (selw[s] / denom) *
+                       (ly->down_exps_scale ? ly->down_exps_scale[e] : 1.0f);
+            // fused gate_up expert weight: [n_embd -> 2*nff], gate=[0,nff) up=[nff,2nff)
+            gguf_tensor guv = *ly->ffn_gate_up_exps;
+            size_t rs = ggml_row_size(guv.type, n_embd);
+            guv.data = (uint8_t *)ly->ffn_gate_up_exps->data +
+                       (size_t)e * (2 * (size_t)nff) * rs;
+            gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
+            CUdeviceptr up = g->hb + (size_t)nff * sizeof(float);
+            ok = enc_mv(g, m, &guv, xn2, g->hb, n_embd, 2 * nff, 0, 1, n_embd, 2 * nff)
+              && enc_actmul(g, m, g->hb, up, nff)         // GELU(gate)*up -> hb[0,nff)
+              && enc_scale(g, g->hb, sc, nff, 1, nff);    // fold selw*down_scale
+            if (!ok) return false;
+            if (s == 0) {
+                if (!enc_mv(g, m, &dv, g->hb, mout, nff, n_embd, 0, 1, nff, n_embd))
+                    return false;
+            } else {
+                if (!enc_mv(g, m, &dv, g->hb, g->moe_eout, nff, n_embd, 0, 1, nff, n_embd) ||
+                    !enc_add(g, mout, g->moe_eout, n_embd, 1, n_embd, n_embd))
+                    return false;
+            }
+        }
+        // post_ffw_norm_2 on the routed branch, then out (=dense) += routed
+        if (!enc_rmsnorm(g, mout, mout, g->sw->g_pn2[l], n_embd, eps, 1, n_embd, n_embd) ||
+            !enc_add(g, out, mout, n_embd, 1, xdim, n_embd))
+            return false;
+    }
+    return cu.StreamSynchronize(g->stream) == 0;
+}
+
 static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                      int pos, bool want_logits, int l0, int l1) {
     (void)tokens; (void)pos;
@@ -1363,6 +1515,12 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         prof_mark(g, PH_ELEM);
 
+        if (ly->moe_gemma) {
+            // dual-branch FFN norms itself off g->x (the un-normed residual)
+            ok = ok && gpu_gemma_moe_ffn(g, m, ly, l, tn, xdim);
+            prof_mark(g, PH_MATVEC);
+            goto ffn_done;
+        }
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->ffn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
         prof_mark(g, PH_NORM);
@@ -1378,6 +1536,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
         prof_mark(g, PH_MATVEC);
         }
+    ffn_done:
         if (g->sw->pfn[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);
@@ -1457,6 +1616,9 @@ static bool batch_eligible(model_t **seqs, int n, gpu_t **lead_out) {
         if (!m || !m->gpu) return false;
         gpu_t *g = m->gpu;
         if (m->gpu_layers < m->n_layer) return false;
+        // fwd_batch runs a dense FFN unconditionally; MoE (sparse experts or the
+        // gemma-4 dual-branch) has no path there, so keep those on fwd_tile
+        if (m->n_expert > 0 || m->moe_gemma) return false;
         if (!g->sw->f_rope_seq || !g->sw->f_store_seq || !g->sw->f_attn_dec_seq)
             return false;
         if (!lead) lead = g;

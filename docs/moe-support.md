@@ -23,8 +23,9 @@ The Mixtral / Qwen3-MoE convention: a per-token router (softmax over **all**
 experts), top-k selection, weights renormalized to sum to 1, per-expert SwiGLU,
 weighted sum. Concretely:
 
-- **Architectures:** `llama` with experts (Mixtral) and `qwen3moe`
-  (Qwen3-MoE = qwen3 attention — qk-norm, GQA, NeoX rope — with an MoE FFN).
+- **Architectures:** `llama` with experts (Mixtral), `qwen3moe`
+  (Qwen3-MoE = qwen3 attention — qk-norm, GQA, NeoX rope — with an MoE FFN), and
+  `gemma4-moe` (gemma-4's **GELU dual-branch MoE**, described below).
 - **Expert tensor layouts:** both the modern **fused 3D** tensors
   (`ffn_gate_exps` / `ffn_up_exps` / `ffn_down_exps`) and the **legacy split
   per-expert 2D** tensors (`ffn_gate.{e}.weight`, older Mixtral GGUFs). One
@@ -36,6 +37,32 @@ weighted sum. Concretely:
   the expert SwiGLU matmuls run on the GPU. MoE layers use the eager path
   (host-dependent routing cannot be CUDA-graph-captured).
 
+### gemma-4 GELU dual-branch MoE (`gemma4-moe`)
+
+gemma-4's MoE is not a plain Mixtral-style sparse FFN — **every MoE layer runs
+two branches and sums them**:
+
+- a **dense shared GELU FFN** (its own `ffn_gate`/`ffn_up`/`ffn_down` +
+  `post_ffw_norm_1`), always active, plus
+- a **routed expert set** with a **fused `ffn_gate_up_exps`** tensor
+  (`{n_embd, 2·n_ff_exp, n_expert}` — gate and up concatenated per expert),
+  **per-expert `ffn_down_exps.scale`**, and a `pre_ffw_norm_2` / `post_ffw_norm_2`
+  sandwich. The router runs on a **separate** weightless RMSNorm of the
+  attention residual scaled by `gate_inp_scale · 1/√n_embd`, then the usual
+  softmax-over-all → top-k → renormalize.
+
+Both branches read the un-normed post-attention residual directly (they do their
+own norms), and the summed result feeds the outer `post_ffn_norm` + residual.
+The activation is the tanh-GELU approximation, shared with the dense gemma FFN
+via one `gated_act()` so the GELU path cannot silently diverge from SiLU MoE.
+**Execution: CPU and CUDA** — the GPU kernel (`gpu_gemma_moe_ffn`) mirrors the
+CPU forward token-for-token (dense written straight into the layer output;
+`selw · down_scale` folded into one pre-down `enc_scale`; the router's
+`1/√n_embd` folded into the uploaded `gate_inp_scale`), verified token-identical
+to llama.cpp b10076 and GPU/CPU-identical on **gemma-4-26B-A4B-it** (128 experts,
+top-8; ~23 tok/s full-offload in the 24 GB slice). Like the other MoE families
+it uses the eager path (router readback).
+
 ### Deliberately refused (no silent wrong output)
 
 To keep runnable == validated, the loader refuses at load rather than
@@ -43,7 +70,11 @@ miscompute:
 
 - **shared-expert MoE** (Qwen2-MoE / DeepSeek — `expert_shared_count > 0` or a
   `ffn_gate_inp_shexp` tensor): the shared expert would be silently ignored.
-- **GELU-gated MoE** (gemma family): the expert FFN path is SiLU-only.
+  (gemma-4's dense shared branch above is a *different* mechanism — a full
+  always-on FFN, not an `expert_shared_count` shared expert — and is handled.)
+- **GELU-gated sparse MoE outside gemma-4** — a non-gemma arch presenting GELU
+  experts stays behind the architecture allowlist; only gemma-4's validated
+  dual-branch layout is admitted.
 - **Other MoE architectures** (`qwen2moe` etc.) stay behind the architecture
   admission allowlist until validated.
 
@@ -170,7 +201,8 @@ engine:
   (sliding-window + sinks), MoE gating, and tensor-layout support — plus an
   MXFP4 **GPU** kernel for VRAM speed. `gpt-oss-20b-MXFP4.gguf` is now on disk
   for that work.
-- **Shared-expert / GELU MoE** refused (see above) — enabling them needs the
-  shared-expert path and a GELU expert FFN, each behind its own validation.
+- **GELU dual-branch MoE** (gemma-4) is now **implemented** (CPU + CUDA) — see
+  the `gemma4-moe` section above. `expert_shared_count`-style shared-expert MoE
+  (Qwen2-MoE / DeepSeek) remains refused, behind its own validation.
 - **MoE GPU decode** still forces the eager path (host-side routing readback per
   token), so MoE GPU throughput trails a dense model of the same active size.
