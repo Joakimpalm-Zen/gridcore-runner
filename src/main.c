@@ -345,8 +345,19 @@ int main(int argc, char **argv) {
         printf(",\"quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
                "\"Q5_0\",\"Q5_1\",\"Q2_K\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
                "\"IQ4_NL\",\"IQ4_XS\"],"
-               "\"gpu_quants\":[\"F32\",\"F16\",\"Q8_0\",\"Q4_0\",\"Q4_1\",\"Q5_0\",\"Q5_1\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
-               "\"IQ4_NL\",\"IQ4_XS\"]}\n");
+               // Q3_K has a CUDA kernel (added with GPU MoE); keep this in sync
+               // with gpu_type_ok() in cuda.c. Q2_K and MXFP4 remain CPU-only.
+               "\"gpu_quants\":[\"F32\",\"F16\",\"Q8_0\",\"Q4_0\",\"Q4_1\",\"Q5_0\",\"Q5_1\","
+               "\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\",\"IQ4_NL\",\"IQ4_XS\"]");
+        // the architectures model_load will admit, so a catalog/advisor can
+        // filter unrunnable models by arch without shipping its own copy of the
+        // allowlist (single source of truth: model_supported_archs)
+        printf(",\"architectures\":[");
+        size_t n_arch;
+        const char *const *arches = model_supported_archs(&n_arch);
+        for (size_t i = 0; i < n_arch; i++)
+            printf("%s\"%s\"", i ? "," : "", arches[i]);
+        printf("]}\n");
         return 0;
     }
     if (!model_path) { usage(argv[0]); return 1; }

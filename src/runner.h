@@ -493,6 +493,10 @@ typedef struct {
 } model_params;
 
 bool   model_load(model_t *m, const char *path, const model_params *p);
+// The architecture admission allowlist, exposed so `--caps` publishes exactly
+// what `model_load` accepts (one source of truth). Wrong-math archs
+// (granite/gemma2/gemma) are deliberately absent — they load but miscompute.
+const char *const *model_supported_archs(size_t *count);
 void   model_free(model_t *m); // frees everything incl. GPU context and mmap
 // process n tokens starting at position pos; returns logits of the last
 // token if want_logits, else NULL

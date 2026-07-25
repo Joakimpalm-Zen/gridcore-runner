@@ -299,6 +299,18 @@ static void model_vram_commit(model_t *m, size_t before) {
     vram_commit(m->vram, before > vfree ? (uint64_t)(before - vfree) : 0);
 }
 
+const char *const *model_supported_archs(size_t *count) {
+    // One source of truth for the admission allowlist (see model_load below and
+    // --caps in main.c). Keep in sync with any new per-family handling added
+    // here; wrong-math archs (granite/gemma2/gemma) are intentionally excluded.
+    static const char *const arches[] = {
+        "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
+        "smollm", "stablelm", "gemma3", "gemma4", "phi3",
+    };
+    if (count) *count = sizeof(arches) / sizeof(arches[0]);
+    return arches;
+}
+
 bool model_load(model_t *m, const char *path, const model_params *p) {
     memset(m, 0, sizeof(*m));
     if (!gguf_open(&m->gf, path)) return false;
@@ -321,13 +333,12 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
                 "but produce incorrect output without its scaling/softcapping\n", arch);
         return false;
     }
-    if (strcmp(arch, "llama") != 0 && strcmp(arch, "qwen2") != 0 &&
-        strcmp(arch, "qwen3") != 0 && strcmp(arch, "qwen35") != 0 &&
-        strcmp(arch, "qwen3moe") != 0 &&
-        strcmp(arch, "mistral") != 0 &&
-        strcmp(arch, "smollm") != 0 && strcmp(arch, "stablelm") != 0 &&
-        strcmp(arch, "gemma3") != 0 && strcmp(arch, "gemma4") != 0 &&
-        strcmp(arch, "phi3") != 0) {
+    size_t n_arch;
+    const char *const *ok_archs = model_supported_archs(&n_arch);
+    bool arch_known = false;
+    for (size_t i = 0; i < n_arch; i++)
+        if (strcmp(arch, ok_archs[i]) == 0) { arch_known = true; break; }
+    if (!arch_known) {
         // Admission is an allowlist: tensor-name compatibility is not proof of
         // mathematical compatibility (Q/K layout, norms, rope, activations,
         // softcapping all vary per family). Running an unknown architecture
