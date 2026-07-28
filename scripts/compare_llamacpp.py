@@ -209,14 +209,18 @@ def timing_fields(response):
     return out
 
 
-def stream_ttft(base, prompt, tokens, request_timeout):
-    body = {
-        "model": "compat",
+def completion_request(prompt, tokens, stream):
+    return {
         "prompt": prompt,
         "max_tokens": tokens,
         "temperature": 0,
-        "stream": True,
+        "top_p": 1,
+        "stream": stream,
     }
+
+
+def stream_ttft(base, prompt, tokens, request_timeout):
+    body = completion_request(prompt, tokens, True)
     req = urllib.request.Request(base + "/v1/completions",
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -241,7 +245,6 @@ def stream_ttft(base, prompt, tokens, request_timeout):
 
 def top_logprobs(base, prompt, tokens, request_timeout):
     body = {
-        "model": "compat",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": min(tokens, 8),
         "temperature": 0,
@@ -282,14 +285,7 @@ def measure_runtime(label, command, log_path, prompt, tokens,
     process, log, base = serve(command, log_path, startup_timeout)
     try:
         after_start = nvidia_snapshot()
-        body = {
-            "model": "compat",
-            "prompt": prompt,
-            "max_tokens": tokens,
-            "temperature": 0,
-            "top_p": 1,
-            "stream": False,
-        }
+        body = completion_request(prompt, tokens, False)
         t0 = time.perf_counter()
         response = request_json(base + "/v1/completions", body,
                                 timeout=request_timeout)

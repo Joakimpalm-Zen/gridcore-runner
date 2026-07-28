@@ -101,6 +101,16 @@ def test_runtime_commands_allow_the_requested_generation_length(tmp_path):
     assert runner[-4:] == ["--gpu", "auto", "-n", "128"]
 
 
+def test_completion_request_selects_the_loaded_model_implicitly():
+    assert compare_llamacpp.completion_request("hello", 128, False) == {
+        "prompt": "hello",
+        "max_tokens": 128,
+        "temperature": 0,
+        "top_p": 1,
+        "stream": False,
+    }
+
+
 def test_top_logprob_comparison_quantifies_common_token_deltas():
     runner = {
         "status": "captured",
