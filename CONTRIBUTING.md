@@ -34,6 +34,29 @@ Use `make test` for the fast schema and Python client correctness checks, and
 on Linux, macOS, and Windows; new behavior lands with a smoke there (TDD: watch
 it fail first).
 
+## Architecture scope (the lean-engine boundary)
+
+Runner stays a compact engine (~19K LOC) on purpose. Breadth is the failure
+mode, so architecture support is admitted by decision, not accumulation:
+
+- **Composable knobs over subsystems.** New model families should land as
+  small orthogonal switches on the existing MoE/attention code (router
+  options, attention sinks, NoPE, temperature scaling) — not as parallel
+  forward paths.
+- **Tier B stays declined in mainline.** MLA/DeepSeek-style latent attention,
+  MTP heads, and linear/recurrent attention are not knobs; they change the
+  attention path, the KV format, or both. They do not enter `model.c`.
+- **The gated exception is Syntetik profiles.** Feasible model/runtime
+  co-design for the suite's own model (MTP verifier, isolated MLA, shared
+  experts, hybrid KDA) may land only behind an explicit versioned
+  agent-profile admission: isolated behind a narrow attention/cache seam or
+  build flag, tested with tiny generated GGUF fixtures, each with a measured
+  trigger recorded before work starts. **No profile may leak complexity into
+  the dense Llama path**, and a checkpoint requiring an unadmitted feature
+  must fail closed at load rather than degrade silently.
+- Everything above is still subject to the correctness gates: CPU==GPU
+  token-identical, certified vs llama.cpp where a reference exists.
+
 ## Style
 
 Plain C11 (gnu11), zero dependencies beyond libc/pthreads. Comments state
