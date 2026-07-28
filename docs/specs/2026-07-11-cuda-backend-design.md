@@ -27,7 +27,8 @@ backend behind the existing 4-function GPU interface, no interface changes.
 - **Goal:** models whose weights + KV + activations fit free VRAM run the full
   per-token forward pass on the GPU (RTX 3070-class → 7B/8B quantized models).
 - **Goal:** zero new build/runtime dependencies. The shipped binary stays a
-  single static exe; a machine without an NVIDIA driver just gets CPU.
+  single static exe; a machine without an NVIDIA driver, or with an NVIDIA GPU
+  older than Turing / compute capability 7.5, just gets CPU.
 - **Non-goal (this milestone):** partial/layer-split offload for models larger
   than VRAM. That is the planned follow-up and will extend the interface.
 
@@ -39,7 +40,8 @@ on Linux) — no CUDA toolkit needed at build or run time. Kernels are written i
 `src/kernels.cu` (1:1 port of `kernels.metal`), compiled **at development time**
 to PTX (`nvcc -ptx -arch=compute_75`) and committed as the generated header
 `src/kernels_ptx.h` (mirrors the `embed-metal.py` convention). The driver JIT
-compiles PTX for whatever GPU is present (sm_75+).
+compiles PTX for supported GPUs, currently NVIDIA Turing / compute capability
+7.5 or newer (`sm_75+`).
 
 Key differences from Metal, forced by discrete-GPU memory:
 

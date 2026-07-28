@@ -120,7 +120,7 @@ static const size_t kv_scalar_size[] = {
 };
 
 static void wr_scalar(writer *w, const gguf_kv *kv, uint32_t type) {
-    uint8_t b1; uint16_t b2; uint32_t b4; uint64_t b8; float f4; double f8;
+    uint8_t b1; uint16_t b2; uint32_t b4; uint64_t b8;
     switch (type) {
         case GGUF_T_U8:   b1 = (uint8_t)kv->v.u64;  wr(w, &b1, 1); break;
         case GGUF_T_I8:   b1 = (uint8_t)(int8_t)kv->v.i64; wr(w, &b1, 1); break;
@@ -129,10 +129,10 @@ static void wr_scalar(writer *w, const gguf_kv *kv, uint32_t type) {
         case GGUF_T_I16:  b2 = (uint16_t)(int16_t)kv->v.i64; wr(w, &b2, 2); break;
         case GGUF_T_U32:  b4 = (uint32_t)kv->v.u64; wr(w, &b4, 4); break;
         case GGUF_T_I32:  b4 = (uint32_t)(int32_t)kv->v.i64; wr(w, &b4, 4); break;
-        case GGUF_T_F32:  f4 = (float)kv->v.f64;    wr(w, &f4, 4); break;
+        case GGUF_T_F32:  { uint32_t u = (uint32_t)kv->raw; wr(w, &u, 4); break; }
         case GGUF_T_U64:  b8 = kv->v.u64;           wr(w, &b8, 8); break;
         case GGUF_T_I64:  b8 = (uint64_t)kv->v.i64; wr(w, &b8, 8); break;
-        case GGUF_T_F64:  f8 = kv->v.f64;           wr(w, &f8, 8); break;
+        case GGUF_T_F64:  wr(w, &kv->raw, 8); break;
     }
 }
 

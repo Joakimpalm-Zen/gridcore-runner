@@ -37,6 +37,15 @@ equivalence claim: four architecture targets matched all five prompts, while
 Llama 3, Qwen 3, Phi 3 and Gemma 4 had at least one divergence. Per-prompt
 outputs are committed under `tests/compatibility/out/reference-*.json`.
 
+`scripts/compare_llamacpp.py` is the reproducible performance/evidence harness
+for current MoE and release-readiness comparisons. It runs Runner and a supplied
+llama.cpp `llama-server` against the same GGUF, prompt, context and greedy
+sampling settings, captures model hash, commits/versions, commands, hardware,
+driver, throughput, time to first token, VRAM snapshots, generated tokens, raw
+responses and top-logprob data where both endpoints expose it, then writes JSON
+and Markdown. CI only exercises its fixture mode; real large-model reports stay
+pending until the model, llama.cpp build and GPU are available.
+
 The model manifest deliberately excludes Apertus from forward-pass coverage.
 Runner supports its `tekken` tokenizer and chat template, but not the Apertus
 tensor architecture; treating it as a Qwen2 model would be a false positive.

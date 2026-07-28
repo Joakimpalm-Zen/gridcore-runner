@@ -314,6 +314,10 @@ int main(int argc, char **argv) {
 #else
             printf("{\"backend\":\"cuda\",\"name\":\"%s\",\"unified_memory\":false",
                    gname);
+            printf(",\"min_compute_capability\":\"%s\",\"min_gpu\":\"%s\","
+                   "\"ptx_target\":\"%s\"",
+                   RUNNER_CUDA_MIN_CC, RUNNER_CUDA_MIN_GPU,
+                   RUNNER_CUDA_PTX_TARGET);
 #endif
             if (vm)
                 printf(",\"vram_bytes\":%llu,\"vram_free_bytes\":%llu",

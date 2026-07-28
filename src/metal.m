@@ -128,6 +128,10 @@ bool gpu_kv_q8_ok(void) {
 }
 
 bool gpu_init(model_t *m) {
+    if (m->n_expert > 0) {
+        fprintf(stderr, "gpu: sparse MoE is not on the metal backend yet — using CPU\n");
+        return false;
+    }
     if (m->swa_window > 0 || m->embd_scale != 1.0f) {
         fprintf(stderr, "gpu: '%s' (sliding-window attention) is not on the metal backend yet — using CPU\n",
                 m->arch);
@@ -215,6 +219,7 @@ bool gpu_init(model_t *m) {
     free(m->kcache); free(m->vcache);
     m->kcache = (f16_t *)g->kc.contents;
     m->vcache = (f16_t *)g->vc.contents;
+    m->kv_owner = KV_OWNER_GPU_BACKEND;
 
     g->x      = NEWBUF(sizeof(float) * m->n_embd);
     g->xb     = NEWBUF(sizeof(float) * xdim);
@@ -252,6 +257,7 @@ bool gpu_init(model_t *m) {
     }
 
     m->gpu = g;
+    m->gpu_owner = g;
     // Metal always runs the whole model; without this the dispatcher takes the
     // partial-offload branch (gpu_layers == 0) and re-runs every layer on the
     // CPU, silently discarding the GPU's work
@@ -333,14 +339,15 @@ static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
-// Metal's KV cache *is* the GPU buffer (unified memory: m->kcache points at
-// g->kc.contents), and the CPU path is about to read the rows already in it.
-// Releasing the buffers here would pull them out from under the fallback, so
-// this only detaches the backend; the buffers are freed at model_free. Unlike
-// CUDA there is nothing duplicated per slot to reclaim — the weights are the
-// mmap itself, shared by the page cache.
+// Metal's KV cache *is* the backend buffer (unified memory: m->kcache points at
+// g->kc.contents), and the CPU path is about to read and overwrite those rows.
+// Releasing the buffers here would pull them out from under the fallback. Keep
+// gpu_owner reachable for model_free(), but make m->gpu NULL so no future
+// forward tries to submit Metal work.
 void gpu_disable(model_t *m) {
+    if (!m) return;
     m->gpu = NULL;
+    m->gpu_layers = 0;
 }
 
 // Metal has no batched-decode kernels yet, so it declines the microbatch and
@@ -364,16 +371,27 @@ bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
 }
 
 void gpu_free(model_t *m) {
-    gpu_t *g = m->gpu;
+    if (!m) return;
+    gpu_t *g = m->gpu_owner ? (gpu_t *)m->gpu_owner : (gpu_t *)m->gpu;
+    m->gpu = NULL;
+    m->gpu_owner = NULL;
     if (!g) return;
-    // the kv cache pointers alias GPU buffer contents; detach them first
-    m->kcache = NULL;
-    m->vcache = NULL;
+    // The KV cache pointers alias MTLBuffer.contents. Detach before releasing
+    // the buffers so model_free() never calls free() on borrowed memory.
+    if (m->kv_owner == KV_OWNER_GPU_BACKEND) {
+        m->kcache = NULL;
+        m->vcache = NULL;
+        m->kv_owner = KV_OWNER_MALLOC;
+    }
     for (int l = 0; l < m->n_layer; l++) {
-        [g->attn_norm[l] release]; [g->ffn_norm[l] release];
-        [g->bq[l] release]; [g->bk[l] release];
-        [g->bv[l] release]; [g->bo[l] release];
-        [g->qn[l] release]; [g->kn[l] release];
+        if (g->attn_norm) [g->attn_norm[l] release];
+        if (g->ffn_norm)  [g->ffn_norm[l] release];
+        if (g->bq) [g->bq[l] release];
+        if (g->bk) [g->bk[l] release];
+        if (g->bv) [g->bv[l] release];
+        if (g->bo) [g->bo[l] release];
+        if (g->qn) [g->qn[l] release];
+        if (g->kn) [g->kn[l] release];
     }
     free(g->attn_norm); free(g->ffn_norm);
     free(g->bq); free(g->bk); free(g->bv); free(g->bo);
@@ -388,7 +406,6 @@ void gpu_free(model_t *m) {
     [g->queue release];
     [g->dev release];
     free(g);
-    m->gpu = NULL;
 }
 
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
@@ -472,7 +489,12 @@ static float *gpu_forward(model_t *m, int token, int pos) {
     [e endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
-    if (cb.status == MTLCommandBufferStatusError) {
+    const char *inject = getenv("RUNNER_METAL_INJECT_FAILURE");
+    static int injected_once = 0;
+    bool injected = inject && *inject && strcmp(inject, "0") &&
+                    (!injected_once || strcmp(inject, "always") == 0);
+    if (injected) injected_once = 1;
+    if (injected || cb.status == MTLCommandBufferStatusError) {
         fprintf(stderr, "gpu: command buffer failed — falling back to CPU\n");
         return NULL;
     }

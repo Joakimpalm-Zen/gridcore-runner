@@ -20,7 +20,8 @@ def test_model_manifest_covers_every_claimed_architecture():
     assert data["schema_version"] == "gridcore.runner.model-compat.v1"
     models = data["models"]
     assert {m["architecture"] for m in models} == {
-        "llama", "qwen2", "qwen3", "qwen35", "phi3", "gemma3", "gemma4"
+        "llama", "qwen2", "qwen3", "qwen35", "phi3", "gemma3", "gemma4",
+        "qwen3moe", "gemma4-moe",
     }
     assert len({m["id"] for m in models}) == len(models)
     for model in models:

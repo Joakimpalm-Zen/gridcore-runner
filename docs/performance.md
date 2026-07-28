@@ -47,13 +47,15 @@ The 100.5s SmolLM2 torture run would now be ~16s. GPU decode is **2.23s**
 
 ## Measured and rejected — CUDA virtual-arch bump
 
-The embedded PTX targets `compute_75` (Turing). The GPU is Blackwell
-(`sm_120`). Regenerating the PTX at `compute_120` and re-benchmarking gave
-**2.12s vs 2.23s — within noise.** The driver JITs `compute_75` PTX to Blackwell
-SASS at load either way, and Runner's hand-written matvec kernels use no
-features (tensor cores, async copy) that a newer *virtual* arch would unlock.
-Bumping would only cost portability (`compute_75` JITs to any ≥Turing GPU).
-**Kept at `compute_75`.**
+The embedded PTX is built from `compute_75` and targets `sm_75`; the documented
+minimum for CUDA offload is **NVIDIA Turing / compute capability 7.5 or newer**.
+The measurement GPU is Blackwell (`sm_120`). Regenerating the PTX at
+`compute_120` and re-benchmarking gave **2.12s vs 2.23s — within noise.** The
+driver JITs `compute_75` PTX to Blackwell SASS at load either way, and Runner's
+hand-written matvec kernels use no features (tensor cores, async copy) that a
+newer *virtual* arch would unlock. Bumping would only cost portability
+(`compute_75` JITs to supported GPUs at Turing or newer; older NVIDIA GPUs fall
+back to CPU). **Kept at `compute_75`.**
 
 > **Update (later 2026-07-22):** the tensor-core lever was then built and
 > measured — and **lost at the runner's batch width**. A correct WMMA Q4_K GEMM

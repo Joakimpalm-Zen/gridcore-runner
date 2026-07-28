@@ -16,14 +16,17 @@ with **partial CPU offload for cards smaller than the model**.
   split-per-expert layout (older Mixtral GGUFs) are supported by one accessor —
   no forward-path branch on layout.
 - **Qwen3-30B-A3B (Q4_K_M, 128 experts, top-8)** loads in **18.6 GB**, fits a
-  24 GB card with ~6 GB free, and decodes at **~55 tok/s on the GPU** — and its
-  greedy output is **token-identical to the CPU reference**.
+  **24 GB MIG slice on an NVIDIA RTX PRO 6000 Blackwell** with ~6 GB free, and
+  decodes at **~55 tok/s on that hardware**. This is not presented as a
+  representative result for every 24 GB consumer GPU. Greedy GPU output is
+  **token-identical to Runner's CPU path on the same quantized GGUF**.
 - **Partial CPU offload (8–16 GB cards):** the runner fits as many leading
   layers on the GPU as the VRAM budget allows and runs the rest on the CPU.
-  Every configuration tested is token-identical to the full-precision reference.
+  Every configuration tested is token-identical to Runner's CPU path on the
+  same quantized GGUF, or to the full-GPU quantized run where the model fits.
 - **Q3_K GPU kernel (new):** Q3_K MoE now runs on the GPU. **Mixtral-8x7B
-  Q3_K_M (20.4 GB) is fully GPU-resident on a 24 GB card**, GPU output
-  token-identical to CPU — it was CPU-only before.
+  Q3_K_M (20.4 GB) is fully GPU-resident on the Blackwell 24 GB MIG slice**,
+  with GPU output token-identical to CPU.
 - **Prefill throughput:** MoE prefill groups tokens by shared expert (batched
   per-expert matmul instead of one token at a time), ~5.6× the per-token CPU
   prefill rate. Decode is unchanged and bit-identical.
@@ -33,19 +36,25 @@ with **partial CPU offload for cards smaller than the model**.
   to spec). *(gpt-oss as a whole needs architecture support to actually run;
   the MXFP4 tensors read correctly today.)*
 - **Runnable == validated:** the loader refuses at load — rather than
-  miscompute — shared-expert MoE (Qwen2-MoE / DeepSeek) and GELU-gated (gemma)
-  MoE, until each is validated on its own.
+  miscompute — shared-expert MoE (Qwen2-MoE / DeepSeek) and non-gemma GELU
+  sparse MoE until each is validated on its own. Gemma-4's GELU dual-branch MoE
+  is implemented and validated separately.
 
-Correctness is checked two ways with no external reference engine: synthetic MoE
-configurations constructed to equal a dense FFN (asserted token-identical in
-CI), and CPU/GPU agreement on the real Qwen3-30B-A3B. See
-[`docs/moe-support.md`](docs/moe-support.md).
+Correctness is checked with synthetic MoE configurations constructed to equal a
+dense FFN (asserted token-identical in CI) and CPU/GPU agreement on real
+quantized models. CPU/GPU agreement is an internal consistency check; independent
+Runner-vs-llama.cpp comparison is handled by
+`scripts/compare_llamacpp.py` when the same GGUF, hardware, and llama.cpp build
+are available. See [`docs/moe-support.md`](docs/moe-support.md).
 
 ### Reliability & security hardening (July 2026 code review, RNR-###)
 
 The release gate from the July code review is cleared (Mac/Windows platform
 items aside):
 
+- Metal runtime fallback preserves the backend resource owner after
+  `gpu_disable()`, so CPU fallback can keep using unified-memory KV buffers and
+  `model_free()` never frees `MTLBuffer.contents` (RNR-001).
 - Quantizer honors `general.alignment` and writes atomically (RNR-002/015).
 - Load/scheduler lifecycle, an OOM tranche, and VRAM rollback; the
   OOM-as-truncated-prompt semantic bug is fixed (RNR-003/005/006/013).
@@ -58,6 +67,12 @@ items aside):
   generated GPU headers (RNR-020).
 - Python client: streamed `tool_calls` assembly + preserved `finish_reason`
   (RNR-016).
+- `make test-moe` runs the synthetic MoE correctness suite in Linux/macOS CI;
+  release packaging now checks tag, binary version, README, changelog and
+  generated `BUILD-INFO.txt` before creating archives.
+- CUDA compatibility is documented as NVIDIA Turing / compute capability 7.5 or
+  newer, matching the embedded `sm_75` PTX target; older NVIDIA GPUs fall back
+  to CPU.
 
 ### Agent conformance
 

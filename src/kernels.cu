@@ -662,8 +662,9 @@ extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
 // (m32n8k16, fp16 inputs, fp32 accumulate). One warp produces a 32-row x MVB(8)
 // -token output tile. Q4_K's per-group scales are applied during dequant to fp16
 // BEFORE the MMA (WMMA cannot apply per-group scales), so the fp16 tile already
-// holds the true weight value. Portable: WMMA compiles into compute_75 PTX and
-// JITs onto any tensor-core GPU (>= Turing), Blackwell included.
+// holds the true weight value. Portable within Runner's CUDA support boundary:
+// WMMA compiles into compute_75 PTX and JITs onto NVIDIA Turing / compute
+// capability 7.5 or newer, Blackwell included.
 //
 // q4k_w() reproduces k_gemm_q4_K's per-element dequant EXACTLY (verified index by
 // index), so the only numeric departure from the scalar kernel is fp16 rounding of

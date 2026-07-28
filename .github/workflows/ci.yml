@@ -42,6 +42,9 @@ jobs:
           ./test-vram-registry
       - name: make test model
         run: python3 scripts/make-test-model.py test.gguf
+      - name: Metal fallback ownership
+        if: runner.os == 'macOS'
+        run: make test-metal-fallback
       - name: focused json/schema tests
         run: |
           cc -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c \
@@ -82,6 +85,8 @@ jobs:
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet pytest
           PYTHONPATH=python/src .venv/bin/python -m pytest python/tests/test_client.py
+      - name: sparse MoE synthetic correctness
+        run: make test-moe PYTHON=.venv/bin/python
       - name: torture harness unit tests
         # The scoring + cross-runtime comparison math the published matrix rests
         # on, gated offline: these exercise the harness itself (case generation,

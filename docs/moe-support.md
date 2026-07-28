@@ -11,11 +11,13 @@ The runner runs real sparse **mixture-of-experts** models — the class the fiel
 converges on for modest-VRAM hardware — on CPU, fully on the GPU, and with
 **partial CPU offload for cards smaller than the model** (8–16 GB). Headline
 results: **Qwen3-30B-A3B (Q4_K_M, 128 experts, top-8) loads in 18.6 GB, fits a
-24 GB card with 6 GB free, and generates at ~55 tok/s on the GPU**, token-
-identical to the CPU reference; on simulated 8/12/16 GB cards it partially
-offloads (19/29/39 of 48 layers on GPU) with identical output. Both supported
-MoE families (qwen3moe fused, Mixtral/llama split) and both expert layouts are
-covered.
+24 GB MIG slice with 6 GB free, and generates at ~55 tok/s on an NVIDIA RTX PRO
+6000 Blackwell**, token-identical to Runner's CPU path on the same quantized
+GGUF. That number is a hardware-specific measurement, not a representative
+claim for every 24 GB consumer GPU. On simulated 8/12/16 GB budgets it
+partially offloads (19/29/39 of 48 layers on GPU) with identical output. Both
+supported MoE families (qwen3moe fused, Mixtral/llama split) and both expert
+layouts are covered.
 
 ## What is supported
 
@@ -86,7 +88,7 @@ miscompute:
 - Geometry: 48 layers, n_embd 2048, 128 experts, top-8, expert FFN 768,
   head_dim 128 (decoupled), GQA 32/4.
 - **VRAM:** 18.6 GB weights + 0.40 GB KV (ctx 4096) → **6.16 GB free of
-  25.37 GB**. Comfortable on a 24 GB card.
+  25.37 GB** in the MIG slice.
 - **Correctness:** greedy (`--temp 0`) GPU output is **token-identical to the
   CPU reference** (validated with a shared prompt). Example completions:
   - `The capital of France is` → ` Paris. The capital of Italy is Rome. The
@@ -113,11 +115,10 @@ miscompute:
 - Geometry: 32 layers, 8 experts, top-2, **legacy split per-expert tensors**.
 - **Correctness:** correct output, e.g. `The three primary colors are` →
   ` red, yellow, and blue. These colors are considered primary because they …`.
-- Q4_K_M (26 GB) exceeds a 24 GB card, so on this hardware it always runs with
-  **partial CPU offload** (see below). Q3_K_M (20.4 GB) fits VRAM; once the Q3_K
+- Q4_K_M (26 GB) exceeds this 24 GB MIG slice, so on this hardware it always
+  runs with **partial CPU offload** (see below). Q3_K_M (20.4 GB) fits VRAM; once the Q3_K
   GPU kernel landed (see Follow-ups, below) it runs **fully on the GPU**,
-  token-identical to CPU — it was CPU-only (~4 tok/s) when this section was
-  first written.
+  token-identical to CPU.
 
 ## Partial CPU offload (8–16 GB cards)
 
@@ -129,8 +130,9 @@ the full per-layer weight (attention + router + every expert, fused or split).
 
 VRAM budgets were simulated on the 24 GB slice with `--reserve-vram PCT` (caps
 usage to PCT% of total). **Every partial-offload configuration is token-
-identical to the full-precision reference** (full-GPU for Qwen3; CPU for the
-26 GB Mixtral that cannot fully fit), so offload is transparent to output.
+identical to Runner's CPU path on the same quantized GGUF**, or to the
+full-GPU quantized run where the model fits, so offload is transparent to
+output.
 
 | Model | ~8 GB | ~12 GB | ~16 GB | full |
 |---|---|---|---|---|
@@ -142,7 +144,7 @@ families (qwen3moe fused, llama split) and both expert layouts are covered.
 Nothing special is required to use it — the runner fits as many leading layers
 as the available (or `--reserve`-capped) VRAM allows and runs the rest on CPU.
 
-### Synthetic equivalence tests (`tests/test_moe.py`, in CI)
+### Synthetic equivalence tests (`make test-moe`, in CI)
 
 Reference-free correctness: `make-test-moe.py` emits a dense model plus MoE
 variants each **mathematically identical** to the dense FFN, so the runner's
@@ -151,20 +153,46 @@ already-trusted dense path is the oracle (no separate reference engine):
 - `moe1` — fused, top-1, one expert zeroed → identical to dense.
 - `moe2` — fused, top-2 with a zero router (0.5/0.5) → identical to dense.
 - `moe3` — **split** layout, top-1 → identical to dense.
+- partial-offload/fallback path — `--gpu-layers 1` exercises the split when a
+  GPU is present and falls back cleanly to CPU on synthetic CI hosts.
 
 All assert byte-identical greedy output; the FFN is scaled so a broken MoE
 produces different tokens (verified during development).
 
 ## Methodology
 
-Two independent correctness checks, neither needing an external reference
-engine:
+Two correctness checks run today:
 
 1. **Dense-oracle equivalence** (synthetic, CI): MoE configurations constructed
    to equal a dense FFN, asserted token-identical.
-2. **CPU/GPU agreement on real models**: the CPU forward is the runner's
-   long-validated path; the GPU MoE output is asserted to match it token-for-
-   token on the real Qwen3-30B-A3B.
+2. **CPU/GPU agreement on real quantized models**: the CPU forward is Runner's
+   long-validated path over the same GGUF; the GPU MoE output is asserted to
+   match it token-for-token on the real Qwen3-30B-A3B. This is an internal
+   consistency check, not independent validation.
+
+Independent comparison against llama.cpp is now reproducible through
+`scripts/compare_llamacpp.py`, which records the model hash, Runner commit,
+llama.cpp version/commit, commands, hardware, driver, context, quantization,
+prompt throughput, decode throughput, time to first token, VRAM snapshots,
+generated tokens, raw responses, and a top-logprob comparison when both
+endpoints expose it. It emits both JSON and Markdown:
+
+```sh
+python3 scripts/compare_llamacpp.py \
+  --runner ./runner \
+  --llamacpp /path/to/llama.cpp/build/bin/llama-server \
+  --llamacpp-commit <llama.cpp git commit> \
+  --model /models/Qwen3-30B-A3B-Q4_K_M.gguf \
+  --quantization Q4_K_M \
+  --ctx 4096 \
+  --tokens 128 \
+  --prompt "The capital of France is" \
+  --out-dir tests/compatibility/out/qwen3-30b-a3b-runner-vs-llamacpp
+```
+
+The repository tests only the harness with fixtures. Real Runner-vs-llama.cpp
+Qwen3-30B-A3B results remain pending until the required GGUF, llama.cpp build,
+and GPU are available.
 
 ## Follow-ups completed (2026-07-24)
 
@@ -177,8 +205,8 @@ engine:
   prompt (~5.6x the per-token rate).
 - **Q3_K GPU kernel — DONE.** `k_mv_q3_K` / `k_mv_q3_K_b` (warp-per-row, dequant
   fused into the dot). **Mixtral-8x7B-Instruct Q3_K_M (20.4 GB) now loads fully
-  on a 24 GB card and runs on the GPU**, token-identical to the CPU reference —
-  previously it refused GPU offload and ran CPU-only.
+  on the Blackwell 24 GB MIG slice and runs on the GPU**, token-identical to
+  the CPU reference.
 - **MXFP4 read — DONE.** OCP microscaling FP4 (GGML type 39) — the gpt-oss
   expert-tensor format — is read and dequantized (E8M0 block scale × E2M1 code),
   admitted at load and usable through the CPU forward. Unit-tested against the

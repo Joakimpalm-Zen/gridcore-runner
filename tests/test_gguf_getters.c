@@ -42,7 +42,8 @@ static void test_getter_validation(void) {
     bkey(&kv, "good_u32", GGUF_T_U32);   bu32(&kv, 42);                 n++;
     bkey(&kv, "neg_i32",  GGUF_T_I32);   bi32(&kv, -5);                 n++;
     bkey(&kv, "huge_u64", GGUF_T_U64);   bu64(&kv, (1ull << 40));       n++;
-    bkey(&kv, "nan_f32",  GGUF_T_F32);   bf32(&kv, NAN);                n++;
+    bkey(&kv, "nan_f32",  GGUF_T_F32);
+    { uint32_t nan_bits = 0x7fc00000u; bput(&kv, &nan_bits, 4); }        n++;
     bkey(&kv, "frac_f32", GGUF_T_F32);   bf32(&kv, 3.5f);               n++;
     bkey(&kv, "true_b",   GGUF_T_BOOL);  { unsigned char t = 1; bput(&kv, &t, 1); } n++;
     bkey(&kv, "a_str",    GGUF_T_STR);   bstr(&kv, "hello");            n++;

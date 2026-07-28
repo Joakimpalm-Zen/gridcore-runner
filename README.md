@@ -6,16 +6,19 @@ standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
 **New in 0.1.3 — sparse Mixture-of-Experts.** Qwen3-30B-A3B (128 experts,
-top-8) loads in 18.6 GB and decodes at **~55 tok/s on a 24 GB card**,
-token-identical CPU vs GPU; partial CPU offload for 8–16 GB cards; a new Q3_K
-GPU kernel (Mixtral-8x7B Q3_K_M now runs fully on the GPU). See
+top-8) loads in 18.6 GB and decodes at **~55 tok/s on an NVIDIA RTX PRO 6000
+Blackwell using a 24 GB MIG slice**; that is a hardware-specific data point,
+not a claim about every 24 GB consumer GPU. CPU/GPU output is token-identical;
+partial CPU offload covers smaller VRAM budgets; Q3_K has a GPU kernel
+(Mixtral-8x7B Q3_K_M now runs fully on the GPU). See
 [CHANGELOG.md](CHANGELOG.md) and [docs/moe-support.md](docs/moe-support.md).
 
 ## Quick start
 
 Download a prebuilt binary from the [latest release](../../releases/latest)
 (Linux / macOS / Windows), **or** build from source — CUDA needs only the
-NVIDIA driver, no toolkit:
+NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
+7.5 or newer:
 
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
@@ -68,9 +71,10 @@ accept loop, `--parent-pid` supervisor lifetime, speculative decoding under
 300k-line upstream.
 
 **Deployment is one static file.** CUDA rides the driver API with embedded
-PTX — no toolkit, no cuBLAS, no DLLs. Copy the binary to any node with an
-NVIDIA driver and it offloads; without one it runs CPU. No build matrix for a
-fleet.
+PTX — no toolkit, no cuBLAS, no DLLs. Copy the binary to a node with an
+NVIDIA Turing / compute capability 7.5 or newer GPU and a driver and it
+offloads; older or unsupported NVIDIA GPUs, and machines without a driver, run
+the CPU path. No build matrix for a fleet.
 
 **Fleet primitives are built in, not bolted on.** Multi-model swap with
 per-request selection and idle TTL, `--caps` machine reports, `--reserve` VRAM
@@ -90,10 +94,11 @@ engine.
 
 **The trade is explicit.** llama.cpp wins on raw speed, exotic quants (IQ2/IQ3,
 Vulkan), and architecture breadth — runner does Mixtral/Qwen3 top-k MoE but
-skips shared-expert/GELU MoE and most SSMs. runner wins when the engine is a
-load-bearing part of a system that has to trust, extend, and debug it — and
-correctness is held to the reference: GPU output is verified token-identical to
-the CPU path.
+skips shared-expert MoE and most SSMs; gemma-4's validated GELU dual-branch MoE
+is supported. runner wins when the engine is a load-bearing part of a system
+that has to trust, extend, and debug it — and correctness is held to explicit
+checks: GPU output is verified token-identical to the CPU path, while certified
+architectures also have pinned llama.cpp reference runs where recorded.
 
 ## Build
 
@@ -109,9 +114,9 @@ libc and pthreads. CI builds and smoke-tests every push on:
 
 | Platform | Toolchain | GPU |
 |---|---|---|
-| Linux (x86_64) | gcc | CUDA (NVIDIA driver only, no toolkit needed) |
+| Linux (x86_64) | gcc | CUDA (NVIDIA Turing / compute capability 7.5 or newer; driver only, no toolkit needed) |
 | macOS (arm64) | Apple clang | Metal |
-| Windows (x86_64) | MinGW-w64 via MSYS2 (`pacman -S make mingw-w64-ucrt-x86_64-gcc`, then `make`) | CUDA (NVIDIA driver only, no toolkit needed) |
+| Windows (x86_64) | MinGW-w64 via MSYS2 (`pacman -S make mingw-w64-ucrt-x86_64-gcc`, then `make`) | CUDA (NVIDIA Turing / compute capability 7.5 or newer; driver only, no toolkit needed) |
 
 The fp16 kernels use ARM hardware half-floats when available and fall back to
 portable table lookups elsewhere. Little-endian hosts only (GGUF is
@@ -132,13 +137,18 @@ mmap (no extra RAM), the KV cache lives in unified memory shared with the
 CPU, and each generated token is a single GPU command buffer. On
 unified-memory Macs single-token generation is memory-bandwidth-bound, so
 the GPU gives modest speedups (~15–20% on a 1.1B) — its real value is
-freeing the CPU cores and growing headroom on bigger GPUs.
+freeing the CPU cores and growing headroom on bigger GPUs. Runtime failure
+fallback keeps Metal-owned KV buffers alive for CPU recovery; the lifecycle and
+remaining hardware-only validation are documented in
+[docs/metal-fallback.md](docs/metal-fallback.md).
 
 **CUDA (NVIDIA, Linux/Windows):** the driver API is loaded dynamically
 (`nvcuda.dll` / `libcuda.so.1`) and kernels ship as embedded PTX, so neither
 building nor running needs the CUDA toolkit — a machine without an NVIDIA
-driver just uses the CPU. Weights are copied to VRAM once, the KV cache (fp16
-or q8_0, see `--kv`) lives in VRAM with the
+driver just uses the CPU. The embedded PTX target is `sm_75`, so GPU offload is
+supported on NVIDIA Turing / compute capability 7.5 or newer; older or
+unsupported NVIDIA GPUs fall back to CPU. Weights are copied to VRAM once, the
+KV cache (fp16 or q8_0, see `--kv`) lives in VRAM with the
 host copy kept authoritative, and prompt batches run as 8-token tiles that
 decode each weight once for all tokens. A model too large for VRAM is
 **partially offloaded** — as many leading layers as fit run on the GPU and
@@ -205,6 +215,10 @@ model when you want concurrent slots instead.
  "gpu":{"backend":"metal","name":"Apple M1","unified_memory":true},
  "quants":[...],"gpu_quants":[...]}
 ```
+
+CUDA capability reports include `"min_compute_capability":"7.5"` and
+`"ptx_target":"sm_75"` so schedulers can avoid placing offload work on older
+NVIDIA GPUs that will fall back to CPU.
 
 ## Get a model
 
@@ -299,9 +313,9 @@ JSON/schema/speculative decoding was active.
 ### Verified coding-agent compatibility
 
 These are executable client results, not claims inferred from a shared API
-name. Each PASS used the published client binary, Runner 0.1.1-alpha and
-Qwen3-4B against a local fixture; schema replay and full agent loops are called
-out separately where they prove different things.
+name. Each PASS used the published client binary and Qwen3-4B against a local
+fixture; schema replay and full agent loops are called out separately where
+they prove different things.
 
 | Client tested | Result | Verified behavior |
 |---|---|---|
@@ -660,14 +674,14 @@ system/template prefixes skip prompt evaluation entirely.
 | Area | Support |
 |---|---|
 | File format | GGUF v2/v3, memory-mapped (weights are never copied) |
-| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it), `qwen3moe` and Mixtral-style sparse **MoE** (top-k router, renormalized weights, per-expert SwiGLU; fused and legacy-split expert layouts; CPU + CUDA; verified on Qwen3-30B-A3B GPU-fitting in 24 GB at ~55 tok/s decode — see docs/moe-support.md), plus gemma-4's GELU **dual-branch MoE** (a dense shared GELU FFN summed with routed fused-`gate_up` experts, per-expert down scales, pre/post sandwich norms; CPU + CUDA; token-identical to llama.cpp and CPU/GPU-identical on gemma-4-26B-A4B-it). Qwen3.5 is CPU-only; the other transformer architectures support CPU + CUDA. |
+| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it), `qwen3moe` and Mixtral-style sparse **MoE** (top-k router, renormalized weights, per-expert SwiGLU; fused and legacy-split expert layouts; CPU + CUDA; Qwen3-30B-A3B measured at ~55 tok/s on an RTX PRO 6000 Blackwell 24 GB MIG slice — see docs/moe-support.md), plus gemma-4's GELU **dual-branch MoE** (a dense shared GELU FFN summed with routed fused-`gate_up` experts, per-expert down scales, pre/post sandwich norms; CPU + CUDA; token-identical to llama.cpp and CPU/GPU-identical on gemma-4-26B-A4B-it). Qwen3.5 is CPU-only; the other transformer architectures support CPU + CUDA. |
 | Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, `tekken` (Mistral Nemo/Small and Apertus: case-split letter runs, single digits), and the original GPT-2 regex as the default. gemma4 adds an SPM-style BPE: spaces normalize to U+2581 and merges run over raw UTF-8, with `<0xNN>` byte fallback for characters the vocabulary has no piece for |
 | Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
 | Transformer | RMSNorm, RoPE (adjacent-pair and NeoX), grouped-query attention, SwiGLU, tied embeddings |
 | Sampling | temperature, top-k, top-p, min-p, repeat penalty, greedy; suppress-token bias; JSON and JSON-Schema constrained decoding; speculative decoding with a draft model |
 | Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots, multi-model swap with idle TTL + keep_alive, prompt-prefix KV reuse, embeddings, logprobs, tool calls |
-| GPU | CUDA (NVIDIA): full + partial (layer-split) offload; Metal (Apple Silicon): full forward pass, zero-copy weights — both CPU-identical output |
+| GPU | CUDA (NVIDIA Turing / compute capability 7.5 or newer): full + partial (layer-split) offload; Metal (Apple Silicon): full forward pass, zero-copy weights — both CPU-identical output |
 | CPU | AVX2/FMA dot kernels for every hot quant format (measured 1.7x scalar end-to-end on a 3B Q4 at 64 threads; see docs/performance.md) |
 | Threading | persistent pthread pool; matmul rows and attention heads run in parallel |
 

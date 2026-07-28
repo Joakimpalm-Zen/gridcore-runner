@@ -84,6 +84,7 @@ TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
 TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
 TEST_PARSE = $(TEST_BATCH:test-batch%=test-parse%)
+TEST_METAL_OWNERSHIP = $(TEST_BATCH:test-batch%=test-metal-ownership%)
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
@@ -218,6 +219,31 @@ test.gguf: scripts/make-test-model.py
 test-ornith-cpu: runner
 	$(PYTHON) -m pytest -q tests/test_ornith_cpu.py
 
+test-moe: runner
+	$(PYTHON) -m pytest -q tests/test_moe.py
+
+$(TEST_METAL_OWNERSHIP): tests/test_metal_ownership.m src/metal.m src/runner.h
+	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
+	    tests/test_metal_ownership.m -o $@ $(LDFLAGS)
+
+test-metal-fallback: runner test.gguf
+ifeq ($(shell uname -s),Darwin)
+	$(MAKE) --no-print-directory $(TEST_METAL_OWNERSHIP)
+	./$(TEST_METAL_OWNERSHIP)
+	@if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu off > metal-cpu.out 2>/dev/null; \
+		env RUNNER_METAL_INJECT_FAILURE=once MallocScribble=1 MallocGuardEdges=1 \
+		    ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-fallback.out 2> metal-fallback.err; \
+		cmp -s metal-cpu.out metal-fallback.out; \
+		grep -q "falling back to CPU" metal-fallback.err; \
+		echo "metal fallback ownership ok"; \
+	else \
+		echo "metal fallback runtime smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal fallback tests skipped: macOS-only backend"
+endif
+
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
@@ -243,8 +269,10 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_PARSE)
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
+		set -e; \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
-		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_moe.py; \
+		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_compare_llamacpp.py; \
+		$(MAKE) --no-print-directory test-moe PYTHON=$(PYTHON); \
 	else \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
 	fi
@@ -257,6 +285,15 @@ smoke: runner test.gguf
 	./$(RUNNER_EXE) -m test.gguf -p "hi" -n 24 --temp 0 --json --gpu off 2>/dev/null | $(PYTHON) -c "import json,sys; json.load(sys.stdin); print('valid json')"
 	./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; c=json.load(sys.stdin); assert c['kv_types'] == ['f16','q8'], c['kv_types']; assert c['kv_type_default'] == 'f16', 'q8 KV is lossy: f16 must stay the default'; print('kv cache types ok')"
 	./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu off --kv q8 2>&1 | grep -q "head_dim not a multiple of 32" && echo "kv q8 fallback ok"
+
+release-check: runner
+	@set -e; \
+	tag="$${TAG:-v$$(./$(RUNNER_EXE) --version | sed 's/^runner //')}"; \
+	tmp="$$(mktemp)"; \
+	trap 'rm -f "$$tmp"' EXIT; \
+	printf '%s\n' "$$(./$(RUNNER_EXE) --version)" > "$$tmp"; \
+	printf 'tag:        %s\ncommit:     %s\nbuilt:      local\n' "$$tag" "$$(git rev-parse HEAD 2>/dev/null || echo unknown)" >> "$$tmp"; \
+	$(PYTHON) scripts/check-release.py --tag "$$tag" --binary ./$(RUNNER_EXE) --build-info "$$tmp"
 
 # Optional ecosystem gate. Install the pinned Python and Node dependencies in
 # tests/compatibility first; Runner itself remains dependency-free.
@@ -351,7 +388,8 @@ clean:
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_PREFIX) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
-	      $(TEST_PARSE)
+	      $(TEST_PARSE) $(TEST_METAL_OWNERSHIP)
+	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 
@@ -362,4 +400,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test smoke fuzz fuzz-build fuzz-run test-shared-asan
+.PHONY: clean debug ptx test test-moe test-metal-fallback smoke release-check fuzz fuzz-build fuzz-run test-shared-asan

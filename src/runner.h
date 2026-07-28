@@ -3,6 +3,10 @@
 #define RUNNER_H
 
 #define RUNNER_VERSION "0.1.3-alpha"
+#define RUNNER_CUDA_NVCC_ARCH "compute_75"
+#define RUNNER_CUDA_PTX_TARGET "sm_75"
+#define RUNNER_CUDA_MIN_CC "7.5"
+#define RUNNER_CUDA_MIN_GPU "NVIDIA Turing / compute capability 7.5 or newer"
 
 // Fixed size of the -m swap registry (server.c SV.reg). Published in --caps as
 // "max_models" so a controller can bound the working set it launches instead of
@@ -76,6 +80,11 @@ enum ggml_type {
     T_MXFP4 = 39,   // OCP microscaling FP4 (E2M1 codes + per-block E8M0 scale); gpt-oss
 };
 
+typedef enum {
+    KV_OWNER_MALLOC = 0,
+    KV_OWNER_GPU_BACKEND = 1,
+} kv_owner_t;
+
 typedef struct {
     uint64_t n;
     char    *s;             // NUL-terminated copy
@@ -86,6 +95,7 @@ typedef struct {
     uint32_t    type;       // gguf_val_type
     // scalar value (widened)
     union { uint64_t u64; int64_t i64; double f64; bool b; } v;
+    uint64_t    raw;        // original scalar bits for F32/F64 finiteness checks
     gg_str      str;        // GGUF_T_STR
     // GGUF_T_ARR
     uint32_t    arr_type;
@@ -330,6 +340,7 @@ typedef struct {
     int    n_ctx, n_batch;
     f16_t *kcache, *vcache;  // [n_layer][n_ctx][kv_dim], fp16 (or q8_0 blocks
                              // when kv_q8 — treated as raw bytes then)
+    kv_owner_t kv_owner;     // malloc on CPU/CUDA; backend-owned on Metal
     bool   kv_q8;            // KV rows stored as q8_0 blocks (CPU and CUDA)
     float *x, *xb, *xb2, *q, *hb, *hb2;   // [n_batch][dim] activations
     float *k_tmp, *v_tmp;                 // [n_batch][kv_dim]
@@ -348,9 +359,12 @@ typedef struct {
                              // Decided by the first instance to upload a given
                              // file and reused by every instance sharing it, so
                              // parallel slots cannot end up on different splits.
-    void  *gpu;              // GPU backend context (NULL = CPU only). Per
-                             // sequence: it owns this stream's KV and
-                             // activations and points at the shared weights.
+    void  *gpu;              // active GPU backend context (NULL = CPU path).
+                             // Runtime fallback clears this without implying
+                             // that backend-owned resources may be released.
+    void  *gpu_owner;        // backend resource owner, possibly retained after
+                             // m->gpu is detached so CPU fallback can keep
+                             // reading backend-owned unified-memory KV.
     struct vram_lease *vram; // this instance's entry in the cross-process VRAM
                              // registry (NULL on CPU-only runs, which are never
                              // accounted and never refused)

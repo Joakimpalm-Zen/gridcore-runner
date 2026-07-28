@@ -910,6 +910,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
     m->kcache = calloc(1, kv_bytes);
     m->vcache = calloc(1, kv_bytes);
+    m->kv_owner = KV_OWNER_MALLOC;
     m->x      = malloc(sizeof(float) * (size_t)B * m->n_embd);
     m->xb     = malloc(sizeof(float) * (size_t)B * xdim);
     m->xb2    = malloc(sizeof(float) * (size_t)B * xdim);
@@ -1076,7 +1077,13 @@ void model_free(model_t *m) {
     free(m->out_norm_w);
     free(m->rope_inv_freq);
     free(m->rope_inv_freq_local);
-    free(m->kcache); free(m->vcache);
+    if (m->kv_owner == KV_OWNER_MALLOC) {
+        free(m->kcache);
+        free(m->vcache);
+    }
+    m->kcache = NULL;
+    m->vcache = NULL;
+    m->kv_owner = KV_OWNER_MALLOC;
     free(m->x); free(m->xb); free(m->xb2); free(m->q);
     free(m->k_tmp); free(m->v_tmp);
     free(m->q_gate); free(m->ssm_qkv); free(m->ssm_z); free(m->ssm_aux);

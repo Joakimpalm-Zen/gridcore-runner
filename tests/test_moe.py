@@ -16,6 +16,7 @@ SwiGLU, weighted sum). The FFN is scaled up in the generator so it drives the
 logits — a broken MoE produces different tokens (verified during development).
 """
 import pathlib
+import os
 import subprocess
 
 import pytest
@@ -25,7 +26,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def runner_bin():
-    exe = ROOT / "runner"
+    exe = ROOT / ("runner.exe" if os.name == "nt" else "runner")
     if not exe.exists():
         pytest.skip("runner binary not built")
     return exe

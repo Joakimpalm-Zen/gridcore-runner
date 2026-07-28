@@ -1,5 +1,9 @@
 # Coding-agent compatibility evidence
 
+This page preserves historical client evidence from earlier alpha runs. Current
+release metadata is `0.1.3-alpha`; new reproducible compatibility gates are in
+`docs/compatibility-program.md` and CI.
+
 The original broad sweep below was validated 2026-07-21 with Runner
 0.1.1-alpha, Qwen3-4B Q4_K_M,
 `--parallel 1`, a 16,384-token context unless noted, and an isolated fixture

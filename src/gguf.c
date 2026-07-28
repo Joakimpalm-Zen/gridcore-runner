@@ -22,8 +22,8 @@ static uint8_t  rd_u8 (cursor *c) { if (!need(c, 1)) return 0; return *c->p++; }
 static uint16_t rd_u16(cursor *c) { uint16_t v = 0; if (need(c, 2)) { memcpy(&v, c->p, 2); c->p += 2; } return v; }
 static uint32_t rd_u32(cursor *c) { uint32_t v = 0; if (need(c, 4)) { memcpy(&v, c->p, 4); c->p += 4; } return v; }
 static uint64_t rd_u64(cursor *c) { uint64_t v = 0; if (need(c, 8)) { memcpy(&v, c->p, 8); c->p += 8; } return v; }
-static float    rd_f32(cursor *c) { uint32_t u = rd_u32(c); float f; memcpy(&f, &u, 4); return f; }
-static double   rd_f64(cursor *c) { uint64_t u = rd_u64(c); double f; memcpy(&f, &u, 8); return f; }
+static float    f32_from_bits(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+static double   f64_from_bits(uint64_t u) { double f; memcpy(&f, &u, 8); return f; }
 
 static bool rd_str(cursor *c, gg_str *s) {
     uint64_t n = rd_u64(c);
@@ -51,11 +51,11 @@ static bool rd_kv_value(cursor *c, gguf_kv *kv, uint32_t type) {
         case GGUF_T_I16:  kv->v.i64 = (int16_t)rd_u16(c); break;
         case GGUF_T_U32:  kv->v.u64 = rd_u32(c); break;
         case GGUF_T_I32:  kv->v.i64 = (int32_t)rd_u32(c); break;
-        case GGUF_T_F32:  kv->v.f64 = rd_f32(c); break;
+        case GGUF_T_F32:  kv->raw = rd_u32(c); kv->v.f64 = f32_from_bits((uint32_t)kv->raw); break;
         case GGUF_T_BOOL: kv->v.b   = rd_u8(c) != 0; break;
         case GGUF_T_U64:  kv->v.u64 = rd_u64(c); break;
         case GGUF_T_I64:  kv->v.i64 = (int64_t)rd_u64(c); break;
-        case GGUF_T_F64:  kv->v.f64 = rd_f64(c); break;
+        case GGUF_T_F64:  kv->raw = rd_u64(c); kv->v.f64 = f64_from_bits(kv->raw); break;
         case GGUF_T_STR:  return rd_str(c, &kv->str);
         case GGUF_T_ARR: {
             kv->arr_type = rd_u32(c);
@@ -265,9 +265,10 @@ static bool kv_is_signed(uint32_t t) {
 // lets the compiler assume no NaN/inf and fold float comparisons like `d>=0` or
 // isfinite() to constants — so those cannot be trusted for validating untrusted
 // metadata. Inspecting the IEEE bits directly is immune to that.
-static bool dbl_finite(double d)  { uint64_t u; memcpy(&u, &d, 8); return (u & 0x7ff0000000000000ull) != 0x7ff0000000000000ull; }
-static bool dbl_negative(double d){ uint64_t u; memcpy(&u, &d, 8); return (u >> 63) != 0; }
-static bool flt_finite(float f)   { uint32_t u; memcpy(&u, &f, 4); return (u & 0x7f800000u) != 0x7f800000u; }
+static bool raw_f32_finite(uint32_t u) { return (u & 0x7f800000u) != 0x7f800000u; }
+static bool raw_f32_negative(uint32_t u) { return (u >> 31) != 0; }
+static bool raw_f64_finite(uint64_t u) { return (u & 0x7ff0000000000000ull) != 0x7ff0000000000000ull; }
+static bool raw_f64_negative(uint64_t u) { return (u >> 63) != 0; }
 
 // Typed getters validate the source type, sign, range, and finiteness rather
 // than reinterpreting whatever the union happens to hold. A negative,
@@ -284,8 +285,14 @@ uint32_t gguf_get_u32(gguf_file *g, const char *key, uint32_t dflt) {
         return (kv->v.i64 >= 0 && kv->v.i64 <= (int64_t)UINT32_MAX)
                  ? (uint32_t)kv->v.i64 : dflt;
     if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) {
-        double d = kv->v.f64;   // must be a finite, non-negative, in-range integer
-        if (!dbl_finite(d) || dbl_negative(d) || d > (double)UINT32_MAX ||
+        bool finite = kv->type == GGUF_T_F32
+                    ? raw_f32_finite((uint32_t)kv->raw)
+                    : raw_f64_finite(kv->raw);
+        bool negative = kv->type == GGUF_T_F32
+                      ? raw_f32_negative((uint32_t)kv->raw)
+                      : raw_f64_negative(kv->raw);
+        double d = kv->v.f64;   // finite, non-negative, in-range integer
+        if (!finite || negative || d > (double)UINT32_MAX ||
             d != (double)(uint32_t)d)
             return dflt;
         return (uint32_t)d;
@@ -296,9 +303,15 @@ uint32_t gguf_get_u32(gguf_file *g, const char *key, uint32_t dflt) {
 float gguf_get_f32(gguf_file *g, const char *key, float dflt) {
     gguf_kv *kv = gguf_get(g, key);
     if (!kv) return dflt;
-    if (kv->type == GGUF_T_F32 || kv->type == GGUF_T_F64) {
+    if (kv->type == GGUF_T_F32) {
+        uint32_t u = (uint32_t)kv->raw;
+        return raw_f32_finite(u) ? f32_from_bits(u) : dflt;
+    }
+    if (kv->type == GGUF_T_F64) {
+        if (!raw_f64_finite(kv->raw)) return dflt;
         float f = (float)kv->v.f64;              // may overflow a huge double to inf
-        return flt_finite(f) ? f : dflt;         // rejects NaN input and overflow
+        uint32_t u; memcpy(&u, &f, 4);
+        return raw_f32_finite(u) ? f : dflt;     // rejects overflow to inf
     }
     if (kv_is_unsigned(kv->type)) return (float)kv->v.u64;
     if (kv_is_signed(kv->type))   return (float)kv->v.i64;

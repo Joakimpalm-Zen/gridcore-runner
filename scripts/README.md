@@ -15,6 +15,9 @@ runner; several are load-bearing gates for changing it.
   LangChain clients against one live Runner and emit a JSON report.
 - **`reference_compare.py`** — compare Runner and llama.cpp exact greedy text
   through equivalent raw OpenAI Completions requests.
+- **`compare_llamacpp.py`** — reproducible Runner-vs-llama.cpp evidence
+  harness for the same GGUF, prompt, context and sampling settings; emits JSON
+  plus Markdown and marks real results pending when run in fixture mode.
 - **`kv-quality.py`** — KV-cache quality gate: compares q8 KV against f16 on
   teacher-forced logits (the deeper version of `tests/test_kv_tol.c`'s gate).
 - **`verify-gguf.py`** — structural sanity check of a GGUF file (metadata,
@@ -33,7 +36,7 @@ runner; several are load-bearing gates for changing it.
 - **`make-test-model.py`** — builds `test.gguf`, the tiny CI fixture (plus
   malformed variants for the rejection tests).
 - **`make-test-moe.py`** — the dense + sparse-MoE GGUF trio for the MoE
-  equivalence test (`tests/test_moe.py`; see `docs/moe-support.md`).
+  equivalence test (`make test-moe`; see `docs/moe-support.md`).
 - **`make-test-ornith.py`** — tiny Qwen3.5/Ornith hybrid fixture
   (via `tests/test_ornith_cpu.py`).
 - **`make-vocab-fixture.py`** — tokenizer vocab fixtures in `tests/fixtures/`.
