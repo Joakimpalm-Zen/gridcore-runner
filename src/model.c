@@ -311,8 +311,18 @@ const char *const *model_supported_archs(size_t *count) {
     return arches;
 }
 
+static bool model_load_inner(model_t *m, const char *path, const model_params *p);
+
 bool model_load(model_t *m, const char *path, const model_params *p) {
     memset(m, 0, sizeof(*m));
+    if (!model_load_inner(m, path, p)) {
+        model_free(m);
+        return false;
+    }
+    return true;
+}
+
+static bool model_load_inner(model_t *m, const char *path, const model_params *p) {
     if (!gguf_open(&m->gf, path)) return false;
     gguf_file *g = &m->gf;
     // kept for the backend's shared-weight registry: two instances of the same
@@ -986,7 +996,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
                        !m->ssm_state_mem || !m->ssm_cw))) {
         fprintf(stderr, "error: cannot allocate buffers (ctx %d needs %.1f MB KV cache)\n",
                 n_ctx, 2.0 * kv_bytes / 1e6);
-        return false; // caller owns cleanup: every load failure ends in model_free
+        return false; // model_load unwinds the partial allocation before returning
     }
 
     int pool_threads = p->n_threads > 0 ? p->n_threads : 1;
