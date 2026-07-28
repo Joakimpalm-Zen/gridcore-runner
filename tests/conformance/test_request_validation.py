@@ -238,37 +238,12 @@ def test_extra_unknown_top_level_fields_are_tolerated(client):
     r.expect_status(200)
 
 
-# ---------------------------------------------------------- known gaps
-# The following is the *opposite* of the "reject, never ignore" invariant
-# above. It is pinned as-is because changing it is a src/ decision, and
-# because an unpinned silent-ignore is exactly the kind of thing that quietly
-# widens.
-#
-# The wrong-typed-scalar gap that used to live here is CLOSED: those cases now
-# assert 400 in test_out_of_range_scalar_is_rejected, with the null-means-
-# absent boundary pinned by test_explicit_null_scalar_reads_as_absent.
+def test_unknown_model_is_rejected_on_single_model_server(client):
+    """A single-model server still has a model contract.
 
-@pytest.mark.known_gap("unscheduled", "\"model\" is unvalidated unless the server is in registry mode")
-def test_known_gap_model_field_unvalidated_on_single_model_server(client):
-    """KNOWN GAP — pins today's behaviour, do not read as desired.
-
-    ``model`` is only checked when the server was started with a registry
-    (``-m "a=x.gguf,b=y.gguf"``); a single-model server answers any model name
-    with the one model it has. A client that thinks it is talking to gpt-4o
-    gets test.gguf and a 200.
-
-    The registry path DOES reject correctly and is covered by the existing CI
-    model-swap step, so this is specifically the single-model case.
-
-    WHEN THIS IS FIXED: assert 400 with "unknown model" here instead.
+    Accepting any request ``model`` value makes client routing mistakes look
+    successful. Registry mode already rejects unknown names; single-model mode
+    must do the same instead of silently serving the one loaded model.
     """
-    r = client.chat(dict(CHAT, model="definitely-not-a-real-model"),
-                    name="unknown-model-single")
-    if r.status == 400:
-        pytest.fail("unknown model is now rejected on a single-model server — "
-                    "the gap is closed, invert this test")
-    r.expect_status(200)
-    served = r.json.get("model")
-    if served == "definitely-not-a-real-model":
-        raise ProtocolError("server echoed back a model it is not serving",
-                            got=served)
+    client.expect_400(dict(CHAT, model="definitely-not-a-real-model"),
+                      name="unknown-model-single", contains="unknown model")

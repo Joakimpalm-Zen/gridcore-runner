@@ -365,16 +365,26 @@ static void handle_unload(sock_t fd) {
 #define SWAP_LOAD_FAILED (-2)
 #define SWAP_ABORTED     (-3)
 
+static bool request_model_matches(const char *want, const char *served) {
+    if (!want || !*want) return true;
+    if (served && !strcmp(want, served)) return true;
+    // Local clients often address an attached single-model runner by a stable
+    // engine tag rather than the GGUF basename. Keep those aliases explicit so
+    // "gpt-4o" or any other arbitrary provider name is not silently accepted.
+    static const char *const aliases[] = { "runner", "default", "local", "test", "clu" };
+    for (size_t i = 0; i < sizeof aliases / sizeof *aliases; i++)
+        if (!strcmp(want, aliases[i])) return true;
+    return false;
+}
+
 // resolve + load the requested model; returns entry index or SWAP_*
 static int swap_to(const char *want) {
     int idx = 0; // default: first entry
-    if (SV.single) want = NULL; // single-model serve answers as any name
     if (want && *want) {
         idx = -1;
         for (int i = 0; i < SV.n_reg; i++)
             if (!strcmp(SV.reg[i].name, want)) { idx = i; break; }
-        // OpenAI clients often send a placeholder model name; accept it
-        if (idx < 0 && (!strcmp(want, "runner") || !strcmp(want, "default")))
+        if (idx < 0 && request_model_matches(want, SV.reg[0].name))
             idx = 0;
         if (idx < 0) return SWAP_UNKNOWN;
     }
@@ -465,6 +475,13 @@ static int swap_to(const char *want) {
     SV.model_name = SV.reg[idx].name;
     pthread_mutex_unlock(&SV.swap_mu);
     return idx;
+}
+
+static bool validate_single_model_request(sock_t fd, jv *req) {
+    const char *want = jv_str(jv_get(req, "model"), NULL);
+    if (request_model_matches(want, SV.model_name)) return true;
+    send_error(fd, 400, "unknown model (see /v1/models)");
+    return false;
 }
 
 static void *ttl_reaper(void *arg) {
@@ -3672,6 +3689,8 @@ static void handle_conn(slot_t *s, sock_t fd) {
                     send_error(fd, 400, "unknown model (see /v1/models)");
                     ok = false;
                 }
+            } else if (!validate_single_model_request(fd, req)) {
+                ok = false;
             }
             if (ok) {
                 if (strcmp(path, "/v1/chat/completions") == 0) handle_chat(s, fd, req);
