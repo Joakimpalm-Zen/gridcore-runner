@@ -71,7 +71,11 @@ for i in range(LAYERS):
     add(t, f"blk.{i}.ffn_down.weight", [FF, E])
 
 kvs = [
-    ks("general.architecture", "qwen35"), ku("qwen35.block_count", LAYERS),
+    # Current Qwen3.5 GGUFs include the auxiliary NextN/MTP predictor in
+    # block_count.  It is not part of the autoregressive backbone and has a
+    # different tensor layout, so the loader must subtract the declared count.
+    ks("general.architecture", "qwen35"), ku("qwen35.block_count", LAYERS + 1),
+    ku("qwen35.nextn_predict_layers", 1),
     ku("qwen35.context_length", 256), ku("qwen35.embedding_length", E),
     ku("qwen35.feed_forward_length", FF), ku("qwen35.attention.head_count", HEADS),
     ku("qwen35.attention.head_count_kv", KV), ku("qwen35.attention.key_length", E // HEADS),

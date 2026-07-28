@@ -503,8 +503,17 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     if (strcmp(arch, "qwen35") == 0) {
         // Qwen3.5 dense (the architecture used by Ornith-1.0-9B) alternates
         // three Gated DeltaNet layers with one conventional attention layer.
-        // MTP weights, when present, are outside block_count and intentionally
-        // do not participate in ordinary autoregressive decoding.
+        // Current GGUFs include their auxiliary NextN/MTP predictor layers in
+        // block_count.  Those blocks have a different tensor layout and do not
+        // participate in ordinary autoregressive decoding, so retain only the
+        // backbone depth.  Older exports omit the key and remain unchanged.
+        int nextn = (int)gguf_get_u32(g, AK("nextn_predict_layers"), 0);
+        if (nextn < 0 || nextn >= m->n_layer) {
+            fprintf(stderr, "error: invalid qwen35 NextN layer count %d for %d blocks\n",
+                    nextn, m->n_layer);
+            return false;
+        }
+        m->n_layer -= nextn;
         m->qwen35            = true;
         m->think_open        = "<think>";
         m->think_close       = "</think>";
