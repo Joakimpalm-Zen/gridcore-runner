@@ -150,15 +150,21 @@ static uint64_t h64f(uint64_t h, double v) { return h64(h, &v, sizeof v); }
 // the BOS/space flags — so a tokenizer that behaves differently keys
 // differently whatever the metadata said.
 //
-// The weights are sampled rather than digested whole: two finetunes of one
-// architecture share every tensor name, dtype and shape, so the table alone
-// would collide. A slice of each layer's Q and down projections separates them
-// at a cost that does not scale with model size.
+// Weight bytes are represented by the load-time file identity, not by a full
+// digest on every request. That keeps prefix admission O(prompt) while still
+// distinguishing a model rebuilt or replaced in place at the same path. The
+// small tensor samples below remain a fallback guard for platforms where stat
+// cannot report a useful identity.
 static uint64_t model_identity(const model_t *m, const tokenizer *tok) {
     uint64_t h = 0xCBF29CE484222325ull;
     h = h64s(h, "runner.prefix.v1");
     h = h64s(h, m->path);
     h = h64s(h, m->arch);
+    h = h64i(h, m->file_id_ok);
+    h = h64i(h, (long long)m->file_size);
+    h = h64i(h, (long long)m->file_ino);
+    h = h64i(h, (long long)m->file_mtime_ns);
+    h = h64i(h, (long long)m->file_ctime_ns);
     const long long geo[] = {
         m->n_layer, m->n_embd, m->n_head, m->n_head_kv, m->head_dim, m->n_ff,
         m->n_vocab, m->n_ctx_train, m->rope_dim, m->rope_neox, m->swa_window,

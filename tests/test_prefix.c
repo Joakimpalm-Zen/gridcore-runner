@@ -259,6 +259,83 @@ static void test_key_rejects_incompatible_snapshots(void) {
     slot_close(&a);
 }
 
+static bool copy_file(const char *from, const char *to) {
+    FILE *a = fopen(from, "rb");
+    FILE *b = fopen(to, "wb");
+    if (!a || !b) {
+        if (a) fclose(a);
+        if (b) fclose(b);
+        return false;
+    }
+    char buf[8192];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), a)) > 0)
+        if (fwrite(buf, 1, n, b) != n) { ok = false; break; }
+    if (ferror(a)) ok = false;
+    fclose(a);
+    fclose(b);
+    return ok;
+}
+
+static bool flip_unsampled_weight_byte(const char *path) {
+    gguf_file g;
+    if (!gguf_open(&g, path)) return false;
+    gguf_tensor *t = gguf_find_tensor(&g, "blk.1.ffn_down.weight");
+    if (!t || !t->data || t->nbytes <= 128) {
+        gguf_close(&g);
+        return false;
+    }
+    long off = (long)((const uint8_t *)t->data - (const uint8_t *)g.map + 128);
+    gguf_close(&g);
+
+    FILE *f = fopen(path, "r+b");
+    if (!f) return false;
+    if (fseek(f, off, SEEK_SET) != 0) { fclose(f); return false; }
+    int c = fgetc(f);
+    if (c == EOF) { fclose(f); return false; }
+    if (fseek(f, off, SEEK_SET) != 0) { fclose(f); return false; }
+    unsigned char b = (unsigned char)c ^ 1u;
+    bool ok = fwrite(&b, 1, 1, f) == 1;
+    fclose(f);
+    return ok;
+}
+
+static void test_key_changes_after_in_place_weight_edit(void) {
+    const char *orig = g_path;
+    const char *tmp = "prefix-key-replaced.gguf";
+    if (!copy_file(orig, tmp)) {
+        ck(0, "copy model for in-place identity test");
+        return;
+    }
+
+    g_path = tmp;
+    model_params p = base_params();
+    slot before;
+    if (!slot_open(&before, &p)) {
+        ck(0, "load identity fixture before edit");
+        g_path = orig;
+        remove(tmp);
+        return;
+    }
+    uint64_t old_key = before.e.model_key;
+    slot_close(&before);
+
+    ck(flip_unsampled_weight_byte(tmp), "edit an unsampled weight byte in place");
+
+    slot after;
+    if (slot_open(&after, &p)) {
+        ck(after.e.model_key != old_key,
+           "model identity changes after an in-place weight edit");
+        slot_close(&after);
+    } else {
+        ck(0, "load identity fixture after edit");
+    }
+
+    g_path = orig;
+    remove(tmp);
+}
+
 // ------------------------------------------------------------- housekeeping
 static void test_eviction(void) {
     model_params p = base_params();
@@ -326,6 +403,7 @@ int main(int argc, char **argv) {
     test_hist_tracks_kv_on_overflow();
     test_fork_is_bit_identical();
     test_key_rejects_incompatible_snapshots();
+    test_key_changes_after_in_place_weight_edit();
     test_eviction();
     if (g_fail) { fprintf(stderr, "test-prefix FAILED\n"); return 1; }
     fprintf(stderr, "test-prefix: all checks passed\n");

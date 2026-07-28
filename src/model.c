@@ -6,12 +6,60 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
 // ---------------------------------------------------------------- helpers
+
+static int64_t stat_mtime_ns(const struct stat *st) {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    return (int64_t)st->st_mtimespec.tv_sec * 1000000000ll +
+           (int64_t)st->st_mtimespec.tv_nsec;
+#elif defined(__linux__)
+    return (int64_t)st->st_mtim.tv_sec * 1000000000ll +
+           (int64_t)st->st_mtim.tv_nsec;
+#else
+    return (int64_t)st->st_mtime * 1000000000ll;
+#endif
+}
+
+static int64_t stat_ctime_ns(const struct stat *st) {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    return (int64_t)st->st_ctimespec.tv_sec * 1000000000ll +
+           (int64_t)st->st_ctimespec.tv_nsec;
+#elif defined(__linux__)
+    return (int64_t)st->st_ctim.tv_sec * 1000000000ll +
+           (int64_t)st->st_ctim.tv_nsec;
+#else
+    return (int64_t)st->st_ctime * 1000000000ll;
+#endif
+}
+
+static void model_record_file_id(model_t *m, const char *path) {
+    struct stat st;
+    if (path && stat(path, &st) == 0) {
+        m->file_id_ok = true;
+        m->file_size = (uint64_t)st.st_size;
+#ifdef _WIN32
+        m->file_ino = 0;
+#else
+        m->file_ino = (uint64_t)st.st_ino;
+#endif
+        m->file_mtime_ns = stat_mtime_ns(&st);
+        m->file_ctime_ns = stat_ctime_ns(&st);
+    } else {
+        // Still include the mapped length in identities on platforms where
+        // stat failed, rather than falling back to path alone.
+        m->file_id_ok = false;
+        m->file_size = (uint64_t)m->gf.map_size;
+        m->file_ino = 0;
+        m->file_mtime_ns = 0;
+        m->file_ctime_ns = 0;
+    }
+}
 
 // Materialize a tensor into a freshly-allocated f32 buffer. Returns NULL when
 // t is absent (a legitimate result for optional tensors). If t is present but
@@ -331,6 +379,7 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     m->path = malloc(plen);
     if (!m->path) return false;
     memcpy(m->path, path, plen);
+    model_record_file_id(m, path);
 
     const char *arch = gguf_get_str(g, "general.architecture", "?");
     snprintf(m->arch, sizeof(m->arch), "%s", arch);

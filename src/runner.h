@@ -280,6 +280,9 @@ typedef struct {
     // ---- immutable: file and geometry ----
     gguf_file gf;
     char     *path;          // owned copy of the load path (shared-weight key)
+    bool      file_id_ok;    // stat-backed identity below is valid
+    uint64_t  file_size, file_ino;
+    int64_t   file_mtime_ns, file_ctime_ns;
     char      arch[32];
     int       n_layer, n_embd, n_head, n_head_kv, head_dim, n_ff;
     int       n_vocab, n_ctx_train, rope_dim;
