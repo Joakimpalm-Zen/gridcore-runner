@@ -268,6 +268,17 @@ def top_logprobs(base, prompt, tokens, request_timeout):
 def legacy_completion_logprobs(response):
     try:
         raw = response["choices"][0]["logprobs"]
+        if isinstance(raw.get("content"), list):
+            return {
+                "status": "captured",
+                "positions": [{
+                    "token": row["token"],
+                    "logprob": row["logprob"],
+                    "top_logprobs": [{
+                        "token": alt["token"], "logprob": alt["logprob"],
+                    } for alt in row.get("top_logprobs", [])],
+                } for row in raw["content"]],
+            }
         tokens = raw["tokens"]
         chosen = raw["token_logprobs"]
         alternatives = raw["top_logprobs"]

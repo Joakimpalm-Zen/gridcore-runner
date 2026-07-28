@@ -210,3 +210,25 @@ def test_legacy_completion_logprobs_are_normalized():
             ],
         }],
     }
+
+
+def test_completion_logprobs_accept_content_rows():
+    response = {"choices": [{"logprobs": {"content": [{
+        "token": "A",
+        "logprob": -0.25,
+        "top_logprobs": [
+            {"token": "A", "logprob": -0.25},
+            {"token": "B", "logprob": -1.5},
+        ],
+    }]}}]}
+    assert compare_llamacpp.legacy_completion_logprobs(response) == {
+        "status": "captured",
+        "positions": [{
+            "token": "A",
+            "logprob": -0.25,
+            "top_logprobs": [
+                {"token": "A", "logprob": -0.25},
+                {"token": "B", "logprob": -1.5},
+            ],
+        }],
+    }
