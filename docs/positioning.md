@@ -1,5 +1,5 @@
 # Positioning
 
-Moved to the suite plans collection:
-`gridcore-control-plane/packages/main/docs/plans/runner-positioning.md`.
-All Gridcore roadmaps and strategy docs are maintained there.
+Moved to the suite plans collection: [Runner positioning](../../gridcore-suite/docs/plans/runner-positioning.md).
+The working roadmap is the
+[`gridcore-runner (engine)` section](../../gridcore-suite/docs/plans/suite-wide-plan.md#gridcore-runner-engine).
