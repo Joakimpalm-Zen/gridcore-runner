@@ -7,6 +7,7 @@ import os
 OUT = sys.argv[1] if len(sys.argv) > 1 else "test-ornith.gguf"
 E, HEADS, KV, FF = 32, 4, 2, 64
 LAYERS = int(os.environ.get("ORNITH_TEST_LAYERS", "4"))
+LEGACY_DT = os.environ.get("ORNITH_LEGACY_DT") == "1"
 STATE, GROUPS, VHEADS, CONV = 8, 2, 4, 4
 VOCAB = ["<unk>", "<s>", "</s>"] + [f"<0x{i:02X}>" for i in range(256)]
 TTYPE = [2, 3, 3] + [6] * 256
@@ -52,7 +53,8 @@ for i in range(LAYERS):
         add(t, f"blk.{i}.attn_qkv.weight", [E, keydim * 2 + valuedim])
         add(t, f"blk.{i}.attn_gate.weight", [E, valuedim])
         add(t, f"blk.{i}.ssm_conv1d.weight", [CONV, keydim * 2 + valuedim])
-        add(t, f"blk.{i}.ssm_dt.bias", [VHEADS], vals([0.] * VHEADS))
+        dt_name = "ssm_dt" if LEGACY_DT else "ssm_dt.bias"
+        add(t, f"blk.{i}.{dt_name}", [VHEADS], vals([0.] * VHEADS))
         add(t, f"blk.{i}.ssm_a", [VHEADS], vals([-1.] * VHEADS))
         add(t, f"blk.{i}.ssm_beta.weight", [E, VHEADS])
         add(t, f"blk.{i}.ssm_alpha.weight", [E, VHEADS])

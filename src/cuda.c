@@ -268,6 +268,7 @@ typedef struct gpu_weights {
     CUmodule    mod;
     CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu,
                 f_add, f_scale;
+    CUfunction  f_q35_split, f_q35_gate, f_q35_conv, f_q35_delta;
     CUfunction  f_attn_dec, f_attn_merge;   // flash-decoding attention (decode)
     CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
     CUfunction  f_gemm[32];             // prefill tiled-GEMM variants (Q8_0/Q4_K)
@@ -293,6 +294,7 @@ typedef struct gpu_weights {
     // gemma-4 MoE dual-branch: dense-post/moe-pre/moe-post norms + the router
     // input scale (with 1/sqrt(n_embd) folded in), per MoE layer, may be 0
     CUdeviceptr *g_pn1, *g_prn2, *g_pn2, *g_gis;
+    CUdeviceptr *ssm_dt, *ssm_a, *ssm_norm;
 } gpu_weights;
 
 // ------------------------------------------------ per-sequence backend state
@@ -306,6 +308,9 @@ typedef struct {
     CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, attn_part, logits;
     CUdeviceptr moe_logits, moe_eout;   // sparse-MoE: router logits, expert down-out
     CUdeviceptr g_scr;                  // gemma-4-MoE dual-branch scratch: 5*n_embd
+    CUdeviceptr q35_mix, q35_cv, q35_z, q35_beta, q35_alpha, q35_gate;
+    CUdeviceptr q35_hist, q35_state;    // persistent recurrent state per sequence
+    CUdeviceptr q35_hist_prev, q35_state_prev; // pre-forward rollback snapshot
     float       *h_x, *h_logits, *h_moe_logits; // host staging
     int          last_pos;              // -2 = nothing synced yet
     // CUDA graphs for the single-token decode path (Experiment A)
@@ -509,6 +514,8 @@ static void shared_destroy(gpu_weights *w) {
             w->pan ? w->pan[l] : 0, w->pfn ? w->pfn[l] : 0,
             w->g_pn1 ? w->g_pn1[l] : 0, w->g_prn2 ? w->g_prn2[l] : 0,
             w->g_pn2 ? w->g_pn2[l] : 0, w->g_gis ? w->g_gis[l] : 0,
+            w->ssm_dt ? w->ssm_dt[l] : 0, w->ssm_a ? w->ssm_a[l] : 0,
+            w->ssm_norm ? w->ssm_norm[l] : 0,
         };
         for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
             if (bufs[i]) cu.MemFree(bufs[i]);
@@ -518,6 +525,7 @@ static void shared_destroy(gpu_weights *w) {
     free(w->qn); free(w->kn);
     free(w->pan); free(w->pfn);
     free(w->g_pn1); free(w->g_prn2); free(w->g_pn2); free(w->g_gis);
+    free(w->ssm_dt); free(w->ssm_a); free(w->ssm_norm);
     for (int i = 0; i < w->n_bindings; i++)
         if (w->bindings[i].device) cu.MemFree(w->bindings[i].device);
     free(w->bindings);
@@ -554,8 +562,11 @@ static void shared_release(gpu_weights *w) {
 // those undercounts a MoE layer by ~all of its weight (the experts).
 static size_t layer_weight_bytes(const layer_t *ly, int n_expert, bool cpu_moe) {
     size_t wb = 0;
-    gguf_tensor *att[] = { ly->wq, ly->wk, ly->wv, ly->wo };
-    for (int i = 0; i < 4; i++) if (att[i]) wb += att[i]->nbytes;
+    gguf_tensor *att[] = { ly->wq, ly->wk, ly->wv, ly->wo, ly->wqkv,
+                           ly->wq_gate, ly->ssm_conv, ly->ssm_beta,
+                           ly->ssm_alpha, ly->ssm_out };
+    for (size_t i = 0; i < sizeof(att) / sizeof(*att); i++)
+        if (att[i]) wb += att[i]->nbytes;
     if (ly->is_moe && cpu_moe) {
         // The complete expert FFN (router, routed tensors and a coupled
         // Gemma shared branch) executes on the host. Attention remains here.
@@ -643,6 +654,8 @@ static size_t layer_weight_end(const layer_t *ly, int n_expert, const uint8_t *m
         size_t _e = (size_t)((uint8_t *)_t->data - map) + _t->nbytes; \
         if (_e > end) end = _e; } } while (0)
     WEND(ly->wq); WEND(ly->wk); WEND(ly->wv); WEND(ly->wo);
+    WEND(ly->wqkv); WEND(ly->wq_gate); WEND(ly->ssm_conv);
+    WEND(ly->ssm_beta); WEND(ly->ssm_alpha); WEND(ly->ssm_out);
     if (ly->is_moe) {
         WEND(ly->ffn_gate_inp);
         WEND(ly->ffn_gate_up_exps);
@@ -768,6 +781,10 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_attn_dec,   "k_attn_dec" },  { &w->f_attn_merge, "k_attn_merge" },
             { &w->f_gelu,       "k_gelu_mul" },  { &w->f_add,    "k_add" },
             { &w->f_scale,      "k_scale" },
+            { &w->f_q35_split,  "k_q35_split_q" },
+            { &w->f_q35_gate,   "k_q35_attn_gate" },
+            { &w->f_q35_conv,   "k_q35_conv" },
+            { &w->f_q35_delta,  "k_q35_delta" },
             { &w->f_mv[T_F32],  "k_mv_f32" },    { &w->f_mv[T_F16],  "k_mv_f16" },
             { &w->f_mv[T_Q8_0], "k_mv_q8_0" },   { &w->f_mv[T_Q4_0], "k_mv_q4_0" },
             { &w->f_mv[T_Q4_1], "k_mv_q4_1" },   { &w->f_mv[T_Q5_0], "k_mv_q5_0" },
@@ -826,7 +843,13 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 if (!binding_add(w, m, ly->wq) ||
                     !binding_add(w, m, ly->wk) ||
                     !binding_add(w, m, ly->wv) ||
-                    !binding_add(w, m, ly->wo)) goto fail;
+                    !binding_add(w, m, ly->wo) ||
+                    !binding_add(w, m, ly->wqkv) ||
+                    !binding_add(w, m, ly->wq_gate) ||
+                    !binding_add(w, m, ly->ssm_conv) ||
+                    !binding_add(w, m, ly->ssm_beta) ||
+                    !binding_add(w, m, ly->ssm_alpha) ||
+                    !binding_add(w, m, ly->ssm_out)) goto fail;
                 if (!ly->is_moe &&
                     (!binding_add(w, m, ly->w_gate) ||
                      !binding_add(w, m, ly->w_up) ||
@@ -866,9 +889,13 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         w->g_prn2 = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_pn2  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_gis  = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ssm_dt   = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ssm_a    = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ssm_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
         if (!w->attn_norm || !w->ffn_norm || !w->bq || !w->bk || !w->bv ||
             !w->bo || !w->qn || !w->kn || !w->pan || !w->pfn ||
-            !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis)
+            !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis ||
+            !w->ssm_dt || !w->ssm_a || !w->ssm_norm)
             goto fail;
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
@@ -882,6 +909,11 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             w->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l));
             w->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
             w->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
+            if (ly->recurrent) {
+                w->ssm_dt[l] = f32_dbuf(ly->ssm_dt, m->ssm_v_heads);
+                w->ssm_a[l] = f32_dbuf(ly->ssm_a, m->ssm_v_heads);
+                w->ssm_norm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_state);
+            }
             if (ly->moe_gemma) {
                 // gemma-4 dual-branch norms + router scale. All are optional in
                 // the GGUF; the CPU path treats an absent norm as weightless and
@@ -907,6 +939,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 (ly->qnorm_w && !w->qn[l]) || (ly->knorm_w && !w->kn[l]) ||
                 (ly->post_attn_norm_w && !w->pan[l]) ||
                 (ly->post_ffn_norm_w && !w->pfn[l]) ||
+                (ly->recurrent && (!w->ssm_dt[l] || !w->ssm_a[l] ||
+                                    !w->ssm_norm[l])) ||
                 (ly->moe_gemma && (!w->g_pn1[l] || !w->g_prn2[l] ||
                                    !w->g_pn2[l] || !w->g_gis[l])))
                 goto fail;
@@ -951,10 +985,16 @@ bool gpu_init(model_t *m) {
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
         gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
-                              ly->w_gate, ly->w_up, ly->w_down };
-        int count = m->cpu_moe && ly->is_moe ? 4 : 7;
+                              ly->w_gate, ly->w_up, ly->w_down, ly->wqkv,
+                              ly->wq_gate, ly->ssm_beta, ly->ssm_alpha,
+                              ly->ssm_out };
+        int count = m->cpu_moe && ly->is_moe ? 4 : 12;
         for (int i = 0; i < count; i++)
             if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
+        // The architecture publishes this tiny depthwise kernel as F32 in its
+        // GGUF contract. Keeping it F32 avoids a second quant decoder in the
+        // stateful kernel; an unexpected export falls back safely.
+        if (ly->ssm_conv && ly->ssm_conv->type != T_F32) goto unsupported;
     }
     // MoE layers leave the dense gate/up/down NULL, so the loop above never
     // checks the router or the per-expert weights — yet enc_mv indexes the
@@ -998,9 +1038,21 @@ bool gpu_init(model_t *m) {
             if (model_head_dim(m, l) > max_hd) max_hd = model_head_dim(m, l);
         }
         int xdim = q_dim > m->n_embd ? q_dim : m->n_embd;
+        int q35_convdim = m->qwen35
+                        ? 2 * m->ssm_state * m->ssm_groups + m->ssm_inner : 0;
+        int q35_mixdim = q35_convdim > 2 * q_dim ? q35_convdim : 2 * q_dim;
         size_t act_bytes = sizeof(float) * (MVB * ((size_t)m->n_embd + 3 * xdim +
                            q_dim + 2 * kv_dim + 2 * m->n_ff +
                            (size_t)m->n_head * m->n_ctx) + m->n_vocab);
+        if (m->qwen35) {
+            size_t q35_scratch = MVB * ((size_t)q35_mixdim + q35_convdim +
+                                 m->ssm_inner + 2 * m->ssm_v_heads + q_dim);
+            size_t q35_persistent = (size_t)m->n_layer *
+                                    (m->ssm_conv_kernel - 1) * q35_convdim +
+                                    (size_t)m->n_layer * m->ssm_v_heads *
+                                    m->ssm_state * m->ssm_state;
+            act_bytes += sizeof(float) * (q35_scratch + 2 * q35_persistent);
+        }
 
         // the weights (and the CPU/GPU split they imply) come from the registry:
         // a second instance of the same file reuses the first one's upload
@@ -1036,6 +1088,27 @@ bool gpu_init(model_t *m) {
                                       ATTN_SPLITS * (max_hd + 2)));
         CK(cu.MemAlloc(&g->logits, sizeof(float) * m->n_vocab));
         CK(cu.MemAlloc(&g->pos_dev, sizeof(int)));
+        if (m->qwen35) {
+            size_t hist_elems = (size_t)m->n_layer * (m->ssm_conv_kernel - 1) *
+                                q35_convdim;
+            size_t hist_alloc = hist_elems ? hist_elems : 1;
+            size_t state_elems = (size_t)m->n_layer * m->ssm_v_heads *
+                                 m->ssm_state * m->ssm_state;
+            CK(cu.MemAlloc(&g->q35_mix, sizeof(float) * MVB * q35_mixdim));
+            CK(cu.MemAlloc(&g->q35_cv, sizeof(float) * MVB * q35_convdim));
+            CK(cu.MemAlloc(&g->q35_z, sizeof(float) * MVB * m->ssm_inner));
+            CK(cu.MemAlloc(&g->q35_beta, sizeof(float) * MVB * m->ssm_v_heads));
+            CK(cu.MemAlloc(&g->q35_alpha, sizeof(float) * MVB * m->ssm_v_heads));
+            CK(cu.MemAlloc(&g->q35_gate, sizeof(float) * MVB * q_dim));
+            CK(cu.MemAlloc(&g->q35_hist, sizeof(float) * hist_alloc));
+            CK(cu.MemAlloc(&g->q35_state, sizeof(float) * state_elems));
+            CK(cu.MemAlloc(&g->q35_hist_prev, sizeof(float) * hist_alloc));
+            CK(cu.MemAlloc(&g->q35_state_prev, sizeof(float) * state_elems));
+            CK(cu.MemsetD8(g->q35_hist, 0, sizeof(float) * hist_alloc));
+            CK(cu.MemsetD8(g->q35_state, 0, sizeof(float) * state_elems));
+            CK(cu.MemsetD8(g->q35_hist_prev, 0, sizeof(float) * hist_alloc));
+            CK(cu.MemsetD8(g->q35_state_prev, 0, sizeof(float) * state_elems));
+        }
         if (m->n_expert > 0) {
             // sparse-MoE router logits + one expert's down output
             CK(cu.MemAlloc(&g->moe_logits, sizeof(float) * (size_t)m->n_expert));
@@ -1050,7 +1123,9 @@ bool gpu_init(model_t *m) {
         // that cannot be captured into a CUDA graph; MoE routing reads router
         // logits back to the host mid-forward, which likewise cannot be captured
         for (int l = 0; l < m->gpu_layers; l++)
-            if (!m->layers[l].wv || m->layers[l].is_moe) g->graph_bad = true;
+            if (!m->layers[l].wv || m->layers[l].is_moe ||
+                m->layers[l].recurrent) g->graph_bad = true;
+        if (m->qwen35) g->graph_bad = true;
         if (m->cpu_moe) g->graph_bad = true;
 
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
@@ -1247,7 +1322,10 @@ static void gpu_ctx_free(model_t *m, gpu_t *g) {
     CUdeviceptr bufs[] = { g->kc, g->vc, g->x, g->xb, g->xb2,
                            g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                            g->attn_part, g->logits, g->pos_dev,
-                           g->moe_logits, g->moe_eout, g->g_scr };
+                           g->moe_logits, g->moe_eout, g->g_scr,
+                           g->q35_mix, g->q35_cv, g->q35_z, g->q35_beta,
+                           g->q35_alpha, g->q35_gate, g->q35_hist,
+                           g->q35_state, g->q35_hist_prev, g->q35_state_prev };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
     free(g->h_x); free(g->h_logits); free(g->h_moe_logits);
@@ -1313,6 +1391,26 @@ void gpu_free(model_t *m) {
 // now that weights are shared — an abandoned context would keep every other
 // slot's copy of them alive too.
 void gpu_disable(model_t *m) {
+    gpu_t *g = m ? m->gpu : NULL;
+    // KV is mirrored after every step. Qwen3.5 recurrent state is much larger,
+    // so rescue it only on this rare fallback path instead of copying tens of
+    // megabytes over PCIe after every generated token.
+    if (g && m->qwen35 && g->sw && g->sw->ctx &&
+        cu.CtxSetCurrent(g->sw->ctx) == 0) {
+        int convdim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
+        size_t hist_layer = (size_t)(m->ssm_conv_kernel - 1) * convdim;
+        size_t state_layer = (size_t)m->ssm_v_heads * m->ssm_state * m->ssm_state;
+        for (int l = 0; l < m->gpu_layers; l++) {
+            if (!m->layers[l].recurrent) continue;
+            if (hist_layer)
+                cu.MemcpyDtoH(m->ssm_conv_state + (size_t)l * hist_layer,
+                              g->q35_hist_prev + (size_t)l * hist_layer * sizeof(float),
+                              hist_layer * sizeof(float));
+            cu.MemcpyDtoH(m->ssm_state_mem + (size_t)l * state_layer,
+                          g->q35_state_prev + (size_t)l * state_layer * sizeof(float),
+                          state_layer * sizeof(float));
+        }
+    }
     gpu_free(m);
 }
 
@@ -1523,6 +1621,56 @@ static bool gpu_gemma_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int l,
     return cu.StreamSynchronize(g->stream) == 0;
 }
 
+// Qwen3.5 Gated DeltaNet layer. Learned projections use the same quant-aware
+// matvec dispatch as dense attention; only convolution and the recurrent state
+// transition are architecture-specific CUDA kernels. Prompt columns are
+// advanced in order because both history and state are causal.
+static bool gpu_q35_recurrent(gpu_t *g, model_t *m, const layer_t *ly, int l,
+                              int tn, int xdim) {
+    int sk = m->ssm_state, ng = m->ssm_groups, nh = m->ssm_v_heads;
+    int inner = m->ssm_inner, convdim = 2 * sk * ng + inner;
+    int histn = m->ssm_conv_kernel - 1;
+    CUdeviceptr weight_base = 0;
+    uint64_t weight_off = 0;
+    if (!binding_find(g->sw, m, ly->ssm_conv, &weight_base, &weight_off))
+        return false;
+    CUdeviceptr conv_w = weight_base + weight_off;
+
+    bool ok = enc_mv(g, m, ly->wqkv, g->xb, g->q35_mix,
+                     m->n_embd, convdim, 0, tn, xdim, convdim)
+           && enc_mv(g, m, ly->wq_gate, g->xb, g->q35_z,
+                     m->n_embd, inner, 0, tn, xdim, inner)
+           && enc_mv(g, m, ly->ssm_beta, g->xb, g->q35_beta,
+                     m->n_embd, nh, 0, tn, xdim, nh)
+           && enc_mv(g, m, ly->ssm_alpha, g->xb, g->q35_alpha,
+                     m->n_embd, nh, 0, tn, xdim, nh);
+    if (!ok) return false;
+
+    size_t hist_layer = (size_t)histn * convdim;
+    size_t state_layer = (size_t)nh * sk * sk;
+    CUdeviceptr hist = g->q35_hist + (size_t)l * hist_layer * sizeof(float);
+    CUdeviceptr state = g->q35_state + (size_t)l * state_layer * sizeof(float);
+    for (int t = 0; t < tn; t++) {
+        CUdeviceptr mix = g->q35_mix + (size_t)t * convdim * sizeof(float);
+        CUdeviceptr cv = g->q35_cv + (size_t)t * convdim * sizeof(float);
+        CUdeviceptr z = g->q35_z + (size_t)t * inner * sizeof(float);
+        CUdeviceptr beta = g->q35_beta + (size_t)t * nh * sizeof(float);
+        CUdeviceptr alpha = g->q35_alpha + (size_t)t * nh * sizeof(float);
+        CUdeviceptr out = g->xb2 + (size_t)t * xdim * sizeof(float);
+        int kernel = m->ssm_conv_kernel;
+        void *pc[] = { &mix, &cv, &conv_w, &hist, &convdim, &kernel };
+        if (!launch(g, g->sw->f_q35_conv, (convdim + 255) / 256,
+                    1, 1, 256, pc)) return false;
+        float eps = m->rms_eps;
+        void *pd[] = { &cv, &z, &beta, &alpha, &g->sw->ssm_dt[l],
+                       &g->sw->ssm_a[l], &g->sw->ssm_norm[l], &state,
+                       &out, &sk, &ng, &nh, &eps };
+        if (!launch(g, g->sw->f_q35_delta, nh, 1, 1, 128, pd)) return false;
+    }
+    return enc_mv(g, m, ly->ssm_out, g->xb2, g->xb, inner, m->n_embd,
+                  0, tn, xdim, xdim);
+}
+
 static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                      int pos, bool want_logits, int l0, int l1) {
     (void)tokens; (void)pos;
@@ -1544,7 +1692,24 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->attn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
         prof_mark(g, PH_NORM);
-        ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->sw->bq[l], tn, xdim, q_dim);
+        if (ly->recurrent) {
+            ok = ok && gpu_q35_recurrent(g, m, ly, l, tn, xdim);
+            prof_mark(g, PH_MATVEC);
+            goto attention_done;
+        }
+        if (m->qwen35) {
+            ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q35_mix,
+                              n_embd, 2 * q_dim, g->sw->bq[l], tn, xdim,
+                              2 * q_dim);
+            int heads = m->n_head, packed_stride = 2 * q_dim, q_stride = q_dim;
+            void *ps[] = { &g->q35_mix, &g->q, &g->q35_gate, &heads, &hd,
+                           &packed_stride, &q_stride };
+            ok = ok && launch(g, g->sw->f_q35_split, (q_dim + 255) / 256,
+                              tn, 1, 256, ps);
+        } else {
+            ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q, n_embd, q_dim,
+                              g->sw->bq[l], tn, xdim, q_dim);
+        }
         ok = ok && enc_mv(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->sw->bk[l], tn, xdim, kv_dim);
         if (ly->wv) {
             ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->sw->bv[l], tn, xdim, kv_dim);
@@ -1602,8 +1767,16 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         }
         prof_mark(g, PH_ATTN);
 
+        if (m->qwen35) {
+            int gate_stride = q_dim;
+            void *pg[] = { &g->xb2, &g->q35_gate, &q_dim, &xdim, &gate_stride };
+            ok = ok && launch(g, g->sw->f_q35_gate, (q_dim + 255) / 256,
+                              tn, 1, 256, pg);
+        }
+
         ok = ok && enc_mv(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->sw->bo[l], tn, xdim, xdim);
         prof_mark(g, PH_MATVEC);
+    attention_done:
         if (g->sw->pan[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);
@@ -1729,7 +1902,7 @@ static bool batch_eligible(model_t **seqs, int n, gpu_t **lead_out) {
         if (m->gpu_layers < m->n_layer) return false;
         // fwd_batch runs a dense FFN unconditionally; MoE (sparse experts or the
         // gemma-4 dual-branch) has no path there, so keep those on fwd_tile
-        if (m->n_expert > 0 || m->moe_gemma) return false;
+        if (m->n_expert > 0 || m->moe_gemma || m->qwen35) return false;
         if (!g->sw->f_rope_seq || !g->sw->f_store_seq || !g->sw->f_attn_dec_seq)
             return false;
         if (!lead) lead = g;
@@ -2050,6 +2223,27 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     if (!g) return false;
 
     if (cu.CtxSetCurrent(g->sw->ctx) != 0) return false;
+    if (m->qwen35 && pos == 0) {
+        int convdim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
+        size_t hist_elems = (size_t)m->n_layer * (m->ssm_conv_kernel - 1) * convdim;
+        size_t state_elems = (size_t)m->n_layer * m->ssm_v_heads *
+                             m->ssm_state * m->ssm_state;
+        if ((hist_elems && cu.MemsetD8(g->q35_hist, 0,
+                                      hist_elems * sizeof(float)) != 0) ||
+            cu.MemsetD8(g->q35_state, 0, state_elems * sizeof(float)) != 0)
+            return false;
+    }
+    if (m->qwen35) {
+        int convdim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
+        size_t hist_bytes = sizeof(float) * (size_t)m->n_layer *
+                            (m->ssm_conv_kernel - 1) * convdim;
+        size_t state_bytes = sizeof(float) * (size_t)m->n_layer *
+                             m->ssm_v_heads * m->ssm_state * m->ssm_state;
+        if ((hist_bytes && cu.MemcpyDtoD(g->q35_hist_prev, g->q35_hist,
+                                        hist_bytes) != 0) ||
+            cu.MemcpyDtoD(g->q35_state_prev, g->q35_state, state_bytes) != 0)
+            return false;
+    }
     if (prof.on && !prof.inited) prof_init();
     prof.cur_mode = (n == 1) ? M_SINGLE : M_BATCH;
     int m_ = prof.cur_mode;
@@ -2134,6 +2328,13 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             !fwd_tile(g, m, tokens + i, tn, p,
                       want_logits && last && !partial, 0, m->gpu_layers)) {
             fprintf(stderr, "gpu: kernel launch failed — falling back to CPU\n");
+            return false;
+        }
+        if (getenv("RUNNER_CUDA_INJECT_FAILURE")) {
+            // Deterministic ownership/state-machine hook: fail after recurrent
+            // state changed, so the caller must restore the pre-forward device
+            // snapshot before recomputing this same tile on the CPU.
+            fprintf(stderr, "gpu: injected CUDA runtime failure — falling back to CPU\n");
             return false;
         }
         // partial: copy this tile's post-boundary activation to the host x

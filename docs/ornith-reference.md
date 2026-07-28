@@ -29,6 +29,13 @@ all 32 blocks, and the published hybrid pattern: three linear-attention blocks
 followed by one full-attention block. The official Q4_K_M contains 427 tensors:
 24 linear-attention blocks and 8 full-attention blocks.
 
+Runner executes both block types on CUDA: quantized projections reuse the
+generic matvec kernels, while native kernels advance the causal depthwise
+convolution and Gated DeltaNet state and apply the full-attention output gate.
+Both `ssm_dt` (older Ornith exports) and `ssm_dt.bias` (current Qwen3.5 GGUFs)
+are accepted. `tests/test_ornith_cpu.py` checks CPU/CUDA greedy identity and an
+injected post-state-update CUDA failure followed by correct CPU recomputation.
+
 ## Independent inference smoke
 
 Build a current llama.cpp outside this repository and pass its `llama-cli`

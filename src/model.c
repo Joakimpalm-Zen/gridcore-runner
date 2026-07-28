@@ -750,7 +750,11 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             l->ssm_beta  = need_tensor(g, "blk.%d.ssm_beta.weight", i, &ok);
             l->ssm_alpha = need_tensor(g, "blk.%d.ssm_alpha.weight", i, &ok);
             l->ssm_out   = need_tensor(g, "blk.%d.ssm_out.weight", i, &ok);
-            l->ssm_dt    = tensor_to_f32(need_tensor(g, "blk.%d.ssm_dt.bias", i, &ok), &ok);
+            // llama.cpp-era Ornith exports used `ssm_dt`; current Qwen3.5
+            // GGUFs use `ssm_dt.bias`. They carry the same per-head vector.
+            gguf_tensor *dt = opt_tensor(g, "blk.%d.ssm_dt.bias", i);
+            if (!dt) dt = need_tensor(g, "blk.%d.ssm_dt", i, &ok);
+            l->ssm_dt    = tensor_to_f32(dt, &ok);
             l->ssm_a     = tensor_to_f32(need_tensor(g, "blk.%d.ssm_a", i, &ok), &ok);
             l->ssm_norm_w = tensor_to_f32(need_tensor(g, "blk.%d.ssm_norm.weight", i, &ok), &ok);
             l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
@@ -1134,18 +1138,7 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     }
     if (!rope_setup(m, g, arch, p->rope_base, p->rope_scale)) return false;
 
-    // The existing GPU backends implement KV attention only. Keep Qwen3.5 on
-    // the correct CPU path until a native recurrent backend is available —
-    // and say so: a silent fallback reads as a mysteriously slow GPU run.
-    // (gemma-4 MoE now has a GPU dual-branch kernel, so it offloads normally.)
-    if (p->gpu_mode == GPU_AUTO && m->qwen35) {
-        char gname[128];
-        if (gpu_available(gname, sizeof(gname)))
-            fprintf(stderr, "gpu: %s has no kernels for the recurrent '%s' path — "
-                    "inference runs on the CPU (%d threads)\n", gname,
-                    m->arch, pool_threads);
-    }
-    if (p->gpu_mode == GPU_AUTO && !m->qwen35) {
+    if (p->gpu_mode == GPU_AUTO) {
         // Register the intended VRAM footprint before allocating any of it, so
         // a concurrent runner sees this claim rather than discovering it as a
         // mysteriously shrunken free figure. CPU-only runs never get here, so

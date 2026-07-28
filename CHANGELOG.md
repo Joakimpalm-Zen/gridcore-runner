@@ -11,6 +11,10 @@ protocol and CLI may still change between alpha releases.
 - `--caps` now advertises `tensor_placement.cpu_moe` for schedulers.
 - Current Qwen3.5 GGUFs that include declared NextN/MTP blocks in
   `block_count` now load only the autoregressive backbone.
+- Added native Qwen3.5/Ornith CUDA execution for recurrent Gated DeltaNet and
+  full-attention blocks, including causal convolution/state kernels, gated
+  attention, partial offload, pre-forward state snapshots for correct runtime
+  CPU fallback, and compatibility with both `ssm_dt` tensor spellings.
 
 ## v0.1.3-alpha — 2026-07-24
 

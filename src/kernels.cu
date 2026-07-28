@@ -1923,3 +1923,125 @@ extern "C" __global__ void k_scale(float *x, float s, int n, int xs) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[(ulong64)blockIdx.y * xs + i] *= s;
 }
+
+// ---------------------------------------------------------- Qwen3.5 hybrid
+// The generic matvec kernels above perform every learned projection.  These
+// small kernels implement only the architecture-specific stateful operators,
+// keeping the runtime compact and the quantized weight support in one place.
+
+// Qwen3.5 full-attention Q is stored head-interleaved as [Q_h, gate_h].
+extern "C" __global__ void k_q35_split_q(const float *packed, float *q,
+                                          float *gate, int heads, int hd,
+                                          int packed_stride, int q_stride) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int qdim = heads * hd;
+    if (i >= qdim) return;
+    int h = i / hd, j = i - h * hd;
+    const float *src = packed + (ulong64)blockIdx.y * packed_stride;
+    q[(ulong64)blockIdx.y * q_stride + i] = src[h * 2 * hd + j];
+    gate[(ulong64)blockIdx.y * q_stride + i] = src[h * 2 * hd + hd + j];
+}
+
+extern "C" __global__ void k_q35_attn_gate(float *x, const float *gate,
+                                            int n, int xs, int gs) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        ulong64 xo = (ulong64)blockIdx.y * xs + i;
+        ulong64 go = (ulong64)blockIdx.y * gs + i;
+        x[xo] *= 1.0f / (1.0f + expf(-gate[go]));
+    }
+}
+
+// One launch per token is intentional: convolution history is recurrent, so
+// prompt columns cannot update it concurrently. Each channel is independent.
+extern "C" __global__ void k_q35_conv(const float *mix, float *cv,
+                                       const float *weight, float *history,
+                                       int convdim, int kernel) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= convdim) return;
+    int histn = kernel - 1;
+    const float *cw = weight + (ulong64)c * kernel;
+    float sum = cw[histn] * mix[c];
+    for (int k = 0; k < histn; k++)
+        sum += cw[k] * history[(ulong64)k * convdim + c];
+    cv[c] = sum / (1.0f + expf(-sum));
+    for (int k = 0; k + 1 < histn; k++)
+        history[(ulong64)k * convdim + c] =
+            history[(ulong64)(k + 1) * convdim + c];
+    if (histn) history[(ulong64)(histn - 1) * convdim + c] = mix[c];
+}
+
+// One block per value head. The model geometry guarantees hv == state/key
+// width. State is [head][value-column][key-row], matching the CPU reference.
+extern "C" __global__ void k_q35_delta(float *cv, const float *z,
+                                        const float *beta_in,
+                                        const float *alpha_in,
+                                        const float *dt, const float *a,
+                                        const float *norm, float *state,
+                                        float *out, int state_dim, int groups,
+                                        int heads, float eps) {
+    __shared__ float red[256];
+    int tid = threadIdx.x, h = blockIdx.x;
+    if (h >= heads) return;
+    int keydim = state_dim * groups;
+    int group = h % groups;
+    float *q = cv + group * state_dim;
+    float *k = cv + keydim + group * state_dim;
+    const float *v = cv + 2 * keydim + h * state_dim;
+    float *st = state + (ulong64)h * state_dim * state_dim;
+    float *yo = out + h * state_dim;
+
+    float qs = 0.0f;
+    for (int i = tid; i < state_dim; i += blockDim.x) qs += q[i] * q[i];
+    red[tid] = qs;
+    __syncthreads();
+    for (int off = blockDim.x / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] += red[tid + off];
+        __syncthreads();
+    }
+    float qscale = rsqrtf(red[0] + eps);
+    float ks = 0.0f;
+    for (int i = tid; i < state_dim; i += blockDim.x) ks += k[i] * k[i];
+    red[tid] = ks;
+    __syncthreads();
+    for (int off = blockDim.x / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] += red[tid + off];
+        __syncthreads();
+    }
+    float kscale = rsqrtf(red[0] + eps);
+    float beta = 1.0f / (1.0f + expf(-beta_in[h]));
+    float av = alpha_in[h] + dt[h];
+    float softplus = av > 20.0f ? av : log1pf(expf(av));
+    float decay = expf(a[h] * softplus);
+
+    for (int j = tid; j < state_dim; j += blockDim.x) {
+        float *row = st + (ulong64)j * state_dim;
+        float pred = 0.0f;
+        for (int i = 0; i < state_dim; i++) {
+            row[i] *= decay;
+            pred += row[i] * (k[i] * kscale);
+        }
+        float delta = (v[j] - pred) * beta;
+        float y = 0.0f;
+        for (int i = 0; i < state_dim; i++) {
+            row[i] += delta * (k[i] * kscale);
+            y += row[i] * (q[i] * qscale);
+        }
+        yo[j] = y * rsqrtf((float)state_dim);
+    }
+    __syncthreads();
+    float ss = 0.0f;
+    for (int j = tid; j < state_dim; j += blockDim.x) ss += yo[j] * yo[j];
+    red[tid] = ss;
+    __syncthreads();
+    for (int off = blockDim.x / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] += red[tid + off];
+        __syncthreads();
+    }
+    float rms = rsqrtf(red[0] / state_dim + eps);
+    for (int j = tid; j < state_dim; j += blockDim.x) {
+        int o = h * state_dim + j;
+        float zv = z[o];
+        yo[j] = yo[j] * rms * norm[j] * (zv / (1.0f + expf(-zv)));
+    }
+}

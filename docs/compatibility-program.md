@@ -21,8 +21,11 @@ The matrix separates independent claims: file/load, Hugging Face tokenizer
 differential, llama.cpp reference generation, CPU/GPU identity, chat/tool use
 and long context. A report only marks checks that actually ran. The 2026-07-22
 run verified hashes and inference loads for all eight architecture targets and
-CPU/CUDA token identity for all seven GPU-capable targets. Qwen3.5/Ornith is
-CPU-only by design.
+CPU/CUDA token identity for the seven GPU-capable targets available at that
+time. Qwen3.5/Ornith gained native CUDA Gated DeltaNet support on 2026-07-28;
+its synthetic hybrid gate and local real-model Q4/Q8 smokes are CPU/GPU
+greedy-identical, while regeneration of the pinned full matrix remains a
+separate evidence run.
 
 Tokenizer references are exercised with the pinned `tokenizers` package and
 the committed 721-string corpus. Install
