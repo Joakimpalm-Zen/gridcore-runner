@@ -34,20 +34,22 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+typedef SOCKET sock_t;
+#define SOCK_INVALID INVALID_SOCKET
 static void sock_init(void) {
     WSADATA w;
     WSAStartup(MAKEWORD(2, 2), &w);
 }
-static int  sock_recv(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n, 0); }
-static int  sock_send(int fd, const char *buf, size_t n) { return send(fd, buf, (int)n, 0); }
-static int  sock_peek(int fd, char *buf, size_t n) { return recv(fd, buf, (int)n, MSG_PEEK); }
-static void sock_close(int fd) { closesocket(fd); }
-static void sock_recv_timeout(int fd, double s) {
+static int  sock_recv(sock_t fd, char *buf, size_t n) { return recv(fd, buf, (int)n, 0); }
+static int  sock_send(sock_t fd, const char *buf, size_t n) { return send(fd, buf, (int)n, 0); }
+static int  sock_peek(sock_t fd, char *buf, size_t n) { return recv(fd, buf, (int)n, MSG_PEEK); }
+static void sock_close(sock_t fd) { closesocket(fd); }
+static void sock_recv_timeout(sock_t fd, double s) {
     DWORD ms = (DWORD)(s * 1000.0);
     if (ms == 0) ms = 1; // 0 would mean "block forever" on winsock
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof(ms));
 }
-static void sock_send_timeout(int fd, double s) {
+static void sock_send_timeout(sock_t fd, double s) {
     DWORD ms = (DWORD)(s * 1000.0);
     if (ms == 0) ms = 1;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms, sizeof(ms));
@@ -59,19 +61,21 @@ static void sock_send_timeout(int fd, double s) {
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+typedef int sock_t;
+#define SOCK_INVALID (-1)
 static void sock_init(void) { signal(SIGPIPE, SIG_IGN); }
-static int  sock_recv(int fd, char *buf, size_t n) { return (int)read(fd, buf, n); }
-static int  sock_send(int fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
-static int  sock_peek(int fd, char *buf, size_t n) { return (int)recv(fd, buf, n, MSG_PEEK); }
-static void sock_close(int fd) { close(fd); }
-static void sock_recv_timeout(int fd, double s) {
+static int  sock_recv(sock_t fd, char *buf, size_t n) { return (int)read(fd, buf, n); }
+static int  sock_send(sock_t fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
+static int  sock_peek(sock_t fd, char *buf, size_t n) { return (int)recv(fd, buf, n, MSG_PEEK); }
+static void sock_close(sock_t fd) { close(fd); }
+static void sock_recv_timeout(sock_t fd, double s) {
     struct timeval tv;
     tv.tv_sec = (time_t)s;
     tv.tv_usec = (suseconds_t)((s - (double)tv.tv_sec) * 1e6);
     if (tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1000;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
-static void sock_send_timeout(int fd, double s) {
+static void sock_send_timeout(sock_t fd, double s) {
     struct timeval tv;
     tv.tv_sec = (time_t)s;
     tv.tv_usec = (suseconds_t)((s - (double)tv.tv_sec) * 1e6);
@@ -162,7 +166,7 @@ static bool parse_request_line(char *hdr, char method[8], char path[256],
 
 // ---------------------------------------------------------------- helpers
 
-static bool send_all(int fd, const char *s, size_t n) {
+static bool send_all(sock_t fd, const char *s, size_t n) {
     while (n > 0) {
         int w = sock_send(fd, s, n);
         if (w <= 0) return false;
@@ -172,7 +176,7 @@ static bool send_all(int fd, const char *s, size_t n) {
     return true;
 }
 
-static void send_response(int fd, int code, const char *ctype, const char *body,
+static void send_response(sock_t fd, int code, const char *ctype, const char *body,
                           size_t blen) {
     char hdr[256];
     const char *msg = code == 200 ? "OK" : code == 400 ? "Bad Request" :
@@ -188,14 +192,14 @@ static void send_response(int fd, int code, const char *ctype, const char *body,
 // Send a built JSON body, or 500 if the builder ran out of memory. A short
 // body that still parses as success is worse than an error: the client cannot
 // tell anything went wrong.
-static void send_error(int fd, int code, const char *message);
+static void send_error(sock_t fd, int code, const char *message);
 
-static void send_built(int fd, sbuf *b) {
+static void send_built(sock_t fd, sbuf *b) {
     if (b->failed) send_error(fd, 500, "out of memory building response");
     else send_response(fd, 200, "application/json", b->s, b->n);
 }
 
-static void send_error(int fd, int code, const char *message) {
+static void send_error(sock_t fd, int code, const char *message) {
     char body[512], esc[384];
     json_escape(message, strlen(message), esc, sizeof(esc));
     int n = snprintf(body, sizeof(body),
@@ -218,7 +222,7 @@ typedef struct {
 } slot_t;
 
 typedef struct {
-    int  fds[512];
+    sock_t fds[512];
     int  head, tail, count, limit;
     bool shutdown;
     pthread_mutex_t mu;
@@ -327,7 +331,7 @@ static void unload_draft(void) {
 // caller — /unload exists so an operator can reclaim memory, and "scheduled"
 // answered now beats "done" answered after a 300s --wait-for-vram queue. An
 // in-flight load is additionally cancelled at its next wait poll.
-static void handle_unload(int fd) {
+static void handle_unload(sock_t fd) {
     bool deferred = false;
     if (SV.n_reg > 0) {
         pthread_mutex_lock(&SV.swap_mu);
@@ -509,12 +513,12 @@ static bool init_swap_runtime(const model_params *mp, int n_threads, int ttl) {
 // is told it was shed rather than having its connection dropped silently,
 // because "503, retry" is something an agent runtime can act on and an
 // unexplained EOF is not.
-static void q_push(int fd) {
+static void q_push(sock_t fd) {
     pthread_mutex_lock(&SV.q.mu);
     bool room = SV.q.count < SV.q.limit;
     if (room) {
         SV.q.fds[SV.q.tail] = fd;
-        SV.q.tail = (SV.q.tail + 1) % (int)(sizeof(SV.q.fds) / sizeof(int));
+        SV.q.tail = (SV.q.tail + 1) % (int)(sizeof(SV.q.fds) / sizeof(sock_t));
         SV.q.count++;
         pthread_cond_signal(&SV.q.cv);
     }
@@ -525,14 +529,14 @@ static void q_push(int fd) {
     }
 }
 
-static int q_pop(void) {
+static sock_t q_pop(void) {
     pthread_mutex_lock(&SV.q.mu);
     while (SV.q.count == 0 && !SV.q.shutdown)
         pthread_cond_wait(&SV.q.cv, &SV.q.mu);
-    int fd = -1;
+    sock_t fd = SOCK_INVALID;
     if (SV.q.count > 0) {
         fd = SV.q.fds[SV.q.head];
-        SV.q.head = (SV.q.head + 1) % (int)(sizeof(SV.q.fds) / sizeof(int));
+        SV.q.head = (SV.q.head + 1) % (int)(sizeof(SV.q.fds) / sizeof(sock_t));
         SV.q.count--;
     }
     pthread_mutex_unlock(&SV.q.mu);
@@ -1709,7 +1713,7 @@ static bool request_json_mode(jv *req) {
 // `env` is the strict tool-call envelope when the request opted into one; it
 // replaces the response_format schema, having already absorbed it as the
 // shape of its `final` branch.
-static void run_completion(slot_t *s, int fd, const char *prompt, int api,
+static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            jv *req, const tool_envelope *env) {
     bool chat = api != API_TEXT; // chat-shaped: thinking channels, tools
     model_t *m = s->m;
@@ -2330,7 +2334,7 @@ static char *message_text(jv *msg, int tmpl) {
     return b.s;
 }
 
-static void handle_chat(slot_t *s, int fd, jv *req) {
+static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     jv *msgs = jv_get(req, "messages");
     if (!msgs || msgs->type != J_ARR || msgs->n == 0) {
         send_error(fd, 400, "missing messages");
@@ -2640,7 +2644,7 @@ static char *responses_item_text(jv *item, const char **role) {
 // Stateful Responses features this runtime has no store behind. Refusing them
 // is the project invariant: a client that asked the server to remember a turn
 // and got a 200 would believe it did.
-static bool responses_reject_stateful(int fd, jv *req) {
+static bool responses_reject_stateful(sock_t fd, jv *req) {
     jv *v = jv_get(req, "previous_response_id");
     if (v && v->type != J_NULL) {
         send_error(fd, 400,
@@ -2703,7 +2707,7 @@ static bool responses_reject_stateful(int fd, jv *req) {
     return false;
 }
 
-static void handle_responses(slot_t *s, int fd, jv *req) {
+static void handle_responses(slot_t *s, sock_t fd, jv *req) {
     if (responses_reject_stateful(fd, req)) return;
 
     jv *input = jv_get(req, "input");
@@ -3117,7 +3121,7 @@ static jv *anth_tool_choice(jv *tc, char *err, int errcap) {
 
 // Features with no local implementation. Refusing them is the project
 // invariant: a client told 200 believes the thing it asked for happened.
-static bool anth_reject_unsupported(slot_t *s, int fd, jv *req) {
+static bool anth_reject_unsupported(slot_t *s, sock_t fd, jv *req) {
     jv *v = jv_get(req, "mcp_servers");
     if (v && v->type == J_ARR && v->n > 0) {
         send_error(fd, 400,
@@ -3173,7 +3177,7 @@ static bool anth_reject_unsupported(slot_t *s, int fd, jv *req) {
 //
 // Returns a heap prompt on success (caller frees) with *strict/*env set, or
 // NULL having already answered `fd` with the error.
-static char *messages_prompt(slot_t *s, int fd, jv *req, tool_envelope *env,
+static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
                              bool *strict) {
     char terr[224];
     *strict = false;
@@ -3286,7 +3290,7 @@ static char *messages_prompt(slot_t *s, int fd, jv *req, tool_envelope *env,
     return prompt;
 }
 
-static void handle_messages(slot_t *s, int fd, jv *req) {
+static void handle_messages(slot_t *s, sock_t fd, jv *req) {
     if (anth_reject_unsupported(s, fd, req)) return;
     // max_tokens is required on this surface, unlike the OpenAI ones where it
     // defaults. A caller that forgot it wants a cap, not the server's.
@@ -3307,7 +3311,7 @@ static void handle_messages(slot_t *s, int fd, jv *req) {
 // POST /v1/messages/count_tokens: how many input tokens this exact request
 // would have cost. It runs the whole inbound translation and stops before
 // generation, so the answer is the prompt the request would really have used.
-static void handle_count_tokens(slot_t *s, int fd, jv *req) {
+static void handle_count_tokens(slot_t *s, sock_t fd, jv *req) {
     if (anth_reject_unsupported(s, fd, req)) return;
     tool_envelope env;
     bool strict = false;
@@ -3327,13 +3331,13 @@ static void handle_count_tokens(slot_t *s, int fd, jv *req) {
     free(r.s);
 }
 
-static void handle_completion(slot_t *s, int fd, jv *req) {
+static void handle_completion(slot_t *s, sock_t fd, jv *req) {
     const char *prompt = jv_str(jv_get(req, "prompt"), NULL);
     if (!prompt) { send_error(fd, 400, "missing prompt"); return; }
     run_completion(s, fd, prompt, API_TEXT, req, NULL);
 }
 
-static void handle_embeddings(slot_t *s, int fd, jv *req) {
+static void handle_embeddings(slot_t *s, sock_t fd, jv *req) {
     jv *input = jv_get(req, "input");
     const char *one = jv_str(input, NULL);
     int n_in = one ? 1 : (input && input->type == J_ARR ? input->n : 0);
@@ -3412,7 +3416,7 @@ static void handle_embeddings(slot_t *s, int fd, jv *req) {
 
 // /health and /v1/models read only startup-immutable strings plus an atomic
 // resident snapshot, so they are safe to answer from the accept thread with no lock
-static void send_health(int fd) {
+static void send_health(sock_t fd) {
     char b[384];
     int n, res = resident_load();
     if (SV.n_reg > 0 && res >= 0) {
@@ -3427,7 +3431,7 @@ static void send_health(int fd) {
     send_response(fd, 200, "application/json", b, n);
 }
 
-static void send_models(int fd) {
+static void send_models(sock_t fd) {
     sbuf r = {0};
     sb_lit(&r, "{\"object\":\"list\",\"data\":[");
     if (SV.n_reg > 0) {
@@ -3451,7 +3455,7 @@ static void send_models(int fd) {
 // request saved; this says whether the cache is earning its memory —
 // hit rate, resident bytes against the budget, and the prefill time it has
 // avoided so far.
-static void send_prefix_cache(int fd) {
+static void send_prefix_cache(sock_t fd) {
     prefix_cache_stats st;
     prefix_cache_stats_get(&st);
     char b[640];
@@ -3470,7 +3474,7 @@ static void send_prefix_cache(int fd) {
     send_response(fd, 200, "application/json", b, n);
 }
 
-static void send_capabilities(int fd) {
+static void send_capabilities(sock_t fd) {
     sbuf r = {0};
     int res = resident_load();
     sb_lit(&r, "{\"object\":\"runner.capabilities\",\"swap\":");
@@ -3531,7 +3535,7 @@ static void send_capabilities(int fd) {
     free(r.s);
 }
 
-static void handle_conn(slot_t *s, int fd) {
+static void handle_conn(slot_t *s, sock_t fd) {
     // a stalled or dead client must not pin an inference slot: the whole
     // request (header + body) has to arrive within this budget. Generation
     // time stays unbounded — the deadline only covers reading the request.
@@ -3715,8 +3719,8 @@ static void handle_conn(slot_t *s, int fd) {
 static void *slot_worker(void *arg) {
     slot_t *s = arg;
     for (;;) {
-        int fd = q_pop();
-        if (fd < 0) return NULL;
+        sock_t fd = q_pop();
+        if (fd == SOCK_INVALID) return NULL;
         handle_conn(s, fd);
         sock_close(fd);
     }
@@ -3728,7 +3732,7 @@ static void *slot_worker(void *arg) {
 // frees anything a slot is using (handle_unload defers under an active load
 // or generation), and an operator reclaiming memory must not queue behind
 // the very work that holds it. POSTs are handed to a slot untouched.
-static bool accept_fastpath(int fd) {
+static bool accept_fastpath(sock_t fd) {
 #ifndef _WIN32
     // POSIX fd_set is a fixed-size bitmask indexed by fd value; FD_SET on an
     // fd >= FD_SETSIZE is undefined behavior (out-of-bounds write). Windows
@@ -3881,12 +3885,13 @@ static bool stop_was_requested(void) { return win_stop_requested != 0; }
 #endif
 
 static void queue_shutdown(void) {
-    int pending[512], n = 0;
+    sock_t pending[512];
+    int n = 0;
     pthread_mutex_lock(&SV.q.mu);
     SV.q.shutdown = true;
     while (SV.q.count > 0) {
         pending[n++] = SV.q.fds[SV.q.head];
-        SV.q.head = (SV.q.head + 1) % (int)(sizeof(SV.q.fds) / sizeof(int));
+        SV.q.head = (SV.q.head + 1) % (int)(sizeof(SV.q.fds) / sizeof(sock_t));
         SV.q.count--;
     }
     pthread_cond_broadcast(&SV.q.cv);
@@ -4005,7 +4010,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     if (bsname && (!name || bsname > name)) name = bsname;
     SV.model_name = SV.n_reg > 0 ? SV.reg[0].name : (name ? name + 1 : model_path);
     SV.n_predict_cap = 1024;
-    SV.q.limit = (int)(sizeof(SV.q.fds) / sizeof(int));
+    SV.q.limit = (int)(sizeof(SV.q.fds) / sizeof(sock_t));
     // a queue bound may only lower the fixed fd capacity, never raise it
     SV.q.limit = (int)env_i64("RUNNER_MAX_QUEUE", 1, SV.q.limit, SV.q.limit);
     // a bad timeout must not silently become 0 (which disables the deadline)
@@ -4134,8 +4139,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         return 0;
     }
 
-    int lfd = (int)socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) {
+    sock_t lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd == SOCK_INVALID) {
         fprintf(stderr, "error: cannot create server socket\n");
         return 1;
     }
@@ -4158,7 +4163,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 #ifndef _WIN32
     listener_fd = lfd;
 #else
-    win_listener_socket = (SOCKET)lfd;
+    win_listener_socket = lfd;
 #endif
 
     // Every slot's model exists now, which is the only precondition the batch
@@ -4197,8 +4202,8 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         // A signal landing after this check finds listener_fd published and
         // closes it, so accept() fails; no window remains.
         if (stop_was_requested()) break;
-        int cfd = (int)accept(lfd, NULL, NULL);
-        if (cfd < 0) {
+        sock_t cfd = accept(lfd, NULL, NULL);
+        if (cfd == SOCK_INVALID) {
 #ifndef _WIN32
             if (stop_requested) break;
 #else

@@ -155,6 +155,24 @@ static void test_no_option_reaches_the_bind_address(void) {
     }
 }
 
+static void test_windows_socket_handles_are_not_truncated(void) {
+    char *src = slurp("src/server.c");
+    static const struct { const char *sym, *why; } forbidden[] = {
+        { "(int)socket(", "A Windows SOCKET is pointer-sized and must not be stored in int." },
+        { "(int)accept(", "Accepted Windows SOCKET handles are pointer-sized." },
+        { "(SOCKET)lfd",  "Casting back from an int listener cannot recover truncated bits." },
+        { "static int  sock_recv(int fd", "Socket helpers must take sock_t, not int." },
+        { "static int  sock_send(int fd", "Socket helpers must take sock_t, not int." },
+        { "int  fds[512]", "The admission queue must store sock_t handles." },
+        { "static int q_pop", "Queue pop must return sock_t, not int." },
+    };
+    for (size_t i = 0; i < sizeof forbidden / sizeof *forbidden; i++)
+        must_not_contain(src, "src/server.c", forbidden[i].sym, forbidden[i].why);
+    must_contain(src, "src/server.c", "typedef SOCKET sock_t;");
+    must_contain(src, "src/server.c", "typedef int sock_t;");
+    free(src);
+}
+
 // The same check through the shipped binary, so a flag added anywhere at all
 // (a new file, a table, a generated parser) still trips the gate. Skipped with
 // a notice when the binary is absent — `make test` and both CI jobs build it
@@ -230,6 +248,7 @@ static void test_binary_rejects_a_host_option(void) {
 int main(void) {
     test_bind_address_is_a_literal_loopback_constant();
     test_no_option_reaches_the_bind_address();
+    test_windows_socket_handles_are_not_truncated();
     test_binary_rejects_a_host_option();
     puts("loopback bind invariant ok");
     return 0;
