@@ -28,6 +28,55 @@ typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
 typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; } attn_args;
 
+static void gpu_release_state(gpu_t *g, int n_layer) {
+    if (!g) return;
+    for (int l = 0; l < n_layer; l++) {
+        if (g->attn_norm) [g->attn_norm[l] release];
+        if (g->ffn_norm)  [g->ffn_norm[l] release];
+        if (g->bq) [g->bq[l] release];
+        if (g->bk) [g->bk[l] release];
+        if (g->bv) [g->bv[l] release];
+        if (g->bo) [g->bo[l] release];
+        if (g->qn) [g->qn[l] release];
+        if (g->kn) [g->kn[l] release];
+    }
+    free(g->attn_norm); free(g->ffn_norm);
+    free(g->bq); free(g->bk); free(g->bv); free(g->bo);
+    free(g->qn); free(g->kn);
+    id<MTLBuffer> bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
+                             g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
+                             g->logits, g->inv_freq, g->out_norm, g->dummy };
+    for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
+    for (int i = 0; i < 32; i++) [g->p_mv[i] release];
+    [g->p_rmsnorm release]; [g->p_qknorm release]; [g->p_rope release];
+    [g->p_store release]; [g->p_attn release]; [g->p_silu release];
+    [g->p_add release];
+    [g->queue release];
+    [g->dev release];
+    free(g);
+}
+
+static bool metal_init_injected(const char *point) {
+    const char *inject = getenv("RUNNER_METAL_INIT_INJECT_FAILURE");
+    return inject && *inject && strcmp(inject, "0") &&
+           (!strcmp(inject, "always") || !strcmp(inject, point));
+}
+
+static bool gpu_init_fail(model_t *m, gpu_t *g, id<MTLLibrary> lib,
+                          const char *why) {
+    if (why && *why)
+        fprintf(stderr, "gpu: Metal initialization failed (%s) — using CPU\n", why);
+    else
+        fprintf(stderr, "gpu: Metal initialization failed — using CPU\n");
+    if (lib) [lib release];
+    gpu_release_state(g, m ? m->n_layer : 0);
+    return false;
+}
+
+static bool metal_buffer_ok(id<MTLBuffer> b) {
+    return b != nil && b.contents != NULL;
+}
+
 bool gpu_available(char *name, int cap) {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
     if (!dev) return false;
@@ -158,10 +207,16 @@ bool gpu_init(model_t *m) {
     if (!lib) {
         fprintf(stderr, "gpu: shader compile failed: %s\n",
                 err.localizedDescription.UTF8String);
+        [dev release];
         return false;
     }
 
     gpu_t *g = calloc(1, sizeof(gpu_t));
+    if (!g) {
+        [lib release];
+        [dev release];
+        return false;
+    }
     g->dev = dev;
     g->queue = [dev newCommandQueue];
     g->p_rmsnorm      = mk_pipeline(dev, lib, @"k_rmsnorm");
@@ -182,11 +237,16 @@ bool gpu_init(model_t *m) {
     g->p_mv[T_Q5_K]   = mk_pipeline(dev, lib, @"k_mv_q5_K");
     g->p_mv[T_Q6_K]   = mk_pipeline(dev, lib, @"k_mv_q6_K");
     [lib release];
+    lib = nil;
     if (!g->p_rmsnorm || !g->p_rope || !g->p_store || !g->p_attn ||
-        !g->p_silu || !g->p_add || !g->p_mv[T_F32] || !g->p_mv[T_Q4_K]) {
-        free(g);
-        return false;
-    }
+        !g->p_silu || !g->p_add || !g->queue || !g->p_qknorm ||
+        !g->p_mv[T_F32] || !g->p_mv[T_F16] || !g->p_mv[T_Q8_0] ||
+        !g->p_mv[T_Q4_0] || !g->p_mv[T_Q4_1] ||
+        !g->p_mv[T_Q5_0] || !g->p_mv[T_Q5_1] ||
+        !g->p_mv[T_Q4_K] || !g->p_mv[T_Q5_K] || !g->p_mv[T_Q6_K])
+        return gpu_init_fail(m, g, lib, "pipeline allocation");
+    if (metal_init_injected("state"))
+        return gpu_init_fail(m, g, lib, "injected state allocation failure");
 
     // weights: wrap the mmap zero-copy (page aligned; length page-rounded —
     // mmap always maps whole pages, so the rounded tail is valid memory)
@@ -202,7 +262,8 @@ bool gpu_init(model_t *m) {
                                       length:m->gf.map_size
                                      options:MTLResourceStorageModeShared];
         g->weights_copied = true;
-        if (!g->weights) { free(g); return false; }
+        if (!g->weights)
+            return gpu_init_fail(m, g, lib, "weight buffer allocation");
     }
 
     int q_dim  = m->n_head * m->head_dim;
@@ -213,13 +274,12 @@ bool gpu_init(model_t *m) {
     #define NEWBUF(n) [dev newBufferWithLength:(n) options:MTLResourceStorageModeShared]
     g->kc = NEWBUF(kv_bytes);
     g->vc = NEWBUF(kv_bytes);
+    if (!metal_buffer_ok(g->kc) || !metal_buffer_ok(g->vc))
+        return gpu_init_fail(m, g, lib, "KV buffer allocation");
     memset(g->kc.contents, 0, kv_bytes);
     memset(g->vc.contents, 0, kv_bytes);
-    // CPU batch prompt processing writes the same cache through these pointers
-    free(m->kcache); free(m->vcache);
-    m->kcache = (f16_t *)g->kc.contents;
-    m->vcache = (f16_t *)g->vc.contents;
-    m->kv_owner = KV_OWNER_GPU_BACKEND;
+    if (metal_init_injected("after-kv"))
+        return gpu_init_fail(m, g, lib, "injected post-KV allocation failure");
 
     g->x      = NEWBUF(sizeof(float) * m->n_embd);
     g->xb     = NEWBUF(sizeof(float) * xdim);
@@ -233,9 +293,18 @@ bool gpu_init(model_t *m) {
     g->logits = NEWBUF(sizeof(float) * m->n_vocab);
     g->dummy  = NEWBUF(4);
     #undef NEWBUF
+    if (!metal_buffer_ok(g->x) || !metal_buffer_ok(g->xb) ||
+        !metal_buffer_ok(g->xb2) || !metal_buffer_ok(g->q) ||
+        !metal_buffer_ok(g->kt) || !metal_buffer_ok(g->vt) ||
+        !metal_buffer_ok(g->hb) || !metal_buffer_ok(g->hb2) ||
+        !metal_buffer_ok(g->att) || !metal_buffer_ok(g->logits) ||
+        !metal_buffer_ok(g->dummy))
+        return gpu_init_fail(m, g, lib, "scratch buffer allocation");
 
     g->inv_freq = f32_buf(dev, m->rope_inv_freq, m->rope_dim / 2);
     g->out_norm = f32_buf(dev, m->out_norm_w, m->n_embd);
+    if (!metal_buffer_ok(g->inv_freq) || !metal_buffer_ok(g->out_norm))
+        return gpu_init_fail(m, g, lib, "shared constant allocation");
     g->attn_norm = calloc(m->n_layer, sizeof(id));
     g->ffn_norm  = calloc(m->n_layer, sizeof(id));
     g->bq = calloc(m->n_layer, sizeof(id));
@@ -244,6 +313,9 @@ bool gpu_init(model_t *m) {
     g->bo = calloc(m->n_layer, sizeof(id));
     g->qn = calloc(m->n_layer, sizeof(id));
     g->kn = calloc(m->n_layer, sizeof(id));
+    if (!g->attn_norm || !g->ffn_norm || !g->bq || !g->bk || !g->bv ||
+        !g->bo || !g->qn || !g->kn)
+        return gpu_init_fail(m, g, lib, "per-layer table allocation");
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
         g->attn_norm[l] = f32_buf(dev, ly->attn_norm_w, m->n_embd);
@@ -254,8 +326,24 @@ bool gpu_init(model_t *m) {
         g->bo[l] = f32_buf(dev, ly->bo, m->n_embd);
         g->qn[l] = f32_buf(dev, ly->qnorm_w, m->head_dim);
         g->kn[l] = f32_buf(dev, ly->knorm_w, m->head_dim);
+        if (!metal_buffer_ok(g->attn_norm[l]) ||
+            !metal_buffer_ok(g->ffn_norm[l]) ||
+            (ly->bq && !metal_buffer_ok(g->bq[l])) ||
+            (ly->bk && !metal_buffer_ok(g->bk[l])) ||
+            (ly->bv && !metal_buffer_ok(g->bv[l])) ||
+            (ly->bo && !metal_buffer_ok(g->bo[l])) ||
+            (ly->qnorm_w && !metal_buffer_ok(g->qn[l])) ||
+            (ly->knorm_w && !metal_buffer_ok(g->kn[l])))
+            return gpu_init_fail(m, g, lib, "per-layer buffer allocation");
     }
 
+    // CPU batch prompt processing writes the same cache through these pointers,
+    // but do not detach the malloc-owned cache until every Metal allocation has
+    // succeeded. Any failure above falls back with the CPU KV still intact.
+    free(m->kcache); free(m->vcache);
+    m->kcache = (f16_t *)g->kc.contents;
+    m->vcache = (f16_t *)g->vc.contents;
+    m->kv_owner = KV_OWNER_GPU_BACKEND;
     m->gpu = g;
     m->gpu_owner = g;
     // Metal always runs the whole model; without this the dispatcher takes the
@@ -383,29 +471,7 @@ void gpu_free(model_t *m) {
         m->vcache = NULL;
         m->kv_owner = KV_OWNER_MALLOC;
     }
-    for (int l = 0; l < m->n_layer; l++) {
-        if (g->attn_norm) [g->attn_norm[l] release];
-        if (g->ffn_norm)  [g->ffn_norm[l] release];
-        if (g->bq) [g->bq[l] release];
-        if (g->bk) [g->bk[l] release];
-        if (g->bv) [g->bv[l] release];
-        if (g->bo) [g->bo[l] release];
-        if (g->qn) [g->qn[l] release];
-        if (g->kn) [g->kn[l] release];
-    }
-    free(g->attn_norm); free(g->ffn_norm);
-    free(g->bq); free(g->bk); free(g->bv); free(g->bo);
-    free(g->qn); free(g->kn);
-    id<MTLBuffer> bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
-                             g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
-                             g->logits, g->inv_freq, g->out_norm, g->dummy };
-    for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
-    for (int i = 0; i < 32; i++) [g->p_mv[i] release];
-    [g->p_rmsnorm release]; [g->p_qknorm release]; [g->p_rope release]; [g->p_store release];
-    [g->p_attn release]; [g->p_silu release]; [g->p_add release];
-    [g->queue release];
-    [g->dev release];
-    free(g);
+    gpu_release_state(g, m->n_layer);
 }
 
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,

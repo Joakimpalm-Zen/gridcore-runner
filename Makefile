@@ -237,12 +237,17 @@ test-metal-fallback: runner test.gguf
 ifeq ($(shell uname -s),Darwin)
 	$(MAKE) --no-print-directory $(TEST_METAL_OWNERSHIP)
 	./$(TEST_METAL_OWNERSHIP)
-	@if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu off > metal-cpu.out 2>/dev/null; \
 		env RUNNER_METAL_INJECT_FAILURE=once MallocScribble=1 MallocGuardEdges=1 \
 		    ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-fallback.out 2> metal-fallback.err; \
 		cmp -s metal-cpu.out metal-fallback.out; \
 		grep -q "falling back to CPU" metal-fallback.err; \
+		env RUNNER_METAL_INIT_INJECT_FAILURE=after-kv MallocScribble=1 MallocGuardEdges=1 \
+		    ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-init-fallback.out 2> metal-init-fallback.err; \
+		cmp -s metal-cpu.out metal-init-fallback.out; \
+		grep -q "Metal initialization failed" metal-init-fallback.err; \
 		echo "metal fallback ownership ok"; \
 	else \
 		echo "metal fallback runtime smoke skipped: no Metal device reported by --caps"; \
@@ -399,6 +404,7 @@ clean:
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
+	rm -f metal-init-fallback.out metal-init-fallback.err
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 
