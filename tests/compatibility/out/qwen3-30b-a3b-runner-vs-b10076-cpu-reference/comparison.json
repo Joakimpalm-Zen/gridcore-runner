@@ -1,0 +1,1996 @@
+{
+  "schema_version": "gridcore.runner.llamacpp-comparison.v1",
+  "generated_utc": "2026-07-28T09:18:10Z",
+  "status": "complete",
+  "real_results": "captured",
+  "model": {
+    "path": "/home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+    "sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+    "bytes": 18556685824
+  },
+  "settings": {
+    "prompt": "The capital of France is",
+    "context": 4096,
+    "tokens": 128,
+    "temperature": 0,
+    "top_p": 1,
+    "sampling": "greedy",
+    "quantization": "Q4_K_M"
+  },
+  "hardware": {
+    "system": "Linux-6.12.0-211.16.1.el10_2.x86_64-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "processor": "x86_64",
+    "python": "3.13.14",
+    "nvidia_smi": [
+      {
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "driver_version": "610.43.02",
+        "memory_used_mib": null,
+        "memory_free_mib": null,
+        "memory_total_mib": null
+      }
+    ]
+  },
+  "runner": {
+    "version": "runner 0.1.3-alpha",
+    "commit": "dd14c11d06bf5baead49b41ff2ba3a04cd7cca22",
+    "command": [
+      "/home/lab/workspace/Gridcore/gridcore-runner/runner",
+      "-m",
+      "/home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "--serve",
+      "--port",
+      "40617",
+      "-c",
+      "4096",
+      "--gpu",
+      "auto",
+      "-n",
+      "128"
+    ],
+    "bench_json": {
+      "command": [
+        "/home/lab/workspace/Gridcore/gridcore-runner/runner",
+        "-m",
+        "/home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+        "-p",
+        "The capital of France is",
+        "-c",
+        "4096",
+        "-n",
+        "128",
+        "--temp",
+        "0",
+        "--bench-json",
+        "--gpu",
+        "auto"
+      ],
+      "returncode": 0,
+      "stdout": "{\"model\":\"/home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf\",\"arch\":\"qwen3moe\",\"context\":4096,\"gpu_layers\":48,\"layers\":48,\"prompt_tokens\":5,\"generated_tokens\":128,\"prompt_tok_s\":65.194,\"gen_tok_s\":56.954}\n",
+      "stderr": "gpu-split: budget=25.13GB fixed=0.72GB G=48/48 full=1 used=19.24GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (18.6 GB weights in VRAM)\ngpu: VRAM 6.16 GB free of 25.37 GB after init (kv 0.40 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf | qwen3moe | 48 layers | ctx 4096 | 64 threads | 1.44s\nsampling: qwen3 (temp 0.00, top_p 0.95, top_k 20, min_p 0.00, repeat_penalty 1.00)\n",
+      "parsed": {
+        "model": "/home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+        "arch": "qwen3moe",
+        "context": 4096,
+        "gpu_layers": 48,
+        "layers": 48,
+        "prompt_tokens": 5,
+        "generated_tokens": 128,
+        "prompt_tok_s": 65.194,
+        "gen_tok_s": 56.954
+      }
+    },
+    "label": "runner",
+    "response": {
+      "id": "cmpl-0",
+      "object": "text_completion",
+      "created": 1785230269,
+      "model": "Qwen3-30B-A3B-Q4_K_M.gguf",
+      "choices": [
+        {
+          "index": 0,
+          "text": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Canada is Ottawa. The capital of Australia is Canberra. The capital of Japan is Tokyo. The capital of China is Beijing. The capital of India is New Delhi. The capital of Russia is Moscow. The capital of Mexico is Mexico City. The capital of Argentina is Buenos Aires. The capital of Egypt is Cairo. The capital of South Africa is Pretoria. The",
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 5,
+        "completion_tokens": 128,
+        "total_tokens": 133
+      },
+      "runner_telemetry": {
+        "prompt_cached_tokens": 0,
+        "prompt_forked_tokens": 0,
+        "prompt_eval_tokens": 5,
+        "prefix_cache_saved_seconds": 0.0,
+        "generation_seconds": 2.261625,
+        "generation_tok_s": 56.596,
+        "json_mode": false,
+        "schema": false,
+        "speculative": false
+      }
+    },
+    "generated_text": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Canada is Ottawa. The capital of Australia is Canberra. The capital of Japan is Tokyo. The capital of China is Beijing. The capital of India is New Delhi. The capital of Russia is Moscow. The capital of Mexico is Mexico City. The capital of Argentina is Buenos Aires. The capital of Egypt is Cairo. The capital of South Africa is Pretoria. The",
+    "stream_text": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Canada is Ottawa. The capital of Australia is Canberra. The capital of Japan is Tokyo. The capital of China is Beijing. The capital of India is New Delhi. The capital of Russia is Moscow. The capital of Mexico is Mexico City. The capital of Argentina is Buenos Aires. The capital of Egypt is Cairo. The capital of South Africa is Pretoria. The",
+    "metrics": {
+      "prompt_tok_s": 65.194,
+      "decode_tok_s": 56.954,
+      "prompt_ms": null,
+      "decode_ms": null,
+      "generated_tokens": 128,
+      "request_wall_s": 2.3404163460072596,
+      "time_to_first_token_s": 0.01820782700087875,
+      "context": 4096
+    },
+    "top_logprobs": {
+      "status": "captured",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "The capital of France is"
+          }
+        ],
+        "max_tokens": 8,
+        "temperature": 0,
+        "logprobs": true,
+        "top_logprobs": 5
+      },
+      "positions": [
+        {
+          "token": "<think>",
+          "logprob": -0.001335,
+          "top_logprobs": [
+            {
+              "token": "<think>",
+              "logprob": -0.001335
+            },
+            {
+              "token": "Generate",
+              "logprob": -9.322225
+            },
+            {
+              "token": "query",
+              "logprob": -9.44413
+            },
+            {
+              "token": "The",
+              "logprob": -9.878524
+            },
+            {
+              "token": "/ge",
+              "logprob": -10.141369
+            }
+          ]
+        },
+        {
+          "token": "\n",
+          "logprob": 0.0,
+          "top_logprobs": [
+            {
+              "token": "\n",
+              "logprob": 0.0
+            },
+            {
+              "token": "\n\n\n",
+              "logprob": -14.944267
+            },
+            {
+              "token": "\n\n",
+              "logprob": -15.219845
+            },
+            {
+              "token": "  \n",
+              "logprob": -19.280033
+            },
+            {
+              "token": " \n",
+              "logprob": -20.663244
+            }
+          ]
+        },
+        {
+          "token": "Okay",
+          "logprob": -0.000114,
+          "top_logprobs": [
+            {
+              "token": "Okay",
+              "logprob": -0.000114
+            },
+            {
+              "token": "Alright",
+              "logprob": -9.076279
+            },
+            {
+              "token": "okay",
+              "logprob": -16.379175
+            },
+            {
+              "token": "OK",
+              "logprob": -16.404507
+            },
+            {
+              "token": " Okay",
+              "logprob": -17.092054
+            }
+          ]
+        },
+        {
+          "token": ",",
+          "logprob": 0.0,
+          "top_logprobs": [
+            {
+              "token": ",",
+              "logprob": 0.0
+            },
+            {
+              "token": ",\"",
+              "logprob": -22.411673
+            },
+            {
+              "token": "\u060c",
+              "logprob": -22.607811
+            },
+            {
+              "token": "\uff0c",
+              "logprob": -22.830254
+            },
+            {
+              "token": ",\n",
+              "logprob": -23.125729
+            }
+          ]
+        },
+        {
+          "token": " the",
+          "logprob": -0.180138,
+          "top_logprobs": [
+            {
+              "token": " the",
+              "logprob": -0.180138
+            },
+            {
+              "token": " so",
+              "logprob": -1.807343
+            },
+            {
+              "token": " I",
+              "logprob": -7.257156
+            },
+            {
+              "token": " let",
+              "logprob": -10.041058
+            },
+            {
+              "token": " what",
+              "logprob": -12.723679
+            }
+          ]
+        },
+        {
+          "token": " user",
+          "logprob": -0.000179,
+          "top_logprobs": [
+            {
+              "token": " user",
+              "logprob": -0.000179
+            },
+            {
+              "token": " question",
+              "logprob": -8.627209
+            },
+            {
+              "token": " capital",
+              "logprob": -15.672026
+            },
+            {
+              "token": " person",
+              "logprob": -16.648663
+            },
+            {
+              "token": " query",
+              "logprob": -17.697803
+            }
+          ]
+        },
+        {
+          "token": " is",
+          "logprob": -0.009663,
+          "top_logprobs": [
+            {
+              "token": " is",
+              "logprob": -0.009663
+            },
+            {
+              "token": " asked",
+              "logprob": -4.64455
+            },
+            {
+              "token": " just",
+              "logprob": -12.837326
+            },
+            {
+              "token": " asks",
+              "logprob": -15.325424
+            },
+            {
+              "token": "'s",
+              "logprob": -15.366989
+            }
+          ]
+        },
+        {
+          "token": " asking",
+          "logprob": 0.0,
+          "top_logprobs": [
+            {
+              "token": " asking",
+              "logprob": 0.0
+            },
+            {
+              "token": "asking",
+              "logprob": -18.829895
+            },
+            {
+              "token": " asked",
+              "logprob": -19.26898
+            },
+            {
+              "token": " ask",
+              "logprob": -20.820354
+            },
+            {
+              "token": " probably",
+              "logprob": -21.787113
+            }
+          ]
+        }
+      ]
+    },
+    "nvidia_smi_before": [
+      {
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "driver_version": "610.43.02",
+        "memory_used_mib": null,
+        "memory_free_mib": null,
+        "memory_total_mib": null
+      }
+    ],
+    "nvidia_smi_after_start": [
+      {
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "driver_version": "610.43.02",
+        "memory_used_mib": null,
+        "memory_free_mib": null,
+        "memory_total_mib": null
+      }
+    ],
+    "vram_load_delta_mib": null,
+    "log": "tests/compatibility/out/qwen3-30b-a3b-runner-vs-llamacpp/runner.log"
+  },
+  "llamacpp": {
+    "version": "version: 1 (305ba51)",
+    "commit": "305ba519ab61cdff8044922cba2347826a04453f",
+    "command": [
+      "/home/lab/workspace/Gridcore/llama.cpp-b10076/build-cpu/bin/llama-server",
+      "-m",
+      "/home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "33591",
+      "-c",
+      "4096",
+      "-ngl",
+      "-1"
+    ],
+    "label": "llama.cpp",
+    "response": {
+      "choices": [
+        {
+          "text": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Japan is Tokyo. The capital of India is New Delhi. The capital of China is Beijing. The capital of Russia is Moscow. The capital of Egypt is Cairo. The capital of South Africa is Pretoria. The capital of Australia is Canberra. The capital of Canada is Ottawa. The capital of Mexico is Mexico City. The capital of Argentina is Buenos Aires. The",
+          "index": 0,
+          "logprobs": null,
+          "finish_reason": "length"
+        }
+      ],
+      "created": 1785230283,
+      "model": "/home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "system_fingerprint": "b1-305ba51",
+      "object": "text_completion",
+      "usage": {
+        "completion_tokens": 128,
+        "prompt_tokens": 5,
+        "total_tokens": 133,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "id": "chatcmpl-sVmX5Ft3zhn4nNxT4r1tieSsr8DZJ2Jm",
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 5,
+        "prompt_ms": 53.144,
+        "prompt_per_token_ms": 10.6288,
+        "prompt_per_second": 94.08399819358723,
+        "predicted_n": 128,
+        "predicted_ms": 2938.79,
+        "predicted_per_token_ms": 22.959296875,
+        "predicted_per_second": 43.55534080352798
+      }
+    },
+    "generated_text": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Japan is Tokyo. The capital of India is New Delhi. The capital of China is Beijing. The capital of Russia is Moscow. The capital of Egypt is Cairo. The capital of South Africa is Pretoria. The capital of Australia is Canberra. The capital of Canada is Ottawa. The capital of Mexico is Mexico City. The capital of Argentina is Buenos Aires. The",
+    "stream_text": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Canada is Ottawa. The capital of Japan is Tokyo. The capital of China is Beijing. The capital of India is New Delhi. The capital of Russia is Moscow. The capital of Egypt is Cairo. The capital of South Africa is Pretoria. The capital of Australia is Canberra. The capital of Mexico is Mexico City. The capital of Argentina is Buenos Aires. The",
+    "metrics": {
+      "prompt_tok_s": 94.08399819358723,
+      "decode_tok_s": 43.55534080352798,
+      "prompt_ms": 53.144,
+      "decode_ms": 2938.79,
+      "generated_tokens": 128,
+      "request_wall_s": 2.9935847250162624,
+      "time_to_first_token_s": 0.02602243097499013
+    },
+    "top_logprobs": {
+      "status": "captured",
+      "request": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "The capital of France is"
+          }
+        ],
+        "max_tokens": 8,
+        "temperature": 0,
+        "logprobs": true,
+        "top_logprobs": 5
+      },
+      "positions": [
+        {
+          "id": 151667,
+          "token": "<think>",
+          "bytes": [
+            60,
+            116,
+            104,
+            105,
+            110,
+            107,
+            62
+          ],
+          "logprob": -5.4837775678606704e-05,
+          "top_logprobs": [
+            {
+              "id": 151667,
+              "token": "<think>",
+              "bytes": [
+                60,
+                116,
+                104,
+                105,
+                110,
+                107,
+                62
+              ],
+              "logprob": -5.4837775678606704e-05
+            },
+            {
+              "id": 68748,
+              "token": "/ge",
+              "bytes": [
+                47,
+                103,
+                101
+              ],
+              "logprob": -12.558473587036133
+            },
+            {
+              "id": 94259,
+              "token": " Georges",
+              "bytes": [
+                32,
+                71,
+                101,
+                111,
+                114,
+                103,
+                101,
+                115
+              ],
+              "logprob": -12.585790634155273
+            },
+            {
+              "id": 42536,
+              "token": " briefing",
+              "bytes": [
+                32,
+                98,
+                114,
+                105,
+                101,
+                102,
+                105,
+                110,
+                103
+              ],
+              "logprob": -12.699041366577148
+            },
+            {
+              "id": 31115,
+              "token": "Generate",
+              "bytes": [
+                71,
+                101,
+                110,
+                101,
+                114,
+                97,
+                116,
+                101
+              ],
+              "logprob": -13.40959644317627
+            }
+          ]
+        },
+        {
+          "id": 198,
+          "token": "\n",
+          "bytes": [
+            10
+          ],
+          "logprob": 0.0,
+          "top_logprobs": [
+            {
+              "id": 198,
+              "token": "\n",
+              "bytes": [
+                10
+              ],
+              "logprob": 0.0
+            },
+            {
+              "id": 271,
+              "token": "\n\n",
+              "bytes": [
+                10,
+                10
+              ],
+              "logprob": -18.325658798217773
+            },
+            {
+              "id": 1406,
+              "token": "\n\n\n",
+              "bytes": [
+                10,
+                10,
+                10
+              ],
+              "logprob": -18.503841400146484
+            },
+            {
+              "id": 2303,
+              "token": "  \n",
+              "bytes": [
+                32,
+                32,
+                10
+              ],
+              "logprob": -22.300861358642578
+            },
+            {
+              "id": 715,
+              "token": " \n",
+              "bytes": [
+                32,
+                10
+              ],
+              "logprob": -23.820117950439453
+            }
+          ]
+        },
+        {
+          "id": 32313,
+          "token": "Okay",
+          "bytes": [
+            79,
+            107,
+            97,
+            121
+          ],
+          "logprob": -6.437322554120328e-06,
+          "top_logprobs": [
+            {
+              "id": 32313,
+              "token": "Okay",
+              "bytes": [
+                79,
+                107,
+                97,
+                121
+              ],
+              "logprob": -6.437322554120328e-06
+            },
+            {
+              "id": 71486,
+              "token": "Alright",
+              "bytes": [
+                65,
+                108,
+                114,
+                105,
+                103,
+                104,
+                116
+              ],
+              "logprob": -11.962676048278809
+            },
+            {
+              "id": 35439,
+              "token": " Okay",
+              "bytes": [
+                32,
+                79,
+                107,
+                97,
+                121
+              ],
+              "logprob": -17.744619369506836
+            },
+            {
+              "id": 3925,
+              "token": "OK",
+              "bytes": [
+                79,
+                75
+              ],
+              "logprob": -19.285541534423828
+            },
+            {
+              "id": 16910,
+              "token": " okay",
+              "bytes": [
+                32,
+                111,
+                107,
+                97,
+                121
+              ],
+              "logprob": -19.35684585571289
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "token": ",",
+          "bytes": [
+            44
+          ],
+          "logprob": 0.0,
+          "top_logprobs": [
+            {
+              "id": 11,
+              "token": ",",
+              "bytes": [
+                44
+              ],
+              "logprob": 0.0
+            },
+            {
+              "id": 1335,
+              "token": ",\"",
+              "bytes": [
+                44,
+                34
+              ],
+              "logprob": -22.202322006225586
+            },
+            {
+              "id": 68785,
+              "token": "\u060c",
+              "bytes": [
+                216,
+                140
+              ],
+              "logprob": -22.38848304748535
+            },
+            {
+              "id": 3837,
+              "token": "\uff0c",
+              "bytes": [
+                239,
+                188,
+                140
+              ],
+              "logprob": -22.56047821044922
+            },
+            {
+              "id": 345,
+              "token": ",\n",
+              "bytes": [
+                44,
+                10
+              ],
+              "logprob": -22.85750961303711
+            }
+          ]
+        },
+        {
+          "id": 279,
+          "token": " the",
+          "bytes": [
+            32,
+            116,
+            104,
+            101
+          ],
+          "logprob": -0.13195818662643433,
+          "top_logprobs": [
+            {
+              "id": 279,
+              "token": " the",
+              "bytes": [
+                32,
+                116,
+                104,
+                101
+              ],
+              "logprob": -0.13195818662643433
+            },
+            {
+              "id": 773,
+              "token": " so",
+              "bytes": [
+                32,
+                115,
+                111
+              ],
+              "logprob": -2.094543695449829
+            },
+            {
+              "id": 358,
+              "token": " I",
+              "bytes": [
+                32,
+                73
+              ],
+              "logprob": -7.691417694091797
+            },
+            {
+              "id": 1077,
+              "token": " let",
+              "bytes": [
+                32,
+                108,
+                101,
+                116
+              ],
+              "logprob": -10.366092681884766
+            },
+            {
+              "id": 1128,
+              "token": " what",
+              "bytes": [
+                32,
+                119,
+                104,
+                97,
+                116
+              ],
+              "logprob": -12.357698440551758
+            }
+          ]
+        },
+        {
+          "id": 1196,
+          "token": " user",
+          "bytes": [
+            32,
+            117,
+            115,
+            101,
+            114
+          ],
+          "logprob": -0.0002406529092695564,
+          "top_logprobs": [
+            {
+              "id": 1196,
+              "token": " user",
+              "bytes": [
+                32,
+                117,
+                115,
+                101,
+                114
+              ],
+              "logprob": -0.0002406529092695564
+            },
+            {
+              "id": 3405,
+              "token": " question",
+              "bytes": [
+                32,
+                113,
+                117,
+                101,
+                115,
+                116,
+                105,
+                111,
+                110
+              ],
+              "logprob": -8.333110809326172
+            },
+            {
+              "id": 6722,
+              "token": " capital",
+              "bytes": [
+                32,
+                99,
+                97,
+                112,
+                105,
+                116,
+                97,
+                108
+              ],
+              "logprob": -15.538187026977539
+            },
+            {
+              "id": 1697,
+              "token": " person",
+              "bytes": [
+                32,
+                112,
+                101,
+                114,
+                115,
+                111,
+                110
+              ],
+              "logprob": -16.455068588256836
+            },
+            {
+              "id": 3239,
+              "token": " query",
+              "bytes": [
+                32,
+                113,
+                117,
+                101,
+                114,
+                121
+              ],
+              "logprob": -17.9381103515625
+            }
+          ]
+        },
+        {
+          "id": 374,
+          "token": " is",
+          "bytes": [
+            32,
+            105,
+            115
+          ],
+          "logprob": -0.00943592470139265,
+          "top_logprobs": [
+            {
+              "id": 374,
+              "token": " is",
+              "bytes": [
+                32,
+                105,
+                115
+              ],
+              "logprob": -0.00943592470139265
+            },
+            {
+              "id": 4588,
+              "token": " asked",
+              "bytes": [
+                32,
+                97,
+                115,
+                107,
+                101,
+                100
+              ],
+              "logprob": -4.668234348297119
+            },
+            {
+              "id": 1101,
+              "token": " just",
+              "bytes": [
+                32,
+                106,
+                117,
+                115,
+                116
+              ],
+              "logprob": -13.042661666870117
+            },
+            {
+              "id": 17064,
+              "token": " asks",
+              "bytes": [
+                32,
+                97,
+                115,
+                107,
+                115
+              ],
+              "logprob": -15.361141204833984
+            },
+            {
+              "id": 594,
+              "token": "'s",
+              "bytes": [
+                39,
+                115
+              ],
+              "logprob": -15.390398025512695
+            }
+          ]
+        },
+        {
+          "id": 10161,
+          "token": " asking",
+          "bytes": [
+            32,
+            97,
+            115,
+            107,
+            105,
+            110,
+            103
+          ],
+          "logprob": 0.0,
+          "top_logprobs": [
+            {
+              "id": 10161,
+              "token": " asking",
+              "bytes": [
+                32,
+                97,
+                115,
+                107,
+                105,
+                110,
+                103
+              ],
+              "logprob": 0.0
+            },
+            {
+              "id": 70705,
+              "token": "asking",
+              "bytes": [
+                97,
+                115,
+                107,
+                105,
+                110,
+                103
+              ],
+              "logprob": -19.04649543762207
+            },
+            {
+              "id": 4588,
+              "token": " asked",
+              "bytes": [
+                32,
+                97,
+                115,
+                107,
+                101,
+                100
+              ],
+              "logprob": -19.496231079101562
+            },
+            {
+              "id": 2548,
+              "token": " ask",
+              "bytes": [
+                32,
+                97,
+                115,
+                107
+              ],
+              "logprob": -20.941375732421875
+            },
+            {
+              "id": 4658,
+              "token": " probably",
+              "bytes": [
+                32,
+                112,
+                114,
+                111,
+                98,
+                97,
+                98,
+                108,
+                121
+              ],
+              "logprob": -21.825471878051758
+            }
+          ]
+        }
+      ]
+    },
+    "nvidia_smi_before": [
+      {
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "driver_version": "610.43.02",
+        "memory_used_mib": null,
+        "memory_free_mib": null,
+        "memory_total_mib": null
+      }
+    ],
+    "nvidia_smi_after_start": [
+      {
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "driver_version": "610.43.02",
+        "memory_used_mib": null,
+        "memory_free_mib": null,
+        "memory_total_mib": null
+      }
+    ],
+    "vram_load_delta_mib": null,
+    "log": "tests/compatibility/out/qwen3-30b-a3b-runner-vs-llamacpp/llamacpp.log"
+  },
+  "text_comparison": {
+    "status": "fail",
+    "runner": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Canada is Ottawa. The capital of Australia is Canberra. The capital of Japan is Tokyo. The capital of China is Beijing. The capital of India is New Delhi. The capital of Russia is Moscow. The capital of Mexico is Mexico City. The capital of Argentina is Buenos Aires. The capital of Egypt is Cairo. The capital of South Africa is Pretoria. The",
+    "llamacpp": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Japan is Tokyo. The capital of India is New Delhi. The capital of China is Beijing. The capital of Russia is Moscow. The capital of Egypt is Cairo. The capital of South Africa is Pretoria. The capital of Australia is Canberra. The capital of Canada is Ottawa. The capital of Mexico is Mexico City. The capital of Argentina is Buenos Aires. The"
+  },
+  "top_logprob_comparison": {
+    "status": "captured",
+    "positions_compared": 8,
+    "max_abs_common_logprob_delta": 4.087371443176,
+    "positions": [
+      {
+        "position": 0,
+        "runner_token": "<think>",
+        "llamacpp_token": "<think>",
+        "chosen_logprob_delta": 0.001280162224,
+        "common_top_logprobs": [
+          {
+            "token": "<think>",
+            "runner_logprob": -0.001335,
+            "llamacpp_logprob": -5.4837775678606704e-05,
+            "abs_delta": 0.001280162224
+          },
+          {
+            "token": "/ge",
+            "runner_logprob": -10.141369,
+            "llamacpp_logprob": -12.558473587036133,
+            "abs_delta": 2.417104587036
+          },
+          {
+            "token": "Generate",
+            "runner_logprob": -9.322225,
+            "llamacpp_logprob": -13.40959644317627,
+            "abs_delta": 4.087371443176
+          }
+        ],
+        "runner_top_logprobs": [
+          {
+            "token": "<think>",
+            "logprob": -0.001335
+          },
+          {
+            "token": "Generate",
+            "logprob": -9.322225
+          },
+          {
+            "token": "query",
+            "logprob": -9.44413
+          },
+          {
+            "token": "The",
+            "logprob": -9.878524
+          },
+          {
+            "token": "/ge",
+            "logprob": -10.141369
+          }
+        ],
+        "llamacpp_top_logprobs": [
+          {
+            "id": 151667,
+            "token": "<think>",
+            "bytes": [
+              60,
+              116,
+              104,
+              105,
+              110,
+              107,
+              62
+            ],
+            "logprob": -5.4837775678606704e-05
+          },
+          {
+            "id": 68748,
+            "token": "/ge",
+            "bytes": [
+              47,
+              103,
+              101
+            ],
+            "logprob": -12.558473587036133
+          },
+          {
+            "id": 94259,
+            "token": " Georges",
+            "bytes": [
+              32,
+              71,
+              101,
+              111,
+              114,
+              103,
+              101,
+              115
+            ],
+            "logprob": -12.585790634155273
+          },
+          {
+            "id": 42536,
+            "token": " briefing",
+            "bytes": [
+              32,
+              98,
+              114,
+              105,
+              101,
+              102,
+              105,
+              110,
+              103
+            ],
+            "logprob": -12.699041366577148
+          },
+          {
+            "id": 31115,
+            "token": "Generate",
+            "bytes": [
+              71,
+              101,
+              110,
+              101,
+              114,
+              97,
+              116,
+              101
+            ],
+            "logprob": -13.40959644317627
+          }
+        ]
+      },
+      {
+        "position": 1,
+        "runner_token": "\n",
+        "llamacpp_token": "\n",
+        "chosen_logprob_delta": 0.0,
+        "common_top_logprobs": [
+          {
+            "token": "\n",
+            "runner_logprob": 0.0,
+            "llamacpp_logprob": 0.0,
+            "abs_delta": 0.0
+          },
+          {
+            "token": "  \n",
+            "runner_logprob": -19.280033,
+            "llamacpp_logprob": -22.300861358642578,
+            "abs_delta": 3.020828358643
+          },
+          {
+            "token": "\n\n",
+            "runner_logprob": -15.219845,
+            "llamacpp_logprob": -18.325658798217773,
+            "abs_delta": 3.105813798218
+          },
+          {
+            "token": " \n",
+            "runner_logprob": -20.663244,
+            "llamacpp_logprob": -23.820117950439453,
+            "abs_delta": 3.156873950439
+          },
+          {
+            "token": "\n\n\n",
+            "runner_logprob": -14.944267,
+            "llamacpp_logprob": -18.503841400146484,
+            "abs_delta": 3.559574400146
+          }
+        ],
+        "runner_top_logprobs": [
+          {
+            "token": "\n",
+            "logprob": 0.0
+          },
+          {
+            "token": "\n\n\n",
+            "logprob": -14.944267
+          },
+          {
+            "token": "\n\n",
+            "logprob": -15.219845
+          },
+          {
+            "token": "  \n",
+            "logprob": -19.280033
+          },
+          {
+            "token": " \n",
+            "logprob": -20.663244
+          }
+        ],
+        "llamacpp_top_logprobs": [
+          {
+            "id": 198,
+            "token": "\n",
+            "bytes": [
+              10
+            ],
+            "logprob": 0.0
+          },
+          {
+            "id": 271,
+            "token": "\n\n",
+            "bytes": [
+              10,
+              10
+            ],
+            "logprob": -18.325658798217773
+          },
+          {
+            "id": 1406,
+            "token": "\n\n\n",
+            "bytes": [
+              10,
+              10,
+              10
+            ],
+            "logprob": -18.503841400146484
+          },
+          {
+            "id": 2303,
+            "token": "  \n",
+            "bytes": [
+              32,
+              32,
+              10
+            ],
+            "logprob": -22.300861358642578
+          },
+          {
+            "id": 715,
+            "token": " \n",
+            "bytes": [
+              32,
+              10
+            ],
+            "logprob": -23.820117950439453
+          }
+        ]
+      },
+      {
+        "position": 2,
+        "runner_token": "Okay",
+        "llamacpp_token": "Okay",
+        "chosen_logprob_delta": 0.000107562677,
+        "common_top_logprobs": [
+          {
+            "token": "Okay",
+            "runner_logprob": -0.000114,
+            "llamacpp_logprob": -6.437322554120328e-06,
+            "abs_delta": 0.000107562677
+          },
+          {
+            "token": " Okay",
+            "runner_logprob": -17.092054,
+            "llamacpp_logprob": -17.744619369506836,
+            "abs_delta": 0.652565369507
+          },
+          {
+            "token": "OK",
+            "runner_logprob": -16.404507,
+            "llamacpp_logprob": -19.285541534423828,
+            "abs_delta": 2.881034534424
+          },
+          {
+            "token": "Alright",
+            "runner_logprob": -9.076279,
+            "llamacpp_logprob": -11.962676048278809,
+            "abs_delta": 2.886397048279
+          }
+        ],
+        "runner_top_logprobs": [
+          {
+            "token": "Okay",
+            "logprob": -0.000114
+          },
+          {
+            "token": "Alright",
+            "logprob": -9.076279
+          },
+          {
+            "token": "okay",
+            "logprob": -16.379175
+          },
+          {
+            "token": "OK",
+            "logprob": -16.404507
+          },
+          {
+            "token": " Okay",
+            "logprob": -17.092054
+          }
+        ],
+        "llamacpp_top_logprobs": [
+          {
+            "id": 32313,
+            "token": "Okay",
+            "bytes": [
+              79,
+              107,
+              97,
+              121
+            ],
+            "logprob": -6.437322554120328e-06
+          },
+          {
+            "id": 71486,
+            "token": "Alright",
+            "bytes": [
+              65,
+              108,
+              114,
+              105,
+              103,
+              104,
+              116
+            ],
+            "logprob": -11.962676048278809
+          },
+          {
+            "id": 35439,
+            "token": " Okay",
+            "bytes": [
+              32,
+              79,
+              107,
+              97,
+              121
+            ],
+            "logprob": -17.744619369506836
+          },
+          {
+            "id": 3925,
+            "token": "OK",
+            "bytes": [
+              79,
+              75
+            ],
+            "logprob": -19.285541534423828
+          },
+          {
+            "id": 16910,
+            "token": " okay",
+            "bytes": [
+              32,
+              111,
+              107,
+              97,
+              121
+            ],
+            "logprob": -19.35684585571289
+          }
+        ]
+      },
+      {
+        "position": 3,
+        "runner_token": ",",
+        "llamacpp_token": ",",
+        "chosen_logprob_delta": 0.0,
+        "common_top_logprobs": [
+          {
+            "token": ",",
+            "runner_logprob": 0.0,
+            "llamacpp_logprob": 0.0,
+            "abs_delta": 0.0
+          },
+          {
+            "token": ",\"",
+            "runner_logprob": -22.411673,
+            "llamacpp_logprob": -22.202322006225586,
+            "abs_delta": 0.209350993774
+          },
+          {
+            "token": "\u060c",
+            "runner_logprob": -22.607811,
+            "llamacpp_logprob": -22.38848304748535,
+            "abs_delta": 0.219327952515
+          },
+          {
+            "token": ",\n",
+            "runner_logprob": -23.125729,
+            "llamacpp_logprob": -22.85750961303711,
+            "abs_delta": 0.268219386963
+          },
+          {
+            "token": "\uff0c",
+            "runner_logprob": -22.830254,
+            "llamacpp_logprob": -22.56047821044922,
+            "abs_delta": 0.269775789551
+          }
+        ],
+        "runner_top_logprobs": [
+          {
+            "token": ",",
+            "logprob": 0.0
+          },
+          {
+            "token": ",\"",
+            "logprob": -22.411673
+          },
+          {
+            "token": "\u060c",
+            "logprob": -22.607811
+          },
+          {
+            "token": "\uff0c",
+            "logprob": -22.830254
+          },
+          {
+            "token": ",\n",
+            "logprob": -23.125729
+          }
+        ],
+        "llamacpp_top_logprobs": [
+          {
+            "id": 11,
+            "token": ",",
+            "bytes": [
+              44
+            ],
+            "logprob": 0.0
+          },
+          {
+            "id": 1335,
+            "token": ",\"",
+            "bytes": [
+              44,
+              34
+            ],
+            "logprob": -22.202322006225586
+          },
+          {
+            "id": 68785,
+            "token": "\u060c",
+            "bytes": [
+              216,
+              140
+            ],
+            "logprob": -22.38848304748535
+          },
+          {
+            "id": 3837,
+            "token": "\uff0c",
+            "bytes": [
+              239,
+              188,
+              140
+            ],
+            "logprob": -22.56047821044922
+          },
+          {
+            "id": 345,
+            "token": ",\n",
+            "bytes": [
+              44,
+              10
+            ],
+            "logprob": -22.85750961303711
+          }
+        ]
+      },
+      {
+        "position": 4,
+        "runner_token": " the",
+        "llamacpp_token": " the",
+        "chosen_logprob_delta": 0.048179813374,
+        "common_top_logprobs": [
+          {
+            "token": " the",
+            "runner_logprob": -0.180138,
+            "llamacpp_logprob": -0.13195818662643433,
+            "abs_delta": 0.048179813374
+          },
+          {
+            "token": " so",
+            "runner_logprob": -1.807343,
+            "llamacpp_logprob": -2.094543695449829,
+            "abs_delta": 0.28720069545
+          },
+          {
+            "token": " let",
+            "runner_logprob": -10.041058,
+            "llamacpp_logprob": -10.366092681884766,
+            "abs_delta": 0.325034681885
+          },
+          {
+            "token": " what",
+            "runner_logprob": -12.723679,
+            "llamacpp_logprob": -12.357698440551758,
+            "abs_delta": 0.365980559448
+          },
+          {
+            "token": " I",
+            "runner_logprob": -7.257156,
+            "llamacpp_logprob": -7.691417694091797,
+            "abs_delta": 0.434261694092
+          }
+        ],
+        "runner_top_logprobs": [
+          {
+            "token": " the",
+            "logprob": -0.180138
+          },
+          {
+            "token": " so",
+            "logprob": -1.807343
+          },
+          {
+            "token": " I",
+            "logprob": -7.257156
+          },
+          {
+            "token": " let",
+            "logprob": -10.041058
+          },
+          {
+            "token": " what",
+            "logprob": -12.723679
+          }
+        ],
+        "llamacpp_top_logprobs": [
+          {
+            "id": 279,
+            "token": " the",
+            "bytes": [
+              32,
+              116,
+              104,
+              101
+            ],
+            "logprob": -0.13195818662643433
+          },
+          {
+            "id": 773,
+            "token": " so",
+            "bytes": [
+              32,
+              115,
+              111
+            ],
+            "logprob": -2.094543695449829
+          },
+          {
+            "id": 358,
+            "token": " I",
+            "bytes": [
+              32,
+              73
+            ],
+            "logprob": -7.691417694091797
+          },
+          {
+            "id": 1077,
+            "token": " let",
+            "bytes": [
+              32,
+              108,
+              101,
+              116
+            ],
+            "logprob": -10.366092681884766
+          },
+          {
+            "id": 1128,
+            "token": " what",
+            "bytes": [
+              32,
+              119,
+              104,
+              97,
+              116
+            ],
+            "logprob": -12.357698440551758
+          }
+        ]
+      },
+      {
+        "position": 5,
+        "runner_token": " user",
+        "llamacpp_token": " user",
+        "chosen_logprob_delta": 6.1652909e-05,
+        "common_top_logprobs": [
+          {
+            "token": " user",
+            "runner_logprob": -0.000179,
+            "llamacpp_logprob": -0.0002406529092695564,
+            "abs_delta": 6.1652909e-05
+          },
+          {
+            "token": " capital",
+            "runner_logprob": -15.672026,
+            "llamacpp_logprob": -15.538187026977539,
+            "abs_delta": 0.133838973022
+          },
+          {
+            "token": " person",
+            "runner_logprob": -16.648663,
+            "llamacpp_logprob": -16.455068588256836,
+            "abs_delta": 0.193594411743
+          },
+          {
+            "token": " query",
+            "runner_logprob": -17.697803,
+            "llamacpp_logprob": -17.9381103515625,
+            "abs_delta": 0.240307351562
+          },
+          {
+            "token": " question",
+            "runner_logprob": -8.627209,
+            "llamacpp_logprob": -8.333110809326172,
+            "abs_delta": 0.294098190674
+          }
+        ],
+        "runner_top_logprobs": [
+          {
+            "token": " user",
+            "logprob": -0.000179
+          },
+          {
+            "token": " question",
+            "logprob": -8.627209
+          },
+          {
+            "token": " capital",
+            "logprob": -15.672026
+          },
+          {
+            "token": " person",
+            "logprob": -16.648663
+          },
+          {
+            "token": " query",
+            "logprob": -17.697803
+          }
+        ],
+        "llamacpp_top_logprobs": [
+          {
+            "id": 1196,
+            "token": " user",
+            "bytes": [
+              32,
+              117,
+              115,
+              101,
+              114
+            ],
+            "logprob": -0.0002406529092695564
+          },
+          {
+            "id": 3405,
+            "token": " question",
+            "bytes": [
+              32,
+              113,
+              117,
+              101,
+              115,
+              116,
+              105,
+              111,
+              110
+            ],
+            "logprob": -8.333110809326172
+          },
+          {
+            "id": 6722,
+            "token": " capital",
+            "bytes": [
+              32,
+              99,
+              97,
+              112,
+              105,
+              116,
+              97,
+              108
+            ],
+            "logprob": -15.538187026977539
+          },
+          {
+            "id": 1697,
+            "token": " person",
+            "bytes": [
+              32,
+              112,
+              101,
+              114,
+              115,
+              111,
+              110
+            ],
+            "logprob": -16.455068588256836
+          },
+          {
+            "id": 3239,
+            "token": " query",
+            "bytes": [
+              32,
+              113,
+              117,
+              101,
+              114,
+              121
+            ],
+            "logprob": -17.9381103515625
+          }
+        ]
+      },
+      {
+        "position": 6,
+        "runner_token": " is",
+        "llamacpp_token": " is",
+        "chosen_logprob_delta": 0.000227075299,
+        "common_top_logprobs": [
+          {
+            "token": " is",
+            "runner_logprob": -0.009663,
+            "llamacpp_logprob": -0.00943592470139265,
+            "abs_delta": 0.000227075299
+          },
+          {
+            "token": "'s",
+            "runner_logprob": -15.366989,
+            "llamacpp_logprob": -15.390398025512695,
+            "abs_delta": 0.023409025513
+          },
+          {
+            "token": " asked",
+            "runner_logprob": -4.64455,
+            "llamacpp_logprob": -4.668234348297119,
+            "abs_delta": 0.023684348297
+          },
+          {
+            "token": " asks",
+            "runner_logprob": -15.325424,
+            "llamacpp_logprob": -15.361141204833984,
+            "abs_delta": 0.035717204834
+          },
+          {
+            "token": " just",
+            "runner_logprob": -12.837326,
+            "llamacpp_logprob": -13.042661666870117,
+            "abs_delta": 0.20533566687
+          }
+        ],
+        "runner_top_logprobs": [
+          {
+            "token": " is",
+            "logprob": -0.009663
+          },
+          {
+            "token": " asked",
+            "logprob": -4.64455
+          },
+          {
+            "token": " just",
+            "logprob": -12.837326
+          },
+          {
+            "token": " asks",
+            "logprob": -15.325424
+          },
+          {
+            "token": "'s",
+            "logprob": -15.366989
+          }
+        ],
+        "llamacpp_top_logprobs": [
+          {
+            "id": 374,
+            "token": " is",
+            "bytes": [
+              32,
+              105,
+              115
+            ],
+            "logprob": -0.00943592470139265
+          },
+          {
+            "id": 4588,
+            "token": " asked",
+            "bytes": [
+              32,
+              97,
+              115,
+              107,
+              101,
+              100
+            ],
+            "logprob": -4.668234348297119
+          },
+          {
+            "id": 1101,
+            "token": " just",
+            "bytes": [
+              32,
+              106,
+              117,
+              115,
+              116
+            ],
+            "logprob": -13.042661666870117
+          },
+          {
+            "id": 17064,
+            "token": " asks",
+            "bytes": [
+              32,
+              97,
+              115,
+              107,
+              115
+            ],
+            "logprob": -15.361141204833984
+          },
+          {
+            "id": 594,
+            "token": "'s",
+            "bytes": [
+              39,
+              115
+            ],
+            "logprob": -15.390398025512695
+          }
+        ]
+      },
+      {
+        "position": 7,
+        "runner_token": " asking",
+        "llamacpp_token": " asking",
+        "chosen_logprob_delta": 0.0,
+        "common_top_logprobs": [
+          {
+            "token": " asking",
+            "runner_logprob": 0.0,
+            "llamacpp_logprob": 0.0,
+            "abs_delta": 0.0
+          },
+          {
+            "token": " probably",
+            "runner_logprob": -21.787113,
+            "llamacpp_logprob": -21.825471878051758,
+            "abs_delta": 0.038358878052
+          },
+          {
+            "token": " ask",
+            "runner_logprob": -20.820354,
+            "llamacpp_logprob": -20.941375732421875,
+            "abs_delta": 0.121021732422
+          },
+          {
+            "token": "asking",
+            "runner_logprob": -18.829895,
+            "llamacpp_logprob": -19.04649543762207,
+            "abs_delta": 0.216600437622
+          },
+          {
+            "token": " asked",
+            "runner_logprob": -19.26898,
+            "llamacpp_logprob": -19.496231079101562,
+            "abs_delta": 0.227251079102
+          }
+        ],
+        "runner_top_logprobs": [
+          {
+            "token": " asking",
+            "logprob": 0.0
+          },
+          {
+            "token": "asking",
+            "logprob": -18.829895
+          },
+          {
+            "token": " asked",
+            "logprob": -19.26898
+          },
+          {
+            "token": " ask",
+            "logprob": -20.820354
+          },
+          {
+            "token": " probably",
+            "logprob": -21.787113
+          }
+        ],
+        "llamacpp_top_logprobs": [
+          {
+            "id": 10161,
+            "token": " asking",
+            "bytes": [
+              32,
+              97,
+              115,
+              107,
+              105,
+              110,
+              103
+            ],
+            "logprob": 0.0
+          },
+          {
+            "id": 70705,
+            "token": "asking",
+            "bytes": [
+              97,
+              115,
+              107,
+              105,
+              110,
+              103
+            ],
+            "logprob": -19.04649543762207
+          },
+          {
+            "id": 4588,
+            "token": " asked",
+            "bytes": [
+              32,
+              97,
+              115,
+              107,
+              101,
+              100
+            ],
+            "logprob": -19.496231079101562
+          },
+          {
+            "id": 2548,
+            "token": " ask",
+            "bytes": [
+              32,
+              97,
+              115,
+              107
+            ],
+            "logprob": -20.941375732421875
+          },
+          {
+            "id": 4658,
+            "token": " probably",
+            "bytes": [
+              32,
+              112,
+              114,
+              111,
+              98,
+              97,
+              98,
+              108,
+              121
+            ],
+            "logprob": -21.825471878051758
+          }
+        ]
+      }
+    ]
+  }
+}

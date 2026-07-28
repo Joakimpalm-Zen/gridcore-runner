@@ -43,8 +43,12 @@ llama.cpp `llama-server` against the same GGUF, prompt, context and greedy
 sampling settings, captures model hash, commits/versions, commands, hardware,
 driver, throughput, time to first token, VRAM snapshots, generated tokens, raw
 responses and top-logprob data where both endpoints expose it, then writes JSON
-and Markdown. CI only exercises its fixture mode; real large-model reports stay
-pending until the model, llama.cpp build and GPU are available.
+and Markdown. CI exercises its fixture mode. Real Qwen3-30B-A3B reports were
+captured on 2026-07-28 against pinned llama.cpp `b10076` on CPU and a newer
+`91d2fc3` build on the same Blackwell GPU. Runner CPU/GPU identity passed, but
+both independent 128-token greedy comparisons diverged after a shared prefix;
+the committed reports under `tests/compatibility/out/qwen3-30b-a3b-*` therefore
+record a release blocker rather than an equivalence claim.
 
 The model manifest deliberately excludes Apertus from forward-pass coverage.
 Runner supports its `tekken` tokenizer and chat template, but not the Apertus

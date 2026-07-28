@@ -193,9 +193,22 @@ python3 scripts/compare_llamacpp.py \
   --out-dir tests/compatibility/out/qwen3-30b-a3b-runner-vs-llamacpp
 ```
 
-The repository tests only the harness with fixtures. Real Runner-vs-llama.cpp
-Qwen3-30B-A3B results remain pending until the required GGUF, llama.cpp build,
-and GPU are available.
+The real comparison was run on 2026-07-28 with model SHA256
+`0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5`.
+Runner CPU and Blackwell GPU output remained byte-identical for the full
+128-token prompt. Independent greedy output did **not** remain token-identical:
+both pinned llama.cpp `b10076` (`305ba519a`, CPU reference) and a newer
+`91d2fc3` GPU build diverged late in the continuation after an identical
+prefix. Strict-math and release Runner builds produced the same Runner output,
+so `-ffast-math` is not the cause. This is a release blocker, not a completed
+correctness claim.
+
+The committed raw evidence is in
+`tests/compatibility/out/qwen3-30b-a3b-runner-vs-b10076-cpu-reference/` and
+`tests/compatibility/out/qwen3-30b-a3b-runner-vs-91d2fc3-gpu/`. The latter is
+the comparable Blackwell performance run; the pinned CPU-reference run is for
+correctness only and its throughput numbers must not be compared to Runner's
+GPU numbers. CI continues to exercise the harness with fixtures.
 
 ## Follow-ups completed (2026-07-24)
 
