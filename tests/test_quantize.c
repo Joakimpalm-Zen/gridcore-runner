@@ -100,6 +100,32 @@ static void make_fixture(const char *path, int bad_type) {
 
 static bool exists(const char *p) { FILE *f = fopen(p, "rb"); if (f) { fclose(f); return true; } return false; }
 
+static void env_set(const char *k, const char *v) {
+#ifdef _WIN32
+    assert(_putenv_s(k, v) == 0);
+#else
+    assert(setenv(k, v, 1) == 0);
+#endif
+}
+
+static void env_unset(const char *k) {
+#ifdef _WIN32
+    assert(_putenv_s(k, "") == 0);
+#else
+    assert(unsetenv(k) == 0);
+#endif
+}
+
+static void check_bytes(const char *path, const void *want, size_t n) {
+    FILE *rf = fopen(path, "rb");
+    assert(rf);
+    unsigned char back[128];
+    assert(n <= sizeof(back));
+    size_t rn = fread(back, 1, sizeof(back), rf);
+    fclose(rf);
+    assert(rn == n && memcmp(back, want, n) == 0);
+}
+
 static void check_valid_q8(const char *path) {
     gguf_file g;
     assert(gguf_open(&g, path));
@@ -192,10 +218,21 @@ int main(void) {
     const char *bad = "q_bad.gguf";
     make_fixture(bad, 1);                          // unsupported tensor type
     assert(quantize_gguf(bad, dest, T_Q8_0) != 0); // must reject
-    FILE *rf = fopen(dest, "rb"); assert(rf);
-    char back[64]; size_t rn = fread(back, 1, sizeof(back), rf); fclose(rf);
-    assert(rn == sizeof(sentinel) && memcmp(back, sentinel, rn) == 0);
+    check_bytes(dest, sentinel, sizeof(sentinel));
     printf("ok: failed requant left the destination untouched\n");
+
+    // RNR-015 on the late install path: the temp file is complete, and only
+    // replacing the destination fails. This is the Windows destroy-destination
+    // window in a platform-independent smoke.
+    FILE *late = fopen(dest, "wb"); assert(late);
+    assert(fwrite(sentinel, 1, sizeof(sentinel), late) == sizeof(sentinel));
+    fclose(late);
+    env_set("RUNNER_QUANTIZE_INSTALL_FAIL", "1");
+    assert(quantize_gguf(in, dest, T_Q8_0) != 0);
+    env_unset("RUNNER_QUANTIZE_INSTALL_FAIL");
+    check_bytes(dest, sentinel, sizeof(sentinel));
+    assert(!exists("q_keep.gguf.partial"));
+    printf("ok: failed install left the destination untouched\n");
 
     check_mxfp4_dequant();
 

@@ -8,7 +8,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <sys/types.h>
 #endif
 
@@ -170,6 +175,21 @@ static bool should_quantize(const gguf_tensor *t) {
     return true;
 }
 
+static bool quantize_install_injected(void) {
+    const char *inject = getenv("RUNNER_QUANTIZE_INSTALL_FAIL");
+    return inject && *inject && strcmp(inject, "0");
+}
+
+static int install_finished_file(const char *tmp_path, const char *out_path) {
+    if (quantize_install_injected()) return -1;
+#ifdef _WIN32
+    return MoveFileExA(tmp_path, out_path,
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 0 : -1;
+#else
+    return rename(tmp_path, out_path);
+#endif
+}
+
 int quantize_gguf(const char *in_path, const char *out_path, int target) {
     if (target != T_Q8_0 && target != T_Q4_0 && target != T_F16) {
         fprintf(stderr, "error: quantize target must be q8_0, q4_0, or f16\n");
@@ -328,14 +348,11 @@ int quantize_gguf(const char *in_path, const char *out_path, int target) {
         return 1;
     }
 
-    // Install the finished file. On POSIX rename() atomically replaces an
-    // existing destination; Windows rename() refuses one, so remove first
-    // (the temp is already complete, so the worst case is a crash between the
-    // two leaving only the temp — never a truncated destination).
-#ifdef _WIN32
-    remove(out_path);
-#endif
-    if (rename(tmp_path, out_path) != 0) {
+    // Install the finished file only after the temp is complete. POSIX rename()
+    // atomically replaces an existing destination; Windows needs MoveFileExA
+    // with replace semantics. Never remove the destination first: if the final
+    // install fails, the caller must still have the previous model.
+    if (install_finished_file(tmp_path, out_path) != 0) {
         remove(tmp_path);
         fprintf(stderr, "error: wrote %s but could not install it as %s "
                 "(destination unchanged)\n", tmp_path, out_path);
