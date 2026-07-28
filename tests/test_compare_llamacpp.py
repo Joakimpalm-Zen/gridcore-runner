@@ -85,6 +85,22 @@ def test_nvidia_snapshot_tolerates_unavailable_mig_memory(monkeypatch):
     assert compare_llamacpp.vram_delta(snapshot, snapshot) is None
 
 
+def test_runtime_commands_allow_the_requested_generation_length(tmp_path):
+    args = SimpleNamespace(
+        runner=tmp_path / "runner",
+        llamacpp=tmp_path / "llama-server",
+        model=tmp_path / "model.gguf",
+        ctx=4096,
+        tokens=128,
+        runner_gpu="auto",
+        llamacpp_gpu_layers=-1,
+        llamacpp_arg=None,
+    )
+
+    runner, _ = compare_llamacpp.runtime_commands(args, 8000, 8001)
+    assert runner[-4:] == ["--gpu", "auto", "-n", "128"]
+
+
 def test_top_logprob_comparison_quantifies_common_token_deltas():
     runner = {
         "status": "captured",

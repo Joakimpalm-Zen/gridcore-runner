@@ -512,6 +512,17 @@ def fixture_report(args):
     return report
 
 
+def runtime_commands(args, runner_port, llama_port):
+    runner_cmd = [str(args.runner.resolve()), "-m", str(args.model.resolve()),
+                  "--serve", "--port", str(runner_port), "-c", str(args.ctx),
+                  "--gpu", args.runner_gpu, "-n", str(args.tokens)]
+    llama_cmd = [str(args.llamacpp.resolve()), "-m", str(args.model.resolve()),
+                 "--host", "127.0.0.1", "--port", str(llama_port),
+                 "-c", str(args.ctx), "-ngl", str(args.llamacpp_gpu_layers)]
+    llama_cmd.extend(args.llamacpp_arg or [])
+    return runner_cmd, llama_cmd
+
+
 def real_report(args):
     if not args.model:
         raise SystemExit("--model is required outside --fixture")
@@ -527,13 +538,7 @@ def real_report(args):
     out = args.out_dir
     runner_port = free_port()
     llama_port = free_port()
-    runner_cmd = [str(args.runner.resolve()), "-m", str(args.model.resolve()),
-                  "--serve", "--port", str(runner_port), "-c", str(args.ctx),
-                  "--gpu", args.runner_gpu]
-    llama_cmd = [str(args.llamacpp.resolve()), "-m", str(args.model.resolve()),
-                 "--host", "127.0.0.1", "--port", str(llama_port),
-                 "-c", str(args.ctx), "-ngl", str(args.llamacpp_gpu_layers)]
-    llama_cmd.extend(args.llamacpp_arg or [])
+    runner_cmd, llama_cmd = runtime_commands(args, runner_port, llama_port)
 
     runner = measure_runtime("runner", runner_cmd, out / "runner.log",
                              args.prompt, args.tokens, args.startup_timeout,
