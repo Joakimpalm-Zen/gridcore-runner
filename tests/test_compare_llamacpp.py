@@ -166,3 +166,47 @@ def test_top_logprob_comparison_quantifies_common_token_deltas():
             "abs_delta": 0.4,
         },
     ]
+
+
+def test_first_token_divergence_reports_competing_logprobs():
+    runner = {"positions": [
+        {"token": " Paris", "logprob": -0.01, "top_logprobs": []},
+        {"token": ".", "logprob": -0.02, "top_logprobs": []},
+        {"token": " Japan", "logprob": -0.40,
+         "top_logprobs": [{"token": " Japan", "logprob": -0.40},
+                          {"token": " Russia", "logprob": -0.42}]},
+    ]}
+    llama = {"positions": [
+        {"token": " Paris", "logprob": -0.01, "top_logprobs": []},
+        {"token": ".", "logprob": -0.02, "top_logprobs": []},
+        {"token": " Russia", "logprob": -0.39,
+         "top_logprobs": [{"token": " Russia", "logprob": -0.39},
+                          {"token": " Japan", "logprob": -0.41}]},
+    ]}
+
+    assert compare_llamacpp.first_token_divergence(runner, llama) == {
+        "status": "diverged",
+        "position": 2,
+        "shared_tokens": 2,
+        "runner": runner["positions"][2],
+        "llamacpp": llama["positions"][2],
+    }
+
+
+def test_legacy_completion_logprobs_are_normalized():
+    response = {"choices": [{"logprobs": {
+        "tokens": ["A"],
+        "token_logprobs": [-0.25],
+        "top_logprobs": [{"A": -0.25, "B": -1.5}],
+    }}]}
+    assert compare_llamacpp.legacy_completion_logprobs(response) == {
+        "status": "captured",
+        "positions": [{
+            "token": "A",
+            "logprob": -0.25,
+            "top_logprobs": [
+                {"token": "A", "logprob": -0.25},
+                {"token": "B", "logprob": -1.5},
+            ],
+        }],
+    }

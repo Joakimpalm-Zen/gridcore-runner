@@ -265,6 +265,47 @@ def top_logprobs(base, prompt, tokens, request_timeout):
                 "reason": str(exc)}
 
 
+def legacy_completion_logprobs(response):
+    try:
+        raw = response["choices"][0]["logprobs"]
+        tokens = raw["tokens"]
+        chosen = raw["token_logprobs"]
+        alternatives = raw["top_logprobs"]
+        if not (len(tokens) == len(chosen) == len(alternatives)):
+            raise ValueError("legacy logprob arrays have different lengths")
+        positions = []
+        for token, logprob, top in zip(tokens, chosen, alternatives):
+            positions.append({
+                "token": token,
+                "logprob": logprob,
+                "top_logprobs": [
+                    {"token": alt, "logprob": lp}
+                    for alt, lp in top.items()
+                ],
+            })
+        return {"status": "captured", "positions": positions}
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"status": "unsupported", "reason": str(exc)}
+
+
+def first_token_divergence(runner, llama):
+    if runner.get("status", "captured") != "captured" or \
+       llama.get("status", "captured") != "captured":
+        return {"status": "pending", "reason": "raw token logprobs unavailable"}
+    a = runner.get("positions", [])
+    b = llama.get("positions", [])
+    for i, (ar, br) in enumerate(zip(a, b)):
+        if ar.get("token") != br.get("token"):
+            return {"status": "diverged", "position": i, "shared_tokens": i,
+                    "runner": ar, "llamacpp": br}
+    if len(a) == len(b):
+        return {"status": "identical", "shared_tokens": len(a)}
+    i = min(len(a), len(b))
+    return {"status": "length_mismatch", "position": i, "shared_tokens": i,
+            "runner": a[i] if i < len(a) else None,
+            "llamacpp": b[i] if i < len(b) else None}
+
+
 def runner_bench_json(runner, model, prompt, ctx, tokens, runner_gpu):
     cmd = [str(runner), "-m", str(model), "-p", prompt, "-c", str(ctx),
            "-n", str(tokens), "--temp", "0", "--bench-json", "--gpu", runner_gpu]
@@ -286,6 +327,7 @@ def measure_runtime(label, command, log_path, prompt, tokens,
     try:
         after_start = nvidia_snapshot()
         body = completion_request(prompt, tokens, False)
+        body["logprobs"] = 20
         t0 = time.perf_counter()
         response = request_json(base + "/v1/completions", body,
                                 timeout=request_timeout)
@@ -303,6 +345,7 @@ def measure_runtime(label, command, log_path, prompt, tokens,
             "stream_text": stream["stream_text"],
             "metrics": metrics,
             "top_logprobs": logprobs,
+            "raw_completion_logprobs": legacy_completion_logprobs(response),
             "nvidia_smi_before": before,
             "nvidia_smi_after_start": after_start,
             "vram_load_delta_mib": vram_delta(before, after_start),
@@ -554,6 +597,8 @@ def real_report(args):
         runner["metrics"]["context"] = parsed.get("context")
 
     text_status = "pass" if runner["generated_text"] == llama["generated_text"] else "fail"
+    divergence = first_token_divergence(runner["raw_completion_logprobs"],
+                                        llama["raw_completion_logprobs"])
     return {
         "schema_version": "gridcore.runner.llamacpp-comparison.v1",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -591,6 +636,7 @@ def real_report(args):
             "status": text_status,
             "runner": runner["generated_text"],
             "llamacpp": llama["generated_text"],
+            "first_token_divergence": divergence,
         },
         "top_logprob_comparison": compare_top_logprobs(
             runner["top_logprobs"], llama["top_logprobs"]),

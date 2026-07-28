@@ -1805,17 +1805,25 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         send_error(fd, 400, "stream must be a boolean");
         return;
     }
-    // OpenAI logprobs (chat, buffered responses only)
-    // chat only: on /v1/completions OpenAI defines logprobs as an integer
-    // count, so a number there is not a type error
+    // OpenAI logprobs. Chat uses a boolean plus top_logprobs; legacy text
+    // completions use logprobs itself as the requested alternative count.
+    // Both are buffered-only because the engine stores one request-sized
+    // diagnostic table which is serialized with the final choice.
     bool lp_on = false;
     if (api == API_CHAT && !request_bool(req, "logprobs", false, &lp_on)) {
         send_error(fd, 400, "logprobs must be a boolean");
         return;
     }
-    bool want_lp = api == API_CHAT && !stream && lp_on;
     double lp_num = 0;
-    if (want_lp && !request_number(req, "top_logprobs", 0, 0, 20, &lp_num)) {
+    if (api == API_TEXT &&
+        !request_number(req, "logprobs", 0, 0, 20, &lp_num)) {
+        send_error(fd, 400, "logprobs out of range");
+        return;
+    }
+    bool want_lp = !stream && ((api == API_CHAT && lp_on) ||
+                               (api == API_TEXT && lp_num > 0));
+    if (api == API_CHAT && want_lp &&
+        !request_number(req, "top_logprobs", 0, 0, 20, &lp_num)) {
         send_error(fd, 400, "top_logprobs out of range");
         return;
     }
@@ -2295,6 +2303,41 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                     sb_fmt(&r, "\",\"logprob\":%.6f}", a->lp);
                 }
                 sb_lit(&r, "]}");
+            }
+            sb_lit(&r, "]},");
+        } else if (!chat && e->lp_count > 0) {
+            char tb[512];
+            int offset = 0;
+            sb_lit(&r, "\"logprobs\":{\"tokens\":[");
+            for (int i = 0; i < e->lp_count; i++) {
+                if (i) sb_lit(&r, ",");
+                int tn = tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
+                sb_lit(&r, "\""); sb_esc(&r, tb, tn); sb_lit(&r, "\"");
+            }
+            sb_lit(&r, "],\"token_logprobs\":[");
+            for (int i = 0; i < e->lp_count; i++) {
+                if (i) sb_lit(&r, ",");
+                sb_fmt(&r, "%.6f", e->lp_chosen[i]);
+            }
+            sb_lit(&r, "],\"top_logprobs\":[");
+            for (int i = 0; i < e->lp_count; i++) {
+                if (i) sb_lit(&r, ",");
+                sb_lit(&r, "{");
+                for (int j = 0; j < e->lp_n; j++) {
+                    const lp_alt *a = &e->lp_top[(size_t)i * e->lp_n + j];
+                    if (a->id < 0) break;
+                    if (j) sb_lit(&r, ",");
+                    int tn = tok_decode(s->tok, a->id, tb, sizeof(tb));
+                    sb_lit(&r, "\""); sb_esc(&r, tb, tn);
+                    sb_fmt(&r, "\":%.6f", a->lp);
+                }
+                sb_lit(&r, "}");
+            }
+            sb_lit(&r, "],\"text_offset\":[");
+            for (int i = 0; i < e->lp_count; i++) {
+                if (i) sb_lit(&r, ",");
+                sb_fmt(&r, "%d", offset);
+                offset += tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
             }
             sb_lit(&r, "]},");
         }
