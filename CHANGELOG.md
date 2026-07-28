@@ -5,6 +5,28 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- CUDA decode matvec pass (the suite plan's P1 decode lever): the Q4_K and
+  Q5_K decode GEMVs now use aligned 8-byte quant loads, `float4` activation
+  loads and a factored per-group affine; Q8_0 covers four blocks per warp
+  iteration; Q6_K unrolls two blocks for load-level parallelism. Measured on
+  an RTX 3070: Qwen3-8B-Q4_K_M decode 31.7 → 53.3 tok/s (+68%),
+  Llama-3.1-8B-Q5_K_M 31.0 → 54.0 tok/s (+74%), Qwen3-4B-Q8_0 58.4 → 60.5
+  tok/s. GPU output remains token-identical to the CPU path on all verified
+  models.
+- Prefill matvec tiles widened from 8 to 16 tokens (MVB 16), halving the
+  per-tile weight passes. The Q8_0 prefill GEMM keeps its proven 8-column
+  tile and runs wide tiles as two launches. Known cost on the 3070:
+  Qwen3-4B-Q8_0 prefill ~-4% (113.5 → 108.7 tok/s) from extra attention-score
+  L2 pressure at 16 columns; Q4_K prefill is unchanged on the default path.
+- Rebuilt the opt-in tensor-core prefill GEMM (`RUNNER_CUDA_TC=1`) as an
+  MMQ-style kernel: the block dequantizes a 64-row × 128-K fp16 weight tile
+  to shared memory once — 8-byte quant loads, two threads per row — and four
+  warps' m16n16k16 MMAs reuse it against a 16-token fp16 activation tile with
+  fp32 register accumulation. The previous per-warp variant measured 6-7×
+  slower than the scalar GEMM; this one measures Qwen3-8B-Q4_K_M prefill
+  96.4 → 138.2 tok/s (+43%) on the RTX 3070, and its greedy output matched
+  the CPU path token-for-token on the verification prompts. It remains
+  opt-in behind the tolerance-gate promotion decision.
 - Added sparse MoE tensor-role placement with `--cpu-moe`. CUDA retains
   attention/dense tensors and KV while expert FFNs execute from system RAM;
   packed uploads omit the expert bank instead of reserving GGUF-sized holes.

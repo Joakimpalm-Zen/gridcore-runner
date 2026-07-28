@@ -138,3 +138,29 @@ Correctness: `RUNNER_CUDA_TC=1` produces token-identical greedy output to the
 scalar path. Speed: the TC `matvec` line is ~7× the scalar one. The kernel is
 kept, off by default, as the correct foundation for the widened-batch work Phase 2
 would need — not as a shipped win.
+
+## Phase 2 result — DONE 2026-07-28 (positive)
+
+Both halves of the re-scoped Phase 2 landed together:
+
+1. **Batch tile widened, MVB 8 → 16.** Prefill tiles now carry 16 token
+   columns. On the scalar path this is roughly neutral (the f32 FMA count per
+   weight scales with columns, so fewer passes buy nothing — measured flat for
+   Q4_K, ~-4% for Q8_0 on an RTX 3070 from attention-score L2 pressure; the
+   Q8_0 GEMM keeps its 8-column tile via a split launch). The widening's real
+   purpose is the fp16 tile shape below.
+2. **The Phase-1 kernel was replaced, not tuned.** Phase 1's per-warp variant
+   re-dequantized per 16-element K-step through a scalar index helper — it
+   measured 6-7× *slower* than the scalar GEMM. The v2 kernel is MMQ-style:
+   the whole block dequantizes a 64-row × 128-K fp16 weight tile into shared
+   memory once (8-byte quant loads, two threads per row, scales computed per
+   64-element segment), and four warps' m16n16k16 MMAs reuse it against a
+   128-K × 16-token fp16 activation tile, accumulating fp32 in registers
+   across the full K.
+
+Measured on an RTX 3070 (full card, not MIG), Qwen3-8B-Q4_K_M, 2000-token
+prompt: prefill 96.4 → **138.2 tok/s (+43%)** with `RUNNER_CUDA_TC=1`; greedy
+output token-identical to CPU on the five kernel-verify prompts. The gate
+posture is unchanged: scalar stays the default, TC stays a measured opt-in
+until the tolerance gate promotes it per (type, arch). Remaining headroom:
+double-buffered staging, a Q8_0 TC twin, and the Phase 3 WGMMA question.

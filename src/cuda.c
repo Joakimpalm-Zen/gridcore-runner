@@ -323,7 +323,7 @@ typedef struct {
 
 // max tokens per matvec tile — must match MVB in kernels.cu; every activation
 // buffer is allocated this many columns wide
-#define MVB 8
+#define MVB 16
 
 // flash-decoding KV split count — must match ATTN_SPLITS in kernels.cu; fixed
 // (not context-dependent) so the decode CUDA graph stays valid across positions
@@ -331,7 +331,7 @@ typedef struct {
 
 // output rows per batched-matvec block — must match GEMM_WARPS in kernels.cu
 #define GEMM_WARPS 8
-#define TC_WPB     4   // tensor-core GEMM warps per block (match kernels.cu)
+#define TC_ROWS    64  // tensor-core GEMM output rows per block (match kernels.cu)
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, neox; float mscale; } rope_args;
@@ -1253,15 +1253,30 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
     mv_args a = { n_in, n_out, w_off, bias != 0, batch, xs, ys };
     CUdeviceptr b = bias ? bias : g->sw->dummy;
     void *p[] = { &weights, &x, &y, &a, &b };
-    // Prefill (batch>1), tensor-core GEMM when enabled and available: one warp
-    // per 32-row tile, TC_WPB warps per block.
+    // Prefill (batch>1), tensor-core GEMM when enabled and available: the
+    // block dequantizes a 64-row fp16 weight tile once and its four warps'
+    // MMAs share it (TC_ROWS rows per block, 128 threads).
     if (batch > 1 && tc_on() && g->sw->f_gemm_tc[w->type])
         return launch(g, g->sw->f_gemm_tc[w->type],
-                      (n_out + 32 * TC_WPB - 1) / (32 * TC_WPB), 1, 1, 32 * TC_WPB, p);
+                      (n_out + TC_ROWS - 1) / TC_ROWS, 1, 1, 128, p);
     // Prefill (batch>1) uses the tiled-GEMM variant where available (Q8_0/Q4_K):
     // GEMM_WARPS(=8) rows per block, 256 threads, x staged in shared memory.
-    if (batch > 1 && g->sw->f_gemm[w->type])
+    if (batch > 1 && g->sw->f_gemm[w->type]) {
+        // k_gemm_q8_0 keeps a fixed 8-column tile — a 16-column f32 x-tile
+        // exceeds shared memory, and every narrower restructure measured
+        // slower — so a wider tile runs as two launches of the proven shape.
+        if (w->type == T_Q8_0 && batch > 8) {
+            mv_args a2 = a;
+            a.batch = 8;
+            a2.batch = batch - 8;
+            CUdeviceptr x2 = x + (CUdeviceptr)(8u * (uint64_t)xs * sizeof(float));
+            CUdeviceptr y2 = y + (CUdeviceptr)(8u * (uint64_t)ys * sizeof(float));
+            void *p2[] = { &weights, &x2, &y2, &a2, &b };
+            return launch(g, g->sw->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p) &&
+                   launch(g, g->sw->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p2);
+        }
         return launch(g, g->sw->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p);
+    }
     // Decode (batch==1) uses the coalesced lane-per-element GEMV where available
     // (Q8_0/Q4_K); same 4-rows/block shape, so capture-compatible with no
     // host-side branching on per-token state.

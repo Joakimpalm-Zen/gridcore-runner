@@ -13,6 +13,7 @@
 #include <mma.h>
 
 typedef unsigned char  uchar;
+typedef unsigned short ushort16;
 typedef unsigned int   uint;
 typedef unsigned long long ulong64;
 
@@ -69,7 +70,7 @@ extern "C" __global__ void k_qknorm(float *v, const float *w, int hd, float eps,
 // weight to all MVB columns (x buffers are always MVB columns wide, so the
 // unguarded reads for t >= batch touch valid, ignored memory).
 
-#define MVB 8   // max tokens per matvec tile (keep in sync with cuda.c)
+#define MVB 16  // max tokens per matvec tile (keep in sync with cuda.c)
 
 struct mv_args {
     int     n_in;
@@ -193,14 +194,22 @@ extern "C" __global__ void k_mv_q8_0_b(MV_PARAMS) {
 #define Q8_CHUNK   32           // q8 blocks staged per k-iteration (== warp lanes)
 #define SMPAD      33           // 32 + 1: makes per-lane smem reads conflict-free
 
+// MVB=16 note: a 16-column f32 x-tile of 32 q8 blocks does not fit shared
+// memory (16*1024*4 = 64 KB), and every narrower restructure measured slower
+// than this proven 8-column shape (the kernel is smem-FMA bound, so per-weight
+// work scales with columns and wider tiles buy nothing on this path). The
+// kernel therefore keeps its 8-column tile and cuda.c splits a 16-token tile
+// into two launches — identical arithmetic to the MVB=8 build.
+#define Q8_COLS 8               // fixed column width of this kernel's tile
+
 // xsm[t][blk_in_chunk*SMPAD + j] holds x column t, element (chunk*1024)+blk*32+j
 extern "C" __global__ void k_gemm_q8_0(MV_PARAMS) {
-    __shared__ float xsm[MVB][Q8_CHUNK * SMPAD];
+    __shared__ float xsm[Q8_COLS][Q8_CHUNK * SMPAD];
     unsigned warp = threadIdx.x >> 5;
     unsigned lane = threadIdx.x & 31;
     unsigned row  = blockIdx.x * GEMM_WARPS + warp;
     int nb = a.n_in / 32;
-    float s[MVB] = {0};
+    float s[Q8_COLS] = {0};
     const uchar *rw = wb + a.w_off + (ulong64)(row < (unsigned)a.n_out ? row : 0) * nb * 34;
 
     for (int cs = 0; cs < nb; cs += Q8_CHUNK) {
@@ -209,7 +218,7 @@ extern "C" __global__ void k_gemm_q8_0(MV_PARAMS) {
         int base_e  = cs * 32;
         // coalesced cooperative load of this chunk's x into padded smem
         #pragma unroll
-        for (int t = 0; t < MVB; t++) {
+        for (int t = 0; t < Q8_COLS; t++) {
             const float *xg = x + (ulong64)t * a.xs + base_e;
             for (int e = threadIdx.x; e < celems; e += blockDim.x)
                 xsm[t][(e >> 5) * SMPAD + (e & 31)] = xg[e];
@@ -224,13 +233,14 @@ extern "C" __global__ void k_gemm_q8_0(MV_PARAMS) {
             for (int j = 0; j < 32; j++) {
                 float w = d * (float)q[j];
                 #pragma unroll
-                for (int t = 0; t < MVB; t++) s[t] += w * xsm[t][soff + j];
+                for (int t = 0; t < Q8_COLS; t++) s[t] += w * xsm[t][soff + j];
             }
         }
         __syncthreads();
     }
     if (row < (unsigned)a.n_out) {
-        for (int t = 0; t < a.batch; t++) {
+        int cols = a.batch < Q8_COLS ? a.batch : Q8_COLS;
+        for (int t = 0; t < cols; t++) {
             float r = warp_sum(s[t]);
             if (lane == 0) y[(ulong64)t * a.ys + row] = a.has_bias ? r + bias[row] : r;
         }
@@ -254,12 +264,36 @@ extern "C" __global__ void k_gemm_q8_0(MV_PARAMS) {
 // shape as k_mv_* (4 rows/block, 128 threads) so occupancy is unchanged; the
 // win is purely coalescing.
 
+// v2 (decode-bandwidth pass): the warp covers FOUR blocks per iteration —
+// lane l owns bytes [(l&7)*4, +4) of block b0+(l>>3) — so each lane issues one
+// aligned float4 x-load and two ushort quant loads per iteration instead of a
+// single scalar element. Quart of the iterations, 4x the loads in flight; the
+// per-lane partial is reduced by the same warp_sum. Reduction order differs
+// from v1 (per-lane running s over its byte-quarter vs per-element), so
+// identity vs CPU is established empirically by kernel-verify, like v1 was.
 extern "C" __global__ void k_gemv_q8_0(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 32;
     const uchar *rw = wb + a.w_off + (ulong64)row * nb * 34;
+    int bsub = (int)(lane >> 3);          // which of the 4 blocks this lane works
+    int boff = ((int)lane & 7) * 4;       // this lane's 4-element chunk
     float s = 0;
-    for (int b = 0; b < nb; b++) {
+    int b4 = nb & ~3;
+    for (int b0 = 0; b0 < b4; b0 += 4) {
+        const uchar *blk = rw + (ulong64)(b0 + bsub) * 34;
+        float d = f16f(blk);
+        // 34-byte stride keeps quants only 2-aligned: two ushort loads, then
+        // sign-extend the four int8 lanes
+        const uchar *qp = blk + 2 + boff;
+        ushort16 u0 = *(const ushort16 *)qp, u1 = *(const ushort16 *)(qp + 2);
+        int q0 = (int)(signed char)(u0 & 0xFF), q1 = (int)(signed char)(u0 >> 8);
+        int q2 = (int)(signed char)(u1 & 0xFF), q3 = (int)(signed char)(u1 >> 8);
+        const float4 xv = *(const float4 *)(x + (ulong64)(b0 + bsub) * 32 + boff);
+        s += d * ((float)q0 * xv.x + (float)q1 * xv.y +
+                  (float)q2 * xv.z + (float)q3 * xv.w);
+    }
+    // tail blocks (nb not a multiple of 4): v1's element-per-lane mapping
+    for (int b = b4; b < nb; b++) {
         const uchar *blk = rw + (ulong64)b * 34;
         float d = f16f(blk);
         const signed char *q = (const signed char *)(blk + 2);
@@ -657,86 +691,133 @@ extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
 }
 
 // ---------------------------------------------------- tensor-core Q4_K GEMM
-// Phase 1 of the tensor-core plan (docs/specs/2026-07-22-tensor-core-gemm-scope.md).
-// Same math as k_gemm_q4_K, but the scalar-FMA accumulation is replaced by WMMA
-// (m32n8k16, fp16 inputs, fp32 accumulate). One warp produces a 32-row x MVB(8)
-// -token output tile. Q4_K's per-group scales are applied during dequant to fp16
-// BEFORE the MMA (WMMA cannot apply per-group scales), so the fp16 tile already
-// holds the true weight value. Portable within Runner's CUDA support boundary:
-// WMMA compiles into compute_75 PTX and JITs onto NVIDIA Turing / compute
-// capability 7.5 or newer, Blackwell included.
-//
-// q4k_w() reproduces k_gemm_q4_K's per-element dequant EXACTLY (verified index by
-// index), so the only numeric departure from the scalar kernel is fp16 rounding of
-// the two operands plus the WMMA accumulation order — bounded by the tolerance gate.
-static __device__ __forceinline__ float q4k_w(const uchar *blk, float dd,
-                                               float dmin, int e) {
-    int g = e >> 5;              // group 0..7 (32 elems each)
-    int ji = e >> 6;             // 32-byte quant segment 0..3
-    int l = e >> 3, k = e & 7;   // scalar kernel's (lane, k) for this element
-    uchar sg, mg;
-    get_scale_min_k4(g, blk + 4, &sg, &mg);
-    const uchar *q = blk + 16 + ji * 32;
-    uchar byte = q[(l & 3) * 8 + k];
-    int nib = ((g & 1) == 0) ? (byte & 0xF) : (byte >> 4);
-    return dd * (float)sg * (float)nib - dmin * (float)mg;
-}
+// v2, MMQ-style (suite plan P1-prefill lever b; supersedes the per-warp v1,
+// which re-dequantized per 16-element K-step through a scalar index helper and
+// measured ~6-7x SLOWER than the scalar GEMM at 8 tokens). The economics that
+// make this one fast:
+//   - the whole BLOCK cooperates on one 64-row x 128-K fp16 weight tile per
+//     step, dequantized ONCE into shared memory with 8-byte quant loads —
+//     two threads per row, each unpacking one contiguous 64-element segment
+//     (exactly two scale groups) — then all four warps' MMAs reuse it;
+//   - activations are staged as a 128-K x 16-token fp16 tile (vectorized
+//     float4 reads, zero-padded past a.batch), tiny enough to live in L2
+//     across the row-block sweep;
+//   - each warp owns a 16-row m16n16k16 fragment strip: 4 warps x 16 = 64
+//     rows per block, accumulated in fp32 across the full K without ever
+//     leaving registers (the "register-accumulate" of the plan item).
+// Numerics: identical per-element weight values to k_gemm_q4_K, rounded to
+// fp16 operands with fp32 accumulation — same numeric class as v1, still
+// behind the RUNNER_CUDA_TC opt-in + tolerance gate, never the default path.
+// Compiles to compute_75 PTX (fp16 WMMA is Turing+; no bf16 in sm_75).
 
-#define TC_WPB 4   // warps per block; each warp owns a 32-row output tile
+#define TC_ROWS 64    // output rows per block (4 warps x 16-row fragments)
+#define TC_K    128   // K-elements staged per step (half a q4_K super-block)
+#define TC_N    16    // token columns per tile (== MVB)
+
 extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
     using namespace nvcuda::wmma;
-    const int warp = threadIdx.x >> 5;
-    const int lane = threadIdx.x & 31;
-    const int row0 = (blockIdx.x * TC_WPB + warp) * 32;   // first of this warp's 32 rows
-    __shared__ __half sh_w[TC_WPB][32 * 16];              // 32 rows x 16 K, row-major
-    __shared__ __half sh_x[TC_WPB][16 * 8];               // 16 K x 8 tokens, col-major
-    __shared__ float  sh_c[TC_WPB][32 * 8];               // 32 rows x 8 tokens, row-major
-    __half *wt = sh_w[warp];
-    __half *xt = sh_x[warp];
+    const int tid  = threadIdx.x;         // 128 threads = 4 warps
+    const int warp = tid >> 5;
+    const unsigned row0 = blockIdx.x * TC_ROWS;
+    __shared__ __half sh_w[TC_ROWS * TC_K];   // row-major, ldm = TC_K
+    __shared__ __half sh_x[TC_N * TC_K];      // col-major (k,t) at [t*TC_K+k]
+    __shared__ float  sh_c[TC_ROWS * TC_N];   // row-major epilogue staging
 
-    fragment<matrix_a, 32, 8, 16, __half, row_major> fa;
-    fragment<matrix_b, 32, 8, 16, __half, col_major> fb;
-    fragment<accumulator, 32, 8, 16, float> fc;
-    fill_fragment(fc, 0.0f);
+    fragment<matrix_a, 16, 16, 16, __half, row_major> fa;
+    fragment<matrix_b, 16, 16, 16, __half, col_major> fb;
+    fragment<accumulator, 16, 16, 16, float> fc[1];
+    fill_fragment(fc[0], 0.0f);
 
     int nb = a.n_in / 256;
+    // this thread stages one 64-element segment of one row per K-step:
+    // row srow, segment sseg (0 or 1) of the 128-K tile
+    int srow = tid >> 1, sseg = tid & 1;
+
     for (int b = 0; b < nb; b++) {
-        int base_e = b * 256;
-        for (int j = 0; j < 16; j++) {          // 16 K-steps of 16 elems per 256-block
-            int e0 = j * 16;
-            // stage 32x16 dequantized weights -> fp16 (32 lanes cover 512 values)
-            for (int idx = lane; idx < 32 * 16; idx += 32) {
-                int rr = idx >> 4, ee = idx & 15;
-                unsigned gr = row0 + rr;
-                float wv = 0.0f;
+        #pragma unroll
+        for (int koff = 0; koff < 256; koff += TC_K) {
+            // ---- stage weights: 64 rows x 128 K, dequantized once ----
+            {
+                unsigned gr = row0 + srow;
+                __half *dst = sh_w + srow * TC_K + sseg * 64;
                 if (gr < (unsigned)a.n_out) {
                     const uchar *blk = wb + a.w_off +
                                        (ulong64)gr * nb * 144 + (ulong64)b * 144;
-                    wv = q4k_w(blk, f16f(blk), f16f(blk + 2), e0 + ee);
+                    int e0 = koff + sseg * 64;         // segment base element
+                    float dd   = f16f(blk);
+                    float dmin = f16f(blk + 2);
+                    uchar sg0, mg0, sg1, mg1;
+                    get_scale_min_k4((e0 >> 5) + 0, blk + 4, &sg0, &mg0);
+                    get_scale_min_k4((e0 >> 5) + 1, blk + 4, &sg1, &mg1);
+                    float dg0 = dd * (float)sg0, mm0 = dmin * (float)mg0;
+                    float dg1 = dd * (float)sg1, mm1 = dmin * (float)mg1;
+                    // 64 consecutive elements live in ONE 32-byte quant
+                    // segment: bytes b8 carry the low nibbles of elements
+                    // 0..31 and the high nibbles of elements 32..63
+                    const uint2 *q8 = (const uint2 *)(blk + 16 + (e0 >> 6) * 32);
+                    #pragma unroll
+                    for (int v = 0; v < 4; v++) {
+                        uint2 qv = q8[v];
+                        #pragma unroll
+                        for (int w = 0; w < 2; w++) {
+                            uint bits = w ? qv.y : qv.x;
+                            int base = v * 8 + w * 4;
+                            uint lo = bits & 0x0F0F0F0Fu;
+                            uint hi = (bits >> 4) & 0x0F0F0F0Fu;
+                            dst[base + 0]  = __float2half(dg0 * (float)(lo & 0xFF) - mm0);
+                            dst[base + 1]  = __float2half(dg0 * (float)((lo >> 8) & 0xFF) - mm0);
+                            dst[base + 2]  = __float2half(dg0 * (float)((lo >> 16) & 0xFF) - mm0);
+                            dst[base + 3]  = __float2half(dg0 * (float)(lo >> 24) - mm0);
+                            dst[base + 32] = __float2half(dg1 * (float)(hi & 0xFF) - mm1);
+                            dst[base + 33] = __float2half(dg1 * (float)((hi >> 8) & 0xFF) - mm1);
+                            dst[base + 34] = __float2half(dg1 * (float)((hi >> 16) & 0xFF) - mm1);
+                            dst[base + 35] = __float2half(dg1 * (float)(hi >> 24) - mm1);
+                        }
+                    }
+                } else {
+                    #pragma unroll
+                    for (int e = 0; e < 64; e++) dst[e] = __float2half(0.0f);
                 }
-                wt[rr * 16 + ee] = __float2half(wv);
             }
-            // stage 16x8 activations -> fp16, col-major (element (k,t) at xt[t*16+k])
-            for (int idx = lane; idx < 16 * 8; idx += 32) {
-                int ee = idx & 15, tt = idx >> 4;
-                float xv = (tt < a.batch)
-                           ? x[(ulong64)tt * a.xs + base_e + e0 + ee] : 0.0f;
-                xt[tt * 16 + ee] = __float2half(xv);
+            // ---- stage activations: 128 K x 16 tokens, vectorized ----
+            {
+                int col = tid >> 3, part = tid & 7;     // 8 threads per column
+                __half *dst = sh_x + col * TC_K + part * 16;
+                if (col < a.batch) {
+                    const float *xg = x + (ulong64)col * a.xs + b * 256 + koff
+                                      + part * 16;
+                    #pragma unroll
+                    for (int v = 0; v < 4; v++) {
+                        float4 xv = *(const float4 *)(xg + v * 4);
+                        dst[v * 4 + 0] = __float2half(xv.x);
+                        dst[v * 4 + 1] = __float2half(xv.y);
+                        dst[v * 4 + 2] = __float2half(xv.z);
+                        dst[v * 4 + 3] = __float2half(xv.w);
+                    }
+                } else {
+                    #pragma unroll
+                    for (int e = 0; e < 16; e++) dst[e] = __float2half(0.0f);
+                }
             }
-            __syncwarp();
-            load_matrix_sync(fa, wt, 16);
-            load_matrix_sync(fb, xt, 16);
-            mma_sync(fc, fa, fb, fc);
-            __syncwarp();
+            __syncthreads();
+            // ---- 8 MMA K-steps over the staged tile ----
+            const __half *wt = sh_w + warp * 16 * TC_K;
+            #pragma unroll
+            for (int k = 0; k < TC_K; k += 16) {
+                load_matrix_sync(fa, wt + k, TC_K);
+                load_matrix_sync(fb, sh_x + k, TC_K);
+                mma_sync(fc[0], fa, fb, fc[0]);
+            }
+            __syncthreads();
         }
     }
-    store_matrix_sync(sh_c[warp], fc, 8, mem_row_major);   // sh_c[rr*8 + tt]
-    __syncwarp();
-    for (int idx = lane; idx < 32 * 8; idx += 32) {
-        int rr = idx >> 3, tt = idx & 7;
+    store_matrix_sync(sh_c + warp * 16 * TC_N, fc[0], TC_N, mem_row_major);
+    __syncthreads();
+    for (int idx = tid; idx < TC_ROWS * TC_N; idx += blockDim.x) {
+        int rr = idx / TC_N, tt = idx % TC_N;
         unsigned gr = row0 + rr;
         if (gr < (unsigned)a.n_out && tt < a.batch) {
-            float r = sh_c[warp][rr * 8 + tt];
+            float r = sh_c[rr * TC_N + tt];
             y[(ulong64)tt * a.ys + gr] = a.has_bias ? r + bias[gr] : r;
         }
     }
@@ -749,31 +830,43 @@ extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
 // read from global (single decode column, small + L1-cached); the 128-byte
 // quant region of each block is read coalesced across the warp. Reduction is
 // reordered vs k_mv_q4_K -> identity is verified empirically.
+// v2 (decode-bandwidth pass): same lane-per-8-elements geometry, but the 8
+// quant bytes arrive as one aligned uint2 (blk+16 + ji*32 + bbase is 8-aligned
+// within the 144-byte block) and the 8 x elements as two aligned float4s. The
+// per-group affine is factored out — s += dg*sum(nib*x) - mmg*sum(x) — so the
+// inner 8 elements are pure FMAs on unpacked nibbles. Per-element weights are
+// unchanged from v1; only load shape and summation order differ, so identity
+// vs CPU stays empirically gated by kernel-verify.
 extern "C" __global__ void k_gemv_q4_K(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 256;
     const uchar *rw = wb + a.w_off + (ulong64)row * nb * 144;
     int g     = (int)(lane >> 2);         // scale/min group 0..7
     int ji    = (int)(lane >> 3);         // 32-byte quant segment 0..3
-    int lo    = (((int)lane >> 2) & 1) == 0;
+    int sh    = ((((int)lane >> 2) & 1) == 0) ? 0 : 4;   // low or high nibble
     int bbase = ((int)lane & 3) * 8;      // byte offset within the segment
     float s = 0;
     for (int b = 0; b < nb; b++) {
         const uchar *blk = rw + (ulong64)b * 144;
         float dd   = f16f(blk);
         float dmin = f16f(blk + 2);
-        const uchar *sc = blk + 4;
-        const uchar *q  = blk + 16 + ji * 32;
         uchar sg, mg;
-        get_scale_min_k4(g, sc, &sg, &mg);
+        get_scale_min_k4(g, blk + 4, &sg, &mg);
         float dg = dd * (float)sg, mmg = dmin * (float)mg;
+        uint2 qv = *(const uint2 *)(blk + 16 + ji * 32 + bbase);
         const float *xp = x + (ulong64)b * 256 + (int)lane * 8;
-        #pragma unroll
-        for (int k = 0; k < 8; k++) {
-            uchar byte = q[bbase + k];
-            int nib = lo ? (byte & 0xF) : (byte >> 4);
-            s += (dg * (float)nib - mmg) * xp[k];
-        }
+        float4 x0 = *(const float4 *)xp, x1 = *(const float4 *)(xp + 4);
+        uint v0 = (qv.x >> sh) & 0x0F0F0F0Fu, v1 = (qv.y >> sh) & 0x0F0F0F0Fu;
+        float t  = (float)(v0 & 0xFF)         * x0.x
+                 + (float)((v0 >>  8) & 0xFF) * x0.y
+                 + (float)((v0 >> 16) & 0xFF) * x0.z
+                 + (float)((v0 >> 24)       ) * x0.w
+                 + (float)(v1 & 0xFF)         * x1.x
+                 + (float)((v1 >>  8) & 0xFF) * x1.y
+                 + (float)((v1 >> 16) & 0xFF) * x1.z
+                 + (float)((v1 >> 24)       ) * x1.w;
+        float sx = x0.x + x0.y + x0.z + x0.w + x1.x + x1.y + x1.z + x1.w;
+        s += dg * t - mmg * sx;
     }
     MV_TAIL;
 }
@@ -845,34 +938,47 @@ extern "C" __global__ void k_mv_q5_K_b(MV_PARAMS) {
 // A warp therefore processes each 256-element block cooperatively, coalescing
 // the 128-byte qs region and 32-byte qh region instead of reading 176-byte-
 // strided blocks across lanes.
+// v2 (decode-bandwidth pass): the Q4_K v2 load shape — one aligned uint2 for
+// the 8 nibbles, one aligned uint2 for the 8 qh bytes (blk+16+bbase is
+// 8-aligned in the 176-byte block), two float4 x loads, and the factored
+// s += dg*sum(qv*x) - mmg*sum(x). Weights per element unchanged; identity vs
+// CPU empirically gated by kernel-verify as before.
 extern "C" __global__ void k_gemv_q5_K(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 256;
     const uchar *rw = wb + a.w_off + (ulong64)row * nb * 176;
     int g     = (int)(lane >> 2);         // scale/min group 0..7
     int ji    = (int)(lane >> 3);         // 32-byte quant segment 0..3
-    int lo    = (((int)lane >> 2) & 1) == 0;
+    int sh    = ((((int)lane >> 2) & 1) == 0) ? 0 : 4;
     int bbase = ((int)lane & 3) * 8;      // byte offset within segment/qh
-    int hmask = 1 << g;
+    int hshift = g;                       // qh bit for this group
     float s = 0;
     for (int b = 0; b < nb; b++) {
         const uchar *blk = rw + (ulong64)b * 176;
         float dd   = f16f(blk);
         float dmin = f16f(blk + 2);
-        const uchar *sc = blk + 4;
-        const uchar *qh = blk + 16;
-        const uchar *q  = blk + 48 + ji * 32;
         uchar sg, mg;
-        get_scale_min_k4(g, sc, &sg, &mg);
+        get_scale_min_k4(g, blk + 4, &sg, &mg);
         float dg = dd * (float)sg, mmg = dmin * (float)mg;
+        uint2 qv = *(const uint2 *)(blk + 48 + ji * 32 + bbase);
+        uint2 hv = *(const uint2 *)(blk + 16 + bbase);
         const float *xp = x + (ulong64)b * 256 + (int)lane * 8;
-        #pragma unroll
-        for (int k = 0; k < 8; k++) {
-            uchar byte = q[bbase + k];
-            int qv = (lo ? (byte & 0xF) : (byte >> 4)) +
-                     ((qh[bbase + k] & hmask) ? 16 : 0);
-            s += (dg * (float)qv - mmg) * xp[k];
-        }
+        float4 x0 = *(const float4 *)xp, x1 = *(const float4 *)(xp + 4);
+        uint v0 = (qv.x >> sh) & 0x0F0F0F0Fu, v1 = (qv.y >> sh) & 0x0F0F0F0Fu;
+        // fifth bit: bit `g` of each qh byte, moved to value 16
+        uint h0 = ((hv.x >> hshift) & 0x01010101u) << 4;
+        uint h1 = ((hv.y >> hshift) & 0x01010101u) << 4;
+        v0 += h0; v1 += h1;
+        float t  = (float)(v0 & 0xFF)         * x0.x
+                 + (float)((v0 >>  8) & 0xFF) * x0.y
+                 + (float)((v0 >> 16) & 0xFF) * x0.z
+                 + (float)((v0 >> 24)       ) * x0.w
+                 + (float)(v1 & 0xFF)         * x1.x
+                 + (float)((v1 >>  8) & 0xFF) * x1.y
+                 + (float)((v1 >> 16) & 0xFF) * x1.z
+                 + (float)((v1 >> 24)       ) * x1.w;
+        float sx = x0.x + x0.y + x0.z + x0.w + x1.x + x1.y + x1.z + x1.w;
+        s += dg * t - mmg * sx;
     }
     MV_TAIL;
 }
@@ -1005,32 +1111,51 @@ extern "C" __global__ void k_mv_q6_K_b(MV_PARAMS) {
 // across the warp -> coalesced. Per-element weight d*sc[base+is]*q matches
 // k_mv_q6_K exactly; only the k-reduction is reordered (per-lane partials +
 // one warp_sum), so identity is verified empirically by kernel-verify.
+// v2 (decode-bandwidth pass): same cooperative geometry — the per-lane loads
+// already coalesce across the warp — but two blocks per iteration with
+// independent accumulators so twice as many loads are in flight per loop trip
+// (the 210-byte stride is only 2-aligned, so wider per-lane loads are not
+// available). Identity vs CPU stays empirically gated by kernel-verify.
+static __device__ __forceinline__ float q6k_block_dot(const uchar *blk,
+                                                      const float *xb,
+                                                      int lane, int is) {
+    float d = f16f(blk + 208);
+    float acc = 0;
+    #pragma unroll
+    for (int half = 0; half < 2; half++) {
+        const uchar *ql = blk + half * 64;
+        const uchar *qh = blk + 128 + half * 32;
+        const signed char *sc = (const signed char *)(blk + 192) + half * 8;
+        int q1 = (int)((ql[lane]      & 0xF) | (((qh[lane] >> 0) & 3) << 4)) - 32;
+        int q2 = (int)((ql[lane + 32] & 0xF) | (((qh[lane] >> 2) & 3) << 4)) - 32;
+        int q3 = (int)((ql[lane]      >> 4)  | (((qh[lane] >> 4) & 3) << 4)) - 32;
+        int q4 = (int)((ql[lane + 32] >> 4)  | (((qh[lane] >> 6) & 3) << 4)) - 32;
+        const float *xp = xb + half * 128;
+        acc += d * ((float)(sc[0 + is] * q1) * xp[lane] +
+                    (float)(sc[2 + is] * q2) * xp[lane + 32] +
+                    (float)(sc[4 + is] * q3) * xp[lane + 64] +
+                    (float)(sc[6 + is] * q4) * xp[lane + 96]);
+    }
+    return acc;
+}
+
 extern "C" __global__ void k_gemv_q6_K(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 256;
     const uchar *rw = wb + a.w_off + (ulong64)row * nb * 210;
     int is = (int)(lane >> 4);          // (lane/16)&1 for lane 0..31 -> 0 or 1
-    float s = 0;
-    for (int b = 0; b < nb; b++) {
-        const uchar *blk = rw + (ulong64)b * 210;
-        float d = f16f(blk + 208);
-        const float *xb = x + (ulong64)b * 256;
-        #pragma unroll
-        for (int half = 0; half < 2; half++) {
-            const uchar *ql = blk + half * 64;
-            const uchar *qh = blk + 128 + half * 32;
-            const signed char *sc = (const signed char *)(blk + 192) + half * 8;
-            int q1 = (int)((ql[lane]      & 0xF) | (((qh[lane] >> 0) & 3) << 4)) - 32;
-            int q2 = (int)((ql[lane + 32] & 0xF) | (((qh[lane] >> 2) & 3) << 4)) - 32;
-            int q3 = (int)((ql[lane]      >> 4)  | (((qh[lane] >> 4) & 3) << 4)) - 32;
-            int q4 = (int)((ql[lane + 32] >> 4)  | (((qh[lane] >> 6) & 3) << 4)) - 32;
-            const float *xp = xb + half * 128;
-            s += d * ((float)(sc[0 + is] * q1) * xp[lane] +
-                      (float)(sc[2 + is] * q2) * xp[lane + 32] +
-                      (float)(sc[4 + is] * q3) * xp[lane + 64] +
-                      (float)(sc[6 + is] * q4) * xp[lane + 96]);
-        }
+    float s0 = 0, s1 = 0;
+    int b2 = nb & ~1;
+    for (int b = 0; b < b2; b += 2) {
+        s0 += q6k_block_dot(rw + (ulong64)b * 210,       x + (ulong64)b * 256,
+                            (int)lane, is);
+        s1 += q6k_block_dot(rw + (ulong64)(b + 1) * 210, x + (ulong64)(b + 1) * 256,
+                            (int)lane, is);
     }
+    if (b2 < nb)
+        s0 += q6k_block_dot(rw + (ulong64)b2 * 210, x + (ulong64)b2 * 256,
+                            (int)lane, is);
+    float s = s0 + s1;
     MV_TAIL;
 }
 
