@@ -113,12 +113,16 @@ def test_completion_request_selects_the_loaded_model_implicitly():
 
 
 def test_version_probe_resolves_a_relative_executable(tmp_path, monkeypatch):
-    runner = tmp_path / "runner"
-    runner.write_text("#!/bin/sh\necho 'runner test-version'\n")
-    runner.chmod(runner.stat().st_mode | stat.S_IXUSR)
+    if sys.platform == "win32":
+        runner = tmp_path / "runner.cmd"
+        runner.write_text("@echo off\necho runner test-version\n")
+    else:
+        runner = tmp_path / "runner"
+        runner.write_text("#!/bin/sh\necho 'runner test-version'\n")
+        runner.chmod(runner.stat().st_mode | stat.S_IXUSR)
     monkeypatch.chdir(tmp_path)
 
-    assert compare_llamacpp.first_line_version(pathlib.Path("runner")) == (
+    assert compare_llamacpp.first_line_version(pathlib.Path(runner.name)) == (
         "runner test-version"
     )
 

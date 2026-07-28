@@ -41,6 +41,8 @@ test-gguf-getters
 test-gguf-getters.exe
 test-parse
 test-parse.exe
+test-model-load-failure
+test-model-load-failure.exe
 # per-PID scratch registries left by tests/test_vram_registry.c
 vramreg-test-*/
 runner-baseline
