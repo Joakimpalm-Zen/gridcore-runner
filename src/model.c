@@ -1572,6 +1572,10 @@ gguf_tensor moe_expert_weight(const layer_t *ly, int which, int e,
     size_t rs = ggml_row_size(base->type, rowlen);
     gguf_tensor v = *base;
     v.data = (uint8_t *)base->data + (size_t)e * rows * rs;
+    // clamp to the slice: enc_mv's binding bounds check reads nbytes, and the
+    // full fused-tensor size pushes expert e>=1 past the upload end (silent
+    // CPU fallback for the whole forward)
+    v.nbytes = (size_t)rows * rs;
     return v;
 }
 

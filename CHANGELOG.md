@@ -5,6 +5,20 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Fixed a silent MoE GPU→CPU fallback introduced by the `--cpu-moe` binding
+  layer (active even without the flag): `binding_find` bounds-checks
+  `t->nbytes` on every dispatch, but the per-expert slice descriptors built
+  by `moe_expert_weight` and the gemma-4 fused `gate_up` slice kept the full
+  multi-expert tensor size, so expert `e >= 1` failed the check, `enc_mv`
+  returned false, and the whole forward silently ran on the CPU while the
+  load banner still reported a full GPU split. Clamping the slice `nbytes`
+  restores the GPU path. Measured on the Blackwell MIG 1g.24gb:
+  Qwen3-30B-A3B-Q4_K_M decode 4.5 → 76.3 tok/s (above the 56.5 pre-regression
+  rate — expert matvecs now also use the new decode GEMVs);
+  gemma-4-26B-A4B-Q4_0 6.9 → 23.5 tok/s (restored). Greedy output verified
+  token-identical between CPU and GPU on both models. Note the CPU/GPU
+  identity gates could not catch this class of defect: the fallback *is* the
+  CPU path, so outputs matched while decode ran up to 12× slow.
 - CUDA decode matvec pass (the suite plan's P1 decode lever): the Q4_K and
   Q5_K decode GEMVs now use aligned 8-byte quant loads, `float4` activation
   loads and a factored per-group affine; Q8_0 covers four blocks per warp

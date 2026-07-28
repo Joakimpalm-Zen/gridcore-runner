@@ -1613,6 +1613,7 @@ static bool gpu_gemma_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int l,
             size_t rs = ggml_row_size(guv.type, n_embd);
             guv.data = (uint8_t *)ly->ffn_gate_up_exps->data +
                        (size_t)e * (2 * (size_t)nff) * rs;
+            guv.nbytes = (2 * (size_t)nff) * rs;  // clamp to the slice (see moe_expert_weight)
             gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
             CUdeviceptr up = g->hb + (size_t)nff * sizeof(float);
             ok = enc_mv(g, m, &guv, xn2, g->hb, n_embd, 2 * nff, 0, 1, n_embd, 2 * nff)
