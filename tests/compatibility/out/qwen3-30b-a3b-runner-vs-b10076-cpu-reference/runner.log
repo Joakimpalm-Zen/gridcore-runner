@@ -1,12 +1,9 @@
-gpu-split: budget=25.13GB fixed=0.72GB G=48/48 full=1 used=19.24GB
-gpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (18.6 GB weights in VRAM)
-gpu: VRAM 6.16 GB free of 25.37 GB after init (kv 0.40 GB + scratch 0.01 GB this instance)
-loaded /home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf | qwen3moe | 48 layers | ctx 4096 | 1 threads | 1.51s
+loaded /home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf | qwen3moe | 48 layers | ctx 4096 | 1 threads | 0.01s
 sampling: qwen3 (temp 0.60, top_p 0.95, top_k 20, min_p 0.00, repeat_penalty 1.00)
-server listening on http://127.0.0.1:40617 — 1 slot x 64 threads
+server listening on http://127.0.0.1:37357 — 1 slot x 64 threads
   POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
   GET /v1/models | GET /v1/capabilities | GET /health
-[slot 0] cmpl-0: 5 prompt (0 cached) + 128 gen tok (56.6 tok/s)
-[slot 0] cmpl-1: 5 prompt (4 cached) + 128 gen tok (56.9 tok/s)
-[slot 0] chatcmpl-2: 13 prompt (0 cached) + 8 gen tok (56.3 tok/s)
+[slot 0] cmpl-0: 5 prompt (0 cached) + 128 gen tok (4.1 tok/s)
+[slot 0] cmpl-1: 5 prompt (4 cached) + 128 gen tok (4.1 tok/s)
+[slot 0] chatcmpl-2: 13 prompt (0 cached) + 8 gen tok (4.1 tok/s)
 swap: unloading Qwen3-30B-A3B-Q4_K_M.gguf

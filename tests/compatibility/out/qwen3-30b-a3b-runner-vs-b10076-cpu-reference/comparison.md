@@ -3,13 +3,13 @@
 ## Provenance
 
 - Schema: `gridcore.runner.llamacpp-comparison.v1`
-- Generated UTC: `2026-07-28T09:18:10Z`
+- Generated UTC: `2026-07-28T09:54:30Z`
 - Status: `complete`
 - Model path: `/home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf`
 - Model SHA256: `0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5`
 - Model bytes: `18556685824`
 - Runner: `runner 0.1.3-alpha`
-- Runner commit: `dd14c11d06bf5baead49b41ff2ba3a04cd7cca22`
+- Runner commit: `e9593131bf5b96df6abfde3c58d484ed40e6e8d5`
 - llama.cpp: `version: 1 (305ba51)`
 - llama.cpp commit: `305ba519ab61cdff8044922cba2347826a04453f`
 
@@ -40,23 +40,23 @@ The TTFT request is a separate warmed streaming request after model load. The au
     }
   ],
   "processor": "x86_64",
-  "python": "3.13.14",
+  "python": "3.14.6",
   "system": "Linux-6.12.0-211.16.1.el10_2.x86_64-x86_64-with-glibc2.39"
 }
 ```
 
 ## Commands
 
-Runner: `/home/lab/workspace/Gridcore/gridcore-runner/runner -m /home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf --serve --port 40617 -c 4096 --gpu auto -n 128`
+Runner: `/home/lab/workspace/Gridcore/gridcore-runner/runner -m /home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf --serve --port 37357 -c 4096 --gpu off -n 128`
 
-llama.cpp: `/home/lab/workspace/Gridcore/llama.cpp-b10076/build-cpu/bin/llama-server -m /home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf --host 127.0.0.1 --port 33591 -c 4096 -ngl -1`
+llama.cpp: `/home/lab/workspace/Gridcore/llama.cpp-b10076/build-cpu/bin/llama-server -m /home/lab/workspace/.Trash-1000/files/Gridcore/gridcore-runner/models/Qwen3-30B-A3B-Q4_K_M.gguf --host 127.0.0.1 --port 45771 -c 4096 -ngl 0`
 
 ## Results
 
 | Runtime | Prompt tok/s | Decode tok/s | TTFT s | Generated tokens | Wall s |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| runner | 65.194 | 56.954 | 0.01820782700087875 | 128 | 2.3404163460072596 |
-| llamacpp | 94.08399819358723 | 43.55534080352798 | 0.02602243097499013 | 128 | 2.9935847250162624 |
+| runner | 5.992 | 4.053 | 0.23925498401513323 | 128 | 32.4121112349967 |
+| llamacpp | 90.53706587476913 | 42.11800939758085 | 0.026342616009060293 | 128 | 3.1094883629994 |
 
 ## VRAM
 
@@ -92,7 +92,8 @@ Load deltas are `nvidia-smi` used-memory changes from immediately before process
 Text comparison: `fail`
 
 Top-logprob comparison: `captured`
-Maximum absolute common-token logprob delta: `4.087371443176`
+Maximum absolute common-token logprob delta: `4.522365358643`
+Correctness gate: `pass`
 
 ## Generated output
 

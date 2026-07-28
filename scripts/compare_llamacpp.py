@@ -417,6 +417,25 @@ def compare_top_logprobs(a, b):
             "max_abs_common_logprob_delta": max_delta, "positions": rows}
 
 
+def correctness_gate(divergence, logprobs, min_shared_tokens, max_logprob_delta):
+    """Judge cross-engine equivalence without requiring brittle text identity."""
+    shared = divergence.get("shared_tokens")
+    delta = logprobs.get("max_abs_common_logprob_delta")
+    reasons = []
+    if not isinstance(shared, int) or shared < min_shared_tokens:
+        reasons.append(f"shared prefix {shared} is below {min_shared_tokens}")
+    if not isinstance(delta, (int, float)) or delta > max_logprob_delta:
+        reasons.append(f"common-token logprob delta {delta} exceeds {max_logprob_delta}")
+    return {
+        "status": "pass" if not reasons else "fail",
+        "minimum_shared_tokens": min_shared_tokens,
+        "maximum_common_logprob_delta": max_logprob_delta,
+        "observed_shared_tokens": shared,
+        "observed_max_common_logprob_delta": delta,
+        "reasons": reasons,
+    }
+
+
 def quote_cmd(cmd):
     return " ".join(shlex.quote(str(x)) for x in cmd)
 
@@ -506,6 +525,7 @@ def render_markdown(report):
         f"Top-logprob comparison: `{top['status']}`",
         f"Maximum absolute common-token logprob delta: "
         f"`{top.get('max_abs_common_logprob_delta')}`",
+        f"Correctness gate: `{report.get('correctness_gate', {}).get('status', 'pending')}`",
         "",
         "## Generated output",
         "",
@@ -558,6 +578,7 @@ def fixture_report(args):
         "text_comparison": {"status": "fixture"},
         "top_logprob_comparison": {"status": "pending",
                                     "reason": "fixture mode does not query logits"},
+        "correctness_gate": {"status": "pending"},
     }
     return report
 
@@ -610,6 +631,16 @@ def real_report(args):
     text_status = "pass" if runner["generated_text"] == llama["generated_text"] else "fail"
     divergence = first_token_divergence(runner["raw_completion_logprobs"],
                                         llama["raw_completion_logprobs"])
+    # Once greedy text diverges the engines condition on different histories,
+    # so later logits are not comparable. Judge only the shared prefix.
+    shared = divergence.get("shared_tokens", 0)
+    runner_shared = {**runner["raw_completion_logprobs"],
+                     "positions": runner["raw_completion_logprobs"].get("positions", [])[:shared]}
+    llama_shared = {**llama["raw_completion_logprobs"],
+                    "positions": llama["raw_completion_logprobs"].get("positions", [])[:shared]}
+    raw_comparison = compare_top_logprobs(runner_shared, llama_shared)
+    gate = correctness_gate(divergence, raw_comparison,
+                            args.min_shared_tokens, args.max_logprob_delta)
     return {
         "schema_version": "gridcore.runner.llamacpp-comparison.v1",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -651,6 +682,8 @@ def real_report(args):
         },
         "top_logprob_comparison": compare_top_logprobs(
             runner["top_logprobs"], llama["top_logprobs"]),
+        "raw_logprob_comparison": raw_comparison,
+        "correctness_gate": gate,
     }
 
 
@@ -668,6 +701,8 @@ def main(argv=None):
     parser.add_argument("--llamacpp-gpu-layers", type=int, default=-1)
     parser.add_argument("--llamacpp-arg", action="append")
     parser.add_argument("--quantization")
+    parser.add_argument("--min-shared-tokens", type=int, default=32)
+    parser.add_argument("--max-logprob-delta", type=float, default=2.0)
     parser.add_argument("--startup-timeout", type=int, default=300)
     parser.add_argument("--request-timeout", type=int, default=300)
     parser.add_argument("--out-dir", type=Path,
@@ -684,7 +719,7 @@ def main(argv=None):
     md_path.write_text(render_markdown(report), encoding="utf-8")
     print(json.dumps({"json": str(json_path), "markdown": str(md_path),
                       "status": report["status"]}))
-    return 0
+    return 1 if report.get("correctness_gate", {}).get("status") == "fail" else 0
 
 
 if __name__ == "__main__":

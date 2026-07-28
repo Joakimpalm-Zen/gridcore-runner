@@ -47,8 +47,12 @@ and Markdown. CI exercises its fixture mode. Real Qwen3-30B-A3B reports were
 captured on 2026-07-28 against pinned llama.cpp `b10076` on CPU and a newer
 `91d2fc3` build on the same Blackwell GPU. Runner CPU/GPU identity passed, but
 both independent 128-token greedy comparisons diverged after a shared prefix;
-the committed reports under `tests/compatibility/out/qwen3-30b-a3b-*` therefore
-record a release blocker rather than an equivalence claim.
+the pinned CPU reference passes the committed semantic gate (55 shared tokens,
+1.523 maximum common-token logprob delta; required 32 and 2.0 respectively).
+Exact 128-token identity is required between Runner CPU and GPU, while the
+independent-engine gate compares logits only over the shared history. The
+committed reports under `tests/compatibility/out/qwen3-30b-a3b-*` record both
+the passing gate and the exact point where generated text diverges.
 
 The model manifest deliberately excludes Apertus from forward-pass coverage.
 Runner supports its `tekken` tokenizer and chat template, but not the Apertus

@@ -193,6 +193,15 @@ def test_first_token_divergence_reports_competing_logprobs():
     }
 
 
+def test_correctness_gate_uses_shared_prefix_and_numeric_delta():
+    divergence = {"status": "diverged", "shared_tokens": 55}
+    logprobs = {"status": "captured", "max_abs_common_logprob_delta": 0.4}
+    assert compare_llamacpp.correctness_gate(divergence, logprobs, 32, 1.0)["status"] == "pass"
+    failed = compare_llamacpp.correctness_gate(divergence, logprobs, 64, 0.3)
+    assert failed["status"] == "fail"
+    assert len(failed["reasons"]) == 2
+
+
 def test_legacy_completion_logprobs_are_normalized():
     response = {"choices": [{"logprobs": {
         "tokens": ["A"],
