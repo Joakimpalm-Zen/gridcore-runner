@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import sys
 from types import SimpleNamespace
+import stat
 
 from scripts import compare_llamacpp
 
@@ -109,6 +110,17 @@ def test_completion_request_selects_the_loaded_model_implicitly():
         "top_p": 1,
         "stream": False,
     }
+
+
+def test_version_probe_resolves_a_relative_executable(tmp_path, monkeypatch):
+    runner = tmp_path / "runner"
+    runner.write_text("#!/bin/sh\necho 'runner test-version'\n")
+    runner.chmod(runner.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.chdir(tmp_path)
+
+    assert compare_llamacpp.first_line_version(pathlib.Path("runner")) == (
+        "runner test-version"
+    )
 
 
 def test_top_logprob_comparison_quantifies_common_token_deltas():

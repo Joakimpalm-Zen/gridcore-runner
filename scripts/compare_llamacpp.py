@@ -35,7 +35,7 @@ def run(cmd, timeout=20):
 
 
 def first_line_version(exe):
-    proc = run([str(exe), "--version"], timeout=15)
+    proc = run([str(Path(exe).resolve()), "--version"], timeout=15)
     if isinstance(proc, Exception):
         return None
     text = (proc.stdout + proc.stderr).strip().splitlines()
