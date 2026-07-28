@@ -176,12 +176,22 @@ static bool send_all(sock_t fd, const char *s, size_t n) {
     return true;
 }
 
+static const char *reason_phrase(int code) {
+    switch (code) {
+        case 200: return "OK";
+        case 400: return "Bad Request";
+        case 404: return "Not Found";
+        case 408: return "Request Timeout";
+        case 500: return "Internal Server Error";
+        case 503: return "Service Unavailable";
+        default:  return "Internal Server Error";
+    }
+}
+
 static void send_response(sock_t fd, int code, const char *ctype, const char *body,
                           size_t blen) {
     char hdr[256];
-    const char *msg = code == 200 ? "OK" : code == 400 ? "Bad Request" :
-                      code == 404 ? "Not Found" : code == 408 ? "Request Timeout" :
-                      "Internal Server Error";
+    const char *msg = reason_phrase(code);
     int hn = snprintf(hdr, sizeof(hdr),
                       "HTTP/1.1 %d %s\r\nContent-Type: %s\r\n"
                       "Content-Length: %zu\r\nConnection: close\r\n\r\n",

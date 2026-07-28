@@ -1,9 +1,15 @@
 """Raw-wire request framing contracts for the loopback HTTP server."""
 
 import contextlib
+import os
 import socket
+import time
 
 import pytest
+
+from harness import RunnerServer, find_runner
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 def raw_request(server, request):
@@ -26,6 +32,17 @@ def raw_request(server, request):
 
 def status(response):
     return int(response.split(b" ", 2)[1])
+
+
+def status_line(response):
+    return response.split(b"\r\n", 1)[0]
+
+
+def chat_request():
+    body = b'{"messages":[{"role":"user","content":"hi"}],"max_tokens":1}'
+    return (b"POST /v1/chat/completions HTTP/1.1\r\n"
+            b"Host: localhost\r\nContent-Type: application/json\r\n" +
+            (b"Content-Length: %d\r\n\r\n" % len(body)) + body)
 
 
 @pytest.mark.parametrize("line", [
@@ -88,3 +105,32 @@ def test_fastpath_also_rejects_invalid_framing(server):
     request = (b"GET /health HTTP/1.1\r\nHost: localhost\r\n"
                b"Transfer-Encoding: chunked\r\n\r\n")
     assert status(raw_request(server, request)) == 400
+
+
+def test_503_status_line_uses_service_unavailable_reason():
+    model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(ROOT, "test.gguf"))
+    old_queue = os.environ.get("RUNNER_MAX_QUEUE")
+    os.environ["RUNNER_MAX_QUEUE"] = "1"
+    stalled = queued = None
+    try:
+        with RunnerServer(find_runner(ROOT), model, ctx=1024, parallel=1,
+                          extra_args=["--gpu", "off"]) as srv:
+            stalled = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+            stalled.sendall(b"POST /v1/chat/completions HTTP/1.1\r\n")
+
+            queued = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+            queued.sendall(chat_request())
+            time.sleep(0.2)
+
+            response = raw_request(srv, chat_request())
+            assert status(response) == 503
+            assert status_line(response) == b"HTTP/1.1 503 Service Unavailable"
+    finally:
+        if stalled is not None:
+            stalled.close()
+        if queued is not None:
+            queued.close()
+        if old_queue is None:
+            os.environ.pop("RUNNER_MAX_QUEUE", None)
+        else:
+            os.environ["RUNNER_MAX_QUEUE"] = old_queue
