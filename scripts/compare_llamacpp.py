@@ -98,15 +98,21 @@ def nvidia_snapshot():
     if isinstance(proc, Exception) or proc.returncode != 0:
         return None
     rows = []
+    def memory_mib(value):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
     for line in proc.stdout.strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 5:
             rows.append({
                 "name": parts[0],
                 "driver_version": parts[1],
-                "memory_used_mib": int(parts[2]),
-                "memory_free_mib": int(parts[3]),
-                "memory_total_mib": int(parts[4]),
+                "memory_used_mib": memory_mib(parts[2]),
+                "memory_free_mib": memory_mib(parts[3]),
+                "memory_total_mib": memory_mib(parts[4]),
             })
     return rows or None
 
@@ -132,7 +138,7 @@ def vram_delta(before, after):
         return None
     rows = []
     for index, (old, new) in enumerate(zip(before, after)):
-        if "memory_used_mib" not in old or "memory_used_mib" not in new:
+        if old.get("memory_used_mib") is None or new.get("memory_used_mib") is None:
             return None
         rows.append({
             "device": index,

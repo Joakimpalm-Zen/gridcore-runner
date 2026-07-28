@@ -2,6 +2,7 @@ import json
 import pathlib
 import subprocess
 import sys
+from types import SimpleNamespace
 
 from scripts import compare_llamacpp
 
@@ -60,6 +61,28 @@ def test_vram_delta_is_reported_per_device():
         {"device": 0, "name": "GPU 0", "used_delta_mib": 256}
     ]
     assert compare_llamacpp.vram_delta(None, after) is None
+
+
+def test_nvidia_snapshot_tolerates_unavailable_mig_memory(monkeypatch):
+    output = (
+        "NVIDIA RTX PRO 6000, 580.65.06, [Insufficient Permissions], "
+        "[Insufficient Permissions], 24192\n"
+    )
+    monkeypatch.setattr(
+        compare_llamacpp,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=output),
+    )
+
+    snapshot = compare_llamacpp.nvidia_snapshot()
+    assert snapshot == [{
+        "name": "NVIDIA RTX PRO 6000",
+        "driver_version": "580.65.06",
+        "memory_used_mib": None,
+        "memory_free_mib": None,
+        "memory_total_mib": 24192,
+    }]
+    assert compare_llamacpp.vram_delta(snapshot, snapshot) is None
 
 
 def test_top_logprob_comparison_quantifies_common_token_deltas():
