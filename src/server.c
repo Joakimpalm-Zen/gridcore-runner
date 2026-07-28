@@ -541,8 +541,19 @@ static bool init_swap_runtime(const model_params *mp, int n_threads, int ttl) {
 // because "503, retry" is something an agent runtime can act on and an
 // unexplained EOF is not.
 static void q_push(sock_t fd) {
-    pthread_mutex_lock(&SV.q.mu);
-    bool room = SV.q.count < SV.q.limit;
+    bool room = false;
+    // A worker awakened for the previous connection may not have run before
+    // accept() returns the next one. Give that handoff a few scheduler ticks;
+    // otherwise an idle slot's first request transiently fills the queue and
+    // the following request is shed even though it should be the one queued.
+    for (int retry = 0; retry < 10; retry++) {
+        pthread_mutex_lock(&SV.q.mu);
+        room = SV.q.count < SV.q.limit;
+        if (room) break;
+        pthread_mutex_unlock(&SV.q.mu);
+        plat_sleep_ms(1);
+    }
+    if (!room) pthread_mutex_lock(&SV.q.mu);
     if (room) {
         SV.q.fds[SV.q.tail] = fd;
         SV.q.tail = (SV.q.tail + 1) % (int)(sizeof(SV.q.fds) / sizeof(sock_t));
