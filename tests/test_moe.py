@@ -1,6 +1,6 @@
 """Sparse-MoE inference is validated against the trusted dense path.
 
-make-test-moe.py emits a dense model plus two MoE variants (all F32, weights
+make-test-moe.py emits a dense model plus three MoE variants (all F32, weights
 shared except the FFN) each constructed to be MATHEMATICALLY IDENTICAL to the
 dense FFN, so the runner's already-verified dense path is the oracle — no
 separate reference engine is needed:
@@ -18,6 +18,7 @@ logits — a broken MoE produces different tokens (verified during development).
 import pathlib
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -35,7 +36,7 @@ def runner_bin():
 @pytest.fixture(scope="module")
 def models(tmp_path_factory):
     base = tmp_path_factory.mktemp("moe") / "m"
-    subprocess.run(["python3", ROOT / "scripts/make-test-moe.py", str(base)],
+    subprocess.run([sys.executable, ROOT / "scripts/make-test-moe.py", str(base)],
                    check=True, cwd=ROOT)
     return base
 

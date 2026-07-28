@@ -49,8 +49,8 @@ are available. See [`docs/moe-support.md`](docs/moe-support.md).
 
 ### Reliability & security hardening (July 2026 code review, RNR-###)
 
-The release gate from the July code review is cleared (Mac/Windows platform
-items aside):
+The release gate from the July code review is cleared, with the remaining
+hardware-only Metal validation documented separately:
 
 - Metal runtime fallback preserves the backend resource owner after
   `gpu_disable()`, so CPU fallback can keep using unified-memory KV buffers and
@@ -68,11 +68,18 @@ items aside):
 - Python client: streamed `tool_calls` assembly + preserved `finish_reason`
   (RNR-016).
 - `make test-moe` runs the synthetic MoE correctness suite in Linux/macOS CI;
-  release packaging now checks tag, binary version, README, changelog and
-  generated `BUILD-INFO.txt` before creating archives.
+  release packaging now checks tag, binary and Python versions, current release
+  docs, changelog, and the generated `BUILD-INFO.txt` tag/commit before creating
+  archives.
 - CUDA compatibility is documented as NVIDIA Turing / compute capability 7.5 or
   newer, matching the embedded `sm_75` PTX target; older NVIDIA GPUs fall back
   to CPU.
+- Windows `make test` now builds the prefix-cache and VRAM-registry tests as
+  distinct `.exe` targets. Native file IDs and 100 ns last-write timestamps
+  prevent an in-place GGUF edit from reusing a stale prefix within the same
+  second; the VRAM and output tests are portable across Windows/POSIX.
+- GPU header embedding is explicitly UTF-8/LF, so the generated-header drift
+  gate is deterministic across Windows, Linux, and macOS.
 
 ### Agent conformance
 

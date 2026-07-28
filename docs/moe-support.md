@@ -174,8 +174,11 @@ Independent comparison against llama.cpp is now reproducible through
 `scripts/compare_llamacpp.py`, which records the model hash, Runner commit,
 llama.cpp version/commit, commands, hardware, driver, context, quantization,
 prompt throughput, decode throughput, time to first token, VRAM snapshots,
-generated tokens, raw responses, and a top-logprob comparison when both
-endpoints expose it. It emits both JSON and Markdown:
+generated tokens, raw responses, and a numeric common-token top-logprob
+comparison when both endpoints expose it. The throughput request uses the same
+raw prompt and greedy settings; the auxiliary top-k check sends the same chat
+payload to both runtimes. TTFT is a separate warmed streaming request. It emits
+both JSON and Markdown:
 
 ```sh
 python3 scripts/compare_llamacpp.py \

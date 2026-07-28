@@ -8,7 +8,7 @@ src = os.path.join(os.path.dirname(__file__), "..", "src", "kernels.metal")
 dst = os.environ.get("EMBED_OUT") or os.path.join(
     os.path.dirname(__file__), "..", "src", "kernels_metal.h")
 
-with open(src) as f:
+with open(src, encoding="utf-8") as f:
     lines = f.read().split("\n")
 
 out = ["// Generated from kernels.metal by scripts/embed-metal.py — do not edit.",
@@ -18,6 +18,6 @@ for ln in lines:
     out.append(f'    "{esc}\\n"')
 out.append(";")
 
-with open(dst, "w") as f:
+with open(dst, "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(out) + "\n")
 print(f"wrote {dst}")

@@ -104,10 +104,11 @@ static const char *scratch_dir(void) {
     snprintf(dir, sizeof(dir), "vramreg-test-%ld", (long)getpid());
 #ifdef _WIN32
     _mkdir(dir);
+    assert(_putenv_s("RUNNER_VRAM_REGISTRY_DIR", dir) == 0);
 #else
     mkdir(dir, 0700);
+    assert(setenv("RUNNER_VRAM_REGISTRY_DIR", dir, 1) == 0);
 #endif
-    setenv("RUNNER_VRAM_REGISTRY_DIR", dir, 1);
     if (scratch_owner_pid == 0) {
         scratch_owner_pid = (long)getpid();
         snprintf(scratch_path, sizeof(scratch_path), "%s", dir);

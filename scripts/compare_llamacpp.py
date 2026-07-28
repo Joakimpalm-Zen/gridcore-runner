@@ -126,6 +126,22 @@ def hardware_info():
     return info
 
 
+def vram_delta(before, after):
+    """Return model-load VRAM deltas without pretending they are peak use."""
+    if not before or not after or len(before) != len(after):
+        return None
+    rows = []
+    for index, (old, new) in enumerate(zip(before, after)):
+        if "memory_used_mib" not in old or "memory_used_mib" not in new:
+            return None
+        rows.append({
+            "device": index,
+            "name": new.get("name") or old.get("name"),
+            "used_delta_mib": new["memory_used_mib"] - old["memory_used_mib"],
+        })
+    return rows
+
+
 def serve(command, log_path, startup_timeout):
     log = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
@@ -231,10 +247,13 @@ def top_logprobs(base, prompt, tokens, request_timeout):
                                 timeout=request_timeout)
         content = response["choices"][0].get("logprobs", {}).get("content")
         if isinstance(content, list) and content:
-            return {"status": "captured", "positions": content}
-        return {"status": "unsupported", "reason": "response had no top logprobs"}
+            return {"status": "captured", "request": body,
+                    "positions": content}
+        return {"status": "unsupported", "request": body,
+                "reason": "response had no top logprobs"}
     except Exception as exc:
-        return {"status": "unsupported", "reason": str(exc)}
+        return {"status": "unsupported", "request": body,
+                "reason": str(exc)}
 
 
 def runner_bench_json(runner, model, prompt, ctx, tokens, runner_gpu):
@@ -284,6 +303,7 @@ def measure_runtime(label, command, log_path, prompt, tokens,
             "top_logprobs": logprobs,
             "nvidia_smi_before": before,
             "nvidia_smi_after_start": after_start,
+            "vram_load_delta_mib": vram_delta(before, after_start),
             "log": str(log_path),
         }
     finally:
@@ -300,15 +320,45 @@ def compare_top_logprobs(a, b):
     bpos = b["positions"]
     n = min(len(apos), len(bpos))
     rows = []
+    max_delta = None
     for i in range(n):
+        ar = apos[i]
+        br = bpos[i]
+        amap = {item.get("token"): item.get("logprob")
+                for item in ar.get("top_logprobs") or []
+                if item.get("token") is not None
+                and isinstance(item.get("logprob"), (int, float))}
+        bmap = {item.get("token"): item.get("logprob")
+                for item in br.get("top_logprobs") or []
+                if item.get("token") is not None
+                and isinstance(item.get("logprob"), (int, float))}
+        common = []
+        for token in amap.keys() & bmap.keys():
+            delta = round(abs(amap[token] - bmap[token]), 12)
+            max_delta = delta if max_delta is None else max(max_delta, delta)
+            common.append({
+                "token": token,
+                "runner_logprob": amap[token],
+                "llamacpp_logprob": bmap[token],
+                "abs_delta": delta,
+            })
+        common.sort(key=lambda item: (item["abs_delta"], item["token"]))
+        chosen_delta = None
+        if (ar.get("token") == br.get("token")
+                and isinstance(ar.get("logprob"), (int, float))
+                and isinstance(br.get("logprob"), (int, float))):
+            chosen_delta = round(abs(ar["logprob"] - br["logprob"]), 12)
         rows.append({
             "position": i,
-            "runner_token": apos[i].get("token"),
-            "llamacpp_token": bpos[i].get("token"),
-            "runner_top_logprobs": apos[i].get("top_logprobs"),
-            "llamacpp_top_logprobs": bpos[i].get("top_logprobs"),
+            "runner_token": ar.get("token"),
+            "llamacpp_token": br.get("token"),
+            "chosen_logprob_delta": chosen_delta,
+            "common_top_logprobs": common,
+            "runner_top_logprobs": ar.get("top_logprobs"),
+            "llamacpp_top_logprobs": br.get("top_logprobs"),
         })
-    return {"status": "captured", "positions_compared": n, "positions": rows}
+    return {"status": "captured", "positions_compared": n,
+            "max_abs_common_logprob_delta": max_delta, "positions": rows}
 
 
 def quote_cmd(cmd):
@@ -316,24 +366,51 @@ def quote_cmd(cmd):
 
 
 def render_markdown(report):
+    settings = report["settings"]
+    runner = report["runner"]
+    llama = report["llamacpp"]
+    top = report["top_logprob_comparison"]
     lines = [
         "# Runner vs llama.cpp comparison",
+        "",
+        "## Provenance",
         "",
         f"- Schema: `{report['schema_version']}`",
         f"- Generated UTC: `{report['generated_utc']}`",
         f"- Status: `{report['status']}`",
+        f"- Model path: `{report['model'].get('path')}`",
         f"- Model SHA256: `{report['model'].get('sha256')}`",
-        f"- Runner: `{report['runner'].get('version')}`",
-        f"- llama.cpp: `{report['llamacpp'].get('version')}`",
-        f"- Context: `{report['settings']['context']}`",
-        f"- Tokens: `{report['settings']['tokens']}`",
-        f"- Prompt: `{report['settings']['prompt']}`",
+        f"- Model bytes: `{report['model'].get('bytes')}`",
+        f"- Runner: `{runner.get('version')}`",
+        f"- Runner commit: `{runner.get('commit')}`",
+        f"- llama.cpp: `{llama.get('version')}`",
+        f"- llama.cpp commit: `{llama.get('commit')}`",
+        "",
+        "## Settings",
+        "",
+        f"- Context: `{settings['context']}`",
+        f"- Maximum generated tokens: `{settings['tokens']}`",
+        f"- Quantization: `{settings.get('quantization')}`",
+        f"- Temperature: `{settings.get('temperature')}`",
+        f"- Top-p: `{settings.get('top_p')}`",
+        f"- Sampling: `{settings.get('sampling')}`",
+        f"- Prompt: `{settings['prompt']}`",
+        "",
+        "The TTFT request is a separate warmed streaming request after model load. "
+        "The auxiliary top-k comparison sends the same chat payload to both "
+        "runtimes; it is distinct from the raw-completion throughput request.",
+        "",
+        "## Hardware and driver",
+        "",
+        "```json",
+        json.dumps(report.get("hardware"), indent=2, sort_keys=True),
+        "```",
         "",
         "## Commands",
         "",
-        f"Runner: `{quote_cmd(report['runner']['command'])}`",
+        f"Runner: `{quote_cmd(runner['command'])}`",
         "",
-        f"llama.cpp: `{quote_cmd(report['llamacpp']['command'])}`",
+        f"llama.cpp: `{quote_cmd(llama['command'])}`",
         "",
         "## Results",
         "",
@@ -352,9 +429,47 @@ def render_markdown(report):
         ))
     lines += [
         "",
+        "## VRAM",
+        "",
+        "Load deltas are `nvidia-smi` used-memory changes from immediately "
+        "before process start to server readiness; they are not peak VRAM.",
+        "",
+        "```json",
+        json.dumps({
+            "runner_load_delta_mib": runner.get("vram_load_delta_mib"),
+            "llamacpp_load_delta_mib": llama.get("vram_load_delta_mib"),
+            "runner_after_start": runner.get("nvidia_smi_after_start"),
+            "llamacpp_after_start": llama.get("nvidia_smi_after_start"),
+        }, indent=2, sort_keys=True),
+        "```",
+        "",
+        "## Correctness comparison",
+        "",
         f"Text comparison: `{report['text_comparison']['status']}`",
         "",
-        f"Top-logprob comparison: `{report['top_logprob_comparison']['status']}`",
+        f"Top-logprob comparison: `{top['status']}`",
+        f"Maximum absolute common-token logprob delta: "
+        f"`{top.get('max_abs_common_logprob_delta')}`",
+        "",
+        "## Generated output",
+        "",
+        "Runner:",
+        "",
+        "```text",
+        runner.get("generated_text") or "",
+        "```",
+        "",
+        "llama.cpp:",
+        "",
+        "```text",
+        llama.get("generated_text") or "",
+        "```",
+        "",
+        "## Raw artifacts",
+        "",
+        "The complete buffered responses, benchmark JSON, top-k values, exact "
+        "requests, and VRAM snapshots are in `comparison.json`. Server output "
+        "is in `runner.log` and `llamacpp.log` for real runs.",
         "",
         "Real Qwen3/MoE GPU results are pending unless this report status is `complete`.",
     ]
@@ -377,6 +492,7 @@ def fixture_report(args):
             "temperature": 0,
             "top_p": 1,
             "sampling": "greedy",
+            "quantization": args.quantization,
         },
         "hardware": {"fixture": True},
         "runner": {"version": "fixture", "commit": None, "command": command,
@@ -453,7 +569,7 @@ def real_report(args):
         "hardware": hardware_info(),
         "runner": {
             "version": first_line_version(args.runner),
-            "commit": git_head(ROOT),
+            "commit": git_head(args.runner),
             "command": runner_cmd,
             "bench_json": bench,
             **runner,

@@ -8,6 +8,11 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -38,15 +43,52 @@ static int64_t stat_ctime_ns(const struct stat *st) {
 #endif
 }
 
+#ifdef _WIN32
+static int64_t filetime_unix_ns(FILETIME ft) {
+    ULARGE_INTEGER ticks;
+    ticks.LowPart = ft.dwLowDateTime;
+    ticks.HighPart = ft.dwHighDateTime;
+    // FILETIME is 100 ns since 1601; normalize to Unix epoch so the value
+    // remains inside signed 64-bit while retaining NTFS timestamp precision.
+    const uint64_t unix_epoch = 116444736000000000ull;
+    return ticks.QuadPart >= unix_epoch
+        ? (int64_t)((ticks.QuadPart - unix_epoch) * 100ull) : 0;
+}
+#endif
+
 static void model_record_file_id(model_t *m, const char *path) {
+#ifdef _WIN32
+    // MinGW's struct stat exposes only whole-second timestamps. That can make
+    // two different GGUF revisions loaded in the same second share a prefix-
+    // cache key. Native file information gives the stable file index and the
+    // filesystem's 100 ns last-write timestamp without hashing multi-GB files.
+    HANDLE h = path ? CreateFileA(path, FILE_READ_ATTRIBUTES,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                  FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL, NULL)
+                    : INVALID_HANDLE_VALUE;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &info)) {
+        m->file_id_ok = true;
+        m->file_size = ((uint64_t)info.nFileSizeHigh << 32) |
+                       info.nFileSizeLow;
+        m->file_ino = ((uint64_t)info.nFileIndexHigh << 32) |
+                      info.nFileIndexLow;
+        m->file_mtime_ns = filetime_unix_ns(info.ftLastWriteTime);
+        m->file_ctime_ns = filetime_unix_ns(info.ftCreationTime);
+        CloseHandle(h);
+        return;
+    }
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+#endif
     struct stat st;
     if (path && stat(path, &st) == 0) {
         m->file_id_ok = true;
         m->file_size = (uint64_t)st.st_size;
-#ifdef _WIN32
-        m->file_ino = 0;
-#else
+#ifndef _WIN32
         m->file_ino = (uint64_t)st.st_ino;
+#else
+        m->file_ino = 0;
 #endif
         m->file_mtime_ns = stat_mtime_ns(&st);
         m->file_ctime_ns = stat_ctime_ns(&st);

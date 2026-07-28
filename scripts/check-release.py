@@ -42,6 +42,20 @@ def read(path):
     return Path(path).read_text(encoding="utf-8")
 
 
+def python_version_for_release(version):
+    """Translate Runner's alpha spelling to its PEP 440 package spelling."""
+    if version.endswith("-alpha"):
+        return version[:-len("-alpha")] + "a0"
+    return version
+
+
+def pyproject_version(path):
+    match = re.search(r'^version\s*=\s*"([^"]+)"\s*$', read(path), re.M)
+    if not match:
+        raise ValueError(f"no project version found in {path}")
+    return match.group(1)
+
+
 def check(args):
     ok = True
     version = args.tag[1:] if args.tag.startswith("v") else args.tag
@@ -64,16 +78,35 @@ def check(args):
         ok &= fail(f"CHANGELOG has no section for {version}")
 
     build_info = read(args.build_info)
-    if expected_binary not in build_info.splitlines()[:1]:
+    build_lines = build_info.splitlines()
+    if build_lines[:1] != [expected_binary]:
         ok &= fail("BUILD-INFO first line does not match binary version")
-    if f"tag:        {args.tag}" not in build_info:
+    if f"tag:        {args.tag}" not in build_lines:
         ok &= fail("BUILD-INFO tag line is inconsistent")
+    if f"commit:     {args.commit}" not in build_lines:
+        ok &= fail("BUILD-INFO commit line is inconsistent")
 
-    release_workflow = ROOT / ".github/workflows/release.yml"
+    expected_python = python_version_for_release(version)
+    try:
+        got_python = pyproject_version(args.python_pyproject)
+    except (OSError, ValueError) as exc:
+        ok &= fail(f"cannot read Python package version: {exc}")
+    else:
+        if got_python != expected_python:
+            ok &= fail(
+                f"Python package version {got_python!r} does not match "
+                f"release {version!r} ({expected_python!r})"
+            )
+
+    release_workflow = args.release_workflow
     if release_workflow.exists():
         workflow = release_workflow.read_text(encoding="utf-8")
         for stale in stale_release_strings(workflow, version, args.tag):
             ok &= fail(f"release workflow contains stale release string {stale!r}")
+
+    for path in args.current_docs:
+        for stale in stale_release_strings(read(path), version, args.tag):
+            ok &= fail(f"current document {path} contains stale release string {stale!r}")
 
     return ok
 
@@ -85,6 +118,18 @@ def main(argv=None):
     parser.add_argument("--readme", type=Path, default=ROOT / "README.md")
     parser.add_argument("--changelog", type=Path, default=ROOT / "CHANGELOG.md")
     parser.add_argument("--build-info", type=Path, required=True)
+    parser.add_argument("--release-workflow", type=Path,
+                        default=ROOT / ".github/workflows/release.yml")
+    parser.add_argument("--python-pyproject", type=Path,
+                        default=ROOT / "python/pyproject.toml")
+    parser.add_argument("--commit", required=True,
+                        help="commit SHA expected in BUILD-INFO.txt")
+    parser.add_argument(
+        "--current-doc", dest="current_docs", type=Path, action="append",
+        default=[ROOT / "SECURITY.md", ROOT / "CONTRIBUTING.md",
+                 ROOT / "docs/moe-support.md"],
+        help="current (non-historical) document that may not contain stale versions",
+    )
     args = parser.parse_args(argv)
     return 0 if check(args) else 1
 

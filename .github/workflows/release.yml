@@ -75,7 +75,8 @@ jobs:
           EOF
           python3 scripts/check-release.py --tag "${GITHUB_REF_NAME}" \
             --binary "./${{ matrix.binary }}" --readme README.md \
-            --changelog CHANGELOG.md --build-info BUILD-INFO.txt
+            --changelog CHANGELOG.md --build-info BUILD-INFO.txt \
+            --commit "${GITHUB_SHA}"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             # zip is the archive Windows users can open without extra tools
             powershell -Command "Compress-Archive -Path '${{ matrix.artifact }}','BUILD-INFO.txt','README.md','LICENSE' -DestinationPath '${{ matrix.artifact }}.zip' -Force"

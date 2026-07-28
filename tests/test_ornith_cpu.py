@@ -22,4 +22,4 @@ def test_qwen35_hybrid_loads_and_decodes(tmp_path):
     # generated weights and prompt-token sequence. It protects the recurrent
     # state orientation, Q scaling, group broadcast, convolution ordering and
     # the full-attention post-norm placement as one end-to-end contract.
-    assert proc.stdout == b"hiii\n"
+    assert proc.stdout.splitlines() == [b"hiii"]

@@ -87,6 +87,8 @@ jobs:
           PYTHONPATH=python/src .venv/bin/python -m pytest python/tests/test_client.py
       - name: sparse MoE synthetic correctness
         run: make test-moe PYTHON=.venv/bin/python
+      - name: comparison and release-gate fixtures
+        run: .venv/bin/python -m pytest tests/test_compare_llamacpp.py tests/test_release_check.py
       - name: torture harness unit tests
         # The scoring + cross-runtime comparison math the published matrix rests
         # on, gated offline: these exercise the harness itself (case generation,

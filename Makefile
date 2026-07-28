@@ -77,8 +77,8 @@ endif
 
 # same .exe suffix rule as every other test binary, without repeating the
 # three-way platform branch above
-TEST_PREFIX = $(TEST_BATCH:test-batch=test-prefix)
-TEST_VRAMREG = $(TEST_BATCH:test-batch=test-vram-registry)
+TEST_PREFIX = $(TEST_BATCH:test-batch%=test-prefix%)
+TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
@@ -285,7 +285,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		set -e; \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
-		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_compare_llamacpp.py; \
+		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_compare_llamacpp.py tests/test_release_check.py; \
 		$(MAKE) --no-print-directory test-moe PYTHON=$(PYTHON); \
 	else \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
@@ -307,7 +307,8 @@ release-check: runner
 	trap 'rm -f "$$tmp"' EXIT; \
 	printf '%s\n' "$$(./$(RUNNER_EXE) --version)" > "$$tmp"; \
 	printf 'tag:        %s\ncommit:     %s\nbuilt:      local\n' "$$tag" "$$(git rev-parse HEAD 2>/dev/null || echo unknown)" >> "$$tmp"; \
-	$(PYTHON) scripts/check-release.py --tag "$$tag" --binary ./$(RUNNER_EXE) --build-info "$$tmp"
+	$(PYTHON) scripts/check-release.py --tag "$$tag" --binary ./$(RUNNER_EXE) \
+		--build-info "$$tmp" --commit "$$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
 # Optional ecosystem gate. Install the pinned Python and Node dependencies in
 # tests/compatibility first; Runner itself remains dependency-free.

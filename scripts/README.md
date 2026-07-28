@@ -17,7 +17,9 @@ runner; several are load-bearing gates for changing it.
   through equivalent raw OpenAI Completions requests.
 - **`compare_llamacpp.py`** — reproducible Runner-vs-llama.cpp evidence
   harness for the same GGUF, prompt, context and sampling settings; emits JSON
-  plus Markdown and marks real results pending when run in fixture mode.
+  plus a provenance-complete Markdown summary, quantifies common-token
+  top-logprob deltas where supported, and marks real results pending when run
+  in fixture mode.
 - **`kv-quality.py`** — KV-cache quality gate: compares q8 KV against f16 on
   teacher-forced logits (the deeper version of `tests/test_kv_tol.c`'s gate).
 - **`verify-gguf.py`** — structural sanity check of a GGUF file (metadata,

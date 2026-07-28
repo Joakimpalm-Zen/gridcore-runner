@@ -11,7 +11,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 #define GB (1024ull * 1024ull * 1024ull)
 
@@ -38,9 +43,16 @@ static int count_entries(const char *path) {
 }
 
 int main(void) {
+#ifdef _WIN32
+    char dir[128];
+    snprintf(dir, sizeof(dir), "vramrb-test-%ld", (long)_getpid());
+    assert(_mkdir(dir) == 0);
+    assert(_putenv_s("RUNNER_VRAM_REGISTRY_DIR", dir) == 0);
+#else
     char dir[] = "/tmp/vramrb-XXXXXX";
     assert(mkdtemp(dir));
-    setenv("RUNNER_VRAM_REGISTRY_DIR", dir, 1);
+    assert(setenv("RUNNER_VRAM_REGISTRY_DIR", dir, 1) == 0);
+#endif
 
     const char *gpu = "rollback-test";
     char path[512];
@@ -77,7 +89,11 @@ int main(void) {
     assert(count_entries(path) == 0);
 
     remove(path);
+#ifdef _WIN32
+    _rmdir(dir);
+#else
     rmdir(dir);
+#endif
     printf("vram rollback test ok\n");
     return 0;
 }

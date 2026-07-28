@@ -13,7 +13,7 @@ src = os.path.join(os.path.dirname(__file__), "..", "src", "kernels.ptx")
 dst = os.environ.get("EMBED_OUT") or os.path.join(
     os.path.dirname(__file__), "..", "src", "kernels_ptx.h")
 
-with open(src) as f:
+with open(src, encoding="utf-8") as f:
     lines = f.read().split("\n")
 
 # Pin the PTX ISA version to 7.8 (CUDA 11.8 era): these kernels use nothing
@@ -31,6 +31,6 @@ for ln in lines:
     out.append(f'    "{esc}\\n"')
 out.append(";")
 
-with open(dst, "w") as f:
+with open(dst, "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(out) + "\n")
 print(f"wrote {dst}")

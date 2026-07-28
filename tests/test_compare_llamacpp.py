@@ -3,6 +3,8 @@ import pathlib
 import subprocess
 import sys
 
+from scripts import compare_llamacpp
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -36,6 +38,70 @@ def test_llamacpp_comparison_fixture_report(tmp_path):
     assert report["real_results"] == "pending"
     assert report["settings"]["prompt"] == "fixture prompt"
 
+    # The readable report must carry the same provenance/settings categories
+    # as the machine-readable result, even when fixture values are pending.
+
     md = (tmp_path / "comparison.md").read_text()
     assert "Runner vs llama.cpp comparison" in md
+    assert "Runner commit:" in md
+    assert "llama.cpp commit:" in md
+    assert "Quantization:" in md
+    assert "## Hardware and driver" in md
+    assert "## VRAM" in md
+    assert "## Generated output" in md
+    assert "comparison.json" in md
     assert "Real Qwen3/MoE GPU results are pending" in md
+
+
+def test_vram_delta_is_reported_per_device():
+    before = [{"name": "GPU 0", "memory_used_mib": 100}]
+    after = [{"name": "GPU 0", "memory_used_mib": 356}]
+    assert compare_llamacpp.vram_delta(before, after) == [
+        {"device": 0, "name": "GPU 0", "used_delta_mib": 256}
+    ]
+    assert compare_llamacpp.vram_delta(None, after) is None
+
+
+def test_top_logprob_comparison_quantifies_common_token_deltas():
+    runner = {
+        "status": "captured",
+        "positions": [{
+            "token": "A",
+            "logprob": -0.2,
+            "top_logprobs": [
+                {"token": "A", "logprob": -0.2},
+                {"token": "B", "logprob": -1.0},
+            ],
+        }],
+    }
+    llama = {
+        "status": "captured",
+        "positions": [{
+            "token": "A",
+            "logprob": -0.3,
+            "top_logprobs": [
+                {"token": "A", "logprob": -0.3},
+                {"token": "B", "logprob": -1.4},
+            ],
+        }],
+    }
+    result = compare_llamacpp.compare_top_logprobs(runner, llama)
+    assert result["status"] == "captured"
+    assert result["positions_compared"] == 1
+    assert result["max_abs_common_logprob_delta"] == 0.4
+    row = result["positions"][0]
+    assert row["chosen_logprob_delta"] == 0.1
+    assert row["common_top_logprobs"] == [
+        {
+            "token": "A",
+            "runner_logprob": -0.2,
+            "llamacpp_logprob": -0.3,
+            "abs_delta": 0.1,
+        },
+        {
+            "token": "B",
+            "runner_logprob": -1.0,
+            "llamacpp_logprob": -1.4,
+            "abs_delta": 0.4,
+        },
+    ]
