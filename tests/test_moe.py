@@ -100,6 +100,27 @@ def test_moe_expert_cpu_placement_matches_dense(runner_bin, models):
         assert b"experts on CPU" in proc.stderr
 
 
+def test_moe_gpu_forward_does_not_fall_back(runner_bin, models):
+    """A GPU MoE run must actually execute on the GPU — assert the runtime-
+    fallback warning never fires. The 69b8085 slice-nbytes defect made every
+    MoE forward fail its binding bounds check and silently continue on the
+    CPU: output stayed token-identical (the fallback IS the CPU oracle), so
+    only the fallback warning can catch this class. moe2 routes through BOTH
+    experts (top-2), so the e>=1 slice descriptors are exercised."""
+    caps = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
+                          stdout=subprocess.PIPE, check=True)
+    if (b'"backend":"cuda"' not in caps.stdout and
+            b'"backend":"metal"' not in caps.stdout):
+        pytest.skip("no GPU backend on this host")
+    dense = _generate(runner_bin, f"{models}.dense.gguf")
+    for variant in ("moe1", "moe2", "moe3"):
+        proc = _run(runner_bin, f"{models}.{variant}.gguf", extra=())
+        assert proc.stdout == dense, f"{variant} GPU output must match dense"
+        assert b"continuing on CPU" not in proc.stderr, (
+            f"{variant} silently fell back to the CPU path:\n"
+            + proc.stderr.decode(errors="replace"))
+
+
 def test_caps_advertise_moe_tensor_placement(runner_bin):
     caps = json.loads(subprocess.run(
         [runner_bin, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,

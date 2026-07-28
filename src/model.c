@@ -1854,10 +1854,17 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             // GPU failed at runtime: fall back to CPU permanently. Release the
             // backend rather than just forgetting it — with shared weights an
             // orphaned context also pins every other slot's copy of them.
+            // Say so: a silent fallback produces correct output at a fraction
+            // of the speed and no gate can see it (the fallback IS the CPU
+            // oracle) — the 69b8085 MoE slice-nbytes defect hid exactly here.
+            fprintf(stderr, "gpu: forward failed at runtime — releasing the "
+                    "backend, continuing on CPU\n");
             gpu_disable(m);
         } else if (gpu_forward_batch(m, tokens, n, pos, false, NULL)) {
             start = m->gpu_layers;
         } else {
+            fprintf(stderr, "gpu: forward failed at runtime — releasing the "
+                    "backend, continuing on CPU\n");
             gpu_disable(m);
         }
     }
