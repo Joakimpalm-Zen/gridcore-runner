@@ -120,7 +120,25 @@ miscompute:
   GPU kernel landed (see Follow-ups, below) it runs **fully on the GPU**,
   token-identical to CPU.
 
-## Partial CPU offload (8–16 GB cards)
+## Expert-tensor CPU placement (8 GB cards)
+
+`--cpu-moe` keeps attention, norms, output and non-MoE dense tensors on CUDA
+while the complete sparse expert FFN executes directly from the mmap in system
+RAM. Only the post-attention activation tile crosses the PCIe boundary per
+layer. The CUDA upload is packed by tensor role, so skipped expert tensors do
+not consume address-space-sized holes in VRAM. `runner --caps` advertises this
+as `tensor_placement.cpu_moe` for controllers and advisors.
+
+This mode covers fused Qwen3-MoE and legacy split Mixtral expert layouts. Its
+synthetic top-1/top-2 correctness gate is byte-identical to the dense CPU
+oracle. If even the retained attention/KV/output footprint does not fit, the
+existing leading-layer split still applies to that smaller device set.
+
+```sh
+./runner -m Qwen3-Coder-30B-A3B-Q4_K_XL.gguf --cpu-moe -p "hello"
+```
+
+## Whole-layer partial CPU offload (8–16 GB cards)
 
 MoE models larger than the card run with the leading layers on the GPU and the
 rest on the CPU. This needed a fix: the gpu-split accounted only the dense FFN
@@ -155,6 +173,9 @@ already-trusted dense path is the oracle (no separate reference engine):
 - `moe3` — **split** layout, top-1 → identical to dense.
 - partial-offload/fallback path — `--gpu-layers 1` exercises the split when a
   GPU is present and falls back cleanly to CPU on synthetic CI hosts.
+- expert-tensor placement — `--cpu-moe --gpu-layers 2` keeps the fixture's
+  attention layers on CUDA, runs fused experts on the host, and must remain
+  byte-identical to the dense oracle; `--caps` must advertise the feature.
 
 All assert byte-identical greedy output; the FFN is scaled so a broken MoE
 produces different tokens (verified during development).

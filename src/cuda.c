@@ -245,6 +245,12 @@ static const char *cu_err(CUresult r) {
 enum { BW_4 = 0, BW_8 = 1, BW_N = 2 };
 static inline int batch_width_class(int n) { return n <= 4 ? BW_4 : BW_8; }
 
+typedef struct {
+    uint64_t    file_off;
+    size_t      nbytes;
+    CUdeviceptr device;
+} gpu_weight_binding;
+
 typedef struct gpu_weights {
     struct gpu_weights *next;
     int         refs;                   // live gpu_t values pointing here
@@ -274,6 +280,9 @@ typedef struct gpu_weights {
     CUfunction  f_gemvb[BW_N][32];
     CUdeviceptr weights;
     size_t      weights_len;
+    bool        cpu_moe;                // sparse tensor-role placement mode
+    gpu_weight_binding *bindings;       // packed non-expert tensors in this mode
+    int         n_bindings, cap_bindings;
     int         gpu_layers;             // split decided by the first loader
     CUdeviceptr inv_freq, inv_freq_local, out_norm, dummy;
     CUdeviceptr ones;                   // weightless V RMS norm (gemma4)
@@ -472,7 +481,8 @@ static bool shared_matches(const gpu_weights *w, const model_t *m,
         w->n_vocab != m->n_vocab || w->n_ctx != m->n_ctx ||
         w->rope_dim != m->rope_dim || w->rope_dim_local != m->rope_dim_local ||
         w->kv_q8 != (int)m->kv_q8 || w->v_rmsnorm != (int)m->v_rmsnorm ||
-        w->rope_base != m->rope_base || w->rope_mscale != m->rope_mscale)
+        w->rope_base != m->rope_base || w->rope_mscale != m->rope_mscale ||
+        w->cpu_moe != m->cpu_moe)
         return false;
     if ((w->rope_inv_freq_local != NULL) != (m->rope_inv_freq_local != NULL))
         return false;
@@ -508,6 +518,9 @@ static void shared_destroy(gpu_weights *w) {
     free(w->qn); free(w->kn);
     free(w->pan); free(w->pfn);
     free(w->g_pn1); free(w->g_prn2); free(w->g_pn2); free(w->g_gis);
+    for (int i = 0; i < w->n_bindings; i++)
+        if (w->bindings[i].device) cu.MemFree(w->bindings[i].device);
+    free(w->bindings);
     CUdeviceptr bufs[] = { w->weights, w->inv_freq, w->inv_freq_local,
                            w->out_norm, w->dummy, w->ones };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
@@ -539,11 +552,14 @@ static void shared_release(gpu_weights *w) {
 // dense FFN and a sparse-MoE layer (router + every expert, fused or split).
 // The dense w_gate/w_up/w_down are NULL on a MoE layer, so accounting only
 // those undercounts a MoE layer by ~all of its weight (the experts).
-static size_t layer_weight_bytes(const layer_t *ly, int n_expert) {
+static size_t layer_weight_bytes(const layer_t *ly, int n_expert, bool cpu_moe) {
     size_t wb = 0;
     gguf_tensor *att[] = { ly->wq, ly->wk, ly->wv, ly->wo };
     for (int i = 0; i < 4; i++) if (att[i]) wb += att[i]->nbytes;
-    if (ly->is_moe) {
+    if (ly->is_moe && cpu_moe) {
+        // The complete expert FFN (router, routed tensors and a coupled
+        // Gemma shared branch) executes on the host. Attention remains here.
+    } else if (ly->is_moe) {
         if (ly->ffn_gate_inp) wb += ly->ffn_gate_inp->nbytes;
         if (ly->ffn_gate_up_exps) wb += ly->ffn_gate_up_exps->nbytes;  // gemma-4 fused
         if (ly->moe_split) {
@@ -564,6 +580,58 @@ static size_t layer_weight_bytes(const layer_t *ly, int n_expert) {
         for (int i = 0; i < 3; i++) if (ffn[i]) wb += ffn[i]->nbytes;
     }
     return wb;
+}
+
+static uint64_t tensor_file_off(const model_t *m, const gguf_tensor *t) {
+    return (uint64_t)((const uint8_t *)t->data - (const uint8_t *)m->gf.map);
+}
+
+// Tensor-role placement cannot preserve mmap offsets in one compact device
+// allocation: the skipped experts are the holes. Upload each retained tensor
+// as a small binding and resolve matvecs by their stable GGUF file offset.
+static bool binding_add(gpu_weights *w, const model_t *m, gguf_tensor *t) {
+    if (!t) return true;
+    uint64_t off = tensor_file_off(m, t);
+    for (int i = 0; i < w->n_bindings; i++)
+        if (w->bindings[i].file_off == off && w->bindings[i].nbytes >= t->nbytes)
+            return true;
+    if (w->n_bindings == w->cap_bindings) {
+        int cap = w->cap_bindings ? w->cap_bindings * 2 : 64;
+        gpu_weight_binding *nb = realloc(w->bindings, sizeof(*nb) * (size_t)cap);
+        if (!nb) return false;
+        w->bindings = nb;
+        w->cap_bindings = cap;
+    }
+    CUdeviceptr d = 0;
+    if (cu.MemAlloc(&d, t->nbytes) != 0) return false;
+    if (cu.MemcpyHtoD(d, t->data, t->nbytes) != 0) {
+        cu.MemFree(d);
+        return false;
+    }
+    w->bindings[w->n_bindings++] = (gpu_weight_binding){ off, t->nbytes, d };
+    w->weights_len += t->nbytes;
+    return true;
+}
+
+static bool binding_find(const gpu_weights *w, const model_t *m,
+                         const gguf_tensor *t, CUdeviceptr *base,
+                         uint64_t *relative_off) {
+    uint64_t off = tensor_file_off(m, t);
+    if (!w->cpu_moe) {
+        *base = w->weights;
+        *relative_off = off;
+        return off <= w->weights_len && t->nbytes <= w->weights_len - (size_t)off;
+    }
+    for (int i = 0; i < w->n_bindings; i++) {
+        const gpu_weight_binding *b = &w->bindings[i];
+        if (off >= b->file_off && off - b->file_off <= b->nbytes &&
+            t->nbytes <= b->nbytes - (size_t)(off - b->file_off)) {
+            *base = b->device;
+            *relative_off = off - b->file_off;
+            return true;
+        }
+    }
+    return false;
 }
 
 // Highest file offset (data end) touched by any of a layer's weight tensors —
@@ -607,6 +675,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
     w->n_layer = m->n_layer; w->n_embd = m->n_embd; w->n_head = m->n_head;
     w->n_head_kv = m->n_head_kv; w->head_dim = m->head_dim; w->n_ff = m->n_ff;
     w->n_vocab = m->n_vocab; w->n_ctx = m->n_ctx;
+    w->cpu_moe = m->cpu_moe;
     w->rope_dim = m->rope_dim; w->rope_dim_local = m->rope_dim_local;
     w->kv_q8 = (int)m->kv_q8; w->v_rmsnorm = (int)m->v_rmsnorm;
     w->rope_base = m->rope_base; w->rope_mscale = m->rope_mscale;
@@ -639,7 +708,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         // fixed device overhead regardless of split: activation scratch, the
         // token-embedding weights (always uploaded), and a margin covering the
         // CUDA context + PTX JIT + WDDM reserve
-        size_t fixed = act_bytes + m->tok_embd->nbytes + (512u << 20);
+        size_t fixed = act_bytes + (m->cpu_moe ? 0 : m->tok_embd->nbytes) +
+                       (512u << 20);
         // decide how many *leading* layers fit — accumulate each layer's weight
         // bytes plus its KV bytes until the budget runs out; the CPU runs the
         // rest (partial offload)
@@ -647,7 +717,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         size_t used = fixed;
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
-            size_t wb = layer_weight_bytes(ly, m->n_expert);
+            size_t wb = layer_weight_bytes(ly, m->n_expert, m->cpu_moe);
             // KV bytes honour the cache format: a q8_0 cache is ~53% of fp16,
             // so quantized KV directly buys more offloaded layers here
             size_t kv = 2 * (size_t)m->n_ctx * model_kv_row_bytes(m, l);
@@ -657,7 +727,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         }
         // a full split also needs token_embd + output weights resident
         bool full = G == m->n_layer &&
-                    used + m->tok_embd->nbytes + m->output->nbytes <= vram_budget;
+                    used + (m->cpu_moe ? 0 : m->tok_embd->nbytes) +
+                    m->output->nbytes <= vram_budget;
         // an explicit --gpu-layers overrides the budget-based fit (the user
         // takes responsibility for VRAM; used for testing partial offload and
         // for manual control). It can only lower the count below what fits, or
@@ -687,7 +758,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 if (end > upload_len) upload_len = end;
             }
         }
-        w->weights_len = upload_len;
+        w->weights_len = m->cpu_moe ? 0 : upload_len;
 
         CK(cu.ModuleLoadData(&w->mod, k_ptx_src));
         struct { CUfunction *f; const char *name; } fns[] = {
@@ -747,8 +818,25 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         // for a full split, a prefix for partial) so byte offsets stay valid.
         // Every instance sharing this upload indexes it with offsets computed
         // against its own mmap base, which is the same layout by construction.
-        CK(cu.MemAlloc(&w->weights, w->weights_len));
-        CK(cu.MemcpyHtoD(w->weights, m->gf.map, w->weights_len));
+        if (m->cpu_moe) {
+            // Pack only tensors used by the CUDA half. Every MoE FFN stays on
+            // the host; attention and dense layers remain device resident.
+            for (int l = 0; l < G; l++) {
+                layer_t *ly = &m->layers[l];
+                if (!binding_add(w, m, ly->wq) ||
+                    !binding_add(w, m, ly->wk) ||
+                    !binding_add(w, m, ly->wv) ||
+                    !binding_add(w, m, ly->wo)) goto fail;
+                if (!ly->is_moe &&
+                    (!binding_add(w, m, ly->w_gate) ||
+                     !binding_add(w, m, ly->w_up) ||
+                     !binding_add(w, m, ly->w_down))) goto fail;
+            }
+            if (full && !binding_add(w, m, m->output)) goto fail;
+        } else {
+            CK(cu.MemAlloc(&w->weights, w->weights_len));
+            CK(cu.MemcpyHtoD(w->weights, m->gf.map, w->weights_len));
+        }
         CK(cu.MemAlloc(&w->dummy, 4));
 
         w->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
@@ -864,7 +952,8 @@ bool gpu_init(model_t *m) {
         layer_t *ly = &m->layers[l];
         gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
                               ly->w_gate, ly->w_up, ly->w_down };
-        for (int i = 0; i < 7; i++)
+        int count = m->cpu_moe && ly->is_moe ? 4 : 7;
+        for (int i = 0; i < count; i++)
             if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
     }
     // MoE layers leave the dense gate/up/down NULL, so the loop above never
@@ -873,7 +962,7 @@ bool gpu_init(model_t *m) {
     // An out-of-range or unsupported type would read past the table (function-
     // pointer type confusion) or launch a NULL fn at decode. Validate them here
     // and fall back to CPU, matching how the dense path already rejects.
-    for (int l = 0; l < m->n_layer; l++) {
+    for (int l = 0; l < m->n_layer && !m->cpu_moe; l++) {
         layer_t *ly = &m->layers[l];
         if (!ly->is_moe) continue;
         if (ly->ffn_gate_inp && !gpu_type_ok(ly->ffn_gate_inp->type)) goto unsupported;
@@ -962,6 +1051,7 @@ bool gpu_init(model_t *m) {
         // logits back to the host mid-forward, which likewise cannot be captured
         for (int l = 0; l < m->gpu_layers; l++)
             if (!m->layers[l].wv || m->layers[l].is_moe) g->graph_bad = true;
+        if (m->cpu_moe) g->graph_bad = true;
 
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
@@ -972,7 +1062,11 @@ bool gpu_init(model_t *m) {
 
         char name[128] = "CUDA GPU";
         cu.DeviceGetName(name, sizeof(name), g->sw->dev);
-        if (m->gpu_layers < m->n_layer)
+        if (m->cpu_moe)
+            fprintf(stderr, "gpu: CUDA backend on %s (%d/%d attention layers, "
+                    "%.1f GB in VRAM; experts on CPU)\n", name,
+                    m->gpu_layers, m->n_layer, g->sw->weights_len / 1e9);
+        else if (m->gpu_layers < m->n_layer)
             fprintf(stderr, "gpu: CUDA backend on %s (%d/%d layers, %.1f GB in "
                     "VRAM; CPU runs the rest)\n", name, m->gpu_layers, m->n_layer,
                     g->sw->weights_len / 1e9);
@@ -1078,11 +1172,12 @@ static bool tc_on(void) {
 static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
                    CUdeviceptr y, int n_in, int n_out, CUdeviceptr bias,
                    int batch, int xs, int ys) {
-    mv_args a = { n_in, n_out,
-                  (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
-                  bias != 0, batch, xs, ys };
+    CUdeviceptr weights = 0;
+    uint64_t w_off = 0;
+    if (!binding_find(g->sw, m, w, &weights, &w_off)) return false;
+    mv_args a = { n_in, n_out, w_off, bias != 0, batch, xs, ys };
     CUdeviceptr b = bias ? bias : g->sw->dummy;
-    void *p[] = { &g->sw->weights, &x, &y, &a, &b };
+    void *p[] = { &weights, &x, &y, &a, &b };
     // Prefill (batch>1), tensor-core GEMM when enabled and available: one warp
     // per 32-row tile, TC_WPB warps per block.
     if (batch > 1 && tc_on() && g->sw->f_gemm_tc[w->type])
@@ -1515,6 +1610,22 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         prof_mark(g, PH_ELEM);
 
+        if (m->cpu_moe && ly->is_moe) {
+            // Tensor-role boundary: attention has updated the residual and KV
+            // on-device. Move only the small activation tile to the host, run
+            // the sparse expert FFN against mmap-resident weights, and resume
+            // the next layer on CUDA. This is the 30B-on-small-VRAM path.
+            if (cu.StreamSynchronize(g->stream) != 0 ||
+                cu.MemcpyDtoH(m->x, g->x,
+                              sizeof(float) * (size_t)tn * n_embd) != 0 ||
+                !model_moe_ffn_cpu(m, l, tn) ||
+                cu.MemcpyHtoD(g->x, m->x,
+                              sizeof(float) * (size_t)tn * n_embd) != 0)
+                return false;
+            prof_mark(g, PH_MATVEC);
+            continue;
+        }
+
         if (ly->moe_gemma) {
             // dual-branch FFN norms itself off g->x (the un-normed residual)
             ok = ok && gpu_gemma_moe_ffn(g, m, ly, l, tn, xdim);
@@ -1693,11 +1804,12 @@ void gpu_batch_free(gpu_batch *b) {
 static bool enc_mv_batch(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
                          CUdeviceptr y, int n_in, int n_out, CUdeviceptr bias,
                          int batch, int xs, int ys) {
-    mv_args a = { n_in, n_out,
-                  (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
-                  bias != 0, batch, xs, ys };
+    CUdeviceptr weights = 0;
+    uint64_t w_off = 0;
+    if (!binding_find(g->sw, m, w, &weights, &w_off)) return false;
+    mv_args a = { n_in, n_out, w_off, bias != 0, batch, xs, ys };
     CUdeviceptr bp = bias ? bias : g->sw->dummy;
-    void *p[] = { &g->sw->weights, &x, &y, &a, &bp };
+    void *p[] = { &weights, &x, &y, &a, &bp };
     // GEMM-shaped twins stage x in shared memory and give 8 rows per block;
     // without that, MVB scattered global x-loads per decoded weight make a
     // microbatch L1-bound and it loses to running the sequences separately.

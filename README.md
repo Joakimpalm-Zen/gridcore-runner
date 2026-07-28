@@ -154,7 +154,11 @@ decode each weight once for all tokens. A model too large for VRAM is
 **partially offloaded** — as many leading layers as fit run on the GPU and
 the CPU finishes the rest, so oversized models still get a speedup instead
 of falling all the way back to CPU (the `--reserve-vram` cap sets how deep
-the split goes). Measured on an RTX 3070: 6–36 tok/s generation
+the split goes). Sparse MoE models also support `--cpu-moe`: attention and
+other retained dense tensors stay on CUDA while only the expert FFNs execute
+from system RAM. This avoids uploading the inactive expert bank and is the
+recommended placement for Qwen3-30B-A3B-class models on 8 GB cards. Measured
+on an RTX 3070: 6–36 tok/s generation
 across 1.5B–8B quantized models (5–8× the same box's CPU) and 2–3× CPU
 prompt evaluation. Regenerate the PTX header after kernel changes with
 `make ptx` (needs a CUDA toolkit at development time only).
@@ -647,6 +651,9 @@ runner -m model [options]
   --no-bos       don't prepend BOS
   --ignore-eos   keep generating past end-of-text tokens
   --gpu auto|off GPU offload if a backend is available (default auto)
+  --gpu-layers N force N leading layers onto the GPU (0 = auto-fit)
+  --cpu-moe      keep sparse MoE expert FFNs in RAM while CUDA runs the
+                 attention and other dense tensors
   --wait-for-vram [S]  queue up to S seconds (default 300) when another
                  registered runner holds the GPU, instead of refusing
   --kv f16|q8    KV cache storage (default f16); q8 halves it, CPU and CUDA

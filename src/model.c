@@ -332,6 +332,22 @@ static uint64_t vram_free_now(void *ud) {
     return gpu_mem_info(&f, &t) ? (uint64_t)f : 0;
 }
 
+static uint64_t model_cuda_weight_estimate(const model_t *m,
+                                           const model_params *p) {
+    if (!p->cpu_moe || m->n_expert <= 0) return (uint64_t)m->gf.map_size;
+    uint64_t total = m->output ? m->output->nbytes : 0;
+    for (int l = 0; l < m->n_layer; l++) {
+        const layer_t *ly = &m->layers[l];
+        gguf_tensor *att[] = { ly->wq, ly->wk, ly->wv, ly->wo };
+        for (int i = 0; i < 4; i++) if (att[i]) total += att[i]->nbytes;
+        if (!ly->is_moe) {
+            gguf_tensor *ffn[] = { ly->w_gate, ly->w_up, ly->w_down };
+            for (int i = 0; i < 3; i++) if (ffn[i]) total += ffn[i]->nbytes;
+        }
+    }
+    return total;
+}
+
 // Register the intended footprint before a byte of it is allocated.
 //
 // Returns false only to abort the load: that happens when the request does not
@@ -349,7 +365,8 @@ static bool model_vram_claim(model_t *m, const model_params *p, size_t kv_bytes)
     // and the same fixed margin cuda.c budgets for context + JIT + activations.
     // An estimate is the right resolution here — it decides fit, and the exact
     // figure replaces it at commit time.
-    uint64_t need = (uint64_t)m->gf.map_size + (uint64_t)kv_bytes * 2 + (512ull << 20);
+    uint64_t need = model_cuda_weight_estimate(m, p) +
+                    (uint64_t)kv_bytes * 2 + (512ull << 20);
     if (p->reserve_vram_pct > 0) {
         uint64_t cap = (uint64_t)vtotal / 100 * (uint64_t)p->reserve_vram_pct;
         if (cap < need) need = cap;   // --reserve-vram already caps the ask
@@ -961,6 +978,7 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     // runtime buffers
     m->reserve_vram_pct = p->reserve_vram_pct;
     m->gpu_layers_override = p->gpu_layers_override;
+    m->cpu_moe = p->cpu_moe && m->n_expert > 0;
     int n_ctx = p->n_ctx;
     if (n_ctx <= 0 && (p->reserve_vram_pct > 0 || p->reserve_ram_pct > 0)) {
         // reservation auto-fit: size the context to fill whatever the
@@ -986,7 +1004,9 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             if (gpu_mem_info(&vfree, &vtotal)) {
                 // device budget covers a weights copy plus the device KV
                 size_t budget = vtotal / 100 * p->reserve_vram_pct;
-                long long room = (long long)budget - (long long)m->gf.map_size - (long long)head;
+                long long room = (long long)budget -
+                                 (long long)model_cuda_weight_estimate(m, p) -
+                                 (long long)head;
                 long long fit = room > 0 ? room / (long long)kv_per_tok : 0;
                 if (best < 0 || fit < best) best = fit;
             }
@@ -1770,6 +1790,38 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
 static void moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
     if (n <= 1) { moe_ffn_token(m, ly, m->xb); return; }
     moe_ffn_grouped(m, ly, n, xdim);
+}
+
+bool model_moe_ffn_cpu(model_t *m, int layer, int n) {
+    if (!m || layer < 0 || layer >= m->n_layer || n < 1 || n > m->n_batch)
+        return false;
+    layer_t *ly = &m->layers[layer];
+    if (!ly->is_moe) return false;
+    int ne = m->n_embd, xs = m->xdim;
+    if (ly->moe_gemma) {
+        // Gemma's validated MoE is a coupled dense+routed branch with its own
+        // sandwich norms, so the correctness boundary is the whole FFN.
+        gemma_moe_ffn(m, ly, n, xs);
+    } else {
+        for (int b = 0; b < n; b++)
+            rmsnorm(m->xb + (size_t)b * xs,
+                    m->x + (size_t)b * ne,
+                    ly->ffn_norm_w, ne, m->rms_eps);
+        moe_ffn(m, ly, n, xs);
+    }
+    if (ly->post_ffn_norm_w)
+        for (int b = 0; b < n; b++)
+            rmsnorm(m->xb + (size_t)b * xs,
+                    m->xb + (size_t)b * xs,
+                    ly->post_ffn_norm_w, ne, m->rms_eps);
+    for (int b = 0; b < n; b++)
+        for (int i = 0; i < ne; i++)
+            m->x[(size_t)b * ne + i] += m->xb[(size_t)b * xs + i];
+    if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
+        for (int b = 0; b < n; b++)
+            for (int i = 0; i < ne; i++)
+                m->x[(size_t)b * ne + i] *= ly->out_scale;
+    return true;
 }
 
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,

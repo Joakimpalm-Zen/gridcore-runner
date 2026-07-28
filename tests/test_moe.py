@@ -16,6 +16,7 @@ SwiGLU, weighted sum). The FFN is scaled up in the generator so it drives the
 logits — a broken MoE produces different tokens (verified during development).
 """
 import pathlib
+import json
 import os
 import subprocess
 import sys
@@ -42,12 +43,17 @@ def models(tmp_path_factory):
 
 
 def _generate(runner_bin, model, prompt="hello world", n=12, extra=("--gpu", "off")):
+    proc = _run(runner_bin, model, prompt=prompt, n=n, extra=extra)
+    return proc.stdout
+
+
+def _run(runner_bin, model, prompt="hello world", n=12, extra=("--gpu", "off")):
     proc = subprocess.run(
         [runner_bin, "-m", str(model), "-p", prompt, "-n", str(n),
          "--temp", "0", *extra],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     assert proc.returncode == 0, proc.stderr.decode(errors="replace")
-    return proc.stdout
+    return proc
 
 
 def test_moe_top1_matches_the_dense_oracle(runner_bin, models):
@@ -80,3 +86,22 @@ def test_moe_partial_cpu_offload_matches_dense(runner_bin, models):
     split = _generate(runner_bin, f"{models}.moe3.gguf", extra=("--gpu-layers", "1"))
     assert fused == dense, "fused MoE with partial offload must match dense"
     assert split == dense, "split MoE with partial offload must match dense"
+
+
+def test_moe_expert_cpu_placement_matches_dense(runner_bin, models):
+    """Attention stays eligible for CUDA while sparse experts remain on CPU."""
+    dense = _generate(runner_bin, f"{models}.dense.gguf")
+    proc = _run(runner_bin, f"{models}.moe1.gguf",
+                extra=("--cpu-moe", "--gpu-layers", "2"))
+    assert proc.stdout == dense
+    caps = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
+                          stdout=subprocess.PIPE, check=True)
+    if b'"available":true' in caps.stdout:
+        assert b"experts on CPU" in proc.stderr
+
+
+def test_caps_advertise_moe_tensor_placement(runner_bin):
+    caps = json.loads(subprocess.run(
+        [runner_bin, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
+        check=True, text=True).stdout)
+    assert caps["tensor_placement"]["cpu_moe"] is True

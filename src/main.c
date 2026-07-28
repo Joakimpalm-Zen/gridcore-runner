@@ -143,6 +143,8 @@ static void usage(const char *prog) {
         "  --ignore-eos   keep generating past end-of-text tokens\n"
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
         "  --gpu-layers N force N leading layers on the GPU, rest on CPU (0=auto-fit)\n"
+        "  --cpu-moe      keep sparse MoE expert FFNs in RAM while CUDA runs\n"
+        "                 attention and other dense tensors on the GPU\n"
         "  --wait-for-vram [S]  when another registered runner is holding the\n"
         "                 GPU, queue for up to S seconds (default 300) instead\n"
         "                 of refusing. Without it a runner that does not fit\n"
@@ -263,6 +265,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--gpu-layers")) mp.gpu_layers_override = (int)int_arg(a, NEXT, 0, 100000);
+        else if (!strcmp(a, "--cpu-moe")) mp.cpu_moe = true;
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--wait-for-vram")) {
@@ -346,6 +349,10 @@ int main(int argc, char **argv) {
         // per-model property and so is reported at load, not here. f16 is the
         // default because q8 is lossy — it does not reproduce f16 output.
         printf(",\"kv_types\":[\"f16\",\"q8\"],\"kv_type_default\":\"f16\"");
+        // Placement modes controllers may safely request. cpu_moe means the
+        // CUDA backend can keep dense/attention tensors resident while sparse
+        // expert FFNs execute from system RAM.
+        printf(",\"tensor_placement\":{\"cpu_moe\":true}");
         // the fixed -m swap-registry capacity, so a controller bounds the set of
         // models it launches instead of overflowing it (see RUNNER_MAX_MODELS)
         printf(",\"max_models\":%d", RUNNER_MAX_MODELS);

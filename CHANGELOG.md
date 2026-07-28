@@ -3,6 +3,15 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## Unreleased
+
+- Added sparse MoE tensor-role placement with `--cpu-moe`. CUDA retains
+  attention/dense tensors and KV while expert FFNs execute from system RAM;
+  packed uploads omit the expert bank instead of reserving GGUF-sized holes.
+- `--caps` now advertises `tensor_placement.cpu_moe` for schedulers.
+- Current Qwen3.5 GGUFs that include declared NextN/MTP blocks in
+  `block_count` now load only the autoregressive backbone.
+
 ## v0.1.3-alpha — 2026-07-24
 
 ### Headline: sparse Mixture-of-Experts (MoE) support

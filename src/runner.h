@@ -357,6 +357,8 @@ typedef struct {
     int    xdim;             // max(n_embd, per-layer q_dim); sizes xb/xb2/q
     int    reserve_vram_pct; // VRAM cap for the GPU backend (0 = free VRAM)
     int    gpu_layers_override; // forced leading GPU layer count (0 = auto)
+    bool   cpu_moe;          // keep sparse expert FFNs on the host while CUDA
+                             // runs the remaining tensors/layers
     int    gpu_layers;       // leading layers run on GPU (n_layer = full,
                              // <n_layer = partial offload, CPU finishes the rest).
                              // Decided by the first instance to upload a given
@@ -498,6 +500,10 @@ typedef struct {
     // force exactly this many leading layers onto the GPU (the rest run on the
     // CPU); 0 = auto-fit to available/reserved VRAM. Like llama.cpp's -ngl.
     int   gpu_layers_override;
+    // Keep sparse MoE expert FFNs in system RAM while the CUDA backend runs
+    // attention, norms, embeddings/output and any dense layers. This is
+    // tensor-role placement, distinct from the leading-layer split above.
+    bool  cpu_moe;
     int   reserve_ram_pct;
     // --wait-for-vram: seconds to queue behind other registered runners rather
     // than refusing outright. 0 = refuse immediately (the default).
@@ -526,6 +532,10 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits);
 // single-token convenience wrapper
 float *model_forward(model_t *m, int token, int pos);
+// Internal backend bridge for tensor-role placement: apply one complete MoE
+// FFN (including its residual) to m->x on the host. CUDA uses this after its
+// attention sublayer and then resumes on-device. False rejects a non-MoE layer.
+bool   model_moe_ffn_cpu(model_t *m, int layer, int n);
 // speculative verify: forward a small batch keeping hidden states, then pull
 // each row's logits lazily (false/NULL on full GPU offload or n > spec_batch)
 bool   model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos);
