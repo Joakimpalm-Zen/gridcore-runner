@@ -1,0 +1,96 @@
+# GPU benchmarks — Runner vs llama.cpp (CUDA)
+
+First published 2026-07-29, runner `94ce01f`. One machine, one method, both
+engines on the same files — and the losing rows published alongside the
+winning ones.
+
+## Setup
+
+| | |
+|---|---|
+| GPU | NVIDIA RTX PRO 6000 Blackwell Max-Q, **MIG 1g.24gb slice** (not the full card) |
+| CPU | AMD Ryzen Threadripper (128 threads available; runner used its defaults) |
+| Runner | `94ce01f` (2026-07-29), built `-O3 -march=native`, CUDA via `sm_75` PTX, JIT to `compute 12.0` |
+| llama.cpp | build `ea12b27` (CUDA), same GGUF files |
+| Method | 512-token prefill / 128-token greedy decode (`--temp 0`), full GPU offload (verified `full=1` per run), median of 3 runs; llama.cpp via `llama-bench -p 512 -n 128 -ngl 99 -r 2` |
+
+**MIG caveat:** a 1g.24gb slice has roughly ~200 GB/s of memory bandwidth and a
+fraction of the card's SMs. Absolute tok/s will differ on other hardware; the
+*ratios* between the two engines are the meaningful result, and even those shift
+with the compute/bandwidth balance (the same kernels measured different ratios
+on an RTX 3070).
+
+## Results — default configuration, 2026-07-29
+
+"Default" means what each engine does out of the box on these files. For Runner
+that includes the tensor-core prefill GEMM on the seven gated dense (Q4_K, arch)
+combos (promoted 2026-07-29 behind a measured tolerance gate; see
+[the TC spec](specs/2026-07-22-tensor-core-gemm-scope.md)) and the scalar path
+everywhere else.
+
+| model | quant | decode tok/s: runner / llama.cpp | prefill tok/s: runner / llama.cpp |
+|---|---|---|---|
+| Llama-3.2-3B | Q4_K_M | 130.7 / 169.0 (**77%**) | 438.1 / 8373.6 (5.2%) |
+| Phi-3.5-mini | Q4_K_M | 112.4 / 142.8 (**79%**) | 302.3 / 6965.6 (4.3%) |
+| gemma-4-12B | Q4_K_M | 35.9 / 48.9 (**73%**) | 131.8 / 2349.0 (5.6%) |
+| Qwen3-30B-A3B (MoE) | Q4_K_M | 72.5 / 151.7 (**48%**) | 106.4 / 3233.5 (3.3%) |
+| gemma-4-26B-A4B (MoE) | Q4_0 | 23.7 / 114.2 (21%) | 22.7 / 3694.2 (0.6%) |
+| Qwen2.5-32B | Q3_K_S | 3.0 / 25.1 (12%) | 1.4 / 794.4 (0.2%) |
+
+## Reading the numbers honestly
+
+**Dense decode is the story: 73–79% of llama.cpp.** Single-stream decode is
+memory-bandwidth-bound on this slice — both engines read the same quantized
+weights per token — so parity is the physical target, not victory. Runner's
+decode GEMVs (aligned 8-byte quant loads, `float4` activation loads, factored
+per-group affine) close most of the remaining gap while keeping the engine
+dependency-free.
+
+**Prefill is llama.cpp's win, and we publish it as such.** llama.cpp's prefill
+throughput comes from a mature tensor-core GEMM stack across every quant.
+Runner's TC path currently covers Q4_K and lifts promoted dense models from
+~3% to ~4–6% of llama.cpp; the Q8_0 twin and further coverage are tracked
+work, and the gap is reported, not hidden.
+
+**Known-slow rows are kept in the table.** Q3_K decode (12%) uses a
+token-identical but naive kernel — its rewrite is a tracked item, including the
+measured root cause (accumulator spill to local memory at the widened tile).
+MoE decode (48% / 21%) still runs an eager per-token routed path on GPU; expert
+batching is tracked.
+
+**Correctness gates every speed number.** The scalar path is certified
+token-identical CPU vs GPU (and against a pinned llama.cpp revision where
+recorded — see [the compatibility program](compatibility-program.md)). The
+tensor-core path is fp16-tile arithmetic and is instead held to a teacher-forced
+tolerance gate (`make test-tc-tol`): every promoted row measured 0/64 top-1
+flips and ≤0.012% mean logit deviation; in free-running checks to date its
+greedy output has matched the scalar path exactly.
+
+## Trajectory (same box, same method, same llama.cpp build)
+
+| model | decode, 2026-07-25 | decode, 2026-07-29 | prefill, 07-25 | prefill, 07-29 |
+|---|---|---|---|---|
+| Llama-3.2-3B | 52% | **77%** | 3.1% | **5.2%** |
+| Phi-3.5-mini | 50% | **79%** | 2.9% | **4.3%** |
+| gemma-4-12B | 48% | **73%** | 3.1% | **5.6%** |
+| Qwen3-30B-A3B | 36% | **48%** | 2.4% | **3.3%** |
+| gemma-4-26B-A4B | 21% | 21% | 0.8% | 0.6% |
+| Qwen2.5-32B | 12% | 12% | 0.3% | 0.2% |
+
+Four days of kernel work (decode GEMV bandwidth pass, MVB-16 tiles, MMQ-style
+TC prefill GEMM + its tolerance gate) — plus one silent MoE GPU→CPU fallback
+found by this benchmark's own control run, fixed and now guarded by a test.
+
+## Reproducing
+
+```sh
+# runner rows (median of 3; verify the gpu-split line reports full=1)
+./runner -m model.gguf -f prompt-512tok.txt -n 128 --temp 0 -s 1 \
+         --ignore-eos --gpu-layers 99
+
+# llama.cpp rows
+llama-bench -m model.gguf -p 512 -n 128 -ngl 99 -r 2
+
+# pin runner's scalar path (byte-identical CPU==GPU) if comparing outputs
+RUNNER_CUDA_TC=0 ./runner ...
+```
