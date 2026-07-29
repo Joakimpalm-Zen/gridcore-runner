@@ -5,13 +5,15 @@ dependencies beyond libc/pthreads, no ggml, one `make`, one binary. It loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**New in 0.1.3 — sparse Mixture-of-Experts.** Qwen3-30B-A3B (128 experts,
-top-8) loads in 18.6 GB and decodes at **~72 tok/s on an NVIDIA RTX PRO 6000
-Blackwell using a 24 GB MIG slice**; that is a hardware-specific data point,
-not a claim about every 24 GB consumer GPU. CPU/GPU output is token-identical;
-partial CPU offload covers smaller VRAM budgets; Q3_K has a GPU kernel
-(Mixtral-8x7B Q3_K_M now runs fully on the GPU). See
-[CHANGELOG.md](CHANGELOG.md) and [docs/moe-support.md](docs/moe-support.md).
+**New in 0.1.4 — tensor cores by default, published benchmarks, European
+models.** The tensor-core prefill GEMM is now the default on
+tolerance-gated dense Q4_K models (**+47–77% prefill**, decode unchanged),
+dense decode reaches **73–79% of llama.cpp** on the reference box, and the
+head-to-head numbers are published — losing rows included
+([docs/benchmarks.md](docs/benchmarks.md)). Six European models (EuroLLM,
+Lucie, Mistral-Nemo, Teuken, Salamandra, TildeOpen-30b) join the pinned
+compatibility manifest under the new [Europe & US model
+scope](docs/model-scope.md). See [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
@@ -23,7 +25,7 @@ NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
 make                 # produces ./runner (GPU auto-detected at runtime)
-./runner --version   # -> runner 0.1.3-alpha
+./runner --version   # -> runner 0.1.4-alpha
 ```
 
 Then point it at any GGUF model:
@@ -37,7 +39,7 @@ Then point it at any GGUF model:
 ./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
 ```
 
-> **Public alpha (`0.1.3-alpha`).** CI-tested on Linux/macOS/Windows and
+> **Public alpha (`0.1.4-alpha`).** CI-tested on Linux/macOS/Windows and
 > daily-driven by the rest of the Gridcore stack, but it has met few machines
 > other than ours — which is what an alpha is for. Run your GGUF models and
 > [open an issue](../../issues) for anything that crashes, misbehaves, or

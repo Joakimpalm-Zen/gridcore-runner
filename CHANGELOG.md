@@ -5,6 +5,23 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+## v0.1.4-alpha — 2026-07-29
+
+### Headline: tensor-core prefill by default, published benchmarks, and the European roster
+
+The tensor-core prefill GEMM is now the **default** on seven
+tolerance-gated dense (Q4_K, arch) combos (+47–77% prefill, decode
+unchanged), backed by a new teacher-forced tolerance gate
+(`make test-tc-tol`); the decode GEMV bandwidth pass lifts dense decode to
+73–79% of llama.cpp on the reference box, and the first head-to-head
+benchmark is published (`docs/benchmarks.md`) with the losing rows
+included. Six European models join the SHA-pinned compatibility manifest
+under the new Europe & US model-scope policy (`docs/model-scope.md`) —
+whose evidence runs found and fixed three real defects (a silent MoE
+GPU→CPU fallback, a fast-math expf-overflow UB in CPU silu, and two
+option footguns) and reported a GGUF conversion bug upstream to
+OpenLLM-France. Full detail below.
+
 - Fixed CPU decode corruption on models with extreme FFN gate values
   (found by TildeOpen-30b's certification run): silu computes expf(-g),
   fp32 expf overflows past ~88, and the -ffast-math build treats that
