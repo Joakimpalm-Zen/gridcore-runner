@@ -5,6 +5,37 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Fixed the full-offload CPU==GPU byte-identity regression the Blackwell
+  box found in the P1 MoE path (near-tie flip at ~token 60 on
+  Qwen3-30B). Isolated with a new routing-bits discriminator: expert
+  SELECTION was identical, but selw differed in the last mantissa bit
+  from two compounding 1-ulp sources in k_moe_route — device expf vs the
+  host libm, and exact IEEE division vs the -freciprocal-math
+  reciprocal-multiply the -ffast-math host build actually emits. The
+  kernel now computes the softmax exponential as
+  (float)exp((double)x) — the correctly-rounded float exp, which
+  bit-matches a correctly-rounded host expf (verified against UCRT on
+  20M sampled inputs; residual double-rounding probability ~2^-28 per
+  call) — and mirrors the reciprocal-multiply normalization. Verified on
+  the 3070: fused output byte-identical to the eager (v0.1.4-certified)
+  path over 128 greedy tokens on BOTH MoE models at ngl 17 and 19, and
+  CPU==GPU identical; layer-1 routing bits equal, which transitively
+  certifies every P1 kernel in layer 0's pipeline. Caveat for the
+  full-offload re-cert: if the Blackwell CPU build auto-vectorizes the
+  host softmax through libmvec's ~4-ulp expf, its CPU routing bits are
+  unmatchable from device code — the new RUNNER_DEBUG_MOE dump (hex
+  sel/selw from both paths) + RUNNER_MOE_EAGER (force the v0.1.4
+  host-routing path) discriminate that case in two runs.
+- (Q4_0, gemma4-moe) tc-tol failure investigated: the tail-safe K loop
+  is NOT the cause — a synthetic n_ff=704 Q4_0 model (the exact
+  X.5x128-step class gemma exercises) passes at 0.00004 of range with
+  0/64 flips, and a 10x-weight variant scales the deviation smoothly
+  (0.00022, still 0 flips), pointing at gemma-4's activation magnitudes
+  under fp16 tile staging rather than a kernel defect. The gate is doing
+  its job; the row stays unpromoted. If that row should ever pass:
+  per-column activation absmax scaling in the TC tile is the identified
+  follow-up.
+
 - Tensor-core GEMM twins for Q8_0 and Q4_0 (moe-gpu-routing spec P3),
   same MMQ-style structure as the Q4_K TC kernel — block-cooperative
   fp16 weight-tile dequant with per-element values matching the scalar

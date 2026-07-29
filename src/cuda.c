@@ -1275,6 +1275,10 @@ bool gpu_init(model_t *m) {
             if (!g->h_moe_sel || !g->h_moe_selw || !g->h_moe_gidx ||
                 !g->h_moe_gw) goto fail;
             g->moe_fused_ok = moe_fused_eligible(m);
+            // RUNNER_MOE_EAGER: debug escape to the v0.1.4 host-routing
+            // path — the reference side of the RUNNER_DEBUG_MOE bit
+            // comparison, and the fused-vs-eager A/B instrument.
+            if (getenv("RUNNER_MOE_EAGER")) g->moe_fused_ok = false;
             g->moe_grouped_ok = moe_grouped_eligible(m);
         }
         if (m->moe_gemma)
@@ -1771,6 +1775,25 @@ static bool gpu_moe_ffn_fused(gpu_t *g, model_t *m, const layer_t *ly,
     if (!enc_moe_route(g, g->moe_logits, g->moe_sel, g->moe_selw, ne, used,
                        tn, ne))
         return false;
+    // RUNNER_DEBUG_MOE: fused-path twin of the eager dump above
+    if (getenv("RUNNER_DEBUG_MOE")) {
+        static int dumped = 0;
+        if (dumped < 2) {
+            dumped++;
+            cu.StreamSynchronize(g->stream);
+            int hs[256]; float hw[256];
+            cu.MemcpyDtoH(hs, g->moe_sel, sizeof(int) * used);
+            cu.MemcpyDtoH(hw, g->moe_selw, sizeof(float) * used);
+            fprintf(stderr, "FUSED sel :");
+            for (int s = 0; s < used; s++) fprintf(stderr, " %d", hs[s]);
+            fprintf(stderr, "\nFUSED selw:");
+            for (int s = 0; s < used; s++) {
+                unsigned u; memcpy(&u, &hw[s], 4);
+                fprintf(stderr, " %08x", u);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
     for (int t = 0; t < tn; t++) {
         CUdeviceptr xin  = g->xb + (size_t)t * xdim * sizeof(float);
         CUdeviceptr sel  = g->moe_sel  + (size_t)t * used * sizeof(int);
@@ -2046,6 +2069,25 @@ static bool gpu_moe_ffn_eager(gpu_t *g, model_t *m, const layer_t *ly, int tn, i
             selw[s] = bp;
             denom += bp;
             lg[best] = -1.0f;
+        }
+        // RUNNER_DEBUG_MOE: dump the first two routings' selection + weights
+        // as hex — the discriminator that isolated the 2026-07-29 identity
+        // regression (device-vs-host expf + reciprocal-math, both 1-ulp).
+        // Paired with the same dump in the fused path; bit-compare them.
+        if (getenv("RUNNER_DEBUG_MOE")) {
+            static int dumped = 0;
+            if (dumped < 2 && t == 0) {
+                dumped++;
+                fprintf(stderr, "EAGER sel :");
+                for (int s = 0; s < used; s++) fprintf(stderr, " %d", sel[s]);
+                fprintf(stderr, "\nEAGER selw:");
+                for (int s = 0; s < used; s++) {
+                    float w_ = selw[s] / denom;
+                    unsigned u; memcpy(&u, &w_, 4);
+                    fprintf(stderr, " %08x", u);
+                }
+                fprintf(stderr, "\n");
+            }
         }
         for (int s = 0; s < used; s++) {
             int e = sel[s];

@@ -2215,11 +2215,28 @@ extern "C" __global__ void k_moe_route(const float *logits, int *sel,
         if (lg[e] > mx) mx = lg[e];
     float ssum = 0.0f;
     for (int e = 0; e < ne; e++) {
-        float p = expf(lg[e] - mx);
+        // (float)exp((double)x), NOT device expf: device expf differs from
+        // the host libm by ~1-2 ulp, and that difference alone broke the
+        // certified full-offload CPU==GPU byte identity (near-tie flip;
+        // isolated 2026-07-29 — selection was identical, selw differed in
+        // the last bit). Rounding the double exp to float yields the
+        // correctly-rounded float exp in all but ~2^-28 of calls (CUDA
+        // documents double exp at 1 ulp), which bit-matches a
+        // correctly-rounded host expf (verified exhaustively-sampled
+        // against UCRT; glibc scalar expf is also correctly rounded). The
+        // serial one-thread contract above already makes this kernel
+        // latency-bound, so the fp64 cost is noise.
+        float p = (float)exp((double)(lg[e] - mx));
         lg[e] = p;
         ssum += p;
     }
-    for (int e = 0; e < ne; e++) lg[e] /= ssum;
+    // reciprocal-multiply, NOT division: the host reference builds with
+    // -ffast-math, whose -freciprocal-math hoists these loop-invariant
+    // divisions into one reciprocal + multiplies — a 1-ulp difference from
+    // exact division that broke selw bit-identity (isolated empirically:
+    // exp-matched routing still differed in the last bit on some slots).
+    float sinv = 1.0f / ssum;
+    for (int e = 0; e < ne; e++) lg[e] *= sinv;
     int   *ts = sel  + (ulong64)t * used;
     float *tw = selw + (ulong64)t * used;
     float denom = 0.0f;
@@ -2233,7 +2250,9 @@ extern "C" __global__ void k_moe_route(const float *logits, int *sel,
         denom += bp;
         lg[best] = -1.0f;
     }
-    for (int s = 0; s < used; s++) tw[s] /= denom;
+    // same -freciprocal-math mirror as the softmax normalization above
+    float dinv = 1.0f / denom;
+    for (int s = 0; s < used; s++) tw[s] *= dinv;
 }
 
 // -------------------------------------------- indirect expert matvec (MoE)
