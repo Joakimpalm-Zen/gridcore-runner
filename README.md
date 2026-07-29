@@ -775,6 +775,10 @@ and `greedy_reference` per the recorded reports):
 architectures are **refused**, not run through llama-style math — a clear
 refusal beats plausible, silently-wrong output.
 
+New model-support work focuses on **EU and US model families**
+([docs/model-scope.md](docs/model-scope.md)); everything already certified
+stays certified and maintained.
+
 Sparse MoE covers Mixtral/Qwen3-style top-k SiLU experts (CPU + CUDA; fused and
 legacy-split layouts) **and** gemma-4's GELU dual-branch MoE — a dense shared
 GELU FFN plus routed fused-`gate_up` experts with per-expert down scales and
