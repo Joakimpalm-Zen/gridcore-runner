@@ -1240,13 +1240,21 @@ static bool enc_rmsnorm(gpu_t *g, CUdeviceptr x, CUdeviceptr y, CUdeviceptr w,
 // stays off by default until the tolerance gate promotes it per (type, arch).
 // Parse the VALUE: a bare existence check made RUNNER_CUDA_TC=0 enable the
 // path — the exact sentinel a benchmark harness sets to mean "off".
+static int g_tc_state = -1;   // -1 = read env on first use; 0/1 = decided
+
+// Test hook (the TC tolerance gate compares scalar and TC in one process,
+// so an env var read once at first launch cannot express "both"). Pass -1
+// to return to the env default.
+void gpu_tc_force(int on) {
+    g_tc_state = on < 0 ? -1 : (on != 0);
+}
+
 static bool tc_on(void) {
-    static int v = -1;
-    if (v < 0) {
+    if (g_tc_state < 0) {
         const char *e = getenv("RUNNER_CUDA_TC");
-        v = e && *e && strcmp(e, "0") != 0 && strcmp(e, "off") != 0;
+        g_tc_state = e && *e && strcmp(e, "0") != 0 && strcmp(e, "off") != 0;
     }
-    return v != 0;
+    return g_tc_state != 0;
 }
 
 static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,

@@ -437,6 +437,10 @@ bool   gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
 // can; a backend that cannot forces the cache back to f16 rather than
 // handing q8_0 blocks to kernels that would read them as fp16.
 bool   gpu_kv_q8_ok(void);
+// test hook for the TC tolerance gate: force the tensor-core GEMM opt-in on
+// (1) or off (0) regardless of RUNNER_CUDA_TC; -1 returns to the env default.
+// A no-op on backends without a TC path (Metal, CPU-only builds).
+void   gpu_tc_force(int on);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 // process n tokens starting at pos (prompt batches); on success returns true
 // and sets *logits to the last token's logits when want_logits (else NULL).

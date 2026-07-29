@@ -164,3 +164,34 @@ output token-identical to CPU on the five kernel-verify prompts. The gate
 posture is unchanged: scalar stays the default, TC stays a measured opt-in
 until the tolerance gate promotes it per (type, arch). Remaining headroom:
 double-buffered staging, a Q8_0 TC twin, and the Phase 3 WGMMA question.
+
+## The tolerance gate — BUILT 2026-07-29 (tests/test_tc_tol.c)
+
+The §constraints gate exists: `make test-tc-tol`, teacher-forced (64 gated
+positions over a fixed 192-token text, same design and constants as the q8-KV
+gate), criteria = top-1 agreement with the near-tie escape (≤5% flips, each
+within 2% of the logit range) plus mean|dlogit| ≤ 0.5% of the mean logit range
+(range computed over real logits — gemma4's −1e30 suppression sentinels are
+excluded, or the bound is vacuous). It self-skips without a GPU, without a
+Q4_K tensor, and when TC and scalar logits are bit-identical (kernel did not
+engage — a comparison of a path with itself must not read as tolerance).
+
+Blackwell MIG 1g.24gb measurements (512-tok-class prefill through the TC
+GEMM, then 64 teacher-forced positions):
+
+| model | arch | mean\|dlogit\| | of range | top-1 flips | gate |
+|---|---|---|---|---|---|
+| Llama-3.2-3B-Q4_K_M | llama | 0.0007 | 0.003% | 0/64 | pass |
+| Phi-3.5-mini-Q4_K_M | phi3 | 0.0013 | 0.004% | 0/64 | pass |
+| gemma-4-12B-Q4_K_M | gemma4 | 0.0056 | 0.012% | 0/64 | pass |
+| Qwen3-30B-A3B-Q4_K_M | qwen3moe | 0.0634 | 0.216% | 1/64 (margin 0.001) | pass |
+
+Two readings worth recording. First, qwen3moe free-running DOES diverge from
+scalar (measured 2026-07-29: token 3 of a 128-token greedy run) — the gate
+classifies that as near-tie amplification, the same accepted class as the q8
+KV cache, not decisive error; its single teacher-forced flip sat at 0.001 of
+range. Second, the MoE deviation is ~86× the dense deviation (0.216% vs
+0.003%) while still inside the bound — expert routing amplifies fp16 noise,
+and any future TC coverage extension (Q8_0 twin, WGMMA) should expect MoE
+archs to be the tightest rows. Promotion per (type, arch) is now a decision
+that can be taken on these numbers; it has not been taken here.

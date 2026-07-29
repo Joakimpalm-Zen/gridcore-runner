@@ -5,6 +5,19 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Added the TC tolerance gate (`tests/test_tc_tol.c`, `make test-tc-tol`),
+  the promotion instrument the tensor-core plan required: teacher-forced
+  logits over 64 positions, gated on top-1 agreement (near-tie escape as in
+  the q8-KV gate) and a bounded mean logit deviation (≤0.5% of the mean
+  logit range, computed over real logits — suppression sentinels excluded).
+  Skips rather than passes when the TC kernel cannot engage (no GPU, no
+  Q4_K tensor, or bit-identical logits meaning the kernel never launched).
+  First measurements on the Blackwell MIG: llama 0.003%, phi3 0.004%,
+  gemma4 0.012% of range with 0/64 flips; qwen3moe 0.216% with 1/64 — a
+  near-tie at 0.001 of range. All four pass; the qwen3moe free-running
+  divergence is thereby classified as near-tie amplification (the q8-KV
+  class), not decisive error. Adds `gpu_tc_force()` so one process can
+  compare both paths; `RUNNER_CUDA_TC` env behavior is unchanged.
 - Fixed a silent MoE GPU→CPU fallback introduced by the `--cpu-moe` binding
   layer (active even without the flag): `binding_find` bounds-checks
   `t->nbytes` on every dispatch, but the per-expert slice descriptors built
