@@ -5,6 +5,17 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Published benchmark MoE rows updated after the device-routing work:
+  Qwen3-30B-A3B decode 102.2 tok/s (67% of llama.cpp, was 48% at
+  v0.1.4) and prefill 194.0 (6.0%, was 3.3%) on the Blackwell MIG;
+  gemma-4-26B 24.7 / 23.6. docs/benchmarks.md and the shareable page
+  carry the same rows.
+- `runner` now depends on `src/kernels_ptx.h` in the Makefile: a pull
+  that changed only the regenerated PTX header rebuilt nothing, and a
+  publication run measured yesterday's kernels for half an hour before
+  the stale binary was caught. Same class as the certification footguns
+  this week — the build must never silently serve old code.
+
 - MoE routing normalizations reverted to per-element division — the
   k_moe_route PTX section is byte-identical to the 4719de6 body again
   (verified by section hash), which is exactly what the Blackwell

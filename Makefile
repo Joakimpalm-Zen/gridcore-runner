@@ -93,7 +93,10 @@ SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sampl
       src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/server.c \
       src/main.c $(GPU_SRC)
 
-runner: $(SRC) src/runner.h
+# kernels_ptx.h is embedded into the binary by cuda.c — a pull that changes
+# ONLY the regenerated PTX header must rebuild, or benchmarks silently run
+# yesterday's kernels (this bit a publication run on 2026-07-29).
+runner: $(SRC) src/runner.h src/kernels_ptx.h
 	$(CC) $(CFLAGS) $(SRC) -o $@ $(LDFLAGS)
 
 debug: $(SRC) src/runner.h

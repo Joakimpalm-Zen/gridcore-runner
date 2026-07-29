@@ -1,8 +1,9 @@
 # GPU benchmarks — Runner vs llama.cpp (CUDA)
 
-First published 2026-07-29, runner `94ce01f`. One machine, one method, both
-engines on the same files — and the losing rows published alongside the
-winning ones.
+First published 2026-07-29, runner `94ce01f`; MoE rows updated the same day
+on runner `26cf7e6` after the device-routing work landed. One machine, one
+method, both engines on the same files — and the losing rows published
+alongside the winning ones.
 
 ## Setup
 
@@ -33,8 +34,8 @@ everywhere else.
 | Llama-3.2-3B | Q4_K_M | 130.7 / 169.0 (**77%**) | 438.1 / 8373.6 (5.2%) |
 | Phi-3.5-mini | Q4_K_M | 112.4 / 142.8 (**79%**) | 302.3 / 6965.6 (4.3%) |
 | gemma-4-12B | Q4_K_M | 35.9 / 48.9 (**73%**) | 131.8 / 2349.0 (5.6%) |
-| Qwen3-30B-A3B (MoE) | Q4_K_M | 72.5 / 151.7 (**48%**) | 106.4 / 3233.5 (3.3%) |
-| gemma-4-26B-A4B (MoE) | Q4_0 | 23.7 / 114.2 (21%) | 22.7 / 3694.2 (0.6%) |
+| Qwen3-30B-A3B (MoE) | Q4_K_M | 102.2 / 151.7 (**67%**) | 194.0 / 3233.5 (6.0%) |
+| gemma-4-26B-A4B (MoE) | Q4_0 | 24.7 / 114.2 (22%) | 23.6 / 3694.2 (0.6%) |
 | Qwen2.5-32B | Q3_K_S | 3.0 / 25.1 (12%) | 1.4 / 794.4 (0.2%) |
 
 ## Reading the numbers honestly
@@ -55,8 +56,12 @@ work, and the gap is reported, not hidden.
 **Known-slow rows are kept in the table.** Q3_K decode (12%) uses a
 token-identical but naive kernel — its rewrite is a tracked item, including the
 measured root cause (accumulator spill to local memory at the widened tile).
-MoE decode (48% / 21%) still runs an eager per-token routed path on GPU; expert
-batching is tracked.
+MoE decode reached 67% via device-side routing and fused indirect expert
+matvecs (2026-07-29); gemma's dual-branch MoE (22%) and MoE prefill remain
+the tracked remainders. The certified byte-identity property for MoE is
+defined over the eager routing path (`RUNNER_MOE_EAGER=1`, pinned in the
+certification harnesses); the fused default is verified
+selection-identical with routing weights within ~2 ulp.
 
 **Correctness gates every speed number.** The scalar path is certified
 token-identical CPU vs GPU (and against a pinned llama.cpp revision where
@@ -73,13 +78,14 @@ greedy output has matched the scalar path exactly.
 | Llama-3.2-3B | 52% | **77%** | 3.1% | **5.2%** |
 | Phi-3.5-mini | 50% | **79%** | 2.9% | **4.3%** |
 | gemma-4-12B | 48% | **73%** | 3.1% | **5.6%** |
-| Qwen3-30B-A3B | 36% | **48%** | 2.4% | **3.3%** |
-| gemma-4-26B-A4B | 21% | 21% | 0.8% | 0.6% |
+| Qwen3-30B-A3B | 36% | **67%** | 2.4% | **6.0%** |
+| gemma-4-26B-A4B | 21% | 22% | 0.8% | 0.6% |
 | Qwen2.5-32B | 12% | 12% | 0.3% | 0.2% |
 
-Four days of kernel work (decode GEMV bandwidth pass, MVB-16 tiles, MMQ-style
-TC prefill GEMM + its tolerance gate) — plus one silent MoE GPU→CPU fallback
-found by this benchmark's own control run, fixed and now guarded by a test.
+Six days of kernel work (decode GEMV bandwidth pass, MVB-16 tiles, MMQ-style
+TC prefill GEMM + its tolerance gate, MoE device-side routing + fused
+indirect expert matvecs) — plus one silent MoE GPU→CPU fallback found by
+this benchmark's own control run, fixed and now guarded by a test.
 
 ## Reproducing
 
