@@ -1622,6 +1622,16 @@ static inline float gated_act(int act, float g, float u) {
         float t = tanhf(0.7978845608f * (g + 0.044715f * g * g * g));
         return 0.5f * g * (1.0f + t) * u;
     }
+    // silu(g) = g / (1 + e^{-g}). fp32 expf overflows past ~x=88, and this
+    // build compiles with -ffast-math, under which that overflow is UB: the
+    // auto-vectorized libmvec expf returns garbage rather than +inf, and the
+    // huge negative gate leaks through (observed: TildeOpen-30b's last-layer
+    // gates legitimately reach |g| ~ 2.7e3, corrupting every CPU decode step
+    // into <unk> emissions — GPU CUDA expf saturates properly and was
+    // unaffected). Below -80, |silu| < 1.5e-33: identically zero for every
+    // downstream purpose, with no UB-adjacent expf call. The positive side is
+    // safe as-is: expf(-g) underflows to 0, which is defined even here.
+    if (g < -80.0f) return 0.0f;
     return (g / (1.0f + expf(-g))) * u;
 }
 
@@ -1836,7 +1846,11 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     // leaves the boundary activation in the host x buffer + the offloaded
     // layers' KV in the host cache, and the CPU loop below finishes the rest.
     int start = 0;
-    int dbg = dbg_act_mode() && dbg_act_pass == 0;
+    // RUNNER_DEBUG_ACT=N dumps the N-th forward pass (1-based): =1 keeps the
+    // historical dump-the-first-pass behavior; =3 reaches the second DECODE
+    // step — the first pass that reads KV a previous decode step wrote, which
+    // is where the TildeOpen CPU-path corruption first became observable.
+    int dbg = dbg_act_mode() && dbg_act_pass == dbg_act_mode() - 1;
     if (dbg_act_mode()) dbg_act_pass++;
     if (dbg)
         fprintf(stderr, "ACT ==== forward n=%d pos=%d arch=%s embd_scale=%.5f "

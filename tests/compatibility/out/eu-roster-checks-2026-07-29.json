@@ -137,12 +137,12 @@
     "detail": "llama arch, 60 layers, full GPU offload (19.4 GB), coherent generation"
    },
    "cpu_cuda": {
-    "status": "fail",
-    "detail": "BLOCKED BY AN OPEN ENGINE DEFECT: the pure-CPU path (--gpu off) emits <unk> for content tokens from the second generated token onward; GPU output is coherent. Batched CPU prefill is sane (activation dump: finite stats through all 60 layers, correct first sampled token); the defect is in single-token CPU decode, position/state-dependent, reproducible deterministically, unaffected by -b or -t. TildeOpen is the first model to trip it; unique geometry: GQA 48:8 (ratio 6), vocab 131072, n_embd 6144, freq_base 200000, ctx_train 65536."
+    "status": "pass",
+    "detail": "128-tok greedy byte-identical, TRUE CPU (--gpu off) vs full GPU, after the gated_act silu guard (fp32 expf overflow is UB under -ffast-math; the vectorized libmvec expf returned garbage for TildeOpen's last-layer gates, |g| up to ~2.7e3 \u2014 the first model to reach that range). Regression evidence: lucie-7b and eurollm-9b CPU outputs are bit-identical pre/post fix."
    },
    "greedy_reference": {
-    "status": "fail",
-    "detail": "1/5 prompts exact (see reference-tildeopen.json) \u2014 the runner side ran the defective CPU path; llama.cpp side coherent"
+    "status": "pass",
+    "detail": "4/5 prompts exact vs pinned b10076 post-fix (the divergence is a coherent near-tie split, the roster's normal class); the pre-fix 1/5 run is preserved as reference-tildeopen-prefix-defect.json \u2014 it documents the defect state"
    },
    "tokenizer": {
     "status": "not_executed",

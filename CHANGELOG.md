@@ -5,6 +5,19 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Fixed CPU decode corruption on models with extreme FFN gate values
+  (found by TildeOpen-30b's certification run): silu computes expf(-g),
+  fp32 expf overflows past ~88, and the -ffast-math build treats that
+  overflow as UB — the auto-vectorized libmvec expf returned garbage for
+  TildeOpen's last-layer gates (|g| up to ~2.7e3), degrading every
+  pure-CPU decode step into <unk> emissions while GPU (CUDA expf
+  saturates properly) was unaffected. gated_act now short-circuits silu
+  to 0 below g = -80, where |silu| < 1.5e-33, so expf never sees an
+  overflowing argument. Verified: TildeOpen CPU==GPU byte-identical over
+  128 greedy tokens, greedy_reference 4/5 vs pinned b10076 (was 1/5),
+  and lucie/eurollm CPU outputs bit-identical pre/post fix (the guard is
+  a no-op for in-range models). RUNNER_DEBUG_ACT=N now dumps the N-th
+  forward pass (was: first only) — the instrument this debug needed.
 - `--gpu-layers 0` now means what it says — no GPU (same as `--gpu off`).
   It used to be the auto-fit sentinel and silently ran FULL GPU, a
   documented footgun that bit its own certification run: the roster's
