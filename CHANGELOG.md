@@ -5,6 +5,26 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Promoted the tensor-core prefill GEMM to the default for gated dense
+  (Q4_K, arch) combos** (owner decision on the tolerance-gate numbers):
+  `llama`, `phi3`, `gemma4`, `qwen3`, `mistral`, `gemma3`, `smollm` — every
+  row measured by `test_tc_tol` on real weights with 0/64 teacher-forced
+  top-1 flips and ≤0.012% mean logit deviation. Measured effect on the
+  Blackwell MIG: dense Q4_K prefill +47–77% with decode unchanged
+  (llama-3.2-3b 263→438 tok/s, qwen3-4b 212→352). `qwen3moe` passed its
+  gate too (0.216%, one near-tie) but stays opt-in: MoE routing amplifies
+  fp16 noise ~86× over dense, and this promotion covers the dense family.
+  Unmeasured archs (`qwen2`, `qwen35`, `stablelm`) remain scalar.
+  `RUNNER_CUDA_TC=1` still forces the path on everywhere (how a gate
+  candidate is measured), `=0`/`off` forces it off; unset now means "per
+  the promotion table" instead of "off". `test_kv_tol` pins the GEMM path
+  scalar (`gpu_tc_force(0)`) so its strict f16 CPU==GPU invariant keeps
+  measuring the KV cache format, not the GEMM. NOTE for certification:
+  on promoted combos, byte-identical CPU==GPU comparisons now compare TC
+  against scalar — certify the scalar path with `RUNNER_CUDA_TC=0` or use
+  the tolerance form (`test_tc_tol`); free-running greedy output was
+  byte-identical TC-vs-scalar on all four models checked (512+128), but
+  near-tie flips are possible in principle on other prompts.
 - Added the TC tolerance gate (`tests/test_tc_tol.c`, `make test-tc-tol`),
   the promotion instrument the tensor-core plan required: teacher-forced
   logits over 64 positions, gated on top-1 agreement (near-tie escape as in

@@ -1236,25 +1236,48 @@ static bool enc_rmsnorm(gpu_t *g, CUdeviceptr x, CUdeviceptr y, CUdeviceptr w,
     return launch(g, g->sw->f_rmsnorm, 1, batch, 1, 256, p);
 }
 
-// Tensor-core GEMM opt-in (RUNNER_CUDA_TC). Read once. Phase 1 of the TC plan;
-// stays off by default until the tolerance gate promotes it per (type, arch).
-// Parse the VALUE: a bare existence check made RUNNER_CUDA_TC=0 enable the
-// path — the exact sentinel a benchmark harness sets to mean "off".
-static int g_tc_state = -1;   // -1 = read env on first use; 0/1 = decided
+// Tensor-core GEMM (RUNNER_CUDA_TC). Promoted per (type, arch) by the
+// tolerance gate (tests/test_tc_tol.c; results in the TC spec): combos in
+// tc_promoted() run TC by DEFAULT, everything else stays scalar until gated.
+// RUNNER_CUDA_TC=1 forces the path on everywhere (including unpromoted
+// combos — how a gate candidate is measured); =0/off forces it off
+// everywhere. Parse the VALUE: a bare existence check made =0 mean "on".
+enum { TC_ENV_UNSET = -2 };
+static int g_tc_state = TC_ENV_UNSET;   // -2 env unread, -1 per-combo, 0/1 forced
 
 // Test hook (the TC tolerance gate compares scalar and TC in one process,
 // so an env var read once at first launch cannot express "both"). Pass -1
-// to return to the env default.
+// to return to the env/promotion default.
 void gpu_tc_force(int on) {
-    g_tc_state = on < 0 ? -1 : (on != 0);
+    g_tc_state = on < 0 ? TC_ENV_UNSET : (on != 0);
 }
 
-static bool tc_on(void) {
-    if (g_tc_state < 0) {
+// Promoted (type, arch) combos — every row measured by test_tc_tol on real
+// weights (Blackwell MIG, 2026-07-29; table in the TC spec). Dense archs
+// only, and only those with a gate row: llama 0.003% of range / phi3 0.004%
+// / gemma4 0.012% / qwen3 dense, mistral, gemma3, smollm per the same run —
+// all 0 top-1 flips in 64 teacher-forced positions. qwen3moe PASSED its
+// gate too (0.216%, one near-tie) but stays opt-in by owner decision: MoE
+// routing amplifies fp16 noise ~86x over dense, and the promotion decision
+// deliberately covers the dense family first. Unmeasured archs (qwen2,
+// qwen35, stablelm) are absent, not implied.
+static bool tc_promoted(const model_t *m, int type) {
+    if (type != T_Q4_K) return false;
+    static const char *archs[] = { "llama", "phi3", "gemma4", "qwen3",
+                                   "mistral", "gemma3", "smollm" };
+    for (size_t i = 0; i < sizeof(archs) / sizeof(*archs); i++)
+        if (strcmp(m->arch, archs[i]) == 0) return true;
+    return false;
+}
+
+static bool tc_on(const model_t *m, int type) {
+    if (g_tc_state == TC_ENV_UNSET) {
         const char *e = getenv("RUNNER_CUDA_TC");
-        g_tc_state = e && *e && strcmp(e, "0") != 0 && strcmp(e, "off") != 0;
+        if (!e || !*e) g_tc_state = -1;                    // per-combo default
+        else g_tc_state = strcmp(e, "0") != 0 && strcmp(e, "off") != 0;
     }
-    return g_tc_state != 0;
+    if (g_tc_state >= 0) return g_tc_state != 0;
+    return tc_promoted(m, type);
 }
 
 static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
@@ -1266,10 +1289,10 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
     mv_args a = { n_in, n_out, w_off, bias != 0, batch, xs, ys };
     CUdeviceptr b = bias ? bias : g->sw->dummy;
     void *p[] = { &weights, &x, &y, &a, &b };
-    // Prefill (batch>1), tensor-core GEMM when enabled and available: the
-    // block dequantizes a 64-row fp16 weight tile once and its four warps'
-    // MMAs share it (TC_ROWS rows per block, 128 threads).
-    if (batch > 1 && tc_on() && g->sw->f_gemm_tc[w->type])
+    // Prefill (batch>1), tensor-core GEMM when promoted for this (type, arch)
+    // or forced by RUNNER_CUDA_TC: the block dequantizes a 64-row fp16 weight
+    // tile once and its four warps' MMAs share it (TC_ROWS/block, 128 threads).
+    if (batch > 1 && tc_on(m, w->type) && g->sw->f_gemm_tc[w->type])
         return launch(g, g->sw->f_gemm_tc[w->type],
                       (n_out + TC_ROWS - 1) / TC_ROWS, 1, 1, 128, p);
     // Prefill (batch>1) uses the tiled-GEMM variant where available (Q8_0/Q4_K):

@@ -64,6 +64,14 @@ back to CPU). **Kept at `compute_75`.**
 > prefill-only ~3× ceiling. Full analysis:
 > `docs/specs/2026-07-22-tensor-core-gemm-scope.md`. Lever 2 below is therefore
 > a measured go/no-go, not a live next step.
+>
+> **Update (2026-07-29): the go was taken and the lever won.** MVB widened to
+> 16, the kernel was rebuilt MMQ-style (Phase 2 of the spec), the tolerance
+> gate was built (`make test-tc-tol`), and TC is now the **default** prefill
+> path for the gated dense (Q4_K, arch) combos — measured +47–77% prefill on
+> the Blackwell MIG with decode unchanged and 0/64 teacher-forced top-1 flips
+> on every promoted row. The spec carries the gate table and the promotion
+> record; `RUNNER_CUDA_TC=0` pins the scalar path.
 
 ## The levers that remain (bigger, and deliberately not rushed)
 

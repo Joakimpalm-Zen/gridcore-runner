@@ -282,6 +282,14 @@ int main(int argc, char **argv) {
     // class of mistake rather than trusting the call to stay here.
     f16_init();
 
+    // Instrument isolation: this gate measures the KV CACHE FORMAT, and its
+    // strict half asserts f16-GPU == f16-CPU token identity. The tensor-core
+    // GEMM is promoted by default on some (type, arch) combos and is NOT
+    // bit-identical to the scalar CPU GEMM, so left free it would leak into
+    // exactly that comparison. Pin the GEMM path scalar; the TC path has its
+    // own tolerance gate (test_tc_tol.c).
+    gpu_tc_force(0);
+
     // tokenize the fixed text with the model's own tokenizer
     gguf_file gf;
     if (!gguf_open(&gf, path)) {

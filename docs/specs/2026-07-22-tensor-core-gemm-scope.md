@@ -193,5 +193,26 @@ KV cache, not decisive error; its single teacher-forced flip sat at 0.001 of
 range. Second, the MoE deviation is ~86× the dense deviation (0.216% vs
 0.003%) while still inside the bound — expert routing amplifies fp16 noise,
 and any future TC coverage extension (Q8_0 twin, WGMMA) should expect MoE
-archs to be the tightest rows. Promotion per (type, arch) is now a decision
-that can be taken on these numbers; it has not been taken here.
+archs to be the tightest rows.
+
+## Promotion — TAKEN 2026-07-29 (dense archs, owner decision)
+
+Four more dense Q4_K archs were gated the same day, same instrument, all
+0/64 flips: qwen3 0.006%, mistral 0.002%, gemma3 0.005%, smollm 0.004% of
+range. On those numbers the owner promoted TC to the **default** for the
+dense measured set — (Q4_K, {llama, phi3, gemma4, qwen3, mistral, gemma3,
+smollm}), the `tc_promoted()` table in cuda.c. qwen3moe stays opt-in despite
+passing (the ~86× amplification is the reason to hold the MoE family), and
+unmeasured archs (qwen2, qwen35, stablelm) are simply absent — gate them
+before adding them.
+
+Semantics after promotion: unset `RUNNER_CUDA_TC` = per-combo default; `=1`
+forces TC everywhere (how the next gate candidate gets measured); `=0`/`off`
+forces scalar everywhere. `test_kv_tol` pins scalar via `gpu_tc_force(0)` so
+its strict f16 invariant keeps measuring the cache format. Certification
+note: on promoted combos a byte-identical CPU==GPU comparison now compares
+TC vs scalar — pin `RUNNER_CUDA_TC=0` to certify the scalar path, or use
+this spec's tolerance form. Verified at promotion: default output on the
+promoted combos is byte-identical to the prior `RUNNER_CUDA_TC=1` output,
+`=0` reproduces the scalar numbers exactly, and qwen3moe's default run is
+unchanged (scalar 106 tok/s prefill).
