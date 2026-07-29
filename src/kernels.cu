@@ -2231,13 +2231,16 @@ extern "C" __global__ void k_moe_route(const float *logits, int *sel,
         lg[e] = p;
         ssum += p;
     }
-    // reciprocal-multiply, NOT division: the host reference builds with
-    // -ffast-math, whose -freciprocal-math hoists these loop-invariant
-    // divisions into one reciprocal + multiplies — a 1-ulp difference from
-    // exact division that broke selw bit-identity (isolated empirically:
-    // exp-matched routing still differed in the last bit on some slots).
-    float sinv = 1.0f / ssum;
-    for (int e = 0; e < ne; e++) lg[e] *= sinv;
+    // Per-element division, not a hoisted reciprocal-multiply. A
+    // reciprocal mirror of the host's -freciprocal-math codegen briefly
+    // lived here chasing selw bit-identity; that goal was retired by the
+    // eager certification pin (RUNNER_MOE_EAGER=1, bf93510), and the
+    // Blackwell splice-proof (suite plan, 2026-07-29 evening: per-kernel
+    // PTX hashing + splicing the old body restores 102.9 tok/s from 79.7)
+    // showed the rcp.rn.f32 form JITs ~58 us/launch slower on the MIG —
+    // x48 layers = 23% of MoE decode. Plain division satisfies the fused
+    // contract (selection identical, selw within ~2 ulp of the host).
+    for (int e = 0; e < ne; e++) lg[e] /= ssum;
     int   *ts = sel  + (ulong64)t * used;
     float *tw = selw + (ulong64)t * used;
     float denom = 0.0f;
@@ -2251,9 +2254,8 @@ extern "C" __global__ void k_moe_route(const float *logits, int *sel,
         denom += bp;
         lg[best] = -1.0f;
     }
-    // same -freciprocal-math mirror as the softmax normalization above
-    float dinv = 1.0f / denom;
-    for (int s = 0; s < used; s++) tw[s] *= dinv;
+    // per-element division, same rationale as the softmax normalization
+    for (int s = 0; s < used; s++) tw[s] /= denom;
 }
 
 // -------------------------------------------- indirect expert matvec (MoE)

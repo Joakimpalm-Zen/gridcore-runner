@@ -5,6 +5,18 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- MoE routing normalizations reverted to per-element division — the
+  k_moe_route PTX section is byte-identical to the 4719de6 body again
+  (verified by section hash), which is exactly what the Blackwell
+  splice-proof restored to 102.9 tok/s decode (the reciprocal-multiply
+  mirror's rcp.rn.f32 codegen JITed ~58 µs/launch slower on that MIG,
+  ×48 layers = 23% of MoE decode; the mirror's bit-identity purpose was
+  already retired by the eager certification pin). Fused-path selw bound
+  restated in the compat doc: within ~2 ulp of the host reference (two
+  independent 1-ulp sources), observed 1 ulp at the first routing on
+  both cert boxes. Gates on the 3070: make test green; eager-pinned
+  CPU==GPU identity byte-green on both MoE models; bench md5 unchanged.
+
 - MoE routing exp reverted to fp32 device expf (keeping the
   reciprocal-multiply mirror), now that certification pins the eager
   path (`RUNNER_MOE_EAGER=1` in the harnesses since bf93510): the

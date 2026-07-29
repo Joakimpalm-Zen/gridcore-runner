@@ -58,13 +58,17 @@ verified; a glibc/libmvec fast-math host is ~4 ulp and unreachable by any
 device code). The certified byte-identity property is therefore defined over
 the **eager path** (`RUNNER_MOE_EAGER=1`) — the unchanged v0.1.4 host-routing
 arithmetic — and the harnesses pin it alongside `RUNNER_CUDA_TC=0`. The
-fused default (fp32 device `expf` since the eager pin landed) is separately
-verified to the weaker class: expert selection identical and `selw` within
-1 ulp of the host reference on every host. (A correctly-rounded double-exp
+fused default (fp32 device `expf` + per-element division, the body the
+Blackwell splice-proof validated) is separately verified to the weaker
+class: expert selection identical and `selw` within ~2 ulp of the host
+reference (two independent 1-ulp sources: device-vs-host expf and
+division-vs-reciprocal codegen; observed 1 ulp at the first routing on
+both cert boxes). (A correctly-rounded double-exp + reciprocal-mirror
 variant briefly made fused byte-identical on correctly-rounded hosts;
-reverted once certification pinned eager — the property it bought was void
-on the fast-math cert box.) `RUNNER_DEBUG_MOE` dumps both paths' routing
-bits for re-verification.
+retired once certification pinned eager — the property was void on the
+fast-math cert box, and the mirror's rcp.rn form measured 23% of MoE
+decode on the Blackwell MIG.) `RUNNER_DEBUG_MOE` dumps both paths'
+routing bits for re-verification.
 
 **Scalar-path pinning (since the 2026-07-29 TC promotion).** The tensor-core
 prefill GEMM is now the default on gated dense (Q4_K, arch) combos. It is
