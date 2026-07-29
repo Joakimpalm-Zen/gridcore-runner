@@ -5,6 +5,20 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Tensor-core GEMM twins for Q8_0 and Q4_0 (moe-gpu-routing spec P3),
+  same MMQ-style structure as the Q4_K TC kernel — block-cooperative
+  fp16 weight-tile dequant with per-element values matching the scalar
+  kernels exactly, fp32-accumulated m16n16k16 MMAs — plus a tail-safe K
+  loop (gemma-4-MoE's n_ff_exp=704 is not a 128-multiple; elements past
+  n_in stage as zeros). Both OPT-IN behind RUNNER_CUDA_TC and the
+  per-(type, arch) test-tc-tol gate; tc_promoted() is unchanged, so no
+  default path moved. test-tc-tol now recognizes all TC-capable types
+  (was: hard-skip without Q4_K). Fresh gate rows measured on the 3070
+  (full offload, 64 teacher-forced positions, 0 top-1 flips each):
+  (Q8_0, qwen3) 0.00005 of range, (Q8_0, phi3) 0.00002, (Q4_0, qwen3
+  requantized) 0.00003 — all far under the 0.005 bound. Promotion
+  remains the owner's decision with the Blackwell rows.
+
 - MoE GPU prefill: expert-grouped GEMM (moe-gpu-routing spec P2) — the
   CUDA port of the CPU `cabdad1` grouping. A prefill tile is routed on
   device, its routing read back once (prefill is never graph-captured),

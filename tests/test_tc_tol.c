@@ -34,7 +34,7 @@
 //      (dense measured ~1e-3 of range; a layout/scale bug lands orders of
 //      magnitude out, and top-1 catches everything decisive anyway).
 //
-// Skips (not passes) when: no GPU, no Q4_K tensor in the model, or the TC
+// Skips (not passes) when: no GPU, no TC-capable tensor in the model, or the TC
 // logits are bit-identical to scalar — bit-identity means the TC kernel never
 // engaged (unresolved symbol, older PTX), and concluding "tolerant" from a
 // comparison of a path with itself would be the vacuity kv_tol warns about.
@@ -228,11 +228,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cannot open %s\n", path);
         return 1;
     }
-    // the TC kernel exists for Q4_K only; without a Q4_K tensor the TC and
-    // scalar paths are the same code and the gate would measure nothing
-    bool has_q4k = false;
+    // TC kernels exist for Q4_K, Q8_0 and Q4_0; without at least one tensor
+    // of a TC-capable type the TC and scalar paths are the same code and
+    // the gate would measure nothing
+    bool has_tc_type = false;
     for (uint64_t i = 0; i < gf.n_tensors; i++)
-        if (gf.tensors[i].type == T_Q4_K) has_q4k = true;
+        if (gf.tensors[i].type == T_Q4_K || gf.tensors[i].type == T_Q8_0 ||
+            gf.tensors[i].type == T_Q4_0) has_tc_type = true;
 
     tokenizer tk;
     if (!tokenizer_init(&tk, &gf)) {
@@ -254,9 +256,9 @@ int main(int argc, char **argv) {
 
     printf("tc-tol: %s | %d tokens, %d teacher-forced positions\n",
            path, n_tok, STEPS);
-    if (!has_q4k) {
-        printf("  skipped: no Q4_K tensor in this model (TC kernel is Q4_K "
-               "only)\n" "tc-tol: ok (skipped)\n");
+    if (!has_tc_type) {
+        printf("  skipped: no TC-capable tensor in this model (TC kernels: "
+               "Q4_K/Q8_0/Q4_0)\n" "tc-tol: ok (skipped)\n");
         return 0;
     }
 

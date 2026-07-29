@@ -823,6 +823,142 @@ extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
     }
 }
 
+// ------------------------------------- tensor-core Q8_0 / Q4_0 GEMM twins
+// P3 of the moe-gpu-routing spec: the same MMQ-style structure as
+// k_gemm_q4_K_tc — a 64-row x 128-K fp16 weight tile dequantized once per
+// step by the whole block, a 128-K x 16-token fp16 activation tile, four
+// warps of m16n16k16 MMA strips with fp32 accumulation. Per-element weight
+// values match the scalar kernels' dequantization exactly, rounded to fp16
+// operands. Both are OPT-IN (RUNNER_CUDA_TC / per-(type, arch) promotion
+// via make test-tc-tol); tc_promoted() does not list them, so the default
+// path is untouched.
+//
+// Unlike Q4_K (256-element super-blocks, so every K-step is block-aligned),
+// these formats have 32-element blocks and real models carry K dims that
+// are not 128-multiples (gemma-4-MoE n_ff_exp = 704), so the K loop is
+// tail-safe: elements past a.n_in stage as zeros, which the MMA then
+// accumulates harmlessly.
+
+// Stage one 64-element segment of one row: two 32-element quant blocks,
+// dequantized with the scalar kernels' exact per-element arithmetic.
+static __device__ __forceinline__ void tc_stage_q8_0(__half *dst,
+                                                     const uchar *rw, int nb,
+                                                     int e0, int n_in) {
+    #pragma unroll
+    for (int half = 0; half < 2; half++) {
+        int base = e0 + half * 32;
+        if (base >= n_in) {
+            #pragma unroll
+            for (int j = 0; j < 32; j++) dst[half * 32 + j] = __float2half(0.0f);
+            continue;
+        }
+        const uchar *blk = rw + (ulong64)(base / 32) * 34;
+        float d = f16f(blk);
+        const signed char *q = (const signed char *)(blk + 2);
+        #pragma unroll
+        for (int j = 0; j < 32; j++)
+            dst[half * 32 + j] = __float2half(d * (float)q[j]);
+    }
+    (void)nb;
+}
+
+static __device__ __forceinline__ void tc_stage_q4_0(__half *dst,
+                                                     const uchar *rw, int nb,
+                                                     int e0, int n_in) {
+    #pragma unroll
+    for (int half = 0; half < 2; half++) {
+        int base = e0 + half * 32;
+        if (base >= n_in) {
+            #pragma unroll
+            for (int j = 0; j < 32; j++) dst[half * 32 + j] = __float2half(0.0f);
+            continue;
+        }
+        const uchar *blk = rw + (ulong64)(base / 32) * 18;
+        float d = f16f(blk);
+        const uchar *q = blk + 2;
+        #pragma unroll
+        for (int j = 0; j < 16; j++) {
+            dst[half * 32 + j]      = __float2half(d * (float)((int)(q[j] & 0xF) - 8));
+            dst[half * 32 + j + 16] = __float2half(d * (float)((int)(q[j] >> 4)  - 8));
+        }
+    }
+    (void)nb;
+}
+
+#define TC_GEMM_32B(NAME, STAGE, BLKBYTES)                                     \
+extern "C" __global__ void NAME(MV_PARAMS) {                                   \
+    using namespace nvcuda::wmma;                                              \
+    const int tid  = threadIdx.x;                                              \
+    const int warp = tid >> 5;                                                 \
+    const unsigned row0 = blockIdx.x * TC_ROWS;                                \
+    __shared__ __half sh_w[TC_ROWS * TC_K];                                    \
+    __shared__ __half sh_x[TC_N * TC_K];                                       \
+    __shared__ float  sh_c[TC_ROWS * TC_N];                                    \
+    fragment<matrix_a, 16, 16, 16, __half, row_major> fa;                      \
+    fragment<matrix_b, 16, 16, 16, __half, col_major> fb;                      \
+    fragment<accumulator, 16, 16, 16, float> fc[1];                            \
+    fill_fragment(fc[0], 0.0f);                                                \
+    int nb = a.n_in / 32;                                                      \
+    int srow = tid >> 1, sseg = tid & 1;                                       \
+    for (int ks = 0; ks < a.n_in; ks += TC_K) {                                \
+        {                                                                      \
+            unsigned gr = row0 + srow;                                         \
+            __half *dst = sh_w + srow * TC_K + sseg * 64;                      \
+            if (gr < (unsigned)a.n_out) {                                      \
+                const uchar *rw = wb + a.w_off +                               \
+                                  (ulong64)gr * nb * BLKBYTES;                 \
+                STAGE(dst, rw, nb, ks + sseg * 64, a.n_in);                    \
+            } else {                                                           \
+                _Pragma("unroll")                                              \
+                for (int e = 0; e < 64; e++) dst[e] = __float2half(0.0f);      \
+            }                                                                  \
+        }                                                                      \
+        {                                                                      \
+            int col = tid >> 3, part = tid & 7;                                \
+            __half *dst = sh_x + col * TC_K + part * 16;                       \
+            int e0 = ks + part * 16;                                           \
+            if (col < a.batch && e0 < a.n_in) {                                \
+                /* 16 elements per part; n_in is a 32-multiple (quant     */   \
+                /* blocks), so a part is either fully inside or fully out */   \
+                const float *xg = x + (ulong64)col * a.xs + e0;                \
+                _Pragma("unroll")                                              \
+                for (int v = 0; v < 4; v++) {                                  \
+                    float4 xv = *(const float4 *)(xg + v * 4);                 \
+                    dst[v * 4 + 0] = __float2half(xv.x);                       \
+                    dst[v * 4 + 1] = __float2half(xv.y);                       \
+                    dst[v * 4 + 2] = __float2half(xv.z);                       \
+                    dst[v * 4 + 3] = __float2half(xv.w);                       \
+                }                                                              \
+            } else {                                                           \
+                _Pragma("unroll")                                              \
+                for (int e = 0; e < 16; e++) dst[e] = __float2half(0.0f);      \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+        const __half *wt = sh_w + warp * 16 * TC_K;                            \
+        _Pragma("unroll")                                                      \
+        for (int k = 0; k < TC_K; k += 16) {                                   \
+            load_matrix_sync(fa, wt + k, TC_K);                                \
+            load_matrix_sync(fb, sh_x + k, TC_K);                              \
+            mma_sync(fc[0], fa, fb, fc[0]);                                    \
+        }                                                                      \
+        __syncthreads();                                                       \
+    }                                                                          \
+    store_matrix_sync(sh_c + warp * 16 * TC_N, fc[0], TC_N, mem_row_major);    \
+    __syncthreads();                                                           \
+    for (int idx = tid; idx < TC_ROWS * TC_N; idx += blockDim.x) {             \
+        int rr = idx / TC_N, tt = idx % TC_N;                                  \
+        unsigned gr = row0 + rr;                                               \
+        if (gr < (unsigned)a.n_out && tt < a.batch) {                          \
+            float r = sh_c[rr * TC_N + tt];                                    \
+            y[(ulong64)tt * a.ys + gr] = a.has_bias ? r + bias[gr] : r;        \
+        }                                                                      \
+    }                                                                          \
+}
+
+TC_GEMM_32B(k_gemm_q8_0_tc, tc_stage_q8_0, 34)
+TC_GEMM_32B(k_gemm_q4_0_tc, tc_stage_q4_0, 18)
+
 // Q4_K decode GEMV: lane-per-element coalesced variant of k_mv_q4_K. Lane l
 // owns the 8 elements [l*8, l*8+8), reusing the exact per-element weight
 // geometry of k_gemm_q4_K (which passed identity empirically) -> group l/4,

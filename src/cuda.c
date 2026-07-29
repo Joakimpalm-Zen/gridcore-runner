@@ -942,6 +942,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         // Tensor-core kernels: resolved non-fatally so an older embedded PTX
         // (without them) still loads — TC just stays unavailable there.
         cu.ModuleGetFunction(&w->f_gemm_tc[T_Q4_K], w->mod, "k_gemm_q4_K_tc");
+        cu.ModuleGetFunction(&w->f_gemm_tc[T_Q8_0], w->mod, "k_gemm_q8_0_tc");
+        cu.ModuleGetFunction(&w->f_gemm_tc[T_Q4_0], w->mod, "k_gemm_q4_0_tc");
 
         // weights: the file bytes the offloaded layers reference (whole file
         // for a full split, a prefix for partial) so byte offsets stay valid.
