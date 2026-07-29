@@ -42,8 +42,8 @@ not the engine**: the file exports Lucie's BPE tokenizer as SentencePiece
 with all 65,024 merge ranks flattened to −1000, so the reference
 tokenization is unreproducible from the artifact by any engine (Runner and
 llama.cpp b10076 are token-identical on the file; OpenLLM-France's own
-official GGUF carries the same defect — an upstream conversion bug worth
-reporting to them). Lucie still does NOT hold the tokenizer check, because
+official GGUF carries the same defect — reported upstream as
+[OpenLLM-France/Lucie-Training#3](https://github.com/OpenLLM-France/Lucie-Training/issues/3)). Lucie still does NOT hold the tokenizer check, because
 the check certifies the shipped artifact against the HF reference — but the
 failure names the right culprit. Teuken's chat template emits artifacts
 (`{Answer}`) though the surface and tool calls work. `reference_compare.py`

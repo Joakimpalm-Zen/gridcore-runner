@@ -41,7 +41,8 @@
    },
    "tokenizer": {
     "status": "fail",
-    "detail": "259/721 strings diverge. ROOT-CAUSED 2026-07-29 (corrects this report's first revision, which attributed the divergence to Runner): the GGUF exports Lucie's BPE tokenizer as SentencePiece with ALL 65024 scores flattened to -1000.0 \u2014 every merge rank is lost, so the file cannot reproduce the reference tokenization at all. Runner is token-identical to llama.cpp b10076 on this file (verified via /tokenize on 'HELLO WORLD' and the fox sentence), and OpenLLM-France's own official GGUF declares the same SPM layout. The defect is the GGUF conversion, upstream of every engine; the check still fails because it measures the shipped artifact against the HF reference."
+    "detail": "259/721 strings diverge. ROOT-CAUSED 2026-07-29 (corrects this report's first revision, which attributed the divergence to Runner): the GGUF exports Lucie's BPE tokenizer as SentencePiece with ALL 65024 scores flattened to -1000.0 \u2014 every merge rank is lost, so the file cannot reproduce the reference tokenization at all. Runner is token-identical to llama.cpp b10076 on this file (verified via /tokenize on 'HELLO WORLD' and the fox sentence), and OpenLLM-France's own official GGUF declares the same SPM layout. The defect is the GGUF conversion, upstream of every engine; the check still fails because it measures the shipped artifact against the HF reference.",
+    "reported_upstream": "https://github.com/OpenLLM-France/Lucie-Training/issues/3 (2026-07-29)"
    },
    "chat": {
     "status": "pass",
