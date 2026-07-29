@@ -1,6 +1,6 @@
-# Model scope — geographic focus (standing policy, 2026-07-29)
+# Model scope — geographic focus: Europe & US (standing policy, 2026-07-29)
 
-Runner's model-support effort focuses on **EU and US model families**. This is
+Runner's model-support effort focuses on **European and US model families**. This is
 a prioritization of where new support work goes, decided by the project owner;
 it is not a removal of anything already shipped.
 
@@ -20,11 +20,10 @@ it is not a removal of anything already shipped.
    is a second, independent reason.)
 4. **Protocol compatibility is unaffected** — the OpenAI and Anthropic API
    surfaces are US ecosystems and stay the compatibility targets.
-5. **Boundary note (owner-decidable):** the policy reads "EU" strictly.
-   European-but-not-EU origins — UK (Stability AI / `stablelm`, supported
-   today) and Switzerland (Apertus, in the test corpus today) — are
-   grandfathered as existing work; widening the focus to "wider Europe" is an
-   owner decision to record here if taken.
+5. **Boundary (owner decision, 2026-07-29): wider Europe.** The European
+   side of the focus includes non-EU Europe — the UK (Stability AI /
+   `stablelm`) and Switzerland (Apertus) are full members of the focus, not
+   just grandfathered existing work.
 
 ## Focus families
 
