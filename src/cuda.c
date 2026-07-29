@@ -329,6 +329,7 @@ typedef struct {
     int        *h_moe_sel, *h_moe_gidx;
     float      *h_moe_selw, *h_moe_gw;
     bool        moe_fused_ok;           // every MoE layer runs the indirect path
+    bool        moe_grouped_ok;         // expert types have width-classed kernels
     CUdeviceptr g_scr;                  // gemma-4-MoE dual-branch scratch: 5*n_embd
     CUdeviceptr q35_mix, q35_cv, q35_z, q35_beta, q35_alpha, q35_gate;
     CUdeviceptr q35_hist, q35_state;    // persistent recurrent state per sequence
@@ -453,6 +454,22 @@ static bool moe_indirect_type_ok(int type) {
     }
 }
 
+// Expert tensor types with WIDTH-CLASSED batched kernels (f_gemvb twins +
+// a real GEMM). The grouped prefill only pays when the expert matmul's
+// work scales with its token count: the fixed-MVB _b/GEMM kernels compute
+// all 16 columns regardless of batch, and at the ~1-2 tokens/expert a
+// 16-token tile routes, that waste more than cancels the weight-streaming
+// win (measured on the 3070: gemma-4 Q4_0 prefill -19% grouped vs fused).
+// Types outside this set keep the per-token fused prefill.
+static bool moe_grouped_type_ok(int type) {
+    switch (type) {
+        case T_Q8_0: case T_Q4_K: case T_Q5_K: case T_Q6_K:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // The fused device-routing MoE path needs the fused-3D expert layout (a
 // legacy split model has one arbitrarily-placed tensor per expert, which
 // in-kernel base+e*stride addressing cannot express) and indirect kernels
@@ -471,6 +488,23 @@ static bool moe_fused_eligible(const model_t *m) {
             if (!moe_indirect_type_ok(ly->ffn_gate_exps->type) ||
                 !moe_indirect_type_ok(ly->ffn_up_exps->type) ||
                 !moe_indirect_type_ok(ly->ffn_down_exps->type)) return false;
+        }
+    }
+    return true;
+}
+
+static bool moe_grouped_eligible(const model_t *m) {
+    if (!moe_fused_eligible(m)) return false;
+    for (int l = 0; l < m->n_layer; l++) {
+        const layer_t *ly = &m->layers[l];
+        if (!ly->is_moe) continue;
+        if (ly->moe_gemma) {
+            if (!moe_grouped_type_ok(ly->ffn_gate_up_exps->type) ||
+                !moe_grouped_type_ok(ly->ffn_down_exps->type)) return false;
+        } else {
+            if (!moe_grouped_type_ok(ly->ffn_gate_exps->type) ||
+                !moe_grouped_type_ok(ly->ffn_up_exps->type) ||
+                !moe_grouped_type_ok(ly->ffn_down_exps->type)) return false;
         }
     }
     return true;
@@ -1228,6 +1262,7 @@ bool gpu_init(model_t *m) {
             if (!g->h_moe_sel || !g->h_moe_selw || !g->h_moe_gidx ||
                 !g->h_moe_gw) goto fail;
             g->moe_fused_ok = moe_fused_eligible(m);
+            g->moe_grouped_ok = moe_grouped_eligible(m);
         }
         if (m->moe_gemma)
             // gemma-4-MoE dual-branch scratch: xn, xn2, rin, mout — MVB
@@ -1789,6 +1824,30 @@ static bool moe_build_groups(gpu_t *g, const layer_t *ly, int tn, int used,
                          sizeof(float) * (size_t)total) == 0;
 }
 
+// defined in the decode-microbatch section below; used here for its
+// width-classed kernel selection
+static bool enc_mv_batch(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
+                         CUdeviceptr y, int n_in, int n_out, CUdeviceptr bias,
+                         int batch, int xs, int ys);
+
+// Batched matmul for one expert's token set, cnt-aware. The fixed-width
+// GEMM kernels compute all MVB columns whatever the batch, so at the small
+// counts grouping produces (~1-2 tokens/expert on a 16-token tile) they do
+// ~10x the useful FMA work and lose to the per-token path (measured on the
+// 3070). Pick the narrowest kernel that covers cnt: the batch-1 GEMV at
+// cnt==1, the width-classed f_gemvb twins up to 8, the full GEMM beyond —
+// and the TC GEMM whenever it is promoted/forced for this (type, arch),
+// since tensor-core MACs make the unused columns nearly free.
+static bool enc_moe_gemm(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
+                         CUdeviceptr y, int n_in, int n_out, int cnt,
+                         int xs, int ys) {
+    if (cnt == 1)
+        return enc_mv(g, m, w, x, y, n_in, n_out, 0, 1, xs, ys);
+    if (cnt > 8 || (tc_on(m, w->type) && g->sw->f_gemm_tc[w->type]))
+        return enc_mv(g, m, w, x, y, n_in, n_out, 0, cnt, xs, ys);
+    return enc_mv_batch(g, m, w, x, y, n_in, n_out, 0, cnt, xs, ys);
+}
+
 static bool enc_moe_gather(gpu_t *g, CUdeviceptr dst, CUdeviceptr src,
                            CUdeviceptr idx, int n, int cnt, int ss, int ds) {
     void *p[] = { &dst, &src, &idx, &n, &ss, &ds };
@@ -1836,13 +1895,13 @@ static bool gpu_moe_ffn_grouped(gpu_t *g, model_t *m, const layer_t *ly,
         gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
         bool ok = enc_moe_gather(g, g->moe_gath, g->xb, idx, n_embd, cnt,
                                  xdim, n_embd)
-               && enc_mv(g, m, &gv, g->moe_gath, g->moe_hb, n_embd, nff, 0,
-                         cnt, n_embd, nff)
-               && enc_mv(g, m, &uv, g->moe_gath, g->moe_hb2, n_embd, nff, 0,
-                         cnt, n_embd, nff)
+               && enc_moe_gemm(g, m, &gv, g->moe_gath, g->moe_hb, n_embd,
+                               nff, cnt, n_embd, nff)
+               && enc_moe_gemm(g, m, &uv, g->moe_gath, g->moe_hb2, n_embd,
+                               nff, cnt, n_embd, nff)
                && enc_actmul(g, m, g->moe_hb, g->moe_hb2, cnt * nff)
-               && enc_mv(g, m, &dv, g->moe_hb, g->moe_dout, nff, n_embd, 0,
-                         cnt, nff, n_embd)
+               && enc_moe_gemm(g, m, &dv, g->moe_hb, g->moe_dout, nff,
+                               n_embd, cnt, nff, n_embd)
                && enc_moe_scatter(g, g->moe_eout, g->moe_dout, idx, wts,
                                   n_embd, cnt, n_embd, n_embd);
         if (!ok) return false;
@@ -1917,12 +1976,12 @@ static bool gpu_gemma_moe_ffn_grouped(gpu_t *g, model_t *m, const layer_t *ly,
         void *pa[] = { &g->moe_hb, &up, &nff, &gss, &gss, &gelu };
         bool eok = enc_moe_gather(g, g->moe_gath, xn2_b, idx, n_embd, cnt,
                                   n_embd, n_embd)
-                && enc_mv(g, m, &guv, g->moe_gath, g->moe_hb, n_embd,
-                          2 * nff, 0, cnt, n_embd, 2 * nff)
+                && enc_moe_gemm(g, m, &guv, g->moe_gath, g->moe_hb, n_embd,
+                                2 * nff, cnt, n_embd, 2 * nff)
                 && launch(g, g->sw->f_moe_actmul_plain, (nff + 255) / 256,
                           cnt, 1, 256, pa)
-                && enc_mv(g, m, &dv, g->moe_hb, g->moe_dout, nff, n_embd, 0,
-                          cnt, 2 * nff, n_embd)
+                && enc_moe_gemm(g, m, &dv, g->moe_hb, g->moe_dout, nff,
+                                n_embd, cnt, 2 * nff, n_embd)
                 && enc_moe_scatter(g, g->moe_eout, g->moe_dout, idx, wts,
                                    n_embd, cnt, n_embd, n_embd);
         if (!eok) return false;
@@ -2005,7 +2064,8 @@ static bool gpu_moe_ffn_eager(gpu_t *g, model_t *m, const layer_t *ly, int tn, i
 static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn,
                         int xdim) {
     if (g->moe_fused_ok)
-        return tn > 1 ? gpu_moe_ffn_grouped(g, m, ly, tn, xdim)
+        return tn > 1 && g->moe_grouped_ok
+                      ? gpu_moe_ffn_grouped(g, m, ly, tn, xdim)
                       : gpu_moe_ffn_fused(g, m, ly, tn, xdim);
     return gpu_moe_ffn_eager(g, m, ly, tn, xdim);
 }
@@ -2162,7 +2222,8 @@ static bool gpu_gemma_moe_ffn_eager(gpu_t *g, model_t *m, const layer_t *ly, int
 static bool gpu_gemma_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int l,
                               int tn, int xdim) {
     if (g->moe_fused_ok)
-        return tn > 1 ? gpu_gemma_moe_ffn_grouped(g, m, ly, l, tn, xdim)
+        return tn > 1 && g->moe_grouped_ok
+                      ? gpu_gemma_moe_ffn_grouped(g, m, ly, l, tn, xdim)
                       : gpu_gemma_moe_ffn_fused(g, m, ly, l, tn, xdim);
     return gpu_gemma_moe_ffn_eager(g, m, ly, l, tn, xdim);
 }

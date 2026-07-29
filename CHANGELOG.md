@@ -14,7 +14,21 @@ protocol and CLI may still change between alpha releases.
   sync+DtoH per MoE layer collapses to one per layer per tile.
   Accumulation mirrors the CPU grouped path (ascending expert index,
   routing weight at the scatter). gemma-4's dense shared branch now also
-  batches across the tile instead of looping per token. Certified: CPU==GPU
+  batches across the tile instead of looping per token.
+  Follow-up measured on the 3070: the fixed-width GEMM kernels compute
+  all 16 tile columns whatever the batch, and a 16-token tile routes only
+  ~1-2 tokens per expert, so naive grouping LOST GPU time (gemma Q4_0
+  prefill −19%). Expert matmuls now pick the narrowest kernel that
+  covers the token count (batch-1 GEMV at 1, the width-classed f_gemvb
+  twins to 8, the full GEMM beyond — TC whenever promoted/forced), and
+  grouping engages only for expert types with width-classed kernels
+  (Q8_0/Q4_K/Q5_K/Q6_K); gemma-4 Q4_0 keeps the per-token fused prefill
+  until a batched Q4_0 kernel exists. 3070 result: gemma regression
+  erased (14.8 tok/s prefill, above the fused path), qwen at end-to-end
+  parity with GPU-busy still 1.65× the fused path's — the grouped win at
+  this tile size has to come from TC on the expert GEMMs; the Blackwell
+  box should A/B fused-vs-grouped prefill when re-measuring.
+  Certified: CPU==GPU
   greedy byte-identical (short 128-tok and 510-tok-prefill configs on
   Qwen3-30B; short config on gemma-4-26B), pinned-b10076 text unchanged,
   bench md5s unchanged, make test green. Noted: gemma-4-26B long-prefill
