@@ -1238,9 +1238,14 @@ static bool enc_rmsnorm(gpu_t *g, CUdeviceptr x, CUdeviceptr y, CUdeviceptr w,
 
 // Tensor-core GEMM opt-in (RUNNER_CUDA_TC). Read once. Phase 1 of the TC plan;
 // stays off by default until the tolerance gate promotes it per (type, arch).
+// Parse the VALUE: a bare existence check made RUNNER_CUDA_TC=0 enable the
+// path — the exact sentinel a benchmark harness sets to mean "off".
 static bool tc_on(void) {
     static int v = -1;
-    if (v < 0) v = getenv("RUNNER_CUDA_TC") != NULL;
+    if (v < 0) {
+        const char *e = getenv("RUNNER_CUDA_TC");
+        v = e && *e && strcmp(e, "0") != 0 && strcmp(e, "off") != 0;
+    }
     return v != 0;
 }
 
