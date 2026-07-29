@@ -656,6 +656,9 @@ typedef struct {
 // Preset for a model. Never NULL: an unrecognised model gets "generic".
 // Either string may be NULL.
 const sampler_preset *sampler_preset_for(const char *arch, const char *name);
+// combined matching identity: general.name + the load path's basename
+// (quantizer metadata is unreliable; the filename carries the family name)
+void sampler_ident(const char *name, const char *path, char *buf, size_t n);
 // Enumerate the preset table; NULL past the end.
 const sampler_preset *sampler_preset_at(int i);
 // Apply preset then overrides to s. Touches only the five sampling knobs —

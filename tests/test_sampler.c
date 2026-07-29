@@ -52,6 +52,47 @@ static void test_preset_selection(void) {
     assert(!strcmp(p->name, "smollm2"));
     assert(EQ(p->temp, 0.2f) && EQ(p->top_p, 0.9f));
 
+    // Mistral Nemo departs from the rest of the Mistral family: the vendor
+    // card demands temperature 0.3. Plain Mistrals must NOT land here, and
+    // NVIDIA's "Nemotron" (which contains "nemo") must not either.
+    p = sampler_preset_for("llama", "Mistral-Nemo-Instruct-2407");
+    assert(!strcmp(p->name, "mistral-nemo"));
+    assert(EQ(p->temp, 0.3f));
+    assert(!strcmp(sampler_preset_for("llama", "Mistral-7B-Instruct-v0.3")->name,
+                   "mistral"));
+    assert(strcmp(sampler_preset_for("llama", "Nemotron Mini 4B")->name,
+                  "mistral-nemo") != 0);
+
+    // European llama-declaring families with published settings.
+    p = sampler_preset_for("llama", "Lucie-7B-Instruct");
+    assert(!strcmp(p->name, "lucie"));
+    assert(EQ(p->temp, 0.6f) && EQ(p->top_p, 0.9f));
+
+    p = sampler_preset_for("llama", "salamandra-7b-instruct");
+    assert(!strcmp(p->name, "salamandra"));
+    assert(EQ(p->temp, 0.6f) && EQ(p->repeat_penalty, 1.2f));
+
+    p = sampler_preset_for("llama", "Teuken-7B-instruct-commercial-v0.4");
+    assert(!strcmp(p->name, "teuken"));
+    assert(EQ(p->temp, 0.7f) && EQ(p->top_p, 0.95f));
+
+    // EuroLLM publishes no sampling settings (gated repo, no guidance in the
+    // quantizer mirrors) — it must stay on generic rather than borrow one.
+    assert(!strcmp(sampler_preset_for("llama", "EuroLLM-9B-Instruct")->name,
+                   "generic"));
+
+    // Quantizer metadata is unreliable: a real community salamandra GGUF
+    // ships general.name "snapshots". The combined identity (name + load-path
+    // basename) recovers the family; call sites resolve through it.
+    char ident[256];
+    sampler_ident("snapshots", "models/salamandra-7b-instruct-Q4_K_M-f32.gguf",
+                  ident, sizeof(ident));
+    p = sampler_preset_for("llama", ident);
+    assert(!strcmp(p->name, "salamandra"));
+    sampler_ident(NULL, "C:\\models\\Mistral-Nemo-Instruct.gguf",
+                  ident, sizeof(ident));
+    assert(!strcmp(sampler_preset_for("llama", ident)->name, "mistral-nemo"));
+
     // Gridcore Syntetik declares arch "llama", name "gridcore-<size>"; the
     // suite-native contract compiler resolves to a deterministic preset, not
     // a vendor one, and greedy is the point (temp 0, no penalty).

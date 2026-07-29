@@ -447,9 +447,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 model_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
-        const sampler_preset *sp =
-            sampler_resolve(&smp, m.arch,
-                            gguf_get_str(&m.gf, "general.name", NULL), &ov);
+        char ident[256];
+        sampler_ident(gguf_get_str(&m.gf, "general.name", NULL), m.path,
+                      ident, sizeof(ident));
+        const sampler_preset *sp = sampler_resolve(&smp, m.arch, ident, &ov);
         char sdesc[256];
         sampler_describe(&smp, sp, sdesc, sizeof(sdesc));
         fprintf(stderr, "sampling: %s\n", sdesc);

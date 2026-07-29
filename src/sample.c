@@ -255,6 +255,30 @@ static const sampler_preset PRESETS[] = {
     { "smollm2", "SmolLM2-Instruct model card suggestion",
       0.20f, 0.90f, 0.00f, 1.10f, 0 },
 
+    // Mistral's Nemo card is explicit that this family departs from other
+    // Mistral models: "Unlike previous Mistral models, Mistral Nemo requires
+    // smaller temperatures. We recommend to use a temperature of 0.3." (their
+    // sample code runs 0.35). Everything else inherits the mistral preset.
+    { "mistral-nemo", "Mistral-Nemo-Instruct-2407 model card (temperature 0.3)",
+      0.30f, 1.00f, 0.00f, 1.10f, 0 },
+
+    // OpenLLM-France Lucie-7B-Instruct generation_config.json:
+    // temperature 0.6, top_p 0.9 (do_sample true; nothing else stated).
+    { "lucie", "Lucie-7B-Instruct generation_config.json (OpenLLM-France)",
+      0.60f, 0.90f, 0.00f, 1.10f, 0 },
+
+    // BSC salamandra-7b-instruct generation_config.json: temperature 0.6,
+    // repetition_penalty 1.2 (no top_p/top_k stated, so both are off).
+    { "salamandra", "salamandra-7b-instruct generation_config.json (BSC-LT)",
+      0.60f, 1.00f, 0.00f, 1.20f, 0 },
+
+    // OpenGPT-X Teuken-7B-instruct model card usage example:
+    // temperature 0.7, top_p 0.95. An example rather than a stated best
+    // practice — the weakest citation grade here, but it is what the vendor
+    // publishes.
+    { "teuken", "Teuken-7B-instruct model card usage example (OpenGPT-X)",
+      0.70f, 0.95f, 0.00f, 1.10f, 0 },
+
     // Gridcore Syntetik (gridcore-model): the suite's own from-scratch
     // decoder that compiles requests into auditable execution contracts.
     // A contract compiler wants deterministic, reproducible output under
@@ -281,6 +305,21 @@ static const sampler_preset *by_name(const char *name) {
 // case-insensitive substring search over a bounded lowercase copy
 static bool has(const char *hay, const char *needle) {
     return hay && strstr(hay, needle) != NULL;
+}
+
+// Combined preset-matching identity: general.name plus the load path's
+// basename. Quantizer metadata is unreliable — a real community conversion
+// shipped general.name "snapshots" (the converter's HF cache directory) —
+// and the filename usually still carries the family name. Substring matching
+// over both is strictly more informative and no less safe.
+void sampler_ident(const char *name, const char *path, char *buf, size_t n) {
+    const char *base = NULL;
+    if (path) {
+        const char *slash = strrchr(path, '/');
+        const char *bslash = strrchr(path, '\\');
+        base = bslash > slash ? bslash + 1 : slash ? slash + 1 : path;
+    }
+    snprintf(buf, n, "%s %s", name ? name : "", base ? base : "");
 }
 
 const sampler_preset *sampler_preset_for(const char *arch, const char *name) {
@@ -310,6 +349,14 @@ const sampler_preset *sampler_preset_for(const char *arch, const char *name) {
     // name separates them. Checked before the llama-3 test because "smollm2"
     // and "mistral" never contain it, but a stray "llama" in a merge name
     // would otherwise win.
+    // European families that declare `llama` and are separated by name only.
+    // Nemo needs BOTH tokens: "nemotron" (NVIDIA) contains "nemo" and must
+    // not land on Mistral's temperature recommendation.
+    if (has(lname, "mistral") && has(lname, "nemo"))
+        return by_name("mistral-nemo");
+    if (has(lname, "lucie"))      return by_name("lucie");
+    if (has(lname, "salamandra")) return by_name("salamandra");
+    if (has(lname, "teuken"))     return by_name("teuken");
     if (has(lname, "mistral"))  return by_name("mistral");
     if (has(lname, "smollm"))   return by_name("smollm2");
     if (has(lname, "qwen3"))    return by_name("qwen3");

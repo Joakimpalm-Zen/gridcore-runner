@@ -5,6 +5,21 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Vendor sampling presets for four European families (each cites its
+  source): `mistral-nemo` — Mistral's card is explicit that Nemo "requires
+  smaller temperatures. We recommend to use a temperature of 0.3", so the
+  0.7 `mistral` preset was actively wrong for it; `lucie` (temp 0.6 /
+  top_p 0.9, generation_config.json) and `salamandra` (temp 0.6 /
+  repetition_penalty 1.2, generation_config.json); `teuken` (temp 0.7 /
+  top_p 0.95, model card usage example — the weakest citation grade, and
+  marked as such). EuroLLM and TildeOpen publish nothing verifiable and
+  deliberately stay on `generic`. Name matching requires BOTH "mistral"
+  and "nemo" so NVIDIA's Nemotron cannot land on Mistral's temperature.
+- Preset matching now runs over `general.name` PLUS the load path's
+  basename (`sampler_ident`): quantizer metadata is unreliable — a real
+  community salamandra GGUF ships `general.name` "snapshots" (the
+  converter's HF cache directory) — and the filename still carries the
+  family. All three resolution sites use the combined identity.
 - **Promoted the tensor-core prefill GEMM to the default for gated dense
   (Q4_K, arch) combos** (owner decision on the tolerance-gate numbers):
   `llama`, `phi3`, `gemma4`, `qwen3`, `mistral`, `gemma3`, `smollm` — every

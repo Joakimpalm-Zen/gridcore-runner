@@ -448,9 +448,11 @@ static int swap_to(const char *want) {
                             s->tok);
         // sampling defaults follow the model, so they are re-resolved on every
         // swap; rng state and the penalty exemptions carry across untouched
+        char ident[256];
+        sampler_ident(gguf_get_str(&s->m->gf, "general.name", NULL),
+                      s->m->path, ident, sizeof(ident));
         const sampler_preset *sp =
-            sampler_resolve(&s->smp, s->m->arch,
-                            gguf_get_str(&s->m->gf, "general.name", NULL), &SV.ov);
+            sampler_resolve(&s->smp, s->m->arch, ident, &SV.ov);
         s->smp_base = s->smp;
         SV.preset_name = sp->name;
         char sdesc[256];
@@ -4014,9 +4016,14 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     if (ov) SV.ov = *ov;
     // `defaults` arrives already resolved against the preloaded model; in swap
     // mode there is no model yet and swap_to resolves per load
-    SV.preset_name = base ? sampler_preset_for(base->arch,
-                        gguf_get_str(&base->gf, "general.name", NULL))->name
-                          : NULL;
+    if (base) {
+        char ident[256];
+        sampler_ident(gguf_get_str(&base->gf, "general.name", NULL),
+                      base->path, ident, sizeof(ident));
+        SV.preset_name = sampler_preset_for(base->arch, ident)->name;
+    } else {
+        SV.preset_name = NULL;
+    }
     if (parallel < 1) parallel = 1;
     if (parallel > 16) parallel = 16;
     bool swap_mode = strchr(model_path, '=') != NULL;
