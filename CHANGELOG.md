@@ -5,6 +5,23 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- MoE GPU prefill: expert-grouped GEMM (moe-gpu-routing spec P2) — the
+  CUDA port of the CPU `cabdad1` grouping. A prefill tile is routed on
+  device, its routing read back once (prefill is never graph-captured),
+  and each active expert then runs ONCE over all its routed tokens with
+  the batched k_gemm/k_mv_b kernels — expert weights stream through the
+  SMs once per tile instead of once per (token, slot); the per-token
+  sync+DtoH per MoE layer collapses to one per layer per tile.
+  Accumulation mirrors the CPU grouped path (ascending expert index,
+  routing weight at the scatter). gemma-4's dense shared branch now also
+  batches across the tile instead of looping per token. Certified: CPU==GPU
+  greedy byte-identical (short 128-tok and 510-tok-prefill configs on
+  Qwen3-30B; short config on gemma-4-26B), pinned-b10076 text unchanged,
+  bench md5s unchanged, make test green. Noted: gemma-4-26B long-prefill
+  CPU-vs-GPU greedy divergence on a pathological repetitive prompt
+  pre-exists in v0.1.4-alpha (P2's GPU output is byte-identical to the
+  eager path's there — no regression; tracked in the suite plan).
+
 - MoE GPU decode: device-side routing + fused indirect expert matvecs
   (moe-gpu-routing spec P1). Softmax → top-k → renormalize now runs in a
   serial-per-token device kernel that mirrors the host reference bit for

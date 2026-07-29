@@ -2336,6 +2336,64 @@ extern "C" __global__ void k_moe_sum(float *out, const float *eout, int n,
     out[i] = s;
 }
 
+// ---------------------------------------- expert-grouped prefill (MoE P2)
+// CUDA port of the CPU cabdad1 grouping: route the tile, then run each
+// active expert ONCE over all the tokens routed to it as a batched GEMM.
+// These three kernels are the glue around the existing k_gemm family:
+// gather the expert's token columns, and scatter its weighted down outputs
+// back into the per-token accumulator. grid.y = position in the expert's
+// token list.
+
+// dst[c][i] = src[idx[c]][i]; ss/ds = element stride between columns
+extern "C" __global__ void k_moe_gather(float *dst, const float *src,
+                                        const int *idx, int n, int ss,
+                                        int ds) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[(ulong64)blockIdx.y * ds + i] = src[(ulong64)idx[blockIdx.y] * ss + i];
+}
+
+// out[idx[c]][i] += w[c] * src[c][i]. Launched once per expert on the
+// stream, so no two active launches write the same token column (a token
+// appears at most once in one expert's list) — no atomics needed.
+extern "C" __global__ void k_moe_scatter_add(float *out, const float *src,
+                                             const int *idx, const float *w,
+                                             int n, int os, int ss) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[(ulong64)idx[blockIdx.y] * os + i] +=
+        w[blockIdx.y] * src[(ulong64)blockIdx.y * ss + i];
+}
+
+// Gated activation over per-column gate/up at arbitrary column strides,
+// with NO weight fold (the grouped path applies selw in the scatter, like
+// the CPU grouping). Same per-element arithmetic as k_silu_mul/k_gelu_mul.
+// Covers gemma's fused gate_up layout (gss = uss = 2*nff, ubuf = gbuf+nff),
+// where the contiguous k_silu_mul cannot run across columns.
+extern "C" __global__ void k_moe_actmul_plain(float *gbuf, const float *ubuf,
+                                              int nff, int gss, int uss,
+                                              int gelu) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nff) return;
+    float *gp = gbuf + (ulong64)blockIdx.y * gss;
+    const float *up = ubuf + (ulong64)blockIdx.y * uss;
+    float xg = gp[i];
+    if (gelu) {
+        float t = tanhf(0.7978845608f * (xg + 0.044715f * xg * xg * xg));
+        gp[i] = 0.5f * xg * (1.0f + t) * up[i];
+    } else {
+        gp[i] = (xg / (1.0f + expf(-xg))) * up[i];
+    }
+}
+
+// strided column copy: dst[c][i] = src[c][i] (accumulator -> xb columns)
+extern "C" __global__ void k_moe_copy_cols(float *dst, const float *src,
+                                           int n, int ds, int ss) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[(ulong64)blockIdx.y * ds + i] = src[(ulong64)blockIdx.y * ss + i];
+}
+
 // ---------------------------------------------------------- Qwen3.5 hybrid
 // The generic matvec kernels above perform every learned projection.  These
 // small kernels implement only the architecture-specific stateful operators,
