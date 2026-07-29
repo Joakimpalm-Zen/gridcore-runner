@@ -27,6 +27,18 @@ its synthetic hybrid gate and local real-model Q4/Q8 smokes are CPU/GPU
 greedy-identical, while regeneration of the pinned full matrix remains a
 separate evidence run.
 
+**Scalar-path pinning (since the 2026-07-29 TC promotion).** The tensor-core
+prefill GEMM is now the default on gated dense (Q4_K, arch) combos. It is
+fp16-tile arithmetic held to a tolerance gate (`tests/test_tc_tol.c`), not to
+byte identity — so all exact-identity evidence in this program (cpu_cuda,
+greedy_reference, the reference comparison scripts) is defined over the
+scalar path, and `compat_matrix.py`, `reference_compare.py` and
+`compare_llamacpp.py` pin `RUNNER_CUDA_TC=0` when spawning Runner. Existing
+recorded reports predate the promotion and were produced by the scalar path
+they describe; they remain valid and reproducible. The promoted default is
+certified separately, per (type, arch), by the tolerance gate's recorded
+rows (see the TC spec).
+
 Tokenizer references are exercised with the pinned `tokenizers` package and
 the committed 721-string corpus. Install
 `tests/compatibility/tokenizer-requirements.txt`, then run `scripts/difftok.py`

@@ -7,6 +7,7 @@ template differences. Exact generated UTF-8 text is compared at temperature 0.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -71,7 +72,13 @@ def wait_ready(base, process, timeout):
 
 def serve(command, log_path, startup_timeout):
     log = log_path.open("w")
-    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+    # Certification pins the scalar GEMM path: TC is default-on for promoted
+    # (Q4_K, arch) combos since 2026-07-29, and it is tolerance-gated
+    # (test_tc_tol), not byte-identical — exact-identity evidence must not
+    # silently become a TC-vs-scalar comparison. Inert for llama.cpp.
+    env = dict(os.environ, RUNNER_CUDA_TC="0")
+    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                               env=env)
     try:
         port = int(command[command.index("--port") + 1])
         base = f"http://127.0.0.1:{port}"

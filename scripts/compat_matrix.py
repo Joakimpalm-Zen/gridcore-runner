@@ -8,6 +8,7 @@ substitutes a similarly named GGUF: its SHA-256 must match before execution.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import subprocess
@@ -56,7 +57,10 @@ def run_load(runner, model, gpu, timeout):
     proc = subprocess.run(
         [str(runner), "-m", str(model), "-p", "Compatibility probe:",
          "-n", "1", "--temp", "0", "--gpu", gpu],
-        text=True, capture_output=True, timeout=timeout)
+        text=True, capture_output=True, timeout=timeout,
+        # certification evidence is scalar-path (TC promotion is
+        # tolerance-gated separately; see docs/compatibility-program.md)
+        env=dict(os.environ, RUNNER_CUDA_TC="0"))
     return {
         "status": "pass" if proc.returncode == 0 else "fail",
         "returncode": proc.returncode,

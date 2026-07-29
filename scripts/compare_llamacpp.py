@@ -150,8 +150,11 @@ def vram_delta(before, after):
 
 def serve(command, log_path, startup_timeout):
     log = log_path.open("w", encoding="utf-8")
+    # Certification pins the scalar GEMM path (TC default-on for promoted
+    # combos is tolerance-gated, not byte-identical). Inert for llama.cpp.
+    env = dict(os.environ, RUNNER_CUDA_TC="0")
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                               text=True)
+                               text=True, env=env)
     try:
         port = int(command[command.index("--port") + 1])
         base = f"http://127.0.0.1:{port}"

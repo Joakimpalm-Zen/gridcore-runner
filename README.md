@@ -97,8 +97,11 @@ Vulkan), and architecture breadth — runner does Mixtral/Qwen3 top-k MoE but
 skips shared-expert MoE and most SSMs; gemma-4's validated GELU dual-branch MoE
 is supported. runner wins when the engine is a load-bearing part of a system
 that has to trust, extend, and debug it — and correctness is held to explicit
-checks: GPU output is verified token-identical to the CPU path, while certified
-architectures also have pinned llama.cpp reference runs where recorded.
+checks: GPU output is verified token-identical to the CPU path on the scalar
+kernels (and on every path where tensor cores are not promoted), certified
+architectures have pinned llama.cpp reference runs where recorded, and the
+promoted tensor-core prefill path is held to its own measured tolerance gate
+(`make test-tc-tol`) rather than an identity claim it cannot have.
 
 ## Build
 
@@ -130,7 +133,12 @@ have kernels (F32, F16, Q8_0, Q4_0/1, Q5_0/1, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL,
 IQ4_XS); anything
 else falls back to CPU with a message, as does any GPU runtime failure or a
 model that does not fit. GPU output is verified token-identical to the CPU
-path across every supported quant on both backends.
+path across every supported quant on both backends — on the scalar kernels.
+Since 2026-07-29 the tensor-core prefill GEMM is the *default* on gated dense
+(Q4_K, arch) combos (+47–77% prefill): that path is fp16-tile arithmetic,
+covered by a teacher-forced tolerance gate (0/64 top-1 flips on every
+promoted row; `make test-tc-tol`) instead of byte identity. Set
+`RUNNER_CUDA_TC=0` to pin the byte-identical scalar path everywhere.
 
 **Metal (Apple Silicon):** model weights are wrapped **zero-copy** from the
 mmap (no extra RAM), the KV cache lives in unified memory shared with the
@@ -714,7 +722,13 @@ with whitespace and the rest are literal U+2581 inputs, which is the same case
 after normalization.
 
 Greedy generation at temperature 0 is token-identical between CUDA and CPU for
-every model above that loads.
+every model above that loads, on the scalar GEMM path (`RUNNER_CUDA_TC=0`,
+and the default wherever tensor cores are not promoted). On the promoted
+dense (Q4_K, arch) combos the default prefill path is the tensor-core GEMM,
+whose guarantee is the tolerance gate — 0/64 teacher-forced top-1 flips and
+≤0.012% mean logit deviation on every promoted row; in free-running checks
+to date its greedy output has matched the scalar path exactly, but that is
+measured behavior, not a by-construction identity.
 
 ## Certified architectures
 
@@ -732,7 +746,7 @@ report only marks the checks that actually ran:
 | **load** | the pinned file's SHA matches and the model loads (a filename is never taken as evidence) |
 | **tokenizer** | runner's tokenizer matches the model's own HuggingFace reference over the committed 721-string corpus |
 | **greedy_reference** | temperature-0 generation is compared token-for-token against a pinned **llama.cpp** revision via the shared `/v1/completions` API |
-| **cpu_cuda** | GPU and CPU produce identical greedy output |
+| **cpu_cuda** | GPU and CPU produce identical greedy output (scalar path — the harnesses pin `RUNNER_CUDA_TC=0`; the promoted TC default is gated by `test_tc_tol`, not by this check) |
 | **chat** | the model answers through the real `/v1/chat/completions` surface |
 | **tool** | a tool/function call round-trips as a well-formed `tool_calls` payload |
 | **long_context** | a needle placed mid-document is retrieved at length |
