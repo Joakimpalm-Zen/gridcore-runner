@@ -31,6 +31,8 @@ test-batch
 test-batch.exe
 test-kv-tol
 test-kv-tol.exe
+test-tc-tol
+test-tc-tol.exe
 test-vram-registry
 test-vram-registry.exe
 test-quantize
