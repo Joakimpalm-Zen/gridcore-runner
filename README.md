@@ -786,7 +786,7 @@ llama.cpp b10076 (same divergence class as the long-certified models):
 | Model | Origin | Notes |
 |---|---|---|
 | EuroLLM-9B-Instruct | EU consortium | tokenizer check blocked (gated reference repo) |
-| Lucie-7B-Instruct | France (OpenLLM-France) | **tokenizer check FAILS** (259/721 vs both candidate references — unresolved, tracked) |
+| Lucie-7B-Instruct | France (OpenLLM-France) | **tokenizer check FAILS** (259/721) — root-caused to the GGUF, not the engine: the conversion exports Lucie's BPE tokenizer as SentencePiece with every merge rank flattened to −1000, so no engine can reproduce the reference tokenization from the file (Runner is token-identical to llama.cpp b10076 on it; the vendor's own GGUF has the same defect) |
 | Mistral-Nemo-12B | France (Mistral) | tokenizer 3/721 edge divergences; vendor sampling preset (temp 0.3) |
 | Teuken-7B-instruct | Germany (OpenGPT-X) | chat template emits artifacts; tool calls clean |
 | salamandra-7b-instruct | Spain (BSC) | cleanest sweep: 5/5 greedy_reference exact |

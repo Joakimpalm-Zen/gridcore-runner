@@ -37,9 +37,15 @@ with `not_executed` recorded where a check could not run) and
 reference binary lives at `/home/lab/agent-torture-tools/llama/llama-b10076`
 on the dev box, and a CPU-only build of the pinned source is reproducible
 from the workspace checkout). Findings worth naming: Lucie's tokenizer
-diverges on 259/721 corpus strings against both candidate reference
-revisions — a real Runner divergence, unresolved and tracked, so Lucie does
-NOT hold the tokenizer check; Teuken's chat template emits artifacts
+diverges on 259/721 corpus strings — **root-caused to the GGUF conversion,
+not the engine**: the file exports Lucie's BPE tokenizer as SentencePiece
+with all 65,024 merge ranks flattened to −1000, so the reference
+tokenization is unreproducible from the artifact by any engine (Runner and
+llama.cpp b10076 are token-identical on the file; OpenLLM-France's own
+official GGUF carries the same defect — an upstream conversion bug worth
+reporting to them). Lucie still does NOT hold the tokenizer check, because
+the check certifies the shipped artifact against the HF reference — but the
+failure names the right culprit. Teuken's chat template emits artifacts
 (`{Answer}`) though the surface and tool calls work. `reference_compare.py`
 was also fixed in this run: Runner now rejects unknown model names, so the
 script asks each server for its served model id instead of sending a

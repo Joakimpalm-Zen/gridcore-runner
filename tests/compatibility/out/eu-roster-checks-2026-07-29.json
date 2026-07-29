@@ -41,7 +41,7 @@
    },
    "tokenizer": {
     "status": "fail",
-    "detail": "259/721 strings diverge (56 whitespace-initial) against BOTH Lucie-7B-Instruct-v1.1 and -human-data references \u2014 a real runner divergence for Lucie's tokenizer, not a reference mismatch; unresolved, root cause not yet identified"
+    "detail": "259/721 strings diverge. ROOT-CAUSED 2026-07-29 (corrects this report's first revision, which attributed the divergence to Runner): the GGUF exports Lucie's BPE tokenizer as SentencePiece with ALL 65024 scores flattened to -1000.0 \u2014 every merge rank is lost, so the file cannot reproduce the reference tokenization at all. Runner is token-identical to llama.cpp b10076 on this file (verified via /tokenize on 'HELLO WORLD' and the fox sentence), and OpenLLM-France's own official GGUF declares the same SPM layout. The defect is the GGUF conversion, upstream of every engine; the check still fails because it measures the shipped artifact against the HF reference."
    },
    "chat": {
     "status": "pass",

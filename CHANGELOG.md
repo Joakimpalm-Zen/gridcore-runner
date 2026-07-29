@@ -12,8 +12,13 @@ protocol and CLI may still change between alpha releases.
   and tool, plus the 8-token greedy_reference sweep against pinned llama.cpp
   b10076 (salamandra 5/5 exact; the others show the same divergence class as
   the long-certified models). Honest gaps recorded rather than skipped:
-  Lucie's tokenizer FAILS the 721-string differential (259 divergences
-  against both candidate references — a real Runner divergence, tracked);
+  Lucie's tokenizer FAILS the 721-string differential (259 divergences) —
+  root-caused to the GGUF, not the engine: the conversion exports Lucie's
+  BPE tokenizer as SentencePiece with all 65,024 merge ranks flattened to
+  -1000, so the reference tokenization is unreproducible from the file by
+  any engine (Runner and llama.cpp b10076 are token-identical on it, and
+  the vendor's own official GGUF shares the defect — an upstream
+  conversion bug affecting every GGUF consumer of Lucie);
   EuroLLM's reference repo is gated and Teuken's has no tokenizer.json, so
   their tokenizer checks are not_executed; long_context was not run for the
   roster. `reference_compare.py` fixed en route: Runner rejects unknown
