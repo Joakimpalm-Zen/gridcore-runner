@@ -5,6 +5,20 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- MoE routing exp reverted to fp32 device expf (keeping the
+  reciprocal-multiply mirror), now that certification pins the eager
+  path (`RUNNER_MOE_EAGER=1` in the harnesses since bf93510): the
+  correctly-rounded double-exp's only purpose was bit-matching
+  correctly-rounded hosts, a property void on the fast-math cert box.
+  NOTE the property downgrade this trades away: the fused default is no
+  longer byte-identical to the host routing even on correctly-rounded
+  (UCRT-class) hosts — its contract is now the verified weaker class,
+  expert selection identical + selw within 1 ulp of the host reference
+  (re-verified on the 3070 with RUNNER_DEBUG_MOE after the revert;
+  docs/compatibility-program.md updated to match). Gates on the 3070:
+  make test green; certified (eager-pinned) CPU==GPU identity green on
+  both MoE models over 128 greedy tokens; bench md5 unchanged.
+
 - Fixed the full-offload CPU==GPU byte-identity regression the Blackwell
   box found in the P1 MoE path (near-tie flip at ~token 60 on
   Qwen3-30B). Isolated with a new routing-bits discriminator: expert

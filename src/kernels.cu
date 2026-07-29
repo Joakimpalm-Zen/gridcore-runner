@@ -2215,18 +2215,19 @@ extern "C" __global__ void k_moe_route(const float *logits, int *sel,
         if (lg[e] > mx) mx = lg[e];
     float ssum = 0.0f;
     for (int e = 0; e < ne; e++) {
-        // (float)exp((double)x), NOT device expf: device expf differs from
-        // the host libm by ~1-2 ulp, and that difference alone broke the
-        // certified full-offload CPU==GPU byte identity (near-tie flip;
-        // isolated 2026-07-29 — selection was identical, selw differed in
-        // the last bit). Rounding the double exp to float yields the
-        // correctly-rounded float exp in all but ~2^-28 of calls (CUDA
-        // documents double exp at 1 ulp), which bit-matches a
-        // correctly-rounded host expf (verified exhaustively-sampled
-        // against UCRT; glibc scalar expf is also correctly rounded). The
-        // serial one-thread contract above already makes this kernel
-        // latency-bound, so the fp64 cost is noise.
-        float p = (float)exp((double)(lg[e] - mx));
+        // Device expf differs from the host libm by ~1-2 ulp, so the fused
+        // path is NOT byte-identical to the host routing — the certified
+        // MoE byte-identity property is therefore defined over the EAGER
+        // path (RUNNER_MOE_EAGER=1, pinned in the certification harnesses;
+        // see docs/compatibility-program.md). The fused default's contract
+        // is the weaker, verified class: expert selection identical, selw
+        // within 1 ulp of the host reference (the reciprocal-multiply
+        // mirror below keeps the divergence to expf alone). History: a
+        // correctly-rounded (float)exp((double)x) here DID bit-match
+        // correctly-rounded hosts (UCRT), but a fast-math/libmvec host is
+        // ~4 ulp and unreachable by construction, so certification pinned
+        // eager and this kernel keeps the plain fp32 expf.
+        float p = expf(lg[e] - mx);
         lg[e] = p;
         ssum += p;
     }
