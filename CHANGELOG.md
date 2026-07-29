@@ -5,6 +5,25 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- MoE GPU decode: device-side routing + fused indirect expert matvecs
+  (moe-gpu-routing spec P1). Softmax → top-k → renormalize now runs in a
+  serial-per-token device kernel that mirrors the host reference bit for
+  bit (same scan/summation order, ties to lowest index), and one indirect
+  launch per projection covers all top-k experts, reading `sel[]` on
+  device — the per-token `cuStreamSynchronize` + DtoH round-trips are
+  gone (~48/token on Qwen3-30B) and launches per decoded token fall
+  ~4× on the MoE fixture (52.0 → 1.3 with the graph, see below). With no
+  host-dependent branching left, fused-layout MoE no longer forces
+  `graph_bad`: full-offload MoE decode is CUDA-graph captured. The
+  legacy split-expert layout and expert quant types without an indirect
+  kernel (outside F32/F16/Q8_0/Q4_0/Q4_K/Q5_K/Q6_K) keep the eager path
+  unchanged. gemma-4's dual-branch routed experts use the same device
+  routing (per-expert down scales uploaded per layer). Certified on this
+  box (RTX 3070, partial offload): CPU==GPU greedy byte-identical over
+  128 tokens on Qwen3-30B-A3B-Q4_K_M and gemma-4-26B-A4B-it-Q4_0;
+  Qwen3-30B greedy text unchanged vs the pinned b10076 comparison;
+  `make test` + `test-moe` green; bench.sh md5s unchanged.
+
 ## v0.1.4-alpha — 2026-07-29
 
 ### Headline: tensor-core prefill by default, published benchmarks, and the European roster

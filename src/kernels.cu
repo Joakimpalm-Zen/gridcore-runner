@@ -2049,6 +2049,293 @@ extern "C" __global__ void k_scale(float *x, float s, int n, int xs) {
     if (i < n) x[(ulong64)blockIdx.y * xs + i] *= s;
 }
 
+// ------------------------------------------------- sparse-MoE device routing
+// Device-side softmax -> top-k -> renormalize, replacing the per-token
+// DtoH round-trip that forced MoE decode onto the eager (graph_bad) path.
+//
+// BIT-IDENTITY CONTRACT (moe-gpu-routing spec): this kernel is the device
+// mirror of moe_route() in model.c, and the byte-identical CPU==GPU greedy
+// cert depends on it selecting exactly as the host would given the same
+// logits. It therefore runs SERIALLY, one thread per token, with the host's
+// exact arithmetic: same max-scan order, one expf per element in element
+// order, same summation order, division (not reciprocal-multiply), and the
+// strict `>` compare that sends ties to the lowest expert index. At
+// n_expert <= 256 a serial thread is microseconds per token; do not
+// restructure this into a parallel reduction — reordering floats here is
+// what the contract forbids.
+//
+// logits: [tokens][ls]; sel/selw: [tokens][used]. lg[] is a local (per-
+// thread) working copy so the router logits buffer itself stays intact.
+extern "C" __global__ void k_moe_route(const float *logits, int *sel,
+                                       float *selw, int ne, int used,
+                                       int tokens, int ls) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= tokens) return;
+    float lg[256];
+    const float *src = logits + (ulong64)t * ls;
+    for (int e = 0; e < ne; e++) lg[e] = src[e];
+    float mx = lg[0];
+    for (int e = 1; e < ne; e++)
+        if (lg[e] > mx) mx = lg[e];
+    float ssum = 0.0f;
+    for (int e = 0; e < ne; e++) {
+        float p = expf(lg[e] - mx);
+        lg[e] = p;
+        ssum += p;
+    }
+    for (int e = 0; e < ne; e++) lg[e] /= ssum;
+    int   *ts = sel  + (ulong64)t * used;
+    float *tw = selw + (ulong64)t * used;
+    float denom = 0.0f;
+    for (int s = 0; s < used; s++) {
+        int best = 0;
+        float bp = -1.0f;
+        for (int e = 0; e < ne; e++)
+            if (lg[e] > bp) { bp = lg[e]; best = e; }
+        ts[s] = best;
+        tw[s] = bp;
+        denom += bp;
+        lg[best] = -1.0f;
+    }
+    for (int s = 0; s < used; s++) tw[s] /= denom;
+}
+
+// -------------------------------------------- indirect expert matvec (MoE)
+// One launch computes ALL selected experts' matvecs for one token: grid.y is
+// the expert slot, the weight base is resolved in-kernel from sel[slot] and
+// the fused-3D expert stride (the same arithmetic moe_expert_weight does on
+// the host — moved into the kernel args so no host round-trip remains).
+//
+// Numerics: each body below is a verbatim copy of the kernel enc_mv would
+// have launched for that quant type at batch 1 (k_gemv_* where the coalesced
+// variant exists, k_mv_* otherwise) — only the weight-base computation and
+// the slot-indexed x/y columns differ, so per-row results are bit-identical
+// to the eager path's launches and every existing per-model cert carries
+// over. Expert FFNs carry no bias in any supported arch, so there is no bias
+// parameter.
+//
+// xs = x column stride per slot (0: all slots read the same input, the
+// gate/up case; nff: per-slot hidden, the down case); ys = y column stride.
+
+struct moe_args {
+    int     n_in;
+    int     n_out;
+    ulong64 w_off;      // fused expert tensor base byte offset
+    ulong64 estride;    // bytes per expert block within the fused tensor
+    int     xs, ys;     // x / y element stride between expert slots
+};
+
+#define MOE_MV_HEAD \
+    unsigned row = blockIdx.x * (blockDim.x / 32) + (threadIdx.x >> 5); \
+    unsigned lane = threadIdx.x & 31; \
+    if (row >= (unsigned)a.n_out) return; \
+    const uchar *wbase = wb + a.w_off + (ulong64)sel[blockIdx.y] * a.estride; \
+    x += (ulong64)blockIdx.y * a.xs; \
+    float s = 0;
+
+#define MOE_MV_TAIL \
+    s = warp_sum(s); \
+    if (lane == 0) y[(ulong64)blockIdx.y * a.ys + row] = s;
+
+#define MOE_MV_PARAMS \
+    const uchar *wb, const float *x, float *y, moe_args a, const int *sel
+
+// body of k_mv_f32
+extern "C" __global__ void k_moe_mv_f32(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    const float *rw = (const float *)wbase + (ulong64)row * a.n_in;
+    for (int i = lane; i < a.n_in; i += 32) s += rw[i] * x[i];
+    MOE_MV_TAIL;
+}
+
+// body of k_mv_f16
+extern "C" __global__ void k_moe_mv_f16(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    const __half *rw = (const __half *)wbase + (ulong64)row * a.n_in;
+    for (int i = lane; i < a.n_in; i += 32) s += __half2float(rw[i]) * x[i];
+    MOE_MV_TAIL;
+}
+
+// body of k_gemv_q8_0 (the batch-1 kernel enc_mv picks for Q8_0)
+extern "C" __global__ void k_moe_mv_q8_0(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 32;
+    const uchar *rw = wbase + (ulong64)row * nb * 34;
+    int bsub = (int)(lane >> 3);
+    int boff = ((int)lane & 7) * 4;
+    int b4 = nb & ~3;
+    for (int b0 = 0; b0 < b4; b0 += 4) {
+        const uchar *blk = rw + (ulong64)(b0 + bsub) * 34;
+        float d = f16f(blk);
+        const uchar *qp = blk + 2 + boff;
+        ushort16 u0 = *(const ushort16 *)qp, u1 = *(const ushort16 *)(qp + 2);
+        int q0 = (int)(signed char)(u0 & 0xFF), q1 = (int)(signed char)(u0 >> 8);
+        int q2 = (int)(signed char)(u1 & 0xFF), q3 = (int)(signed char)(u1 >> 8);
+        const float4 xv = *(const float4 *)(x + (ulong64)(b0 + bsub) * 32 + boff);
+        s += d * ((float)q0 * xv.x + (float)q1 * xv.y +
+                  (float)q2 * xv.z + (float)q3 * xv.w);
+    }
+    for (int b = b4; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 34;
+        float d = f16f(blk);
+        const signed char *q = (const signed char *)(blk + 2);
+        s += d * ((float)q[lane] * x[(ulong64)b * 32 + lane]);
+    }
+    MOE_MV_TAIL;
+}
+
+// body of k_mv_q4_0 (no coalesced GEMV exists for Q4_0 yet)
+extern "C" __global__ void k_moe_mv_q4_0(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 32;
+    const uchar *rw = wbase + (ulong64)row * nb * 18;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 18;
+        float d = f16f(blk);
+        const uchar *q = blk + 2;
+        const float *xp = x + b * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++)
+            t += ((int)(q[j] & 0xF) - 8) * xp[j] + ((int)(q[j] >> 4) - 8) * xp[j + 16];
+        s += d * t;
+    }
+    MOE_MV_TAIL;
+}
+
+// body of k_gemv_q4_K
+extern "C" __global__ void k_moe_mv_q4_K(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wbase + (ulong64)row * nb * 144;
+    int g     = (int)(lane >> 2);
+    int ji    = (int)(lane >> 3);
+    int sh    = ((((int)lane >> 2) & 1) == 0) ? 0 : 4;
+    int bbase = ((int)lane & 3) * 8;
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 144;
+        float dd   = f16f(blk);
+        float dmin = f16f(blk + 2);
+        uchar sg, mg;
+        get_scale_min_k4(g, blk + 4, &sg, &mg);
+        float dg = dd * (float)sg, mmg = dmin * (float)mg;
+        uint2 qv = *(const uint2 *)(blk + 16 + ji * 32 + bbase);
+        const float *xp = x + (ulong64)b * 256 + (int)lane * 8;
+        float4 x0 = *(const float4 *)xp, x1 = *(const float4 *)(xp + 4);
+        uint v0 = (qv.x >> sh) & 0x0F0F0F0Fu, v1 = (qv.y >> sh) & 0x0F0F0F0Fu;
+        float t  = (float)(v0 & 0xFF)         * x0.x
+                 + (float)((v0 >>  8) & 0xFF) * x0.y
+                 + (float)((v0 >> 16) & 0xFF) * x0.z
+                 + (float)((v0 >> 24)       ) * x0.w
+                 + (float)(v1 & 0xFF)         * x1.x
+                 + (float)((v1 >>  8) & 0xFF) * x1.y
+                 + (float)((v1 >> 16) & 0xFF) * x1.z
+                 + (float)((v1 >> 24)       ) * x1.w;
+        float sx = x0.x + x0.y + x0.z + x0.w + x1.x + x1.y + x1.z + x1.w;
+        s += dg * t - mmg * sx;
+    }
+    MOE_MV_TAIL;
+}
+
+// body of k_gemv_q5_K
+extern "C" __global__ void k_moe_mv_q5_K(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wbase + (ulong64)row * nb * 176;
+    int g     = (int)(lane >> 2);
+    int ji    = (int)(lane >> 3);
+    int sh    = ((((int)lane >> 2) & 1) == 0) ? 0 : 4;
+    int bbase = ((int)lane & 3) * 8;
+    int hshift = g;
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 176;
+        float dd   = f16f(blk);
+        float dmin = f16f(blk + 2);
+        uchar sg, mg;
+        get_scale_min_k4(g, blk + 4, &sg, &mg);
+        float dg = dd * (float)sg, mmg = dmin * (float)mg;
+        uint2 qv = *(const uint2 *)(blk + 48 + ji * 32 + bbase);
+        uint2 hv = *(const uint2 *)(blk + 16 + bbase);
+        const float *xp = x + (ulong64)b * 256 + (int)lane * 8;
+        float4 x0 = *(const float4 *)xp, x1 = *(const float4 *)(xp + 4);
+        uint v0 = (qv.x >> sh) & 0x0F0F0F0Fu, v1 = (qv.y >> sh) & 0x0F0F0F0Fu;
+        uint h0 = ((hv.x >> hshift) & 0x01010101u) << 4;
+        uint h1 = ((hv.y >> hshift) & 0x01010101u) << 4;
+        v0 += h0; v1 += h1;
+        float t  = (float)(v0 & 0xFF)         * x0.x
+                 + (float)((v0 >>  8) & 0xFF) * x0.y
+                 + (float)((v0 >> 16) & 0xFF) * x0.z
+                 + (float)((v0 >> 24)       ) * x0.w
+                 + (float)(v1 & 0xFF)         * x1.x
+                 + (float)((v1 >>  8) & 0xFF) * x1.y
+                 + (float)((v1 >> 16) & 0xFF) * x1.z
+                 + (float)((v1 >> 24)       ) * x1.w;
+        float sx = x0.x + x0.y + x0.z + x0.w + x1.x + x1.y + x1.z + x1.w;
+        s += dg * t - mmg * sx;
+    }
+    MOE_MV_TAIL;
+}
+
+// body of k_gemv_q6_K
+extern "C" __global__ void k_moe_mv_q6_K(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wbase + (ulong64)row * nb * 210;
+    int is = (int)(lane >> 4);
+    float s0 = 0, s1 = 0;
+    int b2 = nb & ~1;
+    for (int b = 0; b < b2; b += 2) {
+        s0 += q6k_block_dot(rw + (ulong64)b * 210,       x + (ulong64)b * 256,
+                            (int)lane, is);
+        s1 += q6k_block_dot(rw + (ulong64)(b + 1) * 210, x + (ulong64)(b + 1) * 256,
+                            (int)lane, is);
+    }
+    if (b2 < nb)
+        s0 += q6k_block_dot(rw + (ulong64)b2 * 210, x + (ulong64)b2 * 256,
+                            (int)lane, is);
+    s = s0 + s1;
+    MOE_MV_TAIL;
+}
+
+// Gated activation + routing-weight fold for every expert slot in one launch.
+// grid.y = expert slot. Per element: the exact k_silu_mul / k_gelu_mul
+// arithmetic, then a separate multiply by the slot's routing weight — the
+// same two rounding steps the eager path produced with its actmul + scale
+// launch pair, so values are bit-identical to it. dscale is the per-expert
+// down-projection scale table (gemma-4), indexed via sel; ones when the
+// model has none, so the multiply is exact and harmless.
+// gbuf column stride gss, ubuf column stride uss (gemma reads gate and up
+// out of one fused 2*nff column: gss = uss = 2*nff, ubuf = gbuf + nff).
+extern "C" __global__ void k_moe_actmul(float *gbuf, const float *ubuf,
+                                        int nff, int gss, int uss, int gelu,
+                                        const float *selw, const float *dscale,
+                                        const int *sel) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= nff) return;
+    float *gp = gbuf + (ulong64)blockIdx.y * gss;
+    const float *up = ubuf + (ulong64)blockIdx.y * uss;
+    float xg = gp[i], v;
+    if (gelu) {
+        float t = tanhf(0.7978845608f * (xg + 0.044715f * xg * xg * xg));
+        v = 0.5f * xg * (1.0f + t) * up[i];
+    } else {
+        v = (xg / (1.0f + expf(-xg))) * up[i];
+    }
+    float w = selw[blockIdx.y] * dscale[sel[blockIdx.y]];
+    gp[i] = v * w;
+}
+
+// Sum the per-slot down-projections into the token's FFN output, slot 0
+// first then ascending — the same accumulation order as the eager path's
+// write-then-add sequence, so the sum is bit-identical to it.
+extern "C" __global__ void k_moe_sum(float *out, const float *eout, int n,
+                                     int nslots, int es) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float s = eout[i];
+    for (int sl = 1; sl < nslots; sl++) s += eout[(ulong64)sl * es + i];
+    out[i] = s;
+}
+
 // ---------------------------------------------------------- Qwen3.5 hybrid
 // The generic matvec kernels above perform every learned projection.  These
 // small kernels implement only the architecture-specific stateful operators,

@@ -279,6 +279,9 @@ typedef struct gpu_weights {
     // multi-column twins of f_gemv, per microbatch width (see BW_* below):
     // f_gemvb[w][type], w indexing the width class, not the width itself
     CUfunction  f_gemvb[BW_N][32];
+    // sparse-MoE device routing + indirect expert matvecs (fused-3D layout)
+    CUfunction  f_moe_route, f_moe_actmul, f_moe_sum;
+    CUfunction  f_moe_mv[32];           // indexed by expert tensor type
     CUdeviceptr weights;
     size_t      weights_len;
     bool        cpu_moe;                // sparse tensor-role placement mode
@@ -294,6 +297,11 @@ typedef struct gpu_weights {
     // gemma-4 MoE dual-branch: dense-post/moe-pre/moe-post norms + the router
     // input scale (with 1/sqrt(n_embd) folded in), per MoE layer, may be 0
     CUdeviceptr *g_pn1, *g_prn2, *g_pn2, *g_gis;
+    // per-expert down-projection scale table per MoE layer (gemma-4), ones
+    // when the GGUF has none; and a shared all-ones table for archs without
+    // any such scale — k_moe_actmul multiplies unconditionally
+    CUdeviceptr *g_dsc;
+    CUdeviceptr moe_ones;
     CUdeviceptr *ssm_dt, *ssm_a, *ssm_norm;
 } gpu_weights;
 
@@ -306,7 +314,13 @@ typedef struct {
     gpu_weights *sw;                    // shared weights, refcounted
     CUdeviceptr kc, vc;
     CUdeviceptr x, xb, xb2, q, kt, vt, hb, hb2, att, attn_part, logits;
-    CUdeviceptr moe_logits, moe_eout;   // sparse-MoE: router logits, expert down-out
+    // sparse-MoE: router logits [MVB][n_expert], per-slot expert down-out
+    // [rows][n_embd] (rows = max(used, MVB); the eager path uses column 0)
+    CUdeviceptr moe_logits, moe_eout;
+    // device routing results [MVB][used] and per-slot expert hidden scratch
+    // [rows][gw] (gw = 2*n_ff_exp for gemma's fused gate_up, n_ff_exp else)
+    CUdeviceptr moe_sel, moe_selw, moe_hb, moe_hb2;
+    bool        moe_fused_ok;           // every MoE layer runs the indirect path
     CUdeviceptr g_scr;                  // gemma-4-MoE dual-branch scratch: 5*n_embd
     CUdeviceptr q35_mix, q35_cv, q35_z, q35_beta, q35_alpha, q35_gate;
     CUdeviceptr q35_hist, q35_state;    // persistent recurrent state per sequence
@@ -334,6 +348,8 @@ typedef struct {
 #define TC_ROWS    64  // tensor-core GEMM output rows per block (match kernels.cu)
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
+// indirect expert matvec: weight base = w_off + sel[slot]*estride, slot = grid.y
+typedef struct { int n_in, n_out; uint64_t w_off, estride; int xs, ys; } moe_args;
 typedef struct { int head_dim, n_heads, half_dim, neox; float mscale; } rope_args;
 // l_off is a BYTE offset: the cache is fp16 or q8_0 depending on m->kv_q8,
 // so element indexing is not enough (see the kv storage block in kernels.cu)
@@ -414,6 +430,42 @@ static bool gpu_type_ok(int type) {
         default:
             return false;
     }
+}
+
+// Expert tensor types the indirect MoE matvecs (k_moe_mv_*) cover. A type
+// outside this set is not an error — that model keeps the eager per-expert
+// path, exactly as before the device-routing work.
+static bool moe_indirect_type_ok(int type) {
+    switch (type) {
+        case T_F32: case T_F16: case T_Q8_0: case T_Q4_0:
+        case T_Q4_K: case T_Q5_K: case T_Q6_K:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The fused device-routing MoE path needs the fused-3D expert layout (a
+// legacy split model has one arbitrarily-placed tensor per expert, which
+// in-kernel base+e*stride addressing cannot express) and indirect kernels
+// for every expert tensor type. All-or-nothing per model: one eager layer
+// would force the graph off anyway.
+static bool moe_fused_eligible(const model_t *m) {
+    if (m->n_expert <= 0 || m->n_expert > 256 || m->cpu_moe) return false;
+    for (int l = 0; l < m->n_layer; l++) {
+        const layer_t *ly = &m->layers[l];
+        if (!ly->is_moe) continue;
+        if (ly->moe_split) return false;
+        if (ly->moe_gemma) {
+            if (!moe_indirect_type_ok(ly->ffn_gate_up_exps->type) ||
+                !moe_indirect_type_ok(ly->ffn_down_exps->type)) return false;
+        } else {
+            if (!moe_indirect_type_ok(ly->ffn_gate_exps->type) ||
+                !moe_indirect_type_ok(ly->ffn_up_exps->type) ||
+                !moe_indirect_type_ok(ly->ffn_down_exps->type)) return false;
+        }
+    }
+    return true;
 }
 
 static void gpu_ctx_free(model_t *m, gpu_t *g);
@@ -514,6 +566,7 @@ static void shared_destroy(gpu_weights *w) {
             w->pan ? w->pan[l] : 0, w->pfn ? w->pfn[l] : 0,
             w->g_pn1 ? w->g_pn1[l] : 0, w->g_prn2 ? w->g_prn2[l] : 0,
             w->g_pn2 ? w->g_pn2[l] : 0, w->g_gis ? w->g_gis[l] : 0,
+            w->g_dsc ? w->g_dsc[l] : 0,
             w->ssm_dt ? w->ssm_dt[l] : 0, w->ssm_a ? w->ssm_a[l] : 0,
             w->ssm_norm ? w->ssm_norm[l] : 0,
         };
@@ -525,12 +578,13 @@ static void shared_destroy(gpu_weights *w) {
     free(w->qn); free(w->kn);
     free(w->pan); free(w->pfn);
     free(w->g_pn1); free(w->g_prn2); free(w->g_pn2); free(w->g_gis);
+    free(w->g_dsc);
     free(w->ssm_dt); free(w->ssm_a); free(w->ssm_norm);
     for (int i = 0; i < w->n_bindings; i++)
         if (w->bindings[i].device) cu.MemFree(w->bindings[i].device);
     free(w->bindings);
     CUdeviceptr bufs[] = { w->weights, w->inv_freq, w->inv_freq_local,
-                           w->out_norm, w->dummy, w->ones };
+                           w->out_norm, w->dummy, w->ones, w->moe_ones };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
     if (w->mod) cu.ModuleUnload(w->mod);
@@ -824,6 +878,17 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_gemvb[BW_8][T_Q4_K], "k_gemvb_q4_K_x8" },
             { &w->f_gemvb[BW_8][T_Q5_K], "k_gemvb_q5_K_x8" },
             { &w->f_gemvb[BW_8][T_Q6_K], "k_gemvb_q6_K_x8" },
+            // sparse-MoE device routing + indirect expert matvecs
+            { &w->f_moe_route,        "k_moe_route" },
+            { &w->f_moe_actmul,       "k_moe_actmul" },
+            { &w->f_moe_sum,          "k_moe_sum" },
+            { &w->f_moe_mv[T_F32],    "k_moe_mv_f32" },
+            { &w->f_moe_mv[T_F16],    "k_moe_mv_f16" },
+            { &w->f_moe_mv[T_Q8_0],   "k_moe_mv_q8_0" },
+            { &w->f_moe_mv[T_Q4_0],   "k_moe_mv_q4_0" },
+            { &w->f_moe_mv[T_Q4_K],   "k_moe_mv_q4_K" },
+            { &w->f_moe_mv[T_Q5_K],   "k_moe_mv_q5_K" },
+            { &w->f_moe_mv[T_Q6_K],   "k_moe_mv_q6_K" },
         };
         for (size_t i = 0; i < sizeof(fns) / sizeof(*fns); i++)
             CK(cu.ModuleGetFunction(fns[i].f, w->mod, fns[i].name));
@@ -889,14 +954,21 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         w->g_prn2 = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_pn2  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_gis  = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->g_dsc  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_dt   = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_a    = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
         if (!w->attn_norm || !w->ffn_norm || !w->bq || !w->bk || !w->bv ||
             !w->bo || !w->qn || !w->kn || !w->pan || !w->pfn ||
-            !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis ||
+            !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis || !w->g_dsc ||
             !w->ssm_dt || !w->ssm_a || !w->ssm_norm)
             goto fail;
+        if (m->n_expert > 0 && !m->cpu_moe) {
+            // all-ones per-expert scale table for archs without a down-
+            // projection scale — k_moe_actmul multiplies unconditionally
+            w->moe_ones = f32_dbuf_ones(NULL, (size_t)m->n_expert);
+            if (!w->moe_ones) goto fail;
+        }
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
             w->attn_norm[l] = f32_dbuf(ly->attn_norm_w, m->n_embd);
@@ -932,6 +1004,9 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                     gs[i] = (ly->gate_inp_scale ? ly->gate_inp_scale[i] : 1.0f) * inv;
                 w->g_gis[l] = f32_dbuf(gs, m->n_embd);
                 free(gs);
+                // per-expert down scale for the indirect expert path (ones
+                // when the GGUF has none — same 1.0 fold the CPU applies)
+                w->g_dsc[l] = f32_dbuf_ones(ly->down_exps_scale, m->n_expert);
             }
             if (!w->attn_norm[l] || !w->ffn_norm[l] ||
                 (ly->bq && !w->bq[l]) || (ly->bk && !w->bk[l]) ||
@@ -942,7 +1017,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 (ly->recurrent && (!w->ssm_dt[l] || !w->ssm_a[l] ||
                                     !w->ssm_norm[l])) ||
                 (ly->moe_gemma && (!w->g_pn1[l] || !w->g_prn2[l] ||
-                                   !w->g_pn2[l] || !w->g_gis[l])))
+                                   !w->g_pn2[l] || !w->g_gis[l] ||
+                                   !w->g_dsc[l])))
                 goto fail;
         }
     }
@@ -1110,9 +1186,24 @@ bool gpu_init(model_t *m) {
             CK(cu.MemsetD8(g->q35_state_prev, 0, sizeof(float) * state_elems));
         }
         if (m->n_expert > 0) {
-            // sparse-MoE router logits + one expert's down output
-            CK(cu.MemAlloc(&g->moe_logits, sizeof(float) * (size_t)m->n_expert));
-            CK(cu.MemAlloc(&g->moe_eout, sizeof(float) * (size_t)m->n_embd));
+            // sparse-MoE buffers, sized for both the fused indirect path
+            // (device routing for a whole tile, per-slot expert scratch) and
+            // the eager fallback (which uses column/slot 0 only)
+            int used_c = m->n_expert_used;
+            if (used_c < 1) used_c = 1;
+            if (used_c > 256) used_c = 256;
+            int rows = used_c > MVB ? used_c : MVB;
+            size_t gw = (size_t)m->n_ff_exp * (m->moe_gemma ? 2 : 1);
+            if (gw < 1) gw = 1;
+            CK(cu.MemAlloc(&g->moe_logits,
+                           sizeof(float) * (size_t)MVB * m->n_expert));
+            CK(cu.MemAlloc(&g->moe_eout,
+                           sizeof(float) * (size_t)rows * m->n_embd));
+            CK(cu.MemAlloc(&g->moe_sel,  sizeof(int)   * (size_t)MVB * used_c));
+            CK(cu.MemAlloc(&g->moe_selw, sizeof(float) * (size_t)MVB * used_c));
+            CK(cu.MemAlloc(&g->moe_hb,   sizeof(float) * (size_t)rows * gw));
+            CK(cu.MemAlloc(&g->moe_hb2,  sizeof(float) * (size_t)rows * gw));
+            g->moe_fused_ok = moe_fused_eligible(m);
         }
         if (m->moe_gemma)
             // gemma-4-MoE dual-branch per-token scratch: xn, xn2, rin, mlp, moe_out
@@ -1120,10 +1211,13 @@ bool gpu_init(model_t *m) {
         if (cu_graphs_ok() && cu.StreamCreate(&g->stream, 0) != 0)
             g->stream = NULL;
         // gemma4's V-copy path (ly->wv == NULL) uses a synchronous MemsetD8
-        // that cannot be captured into a CUDA graph; MoE routing reads router
-        // logits back to the host mid-forward, which likewise cannot be captured
+        // that cannot be captured into a CUDA graph. MoE with device routing
+        // (moe_fused_ok) is fully capture-clean; only the eager fallback
+        // (split layout / uncovered expert type) still reads router logits
+        // back to the host mid-forward and must keep the graph off.
         for (int l = 0; l < m->gpu_layers; l++)
-            if (!m->layers[l].wv || m->layers[l].is_moe ||
+            if (!m->layers[l].wv ||
+                (m->layers[l].is_moe && !g->moe_fused_ok) ||
                 m->layers[l].recurrent) g->graph_bad = true;
         if (m->qwen35) g->graph_bad = true;
         if (m->cpu_moe) g->graph_bad = true;
@@ -1373,7 +1467,8 @@ static void gpu_ctx_free(model_t *m, gpu_t *g) {
     CUdeviceptr bufs[] = { g->kc, g->vc, g->x, g->xb, g->xb2,
                            g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                            g->attn_part, g->logits, g->pos_dev,
-                           g->moe_logits, g->moe_eout, g->g_scr,
+                           g->moe_logits, g->moe_eout, g->moe_sel,
+                           g->moe_selw, g->moe_hb, g->moe_hb2, g->g_scr,
                            g->q35_mix, g->q35_cv, g->q35_z, g->q35_beta,
                            g->q35_alpha, g->q35_gate, g->q35_hist,
                            g->q35_state, g->q35_hist_prev, g->q35_state_prev };
@@ -1515,15 +1610,114 @@ static bool stage_x(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
 // vocab-logits matvec (the single most expensive launch) runs only when the
 // caller wants logits, and only for the tile's last token. The caller stages
 // x (and, for graph capture, uploads pos) before calling this.
-// Sparse-MoE FFN on the GPU for `tn` tokens. Reads the RMS-normed input from
-// g->xb (stride xdim) and writes the FFN output back into g->xb. Routing —
-// softmax over ALL experts, top-k, renormalize (Mixtral/Qwen3) — runs on the
-// host from router logits read back per token; the per-expert SwiGLU matmuls
-// run on the GPU by pointing enc_mv at each expert's slice of the fused 3D
-// tensors. The whole model file is uploaded as one buffer, so a slice's mmap
-// offset IS its device offset (that is what enc_mv keys on). Host-dependent
-// routing is why MoE layers force the eager path (graph_bad).
-static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdim) {
+// ----------------------------------------------- sparse-MoE (device routing)
+// Encoders for the fused indirect MoE path: routing and expert selection stay
+// entirely on the device, so a MoE decode step has no host round-trip and is
+// CUDA-graph capturable (the moe-gpu-routing spec's P1).
+
+// Device softmax -> top-k -> renormalize for `tokens` routed columns. The
+// kernel is serial per token and mirrors moe_route() bit for bit (see the
+// contract comment in kernels.cu).
+static bool enc_moe_route(gpu_t *g, CUdeviceptr logits, CUdeviceptr sel,
+                          CUdeviceptr selw, int ne, int used, int tokens,
+                          int ls) {
+    void *p[] = { &logits, &sel, &selw, &ne, &used, &tokens, &ls };
+    return launch(g, g->sw->f_moe_route, (unsigned)(tokens + 31) / 32, 1, 1, 32, p);
+}
+
+// One launch computes every selected expert's matvec: grid.y = expert slot,
+// weight base resolved in-kernel from sel[slot] and the fused-3D expert
+// byte stride (the moe_expert_weight arithmetic, moved into kernel args).
+// base is the whole fused tensor, so binding_find's bounds check covers
+// every expert's slice at once.
+static bool enc_moe_mv(gpu_t *g, model_t *m, gguf_tensor *base,
+                       uint64_t estride, CUdeviceptr x, CUdeviceptr y,
+                       CUdeviceptr sel, int n_in, int n_out, int nslots,
+                       int xs, int ys) {
+    CUdeviceptr weights = 0;
+    uint64_t w_off = 0;
+    if (!binding_find(g->sw, m, base, &weights, &w_off)) return false;
+    CUfunction f = g->sw->f_moe_mv[base->type];
+    if (!f) return false;
+    moe_args a = { n_in, n_out, w_off, estride, xs, ys };
+    void *p[] = { &weights, &x, &y, &a, &sel };
+    return launch(g, f, (n_out + 3) / 4, nslots, 1, 128, p);
+}
+
+// Gated activation + routing-weight fold for every slot in one launch.
+// dscale is the per-expert down-scale table (gemma-4) or the shared ones
+// table; the arithmetic matches the eager actmul+scale launch pair exactly.
+static bool enc_moe_actmul(gpu_t *g, model_t *m, CUdeviceptr gbuf,
+                           CUdeviceptr ubuf, int nff, int gss, int uss,
+                           CUdeviceptr selw, CUdeviceptr dscale,
+                           CUdeviceptr sel, int nslots) {
+    int gelu = m->ffn_act == ACT_GELU;
+    void *p[] = { &gbuf, &ubuf, &nff, &gss, &uss, &gelu, &selw, &dscale, &sel };
+    return launch(g, g->sw->f_moe_actmul, (nff + 255) / 256, nslots, 1, 256, p);
+}
+
+// Sum the per-slot down outputs into the token's FFN output, ascending slot
+// order — same accumulation order as the eager write-then-add sequence.
+static bool enc_moe_sum(gpu_t *g, CUdeviceptr out, CUdeviceptr eout, int n,
+                        int nslots, int es) {
+    void *p[] = { &out, &eout, &n, &nslots, &es };
+    return launch(g, g->sw->f_moe_sum, (n + 255) / 256, 1, 1, 256, p);
+}
+
+// Fused device-routing MoE FFN (Mixtral/Qwen3 topology, fused-3D layout).
+// Reads the RMS-normed input from g->xb (stride xdim) and writes the FFN
+// output back into g->xb. Per layer: one router matvec per token (batch-1,
+// the certified per-token GEMV arithmetic), one routing kernel for the
+// tile, then per token gate/up/actmul/down/sum — six launches a token and
+// zero host round-trips, vs the eager path's ~49 launches and one
+// sync+DtoH per token.
+static bool gpu_moe_ffn_fused(gpu_t *g, model_t *m, const layer_t *ly,
+                              int tn, int xdim) {
+    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int nff = m->n_ff_exp;
+    enum { MOE_MAX_USED = 256 };
+    if (used > MOE_MAX_USED) used = MOE_MAX_USED;
+    if (ne  > MOE_MAX_USED) ne  = MOE_MAX_USED;
+    uint64_t gstride = (uint64_t)nff *
+                       ggml_row_size(ly->ffn_gate_exps->type, n_embd);
+    uint64_t ustride = (uint64_t)nff *
+                       ggml_row_size(ly->ffn_up_exps->type, n_embd);
+    uint64_t dstride = (uint64_t)n_embd *
+                       ggml_row_size(ly->ffn_down_exps->type, nff);
+    for (int t = 0; t < tn; t++) {
+        CUdeviceptr xin = g->xb + (size_t)t * xdim * sizeof(float);
+        CUdeviceptr lg  = g->moe_logits + (size_t)t * ne * sizeof(float);
+        if (!enc_mv(g, m, ly->ffn_gate_inp, xin, lg, n_embd, ne, 0, 1, xdim, ne))
+            return false;
+    }
+    if (!enc_moe_route(g, g->moe_logits, g->moe_sel, g->moe_selw, ne, used,
+                       tn, ne))
+        return false;
+    for (int t = 0; t < tn; t++) {
+        CUdeviceptr xin  = g->xb + (size_t)t * xdim * sizeof(float);
+        CUdeviceptr sel  = g->moe_sel  + (size_t)t * used * sizeof(int);
+        CUdeviceptr selw = g->moe_selw + (size_t)t * used * sizeof(float);
+        bool ok = enc_moe_mv(g, m, ly->ffn_gate_exps, gstride, xin, g->moe_hb,
+                             sel, n_embd, nff, used, 0, nff)
+               && enc_moe_mv(g, m, ly->ffn_up_exps, ustride, xin, g->moe_hb2,
+                             sel, n_embd, nff, used, 0, nff)
+               && enc_moe_actmul(g, m, g->moe_hb, g->moe_hb2, nff, nff, nff,
+                                 selw, g->sw->moe_ones, sel, used)
+               && enc_moe_mv(g, m, ly->ffn_down_exps, dstride, g->moe_hb,
+                             g->moe_eout, sel, nff, n_embd, used, nff, n_embd)
+               && enc_moe_sum(g, xin, g->moe_eout, n_embd, used, n_embd);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// Eager fallback (legacy split expert layout, or an expert tensor type the
+// indirect kernels do not cover). Routing — softmax over ALL experts, top-k,
+// renormalize (Mixtral/Qwen3) — runs on the host from router logits read
+// back per token; the per-expert SwiGLU matmuls run on the GPU by pointing
+// enc_mv at each expert's slice. Host-dependent routing is why this path
+// forces the eager (graph_bad) decode.
+static bool gpu_moe_ffn_eager(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used, nff = m->n_ff_exp;
     // belt-and-suspenders: sel[]/selw[] below are fixed MOE_MAX_USED wide. The
     // loader already bounds n_expert_used <= n_expert <= 256 (model.c), but never
@@ -1586,12 +1780,80 @@ static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdi
     return cu.MemcpyDtoD(g->xb, g->xb2, (size_t)tn * xdim * sizeof(float)) == 0;
 }
 
+static bool gpu_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int tn,
+                        int xdim) {
+    if (g->moe_fused_ok) return gpu_moe_ffn_fused(g, m, ly, tn, xdim);
+    return gpu_moe_ffn_eager(g, m, ly, tn, xdim);
+}
+
 // gemma-4-MoE dual-branch FFN on GPU: a dense GELU shared expert AND a routed
 // top-k GELU expert set, each with its own pre/post RMSNorm sandwich, summed.
 // Reads the post-attention residual from g->x (UN-normed — each branch norms it
 // itself), writes mlp+moe_out into g->xb; the caller then applies post_ffw_norm
 // (pfn) and the residual add. Mirrors the CPU gemma_moe_ffn token-for-token.
-static bool gpu_gemma_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int l,
+//
+// Fused variant: routing and expert selection on device (k_moe_route +
+// indirect matvecs over the fused gate_up tensor), no host round-trip and no
+// stream sync — capture-clean, like gpu_moe_ffn_fused.
+static bool gpu_gemma_moe_ffn_fused(gpu_t *g, model_t *m, const layer_t *ly,
+                                    int l, int tn, int xdim) {
+    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int nff = m->n_ff_exp, dff = m->n_ff;   // dff = dense shared-FFN size
+    enum { MOE_MAX_USED = 256 };
+    if (used > MOE_MAX_USED) used = MOE_MAX_USED;
+    if (ne  > MOE_MAX_USED) ne  = MOE_MAX_USED;
+    float eps = m->rms_eps;
+    // fused gate_up expert block: [n_embd -> 2*nff] per expert
+    uint64_t gustride = (uint64_t)(2 * (size_t)nff) *
+                        ggml_row_size(ly->ffn_gate_up_exps->type, n_embd);
+    uint64_t dstride  = (uint64_t)n_embd *
+                        ggml_row_size(ly->ffn_down_exps->type, nff);
+    CUdeviceptr xn   = g->g_scr + (size_t)0 * n_embd * sizeof(float);
+    CUdeviceptr xn2  = g->g_scr + (size_t)1 * n_embd * sizeof(float);
+    CUdeviceptr rin  = g->g_scr + (size_t)2 * n_embd * sizeof(float);
+    CUdeviceptr mout = g->g_scr + (size_t)3 * n_embd * sizeof(float);
+    for (int t = 0; t < tn; t++) {
+        // g->x (the residual stream) is n_embd-strided; g->xb is xdim-strided
+        CUdeviceptr attn = g->x  + (size_t)t * n_embd * sizeof(float);
+        CUdeviceptr out  = g->xb + (size_t)t * xdim   * sizeof(float);
+        // --- dense shared MLP: rmsnorm(ffn_norm) -> GELU SwiGLU -> post_ffw_norm_1.
+        //     Written straight into `out`; the routed branch is added on top below.
+        bool ok = enc_rmsnorm(g, attn, xn, g->sw->ffn_norm[l], n_embd, eps, 1, xdim, n_embd)
+               && enc_mv(g, m, ly->w_gate, xn, g->hb,  n_embd, dff, 0, 1, n_embd, dff)
+               && enc_mv(g, m, ly->w_up,   xn, g->hb2, n_embd, dff, 0, 1, n_embd, dff)
+               && enc_actmul(g, m, g->hb, g->hb2, dff)
+               && enc_mv(g, m, ly->w_down, g->hb, out, dff, n_embd, 0, 1, dff, xdim)
+               && enc_rmsnorm(g, out, out, g->sw->g_pn1[l], n_embd, eps, 1, xdim, xdim);
+        if (!ok) return false;
+        // --- routed experts: pre-norm the branch input (pre_norm2); the router
+        //     runs on a SEPARATE weightless-rmsnorm(attn) with (1/sqrt(n_embd) *
+        //     gate_inp_scale) folded into the uploaded g_gis weight. Selection
+        //     runs on device; per-slot scale = selw * down_exps_scale[expert].
+        CUdeviceptr lg   = g->moe_logits + (size_t)t * ne * sizeof(float);
+        CUdeviceptr sel  = g->moe_sel  + (size_t)t * used * sizeof(int);
+        CUdeviceptr selw = g->moe_selw + (size_t)t * used * sizeof(float);
+        CUdeviceptr up   = g->moe_hb + (size_t)nff * sizeof(float);
+        ok = enc_rmsnorm(g, attn, xn2, g->sw->g_prn2[l], n_embd, eps, 1, xdim, n_embd)
+          && enc_rmsnorm(g, attn, rin, g->sw->g_gis[l],  n_embd, eps, 1, xdim, n_embd)
+          && enc_mv(g, m, ly->ffn_gate_inp, rin, lg, n_embd, ne, 0, 1, n_embd, ne)
+          && enc_moe_route(g, lg, sel, selw, ne, used, 1, ne)
+          && enc_moe_mv(g, m, ly->ffn_gate_up_exps, gustride, xn2, g->moe_hb,
+                        sel, n_embd, 2 * nff, used, 0, 2 * nff)
+          && enc_moe_actmul(g, m, g->moe_hb, up, nff, 2 * nff, 2 * nff,
+                            selw, g->sw->g_dsc[l], sel, used)
+          && enc_moe_mv(g, m, ly->ffn_down_exps, dstride, g->moe_hb,
+                        g->moe_eout, sel, nff, n_embd, used, 2 * nff, n_embd)
+          && enc_moe_sum(g, mout, g->moe_eout, n_embd, used, n_embd);
+        if (!ok) return false;
+        // post_ffw_norm_2 on the routed branch, then out (=dense) += routed
+        if (!enc_rmsnorm(g, mout, mout, g->sw->g_pn2[l], n_embd, eps, 1, n_embd, n_embd) ||
+            !enc_add(g, out, mout, n_embd, 1, xdim, n_embd))
+            return false;
+    }
+    return true;
+}
+
+static bool gpu_gemma_moe_ffn_eager(gpu_t *g, model_t *m, const layer_t *ly, int l,
                               int tn, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp, dff = m->n_ff;   // dff = dense shared-FFN size
@@ -1671,6 +1933,12 @@ static bool gpu_gemma_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int l,
             return false;
     }
     return cu.StreamSynchronize(g->stream) == 0;
+}
+
+static bool gpu_gemma_moe_ffn(gpu_t *g, model_t *m, const layer_t *ly, int l,
+                              int tn, int xdim) {
+    if (g->moe_fused_ok) return gpu_gemma_moe_ffn_fused(g, m, ly, l, tn, xdim);
+    return gpu_gemma_moe_ffn_eager(g, m, ly, l, tn, xdim);
 }
 
 // Qwen3.5 Gated DeltaNet layer. Learned projections use the same quant-aware
