@@ -60,7 +60,7 @@ def run_load(runner, model, gpu, timeout):
         text=True, capture_output=True, timeout=timeout,
         # certification evidence is scalar-path (TC promotion is
         # tolerance-gated separately; see docs/compatibility-program.md)
-        env=dict(os.environ, RUNNER_CUDA_TC="0"))
+        env=dict(os.environ, RUNNER_CUDA_TC="0", RUNNER_MOE_EAGER="1"))
     return {
         "status": "pass" if proc.returncode == 0 else "fail",
         "returncode": proc.returncode,

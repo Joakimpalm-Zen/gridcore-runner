@@ -51,6 +51,17 @@ was also fixed in this run: Runner now rejects unknown model names, so the
 script asks each server for its served model id instead of sending a
 placeholder.
 
+**Eager-routing pinning for MoE identity (since the 2026-07-29 device
+routing).** MoE decode/prefill default to device-side routing; its softmax
+arithmetic can only bit-match hosts whose `expf` is correctly rounded (UCRT
+verified; a glibc/libmvec fast-math host is ~4 ulp and unreachable by any
+device code). The certified byte-identity property is therefore defined over
+the **eager path** (`RUNNER_MOE_EAGER=1`) — the unchanged v0.1.4 host-routing
+arithmetic — and the harnesses pin it alongside `RUNNER_CUDA_TC=0`. The
+fused default is separately verified: expert selection identical and `selw`
+within 1 ulp on every host, byte-identical end-to-end on correctly-rounded
+hosts. `RUNNER_DEBUG_MOE` dumps both paths' routing bits for re-verification.
+
 **Scalar-path pinning (since the 2026-07-29 TC promotion).** The tensor-core
 prefill GEMM is now the default on gated dense (Q4_K, arch) combos. It is
 fp16-tile arithmetic held to a tolerance gate (`tests/test_tc_tol.c`), not to

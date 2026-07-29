@@ -152,7 +152,7 @@ def serve(command, log_path, startup_timeout):
     log = log_path.open("w", encoding="utf-8")
     # Certification pins the scalar GEMM path (TC default-on for promoted
     # combos is tolerance-gated, not byte-identical). Inert for llama.cpp.
-    env = dict(os.environ, RUNNER_CUDA_TC="0")
+    env = dict(os.environ, RUNNER_CUDA_TC="0", RUNNER_MOE_EAGER="1")
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                text=True, env=env)
     try:

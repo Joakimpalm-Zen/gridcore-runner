@@ -76,7 +76,7 @@ def serve(command, log_path, startup_timeout):
     # (Q4_K, arch) combos since 2026-07-29, and it is tolerance-gated
     # (test_tc_tol), not byte-identical — exact-identity evidence must not
     # silently become a TC-vs-scalar comparison. Inert for llama.cpp.
-    env = dict(os.environ, RUNNER_CUDA_TC="0")
+    env = dict(os.environ, RUNNER_CUDA_TC="0", RUNNER_MOE_EAGER="1")
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
                                env=env)
     try:
