@@ -27,6 +27,24 @@ its synthetic hybrid gate and local real-model Q4/Q8 smokes are CPU/GPU
 greedy-identical, while regeneration of the pinned full matrix remains a
 separate evidence run.
 
+**European roster evidence run (2026-07-29).** Five European `llama`-path
+models (EuroLLM-9B, Lucie-7B, Mistral-Nemo-12B, Teuken-7B, salamandra-7b)
+were SHA-pinned into the manifest and evidenced:
+`eu-roster-load-2026-07-29.json` (hash + load),
+`eu-roster-checks-2026-07-29.json` (cpu_cuda / tokenizer / chat / tool,
+with `not_executed` recorded where a check could not run) and
+`reference-<family>.json` (the 8-token greedy sweep vs pinned b10076 — the
+reference binary lives at `/home/lab/agent-torture-tools/llama/llama-b10076`
+on the dev box, and a CPU-only build of the pinned source is reproducible
+from the workspace checkout). Findings worth naming: Lucie's tokenizer
+diverges on 259/721 corpus strings against both candidate reference
+revisions — a real Runner divergence, unresolved and tracked, so Lucie does
+NOT hold the tokenizer check; Teuken's chat template emits artifacts
+(`{Answer}`) though the surface and tool calls work. `reference_compare.py`
+was also fixed in this run: Runner now rejects unknown model names, so the
+script asks each server for its served model id instead of sending a
+placeholder.
+
 **Scalar-path pinning (since the 2026-07-29 TC promotion).** The tensor-core
 prefill GEMM is now the default on gated dense (Q4_K, arch) combos. It is
 fp16-tile arithmetic held to a tolerance gate (`tests/test_tc_tol.c`), not to

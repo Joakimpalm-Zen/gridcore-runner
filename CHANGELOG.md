@@ -5,6 +5,19 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Certified the European roster into the compatibility program: EuroLLM-9B,
+  Lucie-7B, Mistral-Nemo-12B, Teuken-7B and salamandra-7b are SHA-pinned in
+  `tests/compatibility/models.json` with a recorded evidence run — all five
+  pass load, cpu_cuda (128-token greedy byte-identical, scalar path), chat
+  and tool, plus the 8-token greedy_reference sweep against pinned llama.cpp
+  b10076 (salamandra 5/5 exact; the others show the same divergence class as
+  the long-certified models). Honest gaps recorded rather than skipped:
+  Lucie's tokenizer FAILS the 721-string differential (259 divergences
+  against both candidate references — a real Runner divergence, tracked);
+  EuroLLM's reference repo is gated and Teuken's has no tokenizer.json, so
+  their tokenizer checks are not_executed; long_context was not run for the
+  roster. `reference_compare.py` fixed en route: Runner rejects unknown
+  model names now, so the harness asks each server for its served model id.
 - Vendor sampling presets for four European families (each cites its
   source): `mistral-nemo` — Mistral's card is explicit that Nemo "requires
   smaller temperatures. We recommend to use a temperature of 0.3", so the

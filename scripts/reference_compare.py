@@ -101,13 +101,25 @@ def stop(process, log):
     log.close()
 
 
+def served_model_id(base):
+    # Runner rejects unknown model names (400, "see /v1/models") rather than
+    # silently serving whatever is loaded, so ask each server what it calls
+    # its model instead of sending a placeholder.
+    try:
+        listing = request_json(base + "/v1/models", timeout=15)
+        return listing["data"][0]["id"]
+    except Exception:
+        return "compat"
+
+
 def collect(command, log_path, prompts, tokens, startup_timeout, request_timeout):
     process, log, base = serve(command, log_path, startup_timeout)
     try:
+        model_id = served_model_id(base)
         outputs = []
         for prompt in prompts:
             response = request_json(base + "/v1/completions", {
-                "model": "compat", "prompt": prompt, "max_tokens": tokens,
+                "model": model_id, "prompt": prompt, "max_tokens": tokens,
                 "temperature": 0, "stream": False,
             }, timeout=request_timeout)
             outputs.append(completion_text(response))

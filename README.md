@@ -775,7 +775,25 @@ and `greedy_reference` per the recorded reports):
 architectures are **refused**, not run through llama-style math — a clear
 refusal beats plausible, silently-wrong output.
 
-New model-support work focuses on **EU and US model families**
+**European roster (added 2026-07-29, per the [model-scope
+focus](docs/model-scope.md)).** Five European families ride the certified
+`llama` path and are individually SHA-pinned in the manifest with a recorded
+evidence run (`tests/compatibility/out/eu-roster-*-2026-07-29.json`): each
+passed `load`, `cpu_cuda` (128-token greedy byte-identical, scalar path),
+`chat` and `tool`, plus the 8-token `greedy_reference` sweep against pinned
+llama.cpp b10076 (same divergence class as the long-certified models):
+
+| Model | Origin | Notes |
+|---|---|---|
+| EuroLLM-9B-Instruct | EU consortium | tokenizer check blocked (gated reference repo) |
+| Lucie-7B-Instruct | France (OpenLLM-France) | **tokenizer check FAILS** (259/721 vs both candidate references — unresolved, tracked) |
+| Mistral-Nemo-12B | France (Mistral) | tokenizer 3/721 edge divergences; vendor sampling preset (temp 0.3) |
+| Teuken-7B-instruct | Germany (OpenGPT-X) | chat template emits artifacts; tool calls clean |
+| salamandra-7b-instruct | Spain (BSC) | cleanest sweep: 5/5 greedy_reference exact |
+
+`long_context` was not executed for this roster and is recorded as such.
+
+New model-support work focuses on **European and US model families**
 ([docs/model-scope.md](docs/model-scope.md)); everything already certified
 stays certified and maintained.
 

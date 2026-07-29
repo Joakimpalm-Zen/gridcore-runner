@@ -1,0 +1,45 @@
+{
+  "schema_version": "gridcore.runner.greedy-reference.v1",
+  "generated_utc": "2026-07-29T07:56:01Z",
+  "runner": "runner 0.1.3-alpha",
+  "reference": "version: 10076 (305ba519a)",
+  "model": "models/Teuken-7B-instruct-commercial-v0.4-Q4_K_M.gguf",
+  "tokens": 8,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris.",
+      "reference": " Paris.",
+      "status": "pass"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": " if n < 2: return",
+      "reference": " if n < 2: return",
+      "status": "pass"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10 11",
+      "reference": " 9 10 11",
+      "status": "pass"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " there lived a young girl named Rosalind",
+      "reference": " there was a kingdom where the sun",
+      "status": "fail"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John\", \"age\": 2",
+      "reference": " \"John\", \"age\": 2",
+      "status": "pass"
+    }
+  ],
+  "totals": {
+    "passed": 4,
+    "failed": 1
+  }
+}

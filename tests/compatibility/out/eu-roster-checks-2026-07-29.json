@@ -1,0 +1,134 @@
+{
+ "schema_version": "gridcore.runner.model-compat-report.v1",
+ "generated_utc": "2026-07-29T07:59:45Z",
+ "note": "European-roster evidence run (docs/model-scope.md). cpu_cuda: 128-token greedy CPU vs GPU, scalar path pinned (RUNNER_CUDA_TC=0), byte-compared. greedy_reference: scripts/reference_compare.py vs pinned llama.cpp b10076 (305ba519a) CPU, 8-token 5-prompt sweep \u2014 per-prompt outputs in reference-<family>.json; the sweep is evidence, not a universal claim (recorded divergence class matches the existing certified archs). tokenizer: scripts/difftok.py, tokenizers==0.23.1, 721-string corpus. chat/tool: live /v1/chat/completions requests, tool_choice=required.",
+ "runner": "runner 0.1.3-alpha (d97e8d1)",
+ "reference": "llama.cpp b10076 (305ba519a), /home/lab/agent-torture-tools/llama/llama-b10076",
+ "models": {
+  "eurollm-9b-instruct-q4_k_m": {
+   "cpu_cuda": {
+    "status": "pass",
+    "detail": "128-tok greedy byte-identical, full=1"
+   },
+   "greedy_reference": {
+    "status": "pass",
+    "detail": "4/5 prompts exact; see reference-eurollm.json"
+   },
+   "tokenizer": {
+    "status": "not_executed",
+    "detail": "utter-project repo is gated (HTTP 401); no accessible reference"
+   },
+   "chat": {
+    "status": "pass",
+    "detail": "'Stockholm'"
+   },
+   "tool": {
+    "status": "pass",
+    "detail": "get_weather {'city': 'Paris'}"
+   },
+   "long_context": {
+    "status": "not_executed"
+   }
+  },
+  "lucie-7b-instruct-q4_k_m": {
+   "cpu_cuda": {
+    "status": "pass",
+    "detail": "128-tok greedy byte-identical, full=1"
+   },
+   "greedy_reference": {
+    "status": "pass",
+    "detail": "4/5 prompts exact; see reference-lucie.json"
+   },
+   "tokenizer": {
+    "status": "fail",
+    "detail": "259/721 strings diverge (56 whitespace-initial) against BOTH Lucie-7B-Instruct-v1.1 and -human-data references \u2014 a real runner divergence for Lucie's tokenizer, not a reference mismatch; unresolved, root cause not yet identified"
+   },
+   "chat": {
+    "status": "pass",
+    "detail": "'The capital of Sweden is Stockholm.'"
+   },
+   "tool": {
+    "status": "pass",
+    "detail": "get_weather {'city': ' Paris'} (leading space in value)"
+   },
+   "long_context": {
+    "status": "not_executed"
+   }
+  },
+  "mistral-nemo-instruct-2407-q4_k_m": {
+   "cpu_cuda": {
+    "status": "pass",
+    "detail": "128-tok greedy byte-identical, full=1"
+   },
+   "greedy_reference": {
+    "status": "pass",
+    "detail": "3/5 prompts exact; see reference-mistral-nemo.json"
+   },
+   "tokenizer": {
+    "status": "pass",
+    "detail": "3/721 diverge (Thai combining-character edge)"
+   },
+   "chat": {
+    "status": "pass",
+    "detail": "'Stockholm'"
+   },
+   "tool": {
+    "status": "pass",
+    "detail": "get_weather {'city': 'Paris'}"
+   },
+   "long_context": {
+    "status": "not_executed"
+   }
+  },
+  "teuken-7b-instruct-commercial-v0.4-q4_k_m": {
+   "cpu_cuda": {
+    "status": "pass",
+    "detail": "128-tok greedy byte-identical, full=1"
+   },
+   "greedy_reference": {
+    "status": "pass",
+    "detail": "4/5 prompts exact; see reference-teuken.json"
+   },
+   "tokenizer": {
+    "status": "not_executed",
+    "detail": "openGPT-X repo has no accessible tokenizer.json (HTTP 404)"
+   },
+   "chat": {
+    "status": "pass",
+    "detail": "answers via the surface; content was the template artifact '{Answer}' \u2014 chat-template quality flagged, surface works"
+   },
+   "tool": {
+    "status": "pass",
+    "detail": "get_weather {'city': 'Paris'}"
+   },
+   "long_context": {
+    "status": "not_executed"
+   }
+  },
+  "salamandra-7b-instruct-q4_k_m": {
+   "cpu_cuda": {
+    "status": "pass",
+    "detail": "128-tok greedy byte-identical, full=1"
+   },
+   "greedy_reference": {
+    "status": "pass",
+    "detail": "5/5 prompts exact; see reference-salamandra.json"
+   },
+   "tokenizer": {
+    "status": "pass",
+    "detail": "16/721 diverge (8 whitespace-initial)"
+   },
+   "chat": {
+    "status": "pass",
+    "detail": "'Stockholm.'"
+   },
+   "tool": {
+    "status": "pass",
+    "detail": "get_weather {'city': 'Paris'}"
+   },
+   "long_context": {
+    "status": "not_executed"
+   }
+  }
+ }
+}

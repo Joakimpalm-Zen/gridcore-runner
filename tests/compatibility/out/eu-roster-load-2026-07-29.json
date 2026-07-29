@@ -1,0 +1,194 @@
+{
+  "schema_version": "gridcore.runner.model-compat-report.v1",
+  "generated_utc": "2026-07-29T07:59:25Z",
+  "host": {
+    "os": "Linux",
+    "machine": "x86_64"
+  },
+  "runner": {
+    "path": "/home/lab/workspace/Gridcore/gridcore-runner/runner",
+    "version": "runner 0.1.3-alpha"
+  },
+  "reference": {
+    "path": null,
+    "version": null
+  },
+  "models": [
+    {
+      "id": "eurollm-9b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/EuroLLM-9B-Instruct-Q4_K_M.gguf",
+      "expected_sha256": "785a3b2883532381704ef74f866f822f179a931801d1ed1cf12e6deeb838806b",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 1393.3,
+          "stderr_tail": "gpu-split: budget=25.13GB fixed=0.84GB G=42/42 full=1 used=6.40GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (5.6 GB weights in VRAM)\ngpu: VRAM 18.82 GB free of 25.37 GB after init (kv 0.70 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/EuroLLM-9B-Instruct-Q4_K_M.gguf | llama | 42 layers | ctx 4096 | 64 threads | 1.08s\nsampling: generic (temp 0.00, top_p 0.95, top_k 40, min_p 0.05, repeat_penalty 1.10)\n\nprompt: 6 tok, 39.93 tok/s | gen: 1 tok, 53.03 tok/s\n"
+        },
+        "tokenizer": {
+          "status": "not_executed"
+        },
+        "greedy_reference": {
+          "status": "not_executed"
+        },
+        "cpu_cuda": {
+          "status": "not_executed"
+        },
+        "chat": {
+          "status": "not_executed"
+        },
+        "tool": {
+          "status": "not_executed"
+        },
+        "long_context": {
+          "status": "not_executed"
+        }
+      },
+      "actual_sha256": "785a3b2883532381704ef74f866f822f179a931801d1ed1cf12e6deeb838806b",
+      "file_status": "pass",
+      "complete": false
+    },
+    {
+      "id": "lucie-7b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Lucie-7B-Instruct-Q4_K_M.gguf",
+      "expected_sha256": "0d889e0c126eb0424e478029dd9198af2afdffce29b0d98a86455c3c5b506db3",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 1185.8,
+          "stderr_tail": "gpu-split: budget=25.13GB fixed=0.70GB G=32/32 full=1 used=4.93GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (4.1 GB weights in VRAM)\ngpu: VRAM 20.50 GB free of 25.37 GB after init (kv 0.54 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/Lucie-7B-Instruct-Q4_K_M.gguf | llama | 32 layers | ctx 4096 | 64 threads | 0.89s\nsampling: lucie (temp 0.00, top_p 0.90, top_k 0, min_p 0.00, repeat_penalty 1.10)\n\nprompt: 6 tok, 52.74 tok/s | gen: 1 tok, 70.72 tok/s\n"
+        },
+        "tokenizer": {
+          "status": "not_executed"
+        },
+        "greedy_reference": {
+          "status": "not_executed"
+        },
+        "cpu_cuda": {
+          "status": "not_executed"
+        },
+        "chat": {
+          "status": "not_executed"
+        },
+        "tool": {
+          "status": "not_executed"
+        },
+        "long_context": {
+          "status": "not_executed"
+        }
+      },
+      "actual_sha256": "0d889e0c126eb0424e478029dd9198af2afdffce29b0d98a86455c3c5b506db3",
+      "file_status": "pass",
+      "complete": false
+    },
+    {
+      "id": "mistral-nemo-instruct-2407-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+      "expected_sha256": "5964f3e6d9c17b99e3d2174022048f3ec58b12ee8fefa987888e0562d070d52e",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 1462.1,
+          "stderr_tail": "gpu-split: budget=25.13GB fixed=0.93GB G=40/40 full=1 used=8.14GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (7.5 GB weights in VRAM)\ngpu: VRAM 16.96 GB free of 25.37 GB after init (kv 0.67 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf | llama | 40 layers | ctx 4096 | 64 threads | 1.11s\nsampling: mistral-nemo (temp 0.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.10)\n\nprompt: 5 tok, 25.41 tok/s | gen: 1 tok, 41.93 tok/s\n"
+        },
+        "tokenizer": {
+          "status": "not_executed"
+        },
+        "greedy_reference": {
+          "status": "not_executed"
+        },
+        "cpu_cuda": {
+          "status": "not_executed"
+        },
+        "chat": {
+          "status": "not_executed"
+        },
+        "tool": {
+          "status": "not_executed"
+        },
+        "long_context": {
+          "status": "not_executed"
+        }
+      },
+      "actual_sha256": "5964f3e6d9c17b99e3d2174022048f3ec58b12ee8fefa987888e0562d070d52e",
+      "file_status": "pass",
+      "complete": false
+    },
+    {
+      "id": "teuken-7b-instruct-commercial-v0.4-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Teuken-7B-instruct-commercial-v0.4-Q4_K_M.gguf",
+      "expected_sha256": "03fd13daafb6f20c1c5f4b908d163841cdd96803a6f5a7c0c39dd236a2b1630b",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 1429.4,
+          "stderr_tail": "gpu-split: budget=25.13GB fixed=1.39GB G=32/32 full=1 used=5.70GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (5.0 GB weights in VRAM)\ngpu: VRAM 19.96 GB free of 25.37 GB after init (kv 0.13 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/Teuken-7B-instruct-commercial-v0.4-Q4_K_M.gguf | llama | 32 layers | ctx 4096 | 64 threads | 0.94s\nsampling: teuken (temp 0.00, top_p 0.95, top_k 0, min_p 0.00, repeat_penalty 1.10)\n\nprompt: 6 tok, 17.22 tok/s | gen: 1 tok, 41.31 tok/s\n"
+        },
+        "tokenizer": {
+          "status": "not_executed"
+        },
+        "greedy_reference": {
+          "status": "not_executed"
+        },
+        "cpu_cuda": {
+          "status": "not_executed"
+        },
+        "chat": {
+          "status": "not_executed"
+        },
+        "tool": {
+          "status": "not_executed"
+        },
+        "long_context": {
+          "status": "not_executed"
+        }
+      },
+      "actual_sha256": "03fd13daafb6f20c1c5f4b908d163841cdd96803a6f5a7c0c39dd236a2b1630b",
+      "file_status": "pass",
+      "complete": false
+    },
+    {
+      "id": "salamandra-7b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/salamandra-7b-instruct-Q4_K_M-f32.gguf",
+      "expected_sha256": "bac8e8c1d1d9d53cbdb148b8ff9ad378ddb392429207099e85b5aae3a43bff3d",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 1205.0,
+          "stderr_tail": "gpu-split: budget=25.13GB fixed=1.14GB G=32/32 full=1 used=5.07GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (4.9 GB weights in VRAM)\ngpu: VRAM 19.72 GB free of 25.37 GB after init (kv 0.54 GB + scratch 0.01 GB this instance)\nloaded /home/lab/workspace/Gridcore/gridcore-runner/models/salamandra-7b-instruct-Q4_K_M-f32.gguf | llama | 32 layers | ctx 4096 | 64 threads | 0.95s\nsampling: salamandra (temp 0.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.20)\n\nprompt: 5 tok, 46.93 tok/s | gen: 1 tok, 65.23 tok/s\n"
+        },
+        "tokenizer": {
+          "status": "not_executed"
+        },
+        "greedy_reference": {
+          "status": "not_executed"
+        },
+        "cpu_cuda": {
+          "status": "not_executed"
+        },
+        "chat": {
+          "status": "not_executed"
+        },
+        "tool": {
+          "status": "not_executed"
+        },
+        "long_context": {
+          "status": "not_executed"
+        }
+      },
+      "actual_sha256": "bac8e8c1d1d9d53cbdb148b8ff9ad378ddb392429207099e85b5aae3a43bff3d",
+      "file_status": "pass",
+      "complete": false
+    }
+  ],
+  "complete": false
+}
