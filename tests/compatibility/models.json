@@ -312,6 +312,27 @@
     "tool",
     "long_context"
    ]
+  },
+  {
+   "id": "tildeopen-30b-q4_k_m",
+   "architecture": "llama",
+   "family": "TildeOpen (Tilde, Latvia)",
+   "file": "models/TildeOpen-30b-Q4_K_M.gguf",
+   "sha256": "b051f04a87a74184b70c79ea7e514d7605817eebb5d7b8cc8f610406a52f82d5",
+   "tokenizer_reference": "TildeAI/TildeOpen-30b",
+   "reference": {
+    "implementation": "llama.cpp",
+    "revision": "b10076"
+   },
+   "checks": [
+    "load",
+    "tokenizer",
+    "greedy_reference",
+    "cpu_cuda",
+    "chat",
+    "tool",
+    "long_context"
+   ]
   }
  ]
 }

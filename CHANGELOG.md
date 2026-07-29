@@ -5,6 +5,23 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- `--gpu-layers 0` now means what it says — no GPU (same as `--gpu off`).
+  It used to be the auto-fit sentinel and silently ran FULL GPU, a
+  documented footgun that bit its own certification run: the roster's
+  first cpu_cuda evidence used it as the CPU side and compared GPU with
+  GPU. Re-verified with a true `--gpu off` CPU side: all five EU models
+  and Qwen3-30B-A3B are byte-identical CPU vs GPU over 128 greedy tokens.
+  Omit the flag for auto-fit.
+- TildeOpen-30b added to the compatibility manifest (SHA-pinned): loads
+  and generates coherently on GPU (llama arch, 60 layers, full 19.4 GB
+  offload) — and its evidence run exposed an OPEN ENGINE DEFECT: the
+  pure-CPU path emits <unk> for content tokens from the second generated
+  token onward (batched CPU prefill is sane per the activation dump; the
+  failure is single-token CPU decode, deterministic, independent of -b/-t).
+  TildeOpen is the first model to trip it; its unique geometry — GQA 48:8
+  (ratio 6), vocab 131072, n_embd 6144 — is the suspect surface. cpu_cuda
+  and greedy_reference are recorded FAILED for TildeOpen until the defect
+  is fixed; GPU serving is unaffected.
 - Certified the European roster into the compatibility program: EuroLLM-9B,
   Lucie-7B, Mistral-Nemo-12B, Teuken-7B and salamandra-7b are SHA-pinned in
   `tests/compatibility/models.json` with a recorded evidence run — all five

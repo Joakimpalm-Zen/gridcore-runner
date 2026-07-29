@@ -790,8 +790,13 @@ llama.cpp b10076 (same divergence class as the long-certified models):
 | Mistral-Nemo-12B | France (Mistral) | tokenizer 3/721 edge divergences; vendor sampling preset (temp 0.3) |
 | Teuken-7B-instruct | Germany (OpenGPT-X) | chat template emits artifacts; tool calls clean |
 | salamandra-7b-instruct | Spain (BSC) | cleanest sweep: 5/5 greedy_reference exact |
+| TildeOpen-30b | Latvia (Tilde) | loads + generates on GPU (full 19.4 GB offload — the largest European model in the fleet); **cpu_cuda and greedy_reference blocked by an open engine defect** in the pure-CPU decode path that TildeOpen is first to trip (tracked); base model, so chat/tool not claimed |
 
-`long_context` was not executed for this roster and is recorded as such.
+`long_context` was not executed for this roster and is recorded as such. The
+roster's cpu_cuda evidence was re-verified with a true `--gpu off` CPU side
+after a method correction (`--gpu-layers 0` used to be the auto-fit sentinel
+and silently ran full GPU — fixed: an explicit 0 now means no GPU); all five
+EU models are byte-identical CPU vs GPU over 128 greedy tokens.
 
 New model-support work focuses on **European and US model families**
 ([docs/model-scope.md](docs/model-scope.md)); everything already certified

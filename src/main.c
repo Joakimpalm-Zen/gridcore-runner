@@ -142,7 +142,8 @@ static void usage(const char *prog) {
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
-        "  --gpu-layers N force N leading layers on the GPU, rest on CPU (0=auto-fit)\n"
+        "  --gpu-layers N force N leading layers on the GPU, rest on CPU\n"
+        "                 (0 = no GPU, same as --gpu off; omit for auto-fit)\n"
         "  --cpu-moe      keep sparse MoE expert FFNs in RAM while CUDA runs\n"
         "                 attention and other dense tensors on the GPU\n"
         "  --wait-for-vram [S]  when another registered runner is holding the\n"
@@ -264,7 +265,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--bench-json")) bench_json = true;
         else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = (int)int_arg(a, NEXT, 0, 100);
-        else if (!strcmp(a, "--gpu-layers")) mp.gpu_layers_override = (int)int_arg(a, NEXT, 0, 100000);
+        else if (!strcmp(a, "--gpu-layers")) {
+            // An explicit 0 means what it says: no layers on the GPU. It used
+            // to be the "auto-fit" sentinel, which read as CPU but silently
+            // ran full-GPU — that exact misreading produced vacuous
+            // CPU-vs-GPU certification evidence (GPU compared with GPU).
+            // Auto-fit is the default; omit the flag to get it.
+            int n = (int)int_arg(a, NEXT, 0, 100000);
+            if (n == 0) mp.gpu_mode = GPU_OFF;
+            else mp.gpu_layers_override = n;
+        }
         else if (!strcmp(a, "--cpu-moe")) mp.cpu_moe = true;
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = (int)int_arg(a, NEXT, 0, 100);

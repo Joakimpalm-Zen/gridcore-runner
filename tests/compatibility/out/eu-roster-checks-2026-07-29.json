@@ -8,7 +8,7 @@
   "eurollm-9b-instruct-q4_k_m": {
    "cpu_cuda": {
     "status": "pass",
-    "detail": "128-tok greedy byte-identical, full=1"
+    "detail": "128-tok greedy byte-identical, TRUE CPU (--gpu off) vs full GPU; re-verified 2026-07-29 after the --gpu-layers-0 method correction"
    },
    "greedy_reference": {
     "status": "pass",
@@ -33,7 +33,7 @@
   "lucie-7b-instruct-q4_k_m": {
    "cpu_cuda": {
     "status": "pass",
-    "detail": "128-tok greedy byte-identical, full=1"
+    "detail": "128-tok greedy byte-identical, TRUE CPU (--gpu off) vs full GPU; re-verified 2026-07-29 after the --gpu-layers-0 method correction"
    },
    "greedy_reference": {
     "status": "pass",
@@ -59,7 +59,7 @@
   "mistral-nemo-instruct-2407-q4_k_m": {
    "cpu_cuda": {
     "status": "pass",
-    "detail": "128-tok greedy byte-identical, full=1"
+    "detail": "128-tok greedy byte-identical, TRUE CPU (--gpu off) vs full GPU; re-verified 2026-07-29 after the --gpu-layers-0 method correction"
    },
    "greedy_reference": {
     "status": "pass",
@@ -84,7 +84,7 @@
   "teuken-7b-instruct-commercial-v0.4-q4_k_m": {
    "cpu_cuda": {
     "status": "pass",
-    "detail": "128-tok greedy byte-identical, full=1"
+    "detail": "128-tok greedy byte-identical, TRUE CPU (--gpu off) vs full GPU; re-verified 2026-07-29 after the --gpu-layers-0 method correction"
    },
    "greedy_reference": {
     "status": "pass",
@@ -109,7 +109,7 @@
   "salamandra-7b-instruct-q4_k_m": {
    "cpu_cuda": {
     "status": "pass",
-    "detail": "128-tok greedy byte-identical, full=1"
+    "detail": "128-tok greedy byte-identical, TRUE CPU (--gpu off) vs full GPU; re-verified 2026-07-29 after the --gpu-layers-0 method correction"
    },
    "greedy_reference": {
     "status": "pass",
@@ -130,6 +130,36 @@
    "long_context": {
     "status": "not_executed"
    }
+  },
+  "tildeopen-30b-q4_k_m": {
+   "load": {
+    "status": "pass",
+    "detail": "llama arch, 60 layers, full GPU offload (19.4 GB), coherent generation"
+   },
+   "cpu_cuda": {
+    "status": "fail",
+    "detail": "BLOCKED BY AN OPEN ENGINE DEFECT: the pure-CPU path (--gpu off) emits <unk> for content tokens from the second generated token onward; GPU output is coherent. Batched CPU prefill is sane (activation dump: finite stats through all 60 layers, correct first sampled token); the defect is in single-token CPU decode, position/state-dependent, reproducible deterministically, unaffected by -b or -t. TildeOpen is the first model to trip it; unique geometry: GQA 48:8 (ratio 6), vocab 131072, n_embd 6144, freq_base 200000, ctx_train 65536."
+   },
+   "greedy_reference": {
+    "status": "fail",
+    "detail": "1/5 prompts exact (see reference-tildeopen.json) \u2014 the runner side ran the defective CPU path; llama.cpp side coherent"
+   },
+   "tokenizer": {
+    "status": "not_executed",
+    "detail": "TildeAI/TildeOpen-30b publishes no tokenizer.json (HTTP 404)"
+   },
+   "chat": {
+    "status": "not_executed",
+    "detail": "base model, no chat template claim to test"
+   },
+   "tool": {
+    "status": "not_executed",
+    "detail": "base model"
+   },
+   "long_context": {
+    "status": "not_executed"
+   }
   }
- }
+ },
+ "method_correction": "The first revision's cpu_cuda runs used '--gpu-layers 0' as the CPU side, which the runner then treated as the auto-fit sentinel and silently ran FULL GPU \u2014 the comparisons were GPU-vs-GPU and vacuous. Re-run 2026-07-29 with a true '--gpu off' CPU side, RUNNER_CUDA_TC=0, 128-token greedy: all five EU models plus Qwen3-30B-A3B are byte-IDENTICAL CPU vs GPU. The flag footgun is fixed in the same change (--gpu-layers 0 now means no GPU). Corroborating evidence predating the correction: reference_compare ran every EU model with --gpu off and matched llama.cpp b10076."
 }
