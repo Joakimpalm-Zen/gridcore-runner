@@ -494,6 +494,17 @@ static bool moe_fused_eligible(const model_t *m) {
 }
 
 static bool moe_grouped_eligible(const model_t *m) {
+    // Default OFF as of 2026-07-29: at MVB=16 tiles (~1-2 tokens/expert) the
+    // grouped path loses to the P1 fused prefill on BOTH boxes — 3070:
+    // 55.4 ms vs 33.5 ms GPU-busy per tile; Blackwell MIG full-offload
+    // end-to-end: qwen3-30b prefill 125.4 tok/s grouped vs 194.3 fused
+    // (TC-on-grouped is worse still, 86.5 — the 16-column TC tile wastes
+    // more than it amortizes at these expert token counts). Grouping only
+    // pays with many tokens per expert (large-tile / batched serving);
+    // keep it reachable for those experiments via RUNNER_MOE_GROUPED=1.
+    const char *e = getenv("RUNNER_MOE_GROUPED");
+    if (!e || !*e || strcmp(e, "0") == 0 || strcmp(e, "off") == 0)
+        return false;
     if (!moe_fused_eligible(m)) return false;
     for (int l = 0; l < m->n_layer; l++) {
         const layer_t *ly = &m->layers[l];
