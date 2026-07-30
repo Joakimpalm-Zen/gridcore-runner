@@ -83,7 +83,8 @@ jobs:
         # refuses a bare pip install, so install into a venv instead
         run: |
           python3 -m venv .venv
-          .venv/bin/python -m pip install --quiet pytest
+          .venv/bin/python -m pip install --quiet pytest mypy
+          MYPYPATH=python/src .venv/bin/python -m mypy --strict -p gridcore_runner
           PYTHONPATH=python/src .venv/bin/python -m pytest python/tests/test_client.py
       - name: sparse MoE synthetic correctness
         run: make test-moe PYTHON=.venv/bin/python

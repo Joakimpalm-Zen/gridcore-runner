@@ -9,5 +9,11 @@ description = "Python client and process boundary for Gridcore Runner"
 readme = "README.md"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+dev = ["mypy>=1.14,<2", "pytest>=8,<10"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"gridcore_runner" = ["py.typed"]

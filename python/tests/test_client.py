@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
 import socket
 import sys
 import tempfile
-import time
 import threading
+import time
 import unittest
-import urllib.error
+from importlib.resources import files
 from pathlib import Path
 
 from gridcore_runner import (
     ManagedRunner,
+    RunnerCancelledError,
     RunnerEndpoint,
     RunnerProtocolError,
-    RunnerCancelledError,
     RunnerStallError,
     ServerLaunch,
     StartupLease,
@@ -40,6 +39,11 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+class TypedPackageTests(unittest.TestCase):
+    def test_pep561_marker_is_packaged(self):
+        self.assertTrue(files("gridcore_runner").joinpath("py.typed").is_file())
 
 
 class StartupLeaseTests(unittest.TestCase):

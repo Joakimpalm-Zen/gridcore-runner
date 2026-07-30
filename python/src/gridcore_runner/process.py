@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import subprocess
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from .endpoint import RunnerEndpoint
 
 
-def spawn_detached(args: list[str], *, cwd: str | Path | None = None):
+def spawn_detached(
+    args: list[str], *, cwd: str | Path | None = None
+) -> subprocess.Popen[Any]:
     """Popen a child isolated from the parent's console signals, so a Ctrl+C
     aimed at the supervisor never tears down the server underneath it."""
     kwargs: dict[str, Any] = {
@@ -21,7 +24,7 @@ def spawn_detached(args: list[str], *, cwd: str | Path | None = None):
     if cwd is not None:
         kwargs["cwd"] = str(cwd)
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     else:
         kwargs["start_new_session"] = True
     return subprocess.Popen(args, **kwargs)
@@ -195,5 +198,5 @@ class ManagedRunner:
         self.process = None
 
     @staticmethod
-    def _default_spawn(args: list[str]):
+    def _default_spawn(args: list[str]) -> subprocess.Popen[Any]:
         return spawn_detached(args, cwd=Path(args[0]).resolve().parent)

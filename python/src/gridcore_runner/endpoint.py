@@ -5,8 +5,9 @@ import socket
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 
 class RunnerHttpError(RuntimeError):
@@ -307,7 +308,7 @@ class RunnerEndpoint:
             raise RunnerProtocolError("runner response must be a JSON object")
         return data
 
-    def _open(self, request: urllib.request.Request, timeout: float):
+    def _open(self, request: urllib.request.Request, timeout: float) -> Any:
         return self._opener(request, timeout=timeout)
 
     def _request(self, path: str, payload: dict[str, Any]) -> urllib.request.Request:

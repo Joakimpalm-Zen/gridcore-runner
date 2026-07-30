@@ -8,6 +8,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 _RECORD = "owner.json"
 
@@ -74,7 +75,7 @@ class StartupLease:
         }), encoding="utf-8")
         return claim
 
-    def _read_record(self, path: Path) -> dict:
+    def _read_record(self, path: Path) -> dict[str, Any]:
         try:
             source = path / _RECORD if path.is_dir() else path
             data = json.loads(source.read_text(encoding="utf-8"))
@@ -91,7 +92,7 @@ class StartupLease:
             return None
 
 
-def _still_owned(record: dict) -> bool:
+def _still_owned(record: dict[str, Any]) -> bool:
     """True only if the record's owner process is genuinely still running.
 
     Comparing the PID alone is not enough: after an unclean exit the OS can
@@ -121,7 +122,9 @@ def _process_start_time(pid: int) -> str | None:
     """
     if os.name == "nt":
         try:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = ctypes.WinDLL(  # type: ignore[attr-defined]
+                "kernel32", use_last_error=True
+            )
             kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
             kernel32.OpenProcess.restype = ctypes.c_void_p
             handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFO
@@ -165,10 +168,12 @@ def _process_start_time(pid: int) -> str | None:
         return None
 
 
-def _record_owner_pid(record: dict) -> int | None:
+def _record_owner_pid(record: dict[str, Any]) -> int | None:
     # ``clu_pid`` accepts records written by the former Clu-local lease during
     # migration; Runner owns no other part of that legacy schema.
     value = record.get("owner_pid", record.get("clu_pid"))
+    if value is None:
+        return None
     try:
         pid = int(value)
     except (TypeError, ValueError):
@@ -186,7 +191,7 @@ def _process_alive(pid: int) -> bool:
         except OSError:
             return False
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
     kernel32.OpenProcess.restype = ctypes.c_void_p
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
@@ -194,7 +199,7 @@ def _process_alive(pid: int) -> bool:
     if handle:
         kernel32.CloseHandle(handle)
         return True
-    return ctypes.get_last_error() == 5
+    return bool(ctypes.get_last_error() == 5)  # type: ignore[attr-defined]
 
 
 def _remove_tree(path: Path) -> None:
