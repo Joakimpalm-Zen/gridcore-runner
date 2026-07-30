@@ -367,6 +367,12 @@ typedef struct {
     int    gpu_layers_override; // forced leading GPU layer count (0 = auto)
     bool   cpu_moe;          // keep sparse expert FFNs on the host while CUDA
                              // runs the remaining tensors/layers
+    bool  *moe_host;         // [n_layer] per-layer expert placement under
+                             // cpu_moe: true = this layer's expert FFN runs on
+                             // the host. NULL when cpu_moe is off (no layer
+                             // bounces). Decided once per file at upload and
+                             // shared by every instance on that upload.
+    int    cpu_moe_layers;   // requested host-expert layer count (params copy)
     int    gpu_layers;       // leading layers run on GPU (n_layer = full,
                              // <n_layer = partial offload, CPU finishes the rest).
                              // Decided by the first instance to upload a given
@@ -490,6 +496,9 @@ void       gpu_batch_free(gpu_batch *b);
 bool       gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
                             const int *pos, int n, float **out);
 
+// cpu_moe_layers sentinels; any value >= 0 is a literal host-expert layer count
+enum { CPU_MOE_ALL = -1, CPU_MOE_AUTO = -2 };
+
 typedef struct {
     int   gpu_mode;    // GPU_AUTO | GPU_OFF
     int   n_threads;   // worker threads for this instance (0 = 1)
@@ -516,6 +525,12 @@ typedef struct {
     // attention, norms, embeddings/output and any dense layers. This is
     // tensor-role placement, distinct from the leading-layer split above.
     bool  cpu_moe;
+    // How many MoE layers keep their experts on the host, when cpu_moe is set.
+    // CPU_MOE_ALL reproduces the original all-or-nothing flag; CPU_MOE_AUTO
+    // fills the remaining VRAM budget with expert banks and hosts the rest;
+    // N >= 0 hosts exactly the deepest N MoE layers (device-resident experts
+    // stay a leading run, matching the leading-layer split's direction).
+    int   cpu_moe_layers;
     int   reserve_ram_pct;
     // --wait-for-vram: seconds to queue behind other registered runners rather
     // than refusing outright. 0 = refuse immediately (the default).
@@ -548,6 +563,10 @@ float *model_forward(model_t *m, int token, int pos);
 // FFN (including its residual) to m->x on the host. CUDA uses this after its
 // attention sublayer and then resumes on-device. False rejects a non-MoE layer.
 bool   model_moe_ffn_cpu(model_t *m, int layer, int n);
+// byte cost of one layer's expert half (router + experts + gemma shared branch)
+uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert);
+// fill m->moe_host for a requested host-expert layer count (see model.c)
+void   model_moe_place_host(model_t *m, int host_layers);
 // speculative verify: forward a small batch keeping hidden states, then pull
 // each row's logits lazily (false/NULL on full GPU offload or n > spec_batch)
 bool   model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos);

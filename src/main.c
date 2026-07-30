@@ -144,8 +144,11 @@ static void usage(const char *prog) {
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
         "  --gpu-layers N force N leading layers on the GPU, rest on CPU\n"
         "                 (0 = no GPU, same as --gpu off; omit for auto-fit)\n"
-        "  --cpu-moe      keep sparse MoE expert FFNs in RAM while CUDA runs\n"
-        "                 attention and other dense tensors on the GPU\n"
+        "  --cpu-moe [N|auto]  keep sparse MoE expert FFNs in RAM while CUDA\n"
+        "                 runs attention and other dense tensors on the GPU.\n"
+        "                 Bare = every expert layer on the host; N = only the\n"
+        "                 deepest N expert layers (the rest stay on the GPU);\n"
+        "                 auto = fill the VRAM budget with expert banks first\n"
         "  --wait-for-vram [S]  when another registered runner is holding the\n"
         "                 GPU, queue for up to S seconds (default 300) instead\n"
         "                 of refusing. Without it a runner that does not fit\n"
@@ -275,7 +278,21 @@ int main(int argc, char **argv) {
             if (n == 0) mp.gpu_mode = GPU_OFF;
             else mp.gpu_layers_override = n;
         }
-        else if (!strcmp(a, "--cpu-moe")) mp.cpu_moe = true;
+        else if (!strcmp(a, "--cpu-moe")) {
+            // Optional argument: a layer count or "auto". A bare --cpu-moe
+            // keeps every expert FFN on the host (the original behaviour), so
+            // the argument is only consumed when it is unmistakably ours —
+            // every other CLI token starts with '-' or is a flag's operand.
+            mp.cpu_moe = true;
+            mp.cpu_moe_layers = CPU_MOE_ALL;
+            const char *nx = i + 1 < argc ? argv[i + 1] : NULL;
+            if (nx && !strcmp(nx, "auto")) {
+                mp.cpu_moe_layers = CPU_MOE_AUTO;
+                i++;
+            } else if (nx && nx[0] >= '0' && nx[0] <= '9') {
+                mp.cpu_moe_layers = (int)int_arg(a, argv[++i], 0, INT_MAX);
+            }
+        }
         else if (!strcmp(a, "--reserve-ram")) mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-cpu")) reserve_cpu_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--wait-for-vram")) {
@@ -362,7 +379,10 @@ int main(int argc, char **argv) {
         // Placement modes controllers may safely request. cpu_moe means the
         // CUDA backend can keep dense/attention tensors resident while sparse
         // expert FFNs execute from system RAM.
-        printf(",\"tensor_placement\":{\"cpu_moe\":true}");
+        // cpu_moe_partial advertises the optional layer count / auto fit, so a
+        // controller can size the expert split instead of guessing all-or-none.
+        printf(",\"tensor_placement\":{\"cpu_moe\":true,"
+               "\"cpu_moe_partial\":true}");
         // the fixed -m swap-registry capacity, so a controller bounds the set of
         // models it launches instead of overflowing it (see RUNNER_MAX_MODELS)
         printf(",\"max_models\":%d", RUNNER_MAX_MODELS);

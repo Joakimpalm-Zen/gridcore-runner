@@ -97,7 +97,67 @@ def test_moe_expert_cpu_placement_matches_dense(runner_bin, models):
     caps = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
                           stdout=subprocess.PIPE, check=True)
     if b'"available":true' in caps.stdout:
-        assert b"experts on CPU" in proc.stderr
+        assert b"expert layers on CPU" in proc.stderr
+
+
+def _split_line(stderr):
+    for line in stderr.decode(errors="replace").splitlines():
+        if line.startswith("gpu-split: experts "):
+            return line
+    return ""
+
+
+@pytest.mark.parametrize("mode", [("--cpu-moe", "0"), ("--cpu-moe", "1"),
+                                  ("--cpu-moe", "auto")])
+@pytest.mark.parametrize("variant", ["moe1", "moe2", "moe3"])
+def test_partial_expert_offload_matches_dense(runner_bin, models, variant, mode):
+    """Partial expert offload places only some banks on the device, so the two
+    placements must coexist inside one forward: a device-resident bank runs the
+    CUDA MoE path against uploaded bindings while a host bank still bounces the
+    activation tile. Output must stay identical to the dense oracle for every
+    count, in both expert layouts (moe3 is split-per-expert) and at top-2
+    (moe2), which is what proves the two paths agree rather than one of them
+    quietly serving every layer."""
+    dense = _generate(runner_bin, f"{models}.dense.gguf")
+    proc = _run(runner_bin, f"{models}.{variant}.gguf", extra=mode)
+    assert proc.stdout == dense, f"{variant} {mode} must match the dense oracle"
+    # the same silent-fallback guard the full-GPU test applies: a binding miss
+    # would degrade to the CPU path and still print identical tokens
+    assert b"continuing on CPU" not in proc.stderr, (
+        f"{variant} {mode} fell back to the CPU path:\n"
+        + proc.stderr.decode(errors="replace"))
+
+
+def test_partial_expert_counts_are_reported(runner_bin, models):
+    """The split line must say where the experts actually went — the 5070
+    install could not tell that --cpu-moe was leaving 8.8 GB of its card idle
+    because nothing reported the expert placement."""
+    caps = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
+                          stdout=subprocess.PIPE, check=True)
+    if b'"backend":"cuda"' not in caps.stdout:
+        pytest.skip("split reporting is CUDA-side")
+    all_host = _run(runner_bin, f"{models}.moe1.gguf", extra=("--cpu-moe",))
+    assert "experts 0/2 layers on GPU, 2 on host" in _split_line(all_host.stderr)
+    none_host = _run(runner_bin, f"{models}.moe1.gguf", extra=("--cpu-moe", "0"))
+    assert "experts 2/2 layers on GPU, 0 on host" in _split_line(none_host.stderr)
+    one_host = _run(runner_bin, f"{models}.moe1.gguf", extra=("--cpu-moe", "1"))
+    assert "experts 1/2 layers on GPU, 1 on host" in _split_line(one_host.stderr)
+    auto = _run(runner_bin, f"{models}.moe1.gguf", extra=("--cpu-moe", "auto"))
+    assert "(auto fit)" in _split_line(auto.stderr)
+
+
+def test_cpu_moe_count_is_parsed_strictly(runner_bin, models):
+    """A bare --cpu-moe must keep its original all-on-host meaning even when a
+    non-numeric argument follows, and a malformed count must fail loudly rather
+    than being silently read as 'all' (the env-parsing footgun class)."""
+    bare = _run(runner_bin, f"{models}.moe1.gguf", extra=("--cpu-moe", "--temp", "0"))
+    assert bare.returncode == 0
+    bad = subprocess.run(
+        [runner_bin, "-m", f"{models}.moe1.gguf", "-p", "x", "-n", "1",
+         "--cpu-moe", "99999999999999999999"],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    assert bad.returncode != 0
+    assert b"expects an integer" in bad.stderr
 
 
 def test_moe_gpu_forward_does_not_fall_back(runner_bin, models):
@@ -126,3 +186,4 @@ def test_caps_advertise_moe_tensor_placement(runner_bin):
         [runner_bin, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
         check=True, text=True).stdout)
     assert caps["tensor_placement"]["cpu_moe"] is True
+    assert caps["tensor_placement"]["cpu_moe_partial"] is True

@@ -287,6 +287,7 @@ typedef struct gpu_weights {
     CUdeviceptr weights;
     size_t      weights_len;
     bool        cpu_moe;                // sparse tensor-role placement mode
+    int         cpu_moe_layers;         // requested host-expert count (share key)
     gpu_weight_binding *bindings;       // packed non-expert tensors in this mode
     int         n_bindings, cap_bindings;
     int         gpu_layers;             // split decided by the first loader
@@ -470,16 +471,39 @@ static bool moe_grouped_type_ok(int type) {
     }
 }
 
+// Per-layer expert placement under tensor-role mode. Outside that mode every
+// expert bank is device-resident, so the array is absent and the answer is no.
+static bool moe_on_host(const model_t *m, int l) {
+    return m->cpu_moe && m->moe_host && m->moe_host[l];
+}
+
+static bool moe_any_on_host(const model_t *m) {
+    if (!m->cpu_moe) return false;
+    for (int l = 0; l < m->n_layer; l++)
+        if (m->layers[l].is_moe && moe_on_host(m, l)) return true;
+    return false;
+}
+
+// Any expert bank the device is expected to run — the trigger for uploading
+// expert tensors, validating their types, and allocating MoE scratch.
+static bool moe_any_on_device(const model_t *m) {
+    if (m->n_expert <= 0) return false;
+    for (int l = 0; l < m->n_layer; l++)
+        if (m->layers[l].is_moe && !moe_on_host(m, l)) return true;
+    return false;
+}
+
 // The fused device-routing MoE path needs the fused-3D expert layout (a
 // legacy split model has one arbitrarily-placed tensor per expert, which
 // in-kernel base+e*stride addressing cannot express) and indirect kernels
 // for every expert tensor type. All-or-nothing per model: one eager layer
 // would force the graph off anyway.
 static bool moe_fused_eligible(const model_t *m) {
-    if (m->n_expert <= 0 || m->n_expert > 256 || m->cpu_moe) return false;
+    if (m->n_expert <= 0 || m->n_expert > 256) return false;
+    if (!moe_any_on_device(m)) return false;
     for (int l = 0; l < m->n_layer; l++) {
         const layer_t *ly = &m->layers[l];
-        if (!ly->is_moe) continue;
+        if (!ly->is_moe || moe_on_host(m, l)) continue;
         if (ly->moe_split) return false;
         if (ly->moe_gemma) {
             if (!moe_indirect_type_ok(ly->ffn_gate_up_exps->type) ||
@@ -592,7 +616,8 @@ static bool shared_matches(const gpu_weights *w, const model_t *m,
         w->rope_dim != m->rope_dim || w->rope_dim_local != m->rope_dim_local ||
         w->kv_q8 != (int)m->kv_q8 || w->v_rmsnorm != (int)m->v_rmsnorm ||
         w->rope_base != m->rope_base || w->rope_mscale != m->rope_mscale ||
-        w->cpu_moe != m->cpu_moe)
+        w->cpu_moe != m->cpu_moe ||
+        w->cpu_moe_layers != m->cpu_moe_layers)
         return false;
     if ((w->rope_inv_freq_local != NULL) != (m->rope_inv_freq_local != NULL))
         return false;
@@ -667,32 +692,19 @@ static void shared_release(gpu_weights *w) {
 // dense FFN and a sparse-MoE layer (router + every expert, fused or split).
 // The dense w_gate/w_up/w_down are NULL on a MoE layer, so accounting only
 // those undercounts a MoE layer by ~all of its weight (the experts).
-static size_t layer_weight_bytes(const layer_t *ly, int n_expert, bool cpu_moe) {
+static size_t layer_weight_bytes(const layer_t *ly, int n_expert,
+                                 bool host_experts) {
     size_t wb = 0;
     gguf_tensor *att[] = { ly->wq, ly->wk, ly->wv, ly->wo, ly->wqkv,
                            ly->wq_gate, ly->ssm_conv, ly->ssm_beta,
                            ly->ssm_alpha, ly->ssm_out };
     for (size_t i = 0; i < sizeof(att) / sizeof(*att); i++)
         if (att[i]) wb += att[i]->nbytes;
-    if (ly->is_moe && cpu_moe) {
+    if (ly->is_moe && host_experts) {
         // The complete expert FFN (router, routed tensors and a coupled
         // Gemma shared branch) executes on the host. Attention remains here.
     } else if (ly->is_moe) {
-        if (ly->ffn_gate_inp) wb += ly->ffn_gate_inp->nbytes;
-        if (ly->ffn_gate_up_exps) wb += ly->ffn_gate_up_exps->nbytes;  // gemma-4 fused
-        if (ly->moe_split) {
-            for (int e = 0; e < n_expert; e++)
-                wb += ly->moe_g[e]->nbytes + ly->moe_u[e]->nbytes + ly->moe_d[e]->nbytes;
-        } else {
-            if (ly->ffn_gate_exps) wb += ly->ffn_gate_exps->nbytes;
-            if (ly->ffn_up_exps)   wb += ly->ffn_up_exps->nbytes;
-            if (ly->ffn_down_exps) wb += ly->ffn_down_exps->nbytes;
-        }
-        if (ly->moe_gemma) {  // gemma-4 also has a dense GELU shared expert
-            if (ly->w_gate) wb += ly->w_gate->nbytes;
-            if (ly->w_up)   wb += ly->w_up->nbytes;
-            if (ly->w_down) wb += ly->w_down->nbytes;
-        }
+        wb += model_layer_expert_bytes(ly, n_expert);
     } else {
         gguf_tensor *ffn[] = { ly->w_gate, ly->w_up, ly->w_down };
         for (int i = 0; i < 3; i++) if (ffn[i]) wb += ffn[i]->nbytes;
@@ -796,6 +808,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
     w->n_head_kv = m->n_head_kv; w->head_dim = m->head_dim; w->n_ff = m->n_ff;
     w->n_vocab = m->n_vocab; w->n_ctx = m->n_ctx;
     w->cpu_moe = m->cpu_moe;
+    w->cpu_moe_layers = m->cpu_moe_layers;
     w->rope_dim = m->rope_dim; w->rope_dim_local = m->rope_dim_local;
     w->kv_q8 = (int)m->kv_q8; w->v_rmsnorm = (int)m->v_rmsnorm;
     w->rope_base = m->rope_base; w->rope_mscale = m->rope_mscale;
@@ -837,13 +850,29 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         size_t used = fixed;
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
-            size_t wb = layer_weight_bytes(ly, m->n_expert, m->cpu_moe);
+            size_t wb = layer_weight_bytes(ly, m->n_expert, moe_on_host(m, l));
             // KV bytes honour the cache format: a q8_0 cache is ~53% of fp16,
             // so quantized KV directly buys more offloaded layers here
             size_t kv = 2 * (size_t)m->n_ctx * model_kv_row_bytes(m, l);
             if (used + wb + kv > vram_budget) break;
             used += wb + kv;
             G = l + 1;
+        }
+        // Partial expert offload: the pass above placed attention (and any
+        // dense FFN) for the layers that fit. Whatever budget survives is
+        // spent on whole expert banks, shallowest first, so a card with room
+        // to spare stops idling it — the all-or-nothing flag left 8.8 of 12 GB
+        // unused on the first outside install. Explicit counts are honoured as
+        // given and were already accounted above.
+        if (m->cpu_moe && m->cpu_moe_layers == CPU_MOE_AUTO) {
+            for (int l = 0; l < G; l++) {
+                layer_t *ly = &m->layers[l];
+                if (!ly->is_moe) continue;
+                size_t eb = model_layer_expert_bytes(ly, m->n_expert);
+                if (used + eb > vram_budget) break;
+                used += eb;
+                m->moe_host[l] = false;
+            }
         }
         // a full split also needs token_embd + output weights resident
         bool full = G == m->n_layer &&
@@ -864,7 +893,17 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                     vram_budget / 1e9, m->reserve_vram_pct > 0 ? "reserved" : "free");
             goto fail_quiet;
         }
+        int moe_dev = 0, moe_tot = 0;
+        for (int l = 0; l < m->n_layer; l++) {
+            if (!m->layers[l].is_moe) continue;
+            moe_tot++;
+            if (!moe_on_host(m, l)) moe_dev++;
+        }
         fprintf(stderr, "gpu-split: budget=%.2fGB fixed=%.2fGB G=%d/%d full=%d used=%.2fGB\n", vram_budget/1e9, fixed/1e9, G, m->n_layer, (int)full, used/1e9);
+        if (m->cpu_moe && moe_tot)
+            fprintf(stderr, "gpu-split: experts %d/%d layers on GPU, %d on host%s\n",
+                    moe_dev, moe_tot, moe_tot - moe_dev,
+                    m->cpu_moe_layers == CPU_MOE_AUTO ? " (auto fit)" : "");
         w->gpu_layers = full ? m->n_layer : G;
         // weight bytes to upload: whole file for a full split (output/embedding
         // offsets stay valid), else the prefix covering token_embd + [0, G)
@@ -979,6 +1018,25 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                     (!binding_add(w, m, ly->w_gate) ||
                      !binding_add(w, m, ly->w_up) ||
                      !binding_add(w, m, ly->w_down))) goto fail;
+                // Partial expert offload: a device-resident bank uploads its
+                // router and expert tensors as ordinary bindings, so the same
+                // offset-resolved matvec path serves them.
+                if (ly->is_moe && !moe_on_host(m, l)) {
+                    if (!binding_add(w, m, ly->ffn_gate_inp) ||
+                        !binding_add(w, m, ly->ffn_gate_up_exps) ||
+                        !binding_add(w, m, ly->ffn_gate_exps) ||
+                        !binding_add(w, m, ly->ffn_up_exps) ||
+                        !binding_add(w, m, ly->ffn_down_exps)) goto fail;
+                    if (ly->moe_split)
+                        for (int e = 0; e < m->n_expert; e++)
+                            if (!binding_add(w, m, ly->moe_g[e]) ||
+                                !binding_add(w, m, ly->moe_u[e]) ||
+                                !binding_add(w, m, ly->moe_d[e])) goto fail;
+                    if (ly->moe_gemma &&
+                        (!binding_add(w, m, ly->w_gate) ||
+                         !binding_add(w, m, ly->w_up) ||
+                         !binding_add(w, m, ly->w_down))) goto fail;
+                }
             }
             if (full && !binding_add(w, m, m->output)) goto fail;
         } else {
@@ -1023,7 +1081,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis || !w->g_dsc ||
             !w->ssm_dt || !w->ssm_a || !w->ssm_norm)
             goto fail;
-        if (m->n_expert > 0 && !m->cpu_moe) {
+        if (moe_any_on_device(m)) {
             // all-ones per-expert scale table for archs without a down-
             // projection scale — k_moe_actmul multiplies unconditionally
             w->moe_ones = f32_dbuf_ones(NULL, (size_t)m->n_expert);
@@ -1124,7 +1182,7 @@ bool gpu_init(model_t *m) {
                               ly->w_gate, ly->w_up, ly->w_down, ly->wqkv,
                               ly->wq_gate, ly->ssm_beta, ly->ssm_alpha,
                               ly->ssm_out };
-        int count = m->cpu_moe && ly->is_moe ? 4 : 12;
+        int count = m->cpu_moe && ly->is_moe && moe_on_host(m, l) ? 4 : 12;
         for (int i = 0; i < count; i++)
             if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
         // The architecture publishes this tiny depthwise kernel as F32 in its
@@ -1138,9 +1196,12 @@ bool gpu_init(model_t *m) {
     // An out-of-range or unsupported type would read past the table (function-
     // pointer type confusion) or launch a NULL fn at decode. Validate them here
     // and fall back to CPU, matching how the dense path already rejects.
-    for (int l = 0; l < m->n_layer && !m->cpu_moe; l++) {
+    for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
-        if (!ly->is_moe) continue;
+        // A host-resident bank never reaches a device kernel; an AUTO fit may
+        // still promote this layer later, so only a pinned host layer skips.
+        if (!ly->is_moe || (moe_on_host(m, l) && m->cpu_moe_layers != CPU_MOE_AUTO))
+            continue;
         if (ly->ffn_gate_inp && !gpu_type_ok(ly->ffn_gate_inp->type)) goto unsupported;
         if (ly->moe_split) {
             for (int e = 0; e < m->n_expert; e++)
@@ -1298,7 +1359,7 @@ bool gpu_init(model_t *m) {
                 (m->layers[l].is_moe && !g->moe_fused_ok) ||
                 m->layers[l].recurrent) g->graph_bad = true;
         if (m->qwen35) g->graph_bad = true;
-        if (m->cpu_moe) g->graph_bad = true;
+        if (moe_any_on_host(m)) g->graph_bad = true;
 
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
@@ -1309,10 +1370,18 @@ bool gpu_init(model_t *m) {
 
         char name[128] = "CUDA GPU";
         cu.DeviceGetName(name, sizeof(name), g->sw->dev);
-        if (m->cpu_moe)
+        if (m->cpu_moe) {
+            int on_host = 0, moe_tot = 0;
+            for (int l = 0; l < m->n_layer; l++) {
+                if (!m->layers[l].is_moe) continue;
+                moe_tot++;
+                if (moe_on_host(m, l)) on_host++;
+            }
             fprintf(stderr, "gpu: CUDA backend on %s (%d/%d attention layers, "
-                    "%.1f GB in VRAM; experts on CPU)\n", name,
-                    m->gpu_layers, m->n_layer, g->sw->weights_len / 1e9);
+                    "%.1f GB in VRAM; %d/%d expert layers on CPU)\n", name,
+                    m->gpu_layers, m->n_layer, g->sw->weights_len / 1e9,
+                    on_host, moe_tot);
+        }
         else if (m->gpu_layers < m->n_layer)
             fprintf(stderr, "gpu: CUDA backend on %s (%d/%d layers, %.1f GB in "
                     "VRAM; CPU runs the rest)\n", name, m->gpu_layers, m->n_layer,
@@ -2445,7 +2514,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         prof_mark(g, PH_ELEM);
 
-        if (m->cpu_moe && ly->is_moe) {
+        if (ly->is_moe && moe_on_host(m, l)) {
             // Tensor-role boundary: attention has updated the residual and KV
             // on-device. Move only the small activation tile to the host, run
             // the sparse expert FFN against mmap-resident weights, and resume

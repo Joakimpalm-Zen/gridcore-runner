@@ -167,7 +167,15 @@ of falling all the way back to CPU (the `--reserve-vram` cap sets how deep
 the split goes). Sparse MoE models also support `--cpu-moe`: attention and
 other retained dense tensors stay on CUDA while only the expert FFNs execute
 from system RAM. This avoids uploading the inactive expert bank and is the
-recommended placement for Qwen3-30B-A3B-class models on 8 GB cards. Measured
+recommended placement for Qwen3-30B-A3B-class models on 8 GB cards.
+The placement is per-layer: `--cpu-moe auto` fills whatever VRAM the
+attention split leaves with whole expert banks and hosts only the remainder
+(the split line reports `experts N/M layers on GPU`), and `--cpu-moe N`
+pins exactly the deepest N expert layers to the host. A bare `--cpu-moe`
+keeps every bank on the host, as before. Partial placement matters on
+cards with headroom: all-or-nothing left 8.8 GB of a 12 GB card idle, and
+moving just 3 of 48 banks onto a heavily-occupied 24 GB slice measured
++7% prompt and +7% decode on Qwen3-Coder-30B. Measured
 on an RTX 3070: 6–36 tok/s generation
 across 1.5B–8B quantized models (5–8× the same box's CPU) and 2–3× CPU
 prompt evaluation. Regenerate the PTX header after kernel changes with
@@ -672,7 +680,7 @@ runner -m model [options]
   --ignore-eos   keep generating past end-of-text tokens
   --gpu auto|off GPU offload if a backend is available (default auto)
   --gpu-layers N force N leading layers onto the GPU (0 = auto-fit)
-  --cpu-moe      keep sparse MoE expert FFNs in RAM while CUDA runs the
+  --cpu-moe [N|auto]  keep sparse MoE expert FFNs in RAM while CUDA runs the
                  attention and other dense tensors
   --wait-for-vram [S]  queue up to S seconds (default 300) when another
                  registered runner holds the GPU, instead of refusing

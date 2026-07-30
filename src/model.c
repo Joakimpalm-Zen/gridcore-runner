@@ -332,10 +332,63 @@ static uint64_t vram_free_now(void *ud) {
     return gpu_mem_info(&f, &t) ? (uint64_t)f : 0;
 }
 
+// Byte cost of one MoE layer's expert half: router, routed expert tensors in
+// either layout, and gemma-4's coupled dense shared branch. Shared by the VRAM
+// estimate and the CUDA fit so the two cannot disagree about what an expert
+// bank costs.
+uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert) {
+    uint64_t wb = 0;
+    if (!ly->is_moe) return 0;
+    if (ly->ffn_gate_inp) wb += ly->ffn_gate_inp->nbytes;
+    if (ly->ffn_gate_up_exps) wb += ly->ffn_gate_up_exps->nbytes;  // gemma-4 fused
+    if (ly->moe_split) {
+        for (int e = 0; e < n_expert; e++)
+            wb += ly->moe_g[e]->nbytes + ly->moe_u[e]->nbytes + ly->moe_d[e]->nbytes;
+    } else {
+        if (ly->ffn_gate_exps) wb += ly->ffn_gate_exps->nbytes;
+        if (ly->ffn_up_exps)   wb += ly->ffn_up_exps->nbytes;
+        if (ly->ffn_down_exps) wb += ly->ffn_down_exps->nbytes;
+    }
+    if (ly->moe_gemma) {   // dense GELU shared expert, evaluated with the layer
+        if (ly->w_gate) wb += ly->w_gate->nbytes;
+        if (ly->w_up)   wb += ly->w_up->nbytes;
+        if (ly->w_down) wb += ly->w_down->nbytes;
+    }
+    return wb;
+}
+
+// Publish the per-layer expert placement for a requested host-layer count.
+// CPU_MOE_ALL/CPU_MOE_AUTO and any count at or above the number of MoE layers
+// host every expert FFN (the original all-or-nothing meaning); a smaller N
+// hosts the *deepest* N, leaving the shallower banks device-resident so the
+// GPU-resident run stays leading-aligned like the layer split. AUTO starts
+// all-host and is narrowed by the CUDA upload once the budget is known.
+void model_moe_place_host(model_t *m, int host_layers) {
+    if (!m->moe_host) return;
+    int n_moe = 0;
+    for (int l = 0; l < m->n_layer; l++) if (m->layers[l].is_moe) n_moe++;
+    bool all = host_layers < 0 || host_layers >= n_moe;
+    int seen = 0;
+    for (int l = 0; l < m->n_layer; l++) {
+        if (!m->layers[l].is_moe) { m->moe_host[l] = false; continue; }
+        seen++;
+        m->moe_host[l] = all || seen > n_moe - host_layers;
+    }
+}
+
 static uint64_t model_cuda_weight_estimate(const model_t *m,
                                            const model_params *p) {
     if (!p->cpu_moe || m->n_expert <= 0) return (uint64_t)m->gf.map_size;
+    // An explicit partial split leaves some expert banks device-resident, so
+    // the estimate cannot assume every expert stays on the host. AUTO fits
+    // into whatever is free, so it estimates as the all-host lower bound.
+    int host_layers = p->cpu_moe_layers;
+    int n_moe = 0;
+    for (int l = 0; l < m->n_layer; l++) if (m->layers[l].is_moe) n_moe++;
+    int device_moe = host_layers >= 0 && host_layers < n_moe
+                       ? n_moe - host_layers : 0;
     uint64_t total = m->output ? m->output->nbytes : 0;
+    int seen_moe = 0;
     for (int l = 0; l < m->n_layer; l++) {
         const layer_t *ly = &m->layers[l];
         gguf_tensor *att[] = { ly->wq, ly->wk, ly->wv, ly->wo };
@@ -343,6 +396,8 @@ static uint64_t model_cuda_weight_estimate(const model_t *m,
         if (!ly->is_moe) {
             gguf_tensor *ffn[] = { ly->w_gate, ly->w_up, ly->w_down };
             for (int i = 0; i < 3; i++) if (ffn[i]) total += ffn[i]->nbytes;
+        } else if (seen_moe++ < device_moe) {
+            total += model_layer_expert_bytes(ly, m->n_expert);
         }
     }
     return total;
@@ -1054,6 +1109,16 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     m->reserve_vram_pct = p->reserve_vram_pct;
     m->gpu_layers_override = p->gpu_layers_override;
     m->cpu_moe = p->cpu_moe && m->n_expert > 0;
+    m->cpu_moe_layers = p->cpu_moe_layers;
+    if (m->cpu_moe) {
+        // Per-layer expert placement. The default (and every non-CUDA build)
+        // is the original all-on-host meaning; a CUDA upload may narrow it to
+        // the requested count or to what the VRAM budget actually fits, and
+        // publishes the outcome here so the forward path reads one array.
+        m->moe_host = calloc((size_t)m->n_layer, sizeof(bool));
+        if (!m->moe_host) return false;
+        model_moe_place_host(m, m->cpu_moe_layers);
+    }
     int n_ctx = p->n_ctx;
     if (n_ctx <= 0 && (p->reserve_vram_pct > 0 || p->reserve_ram_pct > 0)) {
         // reservation auto-fit: size the context to fill whatever the
@@ -1243,6 +1308,8 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
 
 void model_free(model_t *m) {
     gpu_free(m); // nulls kcache/vcache if the GPU owned them
+    free(m->moe_host);
+    m->moe_host = NULL;
     // Deregister on the clean path. The unclean paths (SIGKILL, crash) are
     // covered by dead-pid reaping in the next runner's claim, which is how the
     // orphans that motivated the registry would have been cleared.

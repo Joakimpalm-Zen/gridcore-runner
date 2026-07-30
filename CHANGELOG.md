@@ -5,6 +5,23 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Partial expert offload — `--cpu-moe [N|auto]`.** Expert placement is now
+  per-layer instead of all-or-nothing: `auto` fills whatever VRAM the
+  attention split leaves with whole expert banks (shallowest first) and hosts
+  only the remainder, `N` pins exactly the deepest N expert layers to the
+  host, and a bare `--cpu-moe` keeps its original all-on-host meaning. Device
+  banks upload as ordinary offset-resolved bindings, so a device-resident and
+  a host-resident bank coexist inside one forward. The split line now reports
+  `experts N/M layers on GPU, K on host` — the first outside install could not
+  see that all-or-nothing was leaving 8.8 GB of a 12 GB card idle, because
+  nothing reported it. `--caps` advertises `cpu_moe_partial`. Measured on the
+  Blackwell MIG (slice mostly occupied by another process, so only 3 of 48
+  banks fit): Qwen3-Coder-30B prompt 15.82 -> 16.96 tok/s, decode 5.49 -> 5.85
+  (+7% each for 6% of the banks moved). Gates: dense-oracle identity for all
+  three expert layouts x {0, 1, auto} with the silent-fallback guard, strict
+  count parsing, and real-model CPU==GPU byte identity on Qwen3-Coder-30B
+  under the eager pin.
+
 - **Grammar fast-forward (JC-R2, runner half) — opt-in.** Under an active
   constraint, when the validator pins a unique byte continuation (probed by
   trial on validator copies — the same validator-by-trial design as the
