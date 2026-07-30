@@ -290,6 +290,16 @@ Endpoints: `POST /v1/chat/completions`, `POST /v1/responses`,
 string or up to 4 strings, matched across token boundaries and excluded from
 output), OpenAI `tools` (declared
 in the prompt, parsed back into `tool_calls`), and swap-mode `keep_alive`.
+Constrained requests (JSON mode, `json_schema`, tool schemas) additionally
+accept `"choice_logprobs": true` (buffered only): the response's choice gains
+a `choice_logprobs` array with one record per **decision point** — a
+generation step where the grammar left ≥ 2 of the probed top-`M` candidates
+legal (`choice_logprobs_probe`, default 32, max 64) — carrying the legal
+alternatives with a posterior renormalized over the legal probed set, their
+raw full-vocabulary logprobs, and the probed coverage mass. That posterior is
+the calibration surface the judgment-co-processor work builds on;
+`scripts/cl-calibration.py` turns labeled decisions into a reliability/ECE
+report.
 Agent clients speaking the AI-SDK dialect (Cline, OpenCode, …) work as-is:
 part-array message content is flattened, assistant `tool_calls` history and
 `role:"tool"` results render into the conversation, and

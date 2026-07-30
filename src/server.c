@@ -997,6 +997,9 @@ static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
     free(e->lp_chosen); free(e->lp_ids); free(e->lp_top);
     e->lp_chosen = NULL; e->lp_ids = NULL; e->lp_top = NULL;
     e->lp_cap = e->lp_n = e->lp_count = 0;
+    free(e->cl_recs);
+    e->cl_recs = NULL;
+    e->cl_cap = e->cl_count = e->cl_probe = 0;
 }
 
 // emit one section of split output: reasoning goes to the OpenAI-style
@@ -1843,6 +1846,26 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     int lp_n = (int)lp_num;
     if (lp_n < 0) lp_n = 0;
     if (lp_n > 20) lp_n = 20;
+    // JC-R1 constrained-choice posteriors (suite judgment-coprocessor plan):
+    // buffered-only like logprobs, and only meaningful when a schema/JSON
+    // constraint gives the sampler a legal set to choose from — both are
+    // validated below once the request's constraint is known.
+    bool cl_on = false;
+    if (!request_bool(req, "choice_logprobs", false, &cl_on)) {
+        send_error(fd, 400, "choice_logprobs must be a boolean");
+        return;
+    }
+    double cl_probe_d = 32;
+    if (cl_on && !request_number(req, "choice_logprobs_probe", 32, 8, 64,
+                                 &cl_probe_d)) {
+        send_error(fd, 400, "choice_logprobs_probe out of range (8..64)");
+        return;
+    }
+    if (cl_on && stream) {
+        send_error(fd, 400, "choice_logprobs is buffered-only; "
+                            "set stream to false");
+        return;
+    }
     // OpenAI "stop": a string or an array of up to 4 non-empty strings.
     // Pointers borrow from req, which outlives the whole request.
     const char *stops[4];
@@ -1958,6 +1981,35 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     int remaining_ctx = m->n_ctx - n_prompt;
     if (max_tokens < 0 || max_tokens > remaining_ctx) max_tokens = remaining_ctx;
 
+    if (cl_on) {
+        if (!schema && !e->json_mode) {
+            free(toks);
+            completion_cleanup(e, schema, NULL);
+            send_error(fd, 400, "choice_logprobs requires a json_schema "
+                                "response_format, tool schema, or JSON mode");
+            return;
+        }
+        if (e->dm) {
+            free(toks);
+            completion_cleanup(e, schema, NULL);
+            send_error(fd, 400, "choice_logprobs is not supported with "
+                                "speculative decoding");
+            return;
+        }
+        if (max_tokens > 0) {
+            e->cl_recs  = malloc(sizeof(cl_rec) * (size_t)max_tokens);
+            if (!e->cl_recs) {
+                free(toks);
+                completion_cleanup(e, schema, NULL);
+                send_error(fd, 500,
+                           "out of memory allocating choice_logprobs buffer");
+                return;
+            }
+            e->cl_cap   = max_tokens;
+            e->cl_count = 0;
+            e->cl_probe = (int)cl_probe_d;
+        }
+    }
     if (want_lp && max_tokens > 0) {
         e->lp_cap    = max_tokens;
         e->lp_n      = lp_n;
@@ -2353,6 +2405,32 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                 offset += tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
             }
             sb_lit(&r, "]},");
+        }
+        // JC-R1 constrained-choice posteriors: one entry per decision point
+        // (a constrained step where >= 2 probed candidates were legal),
+        // shared shape across the chat and text surfaces.
+        if (e->cl_count > 0) {
+            char tb[512];
+            sb_lit(&r, "\"choice_logprobs\":[");
+            for (int i = 0; i < e->cl_count; i++) {
+                const cl_rec *c = &e->cl_recs[i];
+                if (i) sb_lit(&r, ",");
+                sb_fmt(&r, "{\"index\":%d,\"n_legal\":%d,"
+                           "\"coverage\":%.6f,\"alternatives\":[",
+                       c->pos, c->n_legal, c->coverage);
+                int stored = c->n_legal < CL_MAX_ALT ? c->n_legal : CL_MAX_ALT;
+                for (int j = 0; j < stored; j++) {
+                    if (j) sb_lit(&r, ",");
+                    int tn = tok_decode(s->tok, c->ids[j], tb, sizeof(tb));
+                    sb_lit(&r, "{\"token\":\"");
+                    sb_esc(&r, tb, tn);
+                    sb_fmt(&r, "\",\"id\":%d,\"prob\":%.6f,"
+                               "\"logprob\":%.6f}",
+                           c->ids[j], c->prob[j], c->raw_lp[j]);
+                }
+                sb_lit(&r, "]}");
+            }
+            sb_lit(&r, "],");
         }
         sb_fmt(&r, "\"finish_reason\":\"%s\"}],"
                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"

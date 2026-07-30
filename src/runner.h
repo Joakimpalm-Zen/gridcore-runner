@@ -923,6 +923,23 @@ typedef int (*gen_cb)(void *ud, const char *bytes, int n);
 
 typedef struct { int32_t id; float lp; } lp_alt; // logprob alternative
 
+// JC-R1 constrained-choice posterior: one DECISION POINT — a constrained
+// sampling step where >= 2 of the probed top candidates were legal under
+// the active schema/JSON constraint. prob[] is the softmax renormalized
+// over the legal probed set (raw logits, temperature-free); coverage is
+// the full-softmax mass of everything probed, so a consumer can see how
+// much distribution the probe examined. Alternatives beyond CL_MAX_ALT
+// count toward n_legal/renormalization but are not stored.
+#define CL_MAX_ALT 8
+typedef struct {
+    int32_t pos;                 // emitted-token index in this generation
+    int32_t n_legal;             // legal candidates among the probed set
+    float   coverage;            // full-softmax mass of ALL probed candidates
+    int32_t ids[CL_MAX_ALT];     // legal alternatives, descending probability
+    float   prob[CL_MAX_ALT];    // renormalized over the legal probed set
+    float   raw_lp[CL_MAX_ALT];  // full-vocab log-softmax of each
+} cl_rec;
+
 typedef struct {
     model_t   *m;
     tokenizer *tok;
@@ -958,6 +975,14 @@ typedef struct {
     int32_t *lp_ids;       // chosen token id per emitted token
     lp_alt  *lp_top;       // top-N alternatives per token
     int      lp_n, lp_cap, lp_count;
+    // JC-R1 "choice_logprobs": constrained-choice posteriors. When cl_cap>0
+    // and a schema/JSON constraint is active, each payload sampling step
+    // probes the top cl_probe candidates by raw logit against the validator
+    // and records a decision point when >= 2 are legal — the renormalized
+    // posterior over the legal set is the calibrated verdict surface the
+    // judgment co-processor reads (suite docs/plans/judgment-coprocessor.md).
+    cl_rec  *cl_recs;      // caller-owned buffer [cl_cap]
+    int      cl_cap, cl_count, cl_probe;
     // speculative decoding: a small draft model proposes draft_k tokens per
     // round, the target verifies them in one batched forward
     model_t *dm;           // draft model (NULL = off)

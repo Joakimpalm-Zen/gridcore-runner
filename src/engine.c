@@ -760,6 +760,62 @@ static void lp_capture_pre(engine *e, const float *logits, lp_pre *p) {
     for (int j = filled; j < e->lp_n; j++) { top[j].id = -1; top[j].lp = 0; }
 }
 
+// JC-R1: probe the top candidates against the active constraint and record
+// a decision point when the schema leaves a real choice (>= 2 legal). Raw
+// logits, before sample_pick's repeat penalty mutates them, so the posterior
+// is calibration-meaningful; legality uses the same validator trial the
+// sampler itself uses, so "legal" is exactly "what sample_pick could have
+// returned". Runs only inside the constrained payload — the thinking
+// prelude samples freely and has no decision points.
+static void cl_capture(engine *e, const float *logits) {
+    if (!e->cl_cap || e->cl_count >= e->cl_cap) return;
+    if (!e->schema && !e->json_mode) return;
+    if (e->constraint_phase != CP_OUTPUT) return;
+    int V = e->m->n_vocab;
+    enum { PROBE_CAP = 64 };
+    int M = e->cl_probe >= 8 && e->cl_probe <= PROBE_CAP ? e->cl_probe : 32;
+    if (M > V) M = V;
+    float mx = logits[0];
+    for (int i = 1; i < V; i++) if (logits[i] > mx) mx = logits[i];
+    double sum = 0;
+    for (int i = 0; i < V; i++) sum += expf(logits[i] - mx);
+    float lse = mx + logf((float)sum);
+    int   ids[PROBE_CAP]; float lps[PROBE_CAP];
+    int filled = 0;
+    for (int i = 0; i < V; i++) {
+        float lp = logits[i] - lse;
+        if (filled == M && lp <= lps[filled - 1]) continue;
+        int j = filled < M ? filled++ : M - 1;
+        while (j > 0 && lps[j - 1] < lp) {
+            lps[j] = lps[j - 1]; ids[j] = ids[j - 1]; j--;
+        }
+        lps[j] = lp; ids[j] = i;
+    }
+    cl_rec *r = &e->cl_recs[e->cl_count];
+    r->pos = e->gen_count;
+    r->n_legal = 0;
+    r->coverage = 0;
+    double legal_mass = 0;
+    bool schema = e->schema != NULL;
+    for (int c = 0; c < filled; c++) {
+        float pm = expf(lps[c]);
+        r->coverage += pm;
+        if (!constraint_token_ok(e, ids[c], schema)) continue;
+        if (r->n_legal < CL_MAX_ALT) {
+            r->ids[r->n_legal]    = ids[c];
+            r->raw_lp[r->n_legal] = lps[c];
+            r->prob[r->n_legal]   = pm;   // renormalized below
+        }
+        legal_mass += pm;
+        r->n_legal++;
+    }
+    if (r->n_legal < 2 || legal_mass <= 0) return;  // forced: no decision
+    int stored = r->n_legal < CL_MAX_ALT ? r->n_legal : CL_MAX_ALT;
+    for (int i = 0; i < stored; i++)
+        r->prob[i] = (float)(r->prob[i] / legal_mass);
+    e->cl_count++;
+}
+
 // speculative decoding: sampler-equality verification (llama.cpp-style) —
 // sample each position from the TARGET's logits with the full sampler chain;
 // a draft is accepted when the sampled token equals it, so output follows
@@ -957,6 +1013,7 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
     pre.lse = 0; pre.n_snap = 0;
     bool want_lp = e->lp_cap && e->lp_count < e->lp_cap;
     if (want_lp) lp_capture_pre(e, logits, &pre);
+    if (e->cl_cap) cl_capture(e, logits);
     int tok = sample_pick(e->smp, (float *)logits, e->m->n_vocab,
                           e->schema ? schema_ok :
                           e->json_mode ? json_ok : NULL, e);

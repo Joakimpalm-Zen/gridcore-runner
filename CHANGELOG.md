@@ -5,6 +5,18 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **`choice_logprobs` — constrained-choice posteriors (JC-R1).** Constrained
+  requests (JSON mode / `json_schema` / tool schemas) can set
+  `"choice_logprobs": true` to get, per decision point (a step where ≥ 2 of
+  the probed top-`M` candidates were grammar-legal; `choice_logprobs_probe`
+  8–64, default 32), the legal alternatives with a posterior renormalized
+  over the legal probed set, raw full-vocab logprobs, and probed coverage.
+  Captured from raw logits before the repeat penalty, payload phase only
+  (thinking preludes have no decision points), legality decided by the same
+  validator trial the sampler uses. Buffered responses only; rejected with
+  spec-decode. New `scripts/cl-calibration.py` turns labeled decision
+  records into accuracy/Brier/ECE + a reliability table and can gate via
+  `--max-ece`. Conformance: `tests/conformance/test_choice_logprobs.py`.
 - Published benchmark MoE rows updated after the device-routing work:
   Qwen3-30B-A3B decode 102.2 tok/s (67% of llama.cpp, was 48% at
   v0.1.4) and prefill 194.0 (6.0%, was 3.3%) on the Blackwell MIG;
