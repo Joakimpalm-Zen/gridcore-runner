@@ -146,6 +146,34 @@ def test_partial_expert_counts_are_reported(runner_bin, models):
     assert "(auto fit)" in _split_line(auto.stderr)
 
 
+def test_composition_and_idle_vram_are_reported(runner_bin, models):
+    """Two silent-loss cases the 5070 install hit, now spoken aloud.
+
+    Capping the attention split under tensor-role placement measured 10.3
+    tok/s against 12.7 (all-host) and 14.6 (layer split alone) — the worst of
+    both, with nothing said. And all-or-nothing placement left 8.8 GB of a
+    12 GB card idle because no line reported what the experts were doing."""
+    caps = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
+                          stdout=subprocess.PIPE, check=True)
+    if b'"backend":"cuda"' not in caps.stdout:
+        pytest.skip("both warnings are CUDA-side")
+    combo = _run(runner_bin, f"{models}.moe1.gguf",
+                 extra=("--cpu-moe", "--gpu-layers", "1"))
+    assert b"caps the attention split below" in combo.stderr
+    assert b"--cpu-moe N (or auto)" in combo.stderr
+    idle = _run(runner_bin, f"{models}.moe1.gguf", extra=("--cpu-moe",))
+    assert b"of the budget is unused" in idle.stderr
+    assert b"expert layers on the GPU" in idle.stderr
+    # the advice must never promise more banks than the model has
+    line = [l for l in idle.stderr.decode(errors="replace").splitlines()
+            if "would keep" in l][0]
+    placed, total = line.split("would keep ")[1].split(" expert")[0].split(" of ")
+    assert 0 < int(placed) <= int(total) == 2
+    # auto already spends the headroom, so it must not also advertise it
+    auto = _run(runner_bin, f"{models}.moe1.gguf", extra=("--cpu-moe", "auto"))
+    assert b"of the budget is unused" not in auto.stderr
+
+
 def test_cpu_moe_count_is_parsed_strictly(runner_bin, models):
     """A bare --cpu-moe must keep its original all-on-host meaning even when a
     non-numeric argument follows, and a malformed count must fail loudly rather

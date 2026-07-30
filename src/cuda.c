@@ -882,10 +882,47 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         // takes responsibility for VRAM; used for testing partial offload and
         // for manual control). It can only lower the count below what fits, or
         // request a specific split.
+        int natural_G = G;
         if (m->gpu_layers_override > 0) {
             G = m->gpu_layers_override;
             if (G > m->n_layer) G = m->n_layer;
             full = (G == m->n_layer);
+        }
+        // Composition warning (no silent worst-of-both). Under tensor-role
+        // placement the expert banks are what fill VRAM, so capping the
+        // attention split below what already fits moves attention to the CPU
+        // and frees almost nothing: measured 10.3 tok/s for
+        // `--cpu-moe --gpu-layers 26` against 12.7 (all-host) and 14.6
+        // (layer split alone) on a 12 GB card. Say so instead of obeying
+        // quietly — the flags stay legal, since the pair is meaningful once a
+        // partial expert count is what is being reserved for.
+        if (m->cpu_moe && m->gpu_layers_override > 0 && G < natural_G)
+            fprintf(stderr,
+                    "gpu: --gpu-layers %d caps the attention split below the "
+                    "%d layers that fit; under --cpu-moe that mostly moves "
+                    "attention to the CPU without freeing useful VRAM. Prefer "
+                    "--cpu-moe N (or auto) to spend the headroom on expert "
+                    "banks.\n", G, natural_G);
+        // The discovery the first outside install could not make: all-host
+        // placement left 8.8 GB of a 12 GB card idle and nothing said so.
+        if (m->cpu_moe && m->cpu_moe_layers == CPU_MOE_ALL) {
+            // Count what the auto fit would actually place, by the same greedy
+            // rule, so the advice cannot promise more than it can deliver.
+            size_t would_use = used;
+            int would_place = 0, moe_layers = 0;
+            for (int l = 0; l < G; l++) {
+                if (!m->layers[l].is_moe) continue;
+                moe_layers++;
+                size_t eb = model_layer_expert_bytes(&m->layers[l], m->n_expert);
+                if (would_use + eb > vram_budget) continue;
+                would_use += eb;
+                would_place++;
+            }
+            if (would_place > 0)
+                fprintf(stderr,
+                        "gpu: %.2f GB of the budget is unused — `--cpu-moe "
+                        "auto` would keep %d of %d expert layers on the GPU.\n",
+                        (vram_budget - used) / 1e9, would_place, moe_layers);
         }
         if (G == 0) {
             fprintf(stderr,

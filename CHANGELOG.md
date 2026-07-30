@@ -5,6 +5,16 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **The `--cpu-moe` x `--gpu-layers` worst-of-both is no longer silent.**
+  Capping the attention split under tensor-role placement moves attention to
+  the CPU while freeing almost nothing (the expert banks are what fill VRAM):
+  measured 10.3 tok/s against 12.7 all-host and 14.6 layer-split-alone on a
+  12 GB card. The pair stays legal — it is meaningful once a partial expert
+  count is what the headroom is reserved for — but a run that caps below what
+  already fits now says so and points at `--cpu-moe N|auto`. A bare
+  `--cpu-moe` that leaves room for expert banks also reports how many
+  `--cpu-moe auto` would place, counted by the same greedy rule so the advice
+  cannot over-promise.
 - **Partial expert offload — `--cpu-moe [N|auto]`.** Expert placement is now
   per-layer instead of all-or-nothing: `auto` fills whatever VRAM the
   attention split leaves with whole expert banks (shallowest first) and hosts
