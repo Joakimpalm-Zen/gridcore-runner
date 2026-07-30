@@ -541,14 +541,49 @@ int main(int argc, char **argv) {
         // engine: instruct models that answer a bare prompt with instant EOS
         // reported "0.0 tok/s". Decode every requested token.
         e.ignore_eos = true;
-        const char *bench_prompt = prompt ? prompt :
-            "Write a short story about a lighthouse keeper.";
-        char *p = unescape(bench_prompt);
+        // A ten-token default measured nothing that matters: on the first
+        // outside install this bench looked healthy while a real 2,100-token
+        // prompt took 89 s to reach its first word, because prefill — not
+        // decode — was the wall. Absent an explicit -p/-f, benchmark a
+        // realistic prefill instead, clamped to whatever context exists.
+        enum { BENCH_PROMPT_TOKENS = 512 };
+        char *p = NULL;
+        if (prompt) {
+            p = unescape(prompt);
+        } else {
+            static const char para[] =
+                "The lighthouse keeper recorded the weather every morning: "
+                "wind direction, cloud cover, the height of the swell against "
+                "the north rocks, and the hour the fog lifted. ";
+            size_t one = sizeof(para) - 1;
+            size_t reps = (size_t)BENCH_PROMPT_TOKENS / 8 + 2;  // >= target tok
+            p = malloc(one * reps + 1);
+            if (p) {
+                p[0] = 0;
+                for (size_t r = 0; r < reps; r++) memcpy(p + r * one, para, one);
+                p[one * reps] = 0;
+            }
+        }
+        if (!p) {
+            fprintf(stderr, "error: out of memory building benchmark prompt\n");
+            return 1;
+        }
         n_prompt = tok_encode(&tok, p, toks, (int)tok_cap, !no_bos, true);
         if (n_prompt < 0) {
             fprintf(stderr, "error: out of memory tokenizing benchmark prompt\n");
             free(p);
             return 1;
+        }
+        if (!prompt) {
+            // Truncating the synthesized prompt is safe (it is filler) and is
+            // what keeps the default runnable on a small context.
+            int want = BENCH_PROMPT_TOKENS;
+            // leave the decode phase its tokens, or the rate it reports is
+            // measured over a couple of steps on a small-context model
+            int room = m.n_ctx - (n_predict > 0 ? n_predict : 0) - 1;
+            if (room < 1) room = m.n_ctx - 1;
+            if (want > room) want = room;
+            if (n_prompt > want) n_prompt = want;
         }
         if (n_prompt == 0 || n_prompt >= m.n_ctx) {
             fprintf(stderr, "error: benchmark prompt does not fit context\n");
@@ -566,14 +601,17 @@ int main(int argc, char **argv) {
         n_gen = engine_generate(&e, logits, n_predict, discard_cb, NULL, &gtime);
         char esc_model[1024];
         json_escape(model_path, strlen(model_path), esc_model, sizeof(esc_model));
+        // prompt_s is time-to-first-token for this prompt length: the number
+        // an editor-assistant user actually waits on, and the one a rate alone
+        // hides. Both phases report seconds beside their rates.
         printf("{\"model\":\"%s\",\"arch\":\"%s\",\"context\":%d,"
                "\"gpu_layers\":%d,\"layers\":%d,\"prompt_tokens\":%d,"
                "\"generated_tokens\":%d,\"prompt_tok_s\":%.3f,"
-               "\"gen_tok_s\":%.3f}\n",
+               "\"gen_tok_s\":%.3f,\"prompt_s\":%.3f,\"gen_s\":%.3f}\n",
                esc_model, m.arch, m.n_ctx, m.gpu_layers, m.n_layer,
                n_prompt, n_gen,
                n_prompt / (ptime > 0 ? ptime : 1e-9),
-               n_gen / (gtime > 0 ? gtime : 1e-9));
+               n_gen / (gtime > 0 ? gtime : 1e-9), ptime, gtime);
         free(p);
         return 0;
     }

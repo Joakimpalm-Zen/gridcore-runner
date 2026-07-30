@@ -5,6 +5,15 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **`--bench-json` benchmarks a realistic prefill and reports both phases in
+  seconds.** The default prompt was one ten-token sentence, so the instrument
+  reported healthy numbers on the first outside install while a realistic
+  2,100-token prompt took 89 s to reach its first word — prefill, not decode,
+  was the wall. The default is now a synthesized ~512-token prompt (clamped to
+  the context and to whatever `-n` needs), `-p`/`-f` still override it, and the
+  JSON gained `prompt_s` / `gen_s` beside the existing rates so time-to-first-
+  token is directly readable. Numbers from earlier `--bench-json` runs are not
+  comparable to these, which is the point.
 - **The `--cpu-moe` x `--gpu-layers` worst-of-both is no longer silent.**
   Capping the attention split under tensor-role placement moves attention to
   the CPU while freeing almost nothing (the expert banks are what fill VRAM):

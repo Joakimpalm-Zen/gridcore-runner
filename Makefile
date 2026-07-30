@@ -309,7 +309,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		set -e; \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
-		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_compare_llamacpp.py tests/test_release_check.py; \
+		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_bench_json.py tests/test_compare_llamacpp.py tests/test_release_check.py; \
 		$(MAKE) --no-print-directory test-moe PYTHON=$(PYTHON); \
 	else \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
