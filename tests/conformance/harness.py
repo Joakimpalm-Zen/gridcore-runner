@@ -125,8 +125,9 @@ class Response:
         """Runner's documented error shape: {"error":{"message","type"}}."""
         d = self.json
         err = d.get("error")
-        if not isinstance(err, dict) or "message" not in err or "type" not in err:
-            raise ProtocolError("error response lacks {error:{message,type}}",
+        required = {"message", "type", "param", "code"}
+        if not isinstance(err, dict) or not required.issubset(err):
+            raise ProtocolError("error response lacks required OpenAI fields",
                                 request=self.name, body=d)
         want = "invalid_request_error" if self.status < 500 else "server_error"
         if err["type"] != want:

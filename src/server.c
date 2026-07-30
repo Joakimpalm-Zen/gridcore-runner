@@ -203,6 +203,8 @@ static void send_response(sock_t fd, int code, const char *ctype, const char *bo
 // body that still parses as success is worse than an error: the client cannot
 // tell anything went wrong.
 static void send_error(sock_t fd, int code, const char *message);
+static void send_error_detail(sock_t fd, int code, const char *message,
+                              const char *param, const char *error_code);
 
 static void send_built(sock_t fd, sbuf *b) {
     if (b->failed) send_error(fd, 500, "out of memory building response");
@@ -210,11 +212,22 @@ static void send_built(sock_t fd, sbuf *b) {
 }
 
 static void send_error(sock_t fd, int code, const char *message) {
-    char body[512], esc[384];
+    send_error_detail(fd, code, message, NULL, NULL);
+}
+
+static void send_error_detail(sock_t fd, int code, const char *message,
+                              const char *param, const char *error_code) {
+    char body[768], esc[384], ep[128], ec[128];
     json_escape(message, strlen(message), esc, sizeof(esc));
+    if (param) json_escape(param, strlen(param), ep, sizeof(ep));
+    if (error_code) json_escape(error_code, strlen(error_code), ec, sizeof(ec));
     int n = snprintf(body, sizeof(body),
-                     "{\"error\":{\"message\":\"%s\",\"type\":\"%s\"}}",
-                     esc, code >= 500 ? "server_error" : "invalid_request_error");
+                     "{\"error\":{\"message\":\"%s\",\"type\":\"%s\","
+                     "\"param\":%s%s%s,\"code\":%s%s%s}}",
+                     esc, code >= 500 ? "server_error" : "invalid_request_error",
+                     param ? "\"" : "", param ? ep : "null", param ? "\"" : "",
+                     error_code ? "\"" : "", error_code ? ec : "null",
+                     error_code ? "\"" : "");
     send_response(fd, code, "application/json", body, n);
 }
 
@@ -492,7 +505,8 @@ static int swap_to(const char *want) {
 static bool validate_single_model_request(sock_t fd, jv *req) {
     const char *want = jv_str(jv_get(req, "model"), NULL);
     if (request_model_matches(want, SV.model_name)) return true;
-    send_error(fd, 400, "unknown model (see /v1/models)");
+    send_error_detail(fd, 404, "unknown model (see /v1/models)",
+                      "model", "model_not_found");
     return false;
 }
 
@@ -2071,8 +2085,11 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     if (n_prompt == 0 || n_prompt >= m->n_ctx) {
         free(toks);
         completion_cleanup(e, schema, NULL);
-        send_error(fd, 400, n_prompt == 0 ? "empty prompt"
-                                          : "prompt exceeds context window");
+        if (n_prompt == 0) send_error(fd, 400, "empty prompt");
+        else send_error_detail(fd, 400, "prompt exceeds context window",
+                               api == API_TEXT ? "prompt" :
+                               api == API_RESPONSES ? "input" : "messages",
+                               "context_length_exceeded");
         return;
     }
     int remaining_ctx = m->n_ctx - n_prompt;
@@ -2162,7 +2179,10 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     free(toks);
     if (!logits) {
         completion_cleanup(e, schema, NULL);
-        send_error(fd, 500, "context overflow");
+        send_error_detail(fd, 400, "context overflow",
+                          api == API_TEXT ? "prompt" :
+                          api == API_RESPONSES ? "input" : "messages",
+                          "context_length_exceeded");
         return;
     }
     if (chat && s->tmpl == TMPL_ORNITH) engine_think_started(e);
@@ -3955,7 +3975,9 @@ static void handle_conn(slot_t *s, sock_t fd) {
                                "model load abandoned (unload or shutdown requested; retry)");
                     ok = false;
                 } else if (sw < 0) {
-                    send_error(fd, 400, "unknown model (see /v1/models)");
+                    send_error_detail(fd, 404,
+                                      "unknown model (see /v1/models)",
+                                      "model", "model_not_found");
                     ok = false;
                 }
             } else if (!validate_single_model_request(fd, req)) {

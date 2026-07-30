@@ -263,5 +263,18 @@ def test_unknown_model_is_rejected_on_single_model_server(client):
     successful. Registry mode already rejects unknown names; single-model mode
     must do the same instead of silently serving the one loaded model.
     """
-    client.expect_400(dict(CHAT, model="definitely-not-a-real-model"),
-                      name="unknown-model-single", contains="unknown model")
+    r = client.chat(dict(CHAT, model="definitely-not-a-real-model"),
+                    name="unknown-model-single")
+    r.expect_status(404)
+    err = r.expect_error_envelope("unknown model")
+    assert err["param"] == "model"
+    assert err["code"] == "model_not_found"
+
+
+def test_context_overflow_is_a_typed_request_error(client):
+    payload = dict(CHAT, messages=[{"role": "user", "content": "hello " * 2000}])
+    r = client.chat(payload, name="context-overflow")
+    r.expect_status(400)
+    err = r.expect_error_envelope("context")
+    assert err["param"] == "messages"
+    assert err["code"] == "context_length_exceeded"

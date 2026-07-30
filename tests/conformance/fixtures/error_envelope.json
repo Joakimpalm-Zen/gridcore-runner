@@ -1,6 +1,8 @@
 {
   "error": {
+    "code": null,
     "message": "<redacted>",
+    "param": null,
     "type": "invalid_request_error"
   }
 }
