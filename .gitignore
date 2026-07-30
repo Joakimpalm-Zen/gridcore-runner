@@ -28,6 +28,9 @@ test-prefix
 test-prefix.exe
 test-grammar-ff
 test-grammar-ff.exe
+test-moe-tol
+test-moe-tol.exe
+test-moe-fixture.*.gguf
 test-shared-asan-bin
 test-batch
 test-batch.exe

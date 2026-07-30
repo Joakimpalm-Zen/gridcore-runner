@@ -82,6 +82,7 @@ TEST_GRAMMAR_FF = $(TEST_BATCH:test-batch%=test-grammar-ff%)
 TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
+TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
 TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
@@ -218,6 +219,14 @@ TEST_TC_TOL_SRC = tests/test_tc_tol.c src/gguf.c src/compat.c src/quants.c \
 $(TEST_TC_TOL): $(TEST_TC_TOL_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_TC_TOL_SRC) -o $@ $(LDFLAGS)
 
+# fused-vs-eager MoE routing tolerance: same full-engine link as tc-tol, and
+# the same self-skipping shape (no GPU / not MoE / no full offload / the fused
+# router never engaged all skip rather than pass)
+TEST_MOE_TOL_SRC = tests/test_moe_tol.c src/gguf.c src/compat.c src/quants.c \
+                  src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
+$(TEST_MOE_TOL): $(TEST_MOE_TOL_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_MOE_TOL_SRC) -o $@ $(LDFLAGS)
+
 TEST_QUANTIZE_SRC = tests/test_quantize.c src/quantize.c src/gguf.c \
                     src/compat.c src/quants.c
 $(TEST_QUANTIZE): $(TEST_QUANTIZE_SRC) src/runner.h
@@ -280,7 +289,7 @@ endif
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
-      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) \
+      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_MODEL_LOAD_FAILURE) runner test.gguf
@@ -300,6 +309,11 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_GRAMMAR_FF)
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
+	@# the fused-vs-eager routing gate needs a fixture whose router is not
+	@# zero: the dense-oracle MoE fixtures are 0.5/0.5 either way and can only
+	@# compare a routing path with itself (it self-skips on those, correctly)
+	$(PYTHON) scripts/make-test-moe.py test-moe-fixture
+	./$(TEST_MOE_TOL) test-moe-fixture.moe4.gguf
 	./$(TEST_QUANTIZE)
 	./$(TEST_VRAM_ROLLBACK)
 	./$(TEST_GGUF_GETTERS)
@@ -421,11 +435,11 @@ fuzz:
 	fi
 
 clean:
-	rm -f runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
+	rm -f test-moe-fixture.*.gguf runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_VRAMREG) test-shared-asan-bin \
-	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
+	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err

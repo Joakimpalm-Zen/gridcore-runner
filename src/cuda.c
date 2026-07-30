@@ -473,6 +473,9 @@ static bool moe_grouped_type_ok(int type) {
 
 // Per-layer expert placement under tensor-role mode. Outside that mode every
 // expert bank is device-resident, so the array is absent and the answer is no.
+// test hook state (definition of the setter is beside gpu_tc_force below)
+static int g_moe_eager_force = -1;
+
 static bool moe_on_host(const model_t *m, int l) {
     return m->cpu_moe && m->moe_host && m->moe_host[l];
 }
@@ -1376,7 +1379,11 @@ bool gpu_init(model_t *m) {
             // RUNNER_MOE_EAGER: debug escape to the v0.1.4 host-routing
             // path — the reference side of the RUNNER_DEBUG_MOE bit
             // comparison, and the fused-vs-eager A/B instrument.
-            if (getenv("RUNNER_MOE_EAGER")) g->moe_fused_ok = false;
+            if (g_moe_eager_force >= 0) {
+                if (g_moe_eager_force) g->moe_fused_ok = false;
+            } else if (getenv("RUNNER_MOE_EAGER")) {
+                g->moe_fused_ok = false;
+            }
             g->moe_grouped_ok = moe_grouped_eligible(m);
         }
         if (m->moe_gemma)
@@ -1529,6 +1536,11 @@ static int g_tc_state = TC_ENV_UNSET;   // -2 env unread, -1 per-combo, 0/1 forc
 void gpu_tc_force(int on) {
     g_tc_state = on < 0 ? TC_ENV_UNSET : (on != 0);
 }
+
+// Same hook for the MoE routing path: the fused-vs-eager tolerance gate has to
+// run both inside one process, which an env var read at first launch cannot
+// express. -1 restores the env default (RUNNER_MOE_EAGER).
+void gpu_moe_eager_force(int on) { g_moe_eager_force = on < 0 ? -1 : (on != 0); }
 
 // Promoted (type, arch) combos — every row measured by test_tc_tol on real
 // weights (Blackwell MIG, 2026-07-29; table in the TC spec). Dense archs

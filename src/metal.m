@@ -143,6 +143,7 @@ static float *gpu_forward(model_t *m, int token, int pos);
 
 // No tensor-core GEMM path on Metal; the TC tolerance gate self-skips.
 void gpu_tc_force(int on) { (void)on; }
+void gpu_moe_eager_force(int on) { (void)on; }
 
 bool gpu_kv_q8_ok(void) {
     // FALSE ON PURPOSE, and not a placeholder to be flipped casually.

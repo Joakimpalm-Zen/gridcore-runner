@@ -5,6 +5,21 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Fused-vs-eager MoE routing tolerance gate (`make test`).** Certification
+  defines MoE byte identity over the eager host-routing path
+  (`RUNNER_MOE_EAGER=1`); the shipping fused default's weaker contract —
+  selection identical, routing weights within ~2 ulp — had only ever been spot
+  checked by hand at the first routing. `tests/test_moe_tol.c` now gates it in
+  the shape of test-kv-tol/test-tc-tol: teacher-forced top-1 agreement with the
+  near-tie escape (a decisive-margin flip means selection diverged, not just its
+  weights) plus a mean|dlogit| bound. New `gpu_moe_eager_force()` test hook lets
+  one process run both paths. The gate needs a fixture whose router is not zero —
+  the dense-oracle MoE fixtures are 0.5/0.5 either way and can only compare a
+  path with itself — so `make-test-moe.py` gained `moe4` (real router, four
+  distinct experts, top-2), deliberately not dense-equivalent. Measured row on
+  that fixture: mean|dlogit| 1.47e-08 = 2.0e-08 of range, 0/32 flips. Real
+  quantized-model rows want a free full-offload slice; the gate self-skips
+  (never passes) without one.
 - **MTP heads are admitted as training-only, for every architecture.** An
   export whose `block_count` includes auxiliary NextN/MTP predictor blocks
   declares them with `<arch>.nextn_predict_layers`; those blocks are now

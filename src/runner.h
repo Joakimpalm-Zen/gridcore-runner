@@ -458,6 +458,8 @@ bool   gpu_kv_q8_ok(void);
 // (1) or off (0) regardless of RUNNER_CUDA_TC; -1 returns to the env default.
 // A no-op on backends without a TC path (Metal, CPU-only builds).
 void   gpu_tc_force(int on);
+// test hook: force (1) or forbid (0) the eager MoE routing path; -1 = env
+void   gpu_moe_eager_force(int on);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 // process n tokens starting at pos (prompt batches); on success returns true
 // and sets *logits to the last token's logits when want_logits (else NULL).

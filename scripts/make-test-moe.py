@@ -140,6 +140,26 @@ def moe_ffn(i, n_expert, expert1_down):
     ]
 
 
+def moe_ffn_routed(i, n_expert):
+    # A fixture that actually EXERCISES routing: a non-zero router and distinct
+    # experts, so the softmax has real structure and the experts disagree.
+    # Deliberately NOT dense-equivalent — this one exists for the fused-vs-eager
+    # tolerance gate (test_moe_tol.c), which needs the two routing paths to have
+    # something to differ about. The zero-router fixtures above are exactly
+    # 0.5/0.5 either way and can only ever compare a path with itself.
+    gate_exps, up_exps, down_exps = [], [], []
+    for e in range(n_expert):
+        gate_exps += [x * (1.0 + 0.25 * e) for x in ffn[i]["gate"]]
+        up_exps += [x * (1.0 - 0.15 * e) for x in ffn[i]["up"]]
+        down_exps += [x * (1.0 + 0.10 * e) for x in ffn[i]["down"]]
+    return [
+        (f"blk.{i}.ffn_gate_inp.weight", [E, n_expert], pack(flist(E * n_expert))),
+        (f"blk.{i}.ffn_gate_exps.weight", [E, FF, n_expert], pack(gate_exps)),
+        (f"blk.{i}.ffn_up_exps.weight", [E, FF, n_expert], pack(up_exps)),
+        (f"blk.{i}.ffn_down_exps.weight", [FF, E, n_expert], pack(down_exps)),
+    ]
+
+
 def moe_ffn_split(i, n_expert, expert1_down):
     # legacy split layout: one 2D tensor per expert (older Mixtral GGUFs)
     downs = [ffn[i]["down"], expert1_down]
@@ -178,3 +198,12 @@ for i in range(LAYERS):
     moe3 += moe_ffn_split(i, 2, [0.0] * (FF * E))
 write(f"{OUT}.moe3.gguf", moe3,
       base_meta("llama", [ku("llama.expert_count", 2), ku("llama.expert_used_count", 1)]))
+
+# moe4: real router, distinct experts, top-2 of 4. Not dense-equivalent by
+# design — its job is to give the fused-vs-eager routing comparison something
+# to disagree about, which the zero-router fixtures structurally cannot.
+moe4 = list(shared)
+for i in range(LAYERS):
+    moe4 += moe_ffn_routed(i, 4)
+write(f"{OUT}.moe4.gguf", moe4,
+      base_meta("llama", [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2)]))
