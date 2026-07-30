@@ -867,7 +867,8 @@ static int sched_generate(slot_t *s, float *logits, int max_new,
     engine *e = &s->e;
     // Speculative decoding drives its own batched forwards for one sequence,
     // which is the tile shape and not the microbatch shape; it stays solo.
-    if (!sched_on() || e->dm) {
+    // engine_wants_spec covers grammar fast-forward without a draft model.
+    if (!sched_on() || engine_wants_spec(e)) {
         // A solo generation on a batching server still has to take the device
         // turn: its model_forward launches would break a concurrent
         // microbatch's graph capture just as a prefill would.

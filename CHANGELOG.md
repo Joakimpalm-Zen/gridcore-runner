@@ -5,6 +5,31 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Grammar fast-forward (JC-R2, runner half) — opt-in.** Under an active
+  constraint, when the validator pins a unique byte continuation (probed by
+  trial on validator copies — the same validator-by-trial design as the
+  sampler filter), the pinned run's tokenization is drafted for free and
+  verified by the target through the existing speculative walk, so output is
+  byte-identical to plain decoding with or without a `--draft` model in the
+  loop (`make test` gate: tests/test_grammar_ff.c, identity + engagement +
+  exclusions, ASan-clean). `RUNNER_SPEC_STATS=1` now reports grammar
+  acceptance per generation (`grammar a/d`) — the constrained-segment
+  acceptance measurement the judgment co-processor plan calls for.
+  **Default OFF** (`RUNNER_GRAMMAR_FF=1` to enable, value parsed strictly):
+  measured on EuroLLM-9B and Mistral-Nemo (CPU, contract schema), today's
+  raw-encode drafter is 4-12% slower at 33-38% acceptance — real subword
+  vocabs tokenize pinned runs differently than the model samples them. The
+  toy byte-level vocab accepts 100%; the structural fix is a
+  model-canonical (Syntetik) drafter, which is the remaining JC-R2 half.
+- **Speculative verify batch bound fix.** `model_forward_batch_keep` bounded
+  its batch by `spec_batch` only; with `-b` smaller than the draft window
+  (n_batch < 16) the verify batch overwrote the activation buffers past
+  their allocation (heap corruption in the `--draft` path, found by ASan
+  under the new grammar-ff test). Both the primitive and the draft-window
+  clamps now respect `n_batch`.
+- New `tok_encode_raw`: raw-byte encode without BOS/specials/segment
+  normalization (SPM's leading-space prefix), so a token list can
+  round-trip to exactly the input bytes wherever the vocab allows.
 - **`choice_logprobs` — constrained-choice posteriors (JC-R1).** Constrained
   requests (JSON mode / `json_schema` / tool schemas) can set
   `"choice_logprobs": true` to get, per decision point (a step where ≥ 2 of

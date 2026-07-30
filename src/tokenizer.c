@@ -821,6 +821,22 @@ int tok_find(tokenizer *t, const char *s) {
     return hmap_get(&t->vocab, s, strlen(s));
 }
 
+// Encode raw bytes verbatim: no BOS, no specials, and — the point — none of
+// tok_encode's segment-start normalization (SPM's leading-space prefix), so
+// the token list round-trips to exactly the input bytes wherever the vocab
+// can express them. Grammar fast-forward drafts through this; a vocab that
+// cannot round-trip some byte simply yields a shorter (or empty) draft.
+int tok_encode_raw(tokenizer *t, const char *text, int n,
+                   int32_t *out, int cap) {
+    t->encode_oom = false;
+    if (n <= 0) return 0;
+    return t->model == TOK_SPM
+        ? spm_encode_text(t, text, n, out, cap, 0, false)
+        : t->model == TOK_BPE_SPM
+        ? bpe_spm_encode_text(t, text, n, out, cap, 0)
+        : bpe_encode_text(t, text, n, out, cap, 0);
+}
+
 int tok_decode(tokenizer *t, int id, char *buf, int cap) {
     if (id < 0 || id >= t->n_vocab) return 0;
     int tt = t->ttype ? t->ttype[id] : TT_NORMAL;

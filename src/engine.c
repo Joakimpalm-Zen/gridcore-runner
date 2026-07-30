@@ -59,6 +59,18 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     }
     jsonv_init(&e->jv);
     constraint_reset(e);
+    // grammar fast-forward is opt-in (RUNNER_GRAMMAR_FF=1/on) and needs the
+    // batched verify path. Measured 2026-07-30 (EuroLLM-9B, Mistral-Nemo,
+    // CPU, contract schema): byte-identical output but 4-12% SLOWER at
+    // 33-38% acceptance — real subword vocabs tokenize pinned runs
+    // differently than the model samples them, and a rejected round's
+    // batched forward costs more than the accepted ones save. The value
+    // parses strictly (=1/on), never by existence — the RUNNER_CUDA_TC=0
+    // bug class. The structural fix is a model-canonical drafter (the
+    // Syntetik half of JC-R2).
+    const char *ff = getenv("RUNNER_GRAMMAR_FF");
+    e->gram_ff = model_spec_verify_ok(m) &&
+                 ff && (!strcmp(ff, "1") || !strcmp(ff, "on"));
     e->hist = malloc(sizeof(int32_t) * m->n_ctx);
     if (!e->hist) return false;   // no history buffer: the engine is unusable
     e->model_key = model_identity(m, tok);
@@ -816,6 +828,65 @@ static void cl_capture(engine *e, const float *logits) {
     e->cl_count++;
 }
 
+// JC-R2 grammar fast-forward: byte-level forced-continuation discovery by
+// trial. In the constrained payload phase, when exactly one next byte keeps
+// the validator alive, that byte is pinned by the grammar — no model opinion
+// is involved in emitting it. The pinned run's tokenization is proposed as a
+// free draft (no draft-model forwards) and verified by the target like any
+// other draft, so even a non-canonical tokenization can only cost acceptance,
+// never correctness. Probing is by trial on validator copies — the same
+// validator-by-trial design the sampler filter uses, no materialized mask.
+static int grammar_forced_bytes(const engine *e, bool schema,
+                                char *out, int cap) {
+    if (e->constraint_phase != CP_OUTPUT) return 0;
+    sval  sv = e->sv;
+    jsonv jv = e->jv;
+    if (schema ? sv.done : jv.done) return 0;
+    int n = 0;
+    while (n < cap) {
+        int legal = -1;
+        for (int c = 1; c < 256; c++) {          // NUL is never a legal byte
+            char b = (char)c;
+            bool ok;
+            if (schema) { sval  t = sv; ok = sval_feed(&t, &b, 1); }
+            else        { jsonv t = jv; ok = jsonv_feed(&t, &b, 1); }
+            if (!ok) continue;
+            if (legal >= 0) return n;            // a real choice: stop here
+            legal = c;
+        }
+        if (legal < 0) return n;                 // completion boundary
+        char b = (char)legal;
+        if (!(schema ? sval_feed(&sv, &b, 1) : jsonv_feed(&jv, &b, 1)))
+            return n;
+        out[n++] = b;
+        if (schema ? sv.done : jv.done) return n;
+    }
+    return n;
+}
+
+// tokenize a pinned byte run into draft proposals, keeping only the token
+// prefix that provably round-trips to a prefix of the pinned bytes — any
+// tokenizer normalization the raw encode still leaks (or a byte the vocab
+// cannot express) just shortens the draft, never corrupts it.
+static int grammar_draft(engine *e, int32_t *d, int max_d) {
+    enum { GRAM_FF_BYTES = 96 };
+    char fb[GRAM_FF_BYTES], tb[512];
+    int fn = grammar_forced_bytes(e, e->schema != NULL, fb, GRAM_FF_BYTES);
+    if (fn <= 0) return 0;
+    int nd = tok_encode_raw(e->tok, fb, fn, d, max_d);
+    if (e->tok->encode_oom) return 0;
+    int off = 0, keep = 0;
+    for (int i = 0; i < nd; i++) {
+        if (d[i] < 0 || d[i] >= e->m->n_vocab || tok_is_control(e->tok, d[i]))
+            break;
+        int tn = tok_decode(e->tok, d[i], tb, sizeof(tb));
+        if (tn <= 0 || off + tn > fn || memcmp(fb + off, tb, tn) != 0) break;
+        off += tn;
+        keep++;
+    }
+    return keep;
+}
+
 // speculative decoding: sampler-equality verification (llama.cpp-style) —
 // sample each position from the TARGET's logits with the full sampler chain;
 // a draft is accepted when the sampled token equals it, so output follows
@@ -851,6 +922,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
     e->lp_count = 0;
     double t0 = now_s();
     model_t *m = e->m, *dm = e->dm;
+    memset(&e->spec_st, 0, sizeof(e->spec_st));
     // Draft window size. Bounded below by 1, above by the model's spec_batch,
     // and — defensively — by the fixed stack buffer d[] so a future spec_batch
     // bump can never overflow it (RNC-4: d[] used to be a bare 16 unlinked to
@@ -860,21 +932,45 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
     if (K < 1) K = 1;
     if (K > m->spec_batch - 1) K = m->spec_batch - 1;
     if (K > SPEC_DRAFT_MAX - 1) K = SPEC_DRAFT_MAX - 1;
+    if (K > m->n_batch) K = m->n_batch; // activation buffers hold n_batch rows
     int32_t d[SPEC_DRAFT_MAX];
     float *dl = NULL; // draft logits for position dpos
     // Even under JSON/schema constraints, speculation stays target-exact:
     // the draft proposes, but only target-sampled tokens feed the validator.
     sample_ok_fn ok = e->schema ? schema_ok : e->json_mode ? json_ok : NULL;
+    bool constrained = e->schema || e->json_mode;
+    // grammar drafts fill the whole verify window; they cost no forwards and
+    // a pinned token is a near-certain accept, so draft_k does not cap them
+    int GK = m->spec_batch - 1;
+    if (GK > SPEC_DRAFT_MAX - 1) GK = SPEC_DRAFT_MAX - 1;
+    if (GK > m->n_batch) GK = m->n_batch; // same activation-buffer bound
     int st_rounds = 0, st_drafted = 0, st_accepted = 0;
-    #define SPEC_STATS() fprintf(stderr, \
-        "spec: %d rounds, %d drafted, %d accepted (%.2f tok/round)\n", \
-        st_rounds, st_drafted, st_accepted, \
-        st_rounds ? (double)n_gen / st_rounds : 0)
+    int st_gr_drafted = 0, st_gr_accepted = 0;
+    #define SPEC_STATS() do { \
+        e->spec_st.rounds = st_rounds; e->spec_st.drafted = st_drafted; \
+        e->spec_st.accepted = st_accepted; \
+        e->spec_st.gr_drafted = st_gr_drafted; \
+        e->spec_st.gr_accepted = st_gr_accepted; \
+        if (dm || getenv("RUNNER_SPEC_STATS")) fprintf(stderr, \
+            "spec: %d rounds, %d drafted, %d accepted (%.2f tok/round)" \
+            ", grammar %d/%d\n", \
+            st_rounds, st_drafted, st_accepted, \
+            st_rounds ? (double)n_gen / st_rounds : 0, \
+            st_gr_accepted, st_gr_drafted); } while (0)
 
     while ((max_new < 0 || n_gen < max_new) && e->pos < m->n_ctx) {
         st_rounds++;
+        // a grammar-pinned run drafts for free and preempts the draft model
+        int nd = 0, gr = 0;
+        if (e->gram_ff && constrained) {
+            int cap = GK;
+            if (max_new >= 0 && cap > max_new - n_gen) cap = max_new - n_gen;
+            if (cap > m->n_ctx - e->pos - 1) cap = m->n_ctx - e->pos - 1;
+            if (cap > 0) nd = gr = grammar_draft(e, d, cap);
+            st_drafted += nd; st_gr_drafted += nd;
+        }
         // catch the draft up on tokens accepted since its last position
-        while (e->dpos < e->pos) {
+        while (!nd && dm && e->dpos < e->pos) {
             int chunk = e->pos - e->dpos < dm->n_batch ? e->pos - e->dpos
                                                        : dm->n_batch;
             if (e->dpos + chunk > dm->n_ctx) { dl = NULL; break; }
@@ -883,8 +979,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             e->dpos += chunk;
         }
         // draft up to K tokens greedily (nd == 0 degrades to plain decoding)
-        int nd = 0;
-        while (dl && nd < K && e->pos + nd + 1 < m->n_ctx &&
+        while (!gr && dl && nd < K && e->pos + nd + 1 < m->n_ctx &&
                e->dpos + 1 < dm->n_ctx) {
             int best = 0;
             for (int i = 1; i < dm->n_vocab; i++)
@@ -933,6 +1028,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             if (i < nd && tok == d[i] && rc == 0) {
                 e->hist[e->pos + i] = tok; // accepted: its KV is already right
                 st_accepted++;
+                if (gr) st_gr_accepted++;
                 if (constrained_done) {
                     e->hit_stop = true;
                     e->pos += i + 1;
@@ -1061,9 +1157,17 @@ int engine_gen_end(engine *e, gen_cb cb, void *ud, double *gen_time) {
     return e->gen_count;
 }
 
+// The speculative walk owns its own forwards and cannot interleave with
+// logprob/choice-logprob capture (both hook the solo step path).
+bool engine_wants_spec(const engine *e) {
+    if (e->lp_cap || e->cl_cap) return false;
+    if (e->dm) return true;
+    return e->gram_ff && (e->schema || e->json_mode);
+}
+
 int engine_generate(engine *e, float *logits, int max_new,
                     gen_cb cb, void *ud, double *gen_time) {
-    if (e->dm && e->lp_cap == 0)
+    if (engine_wants_spec(e))
         return engine_generate_spec(e, logits, max_new, cb, ud, gen_time);
     engine_gen_begin(e, max_new);
     int32_t tok; int pos;

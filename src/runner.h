@@ -206,6 +206,9 @@ void tokenizer_free(tokenizer *t);
 // returns number of tokens written to out (capacity cap); add_bos per call
 int  tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
                 bool add_bos, bool parse_special);
+// raw-byte encode without BOS/specials/segment normalization (see tokenizer.c)
+int  tok_encode_raw(tokenizer *t, const char *text, int n,
+                    int32_t *out, int cap);
 // decode one token into buf (returns bytes written, no NUL); control tokens -> 0
 int  tok_decode(tokenizer *t, int id, char *buf, int cap);
 // decoded text of token id even if control (for stop-token matching); NULL if oob
@@ -543,6 +546,8 @@ bool   model_moe_ffn_cpu(model_t *m, int layer, int n);
 // speculative verify: forward a small batch keeping hidden states, then pull
 // each row's logits lazily (false/NULL on full GPU offload or n > spec_batch)
 bool   model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos);
+// whether the batched verify path above can run at all for this model
+bool   model_spec_verify_ok(const model_t *m);
 float *model_spec_row_logits(model_t *m, int b);
 // mean-pooled L2-normalized embedding of toks; clobbers KV slots [0, n)
 bool   model_embed(model_t *m, const int32_t *toks, int n, float *out);
@@ -988,6 +993,16 @@ typedef struct {
     model_t *dm;           // draft model (NULL = off)
     int      dpos;         // draft KV position (may trail pos)
     int      draft_k;      // drafts per round
+    // JC-R2 grammar fast-forward: when the active constraint pins a unique
+    // byte continuation, its tokenization is drafted for free (no draft
+    // forwards) and verified by the target exactly like a draft-model
+    // proposal, so output stays sampler-identical to plain decoding.
+    // Opt-in via RUNNER_GRAMMAR_FF=1 (see engine_init for the measured
+    // reason); needs the batched verify path (not full GPU offload).
+    bool     gram_ff;
+    struct { int rounds, drafted, accepted,      // all drafts (either source)
+                 gr_drafted, gr_accepted; }      // grammar-pinned drafts only
+             spec_st;                            // reset per generation
     // in-flight generation budget, owned by engine_gen_begin/step/end
     int      gen_max, gen_count;
     double   gen_t0;
@@ -996,6 +1011,11 @@ typedef struct {
     // Computed once by engine_init; see engine_prefix_reuse.
     uint64_t model_key;
 } engine;
+
+// True when this request should take the speculative walk (a draft model
+// and/or grammar fast-forward under an active constraint) — shared by
+// engine_generate and the server's scheduler dispatch so they cannot drift.
+bool engine_wants_spec(const engine *e);
 
 // Returns false if the per-context history buffer could not be allocated;
 // the caller must not use the engine in that case.

@@ -2086,11 +2086,19 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
 
 // forward a small batch keeping every row's hidden state in x (speculative
 // verify). CPU path only: full GPU offload keeps hidden states on-device.
+bool model_spec_verify_ok(const model_t *m) {
+    return !(m->gpu && m->gpu_layers >= m->n_layer);
+}
+
 bool model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos) {
-    if (m->gpu && m->gpu_layers >= m->n_layer) return false;
+    if (!model_spec_verify_ok(m)) return false;
     if (!m->all_logits)
         m->all_logits = malloc(sizeof(float) * (size_t)m->spec_batch * m->n_vocab);
-    if (n > m->spec_batch || !m->all_logits) return false;
+    // n_batch bounds the activation buffers (x/xb/q/...), spec_batch bounds
+    // all_logits; a batch beyond EITHER would write past a heap block. The
+    // draft window used to be clamped to spec_batch only — with a small -b
+    // (n_batch < 16) that overflowed x by the difference.
+    if (n > m->spec_batch || n > m->n_batch || !m->all_logits) return false;
     model_forward_batch(m, tokens, n, pos, false); // leaves hidden states in x
     return true;
 }

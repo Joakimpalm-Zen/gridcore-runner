@@ -78,6 +78,7 @@ endif
 # same .exe suffix rule as every other test binary, without repeating the
 # three-way platform branch above
 TEST_PREFIX = $(TEST_BATCH:test-batch%=test-prefix%)
+TEST_GRAMMAR_FF = $(TEST_BATCH:test-batch%=test-grammar-ff%)
 TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
@@ -187,6 +188,15 @@ TEST_PREFIX_SRC = tests/test_prefix.c src/gguf.c src/compat.c src/quants.c \
 $(TEST_PREFIX): $(TEST_PREFIX_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_PREFIX_SRC) -o $@ $(LDFLAGS)
 
+# grammar fast-forward: same full-engine link as the prefix test — the gate
+# is byte identity of a real constrained generation with the walk on and off
+TEST_GRAMMAR_FF_SRC = tests/test_grammar_ff.c src/gguf.c src/compat.c \
+                  src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                  src/jsonmode.c src/schema.c src/json.c src/engine.c \
+                  src/vramreg.c $(GPU_SRC)
+$(TEST_GRAMMAR_FF): $(TEST_GRAMMAR_FF_SRC) src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_GRAMMAR_FF_SRC) -o $@ $(LDFLAGS)
+
 # the cross-process VRAM registry. Links only vramreg.c and compat.c: the
 # free-VRAM figure arrives through a callback, so the whole module is drivable
 # with synthetic numbers and the test needs no GPU, no model and no driver --
@@ -270,7 +280,7 @@ endif
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
-      $(TEST_PREFIX) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) \
+      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_MODEL_LOAD_FAILURE) runner test.gguf
@@ -287,6 +297,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_SHARED)
 	./$(TEST_BATCH)
 	./$(TEST_PREFIX)
+	./$(TEST_GRAMMAR_FF)
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
 	./$(TEST_QUANTIZE)
@@ -414,7 +425,7 @@ clean:
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_VRAMREG) test-shared-asan-bin \
-	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_PREFIX) $(TEST_TOOLS) $(DIFFTOK) \
+	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
