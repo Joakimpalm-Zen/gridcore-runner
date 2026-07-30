@@ -3809,7 +3809,27 @@ static void send_capabilities(sock_t fd) {
         sb_esc(&r, SV.model_name, strlen(SV.model_name));
         sb_lit(&r, "\",\"resident\":true}");
     }
-    sb_lit(&r, "],\"sampling\":{\"preset\":");
+    model_t *pm = res >= 0 ? SV.slots[0].m : NULL;
+    sb_lit(&r, "],\"agent_profile\":");
+    if (!pm || !pm->agent_profile) {
+        sb_lit(&r, "null");
+    } else {
+        sb_fmt(&r, "{\"protocol_version\":%u,\"tokenizer_version\":%u,\"schema_id\":\"",
+               pm->agent_protocol_version, pm->agent_tokenizer_version);
+        sb_esc(&r, pm->agent_schema_id, strlen(pm->agent_schema_id));
+        sb_lit(&r, "\",\"schema_digest\":\"");
+        sb_esc(&r, pm->agent_schema_digest, strlen(pm->agent_schema_digest));
+        sb_lit(&r, "\",\"required_features\":[");
+        for (uint64_t i = 0; i < pm->n_agent_required_features; i++) {
+            if (i) sb_lit(&r, ",");
+            sb_lit(&r, "\"");
+            sb_esc(&r, pm->agent_required_features[i].s,
+                   pm->agent_required_features[i].n);
+            sb_lit(&r, "\"");
+        }
+        sb_lit(&r, "]}");
+    }
+    sb_lit(&r, ",\"sampling\":{\"preset\":");
     if (SV.preset_name) {
         sb_lit(&r, "\"");
         sb_esc(&r, SV.preset_name, strlen(SV.preset_name));

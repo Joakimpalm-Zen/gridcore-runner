@@ -13,6 +13,8 @@ SUPPRESS_ALL_BUT_EOS = False
 ZERO_FIRST_DIM = False
 WRAP_FIRST_OFFSET = False
 ARCH = "llama"
+AGENT_PROFILE = False
+AGENT_FEATURES = ["dense", "json_schema"]
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -26,6 +28,12 @@ while i < len(args):
     elif a == "--arch":
         i += 1
         ARCH = args[i]
+    elif a == "--agent-profile":
+        AGENT_PROFILE = True
+    elif a == "--agent-feature":
+        i += 1
+        AGENT_PROFILE = True
+        AGENT_FEATURES.append(args[i])
     else:
         OUT = a
     i += 1
@@ -118,6 +126,14 @@ meta_kvs = [
     kv_u32("tokenizer.ggml.eos_token_id", 2),
     kv_bool("tokenizer.ggml.add_bos_token", True),
 ]
+if AGENT_PROFILE:
+    meta_kvs += [
+        kv_u32("gridcore.agent.protocol_version", 1),
+        kv_u32("gridcore.agent.tokenizer_version", 1),
+        kv_str("gridcore.agent.schema_id", "gridcore.agent.action.v1"),
+        kv_str("gridcore.agent.schema_digest", "a" * 64),
+        kv_arr_str("gridcore.agent.required_features", AGENT_FEATURES),
+    ]
 if SUPPRESS_ALL_BUT_EOS:
     # every token except </s> is suppressed: greedy generation must emit EOS
     # immediately, so a completion prints only the echoed prompt

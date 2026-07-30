@@ -287,6 +287,11 @@ typedef struct {
     uint64_t  file_size, file_ino;
     int64_t   file_mtime_ns, file_ctime_ns;
     char      arch[32];
+    bool      agent_profile;
+    uint32_t  agent_protocol_version, agent_tokenizer_version;
+    const char *agent_schema_id, *agent_schema_digest;
+    gg_str    *agent_required_features;
+    uint64_t  n_agent_required_features;
     int       n_layer, n_embd, n_head, n_head_kv, head_dim, n_ff;
     int       n_vocab, n_ctx_train, rope_dim;
     // sparse-MoE (0 = dense model). n_ff_exp is the per-expert FFN width.

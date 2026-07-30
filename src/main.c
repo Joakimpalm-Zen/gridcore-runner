@@ -457,6 +457,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 model_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
+        if (m.agent_profile)
+            fprintf(stderr, "agent-profile: protocol=%u tokenizer=%u schema=%s digest=%s features=%llu\n",
+                    m.agent_protocol_version, m.agent_tokenizer_version,
+                    m.agent_schema_id, m.agent_schema_digest,
+                    (unsigned long long)m.n_agent_required_features);
         char ident[256];
         sampler_ident(gguf_get_str(&m.gf, "general.name", NULL), m.path,
                       ident, sizeof(ident));

@@ -420,6 +420,14 @@ const char *const *model_supported_archs(size_t *count) {
 
 static bool model_load_inner(model_t *m, const char *path, const model_params *p);
 
+static bool profile_integer(const gguf_kv *kv) {
+    if (!kv) return false;
+    return kv->type == GGUF_T_U8 || kv->type == GGUF_T_I8 ||
+           kv->type == GGUF_T_U16 || kv->type == GGUF_T_I16 ||
+           kv->type == GGUF_T_U32 || kv->type == GGUF_T_I32 ||
+           kv->type == GGUF_T_U64 || kv->type == GGUF_T_I64;
+}
+
 bool model_load(model_t *m, const char *path, const model_params *p) {
     memset(m, 0, sizeof(*m));
     if (!model_load_inner(m, path, p)) {
@@ -432,6 +440,69 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 static bool model_load_inner(model_t *m, const char *path, const model_params *p) {
     if (!gguf_open(&m->gf, path)) return false;
     gguf_file *g = &m->gf;
+    // A profile is opt-in metadata: legacy/dense GGUFs remain admitted exactly
+    // as before. Once any profile key is present, however, the contract is
+    // atomic and fail-closed. Validate it before path/state/tensor allocation.
+    static const char *const profile_keys[] = {
+        "gridcore.agent.protocol_version", "gridcore.agent.tokenizer_version",
+        "gridcore.agent.schema_id", "gridcore.agent.schema_digest",
+        "gridcore.agent.required_features",
+    };
+    bool profile = false;
+    for (size_t i = 0; i < sizeof(profile_keys) / sizeof(*profile_keys); i++)
+        profile |= gguf_get(g, profile_keys[i]) != NULL;
+    if (profile) {
+        gguf_kv *pv = gguf_get(g, profile_keys[0]);
+        gguf_kv *tv = gguf_get(g, profile_keys[1]);
+        gguf_kv *rf = gguf_get(g, profile_keys[4]);
+        const char *sid = gguf_get_str(g, profile_keys[2], NULL);
+        const char *dig = gguf_get_str(g, profile_keys[3], NULL);
+        uint32_t protocol = gguf_get_u32(g, profile_keys[0], 0);
+        uint32_t tokenizer = gguf_get_u32(g, profile_keys[1], 0);
+        if (!profile_integer(pv) || !profile_integer(tv) ||
+            !sid || !*sid || !dig || strlen(dig) != 64 ||
+            !rf || rf->type != GGUF_T_ARR || rf->arr_type != GGUF_T_STR) {
+            fprintf(stderr, "error: invalid gridcore agent profile metadata\n");
+            return false;
+        }
+        for (int i = 0; i < 64; i++)
+            if (!((dig[i] >= '0' && dig[i] <= '9') ||
+                  (dig[i] >= 'a' && dig[i] <= 'f'))) {
+                fprintf(stderr, "error: invalid gridcore agent schema digest\n");
+                return false;
+            }
+        if (protocol != 1) {
+            fprintf(stderr, "error: unsupported gridcore agent protocol version %u\n",
+                    protocol);
+            return false;
+        }
+        if (tokenizer != 1) {
+            fprintf(stderr, "error: unsupported gridcore agent tokenizer version %u\n",
+                    tokenizer);
+            return false;
+        }
+        static const char *const features[] = {
+            "dense", "json_schema", "continuous_batching", "prefix_cache",
+            "spec_decode",
+        };
+        for (uint64_t i = 0; i < rf->arr_n; i++) {
+            const char *want = rf->arr_str[i].s;
+            bool known = false;
+            for (size_t j = 0; j < sizeof(features) / sizeof(*features); j++)
+                if (!strcmp(want, features[j])) { known = true; break; }
+            if (!known) {
+                fprintf(stderr, "error: unsupported required agent feature '%s'\n", want);
+                return false;
+            }
+        }
+        m->agent_profile = true;
+        m->agent_protocol_version = protocol;
+        m->agent_tokenizer_version = tokenizer;
+        m->agent_schema_id = sid;
+        m->agent_schema_digest = dig;
+        m->agent_required_features = rf->arr_str;
+        m->n_agent_required_features = rf->arr_n;
+    }
     // kept for the backend's shared-weight registry: two instances of the same
     // file are what let `--parallel N` upload the weights once
     size_t plen = strlen(path) + 1;

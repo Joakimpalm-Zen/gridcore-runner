@@ -13,6 +13,47 @@ import pytest
 from harness import RunnerServer, find_runner, free_port
 
 
+def test_agent_profile_is_admitted_and_exposed(tmp_path):
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = tmp_path / "profile.gguf"
+    subprocess.run([sys.executable, os.path.join(root, "scripts", "make-test-model.py"),
+                    "--agent-profile", str(model)], check=True, cwd=root)
+    cli = subprocess.run([find_runner(root), "-m", str(model), "-p", "probe",
+                          "-n", "1", "--gpu", "off"], text=True,
+                         capture_output=True, timeout=10)
+    assert cli.returncode == 0
+    assert "agent-profile: protocol=1 tokenizer=1" in cli.stderr
+    srv = RunnerServer(find_runner(root), str(model), ctx=64, parallel=1,
+                       extra_args=["--gpu", "off"])
+    srv.start()
+    try:
+        with urllib.request.urlopen(srv.base_url + "/v1/capabilities", timeout=5) as r:
+            profile = json.load(r)["agent_profile"]
+        assert profile == {
+            "protocol_version": 1,
+            "tokenizer_version": 1,
+            "schema_id": "gridcore.agent.action.v1",
+            "schema_digest": "a" * 64,
+            "required_features": ["dense", "json_schema"],
+        }
+    finally:
+        srv.stop()
+
+
+def test_unknown_required_agent_feature_fails_before_serving(tmp_path):
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = tmp_path / "future-profile.gguf"
+    subprocess.run([sys.executable, os.path.join(root, "scripts", "make-test-model.py"),
+                    "--agent-feature", "future_attention_v99", str(model)],
+                   check=True, cwd=root)
+    proc = subprocess.run([find_runner(root), "-m", str(model), "-p", "probe",
+                           "-n", "1", "--gpu", "off"], text=True,
+                          capture_output=True, timeout=10)
+    assert proc.returncode != 0
+    assert "unsupported required agent feature 'future_attention_v99'" in proc.stderr
+    assert "loaded " not in proc.stderr
+
+
 def test_thinking_prelude_is_bounded_with_distinct_finish_reason(tmp_path):
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     model = tmp_path / "ornith.gguf"
