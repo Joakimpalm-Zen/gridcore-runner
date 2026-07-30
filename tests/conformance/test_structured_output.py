@@ -211,6 +211,26 @@ def test_embeddings_string_and_array_agree(client):
         raise ProtocolError("string and single-element-array inputs disagree")
 
 
+def test_embeddings_accept_native_output_options(client):
+    baseline = client.embeddings({"input": "alpha"}, name="embeddings-native-base")
+    native_dimensions = len(baseline.json["data"][0]["embedding"])
+    r = client.embeddings({"input": "alpha", "encoding_format": "float",
+                           "dimensions": native_dimensions},
+                          name="embeddings-native-options")
+    r.expect_status(200)
+    assert len(r.json["data"][0]["embedding"]) == native_dimensions
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("encoding_format", "base64"),
+    ("dimensions", 1),
+])
+def test_embeddings_reject_unsupported_output_options(client, field, value):
+    client.expect_400({"input": "alpha", field: value},
+                      name=f"embeddings-unsupported-{field}", contains=field,
+                      path="/v1/embeddings")
+
+
 @pytest.mark.parametrize("payload,label", [
     ({"input": [1, 2]}, "non-string-items"),
     ({"input": []}, "empty-array"),

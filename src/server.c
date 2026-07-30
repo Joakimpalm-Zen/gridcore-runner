@@ -1683,7 +1683,7 @@ static bool request_number(jv *req, const char *key, double dflt,
 }
 
 // negative sentinels: MT_UNLIMITED clamps to the context window later,
-// the other two are request errors with distinct messages
+// the other sentinels are request errors with distinct messages
 enum { MT_NEGATIVE = -4, MT_BAD_TYPE = -3, MT_NON_FINITE = -2,
        MT_UNLIMITED = -1 };
 
@@ -1708,6 +1708,28 @@ static bool request_keep_alive(jv *req, bool *present, int *seconds) {
     if (!isfinite(v->num) || v->num > INT_MAX) return false;
     *seconds = v->num < 0 ? -1 : (int)v->num;
     return true;
+}
+
+// SDKs routinely serialize neutral values for features this single-choice
+// engine does not implement. Accept only the forms whose semantics are exactly
+// a no-op; reject every value that would otherwise be silently ignored.
+static const char *unsupported_completion_field(jv *req) {
+    jv *v = jv_get(req, "n");
+    if (!absent(v) && (v->type != J_NUM || !isfinite(v->num) || v->num != 1))
+        return "n";
+    v = jv_get(req, "frequency_penalty");
+    if (!absent(v) && (v->type != J_NUM || !isfinite(v->num) || v->num != 0))
+        return "frequency_penalty";
+    v = jv_get(req, "presence_penalty");
+    if (!absent(v) && (v->type != J_NUM || !isfinite(v->num) || v->num != 0))
+        return "presence_penalty";
+    v = jv_get(req, "logit_bias");
+    if (!absent(v) && (v->type != J_OBJ || v->n != 0)) return "logit_bias";
+    // `user` is advisory rather than an inference control, but recognizing it
+    // still means rejecting malformed values instead of accepting any JSON.
+    v = jv_get(req, "user");
+    if (!absent(v) && v->type != J_STR) return "user";
+    return NULL;
 }
 
 // a boolean request flag: absent takes the default, a non-boolean is an
@@ -1763,6 +1785,14 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     bool chat = api != API_TEXT; // chat-shaped: thinking channels, tools
     model_t *m = s->m;
     engine *e = &s->e;
+
+    const char *unsupported = unsupported_completion_field(req);
+    if (unsupported) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "%s has unsupported semantics", unsupported);
+        send_error(fd, 400, msg);
+        return;
+    }
 
     // Per-request deadline. A wall-clock bound is what a batching server owes
     // its clients that a serial one does not: your latency now depends on who
@@ -3511,6 +3541,19 @@ static void handle_embeddings(slot_t *s, sock_t fd, jv *req) {
     if (n_in == 0) { send_error(fd, 400, "missing input"); return; }
 
     model_t *m = s->m;
+    jv *encoding = jv_get(req, "encoding_format");
+    if (!absent(encoding) &&
+        (encoding->type != J_STR || strcmp(encoding->str, "float") != 0)) {
+        send_error(fd, 400, "encoding_format must be float");
+        return;
+    }
+    jv *dimensions = jv_get(req, "dimensions");
+    if (!absent(dimensions) &&
+        (dimensions->type != J_NUM || !isfinite(dimensions->num) ||
+         dimensions->num != m->n_embd)) {
+        send_error(fd, 400, "dimensions must equal the model embedding size");
+        return;
+    }
     float *emb = malloc(sizeof(float) * m->n_embd);
     if (!emb) { send_error(fd, 500, "out of memory"); return; }  // RNS-3
     sbuf r = {0};

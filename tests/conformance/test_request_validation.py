@@ -115,6 +115,18 @@ def test_explicit_null_scalar_reads_as_absent(client, field):
     r.expect_status(200)
 
 
+@pytest.mark.parametrize(("field", "value"), [
+    ("n", 2),
+    ("frequency_penalty", 0.5),
+    ("presence_penalty", -0.5),
+    ("logit_bias", {"1": 10}),
+    ("user", 7),
+])
+def test_unsupported_completion_field_semantics_are_rejected(client, field, value):
+    client.expect_400(dict(CHAT, **{field: value}), name=f"unsupported-{field}",
+                      contains=field)
+
+
 @pytest.mark.parametrize("stop,label", [
     ([1], "non-string-item"),
     ([""], "empty-item"),
