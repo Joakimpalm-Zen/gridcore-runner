@@ -24,6 +24,10 @@
       "resident": true
     }
   ],
+  "mtp": {
+    "consumed": false,
+    "declared_layers": "<number>"
+  },
   "object": "runner.capabilities",
   "resident": null,
   "sampling": {

@@ -15,6 +15,7 @@ WRAP_FIRST_OFFSET = False
 ARCH = "llama"
 AGENT_PROFILE = False
 AGENT_FEATURES = ["dense", "json_schema"]
+MTP_LAYERS = 0   # extra trailing blocks declared as NextN/MTP predictor heads
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -34,6 +35,11 @@ while i < len(args):
         i += 1
         AGENT_PROFILE = True
         AGENT_FEATURES.append(args[i])
+    elif a == "--mtp-layers":
+        # emit N extra blocks and declare them as training-only MTP predictor
+        # heads; the runner must exclude them and decode exactly as without
+        i += 1
+        MTP_LAYERS = int(args[i])
     else:
         OUT = a
     i += 1
@@ -94,7 +100,10 @@ def ones(n):
 
 tensors = [("token_embd.weight", [N_EMBD, N_VOCAB], tensor_data(N_EMBD * N_VOCAB)),
            ("output_norm.weight", [N_EMBD], ones(N_EMBD))]
-for i in range(N_LAYER):
+# MTP predictor heads are counted inside block_count by the exports that carry
+# them, exactly like the Qwen3.5 NextN blocks; the runner must strip them back
+# off and decode as if they were never there.
+for i in range(N_LAYER + MTP_LAYERS):
     kv_dim = N_KV * (N_EMBD // N_HEAD)
     tensors += [
         (f"blk.{i}.attn_norm.weight", [N_EMBD], ones(N_EMBD)),
@@ -110,7 +119,7 @@ for i in range(N_LAYER):
 
 meta_kvs = [
     kv_str("general.architecture", ARCH),
-    kv_u32(f"{ARCH}.block_count", N_LAYER),
+    kv_u32(f"{ARCH}.block_count", N_LAYER + MTP_LAYERS),
     kv_u32(f"{ARCH}.context_length", 256),
     kv_u32(f"{ARCH}.embedding_length", N_EMBD),
     kv_u32(f"{ARCH}.feed_forward_length", N_FF),
@@ -126,6 +135,8 @@ meta_kvs = [
     kv_u32("tokenizer.ggml.eos_token_id", 2),
     kv_bool("tokenizer.ggml.add_bos_token", True),
 ]
+if MTP_LAYERS:
+    meta_kvs.append(kv_u32(f"{ARCH}.nextn_predict_layers", MTP_LAYERS))
 if AGENT_PROFILE:
     meta_kvs += [
         kv_u32("gridcore.agent.protocol_version", 1),

@@ -545,6 +545,16 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             bool known = false;
             for (size_t j = 0; j < sizeof(features) / sizeof(*features); j++)
                 if (!strcmp(want, features[j])) { known = true; break; }
+            // Named-but-unimplemented features get their own reason: a profile
+            // that REQUIRES multi-token-prediction consumption is asking for a
+            // verifier this build does not have, which is different from an
+            // unrecognized string and must not read as a typo.
+            if (!strcmp(want, "mtp")) {
+                fprintf(stderr, "error: this profile requires MTP consumption, "
+                        "which this build does not implement (MTP tensors are "
+                        "admitted as training-only; see docs)\n");
+                return false;
+            }
             if (!known) {
                 fprintf(stderr, "error: unsupported required agent feature '%s'\n", want);
                 return false;
@@ -643,20 +653,26 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         m->think_open  = "<think>";
         m->think_close = "</think>";
     }
+    // Multi-token-prediction heads, admitted as training-only for EVERY
+    // architecture that declares them. An export whose block_count includes
+    // auxiliary NextN/MTP predictor blocks says so with
+    // `<arch>.nextn_predict_layers`; those blocks have a different tensor
+    // layout and take no part in ordinary autoregressive decoding, so the
+    // backbone depth excludes them and dense decoding is bit-for-bit
+    // unchanged. Consuming them (speculation off the MTP heads) is a separate,
+    // unimplemented feature — a profile that *requires* it is rejected above.
+    // This generalizes the qwen35-only handling; qwen35 exports read the same
+    // key and behave exactly as before.
+    m->mtp_layers = (int)gguf_get_u32(g, AK("nextn_predict_layers"), 0);
+    if (m->mtp_layers < 0 || m->mtp_layers >= m->n_layer) {
+        fprintf(stderr, "error: invalid NextN/MTP layer count %d for %d blocks\n",
+                m->mtp_layers, m->n_layer);
+        return false;
+    }
+    m->n_layer -= m->mtp_layers;
     if (strcmp(arch, "qwen35") == 0) {
         // Qwen3.5 dense (the architecture used by Ornith-1.0-9B) alternates
         // three Gated DeltaNet layers with one conventional attention layer.
-        // Current GGUFs include their auxiliary NextN/MTP predictor layers in
-        // block_count.  Those blocks have a different tensor layout and do not
-        // participate in ordinary autoregressive decoding, so retain only the
-        // backbone depth.  Older exports omit the key and remain unchanged.
-        int nextn = (int)gguf_get_u32(g, AK("nextn_predict_layers"), 0);
-        if (nextn < 0 || nextn >= m->n_layer) {
-            fprintf(stderr, "error: invalid qwen35 NextN layer count %d for %d blocks\n",
-                    nextn, m->n_layer);
-            return false;
-        }
-        m->n_layer -= nextn;
         m->qwen35            = true;
         m->think_open        = "<think>";
         m->think_close       = "</think>";

@@ -5,6 +5,19 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **MTP heads are admitted as training-only, for every architecture.** An
+  export whose `block_count` includes auxiliary NextN/MTP predictor blocks
+  declares them with `<arch>.nextn_predict_layers`; those blocks are now
+  excluded from the backbone on any architecture (this generalizes the
+  qwen35-only handling — qwen35 exports read the same key and are unchanged),
+  so dense decoding is bit-for-bit identical to an export without them. The
+  load line and `/v1/capabilities` report `mtp.declared_layers` with
+  `consumed: false`, so a controller sees the exclusion instead of inferring
+  it from a layer count. A profile whose `required_features` contains `mtp`
+  is refused with its own reason — requiring consumption asks for a verifier
+  this build does not implement, which is not the same as an unknown feature
+  name. Consumption itself remains unbuilt by design (the staged contract:
+  admission first, verifier second). Gate: tests/test_mtp_admission.py.
 - **`--bench-json` benchmarks a realistic prefill and reports both phases in
   seconds.** The default prompt was one ten-token sentence, so the instrument
   reported healthy numbers on the first outside install while a realistic

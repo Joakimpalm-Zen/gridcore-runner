@@ -3829,6 +3829,11 @@ static void send_capabilities(sock_t fd) {
         }
         sb_lit(&r, "]}");
     }
+    // Admitted-but-unconsumed MTP heads: a controller can see that the export
+    // carries predictor blocks and that this build excluded them, rather than
+    // inferring it from a layer count that silently differs from the card.
+    sb_fmt(&r, ",\"mtp\":{\"declared_layers\":%d,\"consumed\":false}",
+           pm ? pm->mtp_layers : 0);
     sb_lit(&r, ",\"sampling\":{\"preset\":");
     if (SV.preset_name) {
         sb_lit(&r, "\"");

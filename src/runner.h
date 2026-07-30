@@ -365,6 +365,9 @@ typedef struct {
     int    xdim;             // max(n_embd, per-layer q_dim); sizes xb/xb2/q
     int    reserve_vram_pct; // VRAM cap for the GPU backend (0 = free VRAM)
     int    gpu_layers_override; // forced leading GPU layer count (0 = auto)
+    int    mtp_layers;       // declared multi-token-prediction blocks excluded
+                             // from the backbone (training-only; consuming
+                             // them is a separate unimplemented feature)
     bool   cpu_moe;          // keep sparse expert FFNs on the host while CUDA
                              // runs the remaining tensors/layers
     bool  *moe_host;         // [n_layer] per-layer expert placement under

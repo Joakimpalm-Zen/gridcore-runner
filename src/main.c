@@ -477,6 +477,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 model_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
+        if (m.mtp_layers)
+            fprintf(stderr, "mtp: %d predictor block(s) declared and excluded "
+                    "from the backbone (training-only; not consumed)\n",
+                    m.mtp_layers);
         if (m.agent_profile)
             fprintf(stderr, "agent-profile: protocol=%u tokenizer=%u schema=%s digest=%s features=%llu\n",
                     m.agent_protocol_version, m.agent_tokenizer_version,
