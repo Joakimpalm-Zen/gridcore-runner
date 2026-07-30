@@ -26,6 +26,8 @@ test-batch
 test-batch.exe
 test-prefix
 test-prefix.exe
+test-grammar-ff
+test-grammar-ff.exe
 test-shared-asan-bin
 test-batch
 test-batch.exe
