@@ -1684,7 +1684,8 @@ static bool request_number(jv *req, const char *key, double dflt,
 
 // negative sentinels: MT_UNLIMITED clamps to the context window later,
 // the other two are request errors with distinct messages
-enum { MT_BAD_TYPE = -3, MT_NON_FINITE = -2, MT_UNLIMITED = -1 };
+enum { MT_NEGATIVE = -4, MT_BAD_TYPE = -3, MT_NON_FINITE = -2,
+       MT_UNLIMITED = -1 };
 
 static int request_max_tokens(jv *req, int dflt) {
     jv *v = jv_get(req, "max_tokens");
@@ -1694,7 +1695,7 @@ static int request_max_tokens(jv *req, int dflt) {
     if (absent(v)) return dflt;
     if (v->type != J_NUM) return MT_BAD_TYPE;
     if (!isfinite(v->num)) return MT_NON_FINITE;
-    if (v->num < 0) return MT_UNLIMITED;
+    if (v->num < 0) return MT_NEGATIVE;
     if (v->num > INT_MAX) return INT_MAX;
     return (int)v->num;
 }
@@ -1812,6 +1813,10 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     }
     if (max_tokens == MT_BAD_TYPE) {
         send_error(fd, 400, "max_tokens must be a number");
+        return;
+    }
+    if (max_tokens == MT_NEGATIVE) {
+        send_error(fd, 400, "max_tokens must be non-negative");
         return;
     }
     // "stream":"true" used to read as false and answer with a buffered

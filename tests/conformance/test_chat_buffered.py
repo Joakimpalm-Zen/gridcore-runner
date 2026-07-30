@@ -84,6 +84,16 @@ def test_max_tokens_clamped_to_context(client):
                             generated=r.usage["completion_tokens"])
 
 
+@pytest.mark.parametrize("field", [
+    "max_tokens", "max_completion_tokens", "max_output_tokens",
+])
+def test_negative_max_tokens_is_rejected(client, field):
+    payload = dict(BASE)
+    payload.pop("max_tokens")
+    payload[field] = -1
+    client.expect_400(payload, field)
+
+
 def test_prefix_cache_is_deterministic(client):
     """Identical greedy requests must produce identical text whether or not the
     KV prefix cache served them. This is the cheapest correctness canary the
