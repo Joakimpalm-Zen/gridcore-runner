@@ -64,6 +64,21 @@ def test_stream_options_include_usage(client):
                             last=st.chunks[-1])
 
 
+def test_streaming_chat_returns_requested_logprobs(client):
+    st = client.chat_stream(dict(BASE, max_tokens=4, logprobs=True,
+                                 top_logprobs=3),
+                            name="stream-logprobs").expect_sse()
+    records = []
+    for chunk in st.chunks:
+        records.extend((chunk.get("choices") or [{}])[0]
+                       .get("logprobs", {}).get("content", []))
+    if not records:
+        raise ProtocolError("stream requested logprobs but received none")
+    if any(len(record.get("top_logprobs", [])) > 3 for record in records):
+        raise ProtocolError("stream exceeded requested top_logprobs",
+                            records=records)
+
+
 # ------------------------------------------------------- boundary matrix
 @pytest.fixture(scope="module")
 def recorded_stream(client):

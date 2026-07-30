@@ -127,6 +127,12 @@ def test_unsupported_completion_field_semantics_are_rejected(client, field, valu
                       contains=field)
 
 
+@pytest.mark.parametrize("value", [-1, 21])
+def test_top_logprobs_range_is_rejected(client, value):
+    client.expect_400(dict(CHAT, logprobs=True, top_logprobs=value),
+                      name=f"top-logprobs-{value}", contains="top_logprobs")
+
+
 @pytest.mark.parametrize("stop,label", [
     ([1], "non-string-item"),
     ([""], "empty-item"),

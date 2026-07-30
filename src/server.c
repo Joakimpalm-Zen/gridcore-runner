@@ -980,6 +980,66 @@ static int chunk_send(gen_ctx *g, sbuf *c) {
     return g->dead ? 1 : 0;
 }
 
+static void append_chat_logprobs(sbuf *r, slot_t *s, engine *e) {
+    char tb[512];
+    sb_lit(r, "\"logprobs\":{\"content\":[");
+    for (int i = 0; i < e->lp_count; i++) {
+        if (i) sb_lit(r, ",");
+        int tn = tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
+        sb_lit(r, "{\"token\":\"");
+        sb_esc(r, tb, tn);
+        sb_fmt(r, "\",\"logprob\":%.6f,\"top_logprobs\":[", e->lp_chosen[i]);
+        for (int j = 0; j < e->lp_n; j++) {
+            const lp_alt *a = &e->lp_top[(size_t)i * e->lp_n + j];
+            if (a->id < 0) break;
+            if (j) sb_lit(r, ",");
+            tn = tok_decode(s->tok, a->id, tb, sizeof(tb));
+            sb_lit(r, "{\"token\":\"");
+            sb_esc(r, tb, tn);
+            sb_fmt(r, "\",\"logprob\":%.6f}", a->lp);
+        }
+        sb_lit(r, "]}");
+    }
+    sb_lit(r, "]}");
+}
+
+static void append_text_logprobs(sbuf *r, slot_t *s, engine *e) {
+    char tb[512];
+    int offset = 0;
+    sb_lit(r, "\"logprobs\":{\"tokens\":[");
+    for (int i = 0; i < e->lp_count; i++) {
+        if (i) sb_lit(r, ",");
+        int tn = tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
+        sb_lit(r, "\""); sb_esc(r, tb, tn); sb_lit(r, "\"");
+    }
+    sb_lit(r, "],\"token_logprobs\":[");
+    for (int i = 0; i < e->lp_count; i++) {
+        if (i) sb_lit(r, ",");
+        sb_fmt(r, "%.6f", e->lp_chosen[i]);
+    }
+    sb_lit(r, "],\"top_logprobs\":[");
+    for (int i = 0; i < e->lp_count; i++) {
+        if (i) sb_lit(r, ",");
+        sb_lit(r, "{");
+        for (int j = 0; j < e->lp_n; j++) {
+            const lp_alt *a = &e->lp_top[(size_t)i * e->lp_n + j];
+            if (a->id < 0) break;
+            if (j) sb_lit(r, ",");
+            int tn = tok_decode(s->tok, a->id, tb, sizeof(tb));
+            sb_lit(r, "\""); sb_esc(r, tb, tn);
+            sb_fmt(r, "\":%.6f", a->lp);
+        }
+        sb_lit(r, "}");
+    }
+    sb_lit(r, "],\"text_offset\":[");
+    for (int i = 0; i < e->lp_count; i++) {
+        if (i) sb_lit(r, ",");
+        sb_fmt(r, "%d", offset);
+        offset += tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
+    }
+    sb_lit(r, "]}");
+}
+
 static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
     e->schema = NULL;
     e->emit_think_prelude = false;
@@ -1859,8 +1919,9 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     }
     // OpenAI logprobs. Chat uses a boolean plus top_logprobs; legacy text
     // completions use logprobs itself as the requested alternative count.
-    // Both are buffered-only because the engine stores one request-sized
-    // diagnostic table which is serialized with the final choice.
+    // The engine stores one request-sized diagnostic table. Buffered replies
+    // serialize it with the choice; streams send it in one diagnostic chunk
+    // immediately before the terminal finish chunk.
     bool lp_on = false;
     if (api == API_CHAT && !request_bool(req, "logprobs", false, &lp_on)) {
         send_error(fd, 400, "logprobs must be a boolean");
@@ -1872,8 +1933,8 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         send_error(fd, 400, "logprobs out of range");
         return;
     }
-    bool want_lp = !stream && ((api == API_CHAT && lp_on) ||
-                               (api == API_TEXT && lp_num > 0));
+    bool want_lp = (api == API_CHAT && lp_on) ||
+                   (api == API_TEXT && lp_num > 0);
     if (api == API_CHAT && want_lp &&
         !request_number(req, "top_logprobs", 0, 0, 20, &lp_num)) {
         send_error(fd, 400, "top_logprobs out of range");
@@ -2250,6 +2311,21 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         }
     } else if (stream) {
         if (!g.dead) {
+            if (chat && e->lp_count > 0) {
+                sbuf lp = {0};
+                chunk_open(&g, &lp);
+                sb_lit(&lp, "\"delta\":{},");
+                append_chat_logprobs(&lp, s, e);
+                sb_lit(&lp, ",\"finish_reason\":null}]}");
+                chunk_send(&g, &lp);
+            } else if (!chat && e->lp_count > 0) {
+                sbuf lp = {0};
+                chunk_open(&g, &lp);
+                sb_lit(&lp, "\"text\":\"\",");
+                append_text_logprobs(&lp, s, e);
+                sb_lit(&lp, ",\"finish_reason\":null}]}");
+                chunk_send(&g, &lp);
+            }
             sbuf c = {0};
             chunk_open(&g, &c);
             sb_fmt(&c, "%s,\"finish_reason\":\"%s\"}]}",

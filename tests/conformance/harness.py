@@ -452,6 +452,14 @@ class Client:
         self._record(name, "/v1/chat/completions", True, st)
         return st
 
+    def completion_stream(self, payload, name="completion-stream"):
+        payload = dict(payload, stream=True)
+        raw, latency, first = self.stream_raw(name, "/v1/completions", payload)
+        status, headers, body = _split_head(raw)
+        st = Stream(name, status, headers, body, latency, first)
+        self._record(name, "/v1/completions", True, st)
+        return st
+
     # ---- Responses API
     def responses(self, payload, name="responses"):
         return self.raw(name, "POST", "/v1/responses", payload)
