@@ -3,6 +3,7 @@
 import os
 import signal
 import subprocess
+import sys
 import time
 import json
 import urllib.request
@@ -10,6 +11,40 @@ import urllib.request
 import pytest
 
 from harness import RunnerServer, find_runner, free_port
+
+
+def test_thinking_prelude_is_bounded_with_distinct_finish_reason(tmp_path):
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = tmp_path / "ornith.gguf"
+    fixture_env = os.environ.copy()
+    fixture_env["ORNITH_TEST_SEED"] = "1"  # deterministically emits prelude whitespace
+    subprocess.run([sys.executable, os.path.join(root, "scripts", "make-test-ornith.py"),
+                    str(model)], check=True, cwd=root, env=fixture_env)
+    srv = RunnerServer(find_runner(root), str(model), ctx=64, parallel=1,
+                       extra_args=["--gpu", "off", "--chat-template", "ornith"])
+    srv.start()
+    try:
+        cap = 8
+        payload = json.dumps({
+            "messages": [{"role": "user", "content": "emit json"}],
+            "max_tokens": cap,
+            "temperature": 0,
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "answer", "schema": {"type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"]}}},
+        }).encode()
+        req = urllib.request.Request(srv.base_url + "/v1/chat/completions",
+                                     data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            body = json.load(response)
+        choice = body["choices"][0]
+        assert choice["finish_reason"] == "reasoning_limit"
+        assert body["usage"]["completion_tokens"] <= cap // 2
+        assert not choice["message"]["content"].strip()
+    finally:
+        srv.stop()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signal contract")

@@ -29,7 +29,7 @@ def kai(k, xs):
 def kau(k, xs):
     return s(k) + struct.pack("<IIQ", ARR, U32, len(xs)) + struct.pack(f"<{len(xs)}I", *xs)
 
-seed = 0x35
+seed = int(os.environ.get("ORNITH_TEST_SEED", "0x35"), 0)
 def rnd():
     global seed
     seed = (seed * 1103515245 + 12345) & 0x7fffffff

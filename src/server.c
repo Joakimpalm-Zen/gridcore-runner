@@ -1537,7 +1537,8 @@ static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
 // dialect reports, so the two surfaces cannot disagree about how a turn ended.
 static const char *anth_stop_reason(const char *finish, bool stop_hit) {
     if (!strcmp(finish, "tool_calls")) return "tool_use";
-    if (!strcmp(finish, "length"))     return "max_tokens";
+    if (!strcmp(finish, "length") ||
+        !strcmp(finish, "reasoning_limit")) return "max_tokens";
     // a user stop sequence is its own terminal reason in this vocabulary, and
     // the matched string is reported alongside it
     return stop_hit ? "stop_sequence" : "end_turn";
@@ -2264,6 +2265,7 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     // e->oom: generation hit an allocation failure — report it truthfully as
     // "error", never let it masquerade as a clean "stop".
     const char *finish = e->oom ? "error"
+                       : e->prelude_exhausted ? "reasoning_limit"
                        : g.stopped || e->hit_stop ? "stop" : "length";
     // a streamed call reports the same terminal reason a buffered one does
     if (g.tsx_on && tool_stream_called(&g.tsx)) finish = "tool_calls";
@@ -2272,7 +2274,8 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         // whatever item was still streaming is closed first: an item announced
         // with output_item.added must always reach output_item.done, including
         // when generation stopped mid-item
-        bool cut = strcmp(finish, "length") == 0;
+        bool cut = strcmp(finish, "length") == 0 ||
+                   strcmp(finish, "reasoning_limit") == 0;
         // a tool call that was truncated is still an executable call — the
         // envelope schema closed it to a legal document — so only a message
         // is reported as unfinished

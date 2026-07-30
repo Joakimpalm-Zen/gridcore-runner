@@ -920,6 +920,9 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
     e->hit_stop = false;
     e->oom = false;
     e->lp_count = 0;
+    e->prelude_count = 0;
+    e->prelude_exhausted = false;
+    e->prelude_max = max_new < 0 ? 0 : (max_new > 1 ? max_new / 2 : max_new);
     double t0 = now_s();
     model_t *m = e->m, *dm = e->dm;
     memset(&e->spec_st, 0, sizeof(e->spec_st));
@@ -1016,12 +1019,20 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                 goto done;
             }
             int n = tok_decode(e->tok, tok, buf, sizeof(buf));
+            bool in_prelude = constrained && e->constraint_phase != CP_OUTPUT;
             int rc = e->schema && n > 0
                        ? constraint_accept(e, true, buf, n, cb, ud)
                    : e->json_mode && n > 0
                        ? constraint_accept(e, false, buf, n, cb, ud)
                    : cb && n > 0 ? cb(ud, buf, n) : 0;
             n_gen++;
+            if (in_prelude && e->constraint_phase != CP_OUTPUT &&
+                e->prelude_max > 0 && ++e->prelude_count >= e->prelude_max) {
+                e->prelude_exhausted = true;
+                e->pos += i;
+                if (e->dpos > e->pos) e->dpos = e->pos;
+                goto done;
+            }
             bool constrained_done = e->schema
                                       ? constraint_done(e, true)
                                       : e->json_mode && constraint_done(e, false);
@@ -1097,6 +1108,9 @@ void engine_gen_begin(engine *e, int max_new) {
     e->lp_count  = 0;
     e->gen_max   = max_new;
     e->gen_count = 0;
+    e->prelude_count = 0;
+    e->prelude_exhausted = false;
+    e->prelude_max = max_new < 0 ? 0 : (max_new > 1 ? max_new / 2 : max_new);
     e->gen_t0    = now_s();
 }
 
@@ -1133,6 +1147,8 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
         e->lp_count++;
     }
     int n = tok_decode(e->tok, tok, buf, sizeof(buf));
+    bool in_prelude = (e->schema || e->json_mode) &&
+                      e->constraint_phase != CP_OUTPUT;
     int rc = e->schema && n > 0
                ? constraint_accept(e, true, buf, n, cb, ud)
            : e->json_mode && n > 0
@@ -1140,6 +1156,11 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
            : cb && n > 0 ? cb(ud, buf, n) : 0;
     if (rc != 0) { e->gen_count++; return ENGINE_STEP_DONE; } // client gone
     e->gen_count++;
+    if (in_prelude && e->constraint_phase != CP_OUTPUT && e->prelude_max > 0 &&
+        ++e->prelude_count >= e->prelude_max) {
+        e->prelude_exhausted = true;
+        return ENGINE_STEP_DONE;
+    }
     if ((e->schema && constraint_done(e, true)) ||
         (!e->schema && e->json_mode && constraint_done(e, false))) {
         e->hit_stop = true;
