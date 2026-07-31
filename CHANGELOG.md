@@ -5,6 +5,29 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Measured: partial expert offload helps prefill and hurts decode, and
+  plain layer offload beats both.** Qwen3-Coder-30B on the Blackwell MIG with
+  the budget capped to a 12 GB card (`--reserve-vram 48`, `-c 4096`,
+  512-token prompt / 64-token decode, median of 3):
+
+  | config | experts on GPU | prompt tok/s | decode tok/s |
+  |---|---|---|---|
+  | `--cpu-moe` (all host) | 0/48 | 15.5 | 5.35 |
+  | `--cpu-moe auto` | 29/48 | **28.5** (+84%) | 4.32 (**-19%**) |
+  | `--gpu-layers 24` | — | **43.9** (+184%) | **8.27** (+55%) |
+
+  A control at the full 25 GB budget shows the new binding path is free:
+  `--cpu-moe 0` (every expert on the GPU through bindings) measures
+  194.1 / 101.5 against the ordinary full-offload upload's 194.0 / 100.5. So
+  `auto`'s decode cost is inherent to *mixed* placement — the interleaved
+  per-layer host bounces — not to the implementation. Two consequences worth
+  stating plainly: the first outside install's conclusion that layer offload
+  beat `--cpu-moe` is confirmed and much larger than its own numbers showed;
+  and `--reserve-vram` **without an explicit `-c`** grows the KV cache to fill
+  the reservation, which starves expert placement (auto placed 0/48 banks
+  until the context was pinned). No defaults changed — the advisor's
+  moe-hybrid preference is an owner call, now with numbers under it.
+
 - **gpt-oss (OpenAI MoE) runs on the CPU path.** `gpt-oss` joins the
   architecture allowlist with the four pieces it actually needs, each
   transcribed from llama.cpp rather than inferred: per-head **attention
