@@ -221,6 +221,21 @@ static float yarn_corr_dim(int n_dims, int n_ctx_orig, float n_rot, float base) 
     return n_dims * logf(n_ctx_orig / (n_rot * 2 * (float)M_PI)) / (2 * logf(base));
 }
 
+// `attention.sliding_window_pattern` is published two ways. Dense gemma3/4
+// give an integer PERIOD (every period-th layer is full attention); the
+// Gemma-4 E-series instead gives a BOOLEAN ARRAY, one entry per layer. Read
+// as a u32 an array key yields the default, which would silently mis-mark
+// every layer, so both forms are handled here and the array wins when present.
+// Returns true when an array form was consumed into out[].
+static bool swa_pattern_array(gguf_file *g, const char *key, bool *out, int n) {
+    gguf_kv *kv = gguf_get(g, key);
+    if (!kv || kv->type != GGUF_T_ARR || kv->arr_type != GGUF_T_BOOL) return false;
+    if ((int64_t)kv->arr_n != n || !kv->arr_raw) return false;
+    const uint8_t *raw = kv->arr_raw;
+    for (int i = 0; i < n; i++) out[i] = raw[i] != 0;
+    return true;
+}
+
 static bool rope_setup(model_t *m, gguf_file *g, const char *arch,
                        float base_ovr, float scale_ovr) {
     char key[128];
@@ -647,8 +662,12 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         int pattern    = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 6);
         m->l_is_swa    = calloc(m->n_layer, sizeof(bool));
         if (!m->l_is_swa) return false;
-        for (int i = 0; i < m->n_layer; i++)
-            m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % pattern) != 0;
+        if (!swa_pattern_array(g, AK("attention.sliding_window_pattern"),
+                               m->l_is_swa, m->n_layer))
+            for (int i = 0; i < m->n_layer; i++)
+                m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % pattern) != 0;
+        else if (m->swa_window <= 0)
+            for (int i = 0; i < m->n_layer; i++) m->l_is_swa[i] = false;
     }
     if (strcmp(arch, "gpt-oss") == 0) {
         // gpt-oss (OpenAI MoE). Transcribed from llama.cpp
@@ -736,11 +755,22 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         // correctly. Note the model is thinking-tuned: raw untemplated
         // completions are legitimately degenerate, and llama.cpp additionally
         // biases tokenizer.ggml.suppress_tokens to -inf (not done here).
-        if (gguf_get_u32(g, AK("attention.shared_kv_layers"), 0) > 0 ||
-            gguf_get_u32(g, AK("embedding_length_per_layer_input"), 0) > 0) {
-            fprintf(stderr, "error: unsupported architecture variant '%s' — "
-                    "shared-KV / per-layer-embedding gemma4 models (e.g. E2B/E4B) "
-                    "are not supported yet\n", arch);
+        int shared_kv = (int)gguf_get_u32(g, AK("attention.shared_kv_layers"), 0);
+        int ple_dim   = (int)gguf_get_u32(g, AK("embedding_length_per_layer_input"), 0);
+        if (shared_kv > 0 || ple_dim > 0) {
+            // Name what is missing rather than the family. Both halves are
+            // specified in the suite plan from llama.cpp's gemma4 graph:
+            // per-layer embeddings need a second embedding table plus a
+            // gate/proj/post-norm triple per layer, and shared-KV layers have
+            // no K/V projections at all and must read an earlier layer's
+            // cache — which the KV cache, the prefix cache and the offload
+            // accounting all currently assume never happens.
+            fprintf(stderr, "error: unsupported '%s' variant — this export "
+                    "needs %s%s%s, which this build does not implement "
+                    "(Gemma-4 E-series; see docs)\n", arch,
+                    ple_dim > 0 ? "per-layer embeddings" : "",
+                    (ple_dim > 0 && shared_kv > 0) ? " and " : "",
+                    shared_kv > 0 ? "shared-KV layers" : "");
             return false;
         }
         fprintf(stderr, "gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files\n");

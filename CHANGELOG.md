@@ -5,6 +5,19 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Gemma-4 E-series: array-form sliding-window patterns are read correctly,
+  and the refusal now names what is missing.**
+  `attention.sliding_window_pattern` is published two ways — dense gemma3/4
+  give an integer period, the E-series gives a per-layer BOOLEAN ARRAY. Read
+  as a u32 an array key silently yields the default, mis-marking every layer,
+  so both forms are now handled with the array winning when present (dense
+  models are unaffected: verified byte-identical CPU-vs-GPU output on
+  gemma-4-26B before and after). The E-series load refusal changed from
+  naming the family to naming the two missing mechanisms — per-layer
+  embeddings and shared-KV layers — because those are what a reader needs.
+  Full E-series support remains unimplemented by choice; the specs for both
+  halves, read off llama.cpp's gemma4 graph, are recorded in the suite plan.
+
 - **Measured: partial expert offload helps prefill and hurts decode, and
   plain layer offload beats both.** Qwen3-Coder-30B on the Blackwell MIG with
   the budget capped to a 12 GB card (`--reserve-vram 48`, `-c 4096`,
