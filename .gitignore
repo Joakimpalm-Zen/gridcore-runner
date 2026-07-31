@@ -89,3 +89,5 @@ difftok.exe
 /models
 # reference tokenizers fetched for differential testing (vendor files, not ours)
 models/.ref/
+test-responses-sm
+test-responses-sm.exe

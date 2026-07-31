@@ -83,6 +83,7 @@ TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
+TEST_RESP_SM = $(TEST_BATCH:test-batch%=test-responses-sm%)
 TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
 TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
@@ -227,6 +228,16 @@ TEST_MOE_TOL_SRC = tests/test_moe_tol.c src/gguf.c src/compat.c src/quants.c \
 $(TEST_MOE_TOL): $(TEST_MOE_TOL_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_MOE_TOL_SRC) -o $@ $(LDFLAGS)
 
+# the Responses framing state machine, driven directly over a socketpair.
+# Includes server.c (the framer is static there) and links the engine around
+# it — same object set as the runner minus main.c.
+TEST_RESP_SM_SRC = tests/test_responses_sm.c src/gguf.c src/compat.c \
+                  src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                  src/jsonmode.c src/schema.c src/json.c src/engine.c \
+                  src/template.c src/vramreg.c $(GPU_SRC)
+$(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/server.c src/runner.h
+	$(CC) $(CFLAGS) -I src $(TEST_RESP_SM_SRC) -o $@ $(LDFLAGS)
+
 TEST_QUANTIZE_SRC = tests/test_quantize.c src/quantize.c src/gguf.c \
                     src/compat.c src/quants.c
 $(TEST_QUANTIZE): $(TEST_QUANTIZE_SRC) src/runner.h
@@ -289,7 +300,7 @@ endif
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
-      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) \
+      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_RESP_SM) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_MODEL_LOAD_FAILURE) runner test.gguf
@@ -307,6 +318,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_BATCH)
 	./$(TEST_PREFIX)
 	./$(TEST_GRAMMAR_FF)
+	./$(TEST_RESP_SM)
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
 	@# the fused-vs-eager routing gate needs a fixture whose router is not
@@ -439,7 +451,7 @@ clean:
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_VRAMREG) test-shared-asan-bin \
-	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
+	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
