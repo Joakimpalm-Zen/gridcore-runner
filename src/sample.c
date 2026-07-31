@@ -224,6 +224,13 @@ static const sampler_preset PRESETS[] = {
     { "qwen3", "Qwen3 model card best practices (thinking mode)",
       0.60f, 0.95f, 0.00f, 1.00f, 20 },
 
+    // OpenAI's gpt-oss model card: temperature 1.0 and top_p 1.0, and it
+    // publishes no repetition penalty — which matters beyond taste here,
+    // because the generic fallback's 1.10 silently diverges this model from
+    // every reference implementation that defaults to 1.0.
+    { "gpt-oss", "OpenAI gpt-oss model card (temperature 1.0, top_p 1.0)",
+      1.00f, 1.00f, 0.00f, 1.00f, 0 },
+
     // Qwen2.5-Instruct generation_config.json
     { "qwen2.5", "Qwen2.5-Instruct generation_config.json",
       0.70f, 0.80f, 0.00f, 1.05f, 20 },
@@ -339,6 +346,7 @@ const sampler_preset *sampler_preset_for(const char *arch, const char *name) {
         return by_name("gridcore");
 
     // Architectures that name exactly one family.
+    if (!strcmp(arch, "gpt-oss")) return by_name("gpt-oss");
     if (!strcmp(arch, "qwen3"))  return by_name("qwen3");
     if (!strcmp(arch, "qwen2"))  return by_name("qwen2.5");
     if (!strcmp(arch, "phi3"))   return by_name("phi3");

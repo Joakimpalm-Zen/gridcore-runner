@@ -5,6 +5,37 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **gpt-oss (OpenAI MoE) runs on the CPU path.** `gpt-oss` joins the
+  architecture allowlist with the four pieces it actually needs, each
+  transcribed from llama.cpp rather than inferred: per-head **attention
+  sinks** (a learned logit joining only the softmax max and denominator, with
+  no value row — `softmax_sink()`), the clamped alpha-sigmoid
+  **`ACT_SWIGLU_OAI`** activation (alpha 1.702, limit 7; plain SwiGLU here is
+  silently-wrong output), the **router bias plus per-expert gate/up/down
+  biases** in both CPU MoE paths, and `post_attention_norm` as the FFN input
+  norm (the qwen35 shape). Its sliding-window layout needed no new logic —
+  the existing `((i + 1) % period)` form with period 2 is identical to
+  llama.cpp's `set_swa_pattern(2)` — but its SWA layers inherit the GLOBAL
+  rope base (150k), where the runner's generic default would have used 10k.
+  A vendor sampling preset is included (temperature 1.0 / top_p 1.0, no
+  repetition penalty, per the model card).
+  **The GPU refuses this architecture at load**, with a stated reason: a
+  sink-aware attention softmax and MXFP4 kernels do not exist on that
+  backend, and running there would silently drop the sinks.
+  **Not certified, deliberately.** Greedy agreement with pinned llama.cpp
+  b10076 over the five standard prompts is **4/5 exact at 8 tokens** and 1/5
+  at 32 (evidence: `tests/compatibility/out/reference-gpt-oss-2026-07-31-*`).
+  The residual is diagnosed, not mysterious: ggml gives MXFP4 a
+  `vec_dot_type` of `Q8_0`, i.e. llama.cpp quantizes the *activation* vector
+  to int8 before each expert dot, while the runner dots against full fp32
+  activations. The two are different computations by construction, so the
+  paths drift apart at near-ties — every divergence is mid-sentence with both
+  continuations plausible, after 10–88 characters of exact agreement. For
+  scale, the same 8-token method scored the *certified* archs at llama3 3/5,
+  qwen3 4/5 and gemma4 0/5 on 2026-07-30. The README certified table is
+  untouched: the full certification method includes CPU-vs-GPU identity,
+  which an arch the GPU refuses cannot have.
+
 - **Fused-vs-eager MoE routing tolerance gate (`make test`).** Certification
   defines MoE byte identity over the eager host-routing path
   (`RUNNER_MOE_EAGER=1`); the shipping fused default's weaker contract —

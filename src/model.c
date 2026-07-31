@@ -290,8 +290,13 @@ static bool rope_setup(model_t *m, gguf_file *g, const char *arch,
         // sliding-window layers rope at their own (short-context) base with
         // no scaling — gemma locals use 10k while globals run 1M + scaling;
         // gemma4 locals also rotate fewer dims (rope_dim_local)
+        // gemma locals rope at 10k while globals run 1M; gpt-oss instead
+        // inherits the GLOBAL base for its sliding layers (llama.cpp seeds
+        // rope_freq_base_train_swa = rope_freq_base_train), so the 10k
+        // default must not apply there.
         float local_base = gguf_get_f32(g, RK("rope.local.freq_base"),
-                           gguf_get_f32(g, RK("rope.freq_base_swa"), 10000.0f));
+                           gguf_get_f32(g, RK("rope.freq_base_swa"),
+                                        m->gptoss ? m->rope_base : 10000.0f));
         int lhalf = m->rope_dim_local / 2;
         m->rope_inv_freq_local = malloc(sizeof(float) * lhalf);
         if (!m->rope_inv_freq_local) return false;
@@ -467,7 +472,7 @@ const char *const *model_supported_archs(size_t *count) {
     // here; wrong-math archs (granite/gemma2/gemma) are intentionally excluded.
     static const char *const arches[] = {
         "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
-        "smollm", "stablelm", "gemma3", "gemma4", "phi3",
+        "smollm", "stablelm", "gemma3", "gemma4", "phi3", "gpt-oss",
     };
     if (count) *count = sizeof(arches) / sizeof(arches[0]);
     return arches;
@@ -645,6 +650,33 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         for (int i = 0; i < m->n_layer; i++)
             m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % pattern) != 0;
     }
+    if (strcmp(arch, "gpt-oss") == 0) {
+        // gpt-oss (OpenAI MoE). Transcribed from llama.cpp
+        // src/models/openai-moe.cpp + build_moe_ffn, not inferred:
+        //   * attn_norm pre-attention, post_attention_norm as the FFN norm
+        //     (the qwen35 loading shape, not llama's ffn_norm);
+        //   * per-head attention SINKS in the softmax denominator;
+        //   * clamped alpha-sigmoid GLU (ACT_SWIGLU_OAI), not SwiGLU;
+        //   * router bias + per-expert gate/up/down biases;
+        //   * SWA period 2 with NO separate SWA rope base — llama.cpp seeds
+        //     rope_freq_base_train_swa from the main base and only overrides
+        //     it if the key exists, so the locals rope at 150k here. The
+        //     runner's generic SWA path defaults that to 10k, which would be
+        //     silently wrong, so it is pinned explicitly below.
+        m->gptoss     = true;
+        m->ffn_act    = ACT_SWIGLU_OAI;
+        m->swa_window = (int)gguf_get_u32(g, AK("attention.sliding_window"), 0);
+        int swa_period = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 2);
+        if (swa_period < 1) swa_period = 2;
+        m->l_is_swa = calloc(m->n_layer, sizeof(bool));
+        if (!m->l_is_swa) return false;
+        // llama.cpp set_swa_pattern(p): is_swa[il] = il % p < p-1, which for
+        // p=2 marks the EVEN layers — identical to the runner's existing
+        // ((i + 1) % p) != 0 form used by gemma3.
+        for (int i = 0; i < m->n_layer; i++)
+            m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % swa_period) != 0;
+        m->rms_eps = gguf_get_f32(g, AK("attention.layer_norm_rms_epsilon"), 1e-5f);
+    }
     if (strcmp(arch, "qwen3") == 0 || strcmp(arch, "qwen3moe") == 0) {
         // Thinking-tuned Qwen3 (dense and sparse-MoE) responses wrap hidden
         // reasoning before the visible answer; shared CLI/server output
@@ -793,7 +825,10 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         // non-SiLU MoE is refused rather than run through SiLU math.
         bool gemma_moe = strcmp(arch, "gemma4") == 0 &&
                          gguf_find_tensor(g, "blk.0.ffn_gate_up_exps.weight");
-        if (m->ffn_act != ACT_SILU && !gemma_moe) {
+        // gpt-oss's ACT_SWIGLU_OAI is implemented in BOTH CPU MoE paths
+        // (per-token and grouped prefill), so it is admitted here by name
+        // rather than widening the guard to "any non-SiLU".
+        if (m->ffn_act != ACT_SILU && !gemma_moe && !m->gptoss) {
             fprintf(stderr, "error: MoE is only supported with SiLU-gated "
                     "experts (this model uses a different activation)\n");
             return false;
@@ -881,9 +916,14 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     for (int i = 0; i < m->n_layer; i++) {
         layer_t *l = &m->layers[i];
         gguf_tensor *an = need_tensor(g, "blk.%d.attn_norm.weight", i, &ok);
-        gguf_tensor *fn = m->qwen35
+        // gpt-oss shares qwen35's shape here: post_attention_norm IS the FFN
+        // input norm and there is no ffn_norm tensor at all.
+        gguf_tensor *fn = (m->qwen35 || m->gptoss)
             ? need_tensor(g, "blk.%d.post_attention_norm.weight", i, &ok)
             : need_tensor(g, "blk.%d.ffn_norm.weight", i, &ok);
+        if (m->gptoss)
+            l->attn_sinks = tensor_to_f32(
+                need_tensor(g, "blk.%d.attn_sinks.weight", i, &ok), &ok);
         l->recurrent = m->qwen35 && ((i + 1) % m->full_attn_interval != 0);
         if (l->recurrent) {
             l->wqkv      = need_tensor(g, "blk.%d.attn_qkv.weight", i, &ok);
@@ -970,6 +1010,17 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
                 // modern fused 3D expert tensors
                 l->ffn_up_exps   = need_tensor(g, "blk.%d.ffn_up_exps.weight", i, &ok);
                 l->ffn_down_exps = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
+                if (m->gptoss) {
+                    // gpt-oss router + per-expert FFN biases (all F32)
+                    l->ffn_gate_inp_b  = tensor_to_f32(
+                        need_tensor(g, "blk.%d.ffn_gate_inp.bias", i, &ok), &ok);
+                    l->ffn_gate_exps_b = tensor_to_f32(
+                        need_tensor(g, "blk.%d.ffn_gate_exps.bias", i, &ok), &ok);
+                    l->ffn_up_exps_b   = tensor_to_f32(
+                        need_tensor(g, "blk.%d.ffn_up_exps.bias", i, &ok), &ok);
+                    l->ffn_down_exps_b = tensor_to_f32(
+                        need_tensor(g, "blk.%d.ffn_down_exps.bias", i, &ok), &ok);
+                }
             } else {
                 // legacy split layout: one 2D tensor per expert (older Mixtral)
                 l->moe_split = true;
@@ -1071,7 +1122,11 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         l->knorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k_norm.weight", i), &ok);
         // Qwen3.5's post_attention_norm is the FFN input norm (loaded as
         // ffn_norm_w above), not a sandwich norm on the attention projection.
-        l->post_attn_norm_w = m->qwen35 ? NULL
+        // qwen35 AND gpt-oss already consumed post_attention_norm as the FFN
+        // input norm above; loading it here too would apply it a second time
+        // to the attention output (the gemma-style placement) and quietly
+        // corrupt every layer.
+        l->post_attn_norm_w = (m->qwen35 || m->gptoss) ? NULL
             : tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i), &ok);
         l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i), &ok);
         l->out_scale = 1.0f;
@@ -1342,6 +1397,9 @@ void model_free(model_t *m) {
         free(l->qnorm_w); free(l->knorm_w);
         free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
         free(l->down_exps_scale); free(l->gate_inp_scale);
+        free(l->attn_sinks);
+        free(l->ffn_gate_inp_b); free(l->ffn_gate_exps_b);
+        free(l->ffn_up_exps_b);  free(l->ffn_down_exps_b);
         free(l->ffn_pre_norm2_w); free(l->ffn_post_norm1_w); free(l->ffn_post_norm2_w);
         free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
         free(l->moe_g); free(l->moe_u); free(l->moe_d);  // split-MoE pointer arrays
@@ -1385,6 +1443,21 @@ static void rmsnorm(float *o, const float *x, const float *w, int n, float eps) 
     float r = 1.0f / sqrtf(ss / n + eps);
     if (w) for (int i = 0; i < n; i++) o[i] = x[i] * r * w[i];
     else   for (int i = 0; i < n; i++) o[i] = x[i] * r;      // weightless (gemma4 V)
+}
+
+// Attention softmax with a learned sink logit (gpt-oss). Transcribed from
+// llama.cpp's ggml_compute_forward_soft_max: the sink participates in the max
+// and in the denominator, and has NO output row — so the probabilities over
+// real positions sum to less than one and the head's output shrinks. Note the
+// sink is compared against ALREADY-SCALED scores; it is not itself scaled.
+static void softmax_sink(float *x, int n, float sink) {
+    float mx = x[0];
+    for (int i = 1; i < n; i++) if (x[i] > mx) mx = x[i];
+    if (sink > mx) mx = sink;
+    float s = 0;
+    for (int i = 0; i < n; i++) { x[i] = expf(x[i] - mx); s += x[i]; }
+    s += expf(sink - mx);
+    for (int i = 0; i < n; i++) x[i] /= s;
 }
 
 static void softmax(float *x, int n) {
@@ -1499,6 +1572,7 @@ typedef struct {
     size_t row_b;           // bytes per cached row
     bool q8;                // rows are q8_0 blocks
     float scale;
+    const float *sinks;     // gpt-oss per-head sink logits, or NULL
 } attn_job;
 
 static void attn_heads(void *ctx, int h0, int h1) {
@@ -1527,7 +1601,8 @@ static void attn_heads(void *ctx, int h0, int h1) {
             }
             att[t] = s * scale;
         }
-        softmax(att + j->t0, j->pos + 1 - j->t0);
+        if (j->sinks) softmax_sink(att + j->t0, j->pos + 1 - j->t0, j->sinks[h]);
+        else          softmax(att + j->t0, j->pos + 1 - j->t0);
         float *out = j->out + h * hd;
         memset(out, 0, sizeof(float) * hd);
         for (int t = j->t0; t <= j->pos; t++) {
@@ -1740,6 +1815,10 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
                       int n_embd, int ne, int used, int *sel, float *selw) {
     matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, xin,
              n_embd, n_embd, ne, NULL, 1);
+    // gpt-oss carries a router bias. It is added to the LOGITS, before both
+    // the top-k selection and the weight softmax (llama.cpp build_moe_ffn).
+    if (ly->ffn_gate_inp_b)
+        for (int e = 0; e < ne; e++) m->moe_logits[e] += ly->ffn_gate_inp_b[e];
     float mx = m->moe_logits[0];
     for (int e = 1; e < ne; e++)
         if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
@@ -1772,6 +1851,18 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
 // silently run SiLU math. The GPU path already selects f_gelu/f_silu the same
 // way (enc_actmul / dense f-select).
 static inline float gated_act(int act, float g, float u) {
+    if (act == ACT_SWIGLU_OAI) {
+        // gpt-oss, transcribed from llama.cpp's swiglu_oai kernel: the gate is
+        // clamped ABOVE only, the up branch on BOTH sides, and the up branch
+        // carries a +1 shift. alpha/limit are the constants that file pins.
+        const float alpha = 1.702f, limit = 7.0f;
+        float x = g < limit ? g : limit;
+        float y = u < -limit ? -limit : (u > limit ? limit : u);
+        // same overflow guard as silu below: -alpha*x past ~88 is UB under
+        // -ffast-math. x <= -50 makes the sigmoid factor < 1e-36 anyway.
+        float gl = x < -50.0f ? 0.0f : x / (1.0f + expf(alpha * -x));
+        return gl * (y + 1.0f);
+    }
     if (act == ACT_GELU) {
         float t = tanhf(0.7978845608f * (g + 0.044715f * g * g * g));
         return 0.5f * g * (1.0f + t) * u;
@@ -1804,10 +1895,22 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
         gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
         matvec_b(m->tp, m->moe_gate, nff, &gv, xin, n_embd, n_embd, nff, NULL, 1);
         matvec_b(m->tp, m->moe_up,   nff, &uv, xin, n_embd, n_embd, nff, NULL, 1);
+        // gpt-oss per-expert biases: added to this expert's own gate/up before
+        // the activation, and to its down output BEFORE the routing weight
+        // scales it (llama.cpp adds down_exps_b, then multiplies by weights).
+        if (ly->ffn_gate_exps_b)
+            for (int j = 0; j < nff; j++)
+                m->moe_gate[j] += ly->ffn_gate_exps_b[(size_t)e * nff + j];
+        if (ly->ffn_up_exps_b)
+            for (int j = 0; j < nff; j++)
+                m->moe_up[j] += ly->ffn_up_exps_b[(size_t)e * nff + j];
         for (int j = 0; j < nff; j++)
             m->moe_gate[j] = gated_act(m->ffn_act, m->moe_gate[j], m->moe_up[j]);
         matvec_b(m->tp, m->moe_dexp, n_embd, &dv, m->moe_gate,
                  nff, nff, n_embd, NULL, 1);
+        if (ly->ffn_down_exps_b)
+            for (int i = 0; i < n_embd; i++)
+                m->moe_dexp[i] += ly->ffn_down_exps_b[(size_t)e * n_embd + i];
         for (int i = 0; i < n_embd; i++) m->moe_out[i] += w * m->moe_dexp[i];
     }
     for (int i = 0; i < n_embd; i++) xin[i] = m->moe_out[i];
@@ -1853,9 +1956,19 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
                  n_embd, n_embd, nff, NULL, cnt);
         matvec_b(m->tp, m->moe_up_b,   nff, &uv, m->moe_gath,
                  n_embd, n_embd, nff, NULL, cnt);
+        // per-expert biases, identical ordering to the per-token path above:
+        // gate/up before the activation, down before the routing weight
+        const float *gb = ly->ffn_gate_exps_b
+                            ? ly->ffn_gate_exps_b + (size_t)e * nff : NULL;
+        const float *ub = ly->ffn_up_exps_b
+                            ? ly->ffn_up_exps_b + (size_t)e * nff : NULL;
+        const float *db = ly->ffn_down_exps_b
+                            ? ly->ffn_down_exps_b + (size_t)e * n_embd : NULL;
         for (int c = 0; c < cnt; c++) {
             float *g = m->moe_gate_b + (size_t)c * nff;
-            const float *u = m->moe_up_b + (size_t)c * nff;
+            float *u = m->moe_up_b + (size_t)c * nff;
+            if (gb) for (int j = 0; j < nff; j++) g[j] += gb[j];
+            if (ub) for (int j = 0; j < nff; j++) u[j] += ub[j];
             for (int j = 0; j < nff; j++)
                 g[j] = gated_act(m->ffn_act, g[j], u[j]);
         }
@@ -1865,7 +1978,8 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
             float *out = m->moe_out_b + (size_t)m->moe_gidx[c] * n_embd;
             const float *dx = m->moe_dexp_b + (size_t)c * n_embd;
             float w = m->moe_gw[c];
-            for (int i = 0; i < n_embd; i++) out[i] += w * dx[i];
+            if (db) for (int i = 0; i < n_embd; i++) out[i] += w * (dx[i] + db[i]);
+            else    for (int i = 0; i < n_embd; i++) out[i] += w * dx[i];
         }
     }
     for (int b = 0; b < n; b++)
@@ -2161,7 +2275,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             int t0 = local && p - m->swa_window + 1 > 0 ? p - m->swa_window + 1 : 0;
             attn_job aj = { m, kc_l, vc_l, m->q + (size_t)b * q_dim,
                             m->xb2 + (size_t)b * xdim, p, t0, hd, kv_dim,
-                            row_b, m->kv_q8, scale };
+                            row_b, m->kv_q8, scale, ly->attn_sinks };
             tpool_run(m->tp, attn_heads, &aj, m->n_head);
             if (m->qwen35)
                 for (int i = 0; i < q_dim; i++) {

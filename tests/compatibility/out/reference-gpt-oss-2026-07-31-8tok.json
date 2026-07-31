@@ -1,0 +1,45 @@
+{
+  "schema_version": "gridcore.runner.greedy-reference.v1",
+  "generated_utc": "2026-07-31T06:21:09Z",
+  "runner": "runner 0.1.4-alpha",
+  "reference": "version: 10076 (305ba519a)",
+  "model": "models/gpt-oss-20b-MXFP4.gguf",
+  "tokens": 8,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris.\"\n\nSure! Here's a simple",
+      "reference": " Paris.\"\n\nSure! Here's a simple",
+      "status": "pass"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": "\\n    if n <= 1",
+      "reference": "\\n    if n==0:",
+      "status": "fail"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10 11 12",
+      "reference": " 9 10 11 12",
+      "status": "pass"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " there was a young boy named Jack.",
+      "reference": " there was a young boy named Jack.",
+      "status": "pass"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John\", \"age\": 30",
+      "reference": " \"John\", \"age\": 30",
+      "status": "pass"
+    }
+  ],
+  "totals": {
+    "passed": 4,
+    "failed": 1
+  }
+}

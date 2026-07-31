@@ -228,6 +228,17 @@ typedef struct {
     bool         is_moe;
     gguf_tensor *ffn_gate_inp;   // router: n_embd -> n_expert logits (F32)
     // modern fused 3D expert tensors ({.., n_expert}); NULL when split
+    // gpt-oss: per-head learned attention-sink logits [n_head], F32. They
+    // join the attention softmax DENOMINATOR only — no value row — so the
+    // head's output is scaled down without attending anywhere.
+    float       *attn_sinks;
+    // gpt-oss: router bias [n_expert] and per-expert FFN biases. The expert
+    // biases are added to each expert's own gate/up/down result BEFORE the
+    // routing weight multiplies it (llama.cpp build_moe_ffn ordering).
+    float       *ffn_gate_inp_b;     // [n_expert]
+    float       *ffn_gate_exps_b;    // [n_ff_exp * n_expert]
+    float       *ffn_up_exps_b;      // [n_ff_exp * n_expert]
+    float       *ffn_down_exps_b;    // [n_embd * n_expert]
     gguf_tensor *ffn_gate_exps;  // 3D {n_embd, n_ff, n_expert}
     gguf_tensor *ffn_up_exps;    // 3D {n_embd, n_ff, n_expert}
     gguf_tensor *ffn_down_exps;  // 3D {n_ff, n_embd, n_expert}
@@ -368,6 +379,8 @@ typedef struct {
     int    mtp_layers;       // declared multi-token-prediction blocks excluded
                              // from the backbone (training-only; consuming
                              // them is a separate unimplemented feature)
+    bool   gptoss;           // gpt-oss: attention sinks + swiglu_oai + MoE
+                             // biases; no GPU kernels for those yet
     bool   cpu_moe;          // keep sparse expert FFNs on the host while CUDA
                              // runs the remaining tensors/layers
     bool  *moe_host;         // [n_layer] per-layer expert placement under
@@ -786,7 +799,12 @@ enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_APERTUS, TMPL_ORNITH,
        TMPL_RAW };
 
-enum { ACT_SILU = 0, ACT_GELU = 1 };
+// ACT_SWIGLU_OAI is gpt-oss's clamped alpha-sigmoid GLU. Verified against
+// llama.cpp ggml_compute_forward_swiglu_oai_f32 (alpha 1.702, limit 7):
+//   x = min(gate, limit); y = clamp(up, -limit, limit)
+//   out = (x / (1 + exp(-alpha*x))) * (y + 1)
+// Plain SwiGLU here is silently-wrong output, which is why it is its own op.
+enum { ACT_SILU = 0, ACT_GELU = 1, ACT_SWIGLU_OAI = 2 };
 
 // per-layer geometry accessors: uniform models keep the scalars, heterogeneous
 // archs (gemma4) override per layer

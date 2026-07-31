@@ -1215,6 +1215,15 @@ static gpu_weights *shared_acquire(model_t *m, size_t act_bytes, int max_hd) {
 bool gpu_init(model_t *m) {
     // every weight matmul must have a kernel for its quant type (wv may be
     // absent: gemma4 global layers reuse the raw K projection as V)
+    // gpt-oss needs a sink-aware attention softmax and MXFP4 expert kernels;
+    // neither exists on this backend. Running it here would drop the sinks
+    // and produce confident, wrong output, so refuse the GPU outright rather
+    // than fall back mid-forward (no-footguns: refuse > silently wrong).
+    if (m->gptoss) {
+        fprintf(stderr, "gpu: gpt-oss needs sink-aware attention and MXFP4 "
+                "kernels that this backend does not have — running on CPU\n");
+        goto unsupported;
+    }
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
