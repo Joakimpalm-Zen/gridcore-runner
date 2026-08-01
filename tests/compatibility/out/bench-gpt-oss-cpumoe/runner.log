@@ -8,3 +8,6 @@ sampling: gpt-oss (temp 1.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.
 server listening on http://127.0.0.1:55622 — 1 slot x 4 threads
   POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
   GET /v1/models | GET /v1/capabilities | GET /health
+[slot 0] cmpl-0: 642 prompt (0 cached) + 32 gen tok (0.2 tok/s)
+[slot 0] cmpl-1: 642 prompt (641 cached) + 32 gen tok (0.2 tok/s)
+[slot 0] chatcmpl-2: 648 prompt (0 cached) + 8 gen tok (0.2 tok/s)
