@@ -1,0 +1,33 @@
+{
+  "schema_version": "gridcore.runner.divergence-study.v1",
+  "generated_utc": "2026-08-01T21:20:00Z",
+  "model": "models/gpt-oss-20b-MXFP4.gguf",
+  "reference": "llama.cpp b10076 (305ba519a)",
+  "question": "Is gpt-oss's disagreement with llama.cpp explained by the model's own numerical sensitivity, as the gemma-4-26B MoE gap was, or is it a real systematic difference?",
+  "method": "16 prompts x 16 greedy tokens, compared by token id. Self rows perturb one engine against itself: runner changes only KV cache precision, llama.cpp only cold vs warm prefix cache.",
+  "rows": [
+    {
+      "comparison": "llama.cpp vs itself (cold vs warm cache)",
+      "identical": "16/16",
+      "mean_logprob_delta": 0.0023,
+      "max_logprob_delta": 0.2121
+    },
+    {
+      "comparison": "runner vs itself (KV f16 vs q8_0)",
+      "identical": "11/16",
+      "mean_logprob_delta": 0.03177,
+      "max_logprob_delta": 0.8044
+    },
+    {
+      "comparison": "runner vs llama.cpp",
+      "identical": "4/16",
+      "max_logprob_delta": 0.589,
+      "diverged_at_a_tie": 3,
+      "diverged_for_real": 9
+    }
+  ],
+  "conclusion": "The sensitivity floor does NOT explain this gap, and that is the point of the measurement. llama.cpp is perfectly self-consistent on this model (16/16), so gpt-oss is not chaotic the way gemma-4-26B-A4B is - there, runner disagreed with itself MORE than with llama.cpp, leaving nothing to attribute to an implementation difference. Here the opposite holds: 12 cross-engine divergences against 5 from runner's own KV perturbation and 0 from llama.cpp's. The excess is real and systematic.",
+  "cause": "Already diagnosed when the CPU path landed: ggml assigns MXFP4 vec_dot_type = Q8_0, so llama.cpp quantizes activations to int8 for every expert dot product while runner keeps fp32. That is a different computation by construction, and being systematic rather than random it biases consistently instead of only flipping near-ties. This measurement does not overturn that diagnosis - it rules out the competing explanation (model chaos) that would have made the gap unfixable.",
+  "next_experiment": "Quantize activations to Q8_0 for the MXFP4 expert dot product on the CPU path, matching ggml's vec_dot_type, and re-run this table. If the cross-engine row moves toward runner's own 11/16 floor, the residual is explained and certification becomes reachable. This is a HOST change - it needs no new GPU kernels and so is not blocked on the 13.3 box, unlike the MXFP4/sink kernels the GPU refusal waits on. Treat as a hypothesis with a clear test, not a conclusion.",
+  "environment": "Measured with the OpenCode server stopped, so the full 25.4 GB MIG slice was free; gpt-oss is GPU-refused and ran on CPU at ~11 tok/s decode with a warm page cache."
+}
