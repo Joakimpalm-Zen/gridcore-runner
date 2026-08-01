@@ -56,6 +56,13 @@ protocol and CLI may still change between alpha releases.
   each side, which distinguishes a coin-flip tie from an arithmetic fault —
   something `reference_compare.py`'s exact-text gate cannot do.
 
+- **`RUNNER_DEBUG_ACT` traces are now diffable against llama.cpp.** Each line
+  carries the sum plus the leading and trailing three values in
+  `llama-eval-callback`'s layout, and gemma-4 MoE layers additionally dump the
+  pre-softmax router logits and the selected expert ids with their weights.
+  That is what localises a divergence to a layer: comparing aggregate stats
+  against another engine's per-row values cannot.
+
 - **Completion logprobs now carry token ids** (`token_ids` and
   `top_token_ids`, alongside the existing decoded strings). Two distinct ids
   can decode to the same text, and control tokens render differently across

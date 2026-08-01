@@ -1755,6 +1755,12 @@ static int dbg_act_mode(void) {
 }
 static int dbg_act_pass = 0; // forward passes seen so far
 
+// Is the pass currently running the one RUNNER_DEBUG_ACT selected? The layer
+// loop keeps this in a local; helpers called from inside it need to ask.
+static bool dbg_act_now(void) {
+    return dbg_act_mode() && dbg_act_pass == dbg_act_mode();
+}
+
 static void dbg_stat(const char *tag, int layer, const float *v, size_t n) {
     float mn = INFINITY, mx = -INFINITY, absmx = 0;
     double sum = 0;
@@ -1771,9 +1777,15 @@ static void dbg_stat(const char *tag, int layer, const float *v, size_t n) {
         sum += x;
     }
     size_t good = n - n_inf - n_nan;
-    fprintf(stderr, "ACT L%-3d %-16s n=%-7zu min=%+.4g max=%+.4g mean=%+.4g absmax=%.4g inf=%zu nan=%zu zero=%zu\n",
+    fprintf(stderr, "ACT L%-3d %-16s n=%-7zu min=%+.4g max=%+.4g mean=%+.4g absmax=%.4g inf=%zu nan=%zu zero=%zu sum=%+.6f",
             layer, tag, n, good ? mn : 0.0f, good ? mx : 0.0f,
-            good ? sum / (double)good : 0.0, absmx, n_inf, n_nan, n_zero);
+            good ? sum / (double)good : 0.0, absmx, n_inf, n_nan, n_zero, sum);
+    // First and last three values in llama.cpp's eval-callback layout, so a
+    // trace from either engine can be diffed row by row without reformatting.
+    if (n >= 6)
+        fprintf(stderr, " [%+.4f %+.4f %+.4f ... %+.4f %+.4f %+.4f]",
+                v[0], v[1], v[2], v[n - 3], v[n - 2], v[n - 1]);
+    fprintf(stderr, "\n");
 }
 
 // same, over an f16 buffer already written to the KV cache
@@ -2182,6 +2194,10 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
             rin[i] = attn[i] * rss * inv *
                      (ly->gate_inp_scale ? ly->gate_inp_scale[i] : 1.0f);
         matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, rin, n_embd, n_embd, ne, NULL, 1);
+        // Router logits before the softmax, matching llama.cpp's
+        // ffn_moe_logits-N so an expert-selection flip can be seen directly.
+        if (dbg_act_now() && b == n - 1)
+            dbg_stat("moe-logits", ly - m->layers, m->moe_logits, ne);
         // softmax over all experts, top-k, renormalized (same as moe_route)
         float mx = m->moe_logits[0];
         for (int e = 1; e < ne; e++) if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
@@ -2195,6 +2211,12 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
             sel[t] = best; selw[t] = bp; denom += bp; m->moe_logits[best] = -1.0f;
         }
         for (int t = 0; t < used; t++) selw[t] /= denom;
+        if (dbg_act_now() && b == n - 1) {
+            fprintf(stderr, "ACT L%-3d %-16s", (int)(ly - m->layers), "moe-experts");
+            for (int t = 0; t < used; t++)
+                fprintf(stderr, " %d(%.4f)", sel[t], selw[t]);
+            fprintf(stderr, "\n");
+        }
         for (int i = 0; i < n_embd; i++) m->moe_out[i] = 0.0f;
         for (int t = 0; t < used; t++) {
             int e = sel[t];
