@@ -1948,6 +1948,8 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
                       int n_embd, int ne, int used, int *sel, float *selw) {
     matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, xin,
              n_embd, n_embd, ne, NULL, 1);
+    if (dbg_act_now())
+        dbg_stat("moe-logits-raw", (int)(ly - m->layers), m->moe_logits, ne);
     // gpt-oss carries a router bias. It is added to the LOGITS, before both
     // the top-k selection and the weight softmax (llama.cpp build_moe_ffn).
     if (ly->ffn_gate_inp_b)

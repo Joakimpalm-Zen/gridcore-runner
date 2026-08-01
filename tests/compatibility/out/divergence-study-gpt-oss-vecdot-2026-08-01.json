@@ -1,0 +1,31 @@
+{
+  "schema_version": "gridcore.runner.divergence-study.v1",
+  "generated_utc": "2026-08-01T21:55:00Z",
+  "model": "models/gpt-oss-20b-MXFP4.gguf",
+  "reference": "llama.cpp b10076 (305ba519a)",
+  "hypothesis": "The runner/llama.cpp residual on gpt-oss is the activation quantisation: ggml declares vec_dot_type = Q8_0 for MXFP4, so llama.cpp quantises activations to int8 per expert dot while runner uses fp32. Matching it should move the cross-engine row toward runner's own sensitivity floor.",
+  "verdict": "FALSIFIED",
+  "what_was_implemented": "vec_dot_mxfp4_q8_0 and vec_dot_q8_0_q8_0, transcribed from ggml's *_generic bodies, with activations quantised once per matvec by the existing q8_quant_row (already byte-equivalent to ggml's quantize_row_q8_0_ref, fp16 scale round-trip included). Applied to BOTH quantised types this model uses - 72 MXFP4 expert tensors and 98 Q8_0 attention/output tensors - so every quantised matmul in gpt-oss ran the reference's arithmetic.",
+  "results_16_prompts_16_tokens": [
+    {
+      "config": "before (fp32 activations)",
+      "identical": "4/16",
+      "max_logprob_delta": 0.589
+    },
+    {
+      "config": "MXFP4 activations quantised",
+      "identical": "3/16",
+      "max_logprob_delta": 0.5389
+    },
+    {
+      "config": "MXFP4 + Q8_0 activations quantised",
+      "identical": "3/16",
+      "max_logprob_delta": 0.5901
+    }
+  ],
+  "verified_the_change_was_live": "Token logprobs differ between the two builds on the same prompt, so the new path executes. The result is a genuine negative, not a no-op.",
+  "root_cause_located_instead": "Layer-by-layer trace (llama-eval-callback vs RUNNER_DEBUG_ACT) puts the divergence INSIDE LAYER 0. The layer input matches the reference exactly (attn_norm-0 maxdiff 0.00000) and layer 0's output is already 7.3% off relative. For scale, gemma-4-26B - which this same trace showed to be fine - was 0.2% at the same point. The layer-0 router logits, which read the attention output, diverge by ~0.03 absolute on values of order 0.1. So gpt-oss's ATTENTION is producing a materially different result; this is a forward-pass defect, not a precision residual, which is why no amount of activation-quantisation matching could close it. Measured without the vec_dot change applied (7.31% vs 7.66% with it), so the defect is pre-existing and independent of this experiment.",
+  "narrowing_available_for_free": "The divergence is present at TOKEN 0 / POSITION 0, where rope is the identity rotation. That exonerates the YaRN rope scaling the load banner reports (x32.00) and leaves the Q/K/V projections, the attention-sink softmax, or the output projection. The sink is the novel mechanism here and is the first thing to check: even at position 0 it changes the result, because softmax runs over {score_0, sink} rather than {score_0}.",
+  "disposition": "The vec_dot_type change was REVERTED. It is a faithful transcription and was marginally faster (no weight dequantisation), but it did not do what it was written to do, it lowers activation precision relative to the true fp32 model, and it would alter the arithmetic of every Q8_0 model in the fleet. Carrying that for no measured benefit is the wrong trade, and it would muddy the attention investigation that actually matters. The transcription is recorded here precisely enough to redo in minutes if the attention defect is fixed and the residual is worth revisiting.",
+  "broader_note": "ggml quantises activations for EVERY quantised weight type - Q8_0/Q4_0/MXFP4 take Q8_0 activations, the K-quants take Q8_K. So this systematic difference is present in every cross-engine comparison in this repo, not just gpt-oss, and is part of what the ~0.24-0.29 nat noise floor measured on Qwen2.5-7B and gemma-4-E4B consists of. Making runner match globally is an owner decision about engine numerics, not a bug fix: it would trade absolute accuracy for reference agreement across the whole fleet."
+}
