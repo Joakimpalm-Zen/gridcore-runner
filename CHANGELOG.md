@@ -5,6 +5,25 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **`parallel_tool_calls: true` is supported on buffered requests.** The
+  envelope becomes a bounded `{"calls": [ ... ]}` array over the *same*
+  discriminated union, so a direct answer is simply a one-element array
+  holding the final branch — the model chooses how many entries to emit, not
+  which document shape to use. Capped at 8 entries by construction, because an
+  unbounded array under a token budget is a truncation waiting to happen and
+  every legal document must stay completable by `sval_close`. Calls map back
+  with distinct ascending ids through one shared per-entry mapper, so the
+  single-call and multi-call paths cannot drift in how they render a call.
+  **Streaming still refuses it**, with its own reason: the demultiplexer
+  tracks one call per turn, and silently downgrading to a single call would
+  leave the caller expecting calls it never gets. Where the strict envelope
+  does not apply at all — no tools declared, or the ornith template's native
+  protocol — the flag stays tolerated exactly as before, since ordinary
+  OpenAI-shaped traffic sends it alongside requests that will never call
+  anything. Gates: multi-call mapping driven directly in tests/test_tools.c
+  (ids, separators, the mixed and wrong-shape documents) rather than through
+  a sampled model, plus the rewritten conformance contract.
+
 - **Gemma-4 E-series: array-form sliding-window patterns are read correctly,
   and the refusal now names what is missing.**
   `attention.sliding_window_pattern` is published two ways — dense gemma3/4

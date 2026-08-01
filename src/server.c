@@ -2384,8 +2384,8 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             sbuf mapped = {0};
             int rc = tool_envelope_map(env, g.out.s ? g.out.s : "", g.out.n,
                                        &mapped, &tc);
-            if (rc == 1) {
-                n_tc = 1;
+            if (rc >= 1) {
+                n_tc = rc;              // parallel turns map several at once
                 finish = "tool_calls";
                 g.out.n = 0;
                 free(mapped.s);
@@ -2645,31 +2645,41 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     // afterward, so both paths reach the same call from the same guarantee.
     jv *tools = jv_get(req, "tools");
     tool_envelope env = {0};
+    // parallel_tool_calls is read BEFORE the envelope is built, because it
+    // changes the envelope's shape. Silently ignoring a request for several
+    // calls would leave the caller expecting calls it never gets.
+    bool parallel = false;
+    if (!request_bool(req, "parallel_tool_calls", false, &parallel)) {
+        send_error(fd, 400, "parallel_tool_calls must be a boolean");
+        return;
+    }
+    bool want_stream = false;
+    if (!request_bool(req, "stream", false, &want_stream)) {
+        send_error(fd, 400, "stream must be a boolean");
+        return;
+    }
+    if (parallel && want_stream) {
+        // The streaming demultiplexer tracks one call per turn; emitting
+        // several would need per-index delta state it does not have. Refuse
+        // rather than quietly downgrade to one call.
+        send_error(fd, 400,
+                   "parallel_tool_calls:true is not supported with stream:true; "
+                   "use a buffered request");
+        return;
+    }
     char terr[224];
-    int rc = tool_envelope_build(tools, jv_get(req, "tool_choice"),
-                                 request_schema(req), &env,
-                                 terr, sizeof(terr));
+    int rc = tool_envelope_build_ex(tools, jv_get(req, "tool_choice"),
+                                    request_schema(req), parallel, &env,
+                                    terr, sizeof(terr));
     if (rc < 0) { send_error(fd, 400, terr); return; }
     // Ornith is specifically trained on qwen3_xml. Keep its native protocol
     // instead of forcing the model into runner's generic JSON envelope.
     bool strict = rc == 1 && s->tmpl != TMPL_ORNITH;
-    if (strict) {
-        // one call per turn for now; silently ignoring a request for
-        // several would leave the caller expecting calls it never gets
-        bool parallel = false;
-        if (!request_bool(req, "parallel_tool_calls", false, &parallel)) {
-            tool_envelope_free(&env);
-            send_error(fd, 400, "parallel_tool_calls must be a boolean");
-            return;
-        }
-        if (parallel) {
-            tool_envelope_free(&env);
-            send_error(fd, 400,
-                       "parallel_tool_calls:true is not supported yet; "
-                       "one call per turn");
-            return;
-        }
-    }
+    // When the strict envelope does not apply — no tools declared, or the
+    // ornith template's native protocol — the flag is vacuous and stays
+    // TOLERATED, exactly as before: ordinary OpenAI-shaped traffic sends
+    // parallel_tool_calls alongside requests that will never call anything,
+    // and rejecting those would break it.
     sbuf ts = {0};
     if (strict) sb_put(&ts, env.system_turn, strlen(env.system_turn));
     else        tools_render_for(s->tmpl, tools, &ts);

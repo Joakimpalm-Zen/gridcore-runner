@@ -330,15 +330,28 @@ def test_tool_choice_without_tools_is_rejected(client):
                           contains="tools")
 
 
-def test_parallel_tool_calls_true_is_rejected(client):
-    """Phase 1 guarantees one call per turn. Accepting the flag and returning
-    a single call anyway would leave the caller waiting on results for calls
-    that were never made."""
-    client.expect_400(dict(BASE, max_tokens=8, tools=TOOLS,
-                           tool_choice="required", parallel_tool_calls=True),
-                      name="parallel-tool-calls",
-                      contains="parallel_tool_calls")
+def test_parallel_tool_calls_is_accepted_buffered_and_refused_streaming(client):
+    """parallel_tool_calls:true is honoured on buffered requests with tools —
+    the envelope becomes a bounded {"calls":[...]} array over the same
+    discriminated union. Streaming still refuses it, with a reason: the
+    demultiplexer tracks one call per turn, and quietly downgrading to a
+    single call would leave the caller expecting calls it never gets."""
+    ok = client.chat(dict(BASE, tools=TOOLS, tool_choice="required",
+                          parallel_tool_calls=True, max_tokens=64),
+                     name="parallel-buffered")
+    ok.expect_status(200)
+    calls = ok.choice["message"].get("tool_calls") or []
+    assert calls, "a required parallel turn must still produce a call"
+    # ids are distinct and ascending, whatever the model chose to emit
+    ids = [c["id"] for c in calls]
+    assert len(set(ids)) == len(ids)
+    for c in calls:
+        assert c["function"]["name"] in {t["function"]["name"] for t in TOOLS}
+        json.loads(c["function"]["arguments"])   # always parseable
 
+    client.expect_400(dict(BASE, tools=TOOLS, parallel_tool_calls=True,
+                           stream=True), "parallel-streaming",
+                      contains="stream")
 
 def test_tools_are_still_advisory_when_absent(client):
     """The flags stay tolerated on a request with no tools — rejecting them

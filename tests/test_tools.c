@@ -563,6 +563,92 @@ static void test_parameterless_tool(void) {
 
 // The system turn has to actually name the tools and the envelope, or the
 // model has no way to produce what the sampler is willing to accept.
+// parallel_tool_calls: the document is {"calls":[<entry>, ...]} over the same
+// discriminated union, so several calls map in one turn. Driven directly here
+// rather than through a model, because the point is the mapping — which ids
+// are assigned, how entries are separated, and what a mixed document does —
+// and a sampled model would only ever exercise whichever shape it happened
+// to emit.
+static void test_parallel_envelope_maps_several_calls(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build_ex(tools, NULL, NULL, true, &e,
+                                  err, sizeof(err)) == 1);
+    assert(e.parallel);
+    assert(e.max_calls > 1);
+
+    // the schema must accept a multi-entry array
+    snode *root = compile(&e);
+    assert(root != NULL);
+    const char *two =
+        "{\"calls\":[{\"tool\":\"get_weather\","
+        "\"args\":{\"city\":\"Oslo\",\"units\":\"c\"}},"
+        "{\"tool\":\"get_weather\","
+        "\"args\":{\"city\":\"Bergen\",\"units\":\"f\"}}]}";
+    assert(accepts(root, two));
+
+    sbuf content = {0}, tc = {0};
+    int rc = tool_envelope_map(&e, two, strlen(two), &content, &tc);
+    assert(rc == 2);
+    assert(tc.s != NULL);
+    tc.s[tc.n] = 0;
+    // two complete items, separated, with distinct ascending ids
+    assert(strstr(tc.s, "\"id\":\"call_0\"") != NULL);
+    assert(strstr(tc.s, "\"id\":\"call_1\"") != NULL);
+    assert(strstr(tc.s, "Oslo") != NULL && strstr(tc.s, "Bergen") != NULL);
+    assert(strstr(tc.s, "}},{") != NULL);   // exactly one separator between them
+    free(content.s); free(tc.s);
+
+    // a single-entry array is the ordinary one-call turn
+    const char *one =
+        "{\"calls\":[{\"tool\":\"get_weather\","
+        "\"args\":{\"city\":\"Oslo\",\"units\":\"c\"}}]}";
+    content = (sbuf){0}; tc = (sbuf){0};
+    assert(tool_envelope_map(&e, one, strlen(one), &content, &tc) == 1);
+    free(content.s); free(tc.s);
+
+    // the final branch rides the same array: one entry, answering directly
+    const char *final_only =
+        "{\"calls\":[{\"tool\":\"final\",\"args\":{\"content\":\"hi\"}}]}";
+    content = (sbuf){0}; tc = (sbuf){0};
+    assert(tool_envelope_map(&e, final_only, strlen(final_only),
+                             &content, &tc) == 0);
+    assert(content.n == 2 && memcmp(content.s, "hi", 2) == 0);
+    assert(tc.n == 0);
+    free(content.s); free(tc.s);
+
+    // a document of the WRONG shape for this envelope is refused, not guessed
+    const char *single_shape =
+        "{\"tool\":\"get_weather\","
+        "\"args\":{\"city\":\"Oslo\",\"units\":\"c\"}}";
+    content = (sbuf){0}; tc = (sbuf){0};
+    assert(tool_envelope_map(&e, single_shape, strlen(single_shape),
+                             &content, &tc) == -1);
+    free(content.s); free(tc.s);
+
+    schema_free(root);
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
+// The default build is unchanged by the new parameter: same single-object
+// document, same mapping. A regression here would break every existing client.
+static void test_default_envelope_is_unchanged(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope a, b;
+    char err[192];
+    assert(tool_envelope_build(tools, NULL, NULL, &a, err, sizeof(err)) == 1);
+    assert(tool_envelope_build_ex(tools, NULL, NULL, false, &b,
+                                  err, sizeof(err)) == 1);
+    assert(!a.parallel && !b.parallel);
+    assert(strcmp(a.schema_src, b.schema_src) == 0);
+    assert(strcmp(a.system_turn, b.system_turn) == 0);
+    tool_envelope_free(&a);
+    tool_envelope_free(&b);
+    jv_free(tools);
+}
+
 static void test_system_turn_teaches_the_envelope(void) {
     jv *tools = parse(TOOLS);
     tool_envelope e;
@@ -599,6 +685,8 @@ int main(void) {
     test_malformed_tool_declarations_are_rejected();
     test_malformed_tool_choice_is_rejected();
     test_parameterless_tool();
+    test_parallel_envelope_maps_several_calls();
+    test_default_envelope_is_unchanged();
     test_system_turn_teaches_the_envelope();
     puts("tool envelope tests ok");
     return 0;

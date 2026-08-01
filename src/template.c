@@ -479,6 +479,18 @@ static int tool_choice_kind(jv *choice, const char **named, char *err, int errca
 
 int tool_envelope_build(jv *tools, jv *choice, jv *final_schema,
                         tool_envelope *out, char *err, int errcap) {
+    return tool_envelope_build_ex(tools, choice, final_schema, false,
+                                  out, err, errcap);
+}
+
+// Bound on a parallel turn's call count. An unbounded array under a token
+// budget is a truncation waiting to happen, and sval_close would have to
+// close it mid-call; a small cap keeps every legal document completable.
+#define PARALLEL_MAX_CALLS 8
+
+int tool_envelope_build_ex(jv *tools, jv *choice, jv *final_schema,
+                           bool parallel, tool_envelope *out,
+                           char *err, int errcap) {
     memset(out, 0, sizeof(*out));
     err[0] = 0;
 
@@ -510,26 +522,49 @@ int tool_envelope_build(jv *tools, jv *choice, jv *final_schema,
 
     out->kind = kind;
     out->final_is_text = final_schema == NULL;
+    out->parallel = parallel;
+    out->max_calls = parallel ? PARALLEL_MAX_CALLS : 1;
 
     sbuf schema = { 0 }, turn = { 0 };
+    if (parallel)
+        // One uniform array: a direct answer is a single-element array
+        // holding the final branch, so the model never has to choose between
+        // two document shapes — only how many entries to emit.
+        sb_fmt(&schema, "{\"type\":\"object\",\"properties\":{\"calls\":"
+                        "{\"type\":\"array\",\"minItems\":1,\"maxItems\":%d,"
+                        "\"items\":", PARALLEL_MAX_CALLS);
     sb_lit(&schema, "{\"oneOf\":[");
     // The wording matters as much as the schema: sampling is constrained to
     // the union either way, but a model that does not understand the choice
     // spends its one branch on a tool call for a question that needed none.
     // So the no-call branch is stated FIRST and named as the default.
     sb_lit(&turn, "Reply with exactly one JSON object and nothing else.\n");
+    if (parallel) {
+        // The wording carries as much weight as the schema: sampling is
+        // constrained either way, but a model that misreads the shape spends
+        // its calls badly. State the container once, then the entry forms.
+        sb_fmt(&turn, "The object is {\"calls\": [ ... ]} — a list of 1 to %d "
+                      "entries, each one of the forms below. Put every tool "
+                      "call you want made this turn in that list.\n",
+               PARALLEL_MAX_CALLS);
+    }
     if (kind == TCH_AUTO) {
-        sb_lit(&turn, "To answer the user directly, reply:\n");
+        sb_lit(&turn, parallel ? "To answer the user directly, use one entry:\n"
+                               : "To answer the user directly, reply:\n");
         if (out->final_is_text)
             sb_lit(&turn, "  {\"tool\": \"" FINAL_BRANCH "\", "
                           "\"args\": {\"content\": \"<your answer>\"}}\n");
         else
             sb_lit(&turn, "  {\"tool\": \"" FINAL_BRANCH "\", "
                           "\"args\": <the JSON object you were asked for>}\n");
-        sb_lit(&turn, "To call a tool instead, reply:\n"
-                      "  {\"tool\": \"<tool name>\", \"args\": {<arguments>}}\n"
+        sb_lit(&turn, parallel ? "To call tools instead, use one entry each:\n"
+                               : "To call a tool instead, reply:\n");
+        sb_lit(&turn, "  {\"tool\": \"<tool name>\", \"args\": {<arguments>}}\n"
                       "Call a tool only when it is needed to answer; "
                       "otherwise answer directly.\n");
+        if (parallel)
+            sb_lit(&turn, "Do not mix an answer entry with tool-call entries; "
+                          "either answer or call tools.\n");
     } else {
         sb_lit(&turn, "You must call a tool. Reply:\n"
                       "  {\"tool\": \"<tool name>\", \"args\": {<arguments>}}\n");
@@ -576,6 +611,8 @@ int tool_envelope_build(jv *tools, jv *choice, jv *final_schema,
         envelope_branch(&schema, emitted == 0, FINAL_BRANCH, final_schema,
                         FINAL_TEXT_SCHEMA);
     sb_lit(&schema, "]}");
+    if (parallel)
+        sb_lit(&schema, "}},\"required\":[\"calls\"]}");
 
     if (schema.failed || turn.failed || !schema.s || !turn.s) {
         snprintf(err, errcap, "out of memory building the tool envelope");
@@ -598,10 +635,63 @@ void tool_envelope_free(tool_envelope *e) {
     e->schema_src = e->system_turn = NULL;
 }
 
+// Map ONE envelope entry. Shared by the single-call document and each element
+// of the parallel form so the two cannot drift in how they render a call.
+// `index` numbers the call ids; returns 1 when a call was appended, 0 for the
+// final branch, -1 when the entry is malformed.
+static int envelope_entry_map(const tool_envelope *e, jv *v, int index,
+                              sbuf *content, sbuf *tc) {
+    if (!v || v->type != J_OBJ) return -1;
+    const char *tool = jv_str(jv_get(v, "tool"), NULL);
+    jv *args = jv_get(v, "args");
+    if (!tool) return -1;
+
+    if (!strcmp(tool, FINAL_BRANCH)) {
+        if (e->final_is_text) {
+            const char *text = jv_str(jv_get(args, "content"), "");
+            sb_put(content, text, strlen(text));
+        } else if (args) {
+            jv_dump(args, content);
+        }
+        return 0;
+    }
+
+    sbuf a = { 0 };
+    if (args) jv_dump(args, &a);
+    else      sb_lit(&a, "{}");
+    sb_fmt(tc, "{\"id\":\"call_%d\",\"type\":\"function\","
+               "\"function\":{\"name\":\"", index);
+    sb_esc(tc, tool, strlen(tool));
+    sb_lit(tc, "\",\"arguments\":\"");
+    sb_esc(tc, a.s ? a.s : "{}", a.s ? a.n : 2);
+    sb_lit(tc, "\"}}");
+    if (a.failed) tc->failed = true;
+    free(a.s);
+    return 1;
+}
+
 int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
     jv *v = json_parse(doc, n);
     if (!v || v->type != J_OBJ) { jv_free(v); return -1; }
+
+    if (e->parallel) {
+        jv *calls = jv_get(v, "calls");
+        if (!calls || calls->type != J_ARR) { jv_free(v); return -1; }
+        int emitted = 0;
+        for (int i = 0; i < calls->n; i++) {
+            if (emitted) sb_lit(tc, ",");
+            int rc = envelope_entry_map(e, calls->items[i], emitted, content, tc);
+            if (rc < 0) { jv_free(v); return -1; }
+            // a final branch contributes content and no comma-separated item,
+            // so the separator above must key off what was actually emitted
+            if (rc == 0 && emitted) tc->n -= 1;
+            emitted += rc;
+        }
+        jv_free(v);
+        return emitted;
+    }
+
     const char *tool = jv_str(jv_get(v, "tool"), NULL);
     jv *args = jv_get(v, "args");
     if (!tool) { jv_free(v); return -1; }

@@ -885,6 +885,13 @@ typedef struct {
     char *system_turn;    // system message teaching the envelope (owned)
     bool  final_is_text;  // final branch is {"content": "..."} rather than
                           // the caller's own response_format schema
+    // parallel_tool_calls: the document becomes {"calls":[<entry>, ...]} —
+    // one uniform array whose items are the same discriminated union, so a
+    // direct answer is just a one-element array holding the final branch.
+    // Bounded by construction: an unbounded array under a token budget is a
+    // truncation waiting to happen.
+    bool  parallel;
+    int   max_calls;
 } tool_envelope;
 
 // Build the envelope for one request. `final_schema` is the caller's
@@ -895,12 +902,19 @@ typedef struct {
 int  tool_envelope_build(struct jv *tools, struct jv *tool_choice,
                          struct jv *final_schema, tool_envelope *out,
                          char *err, int errcap);
+// Same, but `parallel` opts into the bounded multi-call form. Buffered
+// surfaces only: the streaming demultiplexer still tracks one call per turn.
+int  tool_envelope_build_ex(struct jv *tools, struct jv *tool_choice,
+                            struct jv *final_schema, bool parallel,
+                            tool_envelope *out, char *err, int errcap);
 void tool_envelope_free(tool_envelope *e);
 
 // Map a generated envelope document back to the OpenAI response shape.
-// Returns 1 for a tool call (one tool_calls[] item appended to tc), 0 for
-// the final branch (assistant content appended to content), -1 when doc is
-// not a well-formed envelope.
+// Returns the NUMBER of tool_calls[] items appended to tc (1 for the ordinary
+// single-call envelope, 0..max_calls for the parallel form), 0 for the final
+// branch with assistant content appended instead, and -1 when doc is not a
+// well-formed envelope. A parallel document may mix the two: any final
+// branches contribute content, any tool branches contribute calls.
 int  tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                        struct sbuf *content, struct sbuf *tc);
 
