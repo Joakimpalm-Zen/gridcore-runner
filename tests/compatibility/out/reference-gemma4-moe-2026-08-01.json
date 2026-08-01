@@ -1,0 +1,45 @@
+{
+  "schema_version": "gridcore.runner.greedy-reference.v1",
+  "generated_utc": "2026-08-01T17:36:48Z",
+  "runner": "runner 0.1.4-alpha",
+  "reference": "version: 1 (305ba51)",
+  "model": "models/gemma-4-26B-A4B-it-Q4_0.gguf",
+  "tokens": 8,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris.\n<|channel>3/2/",
+      "reference": " Paris.\n5/5/2",
+      "status": "fail"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": "\n    \"\"\"\n    \u0412\u044b\u0447\u0438\u0441\u043b\u044f\u0435\u0442",
+      "reference": "\n    \"\"\"\n    \u0412\u044b\u0447\u0438\u0441\u043b\u044f\u0435\u0442",
+      "status": "pass"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10 11",
+      "reference": " 9 10 11",
+      "status": "pass"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " in a land of mountains-high and",
+      "reference": " in a land of mountains-high and",
+      "status": "pass"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John Doe\", \"age\": ",
+      "reference": " \"John Doe\", \"age\": ",
+      "status": "pass"
+    }
+  ],
+  "totals": {
+    "passed": 4,
+    "failed": 1
+  }
+}

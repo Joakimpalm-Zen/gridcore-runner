@@ -56,6 +56,33 @@ protocol and CLI may still change between alpha releases.
   each side, which distinguishes a coin-flip tie from an arithmetic fault —
   something `reference_compare.py`'s exact-text gate cannot do.
 
+- **The gemma-4 MoE identity claim is withdrawn, and replaced with a
+  measurement.** Re-running the gate on the *certified* artifact
+  (`ggml-org/gemma-4-26B-A4B-it-GGUF`, sha `d208665a…`, now matching the pin in
+  `tests/compatibility/models.json`) gives 4/5 on `reference_compare.py` at
+  b10076, not the token identity the README claimed. No archived artifact ever
+  backed that claim, and the dense gemma-4 claim in `model.c` cites b9964 — a
+  different revision.
+
+  The claim is withdrawn because it is **unachievable for this model, by any
+  engine pair**, not because runner regressed. New
+  `scripts/sensitivity_floor.py` measures what a model does to a small numeric
+  change, and on the certified 26B runner disagrees with **itself** — same
+  build, same weights, only the KV cache precision changed — on 11 of 16
+  prompts, against the 9 it disagrees with llama.cpp on. A perturbation
+  strictly inside one binary moves the output further than switching engines
+  does, which leaves no room to attribute the gap to a fault. Direct checks
+  agree: layer 0's `attn_norm` matches the reference exactly and the
+  pre-softmax router logits match to ~0.1–0.5%. The amplifier is discrete
+  top-8-of-128 routing over Q4_0 weights — at layer 2 the 6th and 7th selected
+  experts sat 0.0002 apart in weight, so a rounding difference flips an expert
+  and rewrites an eighth of the FFN output.
+
+  For contrast, on the same harness gemma-4-E4B is perfectly self-consistent
+  under that perturbation (16/16) and matches llama.cpp on 11/16 — essentially
+  llama.cpp's own cold-vs-warm-cache floor of 12/16. Evidence:
+  `tests/compatibility/out/divergence-study-gemma4-moe-2026-08-01.json`.
+
 - **`RUNNER_DEBUG_ACT` traces are now diffable against llama.cpp.** Each line
   carries the sum plus the leading and trailing three values in
   `llama-eval-callback`'s layout, and gemma-4 MoE layers additionally dump the

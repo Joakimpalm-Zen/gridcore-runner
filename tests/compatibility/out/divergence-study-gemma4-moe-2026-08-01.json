@@ -1,0 +1,44 @@
+{
+  "schema_version": "gridcore.runner.divergence-study.v1",
+  "generated_utc": "2026-08-01T19:55:00Z",
+  "reference": "llama.cpp b10076 (305ba519a)",
+  "question": "Is gemma-4-26B-A4B's disagreement with llama.cpp a runner fault, or the model amplifying ordinary numeric differences?",
+  "method": "All rows: 16 prompts x 16 greedy tokens, compared by token id. 'self (runner)' perturbs only the KV cache precision inside one binary; 'self (llama.cpp)' changes only cold vs warm prefix cache. Both are smaller perturbations than switching engines.",
+  "rows": [
+    {
+      "model": "Qwen2.5-7B-Instruct-Q4_K_M",
+      "arch": "qwen2 dense",
+      "self_llamacpp_identical": "16/16",
+      "cross_engine_identical": "12/16",
+      "cross_engine_max_logprob_delta": 0.236
+    },
+    {
+      "model": "gemma-4-E4B-it-Q4_K_M",
+      "arch": "gemma4 E-series dense",
+      "self_runner_identical": "16/16",
+      "self_runner_mean_delta": 0.00424,
+      "self_llamacpp_identical": "12/16",
+      "cross_engine_identical": "11/16",
+      "cross_engine_max_logprob_delta": 0.292
+    },
+    {
+      "model": "gemma-4-26B-A4B-it-Q4_0 (ggml-org, certified sha d208665a)",
+      "arch": "gemma4 dual-branch MoE, 128 experts / 8 used",
+      "self_runner_identical": "5/16",
+      "self_runner_mean_delta": 0.0609,
+      "self_llamacpp_identical": "12/16",
+      "cross_engine_identical": "7/16",
+      "cross_engine_max_logprob_delta": 1.325
+    },
+    {
+      "model": "gemma-4-26B_q4_0-it (google QAT, sha 3eca3b8f)",
+      "arch": "gemma4 dual-branch MoE, 128 experts / 8 used",
+      "self_runner_identical": "3/8 (24 tok)",
+      "self_runner_mean_delta": 0.10324,
+      "cross_engine_identical": "5/16",
+      "cross_engine_max_logprob_delta": 1.248
+    }
+  ],
+  "conclusion": "Not a runner fault. On the certified 26B, runner disagrees with ITSELF on 11 of 16 prompts from a KV-cache precision change alone - MORE than the 9 it disagrees with llama.cpp on. A perturbation strictly inside one binary moves the output further than switching engines does, so the cross-engine gap has no room left to attribute to an implementation fault. Direct checks agree: layer 0's attn_norm matches the reference exactly, and the pre-softmax router logits match to ~0.1-0.5%. The amplifier is discrete top-8-of-128 routing over Q4_0 weights: at layer 2 the 6th and 7th selected experts sat 0.0002 apart in weight, so a rounding difference flips an expert and changes an eighth of the FFN output.",
+  "caveat": "The README's 'token-identical to llama.cpp' claim for gemma-4-26B-A4B-it does NOT reproduce at b10076: reference_compare gives 4/5 on the certified file. No archived artifact backs the original claim, and the dense gemma-4 claim in model.c cites b9964, a different revision. Given the sensitivity floor above, exact-text identity is not an achievable gate for this model on any engine pair."
+}
