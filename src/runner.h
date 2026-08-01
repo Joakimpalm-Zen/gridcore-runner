@@ -867,6 +867,8 @@ static inline size_t model_kv_byte_off(const model_t *m, int l) {
 
 typedef struct { const char *role, *content; } chat_msg;
 
+void        model_ple_prepass(model_t *m, const int32_t *tokens, int n,
+                              const float *x, float *out, float *scratch);
 int         template_detect(const char *meta_tmpl, tokenizer *tok);
 int         template_from_name(const char *name); // -1 if unknown
 const char *template_name(int tmpl);

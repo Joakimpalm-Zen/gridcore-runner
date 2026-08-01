@@ -191,6 +191,24 @@
    ]
   },
   {
+   "id": "gemma-4-e4b-it-q4_k_m",
+   "architecture": "gemma4",
+   "family": "Gemma 4 E-series",
+   "file": "models/gemma-4-E4B-it-Q4_K_M.gguf",
+   "sha256": "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87",
+   "tokenizer_reference": "google/gemma-4-E4B-it",
+   "reference": {
+    "implementation": "llama.cpp",
+    "revision": "b10076"
+   },
+   "checks": [
+    "load",
+    "cpu_cuda",
+    "chat"
+   ],
+   "notes": "Per-layer embeddings + shared-KV layers, CPU and CUDA. greedy_reference is not declared: agreement with llama.cpp is at the quantisation noise floor, not token identity - 11/16 prompts at 16 tokens, against llama.cpp's own cold-vs-warm-cache floor of 12/16 on the same model, so the remaining gap is roughly one prompt. cpu_cuda IS exact and is the gate that holds here: byte-identical CPU vs full 42/42 GPU offload over 4 prompts at 32 tokens and one at 128, plus every partial-offload split across the shared-KV boundary on the generated fixture. Measure with scripts/sensitivity_floor.py before reading any cross-engine number."
+  },
+  {
    "id": "gemma-4-26b-a4b-it-q4_0",
    "architecture": "gemma4-moe",
    "family": "Gemma 4 MoE",

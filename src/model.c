@@ -784,10 +784,10 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             // against llama.cpp b10076 on gemma-4-E4B-it Q4_K_M — greedy
             // agreement is at the quantisation noise floor (the same profile a
             // long-verified dense model shows), not exact token identity.
-            // CPU only: see the refusal in cuda.c.
+            // CPU and CUDA, byte-identical to each other.
             fprintf(stderr, "gemma4: E-series (per-layer embeddings%s) — "
-                    "CPU only, verified against llama.cpp at the Q4_K noise "
-                    "floor rather than token-identically\n",
+                    "verified against llama.cpp at the Q4_K noise floor "
+                    "rather than token-identically\n",
                     m->kv_from_start < m->n_layer ? " + shared KV" : "");
         else
             fprintf(stderr, "gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files\n");
@@ -1980,30 +1980,36 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
 // layer loop (llama.cpp gemma4.cpp build_inp_per_layer + project_per_layer_inputs).
 // m->ple ends up laid out [token][layer][n_embd_ple], which is exactly the
 // shape per_layer_model_proj already produces, so no permute is needed.
-static void ple_prepass(model_t *m, const int32_t *tokens, int n) {
+// `x` is the scaled input embedding for the batch (stride n_embd) and `out`
+// receives [token][layer][n_embd_ple]. Split out from the CPU forward so the
+// CUDA path can run the same arithmetic over its own staging buffers — the
+// pre-pass reads a bf16 projection and a q5_K table that have no device
+// kernels, so it stays on the host for both backends.
+void model_ple_prepass(model_t *m, const int32_t *tokens, int n,
+                       const float *x, float *out, float *scratch) {
     int P = m->n_embd_ple, n_embd = m->n_embd;
     size_t per_tok = (size_t)m->n_layer * P;
     const float proj_scale = 1.0f / sqrtf((float)n_embd);
     const float tok_scale  = sqrtf((float)P);
     const float mix_scale  = 1.0f / sqrtf(2.0f);
 
-    matvec_b(m->tp, m->ple, (int)per_tok, m->ple_model_proj, m->x, n_embd,
+    matvec_b(m->tp, out, (int)per_tok, m->ple_model_proj, x, n_embd,
              n_embd, (int)per_tok, NULL, n);
     size_t ers = ggml_row_size(m->ple_tok_embd->type, (int)per_tok);
     for (int b = 0; b < n; b++) {
-        float *dst = m->ple + (size_t)b * per_tok;
+        float *dst = out + (size_t)b * per_tok;
         // Same clamp as the main embedding table: token ids are untrusted.
         int32_t id = tokens[b];
         if (id < 0 || id >= m->n_vocab) id = 0;
         dequant_row(m->ple_tok_embd->type,
                     (uint8_t *)m->ple_tok_embd->data + (size_t)id * ers,
-                    m->ple_tmp, (int)per_tok);
+                    scratch, (int)per_tok);
         for (int l = 0; l < m->n_layer; l++) {
             float *slice = dst + (size_t)l * P;
             for (int i = 0; i < P; i++) slice[i] *= proj_scale;
             rmsnorm(slice, slice, m->ple_proj_norm, P, m->rms_eps);
             for (int i = 0; i < P; i++)
-                slice[i] = (slice[i] + m->ple_tmp[(size_t)l * P + i] * tok_scale)
+                slice[i] = (slice[i] + scratch[(size_t)l * P + i] * tok_scale)
                            * mix_scale;
         }
     }
@@ -2347,7 +2353,8 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                     m->x[(size_t)b * n_embd + i] *= m->embd_scale;
         }
         if (dbg) dbg_stat("post-embd", -1, m->x + (size_t)(n - 1) * n_embd, n_embd);
-        if (m->n_embd_ple > 0) ple_prepass(m, tokens, n);
+        if (m->n_embd_ple > 0)
+            model_ple_prepass(m, tokens, n, m->x, m->ple, m->ple_tmp);
     }
 
     for (int l = start; l < m->n_layer; l++) {

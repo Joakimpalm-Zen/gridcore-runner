@@ -300,6 +300,7 @@ typedef struct gpu_weights {
     // gemma-4 MoE dual-branch: dense-post/moe-pre/moe-post norms + the router
     // input scale (with 1/sqrt(n_embd) folded in), per MoE layer, may be 0
     CUdeviceptr *g_pn1, *g_prn2, *g_pn2, *g_gis;
+    CUdeviceptr *ple_pn;                // gemma4 E-series per-layer post_norm
     // per-expert down-projection scale table per MoE layer (gemma-4), ones
     // when the GGUF has none; and a shared all-ones table for archs without
     // any such scale — k_moe_actmul multiplies unconditionally
@@ -323,6 +324,9 @@ typedef struct {
     // device routing results [MVB][used] and per-slot expert hidden scratch
     // [rows][gw] (gw = 2*n_ff_exp for gemma's fused gate_up, n_ff_exp else)
     CUdeviceptr moe_sel, moe_selw, moe_hb, moe_hb2;
+    // gemma4 E-series: ple holds [token][layer][n_embd_ple] for the batch,
+    // uploaded once per forward; ple_g is the per-layer gate scratch.
+    CUdeviceptr ple, ple_g;
     // expert-grouped prefill: gathered inputs / down outputs [MVB][n_embd],
     // concatenated per-expert token lists + weights [MVB*used], and the host
     // staging the grouping is built from
@@ -336,6 +340,7 @@ typedef struct {
     CUdeviceptr q35_hist, q35_state;    // persistent recurrent state per sequence
     CUdeviceptr q35_hist_prev, q35_state_prev; // pre-forward rollback snapshot
     float       *h_x, *h_logits, *h_moe_logits; // host staging
+    float       *h_ple, *h_ple_tmp;             // E-series pre-pass staging
     int          last_pos;              // -2 = nothing synced yet
     // CUDA graphs for the single-token decode path (Experiment A)
     CUstream     stream;
@@ -650,6 +655,7 @@ static void shared_destroy(gpu_weights *w) {
             w->g_dsc ? w->g_dsc[l] : 0,
             w->ssm_dt ? w->ssm_dt[l] : 0, w->ssm_a ? w->ssm_a[l] : 0,
             w->ssm_norm ? w->ssm_norm[l] : 0,
+            w->ple_pn ? w->ple_pn[l] : 0,
         };
         for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
             if (bufs[i]) cu.MemFree(bufs[i]);
@@ -657,7 +663,7 @@ static void shared_destroy(gpu_weights *w) {
     free(w->attn_norm); free(w->ffn_norm);
     free(w->bq); free(w->bk); free(w->bv); free(w->bo);
     free(w->qn); free(w->kn);
-    free(w->pan); free(w->pfn);
+    free(w->pan); free(w->pfn); free(w->ple_pn);
     free(w->g_pn1); free(w->g_prn2); free(w->g_pn2); free(w->g_gis);
     free(w->g_dsc);
     free(w->ssm_dt); free(w->ssm_a); free(w->ssm_norm);
@@ -712,6 +718,11 @@ static size_t layer_weight_bytes(const layer_t *ly, int n_expert,
         gguf_tensor *ffn[] = { ly->w_gate, ly->w_up, ly->w_down };
         for (int i = 0; i < 3; i++) if (ffn[i]) wb += ffn[i]->nbytes;
     }
+    // E-series per-layer embedding matrices ride with the layer. They are f32
+    // in the published GGUFs and far from negligible (~5 MB/layer on E4B), so
+    // leaving them out would under-budget the offload and overcommit VRAM.
+    if (ly->ple_gate) wb += ly->ple_gate->nbytes;
+    if (ly->ple_proj) wb += ly->ple_proj->nbytes;
     return wb;
 }
 
@@ -1044,7 +1055,9 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             // the host; attention and dense layers remain device resident.
             for (int l = 0; l < G; l++) {
                 layer_t *ly = &m->layers[l];
-                if (!binding_add(w, m, ly->wq) ||
+                if (!binding_add(w, m, ly->ple_gate) ||
+                    !binding_add(w, m, ly->ple_proj) ||
+                    !binding_add(w, m, ly->wq) ||
                     !binding_add(w, m, ly->wk) ||
                     !binding_add(w, m, ly->wv) ||
                     !binding_add(w, m, ly->wo) ||
@@ -1108,11 +1121,13 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         w->kn = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->pan = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->pfn = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ple_pn = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_pn1  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_prn2 = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_pn2  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_gis  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_dsc  = calloc(m->n_layer, sizeof(CUdeviceptr));
+        if (!w->ple_pn) goto fail;
         w->ssm_dt   = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_a    = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
@@ -1139,6 +1154,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             w->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l));
             w->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
             w->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
+            if (ly->ple_post_norm)
+                w->ple_pn[l] = f32_dbuf(ly->ple_post_norm, m->n_embd);
             if (ly->recurrent) {
                 w->ssm_dt[l] = f32_dbuf(ly->ssm_dt, m->ssm_v_heads);
                 w->ssm_a[l] = f32_dbuf(ly->ssm_a, m->ssm_v_heads);
@@ -1172,6 +1189,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 (ly->qnorm_w && !w->qn[l]) || (ly->knorm_w && !w->kn[l]) ||
                 (ly->post_attn_norm_w && !w->pan[l]) ||
                 (ly->post_ffn_norm_w && !w->pfn[l]) ||
+                (ly->ple_post_norm && !w->ple_pn[l]) ||
                 (ly->recurrent && (!w->ssm_dt[l] || !w->ssm_a[l] ||
                                     !w->ssm_norm[l])) ||
                 (ly->moe_gemma && (!w->g_pn1[l] || !w->g_prn2[l] ||
@@ -1222,14 +1240,6 @@ bool gpu_init(model_t *m) {
     if (m->gptoss) {
         fprintf(stderr, "gpu: gpt-oss needs sink-aware attention and MXFP4 "
                 "kernels that this backend does not have — running on CPU\n");
-        goto unsupported;
-    }
-    // gemma4 E-series: the device graph has no per-layer-embedding stage, and
-    // its KV allocator sizes one independent region per layer, so shared-KV
-    // aliasing would silently attend over zeros. Same rule as above.
-    if (m->n_embd_ple > 0 || m->kv_from_start < m->n_layer) {
-        fprintf(stderr, "gpu: gemma4 E-series (per-layer embeddings / shared "
-                "KV) is CPU-only on this backend — running on CPU\n");
         goto unsupported;
     }
     if (!gpu_type_ok(m->output->type)) goto unsupported;
@@ -1322,6 +1332,16 @@ bool gpu_init(model_t *m) {
         CK(cu.MemsetD8(g->kc, 0, kv_bytes));
         CK(cu.MemsetD8(g->vc, 0, kv_bytes));
 
+        if (m->n_embd_ple > 0) {
+            // [token][layer][n_embd_ple] for a whole tile, plus the per-layer
+            // gate scratch. The pre-pass itself runs on the host (it reads a
+            // bf16 projection and a q5_K table that have no device kernels),
+            // so only its result crosses the bus — once per forward, not once
+            // per layer.
+            size_t per_tok = (size_t)m->n_layer * m->n_embd_ple;
+            CK(cu.MemAlloc(&g->ple,   sizeof(float) * MVB * per_tok));
+            CK(cu.MemAlloc(&g->ple_g, sizeof(float) * MVB * m->n_embd_ple));
+        }
         CK(cu.MemAlloc(&g->x,      sizeof(float) * MVB * m->n_embd));
         CK(cu.MemAlloc(&g->xb,     sizeof(float) * MVB * xdim));
         CK(cu.MemAlloc(&g->xb2,    sizeof(float) * MVB * xdim));
@@ -1422,6 +1442,12 @@ bool gpu_init(model_t *m) {
         if (m->qwen35) g->graph_bad = true;
         if (moe_any_on_host(m)) g->graph_bad = true;
 
+        if (m->n_embd_ple > 0) {
+            size_t per_tok = (size_t)m->n_layer * m->n_embd_ple;
+            g->h_ple     = malloc(sizeof(float) * MVB * per_tok);
+            g->h_ple_tmp = malloc(sizeof(float) * per_tok);
+            if (!g->h_ple || !g->h_ple_tmp) goto fail;
+        }
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
         if (m->n_expert > 0)
@@ -1661,6 +1687,41 @@ static bool enc_add(gpu_t *g, CUdeviceptr x, CUdeviceptr d, int n,
     return launch(g, g->sw->f_add, (n + 255) / 256, batch, 1, 256, p);
 }
 
+// gemma4 E-series per-layer embedding branch, mirroring the CPU tail in
+// model.c: gate the post-FFN residual into the PLE width, multiply it by this
+// layer's slice of the per-token table, project back and RMS-norm, then add.
+// Runs after the FFN residual and before the layer output scale.
+//
+// xb is free here (its FFN output already went into x) and doubles as the
+// projection destination, matching what the CPU path reuses.
+static bool enc_ple(gpu_t *g, model_t *m, const layer_t *ly, int l,
+                    int tn, int xdim) {
+    if (!ly->ple_gate) return true;
+    int P = m->n_embd_ple, n_embd = m->n_embd;
+    size_t per_tok = (size_t)m->n_layer * P;
+    if (!enc_mv(g, m, ly->ple_gate, g->x, g->ple_g, n_embd, P, 0,
+                tn, n_embd, P))
+        return false;
+    // k_gelu_mul is gelu(a)*b elementwise in place on a — the same tanh
+    // approximation gated_act(ACT_GELU, ...) uses on the host. The slice
+    // stride is per_tok, so each token reads its own layer-l window.
+    for (int b = 0; b < tn; b++) {
+        CUdeviceptr gate = g->ple_g + (CUdeviceptr)((size_t)b * P * sizeof(float));
+        CUdeviceptr slice = g->ple +
+            (CUdeviceptr)(((size_t)b * per_tok + (size_t)l * P) * sizeof(float));
+        void *p[] = { &gate, &slice, &P };
+        if (!launch(g, g->sw->f_gelu, (P + 255) / 256, 1, 1, 256, p))
+            return false;
+    }
+    if (!enc_mv(g, m, ly->ple_proj, g->ple_g, g->xb, P, n_embd, 0,
+                tn, P, xdim))
+        return false;
+    if (!enc_rmsnorm(g, g->xb, g->xb, g->sw->ple_pn[l], n_embd, m->rms_eps,
+                     tn, xdim, xdim))
+        return false;
+    return enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
+}
+
 static bool enc_actmul(gpu_t *g, model_t *m, CUdeviceptr a, CUdeviceptr b, int n) {
     void *p[] = { &a, &b, &n };
     CUfunction f = m->ffn_act == ACT_GELU ? g->sw->f_gelu : g->sw->f_silu;
@@ -1683,13 +1744,14 @@ static void gpu_ctx_free(model_t *m, gpu_t *g) {
                            g->moe_logits, g->moe_eout, g->moe_sel,
                            g->moe_selw, g->moe_hb, g->moe_hb2,
                            g->moe_gath, g->moe_dout, g->moe_gidx, g->moe_gw,
-                           g->g_scr,
+                           g->g_scr, g->ple, g->ple_g,
                            g->q35_mix, g->q35_cv, g->q35_z, g->q35_beta,
                            g->q35_alpha, g->q35_gate, g->q35_hist,
                            g->q35_state, g->q35_hist_prev, g->q35_state_prev };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
     free(g->h_x); free(g->h_logits); free(g->h_moe_logits);
+    free(g->h_ple); free(g->h_ple_tmp);
     free(g->h_moe_sel); free(g->h_moe_selw);
     free(g->h_moe_gidx); free(g->h_moe_gw);
     shared_release(g->sw);
@@ -1807,6 +1869,17 @@ static bool kv_copyback(gpu_t *g, model_t *m, int lo, int hi) {
 
 // stage the tile's token embeddings into g->x (host dequant + one HtoD);
 // kept outside fwd_tile so graph capture records kernels only
+// E-series: run the per-layer-embedding pre-pass on the host over the freshly
+// staged embeddings and ship its result. Once per forward, so the transfer is
+// n_tokens * n_layer * n_embd_ple floats — 43 KB for a single E4B token.
+static bool stage_ple(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
+    if (m->n_embd_ple <= 0) return true;
+    size_t per_tok = (size_t)m->n_layer * m->n_embd_ple;
+    model_ple_prepass(m, tokens, tn, g->h_x, g->h_ple, g->h_ple_tmp);
+    return cu.MemcpyHtoD(g->ple, g->h_ple,
+                         sizeof(float) * (size_t)tn * per_tok) == 0;
+}
+
 static bool stage_x(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
     size_t ers = ggml_row_size(m->tok_embd->type, m->n_embd);
     for (int b = 0; b < tn; b++) {
@@ -1817,7 +1890,9 @@ static bool stage_x(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
         if (m->embd_scale != 1.0f)
             for (int i = 0; i < m->n_embd; i++) hx[i] *= m->embd_scale;
     }
-    return cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * m->n_embd) == 0;
+    if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * m->n_embd) != 0)
+        return false;
+    return stage_ple(g, m, tokens, tn);
 }
 
 // encode a tile of up to MVB tokens: matvecs read each weight once for the
@@ -2507,6 +2582,11 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q, n_embd, q_dim,
                               g->sw->bq[l], tn, xdim, q_dim);
         }
+        // gemma4 E-series shared-KV layers project Q as usual but compute no
+        // K/V: they attend over the cache an earlier layer filled, which the
+        // aliased model_kv_byte_off() below already resolves to.
+        bool owns_kv = model_kv_owner(m, l) == l;
+        if (!owns_kv) goto kv_done;
         ok = ok && enc_mv(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->sw->bk[l], tn, xdim, kv_dim);
         if (ly->wv) {
             ok = ok && enc_mv(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->sw->bv[l], tn, xdim, kv_dim);
@@ -2517,15 +2597,11 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && enc_add(g, g->vt, g->kt, kv_dim, tn, kv_dim, kv_dim);
         }
         prof_mark(g, PH_MATVEC);
-        if (g->sw->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->sw->qn[l], m->n_head, hd, tn, q_dim);
         if (m->v_rmsnorm)
             // weightless per-head RMS norm on V (pre-K-norm values)
             ok = ok && enc_qknorm(g, m, g->vt, g->sw->ones, n_kv, hd, tn, kv_dim);
         if (g->sw->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->sw->kn[l], n_kv, hd, tn, kv_dim);
-        prof_mark(g, PH_NORM);
-        ok = ok && enc_rope(g, m, g->q,  m->n_head, tn, q_dim, l);
-        ok = ok && enc_rope(g, m, g->kt, n_kv,      tn, kv_dim, l);
-        prof_mark(g, PH_ROPE);
+        ok = ok && enc_rope(g, m, g->kt, n_kv, tn, kv_dim, l);
 
         {
             // cache rows for consecutive positions are contiguous, so the
@@ -2539,6 +2615,11 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                            &g->pos_dev, &q8 };
             ok = ok && launch(g, g->sw->f_store, (units + 63) / 64, tn, 1, 64, ps);
         }
+    kv_done:
+        if (g->sw->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->sw->qn[l], m->n_head, hd, tn, q_dim);
+        prof_mark(g, PH_NORM);
+        ok = ok && enc_rope(g, m, g->q, m->n_head, tn, q_dim, l);
+        prof_mark(g, PH_ROPE);
 
         {
             attn_args aa = { hd, m->n_head, n_kv, m->n_ctx,
@@ -2622,6 +2703,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->rms_eps,
                                    tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
+        ok = ok && enc_ple(g, m, ly, l, tn, xdim);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
             // gemma4: whole-layer output scalar, applied after both residuals
             ok = ok && enc_scale(g, g->x, ly->out_scale, n_embd, tn, n_embd);
@@ -2821,6 +2903,8 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->attn_norm[l], n_embd,
                                m->rms_eps, tn, n_embd, xdim);
         ok = ok && enc_mv_batch(g, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->sw->bq[l], tn, xdim, q_dim);
+        // shared-KV layers: Q only, then attend over the owning layer's rows
+        if (model_kv_owner(m, l) == l) {
         ok = ok && enc_mv_batch(g, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->sw->bk[l], tn, xdim, kv_dim);
         if (ly->wv) {
             ok = ok && enc_mv_batch(g, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->sw->bv[l], tn, xdim, kv_dim);
@@ -2828,12 +2912,10 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
             ok = ok && cu.MemsetD8(g->vt, 0, sizeof(float) * (size_t)tn * kv_dim) == 0;
             ok = ok && enc_add(g, g->vt, g->kt, kv_dim, tn, kv_dim, kv_dim);
         }
-        if (g->sw->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->sw->qn[l], m->n_head, hd, tn, q_dim);
         if (m->v_rmsnorm)
             ok = ok && enc_qknorm(g, m, g->vt, g->sw->ones, n_kv, hd, tn, kv_dim);
         if (g->sw->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->sw->kn[l], n_kv, hd, tn, kv_dim);
-        ok = ok && enc_rope_batch(B, m, g->q,  m->n_head, tn, q_dim, l);
-        ok = ok && enc_rope_batch(B, m, g->kt, n_kv,      tn, kv_dim, l);
+        ok = ok && enc_rope_batch(B, m, g->kt, n_kv, tn, kv_dim, l);
 
         {   // each column stores into its own sequence's cache at its own row
             uint64_t l_off = model_kv_byte_off(m, l);
@@ -2843,6 +2925,9 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
                            &l_off, &B->pos_d, &q8 };
             ok = ok && launch(g, g->sw->f_store_seq, (units + 63) / 64, tn, 1, 64, ps);
         }
+        }
+        if (g->sw->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->sw->qn[l], m->n_head, hd, tn, q_dim);
+        ok = ok && enc_rope_batch(B, m, g->q, m->n_head, tn, q_dim, l);
         {   // flash-decoding over N sequences: grid (head, split, sequence).
             // The extra grid dimension is free occupancy — a solo decode step
             // leaves most of the GPU idle, which is the headroom batching eats.
@@ -2872,6 +2957,7 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
         if (g->sw->pfn[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->rms_eps, tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
+        ok = ok && enc_ple(g, m, ly, l, tn, xdim);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
             ok = ok && enc_scale(g, g->x, ly->out_scale, n_embd, tn, n_embd);
     }
@@ -2896,7 +2982,9 @@ static bool stage_x_batch(gpu_batch *B, model_t *m, const int32_t *tok, int n) {
         if (m->embd_scale != 1.0f)
             for (int i = 0; i < m->n_embd; i++) hx[i] *= m->embd_scale;
     }
-    return cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * (size_t)n * m->n_embd) == 0;
+    if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * (size_t)n * m->n_embd) != 0)
+        return false;
+    return stage_ple(g, m, tok, n);
 }
 
 bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,

@@ -10,7 +10,9 @@ exercises them end to end without the 5 GB real file. What matters here:
   so nothing but an explicit assertion catches it.
 * shared layers reserve no cache rows, so the KV allocation shrinks with them.
 * the two mechanisms are independent: either alone must load and run.
-* the GPU is refused, loudly, rather than silently attending over zeros.
+* the CUDA path agrees with the host bit for bit, including when a partial
+  offload puts a shared-KV layer on a different device from the layer whose
+  rows it reads.
 
 Token-level agreement with llama.cpp is measured separately, against the real
 weights, by scripts/token_divergence.py.
@@ -47,9 +49,9 @@ def runner_bin():
     return exe
 
 
-def _run(runner_bin, model, *extra, env=None, tokens=4):
+def _run(runner_bin, model, *extra, env=None, tokens=4, prompt="hi"):
     return subprocess.run(
-        [runner_bin, "-m", str(model), "-p", "hi", "-n", str(tokens),
+        [runner_bin, "-m", str(model), "-p", prompt, "-n", str(tokens),
          "--gpu", "off", *extra],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
         env={**os.environ, **(env or {})})
@@ -106,11 +108,51 @@ def test_decoding_is_deterministic(runner_bin, tmp_path):
     assert len(outs) == 1, "greedy decoding must not vary run to run"
 
 
-def test_gpu_is_refused_rather_than_run_without_the_extra_stages(runner_bin,
-                                                                 tmp_path):
-    model = _make(tmp_path / "gpu.gguf", shared_kv=3, ple=16)
-    err = subprocess.run(
-        [runner_bin, "-m", str(model), "-p", "hi", "-n", "1", "--gpu", "auto"],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=120).stderr.decode(errors="replace")
-    assert "E-series" in err and "CPU-only" in err
+# --- CUDA ---------------------------------------------------------------
+# Both mechanisms have a device implementation; the gate is that it agrees with
+# the host bit for bit. A silent GPU fallback would make these pass vacuously,
+# so each one asserts the backend actually engaged.
+
+
+GPU_PROMPT = "hello world"
+
+
+def _gpu_run(runner_bin, model, *extra, tokens=12):
+    return subprocess.run(
+        [runner_bin, "-m", str(model), "-p", GPU_PROMPT, "-n", str(tokens),
+         "--temp", "0", "--gpu", "auto", *extra],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+
+
+def _requires_gpu(runner_bin, tmp_path):
+    model = _make(tmp_path / "probe.gguf", shared_kv=3, ple=16)
+    proc = _gpu_run(runner_bin, model, tokens=1)
+    if b"CUDA backend" not in proc.stderr and b"Metal" not in proc.stderr:
+        pytest.skip("no GPU backend available")
+    return model
+
+
+@pytest.mark.parametrize("shared_kv,ple", [(3, 16), (3, 0), (0, 16)])
+def test_gpu_matches_cpu_bit_for_bit(runner_bin, tmp_path, shared_kv, ple):
+    _requires_gpu(runner_bin, tmp_path)
+    model = _make(tmp_path / f"g{shared_kv}_{ple}.gguf", shared_kv, ple)
+    cpu = _run(runner_bin, model, "--temp", "0", tokens=12, prompt=GPU_PROMPT)
+    gpu = _gpu_run(runner_bin, model)
+    assert b"CUDA backend" in gpu.stderr or b"Metal" in gpu.stderr, \
+        "GPU silently fell back; this comparison would be vacuous"
+    assert gpu.stdout == cpu.stdout
+
+
+@pytest.mark.parametrize("gpu_layers", [1, 2, 3, 4, 5])
+def test_partial_offload_matches_cpu_across_the_shared_kv_boundary(
+        runner_bin, tmp_path, gpu_layers):
+    """The split can land before, on, or after the first shared-KV layer.
+
+    With 6 layers and shared_kv=3 the tail starts at layer 3, so a layer that
+    owns no cache can end up on a different device from the layer whose rows it
+    reads. That boundary is where an aliasing mistake would show.
+    """
+    model = _requires_gpu(runner_bin, tmp_path)
+    cpu = _run(runner_bin, model, "--temp", "0", tokens=12, prompt=GPU_PROMPT)
+    gpu = _gpu_run(runner_bin, model, "--gpu-layers", str(gpu_layers))
+    assert gpu.stdout == cpu.stdout
