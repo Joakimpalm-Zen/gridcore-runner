@@ -116,6 +116,31 @@ The model manifest deliberately excludes Apertus from forward-pass coverage.
 Runner supports its `tekken` tokenizer and chat template, but not the Apertus
 tensor architecture; treating it as a Qwen2 model would be a false positive.
 
+The manifest also, since 2026-08-01, deliberately omits `greedy_reference` for
+`gemma-4-26b-a4b-it-q4_0`. This is a different kind of omission from Apertus:
+the architecture *is* implemented and certified for `load`, `cpu_cuda` and
+`chat`. What is unachievable is the check itself. That model is numerically
+chaotic, and the way to establish that is to measure its floor before reading
+any cross-engine number — `scripts/sensitivity_floor.py` compares an engine
+against **itself** under a perturbation smaller than switching engines. On the
+certified file at b10076, Runner disagrees with itself on 11 of 16 prompts when
+only the KV cache precision changes, against the 9 it disagrees with llama.cpp
+on. A perturbation strictly inside one build moves the output further than
+changing engines does, so there is no threshold at which token-for-token
+agreement would be evidence of anything. The cause is discrete top-8-of-128
+expert routing over Q4_0 weights: at layer 2 the sixth and seventh selected
+experts sat 0.0002 apart in weight, so a rounding difference flips an expert
+and rewrites an eighth of the FFN output. The forward pass was checked directly
+and does agree — layer 0 activations match the reference exactly, and the
+pre-softmax router logits to ~0.1–0.5%.
+
+Declaring the check anyway would have been worse than omitting it: under
+`--require-complete` the manifest would assert a property no implementation can
+satisfy, and a future reader would take the recorded failure for a defect. The
+same instrument applies generally — a cross-engine logprob gap is uninterpretable
+without the model's own sensitivity floor, so measure the floor first. Evidence:
+`tests/compatibility/out/divergence-study-gemma4-moe-2026-08-01.json`.
+
 The remaining chat/tool and long-context checks were run on 2026-07-23 through
 the real `/v1/chat/completions` surface with fp16 KV.  Each pinned model saw a
 needle near the middle of a measured 4K-token document and the same weather

@@ -203,10 +203,10 @@
    },
    "checks": [
     "load",
-    "greedy_reference",
     "cpu_cuda",
     "chat"
-   ]
+   ],
+   "notes": "greedy_reference deliberately not declared: this model is numerically chaotic, so token-for-token agreement with any second implementation is unachievable rather than merely unmet. Measured 2026-08-01 at b10076 on this exact file - runner disagrees with ITSELF on 11 of 16 prompts when only the KV cache precision changes, against the 9 it disagrees with llama.cpp on, so a perturbation inside one build moves the output further than switching engines does. Cause is discrete top-8-of-128 expert routing over Q4_0 weights; at layer 2 the 6th and 7th selected experts sat 0.0002 apart in weight. Layer 0 activations and the pre-softmax router logits do match the reference (exactly, and to ~0.1-0.5%). Re-measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap on this model. Evidence: out/divergence-study-gemma4-moe-2026-08-01.json"
   },
   {
    "id": "eurollm-9b-instruct-q4_k_m",
