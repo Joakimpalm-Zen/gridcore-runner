@@ -396,6 +396,12 @@ typedef struct {
     float       *ple_proj_norm;  // [n_embd_ple]
     float       *ple;            // scratch [n_batch][n_layer][n_embd_ple]
     float       *ple_tmp;        // scratch [n_batch][n_embd_ple]
+    // Sliding-window layers are usually their own rope regime (gemma locals
+    // rope at 10k with no scaling while globals run 1M + YaRN). gpt-oss is
+    // not like that: llama.cpp passes the same freq_base, freq_scale,
+    // ext_factor and attn_factor for EVERY layer and varies only the KV
+    // window, so its sliding layers must rope exactly like its global ones.
+    bool   swa_rope_global;
     bool   gptoss;           // gpt-oss: attention sinks + swiglu_oai + MoE
                              // biases; no GPU kernels for those yet
     bool   cpu_moe;          // keep sparse expert FFNs on the host while CUDA
@@ -839,6 +845,13 @@ static inline int model_q_dim(const model_t *m, int l) {
 }
 static inline int model_rope_dim(const model_t *m, int l) {
     return m->l_rope_dim ? m->l_rope_dim[l] : m->rope_dim;
+}
+// The YaRN magnitude factor for this layer. One definition, because the CPU
+// and CUDA rope paths both need it and a disagreement between them would be
+// invisible in output that still looks fluent.
+static inline float model_rope_mscale(const model_t *m, int l) {
+    bool local = m->l_is_swa != NULL && m->l_is_swa[l];
+    return (local && !m->swa_rope_global) ? 1.0f : m->rope_mscale;
 }
 static inline bool model_is_swa(const model_t *m, int l) {
     return m->l_is_swa != NULL && m->l_is_swa[l];

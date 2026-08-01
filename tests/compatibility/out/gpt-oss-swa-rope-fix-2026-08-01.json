@@ -1,0 +1,39 @@
+{
+  "schema_version": "gridcore.runner.divergence-study.v1",
+  "generated_utc": "2026-08-01T22:40:00Z",
+  "model": "models/gpt-oss-20b-MXFP4.gguf",
+  "reference": "llama.cpp b10076 (305ba519a)",
+  "defect": "gpt-oss's sliding-window layers were roped in the wrong regime. Runner treats SWA layers as a separate rope world - correct for gemma, whose locals rope at base 10k with no scaling while its globals run 1M + YaRN - so it built the local frequency table from the raw base BEFORE the YaRN scaling block, and forced the YaRN magnitude factor (attn_factor/mscale) to 1.0 on those layers. llama.cpp's openai-moe graph passes the same freq_base, freq_scale, ext_factor and attn_factor to EVERY layer and varies only the KV window. With sliding_window_pattern period 2, half of gpt-oss's 24 layers were affected.",
+  "why_it_hid": "The rope base for these layers had already been fixed when the CPU path landed (llama.cpp seeds rope_freq_base_train_swa from the global base), which made the regime look handled. The frequency scaling and the magnitude factor are set in two other places and were missed. Output stayed fluent throughout - the failure mode is a systematic bias, not garbage.",
+  "how_it_was_found": "Not by reading. The vec_dot_type hypothesis was implemented, measured and falsified first; the layer trace that followed put the divergence inside layer 0 with the layer INPUT matching exactly, and the free observation that it was already present at position 0 - where rope is the identity ROTATION but the mscale still multiplies - is what pointed here.",
+  "fix": "model_rope_mscale() in runner.h is now the single definition of the per-layer YaRN magnitude factor, used by the CPU and both CUDA rope sites, and a new swa_rope_global flag (set only for gpt-oss) copies the scaled global frequency table over the local one. Nothing else changes: gemma-4-E4B and gemma-4-26B-A4B produce byte-identical output before and after.",
+  "layer_0_relative_divergence": {
+    "before": "7.31%",
+    "after": "0.70%"
+  },
+  "results_16_prompts_16_tokens": [
+    {
+      "comparison": "runner vs llama.cpp, BEFORE",
+      "identical": "4/16",
+      "max_logprob_delta": 0.589
+    },
+    {
+      "comparison": "runner vs llama.cpp, AFTER",
+      "identical": "9/16",
+      "max_logprob_delta": 0.151
+    },
+    {
+      "comparison": "runner vs itself (KV f16/q8), AFTER",
+      "identical": "12/16",
+      "max_logprob_delta": 0.2721
+    },
+    {
+      "comparison": "llama.cpp vs itself (cold/warm), AFTER",
+      "identical": "16/16",
+      "max_logprob_delta": 0.2121
+    }
+  ],
+  "verdict": "The cross-engine max logprob delta (0.151) is now BELOW runner's own sensitivity to a KV cache precision change (0.272). The residual sits at or under the model's own floor, which is the standard this repo uses elsewhere. Before the fix it was 0.589 - four times the floor and plainly a defect.",
+  "caveat": "The 8-token reference_compare sweep reads 3/5 after the fix against 4/5 recorded on 2026-07-31. That sweep is 5 prompts at 8 tokens and is far noisier than the 16-prompt measurement above, which improved unambiguously; the layer-0 trace improving 10x is the load-bearing evidence, not either sweep. Reported rather than buried.",
+  "still_open": "GPU remains refused: MXFP4 and sink-aware attention kernels do not exist and need the nvcc 13.3 box. The remaining ~0.15 nat is consistent with ggml quantising activations for every quantised weight type, which was measured separately and deliberately not matched - see divergence-study-gpt-oss-vecdot-2026-08-01.json."
+}

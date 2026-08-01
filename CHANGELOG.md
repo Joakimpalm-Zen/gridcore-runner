@@ -56,6 +56,32 @@ protocol and CLI may still change between alpha releases.
   each side, which distinguishes a coin-flip tie from an arithmetic fault —
   something `reference_compare.py`'s exact-text gate cannot do.
 
+- **gpt-oss: sliding-window layers were roped in the wrong regime.** Runner
+  treats SWA layers as a separate rope world — right for gemma, whose locals
+  rope at base 10k with no scaling while its globals run 1M + YaRN — so it
+  built the local frequency table from the raw base *before* the YaRN scaling
+  block and forced the YaRN magnitude factor to 1.0 there. llama.cpp's
+  openai-moe graph passes the same `freq_base`, `freq_scale`, `ext_factor` and
+  `attn_factor` to **every** layer and varies only the KV window. With a
+  sliding-window pattern of period 2, half of gpt-oss's 24 layers were wrong.
+
+  The base for those layers had already been fixed when the CPU path landed,
+  which made the regime look handled; the frequency scaling and the magnitude
+  factor live in two other places and were missed. Output stayed fluent
+  throughout — the failure mode is a systematic bias, not garbage.
+
+  Layer 0's relative divergence from the reference drops **7.31% → 0.70%**.
+  Over 16 prompts × 16 greedy tokens, runner vs llama.cpp goes from 4/16 to
+  **9/16** identical and the worst-case logprob delta from **0.589 to 0.151** —
+  now *below* runner's own 0.272 sensitivity to a KV-precision change, i.e. at
+  or under the model's own floor.
+
+  `model_rope_mscale()` is now the single definition of the per-layer YaRN
+  magnitude factor, shared by the CPU and both CUDA rope sites, because a
+  disagreement between them is invisible in output that still reads fluently.
+  The new `swa_rope_global` flag is set only for gpt-oss; gemma-4-E4B and
+  gemma-4-26B-A4B are byte-identical across the change.
+
 - **The gemma-4 E-series runs on CUDA.** The refusal is lifted; both mechanisms
   have a device path and it is byte-identical to the host. Per-layer
   embeddings: the pre-pass stays on the host (it reads a bf16 projection and a

@@ -1670,7 +1670,7 @@ static bool enc_rope(gpu_t *g, model_t *m, CUdeviceptr v, int n_heads,
     // heterogeneous archs (gemma4) also rotate fewer dims on local layers
     bool local = model_is_swa(m, l);
     rope_args a = { model_head_dim(m, l), n_heads, model_rope_dim(m, l) / 2,
-                    m->rope_neox, local ? 1.0f : m->rope_mscale };
+                    m->rope_neox, model_rope_mscale(m, l) };
     CUdeviceptr fr = local ? g->sw->inv_freq_local : g->sw->inv_freq;
     void *p[] = { &v, &fr, &a, &g->pos_dev, &vs };
     return launch(g, g->sw->f_rope, (a.half_dim + 31) / 32, n_heads, batch, 32, p);
@@ -2876,7 +2876,7 @@ static bool enc_rope_batch(gpu_batch *B, model_t *m, CUdeviceptr v, int n_heads,
     gpu_t *g = B->lead;
     bool local = model_is_swa(m, l);
     rope_args a = { model_head_dim(m, l), n_heads, model_rope_dim(m, l) / 2,
-                    m->rope_neox, local ? 1.0f : m->rope_mscale };
+                    m->rope_neox, model_rope_mscale(m, l) };
     CUdeviceptr fr = local ? g->sw->inv_freq_local : g->sw->inv_freq;
     void *p[] = { &v, &fr, &a, &B->pos_d, &vs };
     return launch(g, g->sw->f_rope_seq, (a.half_dim + 31) / 32, n_heads, batch, 32, p);

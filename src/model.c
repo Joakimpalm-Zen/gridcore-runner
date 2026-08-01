@@ -335,6 +335,20 @@ static bool rope_setup(model_t *m, gguf_file *g, const char *arch,
         }
         m->rope_mscale = 1.0f + 0.1f * logf(factor);
     }
+    // The local table above was built from the raw base, BEFORE the block that
+    // scales the global frequencies. For an arch whose sliding layers share
+    // the global rope regime that is wrong twice over — unscaled frequencies
+    // and, via model_rope_mscale, a dropped YaRN magnitude factor. Copy the
+    // scaled table across so the two regimes are genuinely identical.
+    if (m->swa_window > 0 && m->swa_rope_global && m->rope_inv_freq_local) {
+        if (m->rope_dim_local != m->rope_dim) {
+            fprintf(stderr, "error: swa_rope_global needs matching rope dims "
+                    "(local %d, global %d)\n", m->rope_dim_local, m->rope_dim);
+            return false;
+        }
+        memcpy(m->rope_inv_freq_local, m->rope_inv_freq,
+               sizeof(float) * (size_t)(m->rope_dim / 2));
+    }
     #undef RK
     return true;
 }
@@ -685,6 +699,7 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         //     runner's generic SWA path defaults that to 10k, which would be
         //     silently wrong, so it is pinned explicitly below.
         m->gptoss     = true;
+        m->swa_rope_global = true;   // sliding layers rope like the global ones
         m->ffn_act    = ACT_SWIGLU_OAI;
         m->swa_window = (int)gguf_get_u32(g, AK("attention.sliding_window"), 0);
         int swa_period = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 2);
@@ -1667,7 +1682,7 @@ static void rope_apply(model_t *m, float *v, int n_heads, int pos, int layer) {
     int hd   = model_head_dim(m, layer);
     int half = model_rope_dim(m, layer) / 2;
     const float *fr = local ? m->rope_inv_freq_local : m->rope_inv_freq;
-    float ms = local ? 1.0f : m->rope_mscale;
+    float ms = model_rope_mscale(m, layer);
     for (int j = 0; j < half; j++) {
         float a = pos * fr[j];
         float c = cosf(a) * ms, s = sinf(a) * ms;
