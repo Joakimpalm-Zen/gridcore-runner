@@ -1448,6 +1448,53 @@ extern "C" __global__ void k_mv_iq4_xs_b(MV_PARAMS) {
     MV_TAIL_B;
 }
 
+// MXFP4 (gpt-oss expert tensors): 17-byte block = one E8M0 scale byte (a
+// biased power-of-two exponent, 2^(e-127), NOT an fp16) + 32 packed E2M1
+// nibbles indexing a fixed signed codebook. Table and decode are 1:1 with
+// dq_mxfp4 in quants.c — ldexpf keeps 2^(e-127) exact down into the
+// subnormal range, where exp2f of a float could flush to zero.
+static __device__ const float kv_mxfp4[16] = {
+     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+     0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+};
+
+extern "C" __global__ void k_mv_mxfp4(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 32;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 17;
+    float s = 0;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 17;
+        float d = ldexpf(1.0f, (int)blk[0] - 127);
+        const uchar *q = blk + 1;
+        const float *xp = x + b * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++) {
+            t += kv_mxfp4[q[j] & 0xF] * xp[j];
+            t += kv_mxfp4[q[j] >> 4]  * xp[j + 16];
+        }
+        s += d * t;
+    }
+    MV_TAIL;
+}
+
+extern "C" __global__ void k_mv_mxfp4_b(MV_PARAMS) {
+    MV_HEAD_B;
+    int nb = a.n_in / 32;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 17;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 17;
+        float d = ldexpf(1.0f, (int)blk[0] - 127);
+        const uchar *q = blk + 1;
+        ulong64 base = (ulong64)b * 32;
+        for (int j = 0; j < 16; j++) {
+            MV_FMA(d * kv_mxfp4[q[j] & 0xF], base + j);
+            MV_FMA(d * kv_mxfp4[q[j] >> 4],  base + j + 16);
+        }
+    }
+    MV_TAIL_B;
+}
+
 // ---------------------------------------------------------------- rope
 // grid: (ceil(half_dim/32), n_heads, batch); vs = element stride per column
 
@@ -1580,9 +1627,15 @@ __device__ __forceinline__ ulong64 kv_head_off(int kvh, int hd, int q8) {
     return q8 ? (ulong64)(kvh * hd / 32) * 34 : (ulong64)(kvh * hd) * 2;
 }
 
+// sinks: gpt-oss per-head learned attention-sink logits for this layer, or
+// NULL. Transcribed from softmax_sink() in model.c: the sink joins the max
+// scan and the denominator but has NO value row, so the probabilities over
+// real positions sum to < 1 and the head's output shrinks. The sink competes
+// against ALREADY-SCALED scores; it is not itself scaled.
 extern "C" __global__ void k_attn(const float *q, const unsigned char *kc,
                                   const unsigned char *vc, float *att, float *out,
-                                  attn_args a, const int *posp) {
+                                  attn_args a, const int *posp,
+                                  const float *sinks) {
     __shared__ float red[256];
     int h = blockIdx.x, tid = threadIdx.x, tpg = blockDim.x;
     int tk = blockIdx.y;                 // token column in the tile
@@ -1611,6 +1664,7 @@ extern "C" __global__ void k_attn(const float *q, const unsigned char *kc,
         __syncthreads();
     }
     mx = red[0];
+    if (sinks && sinks[h] > mx) mx = sinks[h];
     __syncthreads();
     // exp + sum
     float sum = 0;
@@ -1626,6 +1680,7 @@ extern "C" __global__ void k_attn(const float *q, const unsigned char *kc,
         __syncthreads();
     }
     sum = red[0];
+    if (sinks) sum += expf(sinks[h] - mx);
     __syncthreads();
 
     for (int i2 = tid; i2 < hd / 2; i2 += tpg) {
@@ -1735,8 +1790,13 @@ extern "C" __global__ void k_attn_dec(const float *q, const unsigned char *kc,
     if (tid == 0) { P[hd] = mx; P[hd + 1] = sum; }
 }
 
+// sinks: same contract as k_attn. The sink joins at the GLOBAL reduction —
+// it competes in the merged max and adds one exp term to the merged
+// denominator, and since it has no value row the numerator is untouched, so
+// the split partials (k_attn_dec / k_attn_dec_seq) need no sink awareness.
 extern "C" __global__ void k_attn_merge(float *out, const float *part,
-                                        attn_args a, const int *posp) {
+                                        attn_args a, const int *posp,
+                                        const float *sinks) {
     int h = blockIdx.x, tk = blockIdx.y;
     int tid = threadIdx.x, tpg = blockDim.x;
     int hd = a.head_dim;
@@ -1744,12 +1804,14 @@ extern "C" __global__ void k_attn_merge(float *out, const float *part,
     float M = -1e30f;
     for (int sp = 0; sp < ATTN_SPLITS; sp++)
         M = fmaxf(M, base[sp * (hd + 2) + hd]);
+    if (sinks && sinks[h] > M) M = sinks[h];
     float L = 0.f;
     for (int sp = 0; sp < ATTN_SPLITS; sp++) {
         float m = base[sp * (hd + 2) + hd];
         if (m <= -1e29f) continue;
         L += base[sp * (hd + 2) + hd + 1] * expf(m - M);
     }
+    if (sinks) L += expf(sinks[h] - M);
     for (int i = tid; i < hd; i += tpg) {
         float acc = 0.f;
         for (int sp = 0; sp < ATTN_SPLITS; sp++) {
@@ -2174,6 +2236,24 @@ extern "C" __global__ void k_gelu_mul(float *g, const float *u, int n) {
     }
 }
 
+// gpt-oss clamped alpha-sigmoid GLU, 1:1 with gated_act(ACT_SWIGLU_OAI) in
+// model.c (itself transcribed from llama.cpp's swiglu_oai): gate clamped
+// above only, up clamped both sides, up carries a +1 shift. The x <= -50
+// early-zero mirrors the CPU guard exactly so both backends emit the same
+// value there (0.0f rather than the -0.0f the division limit would give).
+static __device__ __forceinline__ float swiglu_oai(float g, float u) {
+    const float alpha = 1.702f, limit = 7.0f;
+    float x = g < limit ? g : limit;
+    float y = u < -limit ? -limit : (u > limit ? limit : u);
+    float gl = x < -50.0f ? 0.0f : x / (1.0f + expf(alpha * -x));
+    return gl * (y + 1.0f);
+}
+
+extern "C" __global__ void k_swiglu_oai_mul(float *g, const float *u, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) g[i] = swiglu_oai(g[i], u[i]);
+}
+
 extern "C" __global__ void k_add(float *x, const float *d, int n, int xs, int ds) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[(ulong64)blockIdx.y * xs + i] += d[(ulong64)blockIdx.y * ds + i];
@@ -2360,6 +2440,26 @@ extern "C" __global__ void k_moe_mv_q4_0(MOE_MV_PARAMS) {
     MOE_MV_TAIL;
 }
 
+// body of k_mv_mxfp4 (gpt-oss experts; no coalesced GEMV exists for MXFP4)
+extern "C" __global__ void k_moe_mv_mxfp4(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 32;
+    const uchar *rw = wbase + (ulong64)row * nb * 17;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 17;
+        float d = ldexpf(1.0f, (int)blk[0] - 127);
+        const uchar *q = blk + 1;
+        const float *xp = x + b * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++) {
+            t += kv_mxfp4[q[j] & 0xF] * xp[j];
+            t += kv_mxfp4[q[j] >> 4]  * xp[j + 16];
+        }
+        s += d * t;
+    }
+    MOE_MV_TAIL;
+}
+
 // body of k_gemv_q4_K
 extern "C" __global__ void k_moe_mv_q4_K(MOE_MV_PARAMS) {
     MOE_MV_HEAD;
@@ -2463,20 +2563,29 @@ extern "C" __global__ void k_moe_mv_q6_K(MOE_MV_PARAMS) {
 // model has none, so the multiply is exact and harmless.
 // gbuf column stride gss, ubuf column stride uss (gemma reads gate and up
 // out of one fused 2*nff column: gss = uss = 2*nff, ubuf = gbuf + nff).
+// act: 0 = SiLU, 1 = tanh-GELU, 2 = gpt-oss swiglu_oai — same selector values
+// as ACT_* in runner.h. gb/ub are per-expert gate/up bias tables ([n_expert]
+// rows of nff, gpt-oss) or NULL; the slot's expert index picks the row, and
+// the bias lands BEFORE the activation, matching moe_ffn_token on the CPU.
 extern "C" __global__ void k_moe_actmul(float *gbuf, const float *ubuf,
-                                        int nff, int gss, int uss, int gelu,
+                                        int nff, int gss, int uss, int act,
                                         const float *selw, const float *dscale,
-                                        const int *sel) {
+                                        const int *sel, const float *gb,
+                                        const float *ub) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= nff) return;
     float *gp = gbuf + (ulong64)blockIdx.y * gss;
     const float *up = ubuf + (ulong64)blockIdx.y * uss;
-    float xg = gp[i], v;
-    if (gelu) {
+    float xg = gp[i], xu = up[i], v;
+    if (gb) xg += gb[(ulong64)sel[blockIdx.y] * nff + i];
+    if (ub) xu += ub[(ulong64)sel[blockIdx.y] * nff + i];
+    if (act == 2) {
+        v = swiglu_oai(xg, xu);
+    } else if (act == 1) {
         float t = tanhf(0.7978845608f * (xg + 0.044715f * xg * xg * xg));
-        v = 0.5f * xg * (1.0f + t) * up[i];
+        v = 0.5f * xg * (1.0f + t) * xu;
     } else {
-        v = (xg / (1.0f + expf(-xg))) * up[i];
+        v = (xg / (1.0f + expf(-xg))) * xu;
     }
     float w = selw[blockIdx.y] * dscale[sel[blockIdx.y]];
     gp[i] = v * w;
@@ -2485,12 +2594,21 @@ extern "C" __global__ void k_moe_actmul(float *gbuf, const float *ubuf,
 // Sum the per-slot down-projections into the token's FFN output, slot 0
 // first then ascending — the same accumulation order as the eager path's
 // write-then-add sequence, so the sum is bit-identical to it.
+// db: per-expert down-bias table ([n_expert] rows of n, gpt-oss) or NULL.
+// The routing weight was folded into the hidden before the down matvec, so
+// each slot's eout is already w*down(h); the CPU computes w*(down(h)+db),
+// and w*down(h) + selw*db is the same quantity with the fold's association.
 extern "C" __global__ void k_moe_sum(float *out, const float *eout, int n,
-                                     int nslots, int es) {
+                                     int nslots, int es, const float *db,
+                                     const int *sel, const float *selw) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float s = eout[i];
-    for (int sl = 1; sl < nslots; sl++) s += eout[(ulong64)sl * es + i];
+    if (db) s += selw[0] * db[(ulong64)sel[0] * n + i];
+    for (int sl = 1; sl < nslots; sl++) {
+        s += eout[(ulong64)sl * es + i];
+        if (db) s += selw[sl] * db[(ulong64)sel[sl] * n + i];
+    }
     out[i] = s;
 }
 
@@ -2530,13 +2648,15 @@ extern "C" __global__ void k_moe_scatter_add(float *out, const float *src,
 // where the contiguous k_silu_mul cannot run across columns.
 extern "C" __global__ void k_moe_actmul_plain(float *gbuf, const float *ubuf,
                                               int nff, int gss, int uss,
-                                              int gelu) {
+                                              int act) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= nff) return;
     float *gp = gbuf + (ulong64)blockIdx.y * gss;
     const float *up = ubuf + (ulong64)blockIdx.y * uss;
     float xg = gp[i];
-    if (gelu) {
+    if (act == 2) {
+        gp[i] = swiglu_oai(xg, up[i]);
+    } else if (act == 1) {
         float t = tanhf(0.7978845608f * (xg + 0.044715f * xg * xg * xg));
         gp[i] = 0.5f * xg * (1.0f + t) * up[i];
     } else {

@@ -791,6 +791,7 @@ and `greedy_reference` per the recorded reports):
 | `gemma4` E-series | Gemma 4 E2B/E4B | gemma-4-E4B-it (per-layer embeddings + shared-KV layers; CPU + CUDA, GPU/CPU byte-identical) |
 | `qwen3moe` | Qwen 3 MoE / Mixtral-style | Qwen3-30B-A3B (greedy-identical to llama.cpp; 128 experts / 8 active) |
 | `gemma4-moe` | Gemma 4 MoE | gemma-4-26B-A4B-it (dual-branch dense+routed GELU MoE; CPU + CUDA, GPU/CPU-identical; too numerically chaotic to gate on token identity — see the architecture note above) |
+| `gpt-oss` | OpenAI gpt-oss | gpt-oss-20b-MXFP4 (per-head attention sinks, clamped alpha-sigmoid GLU, router + per-expert biases, MXFP4 experts; CPU + CUDA, GPU/CPU byte-identical. Agreement with llama.cpp is at this model's own sensitivity floor rather than token identity, so `greedy_reference` is not claimed — see the note above the table) |
 
 `mistral`, `smollm` and `stablelm` ride the certified `llama` path. Unknown
 architectures are **refused**, not run through llama-style math — a clear

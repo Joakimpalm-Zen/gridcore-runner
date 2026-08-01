@@ -267,21 +267,24 @@ typedef struct gpu_weights {
     CUdevice    dev;
     CUmodule    mod;
     CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu,
-                f_add, f_scale;
+                f_swiglu, f_add, f_scale;
     CUfunction  f_q35_split, f_q35_gate, f_q35_conv, f_q35_delta;
     CUfunction  f_attn_dec, f_attn_merge;   // flash-decoding attention (decode)
-    CUfunction  f_mv[32], f_mvb[32];    // indexed by ggml type; _b = tile variant
-    CUfunction  f_gemm[32];             // prefill tiled-GEMM variants (Q8_0/Q4_K)
-    CUfunction  f_gemm_tc[32];          // tensor-core prefill GEMM (opt-in, Q4_K)
-    CUfunction  f_gemv[32];             // decode coalesced GEMV variants (Q8_0/Q4_K)
+    // kernel tables indexed by ggml tensor type; sized past the largest
+    // supported type id (T_MXFP4 = 39), not the count of supported types
+    #define KT_N 40
+    CUfunction  f_mv[KT_N], f_mvb[KT_N];// indexed by ggml type; _b = tile variant
+    CUfunction  f_gemm[KT_N];           // prefill tiled-GEMM variants (Q8_0/Q4_K)
+    CUfunction  f_gemm_tc[KT_N];        // tensor-core prefill GEMM (opt-in, Q4_K)
+    CUfunction  f_gemv[KT_N];           // decode coalesced GEMV variants (Q8_0/Q4_K)
     // cross-sequence decode microbatch (Phase 6): per-column position and KV
     CUfunction  f_rope_seq, f_store_seq, f_attn_dec_seq;
     // multi-column twins of f_gemv, per microbatch width (see BW_* below):
     // f_gemvb[w][type], w indexing the width class, not the width itself
-    CUfunction  f_gemvb[BW_N][32];
+    CUfunction  f_gemvb[BW_N][KT_N];
     // sparse-MoE device routing + indirect expert matvecs (fused-3D layout)
     CUfunction  f_moe_route, f_moe_actmul, f_moe_sum;
-    CUfunction  f_moe_mv[32];           // indexed by expert tensor type
+    CUfunction  f_moe_mv[KT_N];         // indexed by expert tensor type
     // expert-grouped prefill (P2): gather/scatter around the k_gemm family
     CUfunction  f_moe_gather, f_moe_scatter, f_moe_actmul_plain, f_moe_copy;
     CUdeviceptr weights;
@@ -306,6 +309,11 @@ typedef struct gpu_weights {
     // any such scale — k_moe_actmul multiplies unconditionally
     CUdeviceptr *g_dsc;
     CUdeviceptr moe_ones;
+    // gpt-oss per layer, may be 0: attention-sink logits [n_head]; router
+    // bias [n_expert]; per-expert gate/up ([n_expert][n_ff_exp]) and down
+    // ([n_expert][n_embd]) bias tables
+    CUdeviceptr *sinks;
+    CUdeviceptr *gib, *geb, *ueb, *deb;
     CUdeviceptr *ssm_dt, *ssm_a, *ssm_norm;
 } gpu_weights;
 
@@ -440,7 +448,7 @@ static bool gpu_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:
         case T_Q5_0: case T_Q5_1: case T_Q3_K: case T_Q4_K: case T_Q5_K:
-        case T_Q6_K: case T_IQ4_NL: case T_IQ4_XS:
+        case T_Q6_K: case T_IQ4_NL: case T_IQ4_XS: case T_MXFP4:
             return true;
         default:
             return false;
@@ -453,7 +461,7 @@ static bool gpu_type_ok(int type) {
 static bool moe_indirect_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0:
-        case T_Q4_K: case T_Q5_K: case T_Q6_K:
+        case T_Q4_K: case T_Q5_K: case T_Q6_K: case T_MXFP4:
             return true;
         default:
             return false;
@@ -541,6 +549,11 @@ static bool moe_grouped_eligible(const model_t *m) {
     for (int l = 0; l < m->n_layer; l++) {
         const layer_t *ly = &m->layers[l];
         if (!ly->is_moe) continue;
+        // per-expert biases (gpt-oss) are wired through the fused path's
+        // actmul/sum only; the grouped scatter has no seat for them, so a
+        // biased model keeps the fused prefill (refuse > silently wrong)
+        if (ly->ffn_gate_exps_b || ly->ffn_up_exps_b || ly->ffn_down_exps_b)
+            return false;
         if (ly->moe_gemma) {
             if (!moe_grouped_type_ok(ly->ffn_gate_up_exps->type) ||
                 !moe_grouped_type_ok(ly->ffn_down_exps->type)) return false;
@@ -656,6 +669,9 @@ static void shared_destroy(gpu_weights *w) {
             w->ssm_dt ? w->ssm_dt[l] : 0, w->ssm_a ? w->ssm_a[l] : 0,
             w->ssm_norm ? w->ssm_norm[l] : 0,
             w->ple_pn ? w->ple_pn[l] : 0,
+            w->sinks ? w->sinks[l] : 0,
+            w->gib ? w->gib[l] : 0, w->geb ? w->geb[l] : 0,
+            w->ueb ? w->ueb[l] : 0, w->deb ? w->deb[l] : 0,
         };
         for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
             if (bufs[i]) cu.MemFree(bufs[i]);
@@ -667,6 +683,8 @@ static void shared_destroy(gpu_weights *w) {
     free(w->g_pn1); free(w->g_prn2); free(w->g_pn2); free(w->g_gis);
     free(w->g_dsc);
     free(w->ssm_dt); free(w->ssm_a); free(w->ssm_norm);
+    free(w->sinks);
+    free(w->gib); free(w->geb); free(w->ueb); free(w->deb);
     for (int i = 0; i < w->n_bindings; i++)
         if (w->bindings[i].device) cu.MemFree(w->bindings[i].device);
     free(w->bindings);
@@ -977,6 +995,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_attn,       "k_attn" },      { &w->f_silu,   "k_silu_mul" },
             { &w->f_attn_dec,   "k_attn_dec" },  { &w->f_attn_merge, "k_attn_merge" },
             { &w->f_gelu,       "k_gelu_mul" },  { &w->f_add,    "k_add" },
+            { &w->f_swiglu,     "k_swiglu_oai_mul" },
             { &w->f_scale,      "k_scale" },
             { &w->f_q35_split,  "k_q35_split_q" },
             { &w->f_q35_gate,   "k_q35_attn_gate" },
@@ -989,6 +1008,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_mv[T_Q5_K], "k_mv_q5_K" },   { &w->f_mv[T_Q6_K], "k_mv_q6_K" },
             { &w->f_mv[T_Q3_K], "k_mv_q3_K" },
             { &w->f_mv[T_IQ4_NL], "k_mv_iq4_nl" }, { &w->f_mv[T_IQ4_XS], "k_mv_iq4_xs" },
+            { &w->f_mv[T_MXFP4], "k_mv_mxfp4" },
             { &w->f_mvb[T_F32],  "k_mv_f32_b" },  { &w->f_mvb[T_F16],  "k_mv_f16_b" },
             { &w->f_mvb[T_Q8_0], "k_mv_q8_0_b" }, { &w->f_mvb[T_Q4_0], "k_mv_q4_0_b" },
             { &w->f_mvb[T_Q4_1], "k_mv_q4_1_b" }, { &w->f_mvb[T_Q5_0], "k_mv_q5_0_b" },
@@ -996,6 +1016,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_mvb[T_Q5_K], "k_mv_q5_K_b" }, { &w->f_mvb[T_Q6_K], "k_mv_q6_K_b" },
             { &w->f_mvb[T_Q3_K], "k_mv_q3_K_b" },
             { &w->f_mvb[T_IQ4_NL], "k_mv_iq4_nl_b" }, { &w->f_mvb[T_IQ4_XS], "k_mv_iq4_xs_b" },
+            { &w->f_mvb[T_MXFP4], "k_mv_mxfp4_b" },
             // prefill tiled-GEMM variants (batch>1 fast path for these formats)
             { &w->f_gemm[T_Q8_0], "k_gemm_q8_0" },
             { &w->f_gemm[T_Q4_K], "k_gemm_q4_K" },
@@ -1032,6 +1053,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_moe_mv[T_Q4_K],   "k_moe_mv_q4_K" },
             { &w->f_moe_mv[T_Q5_K],   "k_moe_mv_q5_K" },
             { &w->f_moe_mv[T_Q6_K],   "k_moe_mv_q6_K" },
+            { &w->f_moe_mv[T_MXFP4],  "k_moe_mv_mxfp4" },
             // expert-grouped prefill glue
             { &w->f_moe_gather,       "k_moe_gather" },
             { &w->f_moe_scatter,      "k_moe_scatter_add" },
@@ -1131,10 +1153,16 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         w->ssm_dt   = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_a    = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->sinks    = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->gib      = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->geb      = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ueb      = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->deb      = calloc(m->n_layer, sizeof(CUdeviceptr));
         if (!w->attn_norm || !w->ffn_norm || !w->bq || !w->bk || !w->bv ||
             !w->bo || !w->qn || !w->kn || !w->pan || !w->pfn ||
             !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis || !w->g_dsc ||
-            !w->ssm_dt || !w->ssm_a || !w->ssm_norm)
+            !w->ssm_dt || !w->ssm_a || !w->ssm_norm ||
+            !w->sinks || !w->gib || !w->geb || !w->ueb || !w->deb)
             goto fail;
         if (moe_any_on_device(m)) {
             // all-ones per-expert scale table for archs without a down-
@@ -1161,6 +1189,17 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 w->ssm_a[l] = f32_dbuf(ly->ssm_a, m->ssm_v_heads);
                 w->ssm_norm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_state);
             }
+            // gpt-oss: per-head sink logits + router/per-expert bias tables
+            w->sinks[l] = f32_dbuf(ly->attn_sinks, m->n_head);
+            if (ly->is_moe && !moe_on_host(m, l)) {
+                w->gib[l] = f32_dbuf(ly->ffn_gate_inp_b, m->n_expert);
+                w->geb[l] = f32_dbuf(ly->ffn_gate_exps_b,
+                                     (size_t)m->n_expert * m->n_ff_exp);
+                w->ueb[l] = f32_dbuf(ly->ffn_up_exps_b,
+                                     (size_t)m->n_expert * m->n_ff_exp);
+                w->deb[l] = f32_dbuf(ly->ffn_down_exps_b,
+                                     (size_t)m->n_expert * m->n_embd);
+            }
             if (ly->moe_gemma) {
                 // gemma-4 dual-branch norms + router scale. All are optional in
                 // the GGUF; the CPU path treats an absent norm as weightless and
@@ -1183,6 +1222,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 // when the GGUF has none — same 1.0 fold the CPU applies)
                 w->g_dsc[l] = f32_dbuf_ones(ly->down_exps_scale, m->n_expert);
             }
+            bool moe_dev = ly->is_moe && !moe_on_host(m, l);
             if (!w->attn_norm[l] || !w->ffn_norm[l] ||
                 (ly->bq && !w->bq[l]) || (ly->bk && !w->bk[l]) ||
                 (ly->bv && !w->bv[l]) || (ly->bo && !w->bo[l]) ||
@@ -1190,6 +1230,11 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 (ly->post_attn_norm_w && !w->pan[l]) ||
                 (ly->post_ffn_norm_w && !w->pfn[l]) ||
                 (ly->ple_post_norm && !w->ple_pn[l]) ||
+                (ly->attn_sinks && !w->sinks[l]) ||
+                (moe_dev && ly->ffn_gate_inp_b  && !w->gib[l]) ||
+                (moe_dev && ly->ffn_gate_exps_b && !w->geb[l]) ||
+                (moe_dev && ly->ffn_up_exps_b   && !w->ueb[l]) ||
+                (moe_dev && ly->ffn_down_exps_b && !w->deb[l]) ||
                 (ly->recurrent && (!w->ssm_dt[l] || !w->ssm_a[l] ||
                                     !w->ssm_norm[l])) ||
                 (ly->moe_gemma && (!w->g_pn1[l] || !w->g_prn2[l] ||
@@ -1232,16 +1277,10 @@ static gpu_weights *shared_acquire(model_t *m, size_t act_bytes, int max_hd) {
 
 bool gpu_init(model_t *m) {
     // every weight matmul must have a kernel for its quant type (wv may be
-    // absent: gemma4 global layers reuse the raw K projection as V)
-    // gpt-oss needs a sink-aware attention softmax and MXFP4 expert kernels;
-    // neither exists on this backend. Running it here would drop the sinks
-    // and produce confident, wrong output, so refuse the GPU outright rather
-    // than fall back mid-forward (no-footguns: refuse > silently wrong).
-    if (m->gptoss) {
-        fprintf(stderr, "gpu: gpt-oss needs sink-aware attention and MXFP4 "
-                "kernels that this backend does not have — running on CPU\n");
-        goto unsupported;
-    }
+    // absent: gemma4 global layers reuse the raw K projection as V).
+    // gpt-oss runs here since the sink-aware attention softmax, the MXFP4
+    // kernels, swiglu_oai and the router/expert bias plumbing landed
+    // (2026-08-01); the old refusal is gone.
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
@@ -1259,7 +1298,7 @@ bool gpu_init(model_t *m) {
     }
     // MoE layers leave the dense gate/up/down NULL, so the loop above never
     // checks the router or the per-expert weights — yet enc_mv indexes the
-    // 32-entry kernel tables (f_mv[]/f_mvb[]) by tensor type on exactly those.
+    // KT_N-entry kernel tables (f_mv[]/f_mvb[]) by tensor type on exactly those.
     // An out-of-range or unsupported type would read past the table (function-
     // pointer type confusion) or launch a NULL fn at decode. Validate them here
     // and fall back to CPU, matching how the dense path already rejects.
@@ -1724,7 +1763,9 @@ static bool enc_ple(gpu_t *g, model_t *m, const layer_t *ly, int l,
 
 static bool enc_actmul(gpu_t *g, model_t *m, CUdeviceptr a, CUdeviceptr b, int n) {
     void *p[] = { &a, &b, &n };
-    CUfunction f = m->ffn_act == ACT_GELU ? g->sw->f_gelu : g->sw->f_silu;
+    CUfunction f = m->ffn_act == ACT_SWIGLU_OAI ? g->sw->f_swiglu
+                 : m->ffn_act == ACT_GELU       ? g->sw->f_gelu
+                                                : g->sw->f_silu;
     return launch(g, f, (n + 255) / 256, 1, 1, 256, p);
 }
 
@@ -1939,20 +1980,28 @@ static bool enc_moe_mv(gpu_t *g, model_t *m, gguf_tensor *base,
 // Gated activation + routing-weight fold for every slot in one launch.
 // dscale is the per-expert down-scale table (gemma-4) or the shared ones
 // table; the arithmetic matches the eager actmul+scale launch pair exactly.
+// gb/ub are the per-expert gate/up bias tables (gpt-oss) or 0 — the bias
+// lands before the activation, mirroring moe_ffn_token on the CPU.
 static bool enc_moe_actmul(gpu_t *g, model_t *m, CUdeviceptr gbuf,
                            CUdeviceptr ubuf, int nff, int gss, int uss,
                            CUdeviceptr selw, CUdeviceptr dscale,
-                           CUdeviceptr sel, int nslots) {
-    int gelu = m->ffn_act == ACT_GELU;
-    void *p[] = { &gbuf, &ubuf, &nff, &gss, &uss, &gelu, &selw, &dscale, &sel };
+                           CUdeviceptr sel, int nslots,
+                           CUdeviceptr gb, CUdeviceptr ub) {
+    int act = m->ffn_act;  // ACT_* values match the kernel's selector 1:1
+    void *p[] = { &gbuf, &ubuf, &nff, &gss, &uss, &act, &selw, &dscale, &sel,
+                  &gb, &ub };
     return launch(g, g->sw->f_moe_actmul, (nff + 255) / 256, nslots, 1, 256, p);
 }
 
 // Sum the per-slot down outputs into the token's FFN output, ascending slot
 // order — same accumulation order as the eager write-then-add sequence.
+// db is the per-expert down-bias table (gpt-oss) or 0; each slot adds
+// selw*db[sel] because the routing weight was already folded into the hidden
+// before the down matvec (w*(down+db) distributed).
 static bool enc_moe_sum(gpu_t *g, CUdeviceptr out, CUdeviceptr eout, int n,
-                        int nslots, int es) {
-    void *p[] = { &out, &eout, &n, &nslots, &es };
+                        int nslots, int es, CUdeviceptr db, CUdeviceptr sel,
+                        CUdeviceptr selw) {
+    void *p[] = { &out, &eout, &n, &nslots, &es, &db, &sel, &selw };
     return launch(g, g->sw->f_moe_sum, (n + 255) / 256, 1, 1, 256, p);
 }
 
@@ -1967,6 +2016,7 @@ static bool gpu_moe_ffn_fused(gpu_t *g, model_t *m, const layer_t *ly,
                               int tn, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
+    int l = (int)(ly - m->layers);
     enum { MOE_MAX_USED = 256 };
     if (used > MOE_MAX_USED) used = MOE_MAX_USED;
     if (ne  > MOE_MAX_USED) ne  = MOE_MAX_USED;
@@ -2013,10 +2063,12 @@ static bool gpu_moe_ffn_fused(gpu_t *g, model_t *m, const layer_t *ly,
                && enc_moe_mv(g, m, ly->ffn_up_exps, ustride, xin, g->moe_hb2,
                              sel, n_embd, nff, used, 0, nff)
                && enc_moe_actmul(g, m, g->moe_hb, g->moe_hb2, nff, nff, nff,
-                                 selw, g->sw->moe_ones, sel, used)
+                                 selw, g->sw->moe_ones, sel, used,
+                                 g->sw->geb[l], g->sw->ueb[l])
                && enc_moe_mv(g, m, ly->ffn_down_exps, dstride, g->moe_hb,
                              g->moe_eout, sel, nff, n_embd, used, nff, n_embd)
-               && enc_moe_sum(g, xin, g->moe_eout, n_embd, used, n_embd);
+               && enc_moe_sum(g, xin, g->moe_eout, n_embd, used, n_embd,
+                              g->sw->deb[l], sel, selw);
         if (!ok) return false;
     }
     return true;
@@ -2114,13 +2166,15 @@ static bool gpu_moe_ffn_grouped(gpu_t *g, model_t *m, const layer_t *ly,
                                 int tn, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
+    int l = (int)(ly - m->layers);
     enum { MOE_MAX_USED = 256 };
     if (used > MOE_MAX_USED) used = MOE_MAX_USED;
     if (ne  > MOE_MAX_USED) ne  = MOE_MAX_USED;
     for (int t = 0; t < tn; t++) {
         CUdeviceptr xin = g->xb + (size_t)t * xdim * sizeof(float);
         CUdeviceptr lg  = g->moe_logits + (size_t)t * ne * sizeof(float);
-        if (!enc_mv(g, m, ly->ffn_gate_inp, xin, lg, n_embd, ne, 0, 1, xdim, ne))
+        if (!enc_mv(g, m, ly->ffn_gate_inp, xin, lg, n_embd, ne,
+                    g->sw->gib[l], 1, xdim, ne))
             return false;
     }
     if (!enc_moe_route(g, g->moe_logits, g->moe_sel, g->moe_selw, ne, used,
@@ -2204,7 +2258,7 @@ static bool gpu_gemma_moe_ffn_grouped(gpu_t *g, model_t *m, const layer_t *ly,
         return false;
     if (cu.MemsetD8(g->moe_eout, 0, sizeof(float) * (size_t)tn * n_embd) != 0)
         return false;
-    int gelu = m->ffn_act == ACT_GELU;
+    int act = m->ffn_act;  // ACT_* values match the kernel's selector 1:1
     for (int e = 0; e < ne; e++) {
         int cnt = e_cnt[e];
         if (cnt == 0) continue;
@@ -2219,7 +2273,7 @@ static bool gpu_gemma_moe_ffn_grouped(gpu_t *g, model_t *m, const layer_t *ly,
         gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
         CUdeviceptr up = g->moe_hb + (size_t)nff * sizeof(float);
         int gss = 2 * nff;
-        void *pa[] = { &g->moe_hb, &up, &nff, &gss, &gss, &gelu };
+        void *pa[] = { &g->moe_hb, &up, &nff, &gss, &gss, &act };
         bool eok = enc_moe_gather(g, g->moe_gath, xn2_b, idx, n_embd, cnt,
                                   n_embd, n_embd)
                 && enc_moe_gemm(g, m, &guv, g->moe_gath, g->moe_hb, n_embd,
@@ -2246,6 +2300,7 @@ static bool gpu_gemma_moe_ffn_grouped(gpu_t *g, model_t *m, const layer_t *ly,
 // forces the eager (graph_bad) decode.
 static bool gpu_moe_ffn_eager(gpu_t *g, model_t *m, const layer_t *ly, int tn, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used, nff = m->n_ff_exp;
+    int l = (int)(ly - m->layers);
     // belt-and-suspenders: sel[]/selw[] below are fixed MOE_MAX_USED wide. The
     // loader already bounds n_expert_used <= n_expert <= 256 (model.c), but never
     // let a rogue value walk these stack arrays even if a future path reaches here.
@@ -2255,7 +2310,8 @@ static bool gpu_moe_ffn_eager(gpu_t *g, model_t *m, const layer_t *ly, int tn, i
     for (int t = 0; t < tn; t++) {
         CUdeviceptr xin  = g->xb  + (size_t)t * xdim * sizeof(float);
         CUdeviceptr aout = g->xb2 + (size_t)t * xdim * sizeof(float);
-        if (!enc_mv(g, m, ly->ffn_gate_inp, xin, g->moe_logits, n_embd, ne, 0, 1, xdim, ne))
+        if (!enc_mv(g, m, ly->ffn_gate_inp, xin, g->moe_logits, n_embd, ne,
+                    g->sw->gib[l], 1, xdim, ne))
             return false;
         if (cu.StreamSynchronize(g->stream) != 0) return false;
         if (cu.MemcpyDtoH(g->h_moe_logits, g->moe_logits, sizeof(float) * (size_t)ne) != 0)
@@ -2305,19 +2361,31 @@ static bool gpu_moe_ffn_eager(gpu_t *g, model_t *m, const layer_t *ly, int tn, i
             gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
             gguf_tensor uv = moe_expert_weight(ly, 1, e, n_embd, nff);
             gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
-            bool ok = enc_mv(g, m, &gv, xin, g->hb, n_embd, nff, 0, 1, xdim, nff)
-                   && enc_mv(g, m, &uv, xin, g->hb2, n_embd, nff, 0, 1, xdim, nff)
-                   && enc_actmul(g, m, g->hb, g->hb2, nff)
-                   && enc_scale(g, g->hb, w, nff, 1, nff);       // fold weight into the hidden
+            // gpt-oss per-expert bias slices; 0 for every other arch, which
+            // keeps the certified unbiased launch sequence byte-for-byte
+            CUdeviceptr gb = g->sw->geb[l]
+                ? g->sw->geb[l] + (size_t)e * nff * sizeof(float) : 0;
+            CUdeviceptr ub = g->sw->ueb[l]
+                ? g->sw->ueb[l] + (size_t)e * nff * sizeof(float) : 0;
+            CUdeviceptr db = g->sw->deb[l]
+                ? g->sw->deb[l] + (size_t)e * n_embd * sizeof(float) : 0;
+            bool ok = enc_mv(g, m, &gv, xin, g->hb, n_embd, nff, gb, 1, xdim, nff)
+                   && enc_mv(g, m, &uv, xin, g->hb2, n_embd, nff, ub, 1, xdim, nff)
+                   && enc_actmul(g, m, g->hb, g->hb2, nff);
+            // Down bias must land BEFORE the routing weight scales the
+            // output (CPU: out += w*(down(h)+db)). Folding w into the hidden
+            // first would leave the bias unscaled, so the biased sequence
+            // rides the bias through the down matvec tail and scales after.
             if (!ok) return false;
-            if (s == 0) {
-                if (!enc_mv(g, m, &dv, g->hb, aout, nff, n_embd, 0, 1, nff, n_embd))
-                    return false;
-            } else {
-                if (!enc_mv(g, m, &dv, g->hb, g->moe_eout, nff, n_embd, 0, 1, nff, n_embd) ||
-                    !enc_add(g, aout, g->moe_eout, n_embd, 1, n_embd, n_embd))
-                    return false;
-            }
+            if (!db && !enc_scale(g, g->hb, w, nff, 1, nff))   // fold weight into the hidden
+                return false;
+            CUdeviceptr dst = s == 0 ? aout : g->moe_eout;
+            if (!enc_mv(g, m, &dv, g->hb, dst, nff, n_embd, db, 1, nff, n_embd))
+                return false;
+            if (db && !enc_scale(g, dst, w, n_embd, 1, n_embd))
+                return false;
+            if (s > 0 && !enc_add(g, aout, g->moe_eout, n_embd, 1, n_embd, n_embd))
+                return false;
         }
     }
     // move the accumulated per-token outputs (in xb2) back into xb for the
@@ -2389,10 +2457,10 @@ static bool gpu_gemma_moe_ffn_fused(gpu_t *g, model_t *m, const layer_t *ly,
           && enc_moe_mv(g, m, ly->ffn_gate_up_exps, gustride, xn2, g->moe_hb,
                         sel, n_embd, 2 * nff, used, 0, 2 * nff)
           && enc_moe_actmul(g, m, g->moe_hb, up, nff, 2 * nff, 2 * nff,
-                            selw, g->sw->g_dsc[l], sel, used)
+                            selw, g->sw->g_dsc[l], sel, used, 0, 0)
           && enc_moe_mv(g, m, ly->ffn_down_exps, dstride, g->moe_hb,
                         g->moe_eout, sel, nff, n_embd, used, 2 * nff, n_embd)
-          && enc_moe_sum(g, mout, g->moe_eout, n_embd, used, n_embd);
+          && enc_moe_sum(g, mout, g->moe_eout, n_embd, used, n_embd, 0, 0, 0);
         if (!ok) return false;
         // post_ffw_norm_2 on the routed branch, then out (=dense) += routed
         if (!enc_rmsnorm(g, mout, mout, g->sw->g_pn2[l], n_embd, eps, 1, n_embd, n_embd) ||
@@ -2632,14 +2700,20 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             // so it keeps the single-pass k_attn. tn is the tile size (constant
             // at graph-capture time), not per-token state, so this branch is
             // capture-safe.
+            // gpt-oss attention sinks for this layer (0 elsewhere): the sink
+            // joins the softmax at the normalization point — inside k_attn's
+            // single reduction, or at k_attn_merge's global merge (the split
+            // partials carry no normalization, so k_attn_dec is untouched)
+            CUdeviceptr sinks = g->sw->sinks[l];
             if (tn == 1) {
                 void *pd[] = { &g->q, &g->kc, &g->vc, &g->att, &g->attn_part,
                                &aa, &g->pos_dev };
                 ok = ok && launch(g, g->sw->f_attn_dec, m->n_head, ATTN_SPLITS, 1, 128, pd);
-                void *pm[] = { &g->xb2, &g->attn_part, &aa, &g->pos_dev };
+                void *pm[] = { &g->xb2, &g->attn_part, &aa, &g->pos_dev, &sinks };
                 ok = ok && launch(g, g->sw->f_attn_merge, m->n_head, 1, 1, 128, pm);
             } else {
-                void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa, &g->pos_dev };
+                void *pa[] = { &g->q, &g->kc, &g->vc, &g->att, &g->xb2, &aa, &g->pos_dev,
+                               &sinks };
                 ok = ok && launch(g, g->sw->f_attn, m->n_head, tn, 1, 128, pa);
             }
         }
@@ -2940,7 +3014,8 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
             ok = ok && launch(g, g->sw->f_attn_dec_seq, m->n_head, ATTN_SPLITS, tn, 128, pd);
             // k_attn_merge reads neither position nor cache, so the unbatched
             // kernel serves here unchanged
-            void *pm[] = { &g->xb2, &g->attn_part, &aa, &B->pos_d };
+            CUdeviceptr sinks = g->sw->sinks[l];
+            void *pm[] = { &g->xb2, &g->attn_part, &aa, &B->pos_d, &sinks };
             ok = ok && launch(g, g->sw->f_attn_merge, m->n_head, tn, 1, 128, pm);
         }
 

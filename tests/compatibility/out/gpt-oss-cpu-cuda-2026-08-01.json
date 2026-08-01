@@ -1,0 +1,68 @@
+{
+ "schema_version": "gridcore.runner.cpu-cuda-check.v1",
+ "generated_utc": "2026-08-01T23:20:00Z",
+ "model": "models/gpt-oss-20b-MXFP4.gguf",
+ "architecture": "gpt-oss",
+ "check": "cpu_cuda",
+ "result": "5/5 byte-identical",
+ "what_this_establishes": "gpt-oss generates identical greedy text on the host and on CUDA. Until this change the CUDA backend refused the architecture at load (no MXFP4 matmul kernel, no sink-aware attention softmax), so no cpu_cuda evidence could exist for it at all.",
+ "routing": "eager (RUNNER_MOE_EAGER=1) - MoE byte identity is defined over the eager path; the fused default's contract is selection identity plus a ulp-bounded weight, not bit equality",
+ "tensor_cores": "disabled (RUNNER_CUDA_TC=0) - identity evidence is defined over the scalar path",
+ "offload": "13/24 layers on device, 7.09 GB in VRAM; the remaining 11 layers ran on the host in BOTH runs. Full offload is not reachable for a 12.1 GB model on an 8 GB card, so this gate covers the device kernels for 13 layers rather than the whole graph - recorded as measured, not claimed as full-offload identity.",
+ "kernels_exercised": [
+  "k_mv_mxfp4",
+  "k_mv_mxfp4_b",
+  "k_moe_mv_mxfp4",
+  "k_attn (sink)",
+  "k_attn_merge (sink)",
+  "k_swiglu_oai_mul",
+  "k_moe_actmul (bias + swiglu_oai)",
+  "k_moe_sum (down bias)"
+ ],
+ "settings": {
+  "tokens": 16,
+  "context": 2048,
+  "temperature": 0,
+  "top_p": 1,
+  "sampling": "greedy"
+ },
+ "hardware": {
+  "gpu": "NVIDIA GeForce RTX 3070, 596.36, 8192 MiB",
+  "cpu": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+  "system": "Windows-11-10.0.26100-SP0",
+  "ram_gb": 15.9
+ },
+ "reference_note": "Cross-engine agreement with llama.cpp b10076 was established separately for the CPU path on 2026-08-01 (9/16 prompts token-identical, worst-case logprob delta 0.151 against this model's own 0.272 sensitivity floor, runner d47a0ac). This change alters no host arithmetic, so that result carries over, and CPU==GPU extends it to the device.",
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris.\"\n\nSure! Here's a simple example of a Python program that uses the",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": "\\n    if n <= 1:\\n        return n\\n    return",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 10 11 12 13 14 15 16",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " there was a young boy named Jack. Jack was a curious and adventurous boy,",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 391\n\nQ: What is 17 * 24?\n\nA:",
+   "gpu": null
+  }
+ ]
+}

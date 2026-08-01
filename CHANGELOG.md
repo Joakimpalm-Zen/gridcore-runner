@@ -5,6 +5,29 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **gpt-oss runs on CUDA.** The load-time GPU refusal is gone; everything it
+  guarded landed together, generated on the CUDA 13.3 box that owns
+  `kernels_ptx.h`. *MXFP4 matvec kernels* (`k_mv_mxfp4`, `k_mv_mxfp4_b`,
+  `k_moe_mv_mxfp4`): 17-byte block, E8M0 power-of-two scale decoded with
+  `ldexpf` exactly as the CPU's `dq_mxfp4`, nibbles through the same signed
+  codebook. *Sink-aware attention softmax*: the per-head sink logit joins the
+  max scan and the denominator with no value row — transcribed from
+  `softmax_sink()` — in `k_attn` and in `k_attn_merge`'s global reduction
+  only, so the flash-decoding split partials (`k_attn_dec`,
+  `k_attn_dec_seq`) needed no change and every other arch's arithmetic is
+  untouched. *`ACT_SWIGLU_OAI` on device* (dense actmul + both MoE actmul
+  kernels, one shared `swiglu_oai()` mirroring the CPU's clamp and early-zero
+  guard). *Router + per-expert biases through both CUDA MoE paths*: the
+  router bias rides the matvec tail (bitwise what the CPU's add-after
+  computes); gate/up biases land before the activation; the down bias lands
+  before the routing weight scales it — on the eager path by deferring the
+  weight fold until after the down matvec, on the fused path as
+  `selw*db` inside `k_moe_sum`. The kernel dispatch tables also grew past
+  `T_MXFP4 = 39` (they were sized 32 and would have indexed out of bounds),
+  and the grouped prefill declares itself ineligible for biased experts
+  rather than dropping them. `make test` green; Qwen3-8B and the MoE
+  tolerance fixture verified unchanged (CPU==GPU byte identity holds).
+
 - **`parallel_tool_calls: true` is supported on buffered requests.** The
   envelope becomes a bounded `{"calls": [ ... ]}` array over the *same*
   discriminated union, so a direct answer is simply a one-element array

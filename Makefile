@@ -84,6 +84,16 @@ TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_RESP_SM = $(TEST_BATCH:test-batch%=test-responses-sm%)
+# test_responses_sm drives the framer through a POSIX socketpair(); winsock
+# has none, so on Windows the suite skips it LOUDLY (it runs in Linux CI and
+# on the POSIX dev boxes) rather than shimming the transport under the test.
+ifeq ($(OS),Windows_NT)
+TEST_RESP_SM_DEP =
+TEST_RESP_SM_RUN = @echo "skip: test-responses-sm (POSIX socketpair; covered by Linux CI)"
+else
+TEST_RESP_SM_DEP = $(TEST_RESP_SM)
+TEST_RESP_SM_RUN = ./$(TEST_RESP_SM)
+endif
 TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
 TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
@@ -300,7 +310,7 @@ endif
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
-      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_RESP_SM) \
+      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_MODEL_LOAD_FAILURE) runner test.gguf
@@ -318,7 +328,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_BATCH)
 	./$(TEST_PREFIX)
 	./$(TEST_GRAMMAR_FF)
-	./$(TEST_RESP_SM)
+	$(TEST_RESP_SM_RUN)
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
 	@# the fused-vs-eager routing gate needs a fixture whose router is not

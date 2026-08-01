@@ -227,6 +227,24 @@
    "notes": "greedy_reference deliberately not declared: this model is numerically chaotic, so token-for-token agreement with any second implementation is unachievable rather than merely unmet. Measured 2026-08-01 at b10076 on this exact file - runner disagrees with ITSELF on 11 of 16 prompts when only the KV cache precision changes, against the 9 it disagrees with llama.cpp on, so a perturbation inside one build moves the output further than switching engines does. Cause is discrete top-8-of-128 expert routing over Q4_0 weights; at layer 2 the 6th and 7th selected experts sat 0.0002 apart in weight. Layer 0 activations and the pre-softmax router logits do match the reference (exactly, and to ~0.1-0.5%). Re-measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap on this model. Evidence: out/divergence-study-gemma4-moe-2026-08-01.json"
   },
   {
+   "id": "gpt-oss-20b-mxfp4",
+   "architecture": "gpt-oss",
+   "family": "OpenAI gpt-oss",
+   "file": "models/gpt-oss-20b-MXFP4.gguf",
+   "sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901",
+   "tokenizer_reference": "openai/gpt-oss-20b",
+   "reference": {
+    "implementation": "llama.cpp",
+    "revision": "b10076"
+   },
+   "checks": [
+    "load",
+    "cpu_cuda",
+    "chat"
+   ],
+   "notes": "Per-head attention sinks, clamped alpha-sigmoid GLU (swiglu_oai), router and per-expert biases, MXFP4 expert tensors, SWA layers roped in the GLOBAL regime. CUDA support landed 2026-08-01 with the MXFP4 matmul kernels and the sink-aware attention softmax; before that the backend refused the architecture at load. cpu_cuda measured the same day: 5/5 prompts byte-identical at 16 tokens, eager routing, RUNNER_CUDA_TC=0, on an 8 GB RTX 3070 at a 13/24 layer split - full offload is not reachable for a 12.1 GB model on that card, so the 11 host layers were identical by construction in both runs and the gate covers the device kernels for 13 layers. greedy_reference is NOT declared: after the SWA-rope fix the cross-engine residual is 9/16 prompts token-identical at 16 tokens with a worst-case logprob delta of 0.151, which is BELOW this model's own 0.272 sensitivity floor (runner vs itself under a KV-precision change) - i.e. at the noise floor rather than at token identity, the same standard applied to gemma-4-E4B. Measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap. Evidence: out/gpt-oss-cpu-cuda-2026-08-01.json, out/gpt-oss-swa-rope-fix-2026-08-01.json"
+  },
+  {
    "id": "eurollm-9b-instruct-q4_k_m",
    "architecture": "llama",
    "family": "EuroLLM (EU consortium)",

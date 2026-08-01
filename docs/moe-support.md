@@ -258,10 +258,11 @@ GPU numbers. CI continues to exercise the harness with fixtures.
   OCP spec, and **validated on the real `gpt-oss-20b-MXFP4.gguf`**: the loader
   identifies all 72 MXFP4 expert tensors and a real `ffn_down_exps` row
   dequantizes to finite, sane weights (2527/2880 nonzero, ±0.09375 = 6·2⁻⁶,
-  mean ≈ 0). No MXFP4 **GPU** kernel yet, and gpt-oss's *architecture* (sliding-
-  window attention, attention sinks, its own MoE gating and tensor layout) is a
-  separate task — so gpt-oss does not yet *run*, but its MXFP4 tensors read
-  correctly.
+  mean ≈ 0). Since 2026-08-01 MXFP4 also has **GPU** kernels (`k_mv_mxfp4`,
+  `k_mv_mxfp4_b`, `k_moe_mv_mxfp4` — same E8M0 `ldexpf` decode and codebook as
+  the CPU, so the two backends compute the same dequant), and the gpt-oss
+  architecture itself runs on both backends — see the CHANGELOG entries for
+  the CPU path (2026-07-31), the SWA-rope fix and the CUDA support.
 - **Advisor / runner-control — DONE.** The advisor scores MoE throughput by
   *active* params (a MoE decodes at the speed of its active experts, not its
   full resident weight) while VRAM fit stays by total size; it surfaces expert
@@ -269,11 +270,13 @@ GPU numbers. CI continues to exercise the harness with fixtures.
 
 ## Known limitations / future work
 
-- **gpt-oss architecture** unsupported (distinct from MXFP4 read): the runner
-  refuses arch `gpt-oss`. Making gpt-oss actually run needs its attention
-  (sliding-window + sinks), MoE gating, and tensor-layout support — plus an
-  MXFP4 **GPU** kernel for VRAM speed. `gpt-oss-20b-MXFP4.gguf` is now on disk
-  for that work.
+- **gpt-oss architecture — now supported on CPU and CUDA** (this entry kept
+  for history; it used to say "unsupported"). The CPU path landed 2026-07-31
+  (sinks, swiglu_oai, biases, SWA layout), the SWA-rope regime fix brought
+  greedy agreement with llama.cpp b10076 to at-or-under the model's own
+  sensitivity floor, and the CUDA half (MXFP4 kernels, sink-aware attention
+  softmax, swiglu_oai, router/expert biases) landed 2026-08-01 from the
+  13.3 box. Metal still refuses it via the existing `n_expert > 0` guard.
 - **GELU dual-branch MoE** (gemma-4) is now **implemented** (CPU + CUDA) — see
   the `gemma4-moe` section above. `expert_shared_count`-style shared-expert MoE
   (Qwen2-MoE / DeepSeek) remains refused, behind its own validation.

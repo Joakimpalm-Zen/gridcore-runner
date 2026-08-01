@@ -212,18 +212,23 @@ def timing_fields(response):
     return out
 
 
-def completion_request(prompt, tokens, stream):
-    return {
+def completion_request(prompt, tokens, stream, model=None):
+    body = {
         "prompt": prompt,
         "max_tokens": tokens,
         "temperature": 0,
         "top_p": 1,
         "stream": stream,
     }
+    # Runner and llama.cpp serve one model and ignore the field; Ollama and
+    # LM Studio route on it, so an extra endpoint must name what it loaded.
+    if model:
+        body["model"] = model
+    return body
 
 
-def stream_ttft(base, prompt, tokens, request_timeout):
-    body = completion_request(prompt, tokens, True)
+def stream_ttft(base, prompt, tokens, request_timeout, model=None):
+    body = completion_request(prompt, tokens, True, model)
     req = urllib.request.Request(base + "/v1/completions",
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -369,6 +374,57 @@ def measure_runtime(label, command, log_path, prompt, tokens,
         stop(process, log)
 
 
+def measure_endpoint(label, base, model_name, prompt, tokens, request_timeout):
+    """Throughput for an OpenAI-compatible server this script did not start.
+
+    Ollama and LM Studio are daemons that already hold the model, so there is
+    no process to spawn and no load-time VRAM delta to attribute — the single
+    snapshot here is labelled `during`, not a delta, rather than reporting a
+    number that would read like one.
+
+    Deliberately speed-only. The correctness gate in this report is defined
+    against the pinned llama.cpp b10076 reference, and these runtimes do not
+    expose completion logprobs comparably (Ollama's OpenAI layer does not
+    expose them at all), so asking them for a correctness verdict would
+    produce an unfalsifiable one.
+    """
+    body = completion_request(prompt, tokens, False, model_name)
+    t0 = time.perf_counter()
+    response = request_json(base + "/v1/completions", body,
+                            timeout=request_timeout)
+    wall = time.perf_counter() - t0
+    stream = stream_ttft(base, prompt, tokens, request_timeout, model_name)
+    metrics = timing_fields(response)
+    metrics["request_wall_s"] = wall
+    metrics["time_to_first_token_s"] = stream["time_to_first_token_s"]
+    return {
+        "label": label,
+        "base_url": base,
+        "request_model": model_name,
+        "spawned_by_harness": False,
+        "measurement": "throughput_only",
+        "response": response,
+        "generated_text": completion_text(response),
+        "stream_text": stream["stream_text"],
+        "metrics": metrics,
+        "nvidia_smi_during": nvidia_snapshot(),
+    }
+
+
+def parse_endpoint(spec):
+    """`label=base_url=model_name` -> the three parts.
+
+    Split from the left with maxsplit=2 so a model name may contain `=`;
+    labels and URLs in practice do not.
+    """
+    parts = spec.split("=", 2)
+    if len(parts) != 3 or not all(p.strip() for p in parts):
+        raise SystemExit(
+            f"--endpoint expects label=base_url=model_name, got: {spec!r}")
+    label, base, model_name = (p.strip() for p in parts)
+    return label, base.rstrip("/"), model_name
+
+
 def compare_top_logprobs(a, b):
     if a.get("status") != "captured" or b.get("status") != "captured":
         return {
@@ -505,6 +561,29 @@ def render_markdown(report):
             tokens=m.get("generated_tokens"),
             wall=m.get("request_wall_s"),
         ))
+    for row in report.get("extra_runtimes") or []:
+        if row.get("error"):
+            lines.append(f"| {row['label']} | unreachable: {row['error']} "
+                         "| | | | |")
+            continue
+        m = row.get("metrics") or {}
+        lines.append("| {name} | {prompt} | {decode} | {ttft} | {tokens} | {wall} |".format(
+            name=row["label"],
+            prompt=m.get("prompt_tok_s"),
+            decode=m.get("decode_tok_s"),
+            ttft=m.get("time_to_first_token_s"),
+            tokens=m.get("generated_tokens"),
+            wall=m.get("request_wall_s"),
+        ))
+    if report.get("extra_runtimes"):
+        lines += [
+            "",
+            "Extra runtimes are measured for throughput only, over the same "
+            "prompt, token budget and greedy settings. They are daemons this "
+            "harness did not start, so their model load is not timed here and "
+            "the correctness gate below does not include them — that gate is "
+            "defined against the pinned llama.cpp reference build.",
+        ]
     lines += [
         "",
         "## VRAM",
@@ -631,6 +710,21 @@ def real_report(args):
         runner["metrics"]["generated_tokens"] = parsed.get("generated_tokens")
         runner["metrics"]["context"] = parsed.get("context")
 
+    extra = []
+    for spec in (args.endpoint or []):
+        label, base, model_name = parse_endpoint(spec)
+        try:
+            extra.append(measure_endpoint(label, base, model_name, args.prompt,
+                                          args.tokens, args.request_timeout))
+        except Exception as exc:
+            # A third-party daemon being down must not silently vanish from
+            # the report and must not fake a number for it either.
+            extra.append({"label": label, "base_url": base,
+                          "request_model": model_name,
+                          "spawned_by_harness": False,
+                          "measurement": "throughput_only",
+                          "error": f"{type(exc).__name__}: {exc}"})
+
     text_status = "pass" if runner["generated_text"] == llama["generated_text"] else "fail"
     divergence = first_token_divergence(runner["raw_completion_logprobs"],
                                         llama["raw_completion_logprobs"])
@@ -677,6 +771,7 @@ def real_report(args):
             "command": llama_cmd,
             **llama,
         },
+        "extra_runtimes": extra,
         "text_comparison": {
             "status": text_status,
             "runner": runner["generated_text"],
@@ -703,6 +798,12 @@ def main(argv=None):
     parser.add_argument("--runner-gpu", default="auto", choices=["auto", "off"])
     parser.add_argument("--llamacpp-gpu-layers", type=int, default=-1)
     parser.add_argument("--llamacpp-arg", action="append")
+    parser.add_argument("--endpoint", action="append", metavar="LABEL=URL=MODEL",
+                        help="also measure an already-running OpenAI-compatible "
+                             "server, e.g. "
+                             "ollama=http://127.0.0.1:11434/v1=gpt-oss:20b . "
+                             "Throughput only; the correctness gate stays "
+                             "defined against the pinned llama.cpp build.")
     parser.add_argument("--quantization")
     parser.add_argument("--min-shared-tokens", type=int, default=32)
     parser.add_argument("--max-logprob-delta", type=float, default=2.0)
