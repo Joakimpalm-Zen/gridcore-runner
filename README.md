@@ -709,7 +709,7 @@ system/template prefixes skip prompt evaluation entirely.
 | Area | Support |
 |---|---|
 | File format | GGUF v2/v3, memory-mapped (weights are never copied) |
-| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention; CPU + CUDA), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it), `qwen3moe` and Mixtral-style sparse **MoE** (top-k router, renormalized weights, per-expert SwiGLU; fused and legacy-split expert layouts; CPU + CUDA; Qwen3-30B-A3B measured at ~72 tok/s on an RTX PRO 6000 Blackwell 24 GB MIG slice — see docs/moe-support.md and docs/benchmarks.md), plus gemma-4's GELU **dual-branch MoE** (a dense shared GELU FFN summed with routed fused-`gate_up` experts, per-expert down scales, pre/post sandwich norms; CPU + CUDA; token-identical to llama.cpp and CPU/GPU-identical on gemma-4-26B-A4B-it). |
+| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention; CPU + CUDA), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it) including the **E-series** (E2B/E4B: per-layer embeddings folded into every layer's residual, plus a tail of layers that own no KV cache and read an earlier layer's — CPU only, and agreement with llama.cpp is measured at the quantisation noise floor rather than as token identity; see `scripts/token_divergence.py`), `qwen3moe` and Mixtral-style sparse **MoE** (top-k router, renormalized weights, per-expert SwiGLU; fused and legacy-split expert layouts; CPU + CUDA; Qwen3-30B-A3B measured at ~72 tok/s on an RTX PRO 6000 Blackwell 24 GB MIG slice — see docs/moe-support.md and docs/benchmarks.md), plus gemma-4's GELU **dual-branch MoE** (a dense shared GELU FFN summed with routed fused-`gate_up` experts, per-expert down scales, pre/post sandwich norms; CPU + CUDA; token-identical to llama.cpp and CPU/GPU-identical on gemma-4-26B-A4B-it). |
 | Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, `tekken` (Mistral Nemo/Small and Apertus: case-split letter runs, single digits), and the original GPT-2 regex as the default. gemma4 adds an SPM-style BPE: spaces normalize to U+2581 and merges run over raw UTF-8, with `<0xNN>` byte fallback for characters the vocabulary has no piece for |
 | Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
@@ -788,6 +788,7 @@ and `greedy_reference` per the recorded reports):
 | `phi3` | Phi 3 | Phi-3.5-mini-instruct |
 | `gemma3` | Gemma 3 | gemma-3-4b-it |
 | `gemma4` | Gemma 4 (dense) | gemma-4-12B-it |
+| `gemma4` E-series | Gemma 4 E2B/E4B | gemma-4-E4B-it (per-layer embeddings + shared-KV layers; **CPU only**) |
 | `qwen3moe` | Qwen 3 MoE / Mixtral-style | Qwen3-30B-A3B (greedy-identical to llama.cpp; 128 experts / 8 active) |
 | `gemma4-moe` | Gemma 4 MoE | gemma-4-26B-A4B-it (dual-branch dense+routed GELU MoE; token-identical to llama.cpp; CPU + CUDA, GPU/CPU-identical) |
 
@@ -831,7 +832,7 @@ and GPU/CPU-identical; see docs/moe-support.md).
 Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
 `expert_shared_count`-style shared-expert MoE / MLA (Qwen2-MoE, DeepSeek/Kimi),
 other hybrid-SSM architectures (Mamba/Jamba; Qwen3.5 Gated DeltaNet is supported),
-gemma-4's shared-KV E2B/E4B variants and MTP draft head, IQ2/IQ3 codebook
+gemma-4's MTP draft head, GPU support for the gemma-4 E-series, IQ2/IQ3 codebook
 quants, full GBNF grammar sampling (JSON mode only), TLS/auth on the server
 (bind it behind a reverse proxy if you need those).
 

@@ -635,6 +635,8 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     #define AK(fmt) (snprintf(key, sizeof(key), "%s." fmt, arch), key)
 
     m->n_layer     = (int)gguf_get_u32(g, AK("block_count"), 0);
+    // "every layer owns its KV" is the default; only gemma4 E-series lowers it
+    m->kv_from_start = m->n_layer;
     m->n_embd      = (int)gguf_get_u32(g, AK("embedding_length"), 0);
     m->n_head      = (int)gguf_get_u32(g, AK("attention.head_count"), 0);
     m->n_head_kv   = (int)gguf_get_u32(g, AK("attention.head_count_kv"), m->n_head);
@@ -755,25 +757,40 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         // correctly. Note the model is thinking-tuned: raw untemplated
         // completions are legitimately degenerate, and llama.cpp additionally
         // biases tokenizer.ggml.suppress_tokens to -inf (not done here).
-        int shared_kv = (int)gguf_get_u32(g, AK("attention.shared_kv_layers"), 0);
-        int ple_dim   = (int)gguf_get_u32(g, AK("embedding_length_per_layer_input"), 0);
-        if (shared_kv > 0 || ple_dim > 0) {
-            // Name what is missing rather than the family. Both halves are
-            // specified in the suite plan from llama.cpp's gemma4 graph:
-            // per-layer embeddings need a second embedding table plus a
-            // gate/proj/post-norm triple per layer, and shared-KV layers have
-            // no K/V projections at all and must read an earlier layer's
-            // cache — which the KV cache, the prefix cache and the offload
-            // accounting all currently assume never happens.
-            fprintf(stderr, "error: unsupported '%s' variant — this export "
-                    "needs %s%s%s, which this build does not implement "
-                    "(Gemma-4 E-series; see docs)\n", arch,
-                    ple_dim > 0 ? "per-layer embeddings" : "",
-                    (ple_dim > 0 && shared_kv > 0) ? " and " : "",
-                    shared_kv > 0 ? "shared-KV layers" : "");
+        // The general geometry validation runs after the arch blocks, but this
+        // one sizes several per-layer arrays from block_count first.
+        if (m->n_layer < 1 || m->n_layer > 100000) {
+            fprintf(stderr, "error: gemma4 block_count %d out of range\n", m->n_layer);
             return false;
         }
-        fprintf(stderr, "gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files\n");
+        int shared_kv = (int)gguf_get_u32(g, AK("attention.shared_kv_layers"), 0);
+        int ple_dim   = (int)gguf_get_u32(g, AK("embedding_length_per_layer_input"), 0);
+        m->n_embd_ple    = ple_dim;
+        m->kv_from_start = m->n_layer;
+        if (shared_kv > 0) {
+            // llama-model.cpp's reuse callback: layers at or past
+            // n_layer - shared_kv_layers own no cache and read the LAST KV
+            // layer of their own sliding/full type, which is
+            // (kv_from_start - 2) for sliding and (kv_from_start - 1) for full.
+            m->kv_from_start = m->n_layer - shared_kv;
+            if (m->kv_from_start < 2) {
+                fprintf(stderr, "error: gemma4 shared_kv_layers=%d leaves no "
+                        "KV-owning layers\n", shared_kv);
+                return false;
+            }
+        }
+        if (m->n_embd_ple > 0 || m->kv_from_start < m->n_layer)
+            // E-series: per-layer embeddings and/or shared-KV layers. Verified
+            // against llama.cpp b10076 on gemma-4-E4B-it Q4_K_M — greedy
+            // agreement is at the quantisation noise floor (the same profile a
+            // long-verified dense model shows), not exact token identity.
+            // CPU only: see the refusal in cuda.c.
+            fprintf(stderr, "gemma4: E-series (per-layer embeddings%s) — "
+                    "CPU only, verified against llama.cpp at the Q4_K noise "
+                    "floor rather than token-identically\n",
+                    m->kv_from_start < m->n_layer ? " + shared KV" : "");
+        else
+            fprintf(stderr, "gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files\n");
         m->embd_scale    = sqrtf((float)m->n_embd);
         m->ffn_act       = ACT_GELU;
         m->v_rmsnorm     = true;
@@ -825,6 +842,27 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
                         i, m->l_head_dim[i], m->l_head_kv[i], m->n_head);
                 return false;
             }
+        }
+        // Shared-KV map. Identity for the layers that own a cache; every
+        // later layer points at the last KV-owning layer of its own type.
+        // n_layer is bounded above; the local keeps that range visible to the
+        // allocator call across the intervening stores to *m.
+        size_t nl = (size_t)(unsigned)m->n_layer;
+        m->kv_src = calloc(nl ? nl : 1, sizeof(int));
+        if (!m->kv_src) return false;
+        for (int i = 0; i < m->n_layer; i++) {
+            m->kv_src[i] = i;
+            if (i < m->kv_from_start) continue;
+            int src = m->kv_from_start - (m->l_is_swa[i] ? 2 : 1);
+            if (src < 0 || m->l_head_dim[src] != m->l_head_dim[i] ||
+                m->l_head_kv[src] != m->l_head_kv[i]) {
+                // a source whose KV geometry differs would be read with the
+                // wrong row stride — refuse rather than reinterpret bytes
+                fprintf(stderr, "error: gemma4 shared-KV layer %d maps to %d "
+                        "with mismatched KV geometry\n", i, src);
+                return false;
+            }
+            m->kv_src[i] = src;
         }
     }
     m->n_expert = (int)gguf_get_u32(g, AK("expert_count"), 0);
@@ -933,6 +971,28 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     if (m->output != m->tok_embd &&
         !check_shape(m->output, m->n_embd, m->n_vocab, "output.weight", 0))
         return false;
+
+    if (m->n_embd_ple > 0) {
+        // Gemma-4 E-series per-layer embeddings. The table holds one
+        // n_embd_ple slice per layer per token, concatenated along ne[0].
+        int per_tok = m->n_layer * m->n_embd_ple;
+        if (m->n_embd_ple > INT_MAX / m->n_layer) {
+            fprintf(stderr, "error: gemma4 per-layer embedding size overflows\n");
+            return false;
+        }
+        m->ple_tok_embd   = need_tensor(g, "per_layer_token_embd.weight", 0, &ok);
+        m->ple_model_proj = need_tensor(g, "per_layer_model_proj.weight", 0, &ok);
+        gguf_tensor *pn   = need_tensor(g, "per_layer_proj_norm.weight", 0, &ok);
+        if (!ok) return false;
+        if (!check_shape(m->ple_tok_embd, per_tok, m->n_vocab,
+                         "per_layer_token_embd.weight", 0) ||
+            !check_shape(m->ple_model_proj, m->n_embd, per_tok,
+                         "per_layer_model_proj.weight", 0) ||
+            !check_shape(pn, m->n_embd_ple, 1, "per_layer_proj_norm.weight", 0))
+            return false;
+        m->ple_proj_norm = tensor_to_f32(pn, &ok);
+        if (!ok) return false;
+    }
 
     m->layers = calloc(m->n_layer, sizeof(layer_t));
     if (!m->layers) return false;
@@ -1159,6 +1219,22 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         l->post_attn_norm_w = (m->qwen35 || m->gptoss) ? NULL
             : tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i), &ok);
         l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i), &ok);
+        if (m->n_embd_ple > 0) {
+            // blk.N.post_norm is the PLE branch's own norm — attention and FFN
+            // carry post_attention_norm / post_ffw_norm separately.
+            l->ple_gate = need_tensor(g, "blk.%d.inp_gate.weight", i, &ok);
+            l->ple_proj = need_tensor(g, "blk.%d.proj.weight", i, &ok);
+            gguf_tensor *pn = need_tensor(g, "blk.%d.post_norm.weight", i, &ok);
+            if (!ok) return false;
+            if (!check_shape(l->ple_gate, m->n_embd, m->n_embd_ple,
+                             "blk.%d.inp_gate.weight", i) ||
+                !check_shape(l->ple_proj, m->n_embd_ple, m->n_embd,
+                             "blk.%d.proj.weight", i) ||
+                !check_shape(pn, m->n_embd, 1, "blk.%d.post_norm.weight", i))
+                return false;
+            l->ple_post_norm = tensor_to_f32(pn, &ok);
+            if (!ok) return false;
+        }
         l->out_scale = 1.0f;
         gguf_tensor *osc = opt_tensor(g, "blk.%d.layer_output_scale.weight", i);
         if (osc && osc->type == T_F32 && osc->ne[0] >= 1)
@@ -1227,6 +1303,7 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         // window into the reserved room instead of idling at the default
         size_t kv_per_tok = 0;
         for (int l = 0; l < m->n_layer; l++) {
+            if (model_kv_owner(m, l) != l) continue;  // shared-KV: no rows here
             int d = model_kv_dim(m, l);
             kv_per_tok += 2ull * (m->kv_q8 ? (size_t)(d / 32) * 34
                                            : (size_t)d * sizeof(f16_t));
@@ -1277,7 +1354,10 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     if (!m->kv_off) return false;
     m->kv_off[0] = 0;
     for (int l = 0; l < m->n_layer; l++)
-        m->kv_off[l + 1] = m->kv_off[l] + (size_t)n_ctx * model_kv_dim(m, l);
+        // A shared-KV layer reserves nothing: model_kv_byte_off resolves it to
+        // its owner's rows. Its own kv_off entry is never read as a start.
+        m->kv_off[l + 1] = m->kv_off[l] +
+            (model_kv_owner(m, l) == l ? (size_t)n_ctx * model_kv_dim(m, l) : 0);
     size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
     m->kcache = calloc(1, kv_bytes);
     m->vcache = calloc(1, kv_bytes);
@@ -1288,6 +1368,15 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     m->q      = malloc(sizeof(float) * (size_t)B * q_dim);
     m->k_tmp  = malloc(sizeof(float) * (size_t)B * kv_dim);
     m->v_tmp  = malloc(sizeof(float) * (size_t)B * kv_dim);
+    if (m->n_embd_ple > 0) {
+        // [token][layer][n_embd_ple] for the batch, plus one scratch of the
+        // same width (the pre-pass dequantises a table row into it; the layer
+        // loop reuses its first B*n_embd_ple as the gate output)
+        size_t per_tok = (size_t)m->n_layer * m->n_embd_ple;
+        m->ple     = malloc(sizeof(float) * (size_t)B * per_tok);
+        m->ple_tmp = malloc(sizeof(float) * (size_t)B * per_tok);
+        if (!m->ple || !m->ple_tmp) return false;
+    }
     if (m->qwen35) {
         int conv_dim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
         int hv = m->ssm_inner / m->ssm_v_heads;
@@ -1433,9 +1522,11 @@ void model_free(model_t *m) {
         free(l->ffn_pre_norm2_w); free(l->ffn_post_norm1_w); free(l->ffn_post_norm2_w);
         free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
         free(l->moe_g); free(l->moe_u); free(l->moe_d);  // split-MoE pointer arrays
+        free(l->ple_post_norm);
     }
     free(m->l_head_kv); free(m->l_head_dim); free(m->l_rope_dim);
     free(m->l_is_swa); free(m->kv_off); free(m->suppress);
+    free(m->kv_src); free(m->ple); free(m->ple_tmp); free(m->ple_proj_norm);
     free(m->layers);
     free(m->path);
     free(m->fused_splits);
@@ -1873,6 +1964,39 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
     for (int t = 0; t < used; t++) selw[t] /= denom;     // renormalized weight
 }
 
+// Gemma-4 E-series per-layer embeddings, computed once per batch before the
+// layer loop (llama.cpp gemma4.cpp build_inp_per_layer + project_per_layer_inputs).
+// m->ple ends up laid out [token][layer][n_embd_ple], which is exactly the
+// shape per_layer_model_proj already produces, so no permute is needed.
+static void ple_prepass(model_t *m, const int32_t *tokens, int n) {
+    int P = m->n_embd_ple, n_embd = m->n_embd;
+    size_t per_tok = (size_t)m->n_layer * P;
+    const float proj_scale = 1.0f / sqrtf((float)n_embd);
+    const float tok_scale  = sqrtf((float)P);
+    const float mix_scale  = 1.0f / sqrtf(2.0f);
+
+    matvec_b(m->tp, m->ple, (int)per_tok, m->ple_model_proj, m->x, n_embd,
+             n_embd, (int)per_tok, NULL, n);
+    size_t ers = ggml_row_size(m->ple_tok_embd->type, (int)per_tok);
+    for (int b = 0; b < n; b++) {
+        float *dst = m->ple + (size_t)b * per_tok;
+        // Same clamp as the main embedding table: token ids are untrusted.
+        int32_t id = tokens[b];
+        if (id < 0 || id >= m->n_vocab) id = 0;
+        dequant_row(m->ple_tok_embd->type,
+                    (uint8_t *)m->ple_tok_embd->data + (size_t)id * ers,
+                    m->ple_tmp, (int)per_tok);
+        for (int l = 0; l < m->n_layer; l++) {
+            float *slice = dst + (size_t)l * P;
+            for (int i = 0; i < P; i++) slice[i] *= proj_scale;
+            rmsnorm(slice, slice, m->ple_proj_norm, P, m->rms_eps);
+            for (int i = 0; i < P; i++)
+                slice[i] = (slice[i] + m->ple_tmp[(size_t)l * P + i] * tok_scale)
+                           * mix_scale;
+        }
+    }
+}
+
 // Decode path: one token, per selected expert SwiGLU -> weighted sum. Reads the
 // normed input from xin and writes the FFN output back in place.
 // Gated activation for a (Sw|Ge)GLU FFN: act(g) * u. act is SiLU for the
@@ -2201,6 +2325,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                     m->x[(size_t)b * n_embd + i] *= m->embd_scale;
         }
         if (dbg) dbg_stat("post-embd", -1, m->x + (size_t)(n - 1) * n_embd, n_embd);
+        if (m->n_embd_ple > 0) ple_prepass(m, tokens, n);
     }
 
     for (int l = start; l < m->n_layer; l++) {
@@ -2253,28 +2378,40 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             matvec_b(m->tp, m->q, q_dim, ly->wq, m->xb, xdim,
                      n_embd, q_dim, ly->bq, n);
         }
-        matvec_b(m->tp, m->k_tmp, kv_dim, ly->wk, m->xb, xdim, n_embd, kv_dim, ly->bk, n);
-        if (ly->wv)
-            matvec_b(m->tp, m->v_tmp, kv_dim, ly->wv, m->xb, xdim, n_embd, kv_dim, ly->bv, n);
-        else
-            // gemma4 global layers have no V projection: V is the raw K
-            memcpy(m->v_tmp, m->k_tmp, sizeof(float) * (size_t)n * kv_dim);
+        // gemma4 E-series shared-KV layers project Q as usual but compute no
+        // K/V at all: they attend over the cache an earlier layer already
+        // filled (kc_l/vc_l above resolve to that layer's rows). Their wk/wv
+        // tensors exist in the file and are deliberately never read.
+        bool owns_kv = model_kv_owner(m, l) == l;
+        if (owns_kv) {
+            matvec_b(m->tp, m->k_tmp, kv_dim, ly->wk, m->xb, xdim, n_embd, kv_dim, ly->bk, n);
+            if (ly->wv)
+                matvec_b(m->tp, m->v_tmp, kv_dim, ly->wv, m->xb, xdim, n_embd, kv_dim, ly->bv, n);
+            else
+                // gemma4 global layers have no V projection: V is the raw K
+                memcpy(m->v_tmp, m->k_tmp, sizeof(float) * (size_t)n * kv_dim);
+        }
         if (dbg) {
             dbg_stat("q-raw", l, m->q + (size_t)(n - 1) * q_dim, q_dim);
-            dbg_stat("k-raw", l, m->k_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
-            dbg_stat("v-raw", l, m->v_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
+            if (owns_kv) {
+                dbg_stat("k-raw", l, m->k_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
+                dbg_stat("v-raw", l, m->v_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
+            } else {
+                fprintf(stderr, "ACT L%-3d shared-kv src=%d\n", l, model_kv_owner(m, l));
+            }
         }
         for (int b = 0; b < n; b++) {
             if (ly->qnorm_w)
                 qk_norm(m->q + (size_t)b * q_dim, ly->qnorm_w, m->n_head,
                         hd, m->rms_eps);
+            rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b, l);
+            if (!owns_kv) continue;
             if (m->v_rmsnorm)
                 // gemma4: weightless per-head RMS norm on V (pre-K-norm values)
                 qk_norm(m->v_tmp + (size_t)b * kv_dim, NULL, n_kv, hd, m->rms_eps);
             if (ly->knorm_w)
                 qk_norm(m->k_tmp + (size_t)b * kv_dim, ly->knorm_w, n_kv,
                         hd, m->rms_eps);
-            rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b, l);
             rope_apply(m, m->k_tmp + (size_t)b * kv_dim, n_kv, pos + b, l);
             uint8_t *kc = kc_l + (size_t)(pos + b) * row_b;
             uint8_t *vc = vc_l + (size_t)(pos + b) * row_b;
@@ -2289,7 +2426,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 }
             }
         }
-        if (dbg) {
+        if (dbg && owns_kv) {
             dbg_stat("q-post-rope", l, m->q + (size_t)(n - 1) * q_dim, q_dim);
             dbg_stat("k-post-rope", l, m->k_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
             dbg_stat("v-post-norm", l, m->v_tmp + (size_t)(n - 1) * kv_dim, kv_dim);
@@ -2357,6 +2494,32 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
+
+        // Per-layer embedding branch (E-series). Runs on the post-FFN residual
+        // and before the layer output scale, matching gemma4.cpp's ordering.
+        // ple_tmp is free once the pre-pass is done, and xb once the FFN output
+        // has been added into x just above.
+        if (ly->ple_gate) {
+            int P = m->n_embd_ple;
+            size_t per_tok = (size_t)m->n_layer * P;
+            matvec_b(m->tp, m->ple_tmp, P, ly->ple_gate, m->x, n_embd,
+                     n_embd, P, NULL, n);
+            for (int b = 0; b < n; b++) {
+                const float *slice = m->ple + (size_t)b * per_tok + (size_t)l * P;
+                float *g = m->ple_tmp + (size_t)b * P;
+                for (int i = 0; i < P; i++)
+                    g[i] = gated_act(ACT_GELU, g[i], slice[i]);
+            }
+            matvec_b(m->tp, m->xb, xdim, ly->ple_proj, m->ple_tmp, P,
+                     P, n_embd, NULL, n);
+            for (int b = 0; b < n; b++) {
+                float *u = m->xb + (size_t)b * xdim;
+                rmsnorm(u, u, ly->ple_post_norm, n_embd, m->rms_eps);
+                for (int i = 0; i < n_embd; i++)
+                    m->x[(size_t)b * n_embd + i] += u[i];
+            }
+            if (dbg) dbg_stat("ple-out", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
+        }
 
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
             // gemma4: whole-layer output scalar, applied after both residuals

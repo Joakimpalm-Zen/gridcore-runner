@@ -1026,6 +1026,15 @@ static void append_text_logprobs(sbuf *r, slot_t *s, engine *e) {
         int tn = tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
         sb_lit(r, "\""); sb_esc(r, tb, tn); sb_lit(r, "\"");
     }
+    // Ids alongside the rendered pieces. Two distinct ids can decode to the
+    // same string (and control tokens render differently across engines), so
+    // anything comparing our output to another runtime's needs the id to tell
+    // "same token" from "same text" — scripts/token_divergence.py does.
+    sb_lit(r, "],\"token_ids\":[");
+    for (int i = 0; i < e->lp_count; i++) {
+        if (i) sb_lit(r, ",");
+        sb_fmt(r, "%d", e->lp_ids[i]);
+    }
     sb_lit(r, "],\"token_logprobs\":[");
     for (int i = 0; i < e->lp_count; i++) {
         if (i) sb_lit(r, ",");
@@ -1044,6 +1053,20 @@ static void append_text_logprobs(sbuf *r, slot_t *s, engine *e) {
             sb_fmt(r, "\":%.6f", a->lp);
         }
         sb_lit(r, "}");
+    }
+    // The OpenAI top_logprobs shape is a string->float map with nowhere to put
+    // an id, so the ids ride in a parallel array in the same order.
+    sb_lit(r, "],\"top_token_ids\":[");
+    for (int i = 0; i < e->lp_count; i++) {
+        if (i) sb_lit(r, ",");
+        sb_lit(r, "[");
+        for (int j = 0; j < e->lp_n; j++) {
+            const lp_alt *a = &e->lp_top[(size_t)i * e->lp_n + j];
+            if (a->id < 0) break;
+            if (j) sb_lit(r, ",");
+            sb_fmt(r, "%d", a->id);
+        }
+        sb_lit(r, "]");
     }
     sb_lit(r, "],\"text_offset\":[");
     for (int i = 0; i < e->lp_count; i++) {
@@ -2506,40 +2529,9 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             }
             sb_lit(&r, "]},");
         } else if (!chat && e->lp_count > 0) {
-            char tb[512];
-            int offset = 0;
-            sb_lit(&r, "\"logprobs\":{\"tokens\":[");
-            for (int i = 0; i < e->lp_count; i++) {
-                if (i) sb_lit(&r, ",");
-                int tn = tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
-                sb_lit(&r, "\""); sb_esc(&r, tb, tn); sb_lit(&r, "\"");
-            }
-            sb_lit(&r, "],\"token_logprobs\":[");
-            for (int i = 0; i < e->lp_count; i++) {
-                if (i) sb_lit(&r, ",");
-                sb_fmt(&r, "%.6f", e->lp_chosen[i]);
-            }
-            sb_lit(&r, "],\"top_logprobs\":[");
-            for (int i = 0; i < e->lp_count; i++) {
-                if (i) sb_lit(&r, ",");
-                sb_lit(&r, "{");
-                for (int j = 0; j < e->lp_n; j++) {
-                    const lp_alt *a = &e->lp_top[(size_t)i * e->lp_n + j];
-                    if (a->id < 0) break;
-                    if (j) sb_lit(&r, ",");
-                    int tn = tok_decode(s->tok, a->id, tb, sizeof(tb));
-                    sb_lit(&r, "\""); sb_esc(&r, tb, tn);
-                    sb_fmt(&r, "\":%.6f", a->lp);
-                }
-                sb_lit(&r, "}");
-            }
-            sb_lit(&r, "],\"text_offset\":[");
-            for (int i = 0; i < e->lp_count; i++) {
-                if (i) sb_lit(&r, ",");
-                sb_fmt(&r, "%d", offset);
-                offset += tok_decode(s->tok, e->lp_ids[i], tb, sizeof(tb));
-            }
-            sb_lit(&r, "]},");
+            // same body as the non-streaming path, ids included
+            append_text_logprobs(&r, s, e);
+            sb_lit(&r, ",");
         }
         // JC-R1 constrained-choice posteriors: one entry per decision point
         // (a constrained step where >= 2 probed candidates were legal),

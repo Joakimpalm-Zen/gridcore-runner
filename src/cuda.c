@@ -1224,6 +1224,14 @@ bool gpu_init(model_t *m) {
                 "kernels that this backend does not have — running on CPU\n");
         goto unsupported;
     }
+    // gemma4 E-series: the device graph has no per-layer-embedding stage, and
+    // its KV allocator sizes one independent region per layer, so shared-KV
+    // aliasing would silently attend over zeros. Same rule as above.
+    if (m->n_embd_ple > 0 || m->kv_from_start < m->n_layer) {
+        fprintf(stderr, "gpu: gemma4 E-series (per-layer embeddings / shared "
+                "KV) is CPU-only on this backend — running on CPU\n");
+        goto unsupported;
+    }
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];

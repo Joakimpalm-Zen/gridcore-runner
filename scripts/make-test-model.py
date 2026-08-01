@@ -16,6 +16,12 @@ ARCH = "llama"
 AGENT_PROFILE = False
 AGENT_FEATURES = ["dense", "json_schema"]
 MTP_LAYERS = 0   # extra trailing blocks declared as NextN/MTP predictor heads
+# Gemma-4 E-series: per-layer embeddings plus a tail of layers that own no KV
+# cache. Both mechanisms are structural, so a tiny random model exercises the
+# load-time geometry, the aliased cache reads and the extra forward stage
+# without needing the 5 GB real file.
+ESERIES_SHARED_KV = 0
+ESERIES_PLE = 0
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -35,6 +41,12 @@ while i < len(args):
         i += 1
         AGENT_PROFILE = True
         AGENT_FEATURES.append(args[i])
+    elif a == "--eseries":
+        # --eseries SHARED_KV,PLE_DIM  (e.g. "3,16" on the default 6 layers)
+        i += 1
+        shared, ple = args[i].split(",")
+        ESERIES_SHARED_KV, ESERIES_PLE = int(shared), int(ple)
+        ARCH = "gemma4"
     elif a == "--mtp-layers":
         # emit N extra blocks and declare them as training-only MTP predictor
         # heads; the runner must exclude them and decode exactly as without
@@ -45,6 +57,9 @@ while i < len(args):
     i += 1
 
 N_EMBD, N_HEAD, N_KV, N_FF, N_LAYER = 64, 4, 2, 128, 2
+if ESERIES_SHARED_KV or ESERIES_PLE:
+    # enough layers for a sliding/full pattern with a shared-KV tail
+    N_LAYER = 6
 VOCAB = ["<unk>", "<s>", "</s>"] + [f"<0x{i:02X}>" for i in range(256)]
 TTYPE = [2, 3, 3] + [6] * 256  # unknown, control, control, bytes
 N_VOCAB = len(VOCAB)
@@ -73,6 +88,11 @@ def kv_arr_str(k, items):
 def kv_arr_f32(k, items):
     return (s(k) + struct.pack("<IIQ", GGUF_ARR, GGUF_F32, len(items)) +
             struct.pack(f"<{len(items)}f", *items))
+
+
+def kv_arr_bool(k, items):
+    return (s(k) + struct.pack("<IIQ", GGUF_ARR, GGUF_BOOL, len(items)) +
+            bytes(1 if x else 0 for x in items))
 
 
 def kv_arr_i32(k, items):
@@ -116,6 +136,33 @@ for i in range(N_LAYER + MTP_LAYERS):
         (f"blk.{i}.ffn_up.weight", [N_EMBD, N_FF], tensor_data(N_EMBD * N_FF)),
         (f"blk.{i}.ffn_down.weight", [N_FF, N_EMBD], tensor_data(N_FF * N_EMBD)),
     ]
+    if ESERIES_SHARED_KV or ESERIES_PLE:
+        head_dim = N_EMBD // N_HEAD
+        tensors += [
+            (f"blk.{i}.attn_q_norm.weight", [head_dim], ones(head_dim)),
+            (f"blk.{i}.attn_k_norm.weight", [head_dim], ones(head_dim)),
+            (f"blk.{i}.post_attention_norm.weight", [N_EMBD], ones(N_EMBD)),
+            (f"blk.{i}.post_ffw_norm.weight", [N_EMBD], ones(N_EMBD)),
+            (f"blk.{i}.layer_output_scale.weight", [1], ones(1)),
+        ]
+    if ESERIES_PLE:
+        tensors += [
+            (f"blk.{i}.inp_gate.weight", [N_EMBD, ESERIES_PLE],
+             tensor_data(N_EMBD * ESERIES_PLE)),
+            (f"blk.{i}.proj.weight", [ESERIES_PLE, N_EMBD],
+             tensor_data(ESERIES_PLE * N_EMBD)),
+            (f"blk.{i}.post_norm.weight", [N_EMBD], ones(N_EMBD)),
+        ]
+
+if ESERIES_PLE:
+    width = ESERIES_PLE * N_LAYER
+    tensors += [
+        ("per_layer_token_embd.weight", [width, N_VOCAB],
+         tensor_data(width * N_VOCAB)),
+        ("per_layer_model_proj.weight", [N_EMBD, width],
+         tensor_data(N_EMBD * width)),
+        ("per_layer_proj_norm.weight", [ESERIES_PLE], ones(ESERIES_PLE)),
+    ]
 
 meta_kvs = [
     kv_str("general.architecture", ARCH),
@@ -135,6 +182,24 @@ meta_kvs = [
     kv_u32("tokenizer.ggml.eos_token_id", 2),
     kv_bool("tokenizer.ggml.add_bos_token", True),
 ]
+if ESERIES_SHARED_KV or ESERIES_PLE:
+    # every third layer is a full-attention layer, the rest slide
+    pattern = [(i % 3) != 2 for i in range(N_LAYER)]
+    meta_kvs += [
+        kv_u32(f"{ARCH}.attention.key_length", N_EMBD // N_HEAD),
+        kv_u32(f"{ARCH}.attention.value_length", N_EMBD // N_HEAD),
+        kv_u32(f"{ARCH}.attention.key_length_swa", N_EMBD // N_HEAD),
+        kv_u32(f"{ARCH}.attention.sliding_window", 32),
+        kv_arr_bool(f"{ARCH}.attention.sliding_window_pattern", pattern),
+        kv_u32(f"{ARCH}.rope.dimension_count", N_EMBD // N_HEAD),
+        kv_f32(f"{ARCH}.final_logit_softcapping", 30.0),
+    ]
+    if ESERIES_SHARED_KV:
+        meta_kvs.append(
+            kv_u32(f"{ARCH}.attention.shared_kv_layers", ESERIES_SHARED_KV))
+    if ESERIES_PLE:
+        meta_kvs.append(
+            kv_u32(f"{ARCH}.embedding_length_per_layer_input", ESERIES_PLE))
 if MTP_LAYERS:
     meta_kvs.append(kv_u32(f"{ARCH}.nextn_predict_layers", MTP_LAYERS))
 if AGENT_PROFILE:

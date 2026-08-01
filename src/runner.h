@@ -232,6 +232,12 @@ typedef struct {
     // join the attention softmax DENOMINATOR only — no value row — so the
     // head's output is scaled down without attending anywhere.
     float       *attn_sinks;
+    // Gemma-4 E-series per-layer embeddings: a gate into the PLE width, an
+    // elementwise product with this layer's slice of the per-layer table, a
+    // projection back to n_embd and its own RMS norm.
+    gguf_tensor *ple_gate;       // [n_embd, n_embd_ple]  (blk.N.inp_gate)
+    gguf_tensor *ple_proj;       // [n_embd_ple, n_embd]  (blk.N.proj)
+    float       *ple_post_norm;  // [n_embd]              (blk.N.post_norm)
     // gpt-oss: router bias [n_expert] and per-expert FFN biases. The expert
     // biases are added to each expert's own gate/up/down result BEFORE the
     // routing weight multiplies it (llama.cpp build_moe_ffn ordering).
@@ -379,6 +385,17 @@ typedef struct {
     int    mtp_layers;       // declared multi-token-prediction blocks excluded
                              // from the backbone (training-only; consuming
                              // them is a separate unimplemented feature)
+    // Gemma-4 E-series. n_embd_ple > 0 turns on per-layer embeddings;
+    // kv_from_start < n_layer turns on shared KV, where every layer at or
+    // past it computes no K/V of its own and reads kv_src[l] instead.
+    int    n_embd_ple;
+    int    kv_from_start;
+    int   *kv_src;               // [n_layer] cache-owning layer for each layer
+    gguf_tensor *ple_tok_embd;   // [n_embd_ple * n_layer, n_vocab]
+    gguf_tensor *ple_model_proj; // [n_embd, n_embd_ple * n_layer]
+    float       *ple_proj_norm;  // [n_embd_ple]
+    float       *ple;            // scratch [n_batch][n_layer][n_embd_ple]
+    float       *ple_tmp;        // scratch [n_batch][n_embd_ple]
     bool   gptoss;           // gpt-oss: attention sinks + swiglu_oai + MoE
                              // biases; no GPU kernels for those yet
     bool   cpu_moe;          // keep sparse expert FFNs on the host while CUDA
@@ -837,8 +854,15 @@ static inline size_t model_kv_row_bytes(const model_t *m, int l) {
     int d = model_kv_dim(m, l);
     return m->kv_q8 ? (size_t)(d / 32) * 34 : (size_t)d * sizeof(f16_t);
 }
+// Which layer physically owns layer l's KV rows. Identity everywhere except
+// gemma4 E-series shared-KV layers, which compute no K/V and read an earlier
+// layer's cache. l == n_layer is the total-size sentinel and never remapped.
+static inline int model_kv_owner(const model_t *m, int l) {
+    return (m->kv_src && l < m->n_layer) ? m->kv_src[l] : l;
+}
 static inline size_t model_kv_byte_off(const model_t *m, int l) {
-    return m->kv_q8 ? m->kv_off[l] / 32 * 34 : m->kv_off[l] * sizeof(f16_t);
+    size_t e = m->kv_off[model_kv_owner(m, l)];
+    return m->kv_q8 ? e / 32 * 34 : e * sizeof(f16_t);
 }
 
 typedef struct { const char *role, *content; } chat_msg;

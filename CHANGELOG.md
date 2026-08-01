@@ -24,6 +24,46 @@ protocol and CLI may still change between alpha releases.
   (ids, separators, the mixed and wrong-shape documents) rather than through
   a sampled model, plus the rewritten conformance contract.
 
+- **Gemma-4 E-series (E2B/E4B) runs, on CPU.** Both missing halves landed.
+  *Per-layer embeddings*: a second embedding table gives each token one
+  `n_embd_per_layer` slice per layer; those slices are mixed once per batch
+  with a projection of the input embedding, and each layer then gates its
+  post-FFN residual through them and adds the result back before the layer
+  output scale. *Shared-KV layers*: every layer at or past
+  `n_layer - shared_kv_layers` computes no K/V at all and attends over the
+  cache of the last KV-owning layer **of its own sliding/full type**
+  — `kv_from_start - 2` sliding, `kv_from_start - 1` full. Those layers
+  reserve no cache rows (E4B's allocation drops by 18/42) and the prefix
+  cache skips them so a snapshot cannot save the same rows twice. Their
+  `attn_k`/`attn_v` tensors exist in the file and are deliberately never read.
+  A mismatched-geometry alias is refused at load rather than reinterpreted.
+
+  **The GPU is refused** for these models, with its own message: the device
+  graph has no per-layer-embedding stage and its KV allocator sizes one
+  independent region per layer, so aliasing would silently attend over zeros.
+
+  Verified against llama.cpp b10076 on `gemma-4-E4B-it-Q4_K_M`. Greedy
+  agreement is at the **quantisation noise floor, not token identity**, and
+  the control run is what makes that claim meaningful: over 16 prompts × 32
+  tokens the E-series scores 8/16 identical with a 0.29-nat worst-case
+  logprob delta, while **Qwen2.5-7B — a long-verified dense architecture on
+  the same harness — scores 6/16 with 0.24 nats.** The E-series profile is
+  indistinguishable from a model already known correct; both engines flip on
+  sub-0.3-nat argmax ties, and llama.cpp flips on them by itself depending on
+  whether its prompt cache was warm. New `scripts/token_divergence.py` is the
+  tool that measures this: it walks both engines greedily and reports the
+  first differing position with the logprob gap between the two contenders on
+  each side, which distinguishes a coin-flip tie from an arithmetic fault —
+  something `reference_compare.py`'s exact-text gate cannot do.
+
+- **Completion logprobs now carry token ids** (`token_ids` and
+  `top_token_ids`, alongside the existing decoded strings). Two distinct ids
+  can decode to the same text, and control tokens render differently across
+  runtimes — runner writes `<eos>` where llama.cpp writes `""` — so a
+  cross-engine comparison keyed on the rendered string reports identical
+  tokens as divergences. It did, until this. The two duplicated emitters
+  behind the streaming and buffered paths were also collapsed onto one.
+
 - **Gemma-4 E-series: array-form sliding-window patterns are read correctly,
   and the refusal now names what is missing.**
   `attention.sliding_window_pattern` is published two ways — dense gemma3/4
@@ -34,8 +74,7 @@ protocol and CLI may still change between alpha releases.
   gemma-4-26B before and after). The E-series load refusal changed from
   naming the family to naming the two missing mechanisms — per-layer
   embeddings and shared-KV layers — because those are what a reader needs.
-  Full E-series support remains unimplemented by choice; the specs for both
-  halves, read off llama.cpp's gemma4 graph, are recorded in the suite plan.
+  (Both halves have since been implemented — see the entry above.)
 
 - **Measured: partial expert offload helps prefill and hurts decode, and
   plain layer offload beats both.** Qwen3-Coder-30B on the Blackwell MIG with

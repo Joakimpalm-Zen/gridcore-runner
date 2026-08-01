@@ -229,14 +229,19 @@ static uint64_t model_identity(const model_t *m, const tokenizer *tok) {
 // first c rows of each block, which is Fact 1 turned into code.
 size_t prefix_cache_entry_bytes(const model_t *m, int n) {
     size_t t = 0;
-    for (int l = 0; l < m->n_layer; l++)
+    for (int l = 0; l < m->n_layer; l++) {
+        // shared-KV layers alias an earlier layer's rows: snapshotting them
+        // would copy the same bytes twice and make save/load disagree
+        if (model_kv_owner(m, l) != l) continue;
         t += 2 * (size_t)n * model_kv_row_bytes(m, l);
+    }
     return t;
 }
 
 static void pfx_save(const model_t *m, uint8_t *dst, int n) {
     size_t off = 0;
     for (int l = 0; l < m->n_layer; l++) {
+        if (model_kv_owner(m, l) != l) continue;
         size_t blk = (size_t)n * model_kv_row_bytes(m, l);
         size_t lo  = model_kv_byte_off(m, l);
         memcpy(dst + off,       (const uint8_t *)m->kcache + lo, blk);
@@ -249,6 +254,7 @@ static void pfx_save(const model_t *m, uint8_t *dst, int n) {
 static void pfx_load(const model_t *m, const uint8_t *src, int stride, int n) {
     size_t off = 0;
     for (int l = 0; l < m->n_layer; l++) {
+        if (model_kv_owner(m, l) != l) continue;
         size_t row = model_kv_row_bytes(m, l);
         size_t blk = (size_t)stride * row, take = (size_t)n * row;
         size_t lo  = model_kv_byte_off(m, l);
