@@ -1,0 +1,112 @@
+{
+ "model": "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+ "size_gb": 8.99,
+ "context": 1024,
+ "generated_utc": "2026-08-01T22:26:21Z",
+ "faults": [],
+ "deviances": [],
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris. The capital of France is Paris. The capital of France is Paris.\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=0.98GB G=38/48 full=0 used=7.34GB",
+  "wall_s": 7.0,
+  "stderr_tail": null
+ },
+ "moe": false,
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "8",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris. The capital of France is Paris\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 7.7,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "16"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 41.9,
+   "split": "gpu-split: budget=7.46GB fixed=0.98GB G=38/48 full=0 used=7.34GB",
+   "prompt_tok_s": 14.724,
+   "decode_tok_s": 4.541,
+   "prompt_tokens": 512,
+   "config": "default"
+  },
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "16",
+    "--kv",
+    "q8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 37.6,
+   "split": "gpu-split: budget=7.46GB fixed=0.98GB G=39/48 full=0 used=7.44GB",
+   "prompt_tok_s": 16.53,
+   "decode_tok_s": 5.477,
+   "prompt_tokens": 512,
+   "config": "kv-q8"
+  }
+ ],
+ "recommended": {
+  "config": "kv-q8",
+  "decode_tok_s": 5.477,
+  "prefill_tok_s": 16.53,
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "16",
+   "--kv",
+   "q8"
+  ]
+ }
+}

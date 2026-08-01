@@ -1,0 +1,110 @@
+{
+ "model": "Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+ "size_gb": 5.72,
+ "context": 1024,
+ "generated_utc": "2026-08-01T22:19:14Z",
+ "faults": [],
+ "deviances": [],
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris. It is the most populous city in France, with over 2\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=0.91GB G=36/36 full=1 used=5.97GB",
+  "wall_s": 7.7,
+  "stderr_tail": null
+ },
+ "moe": false,
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris. It is the most populous city in France, with over 2\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 7.9,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 8.5,
+   "split": "gpu-split: budget=7.46GB fixed=0.91GB G=36/36 full=1 used=5.97GB",
+   "prompt_tok_s": 107.523,
+   "decode_tok_s": 34.258,
+   "prompt_tokens": 512,
+   "config": "default"
+  },
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32",
+    "--kv",
+    "q8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 8.5,
+   "split": "gpu-split: budget=7.46GB fixed=0.91GB G=36/36 full=1 used=5.90GB",
+   "prompt_tok_s": 106.829,
+   "decode_tok_s": 34.026,
+   "prompt_tokens": 512,
+   "config": "kv-q8"
+  }
+ ],
+ "recommended": {
+  "config": "default",
+  "decode_tok_s": 34.258,
+  "prefill_tok_s": 107.523,
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "32"
+  ]
+ }
+}

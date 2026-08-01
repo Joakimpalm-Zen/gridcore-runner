@@ -1,0 +1,89 @@
+{
+ "model": "Qwen3.6-27B-Q4_K_M.gguf",
+ "size_gb": 16.82,
+ "context": 1024,
+ "generated_utc": "2026-08-01T22:43:38Z",
+ "faults": [],
+ "deviances": [],
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Qwen3.6-27B-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "8",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris.\n\n<think>\nHere's a\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=1.68GB G=24/64 full=0 used=7.46GB",
+  "wall_s": 31.9,
+  "stderr_tail": null
+ },
+ "moe": false,
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Qwen3.6-27B-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "4",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris.\n\n<think>\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 98.4,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\Qwen3.6-27B-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 186.8,
+   "split": "gpu-split: budget=7.46GB fixed=1.68GB G=24/64 full=0 used=7.46GB",
+   "prompt_tok_s": 3.018,
+   "decode_tok_s": 1.226,
+   "prompt_tokens": 512,
+   "config": "default"
+  }
+ ],
+ "recommended": {
+  "config": "default",
+  "decode_tok_s": 1.226,
+  "prefill_tok_s": 3.018,
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Qwen3.6-27B-Q4_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "8"
+  ]
+ }
+}

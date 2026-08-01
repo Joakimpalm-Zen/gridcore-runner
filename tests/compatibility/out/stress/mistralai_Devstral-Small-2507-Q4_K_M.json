@@ -1,0 +1,89 @@
+{
+ "model": "mistralai_Devstral-Small-2507-Q4_K_M.gguf",
+ "size_gb": 14.33,
+ "context": 1024,
+ "generated_utc": "2026-08-01T22:38:25Z",
+ "faults": [],
+ "deviances": [],
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\mistralai_Devstral-Small-2507-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "8",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris. It is the largest city in\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=0.92GB G=19/40 full=0 used=7.34GB",
+  "wall_s": 29.6,
+  "stderr_tail": null
+ },
+ "moe": false,
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\mistralai_Devstral-Small-2507-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "4",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris. It is\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 60.4,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\mistralai_Devstral-Small-2507-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 157.9,
+   "split": "gpu-split: budget=7.46GB fixed=0.92GB G=19/40 full=0 used=7.34GB",
+   "prompt_tok_s": 3.589,
+   "decode_tok_s": 1.607,
+   "prompt_tokens": 512,
+   "config": "default"
+  }
+ ],
+ "recommended": {
+  "config": "default",
+  "decode_tok_s": 1.607,
+  "prefill_tok_s": 3.589,
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\mistralai_Devstral-Small-2507-Q4_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "8"
+  ]
+ }
+}

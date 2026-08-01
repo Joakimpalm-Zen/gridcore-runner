@@ -24,6 +24,14 @@ runner; several are load-bearing gates for changing it.
   prompt and budget — throughput only, and labelled as such, because the
   correctness gate is defined against the pinned llama.cpp reference and those
   runtimes do not expose comparable completion logprobs.
+- **`stress-models.py`** — run every GGUF on a machine's shelf against this
+  build: load, generate, CPU-vs-CUDA identity, fault detection (fallbacks,
+  kernel-launch failures, refusals, timeouts) and a settings sweep, with one
+  resumable JSON per model. Identity is a PREFIX test, not string equality —
+  the legs may use different token budgets, and comparing truncated character
+  slices reports a mismatch on the trailing newline alone.
+- **`stress-context.py`** — the context/KV edges: auto-fit, a context the
+  machine cannot hold, and whether a refusal says why.
 - **`cpu_cuda_check.py`** — the compatibility program's `cpu_cuda` check for
   one model: greedy CPU output must be byte-identical to greedy CUDA output
   over several prompts, with the eager router pinned (MoE byte identity is

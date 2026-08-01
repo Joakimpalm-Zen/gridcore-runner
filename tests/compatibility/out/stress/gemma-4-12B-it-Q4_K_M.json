@@ -1,0 +1,112 @@
+{
+ "model": "gemma-4-12B-it-Q4_K_M.gguf",
+ "size_gb": 7.38,
+ "context": 1024,
+ "generated_utc": "2026-08-01T22:24:11Z",
+ "faults": [],
+ "deviances": [],
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\gemma-4-12B-it-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is a beach and a beach is a beach.\n<|channel>thought\n<channel|>That is\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=1.37GB G=42/48 full=0 used=7.35GB",
+  "wall_s": 12.2,
+  "stderr_tail": null
+ },
+ "moe": false,
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\gemma-4-12B-it-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "8",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is a beach and a beach is a beach\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 6.9,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\gemma-4-12B-it-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "16"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 25.2,
+   "split": "gpu-split: budget=7.46GB fixed=1.37GB G=42/48 full=0 used=7.35GB",
+   "prompt_tok_s": 28.433,
+   "decode_tok_s": 4.94,
+   "prompt_tokens": 512,
+   "config": "default"
+  },
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\gemma-4-12B-it-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "16",
+    "--kv",
+    "q8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 21.6,
+   "split": "gpu-split: budget=7.46GB fixed=1.37GB G=43/48 full=0 used=7.35GB",
+   "prompt_tok_s": 33.839,
+   "decode_tok_s": 6.602,
+   "prompt_tokens": 512,
+   "config": "kv-q8"
+  }
+ ],
+ "recommended": {
+  "config": "kv-q8",
+  "decode_tok_s": 6.602,
+  "prefill_tok_s": 33.839,
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\gemma-4-12B-it-Q4_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "16",
+   "--kv",
+   "q8"
+  ]
+ }
+}

@@ -1,0 +1,112 @@
+{
+ "model": "google_gemma-3-12b-it-Q4_K_M.gguf",
+ "size_gb": 7.3,
+ "context": 1024,
+ "generated_utc": "2026-08-01T22:23:08Z",
+ "faults": [],
+ "deviances": [],
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\google_gemma-3-12b-it-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris.\nThe capital of Germany is Berlin.\nThe capital of Italy is\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=1.37GB G=42/48 full=0 used=7.33GB",
+  "wall_s": 12.3,
+  "stderr_tail": null
+ },
+ "moe": false,
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\google_gemma-3-12b-it-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "8",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris.\nThe capital of Germany is\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 6.8,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\google_gemma-3-12b-it-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "16"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 24.7,
+   "split": "gpu-split: budget=7.46GB fixed=1.37GB G=42/48 full=0 used=7.33GB",
+   "prompt_tok_s": 29.044,
+   "decode_tok_s": 4.858,
+   "prompt_tokens": 512,
+   "config": "default"
+  },
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\google_gemma-3-12b-it-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "16",
+    "--kv",
+    "q8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 19.0,
+   "split": "gpu-split: budget=7.46GB fixed=1.37GB G=44/48 full=0 used=7.46GB",
+   "prompt_tok_s": 39.588,
+   "decode_tok_s": 7.239,
+   "prompt_tokens": 512,
+   "config": "kv-q8"
+  }
+ ],
+ "recommended": {
+  "config": "kv-q8",
+  "decode_tok_s": 7.239,
+  "prefill_tok_s": 39.588,
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\google_gemma-3-12b-it-Q4_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "16",
+   "--kv",
+   "q8"
+  ]
+ }
+}

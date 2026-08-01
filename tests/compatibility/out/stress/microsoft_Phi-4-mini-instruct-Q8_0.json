@@ -1,0 +1,110 @@
+{
+ "model": "microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+ "size_gb": 4.08,
+ "context": 1024,
+ "generated_utc": "2026-08-01T22:16:47Z",
+ "faults": [],
+ "deviances": [],
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris. The Eiffel Tower is located in Paris. Therefore, the Eiffel Tower is\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=1.19GB G=32/32 full=1 used=4.75GB",
+  "wall_s": 5.8,
+  "stderr_tail": null
+ },
+ "moe": false,
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris. The Eiffel Tower is located in Paris. Therefore, the Eiffel Tower is\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 3.3,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 5.9,
+   "split": "gpu-split: budget=7.46GB fixed=1.19GB G=32/32 full=1 used=4.75GB",
+   "prompt_tok_s": 150.518,
+   "decode_tok_s": 77.617,
+   "prompt_tokens": 512,
+   "config": "default"
+  },
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32",
+    "--kv",
+    "q8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 5.8,
+   "split": "gpu-split: budget=7.46GB fixed=1.19GB G=32/32 full=1 used=4.69GB",
+   "prompt_tok_s": 149.61,
+   "decode_tok_s": 75.43,
+   "prompt_tokens": 512,
+   "config": "kv-q8"
+  }
+ ],
+ "recommended": {
+  "config": "default",
+  "decode_tok_s": 77.617,
+  "prefill_tok_s": 150.518,
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "32"
+  ]
+ }
+}

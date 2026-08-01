@@ -1,0 +1,170 @@
+{
+ "generated_utc": "2026-08-01T23:15:48Z",
+ "models": [
+  {
+   "model": "microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 536.9,
+     "generated": "Hello, I need help",
+     "last_stderr": "prompt: 1 tok, 67.24 tok/s | gen: 4 tok, 79.97 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4295.0,
+     "generated": "Hello, I need help",
+     "last_stderr": "prompt: 1 tok, 5.34 tok/s | gen: 4 tok, 18.86 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)",
+     "explains_itself": true
+    }
+   ],
+   "findings": []
+  },
+  {
+   "model": "Qwen_Qwen3-4B-Q8_0.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 604.0,
+     "generated": "Hello<3\nHello",
+     "last_stderr": "prompt: 1 tok, 60.90 tok/s | gen: 4 tok, 74.29 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4831.8,
+     "generated": "Hello<3\nHello",
+     "last_stderr": "prompt: 1 tok, 5.01 tok/s | gen: 4 tok, 17.84 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 147456.0 MB KV cache)",
+     "explains_itself": true
+    }
+   ],
+   "findings": []
+  },
+  {
+   "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 536.9,
+     "generated": "Hello fetisch\nI am",
+     "last_stderr": "prompt: 1 tok, 57.97 tok/s | gen: 4 tok, 66.47 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4295.0,
+     "generated": "Hello fetisch\nI am",
+     "last_stderr": "prompt: 1 tok, 3.58 tok/s | gen: 4 tok, 8.55 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)",
+     "explains_itself": true
+    }
+   ],
+   "findings": []
+  },
+  {
+   "model": "gemma-4-E4B-it-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 234.9,
+     "generated": "Hello! How can I",
+     "last_stderr": "prompt: 2 tok, 32.09 tok/s | gen: 4 tok, 57.33 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 1879.0,
+     "generated": "Hello! How can I",
+     "last_stderr": "prompt: 2 tok, 3.83 tok/s | gen: 4 tok, 4.99 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 57344.0 MB KV cache)",
+     "explains_itself": true
+    }
+   ],
+   "findings": []
+  },
+  {
+   "model": "Qwen3-8B-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 604.0,
+     "generated": "Hello, I'm trying",
+     "last_stderr": "prompt: 1 tok, 5.25 tok/s | gen: 4 tok, 63.28 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4831.8,
+     "generated": "Hello, I'm trying",
+     "last_stderr": "prompt: 1 tok, 3.58 tok/s | gen: 4 tok, 9.02 tok/s",
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 147456.0 MB KV cache)",
+     "explains_itself": true
+    }
+   ],
+   "findings": []
+  }
+ ]
+}

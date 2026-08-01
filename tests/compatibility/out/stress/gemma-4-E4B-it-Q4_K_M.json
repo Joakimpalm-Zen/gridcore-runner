@@ -1,0 +1,112 @@
+{
+ "model": "gemma-4-E4B-it-Q4_K_M.gguf",
+ "size_gb": 4.98,
+ "context": 1024,
+ "generated_utc": "2026-08-01T22:18:24Z",
+ "faults": [],
+ "deviances": [],
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\gemma-4-E4B-it-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris.\n\n**Question:** What is the capital of France?\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=0.92GB G=42/42 full=1 used=3.61GB",
+  "wall_s": 7.1,
+  "stderr_tail": null
+ },
+ "moe": false,
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\gemma-4-E4B-it-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris.\n\n**Question:** What is the capital of France?\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 3.9,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\gemma-4-E4B-it-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 6.6,
+   "split": "gpu-split: budget=7.46GB fixed=0.92GB G=42/42 full=1 used=3.61GB",
+   "prompt_tok_s": 237.281,
+   "decode_tok_s": 25.123,
+   "prompt_tokens": 512,
+   "config": "default"
+  },
+  {
+   "command": [
+    "-m",
+    "C:\\ProjectGrid\\models\\gemma-4-E4B-it-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32",
+    "--kv",
+    "q8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 6.5,
+   "split": "gpu-split: budget=7.46GB fixed=0.92GB G=42/42 full=1 used=3.56GB",
+   "prompt_tok_s": 245.066,
+   "decode_tok_s": 25.365,
+   "prompt_tokens": 512,
+   "config": "kv-q8"
+  }
+ ],
+ "recommended": {
+  "config": "kv-q8",
+  "decode_tok_s": 25.365,
+  "prefill_tok_s": 245.066,
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\gemma-4-E4B-it-Q4_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "32",
+   "--kv",
+   "q8"
+  ]
+ }
+}
