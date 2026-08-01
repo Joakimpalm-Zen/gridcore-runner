@@ -1,0 +1,87 @@
+{
+  "schema_version": "gridcore.runner.llamacpp-comparison.v1",
+  "generated_utc": "2026-08-01T20:32:59Z",
+  "status": "endpoints_only",
+  "real_results": "captured",
+  "model": {
+    "path": "C:\\ProjectGrid\\models\\Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+    "sha256": "190766d270e0e13a8ea2d1ff5bc2faae8cf5897736881bd1fd1698651cc82c8b",
+    "bytes": 5724146496
+  },
+  "settings": {
+    "prompt": "The history of computing hardware spans several distinct eras. Early mechanical calculators gave way to electromechanical relays, then to vacuum tubes, then to discrete transistors, and finally to integrated circuits. Each transition reduced size and power while increasing reliability and speed. The stored-program architecture, in which instructions and data share one memory, remains the organizing idea behind nearly every general-purpose machine built since. Memory hierarchies developed because fast storage is expensive and dense storage is slow, so designers interpose caches between processors and main memory. The history of computing hardware spans several distinct eras. Early mechanical calculators gave way to electromechanical relays, then to vacuum tubes, then to discrete transistors, and finally to integrated circuits. Each transition reduced size and power while increasing reliability and speed. The stored-program architecture, in which instructions and data share one memory, remains the organizing idea behind nearly every general-purpose machine built since. Memory hierarchies developed because fast storage is expensive and dense storage is slow, so designers interpose caches between processors and main memory. The history of computing hardware spans several distinct eras. Early mechanical calculators gave way to electromechanical relays, then to vacuum tubes, then to discrete transistors, and finally to integrated circuits. Each transition reduced size and power while increasing reliability and speed. The stored-program architecture, in which instructions and data share one memory, remains the organizing idea behind nearly every general-purpose machine built since. Memory hierarchies developed because fast storage is expensive and dense storage is slow, so designers interpose caches between processors and main memory. The history of computing hardware spans several distinct eras. Early mechanical calculators gave way to electromechanical relays, then to vacuum tubes, then to discrete transistors, and finally to integrated circuits. Each transition reduced size and power while increasing reliability and speed. The stored-program architecture, in which instructions and data share one memory, remains the organizing idea behind nearly every general-purpose machine built since. Memory hierarchies developed because fast storage is expensive and dense storage is slow, so designers interpose caches between processors and main memory. The history of computing hardware spans several distinct eras. Early mechanical calculators gave way to electromechanical relays, then to vacuum tubes, then to discrete transistors, and finally to integrated circuits. Each transition reduced size and power while increasing reliability and speed. The stored-program architecture, in which instructions and data share one memory, remains the organizing idea behind nearly every general-purpose machine built since. Memory hierarchies developed because fast storage is expensive and dense storage is slow, so designers interpose caches between processors and main memory. The history of computing hardware spans several distinct eras. Early mechanical calculators gave way to electromechanical relays, then to vacuum tubes, then to discrete transistors, and finally to integrated circuits. Each transition reduced size and power while increasing reliability and speed. The stored-program architecture, in which instructions and data share one memory, remains the organizing idea behind nearly every general-purpose machine built since. Memory hierarchies developed because fast storage is expensive and dense storage is slow, so designers interpose caches between processors and main memory.",
+    "context": 2048,
+    "tokens": 64,
+    "temperature": 0,
+    "top_p": 1,
+    "sampling": "greedy",
+    "quantization": "Q5_K_M"
+  },
+  "hardware": {
+    "system": "Windows-11-10.0.26100-SP0",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel",
+    "python": "3.12.10",
+    "nvidia_smi": [
+      {
+        "name": "NVIDIA GeForce RTX 3070",
+        "driver_version": "596.36",
+        "memory_used_mib": 6088,
+        "memory_free_mib": 1931,
+        "memory_total_mib": 8192
+      }
+    ]
+  },
+  "extra_runtimes": [
+    {
+      "label": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "request_model": "ministral-8b-q5km",
+      "spawned_by_harness": false,
+      "measurement": "throughput_only",
+      "response": {
+        "id": "cmpl-59",
+        "object": "text_completion",
+        "created": 1785616377,
+        "model": "ministral-8b-q5km",
+        "system_fingerprint": "fp_ollama",
+        "choices": [
+          {
+            "text": "It seems like you've repeated the same paragraph multiple times. Here's a concise summary of the history of computing hardware:\n\n1. **Early Mechanical Calculators**: The first calculators were mechanical devices that used gears and levers to perform arithmetic operations.\n\n2. **Electromechanical Relays**: These devices used electrical signals",
+            "index": 0,
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 627,
+          "completion_tokens": 64,
+          "total_tokens": 691
+        }
+      },
+      "generated_text": "It seems like you've repeated the same paragraph multiple times. Here's a concise summary of the history of computing hardware:\n\n1. **Early Mechanical Calculators**: The first calculators were mechanical devices that used gears and levers to perform arithmetic operations.\n\n2. **Electromechanical Relays**: These devices used electrical signals",
+      "stream_text": "It seems like you've repeated the same paragraph multiple times. Here's a concise summary of the history of computing hardware:\n\n1. **Early Mechanical Calculators**: The first calculators were mechanical devices that used gears and levers to perform arithmetic operations.\n\n2. **Electromechanical Relays**: These devices used electrical signals",
+      "metrics": {
+        "prompt_tok_s": null,
+        "decode_tok_s": null,
+        "prompt_ms": null,
+        "decode_ms": null,
+        "generated_tokens": 64,
+        "request_wall_s": 1.5578639000887051,
+        "time_to_first_token_s": 0.25003200001083314,
+        "prompt_tokens": 627,
+        "derived_decode_tok_s": 63.994331112721646,
+        "derived_prefill_tok_s": 2507.6790169771625,
+        "derived_streamed_tokens": 64
+      },
+      "nvidia_smi_during": [
+        {
+          "name": "NVIDIA GeForce RTX 3070",
+          "driver_version": "596.36",
+          "memory_used_mib": 6088,
+          "memory_free_mib": 1931,
+          "memory_total_mib": 8192
+        }
+      ]
+    }
+  ]
+}

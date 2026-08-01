@@ -1,0 +1,12 @@
+rope: YaRN scaling x32.00 (model metadata)
+gpu-split: budget=7.46GB fixed=1.16GB G=13/24 full=0 used=7.09GB
+gpu: CUDA backend on NVIDIA GeForce RTX 3070 (13/24 layers, 7.1 GB in VRAM; CPU runs the rest)
+gpu: VRAM 0.23 GB free of 8.59 GB after init (kv 0.05 GB + scratch 0.01 GB this instance)
+loaded C:\ProjectGrid\models\gpt-oss-20b-MXFP4.gguf | gpt-oss | 24 layers | ctx 2048 | 1 threads | 8.55s
+sampling: gpt-oss (temp 1.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.00)
+server listening on http://127.0.0.1:55488 — 1 slot x 4 threads
+  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
+  GET /v1/models | GET /v1/capabilities | GET /health
+[slot 0] cmpl-0: 642 prompt (0 cached) + 32 gen tok (0.4 tok/s)
+[slot 0] cmpl-1: 642 prompt (641 cached) + 32 gen tok (0.4 tok/s)
+[slot 0] chatcmpl-2: 648 prompt (0 cached) + 8 gen tok (0.4 tok/s)

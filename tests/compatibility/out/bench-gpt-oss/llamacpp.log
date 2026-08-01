@@ -1,0 +1,39 @@
+0.00.085.484 I cmn  common_param: common_params_print_info: verbosity = 3 (adjust with the `-lv N` CLI arg)
+0.00.144.116 W srv  llama_server: -----------------
+0.00.144.122 W srv  llama_server: CORS is set to allow all origins ('*') and no API key is set
+0.00.144.122 W srv  llama_server: this can be a security risk (cross-origin attacks)
+0.00.144.122 W srv  llama_server: more info: https://github.com/ggml-org/llama.cpp/pull/25655
+0.00.144.122 W srv  llama_server: -----------------
+0.00.150.508 I srv    load_model: loading model 'C:\ProjectGrid\models\gpt-oss-20b-MXFP4.gguf'
+0.05.399.249 W load: setting token '<|constrain|>' (200003) attribute to USER_DEFINED (16), old attributes: 8
+0.05.399.423 W load: setting token '<|message|>' (200008) attribute to USER_DEFINED (16), old attributes: 8
+0.05.405.151 W load: setting token '<|channel|>' (200005) attribute to USER_DEFINED (16), old attributes: 8
+0.05.405.158 W load: setting token '<|start|>' (200006) attribute to USER_DEFINED (16), old attributes: 8
+0.05.405.170 W load: special_eog_ids contains both '<|return|>' and '<|call|>', or '<|calls|>' and '<|flush|>' tokens, removing '<|end|>' token from EOG list
+0.05.455.979 W llama_model_loader: tensor overrides to CPU are used with mmap enabled - consider using --no-mmap for better performance
+0.10.409.448 I srv    load_model: initializing, n_slots = 4, n_ctx_slot = 2048, kv_unified = 'true'
+0.10.425.773 I srv  llama_server: model loaded
+0.10.425.778 I srv  llama_server: listening on http://127.0.0.1:55489
+0.10.546.705 I slot get_availabl: id  3 | task -1 | selected slot by LRU, t_last = -1
+0.10.547.186 I slot launch_slot_: id  3 | task 0 | processing task, is_child = 0
+0.13.476.410 I slot print_timing: id  3 | task 0 | prompt eval time =    1759.96 ms /   630 tokens (    2.79 ms per token,   357.96 tokens per second)
+0.13.476.415 I slot print_timing: id  3 | task 0 |        eval time =    1169.20 ms /    32 tokens (   36.54 ms per token,    27.37 tokens per second)
+0.13.476.416 I slot print_timing: id  3 | task 0 |       total time =    2929.17 ms /   662 tokens
+0.13.476.417 I slot print_timing: id  3 | task 0 |    graphs reused =         31
+0.13.476.478 I slot      release: id  3 | task 0 | stop processing: n_tokens = 661, truncated = 0
+0.13.498.046 I slot get_availabl: id  3 | task -1 | selected slot by LCP similarity, sim_best = 1.000 (> 0.100 thold), f_keep = 0.953
+0.13.498.259 I slot launch_slot_: id  3 | task 35 | processing task, is_child = 0
+0.13.498.287 W slot   operator(): id  3 | task 35 | need to evaluate at least 1 token for each active slot (n_past = 630, task.n_tokens() = 630)
+0.13.498.289 W slot   operator(): id  3 | task 35 | n_past was set to 629
+0.14.561.979 I slot print_timing: id  3 | task 35 | prompt eval time =      31.45 ms /     1 tokens (   31.45 ms per token,    31.80 tokens per second)
+0.14.561.986 I slot print_timing: id  3 | task 35 |        eval time =    1030.69 ms /    32 tokens (   32.21 ms per token,    31.05 tokens per second)
+0.14.561.988 I slot print_timing: id  3 | task 35 |       total time =    1062.14 ms /    33 tokens
+0.14.561.989 I slot print_timing: id  3 | task 35 |    graphs reused =         63
+0.14.562.039 I slot      release: id  3 | task 35 | stop processing: n_tokens = 661, truncated = 0
+0.14.577.631 I slot get_availabl: id  2 | task -1 | selected slot by LRU, t_last = -1
+0.14.577.719 I slot launch_slot_: id  2 | task 68 | processing task, is_child = 0
+0.16.250.299 I slot print_timing: id  2 | task 68 | prompt eval time =    1424.88 ms /   697 tokens (    2.04 ms per token,   489.16 tokens per second)
+0.16.250.305 I slot print_timing: id  2 | task 68 |        eval time =     235.39 ms /     8 tokens (   29.42 ms per token,    33.99 tokens per second)
+0.16.250.306 I slot print_timing: id  2 | task 68 |       total time =    1660.27 ms /   705 tokens
+0.16.250.307 I slot print_timing: id  2 | task 68 |    graphs reused =         69
+0.16.250.365 I slot      release: id  2 | task 68 | stop processing: n_tokens = 704, truncated = 0

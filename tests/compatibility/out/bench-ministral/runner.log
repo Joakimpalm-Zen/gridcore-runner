@@ -1,0 +1,11 @@
+gpu-split: budget=7.46GB fixed=0.91GB G=36/36 full=1 used=6.12GB
+gpu: CUDA backend on NVIDIA GeForce RTX 3070 (5.7 GB weights in VRAM)
+gpu: VRAM 1.40 GB free of 8.59 GB after init (kv 0.30 GB + scratch 0.01 GB this instance)
+loaded C:\ProjectGrid\models\Ministral-8B-Instruct-2410-Q5_K_M.gguf | llama | 36 layers | ctx 2048 | 1 threads | 2.05s
+sampling: generic (temp 0.80, top_p 0.95, top_k 40, min_p 0.05, repeat_penalty 1.10)
+server listening on http://127.0.0.1:55455 — 1 slot x 4 threads
+  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
+  GET /v1/models | GET /v1/capabilities | GET /health
+[slot 0] cmpl-0: 625 prompt (0 cached) + 64 gen tok (56.5 tok/s)
+[slot 0] cmpl-1: 625 prompt (624 cached) + 64 gen tok (55.1 tok/s)
+[slot 0] chatcmpl-2: 628 prompt (1 cached) + 8 gen tok (55.7 tok/s)

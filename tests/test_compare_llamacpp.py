@@ -96,6 +96,7 @@ def test_runtime_commands_allow_the_requested_generation_length(tmp_path):
         runner_gpu="auto",
         llamacpp_gpu_layers=-1,
         llamacpp_arg=None,
+        runner_arg=None,
     )
 
     runner, _ = compare_llamacpp.runtime_commands(args, 8000, 8001)
@@ -245,3 +246,51 @@ def test_completion_logprobs_accept_content_rows():
             ],
         }],
     }
+
+
+def test_runner_arg_reaches_the_runner_command(tmp_path):
+    """--runner-arg is the twin of --llamacpp-arg.
+
+    Without it an MoE comparison is not like-for-like: recent llama.cpp moves
+    expert tensors to the host by itself, so a Runner spawned with no
+    --cpu-moe is answering a different question and the row would read as an
+    engine gap rather than a flag gap.
+    """
+    args = SimpleNamespace(
+        runner=tmp_path / "runner",
+        llamacpp=tmp_path / "llama-server",
+        model=tmp_path / "model.gguf",
+        ctx=4096,
+        tokens=128,
+        runner_gpu="auto",
+        llamacpp_gpu_layers=-1,
+        llamacpp_arg=["--no-mmap"],
+        runner_arg=["--cpu-moe", "auto"],
+    )
+
+    runner, llama = compare_llamacpp.runtime_commands(args, 8000, 8001)
+
+    assert runner[-2:] == ["--cpu-moe", "auto"]
+    assert llama[-1] == "--no-mmap"
+
+
+def test_unrenderable_top_logprob_entries_are_excluded_and_counted():
+    """The empty string is not a token identity.
+
+    llama.cpp's completions endpoint exposes no token ids, so top-logprob
+    entries are matched by rendered string. Runner renders the stop token as
+    `<eos>` where llama.cpp renders `""`, so an empty-string key pairs two
+    DIFFERENT tokens and reports their unrelated logprobs as a divergence —
+    4.59 nats on Ministral-8B while every real token agreed to 0.0013. The
+    entry is dropped, and counted so the exclusion is visible.
+    """
+    side = lambda lp: {"status": "captured", "positions": [{
+        "token": " a", "logprob": -0.5,
+        "top_logprobs": [{"token": " a", "logprob": -0.5},
+                         {"token": "", "logprob": lp}],
+    }]}
+
+    result = compare_llamacpp.compare_top_logprobs(side(-1.0), side(-9.0))
+
+    assert result["max_abs_common_logprob_delta"] == 0.0
+    assert result["unrenderable_entries_excluded"] == 2

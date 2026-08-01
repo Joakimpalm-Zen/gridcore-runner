@@ -227,14 +227,31 @@ def completion_request(prompt, tokens, stream, model=None):
     return body
 
 
-def stream_ttft(base, prompt, tokens, request_timeout, model=None):
+def timing_request(prompt, tokens, model=None):
+    """The body used for the throughput measurement.
+
+    `cache_prompt: false` is the whole point: Runner and llama.cpp both keep a
+    prefix cache, so a prompt served twice is not prefilled twice, and a
+    measurement taken after any earlier identical request reports the cache
+    rather than the engine. With it left on, this harness measured "prefill" at
+    16k-18k tok/s for both engines — a cache hit wearing a throughput number.
+    Engines that do not know the field ignore it, so those are additionally
+    measured as the FIRST request against a freshly loaded model.
+    """
     body = completion_request(prompt, tokens, True, model)
+    body["cache_prompt"] = False
+    return body
+
+
+def stream_ttft(base, prompt, tokens, request_timeout, model=None):
+    body = timing_request(prompt, tokens, model)
     req = urllib.request.Request(base + "/v1/completions",
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     start = time.perf_counter()
     first = None
     text = []
+    chunks = 0
     with urllib.request.urlopen(req, timeout=request_timeout) as resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -247,8 +264,38 @@ def stream_ttft(base, prompt, tokens, request_timeout, model=None):
             piece = completion_text(evt) or ""
             if piece and first is None:
                 first = time.perf_counter() - start
+            if piece:
+                chunks += 1
             text.append(piece)
-    return {"time_to_first_token_s": first, "stream_text": "".join(text)}
+    return {"time_to_first_token_s": first, "stream_text": "".join(text),
+            "stream_total_s": time.perf_counter() - start,
+            "stream_chunks": chunks}
+
+
+def derived_metrics(stream, prompt_tokens):
+    """Throughput measured the SAME way for every runtime, from the wire.
+
+    Engines disagree about what they self-report — llama.cpp and Runner return
+    a `timings` block, Ollama's OpenAI layer returns none at all — so a table
+    built from each engine's own accounting is not one measurement repeated,
+    it is several different measurements printed in a column. These fields are
+    derived from the streaming response alone (arrival time of the first token
+    and of the last), so every row means the same thing.
+
+    Prefill is charged the whole time-to-first-token, which slightly
+    understates it: TTFT also contains request handling and sampling for one
+    token. It is the same overhead for every engine measured here.
+    """
+    ttft = stream.get("time_to_first_token_s")
+    total = stream.get("stream_total_s")
+    n = stream.get("stream_chunks") or 0
+    out = {"derived_decode_tok_s": None, "derived_prefill_tok_s": None,
+           "derived_streamed_tokens": n}
+    if ttft and total and n > 1 and total > ttft:
+        out["derived_decode_tok_s"] = (n - 1) / (total - ttft)
+    if ttft and prompt_tokens:
+        out["derived_prefill_tok_s"] = prompt_tokens / ttft
+    return out
 
 
 def top_logprobs(base, prompt, tokens, request_timeout):
@@ -345,17 +392,22 @@ def measure_runtime(label, command, log_path, prompt, tokens,
     process, log, base = serve(command, log_path, startup_timeout)
     try:
         after_start = nvidia_snapshot()
+        # Timing request FIRST, while nothing is cached. The buffered
+        # correctness request runs after it and may be served warm — it is
+        # compared for text and logprobs, which caching does not change.
+        stream = stream_ttft(base, prompt, tokens, request_timeout)
         body = completion_request(prompt, tokens, False)
         body["logprobs"] = 20
         t0 = time.perf_counter()
         response = request_json(base + "/v1/completions", body,
                                 timeout=request_timeout)
         wall = time.perf_counter() - t0
-        stream = stream_ttft(base, prompt, tokens, request_timeout)
         logprobs = top_logprobs(base, prompt, tokens, request_timeout)
         metrics = timing_fields(response)
         metrics["request_wall_s"] = wall
         metrics["time_to_first_token_s"] = stream["time_to_first_token_s"]
+        metrics["prompt_tokens"] = (response.get("usage") or {}).get("prompt_tokens")
+        metrics.update(derived_metrics(stream, metrics["prompt_tokens"]))
         return {
             "label": label,
             "command": command,
@@ -388,15 +440,18 @@ def measure_endpoint(label, base, model_name, prompt, tokens, request_timeout):
     expose them at all), so asking them for a correctness verdict would
     produce an unfalsifiable one.
     """
+    # Timing request first, for the reason in timing_request().
+    stream = stream_ttft(base, prompt, tokens, request_timeout, model_name)
     body = completion_request(prompt, tokens, False, model_name)
     t0 = time.perf_counter()
     response = request_json(base + "/v1/completions", body,
                             timeout=request_timeout)
     wall = time.perf_counter() - t0
-    stream = stream_ttft(base, prompt, tokens, request_timeout, model_name)
     metrics = timing_fields(response)
     metrics["request_wall_s"] = wall
     metrics["time_to_first_token_s"] = stream["time_to_first_token_s"]
+    metrics["prompt_tokens"] = (response.get("usage") or {}).get("prompt_tokens")
+    metrics.update(derived_metrics(stream, metrics["prompt_tokens"]))
     return {
         "label": label,
         "base_url": base,
@@ -422,7 +477,14 @@ def parse_endpoint(spec):
         raise SystemExit(
             f"--endpoint expects label=base_url=model_name, got: {spec!r}")
     label, base, model_name = (p.strip() for p in parts)
-    return label, base.rstrip("/"), model_name
+    base = base.rstrip("/")
+    # Requests are sent to base + "/v1/completions", so the base is the server
+    # root. Ollama and LM Studio document their OpenAI surface as ".../v1",
+    # and pasting that would silently produce /v1/v1/completions and a 404
+    # that reads like the engine being down. Accept either spelling.
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return label, base, model_name
 
 
 def compare_top_logprobs(a, b):
@@ -436,17 +498,32 @@ def compare_top_logprobs(a, b):
     n = min(len(apos), len(bpos))
     rows = []
     max_delta = None
+    skipped_unrenderable = 0
     for i in range(n):
         ar = apos[i]
         br = bpos[i]
+        # Keyed by the RENDERED string, because llama.cpp's completions
+        # endpoint exposes no token ids to key on. The empty string is
+        # therefore excluded: it is not a token identity but whatever each
+        # engine's renderer emits for a token with no printable form, and the
+        # two engines disagree about which token that is (runner renders the
+        # stop token as `<eos>` where llama.cpp renders `""`). Comparing them
+        # measures the renderers, not the arithmetic — on Ministral-8B it
+        # manufactured a 4.59-nat "divergence" while every real token agreed
+        # to 0.0013. Excluded rather than tolerated, and counted so the
+        # exclusion is visible instead of silent.
         amap = {item.get("token"): item.get("logprob")
                 for item in ar.get("top_logprobs") or []
-                if item.get("token") is not None
+                if item.get("token")
                 and isinstance(item.get("logprob"), (int, float))}
         bmap = {item.get("token"): item.get("logprob")
                 for item in br.get("top_logprobs") or []
-                if item.get("token") is not None
+                if item.get("token")
                 and isinstance(item.get("logprob"), (int, float))}
+        skipped_unrenderable += sum(
+            1 for side in (ar, br)
+            for item in side.get("top_logprobs") or []
+            if item.get("token") == "")
         common = []
         for token in amap.keys() & bmap.keys():
             delta = round(abs(amap[token] - bmap[token]), 12)
@@ -473,7 +550,9 @@ def compare_top_logprobs(a, b):
             "llamacpp_top_logprobs": br.get("top_logprobs"),
         })
     return {"status": "captured", "positions_compared": n,
-            "max_abs_common_logprob_delta": max_delta, "positions": rows}
+            "max_abs_common_logprob_delta": max_delta,
+            "unrenderable_entries_excluded": skipped_unrenderable,
+            "positions": rows}
 
 
 def correctness_gate(divergence, logprobs, min_shared_tokens, max_logprob_delta):
@@ -499,7 +578,61 @@ def quote_cmd(cmd):
     return " ".join(shlex.quote(str(x)) for x in cmd)
 
 
+def fmt(value, places=2):
+    return "" if value is None else f"{value:.{places}f}"
+
+
+def render_endpoints_markdown(report):
+    settings = report["settings"]
+    lines = [
+        "# Third-party runtime throughput",
+        "",
+        "Measured with `compare_llamacpp.py --endpoints-only`: each daemon is "
+        "measured while it is the ONLY engine holding the GPU, because VRAM is "
+        "exclusive and a co-resident measurement would report a spilled engine's "
+        "host speed as if it were its device speed. No correctness gate is "
+        "emitted here — that gate is defined against the pinned llama.cpp "
+        "reference build, which this mode does not run.",
+        "",
+        f"- Generated UTC: `{report['generated_utc']}`",
+        f"- Model path: `{report['model'].get('path')}`",
+        f"- Model SHA256: `{report['model'].get('sha256')}`",
+        f"- Context: `{settings['context']}`, max tokens: "
+        f"`{settings['tokens']}`, sampling: `{settings['sampling']}`",
+        f"- Prompt: `{settings['prompt']}`",
+        "",
+        "Derived columns are measured identically for every engine from the "
+        "streaming response (see `derived_metrics`); self-reported columns are "
+        "whatever the engine's own `timings` block claims, and are blank for "
+        "engines that report none.",
+        "",
+        "| Runtime | Model id | Derived prefill tok/s | Derived decode tok/s | "
+        "Self-reported prompt tok/s | Self-reported decode tok/s | TTFT s | Tokens | Wall s |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in report.get("extra_runtimes") or []:
+        if row.get("error"):
+            lines.append(f"| {row['label']} | {row['request_model']} | "
+                         f"unreachable: {row['error']} | | | | | | |")
+            continue
+        m = row.get("metrics") or {}
+        lines.append(
+            "| {n} | {mid} | {dp} | {dd} | {p} | {d} | {t} | {g} | {w} |".format(
+                n=row["label"], mid=row["request_model"],
+                dp=fmt(m.get("derived_prefill_tok_s")),
+                dd=fmt(m.get("derived_decode_tok_s")),
+                p=fmt(m.get("prompt_tok_s")), d=fmt(m.get("decode_tok_s")),
+                t=fmt(m.get("time_to_first_token_s"), 4),
+                g=m.get("generated_tokens"), w=fmt(m.get("request_wall_s"))))
+    lines += ["", "## Hardware and driver", "", "```json",
+              json.dumps(report.get("hardware"), indent=2, sort_keys=True),
+              "```", ""]
+    return "\n".join(lines) + "\n"
+
+
 def render_markdown(report):
+    if report.get("status") == "endpoints_only":
+        return render_endpoints_markdown(report)
     settings = report["settings"]
     runner = report["runner"]
     llama = report["llamacpp"]
@@ -548,32 +681,29 @@ def render_markdown(report):
         "",
         "## Results",
         "",
-        "| Runtime | Prompt tok/s | Decode tok/s | TTFT s | Generated tokens | Wall s |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "Derived columns are measured identically for every engine from the "
+        "streaming response (see `derived_metrics`); self-reported columns come "
+        "from each engine's own `timings` block, which not every engine emits "
+        "and which engines do not all define the same way.",
+        "",
+        "| Runtime | Derived prefill tok/s | Derived decode tok/s | "
+        "Self-reported prompt tok/s | Self-reported decode tok/s | TTFT s | Tokens | Wall s |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for key in ("runner", "llamacpp"):
-        m = report[key].get("metrics") or {}
-        lines.append("| {name} | {prompt} | {decode} | {ttft} | {tokens} | {wall} |".format(
-            name=key,
-            prompt=m.get("prompt_tok_s"),
-            decode=m.get("decode_tok_s"),
-            ttft=m.get("time_to_first_token_s"),
-            tokens=m.get("generated_tokens"),
-            wall=m.get("request_wall_s"),
-        ))
+    rows = [(key, report[key].get("metrics") or {}) for key in ("runner", "llamacpp")]
     for row in report.get("extra_runtimes") or []:
         if row.get("error"):
-            lines.append(f"| {row['label']} | unreachable: {row['error']} "
-                         "| | | | |")
-            continue
-        m = row.get("metrics") or {}
-        lines.append("| {name} | {prompt} | {decode} | {ttft} | {tokens} | {wall} |".format(
-            name=row["label"],
-            prompt=m.get("prompt_tok_s"),
-            decode=m.get("decode_tok_s"),
-            ttft=m.get("time_to_first_token_s"),
-            tokens=m.get("generated_tokens"),
-            wall=m.get("request_wall_s"),
+            rows.append((f"{row['label']} (unreachable: {row['error']})", {}))
+        else:
+            rows.append((row["label"], row.get("metrics") or {}))
+    for name, m in rows:
+        lines.append("| {n} | {dp} | {dd} | {p} | {d} | {t} | {g} | {w} |".format(
+            n=name,
+            dp=fmt(m.get("derived_prefill_tok_s")),
+            dd=fmt(m.get("derived_decode_tok_s")),
+            p=fmt(m.get("prompt_tok_s")), d=fmt(m.get("decode_tok_s")),
+            t=fmt(m.get("time_to_first_token_s"), 4),
+            g=m.get("generated_tokens"), w=fmt(m.get("request_wall_s")),
         ))
     if report.get("extra_runtimes"):
         lines += [
@@ -669,11 +799,55 @@ def runtime_commands(args, runner_port, llama_port):
     runner_cmd = [str(args.runner.resolve()), "-m", str(args.model.resolve()),
                   "--serve", "--port", str(runner_port), "-c", str(args.ctx),
                   "--gpu", args.runner_gpu, "-n", str(args.tokens)]
+    runner_cmd.extend(args.runner_arg or [])
     llama_cmd = [str(args.llamacpp.resolve()), "-m", str(args.model.resolve()),
                  "--host", "127.0.0.1", "--port", str(llama_port),
                  "-c", str(args.ctx), "-ngl", str(args.llamacpp_gpu_layers)]
     llama_cmd.extend(args.llamacpp_arg or [])
     return runner_cmd, llama_cmd
+
+
+def endpoints_only_report(args):
+    """Measure ONLY already-running daemons, spawning nothing.
+
+    Exists because VRAM is exclusive: three engines each holding a 5.4 GB
+    model do not fit on an 8 GB card, so a run that measured them together
+    would report whichever ones got spilled to the host as if that were their
+    speed. Each engine is therefore measured with only itself resident, and
+    the rows are assembled afterwards. No correctness gate is emitted here —
+    that gate is defined against the pinned llama.cpp reference, which this
+    mode does not run.
+    """
+    if not args.endpoint:
+        raise SystemExit("--endpoints-only needs at least one --endpoint")
+    extra = []
+    for spec in args.endpoint:
+        label, base, model_name = parse_endpoint(spec)
+        try:
+            extra.append(measure_endpoint(label, base, model_name, args.prompt,
+                                          args.tokens, args.request_timeout))
+        except Exception as exc:
+            extra.append({"label": label, "base_url": base,
+                          "request_model": model_name,
+                          "spawned_by_harness": False,
+                          "measurement": "throughput_only",
+                          "error": f"{type(exc).__name__}: {exc}"})
+    return {
+        "schema_version": "gridcore.runner.llamacpp-comparison.v1",
+        "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "status": "endpoints_only",
+        "real_results": "captured",
+        "model": {"path": str(args.model) if args.model else None,
+                  "sha256": sha256_file(args.model) if args.model else None,
+                  "bytes": args.model.stat().st_size if args.model else None},
+        "settings": {
+            "prompt": args.prompt, "context": args.ctx, "tokens": args.tokens,
+            "temperature": 0, "top_p": 1, "sampling": "greedy",
+            "quantization": args.quantization,
+        },
+        "hardware": hardware_info(),
+        "extra_runtimes": extra,
+    }
 
 
 def real_report(args):
@@ -798,6 +972,12 @@ def main(argv=None):
     parser.add_argument("--runner-gpu", default="auto", choices=["auto", "off"])
     parser.add_argument("--llamacpp-gpu-layers", type=int, default=-1)
     parser.add_argument("--llamacpp-arg", action="append")
+    parser.add_argument("--runner-arg", action="append",
+                        help="extra flag for the Runner server, the twin of "
+                             "--llamacpp-arg. Needed for a fair MoE row: recent "
+                             "llama.cpp auto-overrides expert tensors to the "
+                             "host, so a Runner run without --cpu-moe is "
+                             "answering a different question")
     parser.add_argument("--endpoint", action="append", metavar="LABEL=URL=MODEL",
                         help="also measure an already-running OpenAI-compatible "
                              "server, e.g. "
@@ -813,10 +993,19 @@ def main(argv=None):
                         default=ROOT / "tests/compatibility/out/llamacpp-comparison")
     parser.add_argument("--fixture", action="store_true",
                         help="write a schema-valid pending report without running binaries")
+    parser.add_argument("--endpoints-only", action="store_true",
+                        help="measure only --endpoint daemons and spawn nothing "
+                             "(VRAM is exclusive; engines must be measured one "
+                             "at a time on a single-GPU box)")
     args = parser.parse_args(argv)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    report = fixture_report(args) if args.fixture else real_report(args)
+    if args.fixture:
+        report = fixture_report(args)
+    elif args.endpoints_only:
+        report = endpoints_only_report(args)
+    else:
+        report = real_report(args)
     json_path = args.out_dir / "comparison.json"
     md_path = args.out_dir / "comparison.md"
     json_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
