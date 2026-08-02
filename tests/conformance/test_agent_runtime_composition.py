@@ -113,8 +113,35 @@ def test_schema_batch_prefix_cancel_and_speculation_compose(report, tmp_path):
             telemetry = response.json["runner_telemetry"]
             assert telemetry["schema"] is True
             assert telemetry["speculative"] is True
-            assert telemetry["prompt_forked_tokens"] > 0
         assert first.content == expected
+
+        # Prefix forking is asserted here, and NOT per-response above, because
+        # per-response is not a property the engine offers.
+        #
+        # A resident prefix can be forked by at most `parallel` requests at
+        # once. Measured directly: with --parallel 2, four concurrent requests
+        # sharing a warm prefix report forks [66, 67, 0, 0]. The block above
+        # issues THREE concurrent requests — the cancel plus both schema ones —
+        # so one of the three necessarily forks nothing, and requiring both
+        # schema responses to fork passed only when the cancel happened to lose
+        # the race. That is a coin flip, and it is what made this test fail
+        # about three runs in ten under whole-suite load while passing every
+        # time in isolation.
+        #
+        # So the assertion is that at least one of them forked: the shared
+        # prefix survived the poisoning and the cancellation and was still
+        # usable under concurrency. That still fails if forking breaks.
+        #
+        # A stronger "and a later sequential request forks too" was tried and
+        # removed: it fails every time, not intermittently, because after this
+        # sequence the shared prefix is no longer forkable at all. That is
+        # deterministic engine behaviour rather than a race, and it is filed
+        # separately — it is a possible caching inefficiency, but asserting it
+        # here would have been asserting something the engine does not do.
+        concurrent_forks = [r.json["runner_telemetry"]["prompt_forked_tokens"]
+                            for r in (first, second)]
+        assert max(concurrent_forks) > 0, (
+            f"no concurrent request forked the shared prefix: {concurrent_forks}")
 
         # Speculative acceptance has to be PROVABLE here, not lucky. Every
         # request above is schema-constrained, and the drafter generates

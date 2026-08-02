@@ -5,6 +5,31 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **The flaky composition test is fixed, and it was not the assertion everyone
+  thought.** `test_schema_batch_prefix_cancel_and_speculation_compose` failed
+  about three runs in ten under whole-suite load and passed every time in
+  isolation. It was read as the speculative-acceptance assertion — both render
+  as `assert 0 > 0` — and an earlier fix hardened that one. The failing line
+  was `prompt_forked_tokens > 0`, the prefix-cache fork.
+
+  Root cause, measured rather than inferred: **a resident prefix can be forked
+  by at most `parallel` requests at once.** With `--parallel 2`, four
+  concurrent requests sharing a warm prefix report forks `[66, 67, 0, 0]`. The
+  test issues *three* concurrent requests — a cancellation plus both schema
+  ones — and required both schema responses to fork, which holds only when the
+  cancellation loses the race. A coin flip, and the ~1-in-3 rate follows from
+  it directly.
+
+  It now asserts that at least one concurrent request forked: the shared prefix
+  survived poisoning, cancellation and concurrency. Twenty whole-suite runs
+  with no occurrence of this failure, against a 0.08% chance of that if the
+  original rate remained.
+
+  Two things found on the way, both filed rather than folded in: after this
+  sequence a *sequential* request never forks at all — deterministic, not a
+  race, and a possible caching inefficiency; and `test_signal_during_startup`
+  has its own much rarer flake (~1 in 20), previously masked by this one.
+
 - **Socket errors are reported through the right platform channel.** A failed
   bind printed `strerror(errno)`, which on Windows is simply the wrong source —
   Winsock reports through `WSAGetLastError`, so a genuine bind failure printed
