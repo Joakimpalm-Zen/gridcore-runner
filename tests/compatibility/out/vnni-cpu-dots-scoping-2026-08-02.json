@@ -1,0 +1,29 @@
+{
+  "schema_version": "gridcore.runner.divergence-study.v1",
+  "generated_utc": "2026-08-02T19:30:00Z",
+  "subject": "P2 - Fused quantized VNNI CPU dots: scoping measurement",
+  "box": "RTX PRO 6000 Blackwell MIG host; CPU has avx2, avx512f, avx512_vnni, avx_vnni",
+  "measured": {
+    "model": "Qwen2.5-7B-Instruct-Q4_K_M, CPU only, same box, same prompt",
+    "runner": {
+      "prompt_tok_s": 49.4,
+      "decode_tok_s": 16.8
+    },
+    "llama_cpp": {
+      "prompt_tok_s": 119.5,
+      "decode_tok_s": 28.7
+    },
+    "runner_share_of_llamacpp": {
+      "prompt": "41%",
+      "decode": "59%"
+    }
+  },
+  "finding_1_the_item_misnames_the_cause": "The plan calls this 'the real memory-traffic gap'. It is not memory traffic. Runner's decode scales 9.4 -> 15.1 -> 18.1 tok/s across 8 -> 16 -> 32 threads (then falls back to 16.3 at 64), which is compute scaling, not a bandwidth plateau. And llama.cpp streams the SAME weights on the SAME box at 1.7x runner's decode rate, so the memory system demonstrably supports the higher rate. The gap is arithmetic throughput: runner dequantises each weight to fp32 and does 8-lane AVX2 FMA, while llama.cpp quantises the ACTIVATIONS and issues integer dot products, where one VNNI instruction retires 4x the MACs per lane.",
+  "finding_2_the_blocker": "VNNI is integer, so using it means quantising activations - which changes results. The CUDA kernels compute the same dot in fp32 against fp32 activations (k_mv_q8_0: `t += (float)q[j] * xp[j]`), and that identical arithmetic is precisely why CPU==GPU byte identity holds. Switching the CPU to integer dots while the GPU stays fp32 breaks `cpu_cuda` for the 17 models that currently declare it. This item is therefore NOT a CPU optimisation; it is a paired CPU+GPU arithmetic migration.",
+  "viable_sequencings": [
+    "A. Paired migration: move CPU and CUDA to quantised-activation integer dots together, re-run cpu_cuda for all 17 models, and re-pin the certification artifacts. The CUDA half needs new kernels, so it needs the 13.3 box. This is the route that gets the default-path speedup.",
+    "B. Opt-in only: ship VNNI behind a flag that is off by default, pinned off in every certification harness, for CPU-only deployments that want throughput over cross-backend identity. Wins nothing by default and adds a second arithmetic to maintain, but unblocks CPU-only users now and needs no kernel work."
+  ],
+  "prior_art_in_repo": "The exact arithmetic was already written and measured on 2026-08-01 for the gpt-oss vec_dot_type experiment (vec_dot_mxfp4_q8_0 and vec_dot_q8_0_q8_0, transcribed from ggml) and reverted when it did not close that gap. Those transcriptions are recorded in out/divergence-study-gpt-oss-vecdot-2026-08-01.json and are the scalar reference a VNNI kernel would be gated against.",
+  "status": "NOT IMPLEMENTED - scoping and blocker only. See sequencings above."
+}
