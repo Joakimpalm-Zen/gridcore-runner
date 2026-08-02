@@ -5,15 +5,25 @@ dependencies beyond libc/pthreads, no ggml, one `make`, one binary. It loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**New in 0.1.4 — tensor cores by default, published benchmarks, European
-models.** The tensor-core prefill GEMM is now the default on
-tolerance-gated dense Q4_K models (**+47–77% prefill**, decode unchanged),
-dense decode reaches **73–79% of llama.cpp** on the reference box, and the
-head-to-head numbers are published — losing rows included
-([docs/benchmarks.md](docs/benchmarks.md)). Six European models (EuroLLM,
-Lucie, Mistral-Nemo, Teuken, Salamandra, TildeOpen-30b) join the pinned
-compatibility manifest under the new [Europe & US model
-scope](docs/model-scope.md). See [CHANGELOG.md](CHANGELOG.md).
+**Since 0.1.4 — two more architectures, both on CPU and CUDA.** **gpt-oss**
+runs end to end (per-head attention sinks, MXFP4 experts, router and
+per-expert biases), and so does the **Gemma-4 E-series** (per-layer embeddings
+plus layers that own no KV cache and read an earlier layer's). Both are
+GPU/CPU byte-identical at whole-graph offload. Where a model is too
+numerically sensitive for token-identity to mean anything, agreement is
+measured against its own floor instead — `scripts/sensitivity_floor.py`
+reports what a given model does to a small numeric change, and
+`scripts/token_divergence.py` reports where two engines first disagree and by
+how much.
+
+**In 0.1.4 — tensor cores by default, published benchmarks, European models.**
+The tensor-core prefill GEMM is the default on tolerance-gated dense Q4_K
+models (**+47–77% prefill**, decode unchanged), dense decode reaches **73–79%
+of llama.cpp** on the reference box, and the head-to-head numbers are
+published — losing rows included ([docs/benchmarks.md](docs/benchmarks.md)).
+Six European models (EuroLLM, Lucie, Mistral-Nemo, Teuken, Salamandra,
+TildeOpen-30b) join the pinned compatibility manifest under the [Europe & US
+model scope](docs/model-scope.md). See [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
@@ -51,8 +61,8 @@ Then point it at any GGUF model:
 
 **Small enough to own outright, strict enough to build on.** llama.cpp is
 broader and faster; runner exists for the case llama.cpp structurally can't
-fill — an engine a larger system can trust to the last line, extend in an
-afternoon, and hold to an exact serving contract.
+fill — an engine a larger system can read to the last line, change without
+asking anyone, and hold to an exact serving contract.
 
 **Schema conformance is the product, not a plugin.** runner compiles a JSON
 Schema into a validator that *drives sampling* — properties emit in declared
@@ -95,24 +105,26 @@ tunnel, or Tailscale — where auth and TLS live, not hand-rolled in an inferenc
 engine.
 
 **The trade is explicit.** llama.cpp wins on raw speed, exotic quants (IQ2/IQ3,
-Vulkan), and architecture breadth — runner does Mixtral/Qwen3 top-k MoE but
-skips shared-expert MoE and most SSMs; gemma-4's validated GELU dual-branch MoE
-is supported. runner wins when the engine is a load-bearing part of a system
-that has to trust, extend, and debug it — and correctness is held to explicit
-checks: GPU output is verified token-identical to the CPU path on the scalar
-kernels (and on every path where tensor cores are not promoted), certified
-architectures have pinned llama.cpp reference runs where recorded, and the
-promoted tensor-core prefill path is held to its own measured tolerance gate
-(`make test-tc-tol`) rather than an identity claim it cannot have.
+Vulkan), and architecture breadth — runner does Mixtral/Qwen3 top-k MoE,
+gemma-4's dual-branch GELU MoE and gpt-oss's MXFP4 experts, but skips
+shared-expert MoE and most SSMs. runner wins when the engine is a load-bearing
+part of a system that has to trust, extend and debug it.
 
-## Build
+**Correctness is a gate, not a claim.** GPU output is verified token-identical
+to the CPU path wherever tensor cores are not promoted; the promoted prefill
+path is held to a measured tolerance gate (`test-tc-tol`, run by `make test`)
+rather than an identity claim it cannot have; and certified architectures have
+pinned llama.cpp reference runs. Where a model is too numerically sensitive for
+token identity to mean anything — a KV-precision change inside one build moving
+its output more than switching engines does — that is measured and said, not
+waved at: see `scripts/sensitivity_floor.py`.
+
+## Build and platform support
 
 ```
 make          # produces ./runner
 make debug    # ASan/UBSan build for development
 ```
-
-## Platform support
 
 Plain C with a small platform layer (`src/compat.c`) — no dependencies beyond
 libc and pthreads. CI builds and smoke-tests every push on:
@@ -127,6 +139,58 @@ The fp16 kernels use ARM hardware half-floats when available and fall back to
 portable table lookups elsewhere. Little-endian hosts only (GGUF is
 little-endian; every mainstream x86/ARM/RISC-V system qualifies).
 
+## Get and fit a model
+
+Two ways:
+
+1. **`./download-model.sh`** fetches a small test model.
+2. **Any GGUF from Hugging Face**, e.g.:
+   ```
+   curl -L -O "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf"
+   ```
+
+Note: safetensors checkpoints must be converted to GGUF first — runner runs
+the converted GGUF.
+
+### Requantizing to fit a machine
+
+```
+./runner -m model-f16.gguf --quantize model-q4.gguf --quant q4_0
+```
+
+Rewrites a GGUF with its weight matrices converted to `q8_0`, `q4_0`, or
+`f16` — one downloaded model can be re-packed to fit each node's RAM/VRAM
+(258 MB f16 → 138 MB q8_0 → 74 MB q4_0 for a 135M model). Norms, biases and
+rope factors stay f32; tensors already smaller than the target are kept;
+metadata is copied verbatim. Output verified against reference quantizations
+of the same model.
+
+## Usage
+
+`runner --help` is the complete, authoritative option list — it ships with the
+binary you are actually running, so it cannot drift from it. What follows is
+the behaviour that a one-line flag description cannot carry.
+
+**Sampling defaults come from the model.** `--temp`, `--top-k`, `--top-p`,
+`--min-p` and `--repeat-penalty` default to the served family's published
+recommended settings, chosen from the GGUF's architecture and name and logged
+at load. `runner --caps` prints the whole preset table with a source for each
+entry; passing an option explicitly always overrides its preset.
+
+**`--gpu-layers` is a manual override, not the auto-fit knob.** Omit it and
+runner fits as many layers as the budget allows; `--gpu-layers 0` means *no
+GPU*, exactly like `--gpu off`.
+
+**Chat mode is stateful and auto-templated.** It keeps the KV cache across
+turns (no re-processing of history) and auto-detects the chat template (ChatML, Llama-2/3, Mistral, Zephyr, Phi-3,
+Gemma, Gemma-4) from the model's metadata and vocabulary. Mistral and Llama-2
+both frame turns with `[INST]`, and Phi-3 and Zephyr both use `<|role|>`, so
+detection keys on the terminator each one actually uses — a Mistral model gets
+no `<<SYS>>` block, which its own template rejects. Thinking-tuned models show their
+reasoning between `[thinking]` markers. The server additionally reuses the
+KV cache for the longest shared prompt prefix across requests, so repeated
+system/template prefixes skip prompt evaluation entirely.
+
 ## GPU
 
 Two backends implement the same small interface (`src/gpu_none.c` documents
@@ -139,7 +203,7 @@ path across every supported quant on both backends — on the scalar kernels.
 Since 2026-07-29 the tensor-core prefill GEMM is the *default* on gated dense
 (Q4_K, arch) combos (+47–77% prefill): that path is fp16-tile arithmetic,
 covered by a teacher-forced tolerance gate (0/64 top-1 flips on every
-promoted row; `make test-tc-tol`) instead of byte identity. Set
+promoted row; the `test-tc-tol` gate in `make test`) instead of byte identity. Set
 `RUNNER_CUDA_TC=0` to pin the byte-identical scalar path everywhere.
 
 **Metal (Apple Silicon):** model weights are wrapped **zero-copy** from the
@@ -183,7 +247,13 @@ prompt evaluation. Regenerate the PTX header after kernel changes with
 
 Vulkan (AMD/Intel) is not written yet — those machines run the CPU path.
 
-## Resource reservations
+## Sharing a machine
+
+Three pieces cover the case where runner is not the only thing on the box:
+a VRAM/RAM budget, one server that swaps between models, and a report a
+scheduler can read.
+
+### Resource reservations
 
 ```
 ./runner --serve -m model.gguf -c 0 --reserve 50
@@ -201,20 +271,7 @@ so the machine can be reclaimed without stopping the server; the next request
 reloads it transparently. `--ttl N` unloads automatically after N idle
 seconds (default: 300 in swap mode, never in single-model mode).
 
-## Fitting models to machines (requantizer)
-
-```
-./runner -m model-f16.gguf --quantize model-q4.gguf --quant q4_0
-```
-
-Rewrites a GGUF with its weight matrices converted to `q8_0`, `q4_0`, or
-`f16` — one downloaded model can be re-packed to fit each node's RAM/VRAM
-(258 MB f16 → 138 MB q8_0 → 74 MB q4_0 for a 135M model). Norms, biases and
-rope factors stay f32; tensors already smaller than the target are kept;
-metadata is copied verbatim. Output verified against reference quantizations
-of the same model.
-
-## Serving multiple models (swap mode)
+### Serving multiple models (swap mode)
 
 ```
 ./runner -m "clu=qwen3-14b.gguf,bit=qwen3-4b.gguf" --serve --ttl 300
@@ -228,7 +285,7 @@ reports the resident model. Swap mode uses a single inference slot
 (matching one-model-per-GPU scheduling); use `--parallel` with a single
 model when you want concurrent slots instead.
 
-## Machine capability report
+### Machine capability report
 
 `runner --caps` prints what a scheduler needs to place work on a node:
 
@@ -242,22 +299,10 @@ CUDA capability reports include `"min_compute_capability":"7.5"` and
 `"ptx_target":"sm_75"` so schedulers can avoid placing offload work on older
 NVIDIA GPUs that will fall back to CPU.
 
-## Get a model
+## Large contexts
 
-Two ways:
-
-1. **`./download-model.sh`** fetches a small test model.
-2. **Any GGUF from Hugging Face**, e.g.:
-   ```
-   curl -L -O "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf"
-   ```
-
-Note: safetensors checkpoints must be converted to GGUF first — runner runs
-the converted GGUF.
-
-## Large contexts on small models
-
-This is runner's specialty. Three pieces work together:
+Running a context far larger than a model was trained for is runner's
+specialty. Three pieces work together:
 
 - **Automatic context extension.** Ask for more context than the model was
   trained on (`-c 8192` on a 2k model) and runner applies YaRN rope scaling
@@ -637,81 +682,14 @@ Rules of thumb, in order of impact:
    that, chunk the work (map-reduce) or retrieve only relevant passages
    instead of stuffing the window.
 
-## Usage
-
-```
-runner -m model [options]
-
-  -m PATH        GGUF model file
-  -p TEXT        prompt (one-shot completion; \n etc. are unescaped)
-  -f FILE        read prompt from file (appended after -p text)
-  -i             interactive chat mode
-  --serve        HTTP server mode (OpenAI-compatible API)
-  --port N       server port (default 8080)
-  --parallel N   parallel inference slots in server mode (default 1)
-  --json         constrain output to a single valid JSON object
-  --json-schema F constrain output to the JSON Schema in file F
-  --quantize OUT rewrite the model to OUT.gguf (see --quant) and exit
-  --quant T      quantize target: q8_0 | q4_0 | f16 (default q4_0)
-  --ttl N        swap mode: unload an idle model after N seconds (default 300)
-  -n N           max new tokens (default 256, -1 = until EOS)
-  -c N           context length (default: min(model max, 4096));
-                 beyond the training context, YaRN is applied automatically
-  -b N           prompt batch size (default 64)
-  -t N           threads (default: physical cores, capped at 64)
-  -s N           RNG seed
-  --temp F       temperature (0 = greedy: the model's argmax, with no
-                 repeat penalty applied)
-  --top-k N      top-k sampling (0 = off)
-  --top-p F      nucleus sampling
-  --min-p F      min-p vs the top candidate (0 = off)
-  --repeat-penalty F   penalty on recently emitted tokens (1 = off)
-                 The five options above default to the served model family's
-                 published recommended settings, chosen from the GGUF's
-                 architecture and name and logged at load. `runner --caps`
-                 prints the whole preset table with a source for each entry;
-                 an option given explicitly always overrides its preset.
-  --rope-scale F force linear rope position scaling
-  --rope-base F  override rope frequency base
-  --system TEXT  system prompt for chat mode
-  --chat-template chatml|llama2|llama3|mistral|zephyr|phi3|gemma|gemma4|apertus|ornith|raw
-                 (default: auto)
-  --no-bos       don't prepend BOS
-  --ignore-eos   keep generating past end-of-text tokens
-  --gpu auto|off GPU offload if a backend is available (default auto)
-  --gpu-layers N force N leading layers onto the GPU (0 = auto-fit)
-  --cpu-moe [N|auto]  keep sparse MoE expert FFNs in RAM while CUDA runs the
-                 attention and other dense tensors
-  --wait-for-vram [S]  queue up to S seconds (default 300) when another
-                 registered runner holds the GPU, instead of refusing
-  --kv f16|q8    KV cache storage (default f16); q8 halves it, CPU and CUDA
-  --draft PATH   small same-vocab GGUF for speculative decoding
-  --draft-k N    draft tokens per round (default 4)
-  --bench-json   run a small decode benchmark and print JSON metrics
-  --caps         print machine capabilities as JSON and exit
-  --version      print the runner version and exit
-  --parent-pid N exit when process N dies (supervisor cleanup)
-  -v             print model hyperparameters and memory use
-```
-
-Chat mode keeps the KV cache across turns (no re-processing of history) and
-auto-detects the chat template (ChatML, Llama-2/3, Mistral, Zephyr, Phi-3,
-Gemma, Gemma-4) from the model's metadata and vocabulary. Mistral and Llama-2
-both frame turns with `[INST]`, and Phi-3 and Zephyr both use `<|role|>`, so
-detection keys on the terminator each one actually uses — a Mistral model gets
-no `<<SYS>>` block, which its own template rejects. Thinking-tuned models show their
-reasoning between `[thinking]` markers. The server additionally reuses the
-KV cache for the longest shared prompt prefix across requests, so repeated
-system/template prefixes skip prompt evaluation entirely.
-
 ## What's implemented
 
 | Area | Support |
 |---|---|
 | File format | GGUF v2/v3, memory-mapped (weights are never copied) |
-| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention; CPU + CUDA), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it) including the **E-series** (E2B/E4B: per-layer embeddings folded into every layer's residual, plus a tail of layers that own no KV cache and read an earlier layer's — CPU + CUDA, byte-identical to each other at full and every partial offload; agreement with llama.cpp is measured at the quantisation noise floor rather than as token identity, see `scripts/token_divergence.py` and `scripts/sensitivity_floor.py`), `qwen3moe` and Mixtral-style sparse **MoE** (top-k router, renormalized weights, per-expert SwiGLU; fused and legacy-split expert layouts; CPU + CUDA; Qwen3-30B-A3B measured at ~72 tok/s on an RTX PRO 6000 Blackwell 24 GB MIG slice — see docs/moe-support.md and docs/benchmarks.md), plus gemma-4's GELU **dual-branch MoE** (a dense shared GELU FFN summed with routed fused-`gate_up` experts, per-expert down scales, pre/post sandwich norms; CPU + CUDA; CPU/GPU-identical on gemma-4-26B-A4B-it. **Not** gated on token identity against llama.cpp: that model is numerically chaotic — a KV-cache precision change *inside one runner build* moves its greedy output on more prompts than switching engines does — so exact-text agreement is not achievable for it on any engine pair. See `scripts/sensitivity_floor.py` and `tests/compatibility/out/divergence-study-gemma4-moe-2026-08-01.json`). |
+| Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention; CPU + CUDA), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it) including the **E-series** (E2B/E4B: per-layer embeddings folded into every layer's residual, plus a tail of layers that own no KV cache and read an earlier layer's — CPU + CUDA, byte-identical to each other at full and every partial offload; agreement with llama.cpp is measured at the quantisation noise floor rather than as token identity, see `scripts/token_divergence.py` and `scripts/sensitivity_floor.py`), `gpt-oss` (per-head attention sinks that join the softmax max and denominator with no value row, clamped alpha-sigmoid GLU, router and per-expert biases, MXFP4 experts; CPU + CUDA, GPU/CPU byte-identical at whole-graph offload), `qwen3moe` and Mixtral-style sparse **MoE** (top-k router, renormalized weights, per-expert SwiGLU; fused and legacy-split expert layouts; CPU + CUDA; Qwen3-30B-A3B measured at ~72 tok/s on an RTX PRO 6000 Blackwell 24 GB MIG slice — see docs/moe-support.md and docs/benchmarks.md), plus gemma-4's GELU **dual-branch MoE** (a dense shared GELU FFN summed with routed fused-`gate_up` experts, per-expert down scales, pre/post sandwich norms; CPU + CUDA; CPU/GPU-identical on gemma-4-26B-A4B-it. **Not** gated on token identity against llama.cpp: that model is numerically chaotic — a KV-cache precision change *inside one runner build* moves its greedy output on more prompts than switching engines does — so exact-text agreement is not achievable for it on any engine pair. See `scripts/sensitivity_floor.py` and `tests/compatibility/out/divergence-study-gemma4-moe-2026-08-01.json`). |
 | Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, `tekken` (Mistral Nemo/Small and Apertus: case-split letter runs, single digits), and the original GPT-2 regex as the default. gemma4 adds an SPM-style BPE: spaces normalize to U+2581 and merges run over raw UTF-8, with `<0xNN>` byte fallback for characters the vocabulary has no piece for |
-| Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS — every commonly served quant |
+| Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4 (gpt-oss; CPU + CUDA) — every commonly served quant. `--caps` prints the live list, plus a separate `gpu_quants`, because a few are CPU-only |
 | Long context | fp16 KV cache, batched prompt eval, YaRN / linear / llama-3 freq-factor rope scaling with auto-extension |
 | Transformer | RMSNorm, RoPE (adjacent-pair and NeoX), grouped-query attention, SwiGLU, tied embeddings |
 | Sampling | temperature, top-k, top-p, min-p, repeat penalty, greedy; suppress-token bias; JSON and JSON-Schema constrained decoding; speculative decoding with a draft model |
