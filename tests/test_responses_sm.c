@@ -18,10 +18,11 @@
 // Plus the invariant the framer alone can guarantee: `sequence_number` is
 // monotonic from 0 with no gaps, because nothing else assigns it.
 //
-// The state machine is `static` inside server.c, so this file includes that
-// translation unit and links the rest of the engine around it. Events are
-// captured through a socketpair — the real send path, not a stub, so a
-// framing bug that only shows up in the bytes still fails here.
+// The state machine is `static` inside src/completion.c (it was server.c
+// before RNR-019 split generation and wire framing out), so this file
+// includes that translation unit and links the rest of the engine around it.
+// Events are captured through a socketpair — the real send path, not a stub,
+// so a framing bug that only shows up in the bytes still fails here.
 #include "runner.h"
 
 #include <assert.h>
@@ -31,7 +32,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "../src/server.c"
+#include "../src/completion.c"
 
 static int g_fail = 0;
 
