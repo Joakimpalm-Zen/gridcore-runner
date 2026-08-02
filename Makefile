@@ -243,7 +243,6 @@ TEST_MOE_ROUTER_SRC = tests/test_moe_router.c src/gguf.c src/compat.c src/quants
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_MOE_ROUTER): $(TEST_MOE_ROUTER_SRC) src/runner.h
 	$(CC) $(CFLAGS) -I src $(TEST_MOE_ROUTER_SRC) -o $@ $(LDFLAGS)
-
 # the Responses framing state machine, driven directly over a socketpair.
 # Includes server.c (the framer is static there) and links the engine around
 # it — same object set as the runner minus main.c.
@@ -343,6 +342,13 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(PYTHON) scripts/make-test-moe.py test-moe-fixture
 	./$(TEST_MOE_TOL) test-moe-fixture.moe4.gguf
 	./$(TEST_MOE_ROUTER) test-moe-fixture
+	@# Llama-4 attention knobs: NoPE and the position-dependent temperature
+	@mkdir -p test-attn
+	$(PYTHON) scripts/make-test-model.py test-attn/k_off.gguf
+	$(PYTHON) scripts/make-test-model.py --attn-knobs 1,0.0 test-attn/k_nope.gguf
+	$(PYTHON) scripts/make-test-model.py --attn-knobs 2,0.0 test-attn/k_half.gguf
+	$(PYTHON) scripts/make-test-model.py --attn-knobs 1,0.1 test-attn/k_temp.gguf
+	$(PYTHON) -m pytest -q tests/test_attn_knobs.py
 	./$(TEST_QUANTIZE)
 	./$(TEST_VRAM_ROLLBACK)
 	./$(TEST_GGUF_GETTERS)
@@ -471,6 +477,7 @@ clean:
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
+	rm -rf test-attn
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
 	rm -f metal-init-fallback.out metal-init-fallback.err
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))

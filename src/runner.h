@@ -415,6 +415,15 @@ typedef struct {
     int    n_group_used;         // groups kept when n_expert_groups > 1
     float  expert_w_scale;       // 0 or 1 = no scaling
     bool   expert_norm_w;        // renormalize the selected weights
+    // Llama-4 attention knobs. Both default off, so every other arch is
+    // untouched. NoPE: every no_rope_layer_step-th layer skips rope entirely.
+    // Attention temperature: on those SAME layers (and only those — it is the
+    // else-branch of the rope test in llama.cpp's llama4 graph) Q is scaled by
+    // a per-token factor that grows with position.
+    int    no_rope_layer_step;    // 0 = every layer ropes
+    int    attn_temp_floor_scale;
+    float  attn_temp_scale;
+    float  attn_temp_offset;
     bool   swa_rope_global;
     bool   gptoss;           // gpt-oss: attention sinks + swiglu_oai + MoE
                              // biases; no GPU kernels for those yet
@@ -882,6 +891,20 @@ static inline bool model_moe_router_is_plain(const model_t *m) {
     return m->expert_gating == EXPERT_GATE_SOFTMAX &&
            m->n_expert_groups <= 1 && m->expert_norm_w &&
            (m->expert_w_scale == 0.0f || m->expert_w_scale == 1.0f);
+}
+// Does layer l apply rope? llama.cpp: n_no_rope_layer_step > 0 &&
+// (il + 1) % n_no_rope_layer_step != 0.
+static inline bool model_layer_ropes(const model_t *m, int l) {
+    return !(m->no_rope_layer_step > 0 &&
+             (l + 1) % m->no_rope_layer_step == 0);
+}
+// The per-token Q scale a NoPE layer applies, from llama.cpp's
+// llm_graph_input_attn_temp::set_input. Returns 1 when the knob is off.
+static inline float model_attn_temp(const model_t *m, int pos) {
+    if (m->attn_temp_scale == 0.0f || m->attn_temp_floor_scale == 0) return 1.0f;
+    return logf(floorf(((float)pos + m->attn_temp_offset) /
+                       (float)m->attn_temp_floor_scale) + 1.0f)
+           * m->attn_temp_scale + 1.0f;
 }
 static inline float model_rope_mscale(const model_t *m, int l) {
     bool local = m->l_is_swa != NULL && m->l_is_swa[l];

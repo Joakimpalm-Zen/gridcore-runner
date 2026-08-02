@@ -5,6 +5,27 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Llama-4 attention knobs: NoPE and the position-dependent attention
+  temperature.** Every `no_rope_layer_step`-th layer skips rope entirely, and
+  on *those same layers* — it is the else-branch of the rope test in
+  llama.cpp's llama4 graph, not a separate pass — Q is scaled by
+  `log(floor((pos + offset) / floor_scale) + 1) * scale + 1`. Both default off,
+  and Qwen2.5-7B, gemma-4-E4B and gpt-oss are byte-identical across the change.
+  CPU and CUDA both implement it, so the two backends cannot diverge; the
+  multi-sequence batch path declines a NoPE model instead, because it keeps
+  positions on the device and would have to scale with the wrong factor — the
+  caller then decodes sequentially, the retreat it already takes for a bad
+  index.
+
+  Gated by `tests/test_attn_knobs.py` reading the activation trace, because
+  greedy text sees none of this: all four fixtures generate byte-identical
+  output while their layer-0 Q rows plainly differ. Two of the three checks
+  fail on a knob-blind binary, so the gate can fail.
+
+  One check exists to stop a "fix": the temperature is **exactly 1.0 below
+  position 8191**, since `floor(pos / 8192)` is 0 there and `log(1) = 0`. That
+  reads as a dead knob and matches the reference.
+
 - **`top_k` is served by selection instead of by sorting the vocabulary, and
   that is most models.** The sampler's head fast path could only satisfy top-k
   by widening until the head held `k` entries, and its loosening schedule

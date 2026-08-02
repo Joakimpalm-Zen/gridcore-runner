@@ -20,6 +20,8 @@ MTP_LAYERS = 0   # extra trailing blocks declared as NextN/MTP predictor heads
 # cache. Both mechanisms are structural, so a tiny random model exercises the
 # load-time geometry, the aliased cache reads and the extra forward stage
 # without needing the 5 GB real file.
+ATTN_NOPE_STEP = 0
+ATTN_TEMP_SCALE = 0.0
 ESERIES_SHARED_KV = 0
 ESERIES_PLE = 0
 args = sys.argv[1:]
@@ -41,6 +43,12 @@ while i < len(args):
         i += 1
         AGENT_PROFILE = True
         AGENT_FEATURES.append(args[i])
+    elif a == "--attn-knobs":
+        # "STEP,TEMPSCALE" — NoPE every STEP-th layer, and the Llama-4
+        # attention temperature on those layers (0 disables the temperature).
+        i += 1
+        _st, _ts = args[i].split(",")
+        ATTN_NOPE_STEP, ATTN_TEMP_SCALE = int(_st), float(_ts)
     elif a == "--eseries":
         # --eseries SHARED_KV,PLE_DIM  (e.g. "3,16" on the default 6 layers)
         i += 1
@@ -200,6 +208,13 @@ if ESERIES_SHARED_KV or ESERIES_PLE:
     if ESERIES_PLE:
         meta_kvs.append(
             kv_u32(f"{ARCH}.embedding_length_per_layer_input", ESERIES_PLE))
+if ATTN_NOPE_STEP:
+    meta_kvs += [
+        kv_u32(f"{ARCH}.attention.no_rope_layer_step", ATTN_NOPE_STEP),
+        kv_u32(f"{ARCH}.attention.attn_temp_floor_scale", 8192),
+        kv_f32(f"{ARCH}.attention.attn_temp_scale", ATTN_TEMP_SCALE),
+        kv_f32(f"{ARCH}.attention.attn_temp_offset", 1.0),
+    ]
 if MTP_LAYERS:
     meta_kvs.append(kv_u32(f"{ARCH}.nextn_predict_layers", MTP_LAYERS))
 if AGENT_PROFILE:

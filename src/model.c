@@ -880,6 +880,15 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             m->kv_src[i] = src;
         }
     }
+    // Llama-4 attention knobs, off unless the GGUF asks for them.
+    m->no_rope_layer_step   = (int)gguf_get_u32(g, AK("attention.no_rope_layer_step"), 0);
+    m->attn_temp_floor_scale = (int)gguf_get_u32(g, AK("attention.attn_temp_floor_scale"), 0);
+    m->attn_temp_scale       = gguf_get_f32(g, AK("attention.attn_temp_scale"), 0.0f);
+    m->attn_temp_offset      = gguf_get_f32(g, AK("attention.attn_temp_offset"), 1.0f);
+    if (m->no_rope_layer_step < 0) {
+        fprintf(stderr, "error: negative no_rope_layer_step\n");
+        return false;
+    }
     m->n_expert = (int)gguf_get_u32(g, AK("expert_count"), 0);
     if (m->n_expert > 0) {
         // sparse-MoE (Mixtral / Qwen3-MoE): softmax-over-all router, top-k
@@ -2552,7 +2561,17 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             if (ly->qnorm_w)
                 qk_norm(m->q + (size_t)b * q_dim, ly->qnorm_w, m->n_head,
                         hd, m->rms_eps);
-            rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b, l);
+            if (model_layer_ropes(m, l)) {
+                rope_apply(m, m->q + (size_t)b * q_dim, m->n_head, pos + b, l);
+            } else {
+                // NoPE layer: no rotation, and THIS is where the attention
+                // temperature applies — llama.cpp scales Q only on the layers
+                // that skipped rope, not on every layer.
+                float ts = model_attn_temp(m, pos + b);
+                if (ts != 1.0f)
+                    for (int i = 0; i < q_dim; i++)
+                        m->q[(size_t)b * q_dim + i] *= ts;
+            }
             if (!owns_kv) continue;
             if (m->v_rmsnorm)
                 // gemma4: weightless per-head RMS norm on V (pre-K-norm values)
@@ -2560,7 +2579,8 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             if (ly->knorm_w)
                 qk_norm(m->k_tmp + (size_t)b * kv_dim, ly->knorm_w, n_kv,
                         hd, m->rms_eps);
-            rope_apply(m, m->k_tmp + (size_t)b * kv_dim, n_kv, pos + b, l);
+            if (model_layer_ropes(m, l))
+                rope_apply(m, m->k_tmp + (size_t)b * kv_dim, n_kv, pos + b, l);
             uint8_t *kc = kc_l + (size_t)(pos + b) * row_b;
             uint8_t *vc = vc_l + (size_t)(pos + b) * row_b;
             if (m->kv_q8) {

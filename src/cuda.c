@@ -1791,6 +1791,24 @@ static bool enc_scale(gpu_t *g, CUdeviceptr x, float s, int n, int batch, int xs
     return launch(g, g->sw->f_scale, (n + 255) / 256, batch, 1, 256, p);
 }
 
+// NoPE + attention temperature, mirroring the CPU tail. A NoPE layer skips
+// rope and instead scales Q by a per-token factor that grows with position;
+// the factor differs per token, so this is one enc_scale per column rather
+// than one for the tile. Only reached by a model that declares the knob.
+static bool enc_rope_or_temp(gpu_t *g, model_t *m, CUdeviceptr q, int n_heads,
+                             int tn, int q_dim, int l, int pos,
+                             bool (*rope)(gpu_t *, model_t *, CUdeviceptr, int, int, int, int)) {
+    if (model_layer_ropes(m, l)) return rope(g, m, q, n_heads, tn, q_dim, l);
+    for (int b = 0; b < tn; b++) {
+        float ts = model_attn_temp(m, pos + b);
+        if (ts == 1.0f) continue;
+        CUdeviceptr col = q + (CUdeviceptr)((size_t)b * q_dim * sizeof(float));
+        if (!enc_scale(g, col, ts, q_dim, 1, q_dim)) return false;
+    }
+    return true;
+}
+
+
 static bool enc_add(gpu_t *g, CUdeviceptr x, CUdeviceptr d, int n,
                     int batch, int xs, int ds) {
     void *p[] = { &x, &d, &n, &xs, &ds };
@@ -2748,7 +2766,8 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             // weightless per-head RMS norm on V (pre-K-norm values)
             ok = ok && enc_qknorm(g, m, g->vt, g->sw->ones, n_kv, hd, tn, kv_dim);
         if (g->sw->kn[l]) ok = ok && enc_qknorm(g, m, g->kt, g->sw->kn[l], n_kv, hd, tn, kv_dim);
-        ok = ok && enc_rope(g, m, g->kt, n_kv, tn, kv_dim, l);
+        if (model_layer_ropes(m, l))
+            ok = ok && enc_rope(g, m, g->kt, n_kv, tn, kv_dim, l);
 
         {
             // cache rows for consecutive positions are contiguous, so the
@@ -2765,7 +2784,8 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
     kv_done:
         if (g->sw->qn[l]) ok = ok && enc_qknorm(g, m, g->q,  g->sw->qn[l], m->n_head, hd, tn, q_dim);
         prof_mark(g, PH_NORM);
-        ok = ok && enc_rope(g, m, g->q, m->n_head, tn, q_dim, l);
+        ok = ok && enc_rope_or_temp(g, m, g->q, m->n_head, tn, q_dim, l,
+                                    pos, enc_rope);
         prof_mark(g, PH_ROPE);
 
         {
@@ -3153,6 +3173,12 @@ bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
     // rather than launch against garbage — the caller then decodes sequentially.
     for (int i = 0; i < n; i++)
         if (idx[i] < 0 || idx[i] >= b->n) return false;
+    // NoPE layers need a per-token Q scale derived from each column's
+    // position, and this path keeps positions on the device. Decline rather
+    // than scale with the wrong factor; the caller decodes sequentially,
+    // which is the same retreat it already takes for a bad index.
+    if (b->n > 0 && b->seqs[idx[0]] && b->seqs[idx[0]]->no_rope_layer_step > 0)
+        return false;
     // A microbatch of one is just a decode step with extra staging, and the
     // solo path is better at it: narrower matvec kernels, x straight from
     // global, and a graph that is already warm. Hand it over rather than
