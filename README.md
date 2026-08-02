@@ -62,43 +62,52 @@ Then point it at any GGUF model:
 **Small enough to own outright, strict enough to build on.** llama.cpp is
 broader and faster; runner exists for the case llama.cpp structurally can't
 fill — an engine a larger system can read to the last line, change without
-asking anyone, and hold to an exact serving contract.
+asking anyone, and hold to an exact serving contract. One C codebase, one
+`make`, no ggml split, no CMake, no submodules. `/health` in the accept loop,
+`--parent-pid` supervisor lifetime, speculative decoding under `--serve`: each
+was a same-day change here, and a feature request against a 300k-line upstream.
 
-**Schema conformance is the product, not a plugin.** runner compiles a JSON
-Schema into a validator that *drives sampling* — properties emit in declared
-order, unknown keys are impossible, and a call cut off by the token budget
-still parses. On the [agent-torture suite](docs/agent-torture.md) (same model,
-same box, every runtime a `--runtime` target) that reads out as **12/12 valid
-tool calls vs 5/12 for llama.cpp and Ollama** — and the gap is exactly the
-schema cases: deep nested arguments, or truncation mid-call, where free
-generation emits unparseable JSON and schema-driven sampling can't. On a model
-small enough that llama.cpp's template path lands *no* parseable call (3/12),
-runner still hits 12/12. Bring your nastiest schema; the suite is built to be
-reproduced and contested.
+**Schema conformance is the default path, and it holds under stress.**
+Constrained decoding is not novel — llama.cpp compiles JSON Schema to GBNF
+behind `response_format`, and Ollama takes a schema in `format`. The claim here
+is narrower and measurable: runner's validator drives sampling on the path a
+tool call actually takes, so properties emit in declared order, unknown keys
+are impossible, and **a call cut off by the token budget still parses**. On the
+[agent-torture suite](docs/agent-torture.md) (same model, same box, every
+runtime a `--runtime` target) that reads out as **12/12 valid tool calls vs
+5/12 for llama.cpp and Ollama** — and the gap is exactly the hard cases: deep
+nested arguments and truncation mid-call. On a model small enough that
+llama.cpp's template path lands *no* parseable call (3/12), runner still hits
+12/12. Bring your nastiest schema; the suite is built to be reproduced and
+contested.
 
-**The whole engine bends in an afternoon.** One C codebase, one `make`, no ggml
-split, no CMake, no submodules — one person holds all of it. `/health` in the
-accept loop, `--parent-pid` supervisor lifetime, speculative decoding under
-`--serve`: a same-day change here is a feature request and a wait against a
-300k-line upstream.
+**Deployment is one file, and nothing beside it.** llamafile got to driver-only
+GPU first, by bundling tinyBLAS libraries next to the model; runner takes the
+other route — CUDA rides the driver API with the **PTX embedded in the
+executable**, so there is no toolkit, no cuBLAS, and no accompanying DLLs to
+ship or version. Copy the binary to a node with an NVIDIA Turing / compute
+capability 7.5 or newer GPU and a driver and it offloads; older or unsupported
+NVIDIA GPUs, and machines without a driver, run the CPU path. No build matrix
+for a fleet.
 
-**Deployment is one static file.** CUDA rides the driver API with embedded
-PTX — no toolkit, no cuBLAS, no DLLs. Copy the binary to a node with an
-NVIDIA Turing / compute capability 7.5 or newer GPU and a driver and it
-offloads; older or unsupported NVIDIA GPUs, and machines without a driver, run
-the CPU path. No build matrix for a fleet.
-
-**Fleet primitives are built in, not bolted on.** Multi-model swap with
-per-request selection and idle TTL, `--caps` machine reports, `--reserve` VRAM
-budgeting with auto-fit context, `/unload`, `--parent-pid`. The llama.cpp
-equivalent is llama-server + llama-swap + supervision scripts; here it's the
-one binary you already shipped.
+**Built for a scheduler to place, not just for a user to run.** Model swapping
+is table stakes — Ollama has done it natively for ages, with `keep_alive`, LRU
+eviction and more than one model resident; runner keeps exactly one and is not
+trying to win that. What is harder to find anywhere is the placement side:
+`--caps` emits a machine report (cores, RAM, GPU, compute capability, the quant
+lists the CPU and GPU each support) for a scheduler to read *before* dispatching
+work, `--reserve P` caps the process at a percentage of total VRAM and RAM with
+the context auto-fit to what is left, and `--parent-pid` ties the process's life
+to its supervisor. The llama.cpp equivalent of the whole set is llama-server +
+llama-swap + supervision scripts.
 
 **No `--host` flag to get wrong.** runner binds `127.0.0.1` with no override —
 no flag, no env var, no config key. The defaults match llama-server and
-Ollama; the difference is they kept the escape hatch. (In January 2026 ~175,000
-Ollama instances sat exposed — no auth, nearly half with tool calling on, i.e.
-an open shell — one afternoon's `0.0.0.0` at a time.) It's a gate, not a hope:
+Ollama; the difference is they kept the escape hatch. (SentinelLABS and Censys
+found **175,000 Ollama hosts reachable from the internet** across 130 countries
+in January 2026, *nearly half with tool calling enabled* — an open shell, where
+those are also unauthenticated; a separate LeakIX scan confirmed zero auth on
+12,269 of them. One afternoon's `0.0.0.0` at a time.) It's a gate, not a hope:
 `tests/test_bind.c` and `tests/conformance/test_loopback_bind.py` fail the build
 if the bind ever moves. Remote access belongs behind a reverse proxy, SSH
 tunnel, or Tailscale — where auth and TLS live, not hand-rolled in an inference
