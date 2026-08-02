@@ -502,6 +502,7 @@ const char *const *model_supported_archs(size_t *count) {
     static const char *const arches[] = {
         "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
         "smollm", "stablelm", "gemma3", "gemma4", "phi3", "gpt-oss",
+        "apertus",
     };
     if (count) *count = sizeof(arches) / sizeof(arches[0]);
     return arches;
@@ -758,6 +759,41 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             m->ssm_v_heads % m->ssm_groups != 0) {
             fprintf(stderr, "error: invalid qwen35 Gated DeltaNet geometry\n");
             return false;
+        }
+    }
+    if (strcmp(arch, "apertus") == 0) {
+        // Apertus: ungated MLP (no ffn_gate) with the xIELU activation, whose
+        // four parameters are published per layer.
+        m->ffn_act = ACT_XIELU;
+        if (m->n_layer < 1 || m->n_layer > 100000) {
+            fprintf(stderr, "error: apertus block_count %d out of range\n", m->n_layer);
+            return false;
+        }
+        size_t nl = (size_t)(unsigned)m->n_layer;
+        m->xielu_an  = malloc(sizeof(float) * nl);
+        m->xielu_ap  = malloc(sizeof(float) * nl);
+        m->xielu_b   = malloc(sizeof(float) * nl);
+        m->xielu_eps = malloc(sizeof(float) * nl);
+        if (!m->xielu_an || !m->xielu_ap || !m->xielu_b || !m->xielu_eps)
+            return false;
+        // The keys are NOT architecture-prefixed (llama.cpp spells them
+        // "xielu.alpha_n", not "apertus.xielu.alpha_n") and may be a scalar
+        // shared by every layer or a per-layer array.
+        static const struct { const char *key; size_t off; float dflt; } XK[] = {
+            { "xielu.alpha_n", 0, 0.8f }, { "xielu.alpha_p", 1, 0.8f },
+            { "xielu.beta",    2, 0.5f }, { "xielu.eps",     3, -1e-6f },
+        };
+        float *dst[4] = { m->xielu_an, m->xielu_ap, m->xielu_b, m->xielu_eps };
+        for (int k = 0; k < 4; k++) {
+            gguf_kv *a = gguf_get(g, XK[k].key);
+            float scalar = gguf_get_f32(g, XK[k].key, XK[k].dflt);
+            for (int i = 0; i < m->n_layer; i++) {
+                float v = scalar;
+                if (a && a->arr_raw && a->arr_type == GGUF_T_F32 &&
+                    (uint64_t)i < a->arr_n)
+                    v = ((const float *)a->arr_raw)[i];
+                dst[XK[k].off][i] = v;
+            }
         }
     }
     if (strcmp(arch, "gemma4") == 0) {
@@ -1131,7 +1167,12 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             l->wv     = m->v_rmsnorm ? opt_tensor(g, "blk.%d.attn_v.weight", i)
                                      : need_tensor(g, "blk.%d.attn_v.weight", i, &ok);
             if (m->n_expert == 0) {
-                l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
+                // Apertus has no ffn_gate: its MLP is up -> xielu -> down.
+                // Every other dense arch here is gated, so the tensor stays
+                // required unless the activation is the ungated one.
+                l->w_gate = m->ffn_act == ACT_XIELU
+                            ? opt_tensor(g, "blk.%d.ffn_gate.weight", i)
+                            : need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
                 l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
             }
         }
@@ -1630,6 +1671,7 @@ void model_free(model_t *m) {
     free(m->ssm_cw);
     free(m->ssm_conv_state); free(m->ssm_state_mem);
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
+    free(m->xielu_an); free(m->xielu_ap); free(m->xielu_b); free(m->xielu_eps);
     free(m->shexp_in); free(m->shexp_o); free(m->shexp_g); free(m->shexp_u);
     free(m->moe_logits); free(m->moe_sel_scores); free(m->moe_group_score);
     free(m->moe_gate); free(m->moe_up);
@@ -2711,10 +2753,20 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             moe_ffn(m, ly, n, xdim);   // reads normed m->xb, writes FFN out to m->xb
             shexp_add(m, ly, m->shexp_in, n, xdim);
         } else {
+        if (!ly->w_gate) {
+            // ungated MLP (Apertus): up -> xielu -> down, no gate branch
+            int l_i = (int)(ly - m->layers);
+            matvec_b(m->tp, m->hb, m->n_ff, ly->w_up, m->xb, xdim, n_embd, m->n_ff, NULL, n);
+            float an = m->xielu_an[l_i], ap = m->xielu_ap[l_i];
+            float bb = m->xielu_b[l_i],  ep = m->xielu_eps[l_i];
+            for (size_t i = 0; i < (size_t)n * m->n_ff; i++)
+                m->hb[i] = xielu(m->hb[i], an, ap, bb, ep);
+        } else {
         matvec_b(m->tp, m->hb,  m->n_ff, ly->w_gate, m->xb, xdim, n_embd, m->n_ff, NULL, n);
         matvec_b(m->tp, m->hb2, m->n_ff, ly->w_up,   m->xb, xdim, n_embd, m->n_ff, NULL, n);
         for (size_t i = 0; i < (size_t)n * m->n_ff; i++)
             m->hb[i] = gated_act(m->ffn_act, m->hb[i], m->hb2[i]);
+        }
         if (dbg) dbg_stat("ffn-act", l, m->hb + (size_t)(n - 1) * m->n_ff, m->n_ff);
         matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, m->n_ff, m->n_ff, n_embd, NULL, n);
         }

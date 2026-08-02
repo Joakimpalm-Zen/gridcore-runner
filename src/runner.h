@@ -417,6 +417,8 @@ typedef struct {
     // softmax + top-k + renormalize path every currently-certified MoE uses,
     // so an arch that sets none of these is bit-for-bit unaffected.
     int    expert_gating;        // EXPERT_GATE_* above
+    // xIELU parameters, one per layer (Apertus publishes them as arrays).
+    float *xielu_an, *xielu_ap, *xielu_b, *xielu_eps;
     int    n_ff_shexp;           // shared-expert FFN width (0 = no shared expert)
     int    n_expert_groups;      // >1 enables group-limited top-k (DeepSeek V3)
     int    n_group_used;         // groups kept when n_expert_groups > 1
@@ -857,7 +859,18 @@ enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
 //   x = min(gate, limit); y = clamp(up, -limit, limit)
 //   out = (x / (1 + exp(-alpha*x))) * (y + 1)
 // Plain SwiGLU here is silently-wrong output, which is why it is its own op.
-enum { ACT_SILU = 0, ACT_GELU = 1, ACT_SWIGLU_OAI = 2 };
+enum { ACT_SILU = 0, ACT_GELU = 1, ACT_SWIGLU_OAI = 2, ACT_XIELU = 3 };
+
+// xIELU (Apertus). Transcribed from ggml's op_xielu:
+//   x >  0 : alpha_p * x^2 + beta * x
+//   x <= 0 : (expm1(min(x, eps)) - x) * alpha_n + beta * x
+// Unlike every other activation here it is UNGATED — Apertus has no
+// ffn_gate tensor, so the FFN is up -> xielu -> down.
+static inline float xielu(float x, float an, float ap, float b, float eps) {
+    if (x > 0.0f) return ap * x * x + b * x;
+    float mn = x < eps ? x : eps;
+    return (expm1f(mn) - x) * an + b * x;
+}
 
 // Router gating functions, numbered as llama.cpp's llama_expert_gating_func_type
 // so a GGUF's expert_gating_func value maps across without translation.

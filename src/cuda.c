@@ -1332,6 +1332,13 @@ bool gpu_init(model_t *m) {
                 "running on CPU\n");
         goto unsupported;
     }
+    // xIELU has no device kernel, and an ungated MLP has no device path
+    // either (the dense FFN encoder always issues a gate matvec).
+    if (m->ffn_act == ACT_XIELU) {
+        fprintf(stderr, "gpu: xIELU / ungated MLP has no device kernel — "
+                "running on CPU\n");
+        goto unsupported;
+    }
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];

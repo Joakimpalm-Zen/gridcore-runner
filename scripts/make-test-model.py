@@ -20,6 +20,7 @@ MTP_LAYERS = 0   # extra trailing blocks declared as NextN/MTP predictor heads
 # cache. Both mechanisms are structural, so a tiny random model exercises the
 # load-time geometry, the aliased cache reads and the extra forward stage
 # without needing the 5 GB real file.
+APERTUS = None
 ATTN_NOPE_STEP = 0
 ATTN_TEMP_SCALE = 0.0
 ESERIES_SHARED_KV = 0
@@ -43,6 +44,13 @@ while i < len(args):
         i += 1
         AGENT_PROFILE = True
         AGENT_FEATURES.append(args[i])
+    elif a == "--apertus":
+        # ungated MLP + xIELU. "IDENT" makes xIELU the identity
+        # (alpha_p=0, alpha_n=0, beta=1) so the FFN is a plain up->down
+        # linear map, which the runner's own dense path can be checked against.
+        i += 1
+        APERTUS = args[i]
+        ARCH = "apertus"
     elif a == "--attn-knobs":
         # "STEP,TEMPSCALE" — NoPE every STEP-th layer, and the Llama-4
         # attention temperature on those layers (0 disables the temperature).
@@ -140,7 +148,8 @@ for i in range(N_LAYER + MTP_LAYERS):
         (f"blk.{i}.attn_v.weight", [N_EMBD, kv_dim], tensor_data(N_EMBD * kv_dim)),
         (f"blk.{i}.attn_output.weight", [N_EMBD, N_EMBD], tensor_data(N_EMBD * N_EMBD)),
         (f"blk.{i}.ffn_norm.weight", [N_EMBD], ones(N_EMBD)),
-        (f"blk.{i}.ffn_gate.weight", [N_EMBD, N_FF], tensor_data(N_EMBD * N_FF)),
+        *([] if APERTUS else
+          [(f"blk.{i}.ffn_gate.weight", [N_EMBD, N_FF], tensor_data(N_EMBD * N_FF))]),
         (f"blk.{i}.ffn_up.weight", [N_EMBD, N_FF], tensor_data(N_EMBD * N_FF)),
         (f"blk.{i}.ffn_down.weight", [N_FF, N_EMBD], tensor_data(N_FF * N_EMBD)),
     ]
@@ -208,6 +217,14 @@ if ESERIES_SHARED_KV or ESERIES_PLE:
     if ESERIES_PLE:
         meta_kvs.append(
             kv_u32(f"{ARCH}.embedding_length_per_layer_input", ESERIES_PLE))
+if APERTUS:
+    _id = APERTUS == "IDENT"
+    meta_kvs += [
+        kv_f32("xielu.alpha_n", 0.0 if _id else 0.8),
+        kv_f32("xielu.alpha_p", 0.0 if _id else 0.8),
+        kv_f32("xielu.beta",    1.0 if _id else 0.5),
+        kv_f32("xielu.eps",     -1e-6),
+    ]
 if ATTN_NOPE_STEP:
     meta_kvs += [
         kv_u32(f"{ARCH}.attention.no_rope_layer_step", ATTN_NOPE_STEP),

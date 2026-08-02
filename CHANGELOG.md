@@ -5,6 +5,26 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Apertus (`apertus`) is admitted: ungated MLP plus xIELU.** Its FFN has no
+  `ffn_gate` — it is up → xIELU → down — so the gate tensor became optional
+  for the ungated activation and stays required for every other dense arch.
+  xIELU is transcribed from ggml's `op_xielu`: `alpha_p*x² + beta*x` above
+  zero, `(expm1(min(x, eps)) - x)*alpha_n + beta*x` at or below. Its four
+  parameters are read per layer, and from **un-prefixed** keys — llama.cpp
+  spells them `xielu.alpha_n`, not `apertus.xielu.alpha_n` — accepting either
+  a scalar shared by all layers or a per-layer array.
+
+  Runner already had Apertus's `tekken` tokenizer and chat template; this is
+  the forward pass, so the EU-column Apache-2.0 blocker is now down to
+  verifying against a real checkpoint.
+
+  **CUDA refuses**: the dense FFN encoder always issues a gate matvec and
+  there is no xIELU kernel, so it runs on CPU with a message saying so.
+  Gated by `tests/test_apertus.py`, which compares identity xIELU parameters
+  (`alpha_p = alpha_n = 0`, `beta = 1`, making it the identity map) against
+  real ones — a build ignoring the parameters produces the same output for
+  both. The previous binary refuses the architecture outright.
+
 - **Shared always-on expert (Qwen2-MoE / DeepSeek) is supported.** It was
   refused at load. A dense FFN runs over the same normed input the router saw
   and is summed into the routed output; Qwen2-MoE additionally scales it by
