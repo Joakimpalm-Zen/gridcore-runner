@@ -102,6 +102,11 @@ TEST_PARSE = $(TEST_BATCH:test-batch%=test-parse%)
 TEST_METAL_OWNERSHIP = $(TEST_BATCH:test-batch%=test-metal-ownership%)
 TEST_MODEL_LOAD_FAILURE = $(TEST_BATCH:test-batch%=test-model-load-failure%)
 
+# Every module header, so a change to any of them rebuilds. runner.h was one
+# file until 0.1.5; the split (RNR-018) would otherwise have quietly narrowed
+# what `make` considers a dependency.
+HDR = $(wildcard src/*.h)
+
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
       src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/server.c \
@@ -110,10 +115,10 @@ SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sampl
 # kernels_ptx.h is embedded into the binary by cuda.c — a pull that changes
 # ONLY the regenerated PTX header must rebuild, or benchmarks silently run
 # yesterday's kernels (this bit a publication run on 2026-07-29).
-runner: $(SRC) src/runner.h src/kernels_ptx.h
+runner: $(SRC) $(HDR) src/kernels_ptx.h
 	$(CC) $(CFLAGS) $(SRC) -o $@ $(LDFLAGS)
 
-debug: $(SRC) src/runner.h
+debug: $(SRC) $(HDR)
 	$(CC) -O0 -g -fsanitize=address,undefined -std=gnu11 -Wall $(SRC) -o runner-debug $(LDFLAGS)
 
 $(TEST_JSON_SCHEMA): tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c
@@ -122,31 +127,31 @@ $(TEST_JSON_SCHEMA): tests/test_json_schema.c src/json.c src/jsonmode.c src/sche
 # quants.c is needed for the ggml_type_* helpers gguf.c links against; CFLAGS
 # (not the plainer flags above) so the AVX2 paths match a real build
 TEST_TOK_SRC = tests/test_tokenizer.c src/gguf.c src/tokenizer.c src/compat.c src/quants.c
-$(TEST_TOKENIZER): $(TEST_TOK_SRC) src/runner.h
+$(TEST_TOKENIZER): $(TEST_TOK_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_SRC) -o $@ -lm
 
 # difftok: tokenizer differential harness. Not part of `make test` -- it needs a
 # real multi-GB model GGUF, which models/ is gitignored for. scripts/difftok.py
 # builds it on demand and compares against the HuggingFace reference.
 DIFFTOK_SRC = tests/difftok.c src/gguf.c src/tokenizer.c src/compat.c src/quants.c
-$(DIFFTOK): $(DIFFTOK_SRC) src/runner.h
+$(DIFFTOK): $(DIFFTOK_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(DIFFTOK_SRC) -o $@ -lm
 
 TEST_TMPL_SRC = tests/test_template.c src/gguf.c src/tokenizer.c src/template.c \
                 src/json.c src/compat.c src/quants.c
-$(TEST_TEMPLATE): $(TEST_TMPL_SRC) src/runner.h
+$(TEST_TEMPLATE): $(TEST_TMPL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TMPL_SRC) -o $@ -lm
 
 # the strict tool envelope is only meaningful if the schema engine enforces
 # it, so schema.c/jsonmode.c compile in and the tests drive the real validator
 TEST_TOOLS_SRC = tests/test_tools.c src/gguf.c src/tokenizer.c src/template.c \
                  src/schema.c src/jsonmode.c src/json.c src/compat.c src/quants.c
-$(TEST_TOOLS): $(TEST_TOOLS_SRC) src/runner.h
+$(TEST_TOOLS): $(TEST_TOOLS_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOOLS_SRC) -o $@ -lm
 
 # sampler presets and the greedy/penalty contract need no model, so the test
 # links src/sample.c alone
-$(TEST_SAMPLER): tests/test_sampler.c src/sample.c src/runner.h
+$(TEST_SAMPLER): tests/test_sampler.c src/sample.c $(HDR)
 	$(CC) $(CFLAGS) -I src tests/test_sampler.c src/sample.c -o $@ -lm
 
 # compiles src/json.c directly into the test with instrumented allocators
@@ -156,24 +161,24 @@ $(TEST_JSON_OOM): tests/test_json_oom.c src/json.c src/json.h
 # compiles src/tokenizer.c into the test with instrumented allocators; gguf.c
 # and friends link normally so their allocations stay outside the failure window
 TEST_TOK_OOM_SRC = tests/test_tokenizer_oom.c src/gguf.c src/compat.c src/quants.c
-$(TEST_TOKENIZER_OOM): $(TEST_TOK_OOM_SRC) src/tokenizer.c src/runner.h
+$(TEST_TOKENIZER_OOM): $(TEST_TOK_OOM_SRC) src/tokenizer.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_OOM_SRC) -o $@ -lm
 
 # schema.c and json.c both compile into the test: enum/const literals are
 # serialised through jv_dump, so builder failures are schema failure paths
-$(TEST_SCHEMA_OOM): tests/test_schema_oom.c src/schema.c src/json.c src/jsonmode.c src/runner.h
+$(TEST_SCHEMA_OOM): tests/test_schema_oom.c src/schema.c src/json.c src/jsonmode.c $(HDR)
 	$(CC) $(CFLAGS) -I src tests/test_schema_oom.c src/jsonmode.c -o $@ -lm
 
 # shared model weights: needs the real model + backend, so it links the same
 # sources the runner does minus the CLI/server front end
 TEST_SHARED_SRC = tests/test_shared_weights.c src/gguf.c src/compat.c \
                   src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
-$(TEST_SHARED): $(TEST_SHARED_SRC) src/runner.h
+$(TEST_SHARED): $(TEST_SHARED_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_SHARED_SRC) -o $@ $(LDFLAGS)
 
 # same test under ASan/UBSan: the free-exactly-once half of it only fails
 # loudly here. Kept out of `make test` because a sanitized model load is slow.
-test-shared-asan: $(TEST_SHARED_SRC) src/runner.h test.gguf
+test-shared-asan: $(TEST_SHARED_SRC) $(HDR) test.gguf
 	$(CC) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
 	    -std=gnu11 -Wall -I src $(TEST_SHARED_SRC) -o test-shared-asan-bin $(LDFLAGS)
 	./test-shared-asan-bin $(ASAN_MODEL)
@@ -182,7 +187,7 @@ test-shared-asan: $(TEST_SHARED_SRC) src/runner.h test.gguf
 # backend), because the property under test is a backend property
 TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
                  src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
-$(TEST_BATCH): $(TEST_BATCH_SRC) src/runner.h
+$(TEST_BATCH): $(TEST_BATCH_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_BATCH_SRC) -o $@ $(LDFLAGS)
 
 # the loopback-only bind. Links nothing: it reads src/server.c and src/main.c
@@ -198,7 +203,7 @@ $(TEST_BIND): tests/test_bind.c src/server.c src/main.c
 TEST_PREFIX_SRC = tests/test_prefix.c src/gguf.c src/compat.c src/quants.c \
                   src/tokenizer.c src/model.c src/sample.c src/jsonmode.c \
                   src/schema.c src/json.c src/engine.c src/vramreg.c $(GPU_SRC)
-$(TEST_PREFIX): $(TEST_PREFIX_SRC) src/runner.h
+$(TEST_PREFIX): $(TEST_PREFIX_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_PREFIX_SRC) -o $@ $(LDFLAGS)
 
 # grammar fast-forward: same full-engine link as the prefix test — the gate
@@ -207,28 +212,28 @@ TEST_GRAMMAR_FF_SRC = tests/test_grammar_ff.c src/gguf.c src/compat.c \
                   src/quants.c src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
                   src/vramreg.c $(GPU_SRC)
-$(TEST_GRAMMAR_FF): $(TEST_GRAMMAR_FF_SRC) src/runner.h
+$(TEST_GRAMMAR_FF): $(TEST_GRAMMAR_FF_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_GRAMMAR_FF_SRC) -o $@ $(LDFLAGS)
 
 # the cross-process VRAM registry. Links only vramreg.c and compat.c: the
 # free-VRAM figure arrives through a callback, so the whole module is drivable
 # with synthetic numbers and the test needs no GPU, no model and no driver --
 # which is what lets it run in CI.
-$(TEST_VRAMREG): tests/test_vram_registry.c src/vramreg.c src/compat.c src/runner.h
+$(TEST_VRAMREG): tests/test_vram_registry.c src/vramreg.c src/compat.c $(HDR)
 	$(CC) $(CFLAGS) -I src tests/test_vram_registry.c src/vramreg.c src/compat.c -o $@ $(LDFLAGS)
 
 # q8 KV tolerance gate: needs the tokenizer too, because it teacher-forces a
 # fixed piece of real text rather than synthetic token ids
 TEST_KV_TOL_SRC = tests/test_kv_tol.c src/gguf.c src/compat.c src/quants.c \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
-$(TEST_KV_TOL): $(TEST_KV_TOL_SRC) src/runner.h
+$(TEST_KV_TOL): $(TEST_KV_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_KV_TOL_SRC) -o $@ $(LDFLAGS)
 
 # TC tolerance gate: same shape as the q8-KV gate — teacher-forced logits,
 # top-1 + bounded-deviation criteria, per (type, arch) via the model argument
 TEST_TC_TOL_SRC = tests/test_tc_tol.c src/gguf.c src/compat.c src/quants.c \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
-$(TEST_TC_TOL): $(TEST_TC_TOL_SRC) src/runner.h
+$(TEST_TC_TOL): $(TEST_TC_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TC_TOL_SRC) -o $@ $(LDFLAGS)
 
 # fused-vs-eager MoE routing tolerance: same full-engine link as tc-tol, and
@@ -236,12 +241,12 @@ $(TEST_TC_TOL): $(TEST_TC_TOL_SRC) src/runner.h
 # router never engaged all skip rather than pass)
 TEST_MOE_TOL_SRC = tests/test_moe_tol.c src/gguf.c src/compat.c src/quants.c \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
-$(TEST_MOE_TOL): $(TEST_MOE_TOL_SRC) src/runner.h
+$(TEST_MOE_TOL): $(TEST_MOE_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MOE_TOL_SRC) -o $@ $(LDFLAGS)
 
 TEST_MOE_ROUTER_SRC = tests/test_moe_router.c src/gguf.c src/compat.c src/quants.c \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
-$(TEST_MOE_ROUTER): $(TEST_MOE_ROUTER_SRC) src/runner.h
+$(TEST_MOE_ROUTER): $(TEST_MOE_ROUTER_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MOE_ROUTER_SRC) -o $@ $(LDFLAGS)
 # the Responses framing state machine, driven directly over a socketpair.
 # Includes server.c (the framer is static there) and links the engine around
@@ -250,19 +255,19 @@ TEST_RESP_SM_SRC = tests/test_responses_sm.c src/gguf.c src/compat.c \
                   src/quants.c src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
                   src/template.c src/vramreg.c $(GPU_SRC)
-$(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/server.c src/runner.h
+$(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/server.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_RESP_SM_SRC) -o $@ $(LDFLAGS)
 
 TEST_QUANTIZE_SRC = tests/test_quantize.c src/quantize.c src/gguf.c \
                     src/compat.c src/quants.c
-$(TEST_QUANTIZE): $(TEST_QUANTIZE_SRC) src/runner.h
+$(TEST_QUANTIZE): $(TEST_QUANTIZE_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_QUANTIZE_SRC) -o $@ $(LDFLAGS)
 
 # vramreg.c is #included (calloc-hooked) by the test, so it is not linked here
-$(TEST_VRAM_ROLLBACK): tests/test_vram_rollback.c src/compat.c src/runner.h
+$(TEST_VRAM_ROLLBACK): tests/test_vram_rollback.c src/compat.c $(HDR)
 	$(CC) $(CFLAGS) -I src tests/test_vram_rollback.c src/compat.c -o $@ $(LDFLAGS)
 
-$(TEST_GGUF_GETTERS): tests/test_gguf_getters.c src/gguf.c src/compat.c src/quants.c src/runner.h
+$(TEST_GGUF_GETTERS): tests/test_gguf_getters.c src/gguf.c src/compat.c src/quants.c $(HDR)
 	$(CC) $(CFLAGS) -I src tests/test_gguf_getters.c src/gguf.c src/compat.c src/quants.c -o $@ $(LDFLAGS)
 
 $(TEST_PARSE): tests/test_parse.c src/compat.c src/compat.h
@@ -271,7 +276,7 @@ $(TEST_PARSE): tests/test_parse.c src/compat.c src/compat.h
 TEST_MODEL_LOAD_FAILURE_SRC = tests/test_model_load_failure.c src/gguf.c \
                               src/compat.c src/quants.c src/model.c \
                               src/vramreg.c $(GPU_SRC)
-$(TEST_MODEL_LOAD_FAILURE): $(TEST_MODEL_LOAD_FAILURE_SRC) src/runner.h
+$(TEST_MODEL_LOAD_FAILURE): $(TEST_MODEL_LOAD_FAILURE_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MODEL_LOAD_FAILURE_SRC) -o $@ $(LDFLAGS)
 
 test.gguf: scripts/make-test-model.py
@@ -285,7 +290,7 @@ test-ornith-cpu: runner
 test-moe: runner
 	$(PYTHON) -m pytest -q tests/test_moe.py
 
-$(TEST_METAL_OWNERSHIP): tests/test_metal_ownership.m src/metal.m src/runner.h
+$(TEST_METAL_OWNERSHIP): tests/test_metal_ownership.m src/metal.m $(HDR)
 	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
 	    tests/test_metal_ownership.m -o $@ $(LDFLAGS)
 
@@ -422,7 +427,7 @@ FUZZ_SRC_sval_feed      = src/json.c src/schema.c src/jsonmode.c
 FUZZ_SRC_jsonv_feed     = src/jsonmode.c
 FUZZ_SRC_gguf_open      = src/gguf.c src/compat.c src/quants.c
 
-fuzz-%: tests/fuzz/fuzz_%.c $(wildcard src/*.c) src/runner.h
+fuzz-%: tests/fuzz/fuzz_%.c $(wildcard src/*.c) $(HDR)
 	$(FUZZ_CLANG) $(FUZZ_FLAGS) tests/fuzz/fuzz_$*.c $(FUZZ_SRC_$*) -o $@ -lm
 
 # build only; useful on its own to check the harnesses still compile

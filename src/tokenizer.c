@@ -1,5 +1,6 @@
 // Tokenizers: SentencePiece-style (llama) and byte-level BPE (gpt2).
-#include "runner.h"
+#include <math.h>
+#include "tokenizer.h"
 
 #include <stdio.h>
 #include <stdlib.h>

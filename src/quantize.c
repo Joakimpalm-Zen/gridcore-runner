@@ -1,7 +1,9 @@
 // GGUF requantizer: rewrite a model with its weight matrices converted to a
 // smaller quantization so one downloaded model can be fitted to each node's
 // RAM/VRAM. Metadata is copied verbatim; norms/biases/1-D tensors stay F32.
-#include "runner.h"
+#include "quants.h"
+#include "fp16.h"
+#include "gguf.h"
 #include "compat.h"
 
 #include <math.h>

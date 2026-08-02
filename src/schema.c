@@ -3,7 +3,7 @@
 // that would break the schema. Properties are enforced in declared order
 // (required ones mandatory, optional ones skippable), matching how
 // grammar-based constrained decoding behaves elsewhere.
-#include "runner.h"
+#include "schema.h"
 #include "json.h"
 
 #include <stdio.h>

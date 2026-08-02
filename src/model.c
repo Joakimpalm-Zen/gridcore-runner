@@ -1,5 +1,7 @@
 // Llama-family transformer: weight wiring + batched forward pass.
-#include "runner.h"
+#include "model.h"
+#include "gpu.h"
+#include "vramreg.h"
 #include "compat.h"
 
 #include <math.h>

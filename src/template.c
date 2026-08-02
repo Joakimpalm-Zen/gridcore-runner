@@ -1,7 +1,7 @@
 // Chat template detection and rendering, plus the model-facing chat
 // conventions that ride on top of it: thinking-tag splitting and the
 // tool-call syntax (declaration rendering and response parsing).
-#include "runner.h"
+#include "template.h"
 #include "json.h"
 
 #include <stdio.h>

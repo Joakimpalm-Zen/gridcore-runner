@@ -1,5 +1,7 @@
 // Quantization block formats (ggml-compatible), dot kernels, threadpool.
-#include "runner.h"
+#include "quants.h"
+#include "fp16.h"
+#include "tpool.h"
 
 #include <math.h>
 #include <stdio.h>

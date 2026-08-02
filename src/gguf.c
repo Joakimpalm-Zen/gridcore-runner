@@ -1,5 +1,6 @@
 // GGUF v2/v3 file parser (mmap based).
-#include "runner.h"
+#include "gguf.h"
+#include "quants.h"
 #include "compat.h"
 
 #include <stdio.h>

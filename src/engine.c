@@ -1,8 +1,10 @@
 // Generation engine shared by the CLI and the server: prompt feeding,
 // stop-token handling, optional JSON-constrained sampling.
-#include "runner.h"
-
+#include "engine.h"
+#include "gpu.h"
+#include "template.h"
 #include "compat.h"
+
 
 #include <pthread.h>
 #include <stdio.h>

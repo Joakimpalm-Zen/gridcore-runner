@@ -23,7 +23,7 @@
 // Committed entries therefore contribute nothing to the arithmetic and
 // everything to the message. That is the whole point: the scarcity is measured
 // from the device, the blame is read from the ledger.
-#include "runner.h"
+#include "vramreg.h"
 #include "compat.h"
 
 #include <stdatomic.h>

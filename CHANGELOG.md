@@ -5,7 +5,50 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
-_Nothing yet._
+- **RNR-018 — `runner.h` is thirteen module headers instead of one.** The core
+  header declared the whole engine: GGUF internals, the tokenizer maps, the
+  full mutable `model_t`, the backend contract, the VRAM registry, the sampler,
+  the JSON and schema validators, chat templates, the tool-call envelope and
+  the generation engine — 1,291 lines visible to every translation unit and
+  every test. `model.c` could reach the HTTP-facing tool envelope; `sample.c`
+  could reach the GGUF tensor directory. Nothing did, but nothing stopped it.
+
+  Now: `fp16.h`, `quants.h`, `gguf.h`, `tpool.h`, `tokenizer.h`, `model.h`,
+  `vramreg.h`, `gpu.h`, `sample.h`, `jsonmode.h`, `schema.h`, `template.h`,
+  `engine.h`. `runner.h` remains and includes all thirteen, so every consumer
+  that wants the whole engine — the CLI, the server, the GPU backends, the
+  tests — keeps one include and sees exactly what it saw before. Twelve
+  single-module translation units now include only their own boundary:
+
+  | TU | module headers visible |
+  |---|---|
+  | `sample.c`, `jsonmode.c`, `vramreg.c` | 1 of 13 |
+  | `gguf.c`, `tokenizer.c`, `schema.c` | 2 |
+  | `quants.c`, `template.c`, `quantize.c` | 3 |
+  | `gpu_none.c` | 6 |
+  | `model.c` | 7 |
+  | `engine.c` | 12 |
+
+  The split is a **verbatim text move**: every declaration was checked to
+  appear exactly once across the thirteen files and to be identical to the
+  original, by comparing the multiset of non-comment lines before and after.
+  No signature, type or comment was reworded — a move can be audited, a
+  rewrite has to be re-reviewed.
+
+  `src/cuda.c` and `src/metal.m` deliberately still include `runner.h`: they
+  are owned by the CUDA box, and one of them has CRLF line endings, so
+  touching them here would have handed that machine a whitespace conflict for
+  no gain.
+
+  Two things this does **not** buy, stated because it would be easy to assume
+  otherwise. It does not speed up builds: `make` compiles all sixteen sources
+  in a single command with no object files, so header granularity has never
+  affected rebuild cost. And it does not split immutable weights from
+  per-sequence state inside `model_t`, which is the other half of RNR-018 and
+  a real interface change rather than a move. `Makefile` gained
+  `HDR = $(wildcard src/*.h)`, replacing 26 hardcoded `src/runner.h`
+  prerequisites — without it the split would have quietly stopped a change to
+  any of the new headers from triggering a rebuild.
 
 ## v0.1.5-alpha — 2026-08-02
 

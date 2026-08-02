@@ -1,6 +1,6 @@
 // GPU backend stub for platforms without one.
 // CUDA (cuda.c) and Metal (metal.m) implement this same interface.
-#include "runner.h"
+#include "gpu.h"
 
 bool gpu_available(char *name, int cap) {
     (void)name; (void)cap;

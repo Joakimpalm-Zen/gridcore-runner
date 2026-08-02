@@ -1,7 +1,7 @@
 // Token sampling: temperature, top-k, top-p, repeat penalty, optional
 // validity-constrained selection (used for JSON mode), and the per-family
 // defaults that seed all of the above.
-#include "runner.h"
+#include "sample.h"
 
 #include <ctype.h>
 #include <math.h>

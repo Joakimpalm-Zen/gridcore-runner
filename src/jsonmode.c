@@ -1,7 +1,7 @@
 // Incremental JSON-prefix validator for constrained generation.
 // Accepts bytes only while the output remains a valid prefix of exactly one
 // top-level JSON object; sets `done` once that object closes.
-#include "runner.h"
+#include "jsonmode.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define FALLTHROUGH __attribute__((fallthrough))
