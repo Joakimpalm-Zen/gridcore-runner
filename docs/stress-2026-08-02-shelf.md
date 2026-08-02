@@ -26,6 +26,20 @@ including all three MoE families and both partial- and full-offload splits.
 That is the strongest single result here — it covers a set far wider than the
 pinned compatibility matrix, at splits the matrix never exercises.
 
+> **Update, same day — found and FIXED, and the first diagnosis was wrong.**
+> The section below records what the stress pass observed. The cause was not a
+> VRAM over-commit. `full` (which decides whether `output.weight` is uploaded)
+> requires the output tensor to fit the budget, while `partial` (which decides
+> whether the device computes logits) is derived from the layer count alone.
+> The auto fit spent the last of the budget on expert banks, so every layer sat
+> on the device — the forward asked for logits — and `output.weight` had never
+> been uploaded. `--cpu-moe 20` "worked" only because placing fewer banks left
+> room for it. Fixed by reserving what a full split still owes before placing
+> banks, plus an invariant guard. It also **unlocked ~2x on two models** that
+> the crash had been hiding — gemma-4-26B-A4B 4.7 → 10.9 tok/s and
+> Qwen3-30B-A3B 5.5 → 10.0 — so `--cpu-moe auto` is now their best setting.
+> See "The fix" at the end of this document.
+
 ## One bug, and it is bigger than first filed
 
 **`--cpu-moe auto` fails on every MoE model on this machine — 3 of 3.** Each
@@ -117,18 +131,19 @@ configurations were within a couple of percent the simpler one is preferred, so
 | `gemma-4-12B-it-Q4_K_M` | 7.4 | partial | `runner -m <model> --kv q8` | 6.6 |
 | `gemma-4-12B-it-qat-UD-Q4_K_XL` | 6.7 | partial | `runner -m <model> --kv q8` | 5.7 |
 | `Qwen2.5-Coder-14B-Instruct-Q4_K_M` | 9.0 | partial | `runner -m <model> --kv q8` | 5.5 |
-| `Qwen3-30B-A3B-Q4_K_M` | 18.6 | partial | `runner -m <model>` (**not** `--cpu-moe auto`) | 5.5 |
+| `Qwen3-30B-A3B-Q4_K_M` | 18.6 | partial | `runner -m <model> --cpu-moe auto` | **10.0** |
 | `Qwen3-14B-Q4_K_M` | 9.0 | partial | `runner -m <model> --kv q8` | 5.2 |
-| `gemma-4-26B-A4B-it-Q4_0` | 14.4 | partial | `runner -m <model>` (**not** `--cpu-moe auto`) | 4.7 |
+| `gemma-4-26B-A4B-it-Q4_0` | 14.4 | partial | `runner -m <model> --cpu-moe auto` | **10.9** |
 | `Qwen_Qwen3.5-9B-Q8_0` | 9.8 | partial | `runner -m <model>` (q8 KV is slower here) | 3.0 |
 | `mistralai_Devstral-Small-2507-Q4_K_M` | 14.3 | partial | `runner -m <model>` | 1.6 |
 | `Qwen3.6-27B-Q4_K_M` | 16.8 | partial | `runner -m <model>` | 1.2 |
-| `gpt-oss-20b-MXFP4` | 12.1 | partial | `runner -m <model>` (**not** `--cpu-moe auto`) | 0.4 |
+| `gpt-oss-20b-MXFP4` | 12.1 | partial | `runner -m <model>` | 0.4 |
 | `ibm-granite_granite-3.3-8b-instruct-Q8_0` | 8.7 | — | refused by design | — |
 
-For the three MoE models the plain layer split beats every `--cpu-moe`
-variant that runs, and `auto` must be avoided entirely until the fit bug above
-is fixed. That inverts the advice the split banner currently prints.
+**Superseded for the MoE rows by the fix at the end of this document**: with
+`--cpu-moe auto` working, it is the fastest option for gemma-4-26B-A4B (10.9)
+and Qwen3-30B-A3B (10.0), roughly doubling both. The table rows above already
+reflect that. gpt-oss is unaffected either way.
 
 ## Anomalies worth a follow-up
 
@@ -162,6 +177,62 @@ path for all of them.
   to the slowdown, so the operator sees an inexplicably slow model and no
   suggestion that the context request caused it. Naming that trade at load —
   the split banner already reports layer placement — would cost one line.
+
+## The fix
+
+The observed symptom was a VRAM over-commit; it was not one. Adding the
+missing diagnostic made the engine say so in one line:
+
+```
+gpu: tensor 'output.weight' is not resident on the device (no binding covers it)
+```
+
+Two decisions disagreed about who owns the output projection:
+
+- `full` — whether `output.weight` is uploaded — is `G == n_layer` **and** the
+  output tensor still fitting the budget.
+- `partial` — whether the device computes logits — is `gpu_layers < n_layer`,
+  the layer count **alone**.
+
+The auto fit places attention for every layer (expert weights are not counted
+there), then spends whatever budget survives on expert banks, shallowest first.
+When the last of the budget went to a bank, `used + output->nbytes` exceeded it,
+so `full` went false and `output.weight` was never uploaded — while `G` still
+equalled `n_layer`, so the forward asked the device for logits. It then looked
+up a tensor that was not there. The plain layer split cannot reach that state,
+because there `G == n_layer` implies the budget covered everything; only the
+auto fit spends budget *after* `G` is decided.
+
+`--cpu-moe 20` appeared to "work" for the same reason it was slower: placing
+four banks instead of fourteen left room for the output weights by accident.
+
+The fix holds back what a full split still owes *before* placing banks, so the
+two decisions cannot diverge, plus an invariant guard that hands the last layer
+to the CPU if the reserve ever cannot be met — an honestly partial split rather
+than an internally inconsistent one. Reserving is also the better trade on
+merit: the output projection runs every token over the whole vocabulary, an
+expert bank only when its layer is routed to.
+
+**It was not only a crash fix.** With `auto` working, gemma-4-26B-A4B decodes
+**2.3× faster** than the plain split it was falling back to:
+
+| Model | plain `--gpu auto` | `--cpu-moe auto` (fixed) |
+|---|---:|---:|
+| gemma-4-26B-A4B Q4_0 | 4.74 | **10.89** (2.3x) |
+| Qwen3-30B-A3B Q4_K_M | 5.54 | **10.04** (1.8x) |
+| gpt-oss-20b MXFP4 | 0.374 | 0.375 (unchanged) |
+
+gpt-oss is unchanged because at 12.1 GB the fit can only keep 13 of 24 expert
+banks either way; the other two have enough banks resident for the placement to
+pay. The recommended-settings table above is superseded for the MoE rows:
+**`--cpu-moe auto` is now the right default for gemma-4-26B-A4B and
+Qwen3-30B-A3B**, and is at least harmless for gpt-oss.
+
+The diagnostic added along the way is worth keeping on its own. Every `enc_*`
+helper returned a bare `false`, so a missing binding, a missing kernel for a
+quant type, and a genuine `cuLaunchKernel` error all printed the same
+"kernel launch failed". They need different fixes; the first failure now names
+itself, once per process.
 
 ## Caveat on the absolute numbers — and an unresolved discrepancy
 

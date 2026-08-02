@@ -126,6 +126,26 @@ def generate(runner, model, ctx, gen, extra, timeout):
             "stderr_tail": (res["stderr"] or "")[-800:] if faults else None}
 
 
+def same_greedy_output(gpu_text, cpu_text, gpu_gen, cpu_gen):
+    """Do the two backends agree, given they may have run different budgets?
+
+    A PREFIX test, not equality. The host leg gets a smaller token budget for a
+    model larger than RAM, so the device output is legitimately longer. Greedy
+    decoding is deterministic and prefix-consistent, so if the shorter run is a
+    prefix of the longer one they agree for every token the shorter one
+    produced.
+
+    Comparing truncated CHARACTER slices instead — which this harness did
+    first — reports a mismatch on the trailing newline alone, and flagged three
+    Gemma models as CPU!=GPU when every GPU text was a clean continuation of
+    its CPU text. Strip trailing whitespace: the CLI ends output with one.
+    """
+    gpu_txt = (gpu_text or "").rstrip()
+    cpu_txt = (cpu_text or "").rstrip()
+    shorter, longer = (cpu_txt, gpu_txt) if cpu_gen <= gpu_gen else (gpu_txt, cpu_txt)
+    return bool(shorter) and longer.startswith(shorter)
+
+
 def degenerate(text):
     """Obvious garbage: one token repeated, or nothing at all.
 
@@ -273,19 +293,10 @@ def main():
         report["cpu_run"] = cpu
         for f in cpu["faults"]:
             report["faults"].append({"where": "cpu_run", "what": f})
-        # The legs may run different token budgets (a model larger than RAM
-        # gets a smaller host budget), so this is a PREFIX test, not equality.
-        # Greedy decoding is deterministic and prefix-consistent: if the host's
-        # output is a prefix of the device's, they agree for every token the
-        # host produced. Comparing truncated CHARACTER slices instead reports a
-        # mismatch on the trailing newline alone — it flagged three Gemma models
-        # as divergent when each GPU text was a clean continuation of its CPU
-        # text. Strip trailing whitespace, since the CLI ends output with one.
         gpu_txt = (gpu["text"] or "").rstrip()
         cpu_txt = (cpu["text"] or "").rstrip()
-        shorter, longer = (cpu_txt, gpu_txt) if t["cpu_gen"] <= t["gen"] \
-            else (gpu_txt, cpu_txt)
-        identical = bool(shorter) and longer.startswith(shorter)
+        identical = same_greedy_output(gpu["text"], cpu["text"],
+                                       t["gen"], t["cpu_gen"])
         report["cpu_cuda_identical"] = identical
         if not identical and not cpu["faults"] and not gpu["faults"]:
             report["deviances"].append({

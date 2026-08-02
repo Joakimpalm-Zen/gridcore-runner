@@ -15,6 +15,7 @@
 #include "runner.h"
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -897,11 +898,26 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         // unused on the first outside install. Explicit counts are honoured as
         // given and were already accounted above.
         if (m->cpu_moe && m->cpu_moe_layers == CPU_MOE_AUTO) {
+            // Hold back what a full split still owes before spending the rest
+            // on expert banks. `full` below decides whether output.weight is
+            // uploaded, but the forward decides whether to compute logits on
+            // the device from the LAYER COUNT alone (fwd: gpu_layers <
+            // n_layer). Letting a bank eat the last of the budget makes those
+            // two disagree: every layer is on the device, so the forward asks
+            // for logits, and output.weight was never uploaded. That is the
+            // whole of the "--cpu-moe auto dies mid-forward" bug — it was not
+            // a VRAM over-commit, and it reproduced on every MoE model.
+            // Reserving here is also the better trade: the output projection
+            // runs every token over the full vocabulary, an expert bank only
+            // when its layer is routed to.
+            size_t owed = G == m->n_layer
+                        ? (m->cpu_moe ? 0 : m->tok_embd->nbytes) + m->output->nbytes
+                        : 0;
             for (int l = 0; l < G; l++) {
                 layer_t *ly = &m->layers[l];
                 if (!ly->is_moe) continue;
                 size_t eb = model_layer_expert_bytes(ly, m->n_expert);
-                if (used + eb > vram_budget) break;
+                if (used + eb + owed > vram_budget) break;
                 used += eb;
                 m->moe_host[l] = false;
             }
@@ -910,6 +926,17 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         bool full = G == m->n_layer &&
                     used + (m->cpu_moe ? 0 : m->tok_embd->nbytes) +
                     m->output->nbytes <= vram_budget;
+        // Invariant, belt and braces: "the device owns every layer" and "the
+        // device owns the output projection" must agree, because the forward
+        // reads only the first and the upload honours only the second. If the
+        // reserve above could not be met, hand the last layer back to the CPU
+        // so the split is honestly partial rather than internally inconsistent.
+        if (G == m->n_layer && !full && G > 1) {
+            G--;
+            fprintf(stderr, "gpu: output weights do not fit alongside the "
+                            "layer split — running the last layer on the CPU "
+                            "so the boundary is consistent\n");
+        }
         // an explicit --gpu-layers overrides the budget-based fit (the user
         // takes responsibility for VRAM; used for testing partial offload and
         // for manual control). It can only lower the count below what fits, or
@@ -1541,10 +1568,33 @@ unsupported:
 
 // ----------------------------------------------------------------- launches
 
+// One-shot diagnostic for the GPU giving up mid-forward. Every enc_* helper
+// returns a bare false, so the caller could only ever say "kernel launch
+// failed" — which is true of a real launch error, a missing kernel for a quant
+// type, and a weight that was never uploaded alike. Those need different
+// fixes, so the first one to happen names itself. Once per process: a failing
+// forward fails for every layer, and the first is the informative one.
+static void gpu_first_error(const char *fmt, ...) {
+    static bool reported = false;
+    if (reported) return;
+    reported = true;
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "gpu: ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+}
+
 static bool launch(gpu_t *g, CUfunction f, unsigned gx, unsigned gy, unsigned gz,
                    unsigned bx, void **params) {
     if (prof.on) prof.total_launches[prof.cur_mode]++;
-    return cu.LaunchKernel(f, gx, gy, gz, bx, 1, 1, 0, g->stream, params, NULL) == 0;
+    if (!f) { gpu_first_error("no kernel bound for this operation"); return false; }
+    CUresult r = cu.LaunchKernel(f, gx, gy, gz, bx, 1, 1, 0, g->stream, params, NULL);
+    if (r != 0)
+        gpu_first_error("cuLaunchKernel failed: %s (grid %ux%ux%u, block %u)",
+                        cu_err(r), gx, gy, gz, bx);
+    return r == 0;
 }
 
 static void prof_report(void);
@@ -1657,7 +1707,11 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
                    int batch, int xs, int ys) {
     CUdeviceptr weights = 0;
     uint64_t w_off = 0;
-    if (!binding_find(g->sw, m, w, &weights, &w_off)) return false;
+    if (!binding_find(g->sw, m, w, &weights, &w_off)) {
+        gpu_first_error("tensor '%s' is not resident on the device "
+                        "(no binding covers it)", w->name);
+        return false;
+    }
     mv_args a = { n_in, n_out, w_off, bias != 0, batch, xs, ys };
     CUdeviceptr b = bias ? bias : g->sw->dummy;
     void *p[] = { &weights, &x, &y, &a, &b };
@@ -1969,9 +2023,17 @@ static bool enc_moe_mv(gpu_t *g, model_t *m, gguf_tensor *base,
                        int xs, int ys) {
     CUdeviceptr weights = 0;
     uint64_t w_off = 0;
-    if (!binding_find(g->sw, m, base, &weights, &w_off)) return false;
+    if (!binding_find(g->sw, m, base, &weights, &w_off)) {
+        gpu_first_error("expert tensor '%s' is not resident on the device "
+                        "(no binding covers it)", base->name);
+        return false;
+    }
     CUfunction f = g->sw->f_moe_mv[base->type];
-    if (!f) return false;
+    if (!f) {
+        gpu_first_error("no indirect MoE kernel for quant type %s",
+                        ggml_type_name(base->type));
+        return false;
+    }
     moe_args a = { n_in, n_out, w_off, estride, xs, ys };
     void *p[] = { &weights, &x, &y, &a, &sel };
     return launch(g, f, (n_out + 3) / 4, nslots, 1, 128, p);
@@ -2932,7 +2994,11 @@ static bool enc_mv_batch(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
                          int batch, int xs, int ys) {
     CUdeviceptr weights = 0;
     uint64_t w_off = 0;
-    if (!binding_find(g->sw, m, w, &weights, &w_off)) return false;
+    if (!binding_find(g->sw, m, w, &weights, &w_off)) {
+        gpu_first_error("tensor '%s' is not resident on the device "
+                        "(no binding covers it)", w->name);
+        return false;
+    }
     mv_args a = { n_in, n_out, w_off, bias != 0, batch, xs, ys };
     CUdeviceptr bp = bias ? bias : g->sw->dummy;
     void *p[] = { &weights, &x, &y, &a, &bp };
