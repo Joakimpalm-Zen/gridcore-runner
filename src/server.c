@@ -970,6 +970,15 @@ typedef struct {
     // did not, and must say so — a client rendering output[] without reading
     // the response status would otherwise show a truncated message as whole.
     const char *close_status;
+    // A multi-byte character can span two generated tokens, and a delta is
+    // escaped on its own — so each half would be an ill-formed sequence and
+    // get replaced with U+FFFD, destroying a character the buffered path
+    // renders correctly. Hold an incomplete trailing sequence back here and
+    // prepend it to the next delta. Indexed by channel (0 = text,
+    // 1 = reasoning) so the two streams cannot splice each other's bytes.
+    // At most 3 bytes can ever be pending: a 4-byte sequence missing one.
+    char  u8_pend[2][4];
+    int   u8_pend_n[2];
 } gen_ctx;
 
 // common prefix of every streamed chunk. `created` and `model` are required by
@@ -1107,7 +1116,73 @@ static int responses_text_delta(gen_ctx *g, int reasoning, const char *bytes,
                                 int n);
 static int anth_delta(gen_ctx *g, const char *kind, const char *bytes, int n);
 
+// How many trailing bytes of `s` begin a UTF-8 sequence that is not finished
+// yet — i.e. how much must be held back until the next token arrives. 0 when
+// the buffer already ends on a character boundary.
+//
+// This reads the byte SHAPE only; it deliberately does not judge validity.
+// A stray continuation byte returns 0 and goes out immediately, because
+// nothing can complete it. An invalid lead such as 0xC0 has a two-byte shape
+// and IS held for one token — harmless, because whatever it becomes is then
+// rejected by json_escape and rendered U+FFFD, and the flush at end of
+// generation stops it being held forever. Validity belongs in one place, and
+// that place is the escaper.
+static int u8_incomplete_tail(const char *s, int n) {
+    for (int back = 1; back <= 3 && back <= n; back++) {
+        unsigned char c = (unsigned char)s[n - back];
+        if ((c & 0xC0) == 0x80) continue;          // continuation: keep looking
+        int len = (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 :
+                  (c & 0xF8) == 0xF0 ? 4 : 0;
+        // A lead byte whose sequence runs past the end of what we have is the
+        // only case worth waiting on.
+        return (len > back) ? back : 0;
+    }
+    return 0;
+}
+
+static int send_text_delta_raw(gen_ctx *g, int reasoning, const char *bytes, int n);
+
+// Splice in whatever was held back last time, and hold back an unfinished
+// tail this time. Callers hand over whole tokens; characters do not respect
+// token boundaries.
 static int send_text_delta(gen_ctx *g, int reasoning, const char *bytes, int n) {
+    if (!g->stream || g->dead) return g->dead ? 1 : 0;
+    int ch = reasoning ? 1 : 0;
+    int held = g->u8_pend_n[ch];
+    if (!held && u8_incomplete_tail(bytes, n) == 0)
+        return send_text_delta_raw(g, reasoning, bytes, n);   // the common path
+
+    int total = held + n;
+    char *joined = malloc((size_t)total + 1);
+    if (!joined)                       // never drop text because of an OOM here
+        return send_text_delta_raw(g, reasoning, bytes, n);
+    memcpy(joined, g->u8_pend[ch], (size_t)held);
+    memcpy(joined + held, bytes, (size_t)n);
+    g->u8_pend_n[ch] = 0;
+
+    int tail = u8_incomplete_tail(joined, total);
+    int emit = total - tail;
+    if (tail) {
+        memcpy(g->u8_pend[ch], joined + emit, (size_t)tail);
+        g->u8_pend_n[ch] = tail;
+    }
+    int rc = emit > 0 ? send_text_delta_raw(g, reasoning, joined, emit) : 0;
+    free(joined);
+    return rc;
+}
+
+// Emit whatever is still held back. A sequence unfinished when generation ends
+// is genuinely truncated, so it goes out and is replaced with U+FFFD — the one
+// honest rendering of bytes the model never completed.
+static int flush_text_delta(gen_ctx *g, int reasoning) {
+    int ch = reasoning ? 1 : 0;
+    int held = g->u8_pend_n[ch];
+    if (!held) return 0;
+    g->u8_pend_n[ch] = 0;
+    return send_text_delta_raw(g, reasoning, g->u8_pend[ch], held);
+}
+
+static int send_text_delta_raw(gen_ctx *g, int reasoning, const char *bytes, int n) {
     if (!g->stream || g->dead) return g->dead ? 1 : 0;
     if (g->api == API_RESPONSES) return responses_text_delta(g, reasoning, bytes, n);
     // Anthropic separates reasoning into a `thinking` content block rather
@@ -2285,6 +2360,12 @@ static void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         emit_channel(&g, 0, g.hold.s, (int)g.hold.n);
         g.hold.n = 0;
     }
+    // Anything still held for a multi-byte character the model never finished
+    // goes out now rather than disappearing. It is genuinely truncated, so it
+    // renders as U+FFFD — but silently dropping bytes would make the streamed
+    // turn shorter than the buffered one, which is the invariant that matters.
+    flush_text_delta(&g, 0);
+    flush_text_delta(&g, 1);
     // e->oom: generation hit an allocation failure — report it truthfully as
     // "error", never let it masquerade as a clean "stop".
     const char *finish = e->oom ? "error"

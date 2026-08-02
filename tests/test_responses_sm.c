@@ -182,7 +182,32 @@ static void test_unclosed_item_emits_no_done(void) {
        "an item left open emits no .done");
 }
 
+// A character can span two generated tokens, and each streamed delta is JSON
+// escaped on its own — so without holding the unfinished tail back, each half
+// is an ill-formed sequence, becomes U+FFFD, and the streamed turn says
+// something different from the buffered one. Observed on a real model:
+// buffered rendered a CJK character where the stream rendered three U+FFFD.
+// This pins the boundary arithmetic that holds it together.
+static void test_utf8_tail_is_held_until_the_character_completes(void) {
+    struct { const char *buf; int n; int want; const char *what; } cases[] = {
+        { "abc",                 3, 0, "ascii is never held" },
+        { "caf\xC3\xA9",         5, 0, "complete two-byte" },
+        { "caf\xC3",             4, 1, "two-byte missing its continuation" },
+        { "\xE6\x84\x9A",        3, 0, "complete three-byte" },
+        { "\xE6\x84",            2, 2, "three-byte missing one" },
+        { "\xE6",                1, 1, "three-byte missing two" },
+        { "\xF0\x9F\x98\x80",    4, 0, "complete four-byte (emoji)" },
+        { "\xF0\x9F\x98",        3, 3, "four-byte missing one" },
+        { "\x80\x80",            2, 0, "stray continuations can never complete" },
+        { "",                    0, 0, "empty" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++)
+        ck(u8_incomplete_tail(cases[i].buf, cases[i].n) == cases[i].want,
+           cases[i].what);
+}
+
 int main(void) {
+    test_utf8_tail_is_held_until_the_character_completes();
     test_message_item_order();
     test_event_names_agree();
     test_sequence_numbers_are_dense();
