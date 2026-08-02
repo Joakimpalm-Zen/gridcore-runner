@@ -24,10 +24,12 @@ import argparse
 import json
 import os
 import socket
+import re
 import subprocess
 import sys
 import time
 import urllib.request
+import pathlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +68,26 @@ def wait_ready(base, process, timeout):
         except Exception:
             time.sleep(0.5)
     raise SystemExit("server startup timed out")
+
+
+def read_split(log_path):
+    """The offload split the CUDA run actually achieved, from its own log.
+
+    "5/5 identical" means something different at 24/24 than at 13/24: the
+    second only certifies the layers that were on the device. Recording the
+    split removes the need to remember which box produced a report.
+    """
+    try:
+        text = pathlib.Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    hit = re.search(r"gpu-split: .*?G=(\d+)/(\d+).*?full=(\d)", text)
+    if not hit:
+        return None
+    on, total, full = hit.group(1), hit.group(2), hit.group(3)
+    return {"layers_on_gpu": int(on), "layers_total": int(total),
+            "output_weight_on_gpu": full == "1",
+            "whole_graph": int(on) == int(total) and full == "1"}
 
 
 def generate_all(runner, model, gpu, tokens, ctx, env, extra, timeout, log_path):
@@ -117,12 +139,13 @@ def main():
         env["RUNNER_MOE_EAGER"] = "1"
 
     logs = Path(args.out).parent if args.out else Path(".")
+    gpu_log = logs / "cpu_cuda-gpu.log"
     print("loading CPU backend...", flush=True)
     cpu = generate_all(args.runner, args.model, "off", args.tokens, args.ctx,
                        env, args.extra_arg, args.timeout, logs / "cpu_cuda-cpu.log")
     print("loading CUDA backend...", flush=True)
     gpu = generate_all(args.runner, args.model, "auto", args.tokens, args.ctx,
-                       env, args.extra_arg, args.timeout, logs / "cpu_cuda-gpu.log")
+                       env, args.extra_arg, args.timeout, gpu_log)
 
     rows, ok = [], True
     for prompt, c, g in zip(PROMPTS, cpu, gpu):
@@ -134,10 +157,12 @@ def main():
         if not same:
             print(f"  cpu: {c!r}\n  gpu: {g!r}", flush=True)
 
+    split = read_split(gpu_log)
     report = {"model": str(args.model), "tokens": args.tokens,
               "context": args.ctx,
               "routing": "fused" if args.fused else "eager",
               "extra_args": args.extra_arg,
+              "gpu_split": split,
               "identical": sum(r["identical"] for r in rows),
               "total": len(rows), "rows": rows}
     if args.out:

@@ -1,0 +1,47 @@
+{
+ "model": "models/gemma-4-E4B-it-Q4_K_M.gguf",
+ "tokens": 32,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 42,
+  "layers_total": 42,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 5,
+ "total": 5,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris.\n\n**Question:** What is the capital of France?",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": "\n    if n <= 1:\n        return n\n    else:\n        return fibonacci(n-1) + fibonacci(n-",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": "\n1 A B C D E F G H\n2 I J K L M N O P\n3 Q R S T U V W X\n4",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " lived a young woman named Elara. She possessed a spirit as bright as the morning sun and a heart as kind as the summer rain. Elara lived in",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 391",
+   "gpu": null
+  }
+ ]
+}
