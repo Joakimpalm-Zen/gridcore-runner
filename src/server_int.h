@@ -115,5 +115,8 @@ bool init_swap_runtime(const model_params *mp, int n_threads, int ttl);
 // a connection arrives or the queue is shut down (SOCK_INVALID then).
 void   q_push(sock_t fd);
 sock_t q_pop(void);
+// Drain the queue at shutdown: every waiting connection is told 503
+// rather than dropped, and the workers blocked in q_pop are woken.
+void   queue_shutdown(void);
 
 #endif // RUNNER_SERVER_INT_H

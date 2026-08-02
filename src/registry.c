@@ -304,3 +304,21 @@ sock_t q_pop(void) {
     pthread_mutex_unlock(&SV.q.mu);
     return fd;
 }
+
+void queue_shutdown(void) {
+    sock_t pending[512];
+    int n = 0;
+    pthread_mutex_lock(&SV.q.mu);
+    SV.q.shutdown = true;
+    while (SV.q.count > 0) {
+        pending[n++] = SV.q.fds[SV.q.head];
+        SV.q.head = (SV.q.head + 1) % (int)(sizeof(SV.q.fds) / sizeof(sock_t));
+        SV.q.count--;
+    }
+    pthread_cond_broadcast(&SV.q.cv);
+    pthread_mutex_unlock(&SV.q.mu);
+    for (int i = 0; i < n; i++) {
+        send_error(pending[i], 503, "server shutting down");
+        sock_close(pending[i]);
+    }
+}

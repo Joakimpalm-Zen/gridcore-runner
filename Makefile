@@ -109,7 +109,7 @@ HDR = $(wildcard src/*.h)
 
 SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
-      src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/http.c src/registry.c src/server.c \
+      src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/http.c src/registry.c src/scheduler.c src/server.c \
       src/main.c $(GPU_SRC)
 
 # kernels_ptx.h is embedded into the binary by cuda.c — a pull that changes
@@ -254,7 +254,7 @@ $(TEST_MOE_ROUTER): $(TEST_MOE_ROUTER_SRC) $(HDR)
 TEST_RESP_SM_SRC = tests/test_responses_sm.c src/gguf.c src/compat.c \
                   src/quants.c src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
-                  src/template.c src/vramreg.c src/http.c src/registry.c $(GPU_SRC)
+                  src/template.c src/vramreg.c src/http.c src/registry.c src/scheduler.c $(GPU_SRC)
 $(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/server.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_RESP_SM_SRC) -o $@ $(LDFLAGS)
 

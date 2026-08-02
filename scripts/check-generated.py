@@ -63,11 +63,48 @@ def check(script: str, header: str) -> bool:
     return True
 
 
+# Header names that a C or POSIX implementation also ships. src/ goes on the
+# include path with -I for every test target, and -I directories are searched
+# BEFORE the system ones -- so a src/foo.h whose name collides silently
+# shadows the real header for anything that includes <foo.h>, including the
+# system headers themselves. This is not theoretical: the continuous-batching
+# scheduler was briefly src/sched.h, and <pthread.h> includes <sched.h>, so
+# every test that reached pthread.h got the scheduler instead. It is called
+# scheduler.h now. The rule is a name check rather than a comment because the
+# failure is a wall of unrelated type errors in a file nobody edited.
+RESERVED_HEADERS = {
+    "aio.h", "assert.h", "complex.h", "cpio.h", "ctype.h", "dirent.h", "dlfcn.h",
+    "endian.h", "errno.h", "fcntl.h", "fenv.h", "float.h", "fnmatch.h", "ftw.h",
+    "glob.h", "grp.h", "iconv.h", "inttypes.h", "iso646.h", "langinfo.h",
+    "libgen.h", "limits.h", "locale.h", "math.h", "monetary.h", "mqueue.h",
+    "ndbm.h", "net.h", "netdb.h", "nl_types.h", "poll.h", "pthread.h", "pwd.h",
+    "regex.h", "sched.h", "search.h", "semaphore.h", "setjmp.h", "signal.h",
+    "spawn.h", "stdalign.h", "stdarg.h", "stdatomic.h", "stdbool.h", "stddef.h",
+    "stdint.h", "stdio.h", "stdlib.h", "stdnoreturn.h", "string.h", "strings.h",
+    "stropts.h", "syslog.h", "tar.h", "termios.h", "tgmath.h", "threads.h",
+    "time.h", "trace.h", "uchar.h", "ulimit.h", "unistd.h", "utime.h",
+    "utmpx.h", "wchar.h", "wctype.h", "wordexp.h",
+}
+
+
+def check_header_names() -> bool:
+    src = os.path.join(ROOT, "src")
+    clashes = sorted(h for h in os.listdir(src)
+                     if h.endswith(".h") and h in RESERVED_HEADERS)
+    for h in clashes:
+        print(f"COLLISION: src/{h} shadows the standard <{h}> for every "
+              f"target built with -I src; rename it", file=sys.stderr)
+    if not clashes:
+        print("ok: no src/*.h shadows a standard header")
+    return not clashes
+
+
 def main() -> int:
     ok = True
     for script, header in TARGETS:
         ok &= check(script, header)
     ok &= check_cuda_target()
+    ok &= check_header_names()
     return 0 if ok else 1
 
 
