@@ -122,20 +122,26 @@ explanation was reasoning from a bad number, and is withdrawn.
 | `gpt-oss-20b-MXFP4` | 12.1 | partial | `runner -m <model> --cpu-moe auto` | 0.38 |
 | `ibm-granite_granite-3.3-8b-instruct-Q8_0` | 8.7 | — | refused by design | — |
 
-## Anomalies worth a follow-up
+## Anomalies — two of three RESOLVED, and they were not the engine
 
-Not faults — every one of these models is correct — but performance shapes that
-do not follow from size alone. All reproduced across both passes.
+- ~~**Llama-3.1-8B decodes twice as fast as Qwen3-8B at the same size**
+  (62.4 vs 31.8).~~ **Explained: the sampler, not the model.** At `--temp 0`
+  they are 62.9 and 60.2 — the same, within noise. Qwen3's preset carries
+  `top_p 0.95`/`top_k 20`, which on this model's flat distribution lands in the
+  full-vocabulary sort; Llama-3.1's `top_p 0.9` does not. My speculation about
+  per-head QK norms and vocabulary size was reasoning from a confounded number.
+- ~~**Ministral-8B Q5_K_M (35.1) against Llama-3.1-8B Q5_K_M (56.8)**, same
+  quant, same size, same code path.~~ **Same cause.** At `--temp 0` they are
+  56.4 and 57.1. Mistral's preset ships `top_p 1.0`, the slowest configuration
+  (see the sampler section below).
+- **Still open — Devstral-Small (1.6) and Qwen3.6-27B (1.2) sit far below the
+  other partially-offloaded models**, including MoE models twice their size.
+  This one is not the sampler: both are dense and large, so every layer's full
+  weight moves each token, where the MoE models move only their active experts.
 
-- **Llama-3.1-8B and Qwen3-8B are the same 4.9/5.0 GB at full offload, and
-  Llama decodes twice as fast** (62.4 vs 31.8 tok/s). Qwen3 adds per-head QK
-  norms and a larger vocabulary; neither obviously accounts for 2×.
-- **Ministral-8B Q5_K_M (35.1) against Llama-3.1-8B Q5_K_M (56.8)** — same
-  quant, same file size, same `llama` code path, 1.6× apart.
-- **Devstral-Small (1.6) and Qwen3.6-27B (1.2) sit far below the other
-  partially-offloaded models**, including MoE models twice their size. Both are
-  dense and large, so every layer's full weight moves each token; the MoE models
-  move only their active experts.
+The lesson generalises past these two rows: **a throughput table built with
+each model's own preset is comparing samplers as well as models.** Anything
+cross-model in this document should be re-read with that in mind.
 
 ## Context and KV edges (`scripts/stress-context.py`)
 
@@ -178,20 +184,68 @@ be met. Reserving is the better trade on merit too: the output projection runs
 every token over the whole vocabulary, an expert bank only when its layer is
 routed to.
 
-## Caveat on the absolute numbers
+## Caveat on the absolute numbers — RESOLVED
 
-Comparisons within this document are sound: one tool, one settings set, one
-idle machine. Two warnings on the absolute figures.
+An earlier version of this document recorded a 1.7x disagreement between
+Runner's two measurement paths as unexplained. It is explained, and it was not
+a measurement bug: **the two runs used different samplers.**
 
-Runner's two measurement paths disagree. On Ministral-8B, `--bench-json`
-reports ~35 tok/s decode while the same binary driven through `--serve` and
-measured off the streaming response reported 55.6. The obvious explanation —
-that a short `-n` amortises warmup over too few tokens — was tested and is
-**wrong** (`-n 8` gives 31.0, `-n 64` gives 32.5–36.0, nowhere near 1.7×). It is
-recorded unexplained rather than explained away. Treat `--bench-json` as an
-internally consistent ranking, not a quotable throughput, and do not compare it
-against another engine; `docs/bench-2026-08-01-3070.md` has cross-engine figures
-measured through the streaming path for both engines.
+`--bench-json` with no `--temp` uses the model's vendor sampling preset. The
+cross-engine benchmarks and the `--serve` measurement sent `temperature: 0`.
+With the sampler matched, the two paths agree to within noise:
 
-And the first pass of this document is the standing reminder that a contended
-box produces numbers that look perfectly plausible and are simply wrong.
+| Ministral-8B Q5_K_M, same 625-token prompt, `-c 1024`, `-n 64` | decode tok/s |
+|---|---:|
+| `--serve`, greedy, derived from the stream | 55.9 |
+| `--serve`, greedy, first-to-last-token window | 56.8 |
+| `--bench-json --temp 0` | **56.7** |
+| `--bench-json`, default preset | 34.2 |
+
+So both numbers were right about what they measured, and the earlier "warmup"
+hypothesis was correctly rejected — it just was not the alternative either.
+
+**The tables above therefore include per-model sampler cost**, because they
+were produced with each model's own preset. That is a defensible thing to
+measure (it is what a user gets by default), but it is not a like-for-like
+engine comparison across models, and two entries in the anomalies section were
+wrong because of it. Cross-engine figures in
+`docs/bench-2026-08-01-3070.md` are greedy on both sides and unaffected.
+
+## The sampler finding this turned up
+
+Chasing the above produced a real optimisation target. Decode with the default
+preset against decode at `--temp 0`, same prompt and context:
+
+| Model | preset | greedy | preset cost |
+|---|---:|---:|---:|
+| Qwen3-8B Q4_K_M | 31.4 | 60.2 | **−48%** |
+| Ministral-8B Q5_K_M | 34.7 | 56.4 | **−38%** |
+| Llama-3.1-8B Q5_K_M | 55.9 | 57.1 | −2% |
+| Llama-3.1-8B Q4_K_M | 61.3 | 62.9 | −3% |
+| Phi-4-mini Q8_0 | 76.9 | 77.2 | 0% |
+
+The discriminator is **`top_p`**, and the direction is backwards from
+intuition — `top_p = 1.0`, the documented "off" value, is the *slowest*
+configuration:
+
+| Ministral-8B, `temp 0.7` | decode tok/s |
+|---|---:|
+| `top_k 0, top_p 1.0` (both filters off) | 31.6 |
+| `top_k 0, top_p 1.0, repeat_penalty 1.1` | 31.5 |
+| `top_k 40, top_p 1.0` | 49.5 |
+| `top_k 0, top_p 0.9` | 55.1 |
+
+`repeat_penalty` costs nothing. The cause is `src/sample.c:130`: the
+large-vocabulary fast path is guarded by
+`(want_k < n_vocab || s->top_p < 1.0f)`, so when top-k is off **and**
+`top_p == 1.0` it is not even attempted, and the sampler falls through to a
+full `qsort` of the whole vocabulary every token — the code's own comment
+prices that at ~12 ms/token. The configuration needing the least filtering
+takes the most expensive path. (`top_k` only partly rescues it: with `top_k`
+set the fast path is entered but its head can overflow on a flat distribution
+and fall back to the same full sort, which is why `top_k 20` did nothing for
+Qwen3 while `top_k 40` helped Ministral.)
+
+This is not theoretical: **`top_p 1.0` is what the Mistral and gpt-oss presets
+ship**, the latter straight off OpenAI's model card. Filed in the suite-wide
+plan with a proposed exactness-preserving fix.
