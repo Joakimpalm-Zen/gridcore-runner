@@ -5,25 +5,29 @@ dependencies beyond libc/pthreads, no ggml, one `make`, one binary. It loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**Since 0.1.4 — two more architectures, both on CPU and CUDA.** **gpt-oss**
-runs end to end (per-head attention sinks, MXFP4 experts, router and
-per-expert biases), and so does the **Gemma-4 E-series** (per-layer embeddings
-plus layers that own no KV cache and read an earlier layer's). Both are
-GPU/CPU byte-identical at whole-graph offload. Where a model is too
-numerically sensitive for token-identity to mean anything, agreement is
-measured against its own floor instead — `scripts/sensitivity_floor.py`
-reports what a given model does to a small numeric change, and
+**In 0.1.5 — three more architectures, and a sampler that stopped sorting the
+vocabulary.** **gpt-oss** runs end to end (per-head attention sinks, MXFP4
+experts, router and per-expert biases), and so does the **Gemma-4 E-series**
+(per-layer embeddings plus layers that own no KV cache and read an earlier
+layer's); both are GPU/CPU byte-identical at whole-graph offload. **Apertus**
+joins on CPU (ungated MLP, xIELU), and the MoE router is now general enough
+for the Llama-4 / DeepSeek-V3 knobs. `top_k` is served by selection rather
+than by sorting the whole vocabulary — gemma-4-E4B decode **26.1 → 59.0
+tok/s**, bit-identical output — and `--cpu-moe auto` no longer crashes
+mid-forward (gemma-4-26B-A4B decode **4.74 → 10.89 tok/s**). Where a model is
+too numerically sensitive for token-identity to mean anything, agreement is
+measured against its own floor instead: `scripts/sensitivity_floor.py` reports
+what a given model does to a small numeric change, and
 `scripts/token_divergence.py` reports where two engines first disagree and by
 how much.
 
-**In 0.1.4 — tensor cores by default, published benchmarks, European models.**
-The tensor-core prefill GEMM is the default on tolerance-gated dense Q4_K
-models (**+47–77% prefill**, decode unchanged), dense decode reaches **73–79%
-of llama.cpp** on the reference box, and the head-to-head numbers are
-published — losing rows included ([docs/benchmarks.md](docs/benchmarks.md)).
-Six European models (EuroLLM, Lucie, Mistral-Nemo, Teuken, Salamandra,
-TildeOpen-30b) join the pinned compatibility manifest under the [Europe & US
-model scope](docs/model-scope.md). See [CHANGELOG.md](CHANGELOG.md).
+Earlier, in 0.1.4: the tensor-core prefill GEMM became the default on
+tolerance-gated dense Q4_K models (**+47–77% prefill**, decode unchanged),
+dense decode reached **73–79% of llama.cpp** on the reference box with the
+head-to-head numbers published, losing rows included
+([docs/benchmarks.md](docs/benchmarks.md)), and six European models joined the
+pinned compatibility manifest under the [Europe & US model
+scope](docs/model-scope.md). See [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
