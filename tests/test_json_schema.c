@@ -1038,6 +1038,52 @@ static void test_schema_rejects_discriminator_after_conditional_args(void) {
     jv_free(schema_json);
 }
 
+// A response body must be decodable by a strict UTF-8 JSON client. Structural
+// validation is not enough: 0xC0 has a valid two-byte lead pattern and can be
+// followed by a valid continuation byte, yet no conforming decoder accepts it
+// (it is an overlong encoding). Emitting it produced a Messages body Python
+// refused outright with "invalid start byte", which a model reaches whenever a
+// byte-fallback token emits a stray byte or max_tokens cuts a character in
+// half. Every rejected form must come back as U+FFFD, never as raw bytes.
+static void test_escape_replaces_ill_formed_utf8(void) {
+    struct { const char *in; size_t n; const char *what; } bad[] = {
+        { "\xC0\x80",         2, "overlong two-byte (0xC0)" },
+        { "\xC1\xBF",         2, "overlong two-byte (0xC1)" },
+        { "\xE0\x80\x80",     3, "overlong three-byte" },
+        { "\xED\xA0\x80",     3, "UTF-16 surrogate U+D800" },
+        { "\xF0\x80\x80\x80", 4, "overlong four-byte" },
+        { "\xF4\x90\x80\x80", 4, "beyond U+10FFFF" },
+        { "\xF5\x80\x80\x80", 4, "lead byte 0xF5" },
+        { "\x80",             1, "bare continuation byte" },
+        { "\xE2\x82",         2, "truncated three-byte at end of buffer" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        char out[64];
+        size_t m = json_escape(bad[i].in, bad[i].n, out, sizeof(out));
+        for (size_t k = 0; k < m; k++)
+            if ((unsigned char)out[k] >= 0x80) {
+                // the only bytes above ASCII that may survive are U+FFFD's
+                assert(((unsigned char)out[k] == 0xEF ||
+                        (unsigned char)out[k] == 0xBF ||
+                        (unsigned char)out[k] == 0xBD) && bad[i].what);
+            }
+        // and the result must itself re-validate as UTF-8
+        for (size_t k = 0; k < m; ) {
+            unsigned char c = (unsigned char)out[k];
+            size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 :
+                         (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+            assert(len != 0 && k + len <= m && bad[i].what);
+            k += len;
+        }
+    }
+    // well-formed input must pass through untouched
+    const char *ok = "caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80";
+    char out[64];
+    size_t m = json_escape(ok, strlen(ok), out, sizeof(out));
+    assert(m == strlen(ok) && memcmp(out, ok, m) == 0);
+    puts("ok: ill-formed UTF-8 is replaced, well-formed passes through");
+}
+
 int main(void) {
     test_strict_bounded_numbers();
     test_json_close_partial_string();
@@ -1076,6 +1122,7 @@ int main(void) {
     test_schema_nested_tool_key_keeps_discriminator();
     test_schema_close_mid_discriminator_matches_args();
     test_schema_rejects_discriminator_after_conditional_args();
+    test_escape_replaces_ill_formed_utf8();
     puts("json/schema tests ok");
     return 0;
 }

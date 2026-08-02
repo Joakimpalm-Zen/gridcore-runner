@@ -323,6 +323,21 @@ bool jv_bool(jv *v, bool dflt) {
 
 // length of the valid UTF-8 sequence starting at s[i] (bounded by n), or 0
 // when the bytes there are not well-formed UTF-8
+// Length of the well-formed UTF-8 sequence at s[i], or 0 if there isn't one.
+//
+// Structure is NOT enough. A byte pattern can have a valid lead byte and valid
+// continuation bytes and still not be UTF-8, and a strict decoder — every JSON
+// client — rejects it. Checking only the shape let 0xC0 through as a two-byte
+// lead and emitted a response body Python could not decode at all
+// ("invalid start byte"), which a model reaches whenever a byte-fallback token
+// emits a stray byte or `max_tokens` cuts a multi-byte character in half.
+//
+// The three families a conforming decoder refuses, all rejected here so the
+// caller replaces them with U+FFFD:
+//   overlong    — a value encoded in more bytes than it needs (0xC0/0xC1 at
+//                 two bytes, 0xE0 80..9F, 0xF0 80..8F)
+//   surrogates  — U+D800..DFFF (0xED A0..BF) exist only in UTF-16
+//   out of range— anything past U+10FFFF (0xF4 90.. and every 0xF5..0xFF lead)
 static size_t utf8_seq(const char *s, size_t i, size_t n) {
     unsigned char c = (unsigned char)s[i];
     size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 :
@@ -330,6 +345,12 @@ static size_t utf8_seq(const char *s, size_t i, size_t n) {
     if (len == 0 || i + len > n) return 0;
     for (size_t k = 1; k < len; k++)
         if (((unsigned char)s[i + k] & 0xC0) != 0x80) return 0;
+    unsigned char c1 = len > 1 ? (unsigned char)s[i + 1] : 0;
+    if (len == 2 && c < 0xC2) return 0;
+    if (len == 3 && c == 0xE0 && c1 < 0xA0) return 0;
+    if (len == 3 && c == 0xED && c1 >= 0xA0) return 0;
+    if (len == 4 && c == 0xF0 && c1 < 0x90) return 0;
+    if (len == 4 && (c > 0xF4 || (c == 0xF4 && c1 >= 0x90))) return 0;
     return len;
 }
 
