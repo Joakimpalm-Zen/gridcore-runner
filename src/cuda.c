@@ -1325,6 +1325,13 @@ bool gpu_init(model_t *m) {
                     "device kernel — running on CPU\n");
             goto unsupported;
         }
+    // The shared always-on expert has no device path: the routed MoE
+    // kernels write the FFN output and nothing adds a second dense branch.
+    if (m->n_ff_shexp > 0) {
+        fprintf(stderr, "gpu: shared-expert MoE has no device path — "
+                "running on CPU\n");
+        goto unsupported;
+    }
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];

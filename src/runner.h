@@ -236,6 +236,11 @@ typedef struct {
     // Added to the probabilities for TOP-K SELECTION and deliberately not to
     // the weights the selected experts are scaled by.
     float       *exp_probs_b;
+    // Shared always-on expert (Qwen2-MoE / DeepSeek): a dense FFN over the
+    // same normed input, added to the routed output. Qwen2-MoE additionally
+    // gates it by sigmoid of a scalar router; DeepSeek has no gate.
+    gguf_tensor *w_gate_shexp, *w_up_shexp, *w_down_shexp;
+    gguf_tensor *ffn_gate_inp_shexp;
     // Gemma-4 E-series per-layer embeddings: a gate into the PLE width, an
     // elementwise product with this layer's slice of the per-layer table, a
     // projection back to n_embd and its own RMS norm.
@@ -318,6 +323,7 @@ typedef struct {
     // sparse-MoE (0 = dense model). n_ff_exp is the per-expert FFN width.
     int       n_expert, n_expert_used, n_ff_exp;
     float    *moe_logits;  // [n_expert] router scratch (forward, single token)
+    float    *shexp_in, *shexp_g, *shexp_u, *shexp_o;  // shared-expert scratch
     float    *moe_sel_scores;   // [n_expert] selection scores when biased/grouped
     float    *moe_group_score;  // [n_expert_groups] group-limited top-k scratch
     float    *moe_gate;    // [n_ff_exp]
@@ -411,6 +417,7 @@ typedef struct {
     // softmax + top-k + renormalize path every currently-certified MoE uses,
     // so an arch that sets none of these is bit-for-bit unaffected.
     int    expert_gating;        // EXPERT_GATE_* above
+    int    n_ff_shexp;           // shared-expert FFN width (0 = no shared expert)
     int    n_expert_groups;      // >1 enables group-limited top-k (DeepSeek V3)
     int    n_group_used;         // groups kept when n_expert_groups > 1
     float  expert_w_scale;       // 0 or 1 = no scaling

@@ -937,10 +937,16 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         // gating, top-k, renormalized weights, no shared expert. A shared-expert
         // MoE (Qwen2-MoE / DeepSeek) would load its standard experts and
         // silently ignore the shared expert — refuse rather than compute wrong.
-        if (gguf_get_u32(g, AK("expert_shared_count"), 0) > 0 ||
-            gguf_find_tensor(g, "blk.0.ffn_gate_inp_shexp.weight")) {
-            fprintf(stderr, "error: shared-expert MoE is not supported "
-                    "(only Mixtral/Qwen3-style top-k MoE)\n");
+        // Shared always-on expert (Qwen2-MoE / DeepSeek): a dense FFN over the
+        // same normed input, summed with the routed output. Supported when the
+        // tensors are present; the width falls back to the routed expert width
+        // exactly as llama.cpp does.
+        if (gguf_find_tensor(g, "blk.0.ffn_gate_shexp.weight"))
+            m->n_ff_shexp = (int)gguf_get_u32(
+                g, AK("expert_shared_feed_forward_length"), m->n_ff_exp);
+        else if (gguf_get_u32(g, AK("expert_shared_count"), 0) > 0) {
+            fprintf(stderr, "error: expert_shared_count is set but the shared "
+                    "expert tensors are absent\n");
             return false;
         }
         // GELU-gated MoE is implemented only for gemma-4's dual-branch layout
@@ -1134,6 +1140,14 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             // sparse-MoE FFN: a router plus fused 3D expert tensors replace the
             // dense gate/up/down for this layer
             l->is_moe = true;
+            if (m->n_ff_shexp > 0) {
+                l->w_gate_shexp = need_tensor(g, "blk.%d.ffn_gate_shexp.weight", i, &ok);
+                l->w_up_shexp   = need_tensor(g, "blk.%d.ffn_up_shexp.weight", i, &ok);
+                l->w_down_shexp = need_tensor(g, "blk.%d.ffn_down_shexp.weight", i, &ok);
+                // optional: Qwen2-MoE gates the branch, DeepSeek does not
+                l->ffn_gate_inp_shexp =
+                    opt_tensor(g, "blk.%d.ffn_gate_inp_shexp.weight", i);
+            }
             l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
             // Optional selection-only bias; absent on every arch certified so far.
             l->exp_probs_b   = tensor_to_f32(
@@ -1475,6 +1489,15 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
         // per-token MoE scratch (decode routes each token independently)
         m->moe_logits = malloc(sizeof(float) * (size_t)m->n_expert);
         m->moe_sel_scores = malloc(sizeof(float) * (size_t)m->n_expert);
+        if (m->n_ff_shexp > 0) {
+            size_t nb = (size_t)m->n_batch;
+            m->shexp_in = malloc(sizeof(float) * nb * (size_t)m->n_embd);
+            m->shexp_o  = malloc(sizeof(float) * nb * (size_t)m->n_embd);
+            m->shexp_g  = malloc(sizeof(float) * nb * (size_t)m->n_ff_shexp);
+            m->shexp_u  = malloc(sizeof(float) * nb * (size_t)m->n_ff_shexp);
+            if (!m->shexp_in || !m->shexp_o || !m->shexp_g || !m->shexp_u)
+                return false;
+        }
         m->moe_group_score = malloc(sizeof(float) * (size_t)m->n_expert_groups);
         if (!m->moe_sel_scores || !m->moe_group_score) return false;
         m->moe_gate   = malloc(sizeof(float) * (size_t)m->n_ff_exp);
@@ -1607,6 +1630,7 @@ void model_free(model_t *m) {
     free(m->ssm_cw);
     free(m->ssm_conv_state); free(m->ssm_state_mem);
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
+    free(m->shexp_in); free(m->shexp_o); free(m->shexp_g); free(m->shexp_u);
     free(m->moe_logits); free(m->moe_sel_scores); free(m->moe_group_score);
     free(m->moe_gate); free(m->moe_up);
     free(m->moe_dexp); free(m->moe_out);
@@ -2180,6 +2204,36 @@ static inline float gated_act(int act, float g, float u) {
     return (g / (1.0f + expf(-g))) * u;
 }
 
+// Shared always-on expert. A dense FFN over the SAME normed input the router
+// saw, summed into the routed output. Qwen2-MoE scales it by sigmoid of a
+// scalar router (llama.cpp writes that sigmoid as silu(x)/x); DeepSeek has no
+// router tensor and adds the branch unscaled.
+//
+// `in` is the normed input the routed path consumed, kept aside because
+// moe_ffn overwrites m->xb with its own output.
+static void shexp_add(model_t *m, const layer_t *ly, const float *in,
+                      int n, int xdim) {
+    if (!ly->w_gate_shexp) return;
+    int ne = m->n_embd, nf = m->n_ff_shexp;
+    matvec_b(m->tp, m->shexp_g, nf, ly->w_gate_shexp, in, ne, ne, nf, NULL, n);
+    matvec_b(m->tp, m->shexp_u, nf, ly->w_up_shexp,   in, ne, ne, nf, NULL, n);
+    for (size_t i = 0; i < (size_t)n * nf; i++)
+        m->shexp_g[i] = gated_act(m->ffn_act, m->shexp_g[i], m->shexp_u[i]);
+    matvec_b(m->tp, m->shexp_o, ne, ly->w_down_shexp, m->shexp_g, nf, nf, ne, NULL, n);
+    for (int b = 0; b < n; b++) {
+        float gate = 1.0f;
+        if (ly->ffn_gate_inp_shexp) {
+            float logit = 0.0f;
+            matvec_b(m->tp, &logit, 1, ly->ffn_gate_inp_shexp,
+                     in + (size_t)b * ne, ne, ne, 1, NULL, 1);
+            gate = 1.0f / (1.0f + expf(-logit));
+        }
+        float *out = m->xb + (size_t)b * xdim;
+        const float *sh = m->shexp_o + (size_t)b * ne;
+        for (int i = 0; i < ne; i++) out[i] += gate * sh[i];
+    }
+}
+
 static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
@@ -2392,7 +2446,12 @@ bool model_moe_ffn_cpu(model_t *m, int layer, int n) {
             rmsnorm(m->xb + (size_t)b * xs,
                     m->x + (size_t)b * ne,
                     ly->ffn_norm_w, ne, m->rms_eps);
+        if (ly->w_gate_shexp)
+            for (int b = 0; b < n; b++)
+                memcpy(m->shexp_in + (size_t)b * ne,
+                       m->xb + (size_t)b * xs, sizeof(float) * (size_t)ne);
         moe_ffn(m, ly, n, xs);
+        shexp_add(m, ly, m->shexp_in, n, xs);
     }
     if (ly->post_ffn_norm_w)
         for (int b = 0; b < n; b++)
@@ -2644,7 +2703,13 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             rmsnorm(m->xb + (size_t)b * xdim, m->x + (size_t)b * n_embd,
                     ly->ffn_norm_w, n_embd, m->rms_eps);
         if (ly->is_moe) {
+            if (ly->w_gate_shexp)
+                for (int b = 0; b < n; b++)
+                    memcpy(m->shexp_in + (size_t)b * n_embd,
+                           m->xb + (size_t)b * xdim,
+                           sizeof(float) * (size_t)n_embd);
             moe_ffn(m, ly, n, xdim);   // reads normed m->xb, writes FFN out to m->xb
+            shexp_add(m, ly, m->shexp_in, n, xdim);
         } else {
         matvec_b(m->tp, m->hb,  m->n_ff, ly->w_gate, m->xb, xdim, n_embd, m->n_ff, NULL, n);
         matvec_b(m->tp, m->hb2, m->n_ff, ly->w_up,   m->xb, xdim, n_embd, m->n_ff, NULL, n);

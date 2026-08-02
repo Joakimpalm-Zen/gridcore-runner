@@ -313,3 +313,34 @@ for _tag, _fn in (("rsoft", 1), ("rsigmoid", 2), ("rsmw", 3), ("rsqrtsp", 4)):
           base_meta("llama", [ku("llama.expert_count", 4),
                               ku("llama.expert_used_count", 2),
                               ku("llama.expert_gating_func", _fn)]))
+
+# --- shared always-on expert. The routed experts are all zeros and the SHARED
+# branch carries the dense FFN, so the routed path contributes nothing and the
+# output must equal the dense oracle exactly. If the shared branch were
+# ignored the output collapses to zero-FFN; if it were added twice it doubles.
+#   shexp    ungated (DeepSeek shape)
+#   shexpg   gated by a scalar sigmoid router (Qwen2-MoE shape). The router
+#            weight is zero, so the logit is 0 and sigmoid(0) = 0.5 — the
+#            shared FFN is therefore doubled to compensate, which only works
+#            if the gate is really applied.
+for _tag, _gated in (("shexp", False), ("shexpg", True)):
+    _ts = list(shared)
+    for _i in range(LAYERS):
+        _scale = 2.0 if _gated else 1.0
+        _ts += [
+            (f"blk.{_i}.ffn_gate_inp.weight", [E, 2], zeros(E * 2)),
+            (f"blk.{_i}.ffn_gate_exps.weight", [E, FF, 2], pack(ffn[_i]["gate"] * 2)),
+            (f"blk.{_i}.ffn_up_exps.weight", [E, FF, 2], pack(ffn[_i]["up"] * 2)),
+            (f"blk.{_i}.ffn_down_exps.weight", [FF, E, 2], zeros(FF * E * 2)),
+            (f"blk.{_i}.ffn_gate_shexp.weight", [E, FF], pack(ffn[_i]["gate"])),
+            (f"blk.{_i}.ffn_up_shexp.weight", [E, FF], pack(ffn[_i]["up"])),
+            (f"blk.{_i}.ffn_down_shexp.weight", [FF, E],
+             pack([x * _scale for x in ffn[_i]["down"]])),
+        ]
+        if _gated:
+            _ts.append((f"blk.{_i}.ffn_gate_inp_shexp.weight", [E, 1], zeros(E)))
+    write(f"{OUT}.{_tag}.gguf", _ts,
+          base_meta("llama", [ku("llama.expert_count", 2),
+                              ku("llama.expert_used_count", 1),
+                              ku("llama.expert_shared_count", 1),
+                              ku("llama.expert_shared_feed_forward_length", FF)]))

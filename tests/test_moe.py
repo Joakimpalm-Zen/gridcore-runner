@@ -215,3 +215,21 @@ def test_caps_advertise_moe_tensor_placement(runner_bin):
         check=True, text=True).stdout)
     assert caps["tensor_placement"]["cpu_moe"] is True
     assert caps["tensor_placement"]["cpu_moe_partial"] is True
+
+
+@pytest.mark.parametrize("variant", ["shexp", "shexpg"])
+def test_shared_always_on_expert_matches_the_dense_oracle(runner_bin, models,
+                                                          variant):
+    """A shared expert carrying the dense FFN, with the routed experts zeroed.
+
+    The routed path contributes nothing, so the output can only equal the dense
+    oracle if the shared branch ran exactly once. Ignoring it collapses the FFN
+    to zero; adding it twice doubles it.
+
+    `shexpg` additionally gates the branch by a scalar sigmoid router (the
+    Qwen2-MoE shape). Its router weight is zero, so the gate is sigmoid(0) =
+    0.5 and the shared FFN is doubled to compensate — which only comes out
+    right if the gate is genuinely applied.
+    """
+    dense = _generate(runner_bin, f"{models}.dense.gguf")
+    assert _generate(runner_bin, f"{models}.{variant}.gguf") == dense

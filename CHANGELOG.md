@@ -5,6 +5,28 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Shared always-on expert (Qwen2-MoE / DeepSeek) is supported.** It was
+  refused at load. A dense FFN runs over the same normed input the router saw
+  and is summed into the routed output; Qwen2-MoE additionally scales it by
+  sigmoid of a scalar router (llama.cpp writes that sigmoid as `silu(x)/x`),
+  DeepSeek has no router tensor and adds it unscaled. Both shapes are handled,
+  and the width falls back to the routed expert width exactly as the reference
+  does. The branch is added at the call sites rather than inside `moe_ffn`, so
+  the routed path is untouched — Qwen3-Coder-30B, gpt-oss and gemma-4-26B-A4B
+  are byte-identical across the change.
+
+  **CUDA refuses**: the routed kernels write the FFN output and nothing adds a
+  second dense branch, so a shared-expert model runs on CPU with a message
+  saying why.
+
+  Gated against the dense oracle with the routed experts zeroed, so the output
+  can only match if the shared branch ran exactly once — ignoring it collapses
+  the FFN to zero, adding it twice doubles it. The gated variant's router
+  weight is zero, making the gate `sigmoid(0) = 0.5`, with the shared FFN
+  doubled to compensate: it only comes out right if the gate is really applied.
+  The previous binary refuses both fixtures outright, which is the negative
+  control.
+
 - **Llama-4 attention knobs: NoPE and the position-dependent attention
   temperature.** Every `no_rope_layer_step`-th layer skips rope entirely, and
   on *those same layers* — it is the else-branch of the rope test in
