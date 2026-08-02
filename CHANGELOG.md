@@ -5,6 +5,59 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **RNR-019 — `server.c` is seven files instead of one.** 4,702 lines
+  combining socket portability, HTTP parsing, routing, request validation,
+  three protocol translations, SSE streaming, model registry and swap
+  lifecycle, thread queues, continuous batching and shutdown. Now:
+
+  | file | lines | owns |
+  |---|---|---|
+  | `http.c` | 211 | sockets, request parsing, response writing |
+  | `registry.c` | 324 | model residency, swap, TTL reaper, admission queue |
+  | `scheduler.c` | 343 | the continuous-batching decode thread |
+  | `completion.c` | 1,757 | the generation loop and all three wire framings |
+  | `api_responses.c` | 414 | Responses request → chat |
+  | `api_anthropic.c` | 495 | Anthropic Messages request → chat |
+  | `server.c` | 1,135 | routes, HTTP dispatch, capabilities, listener, shutdown |
+
+  Every extraction is a **verbatim text move** — linkage is the only edit —
+  each verified by comparing the multiset of non-comment lines before and
+  after, and each gated on `make test` plus the 307-case conformance suite
+  before the next one started. That gate is the reason this work waited: the
+  suite had a ~30% flaky test until 0.1.5 and could not have told a broken
+  refactor from a fired flake.
+
+  Two of the seams are genuinely narrow and one is not, which is worth being
+  precise about. `scheduler.h` is six functions and `SCH` is fully private —
+  `sched_shutdown` was the only outside reference, so it moved too.
+  `completion.h` is six declarations, because the routes reached the whole
+  generation-and-framing complex through `run_completion` and nothing else.
+  `api.h` is three. But `server_int.h` exposes the `SV` global as a declared
+  `server_state` type rather than hiding it: that is the minimum needed for
+  these to be separate translation units at all, and **de-globalising `SV`
+  into a context threaded down from `server_run` is the rest of the finding**,
+  a behavioural change rather than a move, deliberately not attempted here.
+
+  Two things found on the way. `test_bind.c` — the source-text gate on the
+  loopback-only bind — would have been quietly hollowed out: it asserted
+  `typedef SOCKET sock_t;` appears in `server.c`, which is no longer where
+  that lives, and a check left pointing at a file the code moved out of passes
+  vacuously. Each check now follows the code it guards, and the
+  forbidden-resolver scan (`getaddrinfo`, `inet_pton`, `INADDR_ANY`,
+  `SO_BINDTODEVICE`…) was widened to the new transport and admission files,
+  which are the more natural place to smuggle in an escape hatch. Confirmed
+  each still fails by planting the forbidden text.
+
+  And the scheduler is `scheduler.c`, not `sched.c`, because `src/` goes on
+  the include path with `-I` for every test target and `-I` directories are
+  searched **before** the system ones — so `src/sched.h` silently shadowed the
+  standard `<sched.h>`, which `<pthread.h>` includes. Every test that reached
+  `pthread.h` got the batching scheduler instead and failed with
+  `unknown type 'slot_t'` inside a system header. `scripts/check-generated.py`
+  now fails the build if any `src/*.h` collides with a C or POSIX header name;
+  the symptom is a wall of type errors in a file nobody edited and the cause
+  is invisible from there.
+
 - **RNR-018 — `runner.h` is thirteen module headers instead of one.** The core
   header declared the whole engine: GGUF internals, the tokenizer maps, the
   full mutable `model_t`, the backend contract, the VRAM registry, the sampler,
