@@ -279,6 +279,13 @@ typedef struct {
     struct vram_lease *vram; // this instance's entry in the cross-process VRAM
                              // registry (NULL on CPU-only runs, which are never
                              // accounted and never refused)
+    // The immutable half above is not owned by this instance: it belongs to a
+    // refcounted record holding the mmap, the parsed metadata, the layer array
+    // and every f32 conversion, shared by every model_t loaded from the same
+    // file with the same weight-side parameters. Every pointer in the
+    // immutable section aliases into it, so field access is unchanged and only
+    // ownership moved. NULL only for a load that failed before publishing.
+    struct model_weights *W;
 } model_t;
 // per-layer geometry accessors: uniform models keep the scalars, heterogeneous
 // archs (gemma4) override per layer

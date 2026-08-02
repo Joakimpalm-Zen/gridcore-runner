@@ -5,6 +5,65 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Phase 5 — one parse per file, not one per slot.** `model_t` fused the
+  weight side and the per-sequence side, and the header had said so for a
+  while: *"the struct itself is not yet split into two types… the sharing was
+  pushed into the backend first, where the duplication actually cost
+  gigabytes."* The host side was never done, and the bill was not the weights
+  — those are mmap'd and the page cache already dedupes them — it was the
+  **parse**.
+
+  Measured on Qwen2.5-7B-Instruct-Q4_K_M, `--serve -c 512 --gpu off`, touched
+  host memory after startup:
+
+  | slots | before | after |
+  |---|---|---|
+  | 1 | 51.3 MB | 51.2 MB |
+  | 2 | 81.0 MB | 51.3 MB |
+  | 4 | 140.3 MB | 51.4 MB |
+
+  **29.7 MB per extra slot → 87 KB.** Reading the file's own metadata
+  accounts for 15.3 MB of what was being repeated: `tokenizer.ggml.tokens` and
+  `tokenizer.ggml.merges` are 303,454 strings, each its own `malloc`, re-made
+  for every slot — for a vocabulary the slots **never read**, because they
+  share one tokenizer built from slot 0's file. The rest is the f32 conversion
+  of every norm and bias, the tensor directory, and the pages each duplicate
+  mapping faults in separately.
+
+  `model_load` now splits at the line where it stops reading the file and
+  starts sizing buffers: `model_bind_weights` produces the immutable half,
+  `model_alloc_runtime` the per-sequence half. The immutable half lives in a
+  refcounted record keyed on path plus file identity (size, inode, mtime,
+  ctime) — a model rebuilt on disk between two loads must not be served out of
+  the previous parse — plus the only two parameters the bind phase reads.
+  Every `model_t` sharing a record holds **aliasing pointers**, so field
+  access is unchanged and only ownership moved; that is what kept this out of
+  `cuda.c` and `metal.m` entirely. It is deliberately the same shape
+  `cuda.c` has used for the device upload since the MoE work.
+
+  What is **not** shared, and why: the rope tables. YaRN auto-extension keys
+  off the requested context and phi3 picks its LongRoPE factor set the same
+  way, so two slots of one file with different `-c` legitimately want
+  different tables — they are built after the seam and stay per-instance,
+  along with the KV cache, all activation scratch, the thread pool, the VRAM
+  lease and the expert placement array.
+
+  `tests/test_shared_weights.c` already checked that two instances agree, stay
+  isolated, and free exactly once in any order. All three still pass on a
+  build that copies the whole file per instance, so they could not have caught
+  a regression here — the test now also asserts the aliasing directly, and
+  that a load differing in a weight-side parameter gets its own parse.
+  Verified the four new assertions fail on a sharing-blind build.
+
+  Also: `make test-shared-asan` was **red before this change and unrelated to
+  it** — 5,280 bytes in 12 allocations, every one below `cuInit` in
+  `libcuda.so`, reported identically at the previous commit. A leak gate that
+  always fails is a leak gate nobody reads, and this is precisely the change
+  it exists to check, so `tests/lsan.supp` suppresses that library (not a
+  wildcard: a leak in runner's own frames during a CUDA call is still
+  reported). The gate is green and reports the suppression matching exactly
+  those 12 allocations.
+
 - **RNR-019 — `server.c` is seven files instead of one.** 4,702 lines
   combining socket portability, HTTP parsing, routing, request validation,
   three protocol translations, SSE streaming, model registry and swap

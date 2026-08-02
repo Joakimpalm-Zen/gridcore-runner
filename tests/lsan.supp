@@ -1,0 +1,16 @@
+# LeakSanitizer suppressions for the ASan test targets.
+#
+# The NVIDIA driver allocates process-lifetime bookkeeping inside cuInit and
+# never frees it. On this box that is a fixed 5,280 bytes in 12 allocations,
+# every one of them below cuInit in libcuda.so, and it is reported identically
+# on a build with no runner code in the trace at all.
+#
+# It is suppressed rather than tolerated because the alternative is a leak gate
+# that always fails, which is a leak gate nobody reads. `make test-shared-asan`
+# exists to catch a refcount that frees early, twice, or never — exactly the
+# class of bug the shared-weight records could introduce — and it can only do
+# that if a clean run is actually clean.
+#
+# Scope is deliberately the library, not a wildcard: a leak in runner's own
+# frames is still reported even when the allocation happens during a CUDA call.
+leak:libcuda.so

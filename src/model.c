@@ -5,6 +5,7 @@
 #include "compat.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -511,6 +512,8 @@ const char *const *model_supported_archs(size_t *count) {
 }
 
 static bool model_load_inner(model_t *m, const char *path, const model_params *p);
+static bool model_bind_weights(model_t *m, const char *path, const model_params *p);
+static bool model_alloc_runtime(model_t *m, const model_params *p);
 
 static bool profile_integer(const gguf_kv *kv) {
     if (!kv) return false;
@@ -518,6 +521,160 @@ static bool profile_integer(const gguf_kv *kv) {
            kv->type == GGUF_T_U16 || kv->type == GGUF_T_I16 ||
            kv->type == GGUF_T_U32 || kv->type == GGUF_T_I32 ||
            kv->type == GGUF_T_U64 || kv->type == GGUF_T_I64;
+}
+
+// ------------------------------------------------------ shared host weights
+//
+// Everything model_bind_weights produces is derived from the GGUF and never
+// written again: the mmap and its parsed metadata, the layer array, the f32
+// conversion of every norm and bias, the per-layer geometry. Two model_t
+// values loaded from the same file with the same weight-side parameters hold
+// bit-identical copies of all of it.
+//
+// Until now they held literal copies, and the bill was not the weights — those
+// are mmap'd — but the parse. Measured on Qwen2.5-7B-Instruct-Q4_K_M,
+// `--serve --parallel 4` cost 29.7 MB of touched host memory per extra slot,
+// of which 15.3 MB is the tokenizer vocabulary and merge list: 303,454
+// separate string allocations, remade per slot, for a vocabulary the slots
+// never read — they share one tokenizer built from slot 0's file.
+//
+// src/cuda.c has done the device-side version of this since the MoE work: one
+// upload, refcounted, keyed on file identity. This is that, on the host. The
+// record owns the buffers and every model_t sharing it holds aliasing
+// pointers, so field access is unchanged and only ownership moved — which is
+// what keeps the change out of the backends.
+typedef struct model_weights {
+    int      refs;
+    model_t  proto;         // the model exactly as the bind phase left it
+    // What these buffers were derived from, compared rather than assumed from
+    // the path: a model rebuilt on disk between two loads must not be served
+    // out of the previous parse.
+    uint64_t fsize, fino;
+    int64_t  fmtime, fctime;
+    // The only two parameters the bind phase reads. Everything else the load
+    // takes from `p` is consumed after the seam, by the per-instance half, so
+    // two slots may legitimately differ on it and still share these buffers.
+    bool     want_kv_q8;
+    int      gpu_mode;
+    struct model_weights *next;
+} model_weights;
+
+static model_weights *g_weights;
+static pthread_mutex_t g_weights_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static bool mw_file_id(const char *path, uint64_t *size, uint64_t *ino,
+                       int64_t *mtime, int64_t *ctime) {
+    struct stat st;
+    if (!path || stat(path, &st) != 0) return false;
+    *size  = (uint64_t)st.st_size;
+    *ino   = (uint64_t)st.st_ino;
+    *mtime = stat_mtime_ns(&st);
+    *ctime = stat_ctime_ns(&st);
+    return true;
+}
+
+// Caller holds g_weights_mu.
+static model_weights *mw_find(const char *path, const model_params *p,
+                              uint64_t size, uint64_t ino,
+                              int64_t mtime, int64_t ctime) {
+    for (model_weights *w = g_weights; w; w = w->next) {
+        if (!w->proto.path || strcmp(w->proto.path, path) != 0) continue;
+        if (w->fsize != size || w->fino != ino ||
+            w->fmtime != mtime || w->fctime != ctime) continue;
+        if (w->want_kv_q8 != p->kv_q8 || w->gpu_mode != p->gpu_mode) continue;
+        return w;
+    }
+    return NULL;
+}
+
+// The immutable half. Freed by the last holder, or directly by model_free for
+// a load that failed before it could publish.
+static void model_free_weights(model_t *m) {
+    // partial load: n_layer is read from GGUF metadata long before m->layers
+    // is allocated, so a load that fails in between (unsupported tensor
+    // type, missing token_embd/output_norm, etc.) reaches here with
+    // m->layers still NULL — guard against dereferencing it.
+    for (int i = 0; m->layers && i < m->n_layer; i++) {
+        layer_t *l = &m->layers[i];
+        free(l->attn_norm_w); free(l->ffn_norm_w);
+        free(l->bq); free(l->bk); free(l->bv); free(l->bo);
+        free(l->qnorm_w); free(l->knorm_w);
+        free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
+        free(l->down_exps_scale); free(l->gate_inp_scale);
+        free(l->attn_sinks);
+        free(l->ffn_gate_inp_b); free(l->ffn_gate_exps_b); free(l->exp_probs_b);
+        free(l->ffn_up_exps_b);  free(l->ffn_down_exps_b);
+        free(l->ffn_pre_norm2_w); free(l->ffn_post_norm1_w); free(l->ffn_post_norm2_w);
+        free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
+        free(l->moe_g); free(l->moe_u); free(l->moe_d);  // split-MoE pointer arrays
+        free(l->ple_post_norm);
+    }
+    free(m->l_head_kv); free(m->l_head_dim); free(m->l_rope_dim);
+    free(m->l_is_swa); free(m->suppress); free(m->kv_src);
+    free(m->ple_proj_norm);
+    free(m->xielu_an); free(m->xielu_ap); free(m->xielu_b); free(m->xielu_eps);
+    free(m->layers);
+    free(m->path);
+    free(m->fused_splits);
+    free(m->out_norm_w);
+    gguf_close(&m->gf);
+}
+
+static void mw_release(model_weights *w) {
+    if (!w) return;
+    pthread_mutex_lock(&g_weights_mu);
+    bool last = --w->refs == 0;
+    if (last)
+        for (model_weights **pp = &g_weights; *pp; pp = &(*pp)->next)
+            if (*pp == w) { *pp = w->next; break; }
+    pthread_mutex_unlock(&g_weights_mu);
+    if (last) {
+        model_free_weights(&w->proto);
+        free(w);
+    }
+}
+
+static bool model_load_inner(model_t *m, const char *path, const model_params *p) {
+    uint64_t size = 0, ino = 0;
+    int64_t  mtime = 0, ctime = 0;
+    bool id_ok = mw_file_id(path, &size, &ino, &mtime, &ctime);
+
+    // The lock is held across the whole bind, so two slots racing on one file
+    // cannot both pay for the parse — the same reason cuda.c holds its
+    // registry lock across the upload. It serializes concurrent *loads*, which
+    // is all it can block: the server loads slots in sequence, and swap and
+    // draft loads already hold their own locks.
+    pthread_mutex_lock(&g_weights_mu);
+    model_weights *w = id_ok ? mw_find(path, p, size, ino, mtime, ctime) : NULL;
+    if (w) {
+        w->refs++;
+        *m = w->proto;      // scalars, plus aliases into the shared buffers
+        m->W = w;
+    } else {
+        if (!model_bind_weights(m, path, p)) {
+            pthread_mutex_unlock(&g_weights_mu);
+            return false;
+        }
+        // A file that cannot be stat'd cannot be keyed, so it is loaded
+        // privately rather than shared under an identity nothing can confirm.
+        // Same if the record itself cannot be allocated: sharing is an
+        // optimization and must never be the reason a load fails.
+        if (id_ok && (w = calloc(1, sizeof(*w))) != NULL) {
+            w->refs       = 1;
+            w->proto      = *m;   // the per-instance fields are all still zero
+            w->fsize      = size;
+            w->fino       = ino;
+            w->fmtime     = mtime;
+            w->fctime     = ctime;
+            w->want_kv_q8 = p->kv_q8;
+            w->gpu_mode   = p->gpu_mode;
+            w->next       = g_weights;
+            g_weights     = w;
+            m->W          = w;
+        }
+    }
+    pthread_mutex_unlock(&g_weights_mu);
+    return model_alloc_runtime(m, p);
 }
 
 bool model_load(model_t *m, const char *path, const model_params *p) {
@@ -529,7 +686,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     return true;
 }
 
-static bool model_load_inner(model_t *m, const char *path, const model_params *p) {
+static bool model_bind_weights(model_t *m, const char *path, const model_params *p) {
     if (!gguf_open(&m->gf, path)) return false;
     gguf_file *g = &m->gf;
     // A profile is opt-in metadata: legacy/dense GGUFs remain admitted exactly
@@ -1397,6 +1554,20 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             m->kv_q8 = true;
     }
 
+    return true;
+}
+
+// The per-instance half: everything sized by this sequence's context, batch
+// and thread count, allocated fresh for every model_t even when the weights
+// above are shared. The split is at exactly the line where the load stops
+// reading the file and starts sizing buffers -- `path` and the gguf handle are
+// not referenced past here, which is what makes the seam a clean one.
+static bool model_alloc_runtime(model_t *m, const model_params *p) {
+    // The gguf handle and the architecture name come off the model rather than
+    // out of the bind function's locals, because on a shared-weights hit the
+    // bind function never ran for this instance.
+    gguf_file *g = &m->gf;
+    const char *arch = m->arch;
     // runtime buffers
     m->reserve_vram_pct = p->reserve_vram_pct;
     m->gpu_layers_override = p->gpu_layers_override;
@@ -1632,32 +1803,13 @@ void model_free(model_t *m) {
     // orphans that motivated the registry would have been cleared.
     vram_release(m->vram);
     m->vram = NULL;
-    // partial load: n_layer is read from GGUF metadata long before m->layers
-    // is allocated, so a load that fails in between (unsupported tensor
-    // type, missing token_embd/output_norm, etc.) reaches here with
-    // m->layers still NULL — guard against dereferencing it.
-    for (int i = 0; m->layers && i < m->n_layer; i++) {
-        layer_t *l = &m->layers[i];
-        free(l->attn_norm_w); free(l->ffn_norm_w);
-        free(l->bq); free(l->bk); free(l->bv); free(l->bo);
-        free(l->qnorm_w); free(l->knorm_w);
-        free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
-        free(l->down_exps_scale); free(l->gate_inp_scale);
-        free(l->attn_sinks);
-        free(l->ffn_gate_inp_b); free(l->ffn_gate_exps_b); free(l->exp_probs_b);
-        free(l->ffn_up_exps_b);  free(l->ffn_down_exps_b);
-        free(l->ffn_pre_norm2_w); free(l->ffn_post_norm1_w); free(l->ffn_post_norm2_w);
-        free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
-        free(l->moe_g); free(l->moe_u); free(l->moe_d);  // split-MoE pointer arrays
-        free(l->ple_post_norm);
-    }
-    free(m->l_head_kv); free(m->l_head_dim); free(m->l_rope_dim);
-    free(m->l_is_swa); free(m->kv_off); free(m->suppress);
-    free(m->kv_src); free(m->ple); free(m->ple_tmp); free(m->ple_proj_norm);
-    free(m->layers);
-    free(m->path);
-    free(m->fused_splits);
-    free(m->out_norm_w);
+    // ---- the per-instance half. Everything below belongs to this sequence
+    // alone and is freed unconditionally; the weights are refcounted at the
+    // bottom. The rope tables are per-instance and not shared: YaRN
+    // auto-extension keys off the requested context and phi3 picks its
+    // LongRoPE factor set the same way, so two slots of one file with
+    // different -c legitimately want different tables.
+    free(m->kv_off); free(m->ple); free(m->ple_tmp);
     free(m->rope_inv_freq);
     free(m->rope_inv_freq_local);
     if (m->kv_owner == KV_OWNER_MALLOC) {
@@ -1673,7 +1825,6 @@ void model_free(model_t *m) {
     free(m->ssm_cw);
     free(m->ssm_conv_state); free(m->ssm_state_mem);
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
-    free(m->xielu_an); free(m->xielu_ap); free(m->xielu_b); free(m->xielu_eps);
     free(m->shexp_in); free(m->shexp_o); free(m->shexp_g); free(m->shexp_u);
     free(m->moe_logits); free(m->moe_sel_scores); free(m->moe_group_score);
     free(m->moe_gate); free(m->moe_up);
@@ -1682,7 +1833,13 @@ void model_free(model_t *m) {
     free(m->moe_up_b); free(m->moe_dexp_b); free(m->moe_sel);
     free(m->moe_selw); free(m->moe_gidx); free(m->moe_gw);
     tpool_destroy(m->tp);
-    gguf_close(&m->gf);
+    // ---- the shared half. A published load hands its reference back and the
+    // last holder frees the buffers; an unpublished one (stat failed, or the
+    // load failed inside the bind phase) owns them outright and frees them
+    // here. Nothing else may free them: every other model_t sharing this
+    // record still holds aliasing pointers.
+    if (m->W) mw_release(m->W);
+    else      model_free_weights(m);
     memset(m, 0, sizeof(*m));
 }
 

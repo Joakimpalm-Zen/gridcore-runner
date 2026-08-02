@@ -114,6 +114,35 @@ int main(int argc, char **argv) {
     ck((a.gpu != NULL) == ref_on_gpu && (b.gpu != NULL) == ref_on_gpu,
        "every instance reaches the same backend");
 
+    // The HOST half is shared too, not only the device upload: a and b must be
+    // two sequences over one parse. Everything else in this file still passes
+    // on a build that re-reads and re-converts the whole file per instance —
+    // which is what runner did until this change, at 29.7 MB of touched host
+    // memory per extra slot on a 7B model, most of it a tokenizer vocabulary
+    // the slots never read. So the aliasing is asserted directly.
+    ck(a.layers == b.layers, "instances share one layer array");
+    ck(a.gf.map == b.gf.map, "instances share one mapping of the file");
+    ck(a.layers[0].attn_norm_w == b.layers[0].attn_norm_w,
+       "instances share the f32 norm conversions");
+    ck(a.out_norm_w == b.out_norm_w, "instances share the output norm");
+
+    // ...and only when the parameters the bind phase reads agree. gpu_mode
+    // decides whether a q8 KV cache is accepted, which is settled before the
+    // seam, so a GPU_OFF load must get its own record rather than a set of
+    // buffers built under a different answer. A key that ignored this would
+    // hand one instance the other's decision.
+    {
+        model_params off = p;
+        off.gpu_mode = GPU_OFF;
+        model_t d;
+        ck(model_load(&d, g_path, &off), "instance with a different gpu_mode loads");
+        ck(d.layers != a.layers,
+           "a differing weight-side parameter gets its own parse");
+        model_free(&d);
+        ck(model_forward(&a, TOKENS[0], 0) != NULL,
+           "freeing an unrelated record leaves the shared one intact");
+    }
+
     for (int t = 0; t < SEQ; t++) {
         // step a, then b, at the same position: if they shared KV rows or
         // activation scratch, the second write would poison the first's history
