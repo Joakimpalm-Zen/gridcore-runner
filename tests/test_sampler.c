@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define EQ(a, b) (fabsf((a) - (b)) < 1e-6f)
@@ -228,6 +229,74 @@ static void test_greedy_constrained(void) {
     assert(sample_pick(&s, logits, 4, reject_zero, NULL) == 1);
 }
 
+// The "no filter at all" configuration -- top-k off, top-p 1.0, min-p off --
+// is now served from a head instead of a full-vocabulary sort, with the head
+// sized from the roulette draw itself. Two properties have to survive that,
+// and both are checked here through the public API only:
+//
+//   determinism -- the same seed and the same logits must give the same token,
+//   because the head is sized from a draw and a bug there would show up as a
+//   seed-dependent wobble;
+//
+//   distribution -- sampling many seeds must still track the softmax over the
+//   WHOLE vocabulary. If the head were sized too small the tail would be
+//   truncated and the common tokens would be over-represented.
+//
+// The stronger check that the token is bit-for-bit what the old full sort
+// returned is an end-to-end one against the previous binary at a fixed seed;
+// it is recorded in docs/ rather than run here, since it needs two builds.
+static void test_no_filter_sampling_is_deterministic_and_unbiased(void) {
+    enum { V = 8192, TRIALS = 4000 };
+    float *logits = malloc(sizeof(float) * V);
+    float *scratch = malloc(sizeof(float) * V);
+    assert(logits && scratch);
+    uint64_t seed = 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < V; i++) {
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        logits[i] = (float)((seed >> 40) / (double)(1 << 24)) * 4.0f - 6.0f;
+    }
+    // three dominant tokens carrying most of the mass
+    logits[42] = 6.0f; logits[1234] = 5.4f; logits[7000] = 4.8f;
+
+    sampler base = {0};
+    base.temp = 1.0f; base.top_p = 1.0f; base.top_k = 0; base.min_p = 0.0f;
+    base.repeat_penalty = 1.0f;
+
+    // determinism: same seed twice, same token
+    for (int trial = 0; trial < 50; trial++) {
+        sampler a = base, b = base;
+        a.rng = b.rng = 0xD1CE0000ull + (uint64_t)trial;
+        memcpy(scratch, logits, sizeof(float) * V);
+        int ta = sample_pick(&a, scratch, V, NULL, NULL);
+        memcpy(scratch, logits, sizeof(float) * V);
+        int tb = sample_pick(&b, scratch, V, NULL, NULL);
+        assert(ta == tb);
+    }
+
+    // distribution: empirical frequency of the dominant tokens must match the
+    // analytic softmax over the whole vocabulary
+    double mx = -1e30, total = 0;
+    for (int i = 0; i < V; i++) if (logits[i] > mx) mx = logits[i];
+    for (int i = 0; i < V; i++) total += exp(logits[i] - mx);
+    const int watch[3] = { 42, 1234, 7000 };
+    int hits[3] = {0, 0, 0};
+    sampler s = base;
+    s.rng = 0xBEEF1234ull;
+    for (int trial = 0; trial < TRIALS; trial++) {
+        memcpy(scratch, logits, sizeof(float) * V);
+        int tok = sample_pick(&s, scratch, V, NULL, NULL);
+        for (int w = 0; w < 3; w++) if (tok == watch[w]) hits[w]++;
+    }
+    for (int w = 0; w < 3; w++) {
+        double want = exp(logits[watch[w]] - mx) / total;
+        double got = (double)hits[w] / TRIALS;
+        // 4000 draws: a 4-sigma band on the rarest of the three is ~0.02
+        assert(fabs(got - want) < 0.03);
+    }
+    free(logits); free(scratch);
+    puts("ok: no-filter sampling is deterministic and matches the full softmax");
+}
+
 int main(void) {
     test_preset_selection();
     test_preset_fallback();
@@ -238,6 +307,7 @@ int main(void) {
     test_sampling_applies_repeat_penalty();
     test_stop_tokens_stay_exempt();
     test_greedy_constrained();
+    test_no_filter_sampling_is_deterministic_and_unbiased();
     puts("sampler tests ok");
     return 0;
 }

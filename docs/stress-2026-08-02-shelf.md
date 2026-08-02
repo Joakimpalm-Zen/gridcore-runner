@@ -224,28 +224,58 @@ preset against decode at `--temp 0`, same prompt and context:
 | Llama-3.1-8B Q4_K_M | 61.3 | 62.9 | −3% |
 | Phi-4-mini Q8_0 | 76.9 | 77.2 | 0% |
 
-The discriminator is **`top_p`**, and the direction is backwards from
-intuition — `top_p = 1.0`, the documented "off" value, is the *slowest*
-configuration:
+**Correction — the mechanism I first published was wrong for these models.**
+The isolation run that produced it left `min_p` at the preset's value, and the
+models measured do not use the presets I named. The accurate picture, from
+instrumenting the sampler (`RUNNER_SAMPLE_STATS=1`):
 
-| Ministral-8B, `temp 0.7` | decode tok/s |
-|---|---:|
-| `top_k 0, top_p 1.0` (both filters off) | 31.6 |
-| `top_k 0, top_p 1.0, repeat_penalty 1.1` | 31.5 |
-| `top_k 40, top_p 1.0` | 49.5 |
-| `top_k 0, top_p 0.9` | 55.1 |
+There are **two** ways the large-vocabulary fast path is missed, and they hit
+different configurations.
 
-`repeat_penalty` costs nothing. The cause is `src/sample.c:130`: the
-large-vocabulary fast path is guarded by
-`(want_k < n_vocab || s->top_p < 1.0f)`, so when top-k is off **and**
-`top_p == 1.0` it is not even attempted, and the sampler falls through to a
-full `qsort` of the whole vocabulary every token — the code's own comment
-prices that at ~12 ms/token. The configuration needing the least filtering
-takes the most expensive path. (`top_k` only partly rescues it: with `top_k`
-set the fast path is entered but its head can overflow on a flat distribution
-and fall back to the same full sort, which is why `top_k 20` did nothing for
-Qwen3 while `top_k 40` helped Ministral.)
+1. **No filter at all** — `top_k 0`, `top_p 1.0`. `sample.c` guarded the fast
+   path with `(want_k < n_vocab || top_p < 1.0f)`, so the case asking for the
+   least work was the one case excluded, and full-sorted the vocabulary every
+   token. **Fixed** (see below): 30.6 → 59.3 tok/s, a 1.94x speedup, output
+   identical at fixed seed. This is the shape the `mistral` and `gpt-oss`
+   presets request.
 
-This is not theoretical: **`top_p 1.0` is what the Mistral and gpt-oss presets
-ship**, the latter straight off OpenAI's model card. Filed in the suite-wide
-plan with a proposed exactness-preserving fix.
+2. **`top_k` set, but the head is smaller than `k`** — still open. With
+   `top_k 40`, the first threshold (`p >= p_max/1024`) yields only ~11
+   candidates *carrying 99% of the mass*, which fails the `m >= want_k` test.
+   The loosening schedule then jumps by `e^-27` and overflows the 4096-entry
+   head cap, so it full-sorts anyway. Trace from Ministral-8B:
+   `[smp short m=11 mass=0.9908 need=0.9500][smp overflow m=4096]`.
+   This cannot be fixed by relaxing the criterion — `pick_scaled` renormalises
+   over exactly the top `k`, so dropping to 11 would change every probability.
+   It needs a selection algorithm (quickselect for the true top-k) rather than
+   threshold probing.
+
+**Case 2 is the one most models hit**, because `generic` (top_k 40), `qwen3`
+(20) and `gemma3` (64) all set `top_k`. That is what the 38-48% preset-vs-greedy
+gap in the table above actually measures — not `top_p 1.0`, which those models
+never request. Ministral-8B resolves to the `generic` preset, not `mistral`,
+which is itself worth a look.
+
+### The fix for case 1, and why it is exact
+
+The head is now sized from the roulette draw itself. `pick_scaled` walks the
+candidates in descending probability and stops at the first whose cumulative
+mass reaches `r`, so **any head carrying more than `r` of the total provably
+contains that token** — no filtering knob required. `r` is drawn up front and
+handed to whichever path runs, so the RNG still advances exactly once per call
+and a seeded run is unchanged. If the double-precision mass check and the
+float walk disagree at the very edge, the walk reports it and the code retreats
+to the exact full sort rather than returning the head's last token.
+
+`min_p` gets a head criterion too, and a simpler one: min-p keeps everything
+within a fixed ratio of the best token, which is a *logit* threshold, so a head
+cut at or below `log(min_p)` contains the whole surviving set whatever mass it
+carries.
+
+Verified two ways. `tests/test_sampler.c` pins determinism (same seed, same
+token) and that the sampled distribution still tracks the full-vocabulary
+softmax — if the head were sized too small the tail would be truncated and
+common tokens over-represented. And end-to-end against the pre-change binary at
+fixed seeds 1/7/42/1234/99999 on Ministral-8B, Qwen3-8B and Llama-3.1-8B, both
+in the accelerated configurations and in the ones that must not change:
+byte-identical everywhere.

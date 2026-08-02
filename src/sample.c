@@ -41,7 +41,15 @@ static int cand_cmp(const void *a, const void *b) {
 // caller-computed softmax denominator (the head fast path passes the whole
 // vocabulary's mass so truncation does not change any candidate's share);
 // 0 computes it over the k candidates, the historical behavior.
-static int pick_scaled(sampler *s, cand_t *c, int k, float norm_sum) {
+// `r_pre` >= 0 supplies the roulette draw instead of taking one from the RNG.
+// The no-filter fast path below has to know the draw before it can size its
+// head, and the draw must happen exactly ONCE per sample_pick call whichever
+// path ends up running, or a seeded run stops reproducing. `fell_off` reports
+// that the cumulative walk never reached `r` — only possible when a caller
+// hands in a candidate set that does not carry the whole mass, which is
+// precisely the case the fast path has to detect and retreat from.
+static int pick_scaled(sampler *s, cand_t *c, int k, float norm_sum,
+                       float r_pre, bool *fell_off) {
     float mx = c[0].p, sum = 0;
     for (int i = 0; i < k; i++) { c[i].p = expf(c[i].p - mx); sum += c[i].p; }
     if (norm_sum > 0) sum = norm_sum;
@@ -72,13 +80,23 @@ static int pick_scaled(sampler *s, cand_t *c, int k, float norm_sum) {
             for (int i = 0; i < k; i++) c[i].p /= cum;
         }
     }
-    float r = rng_f32(&s->rng), cum = 0;
+    float r = r_pre >= 0.0f ? r_pre : rng_f32(&s->rng), cum = 0;
     int pick = c[k - 1].id;
+    bool hit = false;
     for (int i = 0; i < k; i++) {
         cum += c[i].p;
-        if (r < cum) { pick = c[i].id; break; }
+        if (r < cum) { pick = c[i].id; hit = true; break; }
     }
+    if (fell_off) *fell_off = !hit;
     return pick;
+}
+
+// RUNNER_SAMPLE_STATS=1 traces why the head fast path was or was not usable.
+// Cached: this sits in the per-token path and getenv is not free.
+static bool sample_stats(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("RUNNER_SAMPLE_STATS"); on = e && *e && strcmp(e, "0") != 0; }
+    return on != 0;
 }
 
 // Head cap for the large-vocab fast path: distributions whose top-k/top-p
@@ -126,8 +144,24 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
     // top_p of the total mass, whose cutoff prefix then lies inside). The
     // whole-vocabulary softmax denominator is passed through, so each
     // candidate's probability is what the full sort would have given it.
-    if (!ok && s->temp > 0 && n_vocab >= 4096 &&
-        (want_k < n_vocab || s->top_p < 1.0f)) {
+    // "No filter at all" -- top-k off, top-p 1.0, min-p off -- used to be the
+    // ONE configuration excluded from the fast path, so the case asking for
+    // the least work paid a full-vocabulary sort every token. That is what the
+    // shipped mistral and gpt-oss presets request, and it cost them 38-48% of
+    // decode. It can be served from a head too: the roulette walk stops at the
+    // first token whose cumulative mass reaches `r`, so any head carrying more
+    // than `r` of the total mass provably contains that token. Draw `r` up
+    // front to size the head with; it is passed to whichever path runs, so the
+    // RNG still advances exactly once per call and a seeded run is unchanged.
+    bool no_filter = want_k >= n_vocab && s->top_p >= 1.0f && s->min_p <= 0.0f;
+    float r_pre = -1.0f;
+    if (no_filter && !ok && s->temp > 0 && n_vocab >= 4096)
+        r_pre = rng_f32(&s->rng);
+
+    // Every combination now has a head criterion, so the fast path is always
+    // worth attempting; it still retreats to the full sort when the head
+    // cannot be shown to contain the survivors.
+    if (!ok && s->temp > 0 && n_vocab >= 4096) {
         float mx = logits[0] / temp;
         for (int i = 1; i < n_vocab; i++) {
             float v = logits[i] / temp;
@@ -151,17 +185,48 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
                         head_mass += expf(v - mx);
                     }
                 }
-                if (overflow) break;   // head too broad: full sort below
-                bool enough = (want_k < n_vocab)
-                                  ? m >= want_k
-                                  : head_mass >= (double)s->top_p * total;
-                if (!enough) continue; // loosen the threshold and retry
+                if (overflow) { if (sample_stats()) fprintf(stderr, "[smp overflow m=%d]", m); break; }   // head too broad: full sort below
+                // The head must provably contain the whole surviving set:
+                // top_k candidates, or top_p of the mass, or -- with no filter
+                // at all -- more mass than the draw `r` needs to land in.
+                // Strictly greater, because the walk takes the first token
+                // with cum > r and equality would leave it just past the end.
+                bool enough;
+                if (want_k < n_vocab)
+                    // top-k needs the true k most likely, because pick_scaled
+                    // renormalises over exactly those k
+                    enough = m >= want_k;
+                else if (s->top_p < 1.0f)
+                    // the top-p cutoff prefix lies inside a head carrying
+                    // top_p of the mass
+                    enough = head_mass >= (double)s->top_p * total;
+                else if (s->min_p > 0.0f)
+                    // min-p keeps everything within min_p of the best token,
+                    // which is a LOGIT threshold — so a head cut at or below
+                    // log(min_p) provably contains the whole surviving set,
+                    // whatever mass it happens to carry
+                    enough = t_log <= logf(s->min_p);
+                else
+                    // nothing filters: the walk stops at the first token whose
+                    // cumulative mass reaches r, so a head carrying more than
+                    // r of the total provably contains it
+                    enough = head_mass > (double)r_pre * total;
+                if (!enough) { if (sample_stats()) fprintf(stderr, "[smp short m=%d mass=%.4f need=%.4f]", m, head_mass/total, no_filter ? (double)r_pre : (double)s->top_p); continue; } // loosen the threshold and retry
                 qsort(h, m, sizeof(cand_t), cand_cmp);
                 int k = m < want_k ? m : want_k;
                 // top_k active: softmax over the k survivors (historical
                 // semantics); top_k off: normalize by the whole vocabulary
+                bool fell_off = false;
                 int pick = pick_scaled(s, h, k,
-                                       want_k < n_vocab ? 0 : (float)total);
+                                       want_k < n_vocab ? 0 : (float)total,
+                                       r_pre, &fell_off);
+                // The mass check is done in double while the walk accumulates
+                // in float, so a draw sitting within an ulp of the head's edge
+                // can still run off it. Retreat to the exact full sort rather
+                // than return the head's last token, which is what the walk
+                // falls back to and would be silently wrong.
+                if (fell_off) { if (sample_stats()) fprintf(stderr, "[smp felloff]"); free(h); break; }
+                if (sample_stats()) fprintf(stderr, "[smp fast m=%d]", m);
                 free(h);
                 return pick;
             }
@@ -193,7 +258,7 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
         k = want_k;
     }
 
-    int pick = pick_scaled(s, c, k, 0);
+    int pick = pick_scaled(s, c, k, 0, r_pre, NULL);
     free(c);
     return pick;
 }
