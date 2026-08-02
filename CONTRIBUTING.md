@@ -6,7 +6,7 @@ Runner is in public alpha; bug reports with `runner --version` and
 When bumping the release, update `RUNNER_VERSION` in `src/runner.h` first;
 the versions in `README.md` and `SECURITY.md` must match it verbatim, and
 `python/pyproject.toml` must carry the same version in PEP 440 form (pre-release
-suffixes translate: `0.1.4-alpha` → `0.1.4a0`). The Python client remains a
+suffixes translate: `X.Y.Z-alpha` → `X.Y.Za0`). The Python client remains a
 separate distributable with no build-time coupling to the C header.
 
 ## Correctness gates (non-negotiable)

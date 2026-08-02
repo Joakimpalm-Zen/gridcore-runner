@@ -5,6 +5,34 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+_Nothing yet._
+
+## v0.1.5-alpha — 2026-08-02
+
+- **Generalized MoE router.** The router was hardcoded to softmax + top-k +
+  renormalize. It now carries the knobs the Llama-4, DeepSeek-V3 and GroveMoE
+  families need, transcribed from llama.cpp's `build_moe_ffn`:
+  `expert_gating_func` (softmax | sigmoid | softmax-over-selected-weights |
+  sqrt-softplus), `exp_probs_b` (a bias applied to **selection only** — the
+  weights still come from the unbiased probabilities, which is the point of
+  DeepSeek's aux-loss-free balancing), group-limited top-k
+  (`expert_group_count` / `expert_group_used_count`), `expert_weights_scale`
+  and `expert_weights_norm`. Also picked up from the reference: the
+  renormalization divisor is clamped to the smallest normal fp16, so a
+  degenerate all-zero row cannot divide by zero — the old code had no clamp.
+
+  Every default reproduces the previous path bit-for-bit: Qwen3-Coder-30B,
+  gpt-oss-20b and gemma-4-26B-A4B are byte-identical across the change.
+  **CUDA refuses rather than approximates** — `k_moe_route` is softmax + top-k
+  with no bias input, so a model needing any non-default knob falls back to the
+  host naming the knob.
+
+  Gated by `tests/test_moe_router.c`, one dense-oracle fixture per knob,
+  compared in **logit** space. That distinction is not academic:
+  `expert_weights_norm` and all three alternative gating functions pass a
+  *text* comparison on a binary that does not implement them at all, because a
+  2x change in the FFN contribution often does not move a greedy argmax.
+
 - **The flaky composition test is fixed, and it was not the assertion everyone
   thought.** `test_schema_batch_prefix_cancel_and_speculation_compose` failed
   about three runs in ten under whole-suite load and passed every time in
