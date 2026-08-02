@@ -128,7 +128,8 @@ static void test_bind_address_is_a_literal_loopback_constant(void) {
         { "gethostbyname", "Resolving a host means the host was configurable." },
         { "SO_BINDTODEVICE", "Binding to a named device means an interface was chosen." },
     };
-    static const char *listeners[] = { "src/server.c", "src/http.c", "src/http.h" };
+    static const char *listeners[] = { "src/server.c", "src/http.c", "src/http.h",
+                                       "src/registry.c", "src/server_int.h" };
     for (size_t f = 0; f < sizeof listeners / sizeof *listeners; f++) {
         char *s = slurp(listeners[f]);
         for (size_t i = 0; i < sizeof forbidden / sizeof *forbidden; i++)
@@ -142,7 +143,8 @@ static void test_bind_address_is_a_literal_loopback_constant(void) {
 // keep an override. runner's guarantee is that there is nothing to override.
 static void test_no_option_reaches_the_bind_address(void) {
     static const char *files[] = { "src/main.c", "src/server.c", "src/http.c",
-                                   "src/http.h" };
+                                   "src/http.h", "src/registry.c",
+                                   "src/server_int.h" };
     static const char *opts[] = {
         "--host", "--bind", "--listen", "--address", "--addr",
         "--interface", "--ip", "--public", "--expose",
@@ -165,21 +167,24 @@ static void test_no_option_reaches_the_bind_address(void) {
     }
 }
 
-// Since RNR-019 the handle type is declared in src/http.h and the helpers are
-// defined in src/http.c, while the listener and the admission queue stayed in
-// src/server.c. Each check follows the code it guards rather than the file it
-// used to live in.
+// Since RNR-019 the handle type is declared in src/http.h, the helpers are
+// defined in src/http.c, the admission queue lives in src/server_int.h and
+// src/registry.c, and the listener stayed in src/server.c. Each check follows
+// the code it guards rather than the file it used to live in -- a check left
+// pointing at server.c for something that moved out of it passes vacuously,
+// which is worse than no check.
 static void test_windows_socket_handles_are_not_truncated(void) {
     static const struct { const char *file, *sym, *why; } forbidden[] = {
-        { "src/server.c", "(int)socket(", "A Windows SOCKET is pointer-sized and must not be stored in int." },
-        { "src/server.c", "(int)accept(", "Accepted Windows SOCKET handles are pointer-sized." },
-        { "src/server.c", "(SOCKET)lfd",  "Casting back from an int listener cannot recover truncated bits." },
-        { "src/server.c", "int  fds[512]", "The admission queue must store sock_t handles." },
-        { "src/server.c", "static int q_pop", "Queue pop must return sock_t, not int." },
-        { "src/http.c",   "int  sock_recv(int fd", "Socket helpers must take sock_t, not int." },
-        { "src/http.c",   "int  sock_send(int fd", "Socket helpers must take sock_t, not int." },
-        { "src/http.h",   "int  sock_recv(int fd", "Socket helpers must take sock_t, not int." },
-        { "src/http.h",   "int  sock_send(int fd", "Socket helpers must take sock_t, not int." },
+        { "src/server.c",     "(int)socket(", "A Windows SOCKET is pointer-sized and must not be stored in int." },
+        { "src/server.c",     "(int)accept(", "Accepted Windows SOCKET handles are pointer-sized." },
+        { "src/server.c",     "(SOCKET)lfd",  "Casting back from an int listener cannot recover truncated bits." },
+        { "src/server_int.h", "int  fds[512]", "The admission queue must store sock_t handles." },
+        { "src/server_int.h", "int q_pop(void)", "Queue pop must return sock_t, not int." },
+        { "src/registry.c",   "int q_pop(void)", "Queue pop must return sock_t, not int." },
+        { "src/http.c",       "int  sock_recv(int fd", "Socket helpers must take sock_t, not int." },
+        { "src/http.c",       "int  sock_send(int fd", "Socket helpers must take sock_t, not int." },
+        { "src/http.h",       "int  sock_recv(int fd", "Socket helpers must take sock_t, not int." },
+        { "src/http.h",       "int  sock_send(int fd", "Socket helpers must take sock_t, not int." },
     };
     for (size_t i = 0; i < sizeof forbidden / sizeof *forbidden; i++) {
         char *s = slurp(forbidden[i].file);
