@@ -59,74 +59,60 @@ Then point it at any GGUF model:
 
 ## Why runner
 
-**Small enough to own outright, strict enough to build on.** llama.cpp is
-broader and faster; runner exists for the case llama.cpp structurally can't
-fill — an engine a larger system can read to the last line, change without
-asking anyone, and hold to an exact serving contract. One C codebase, one
-`make`, no ggml split, no CMake, no submodules. `/health` in the accept loop,
-`--parent-pid` supervisor lifetime, speculative decoding under `--serve`: each
-was a same-day change here, and a feature request against a 300k-line upstream.
+**Tool calls that still parse when the budget runs out.** Constrained decoding
+is not novel — llama.cpp compiles JSON Schema to GBNF behind `response_format`,
+Ollama takes a schema in `format`. The difference is where it sits: runner's
+validator drives sampling on the path a tool call actually takes, so properties
+emit in declared order, unknown keys are impossible, and **a call truncated
+mid-emission still parses**. On the [agent-torture suite](docs/agent-torture.md)
+— same model, same box, each runtime a `--runtime` target — that is **12/12
+valid tool calls against 5/12 for llama.cpp and Ollama**, and the gap is
+entirely the hard cases: deep nesting and truncation. On a model small enough
+that llama.cpp's template path lands *no* parseable call (3/12), runner still
+returns 12/12. Bring your nastiest schema; the suite exists to be contested.
 
-**Schema conformance is the default path, and it holds under stress.**
-Constrained decoding is not novel — llama.cpp compiles JSON Schema to GBNF
-behind `response_format`, and Ollama takes a schema in `format`. The claim here
-is narrower and measurable: runner's validator drives sampling on the path a
-tool call actually takes, so properties emit in declared order, unknown keys
-are impossible, and **a call cut off by the token budget still parses**. On the
-[agent-torture suite](docs/agent-torture.md) (same model, same box, every
-runtime a `--runtime` target) that reads out as **12/12 valid tool calls vs
-5/12 for llama.cpp and Ollama** — and the gap is exactly the hard cases: deep
-nested arguments and truncation mid-call. On a model small enough that
-llama.cpp's template path lands *no* parseable call (3/12), runner still hits
-12/12. Bring your nastiest schema; the suite is built to be reproduced and
-contested.
+**Small enough to own outright.** One C codebase, one `make`, no ggml split, no
+CMake, no submodules — readable in a sitting, changeable the same afternoon.
+`/health` in the accept loop, `--parent-pid` supervisor lifetime, speculative
+decoding under `--serve`: each was an afternoon here and would be a feature
+request against a 300k-line upstream. llama.cpp is broader and faster; runner is
+for when the engine is load-bearing and you need to read it to the last line.
 
-**Deployment is one file, and nothing beside it.** llamafile got to driver-only
-GPU first, by bundling tinyBLAS libraries next to the model; runner takes the
-other route — CUDA rides the driver API with the **PTX embedded in the
-executable**, so there is no toolkit, no cuBLAS, and no accompanying DLLs to
-ship or version. Copy the binary to a node with an NVIDIA Turing / compute
-capability 7.5 or newer GPU and a driver and it offloads; older or unsupported
-NVIDIA GPUs, and machines without a driver, run the CPU path. No build matrix
-for a fleet.
-
-**Built for a scheduler to place, not just for a user to run.** Model swapping
-is table stakes — Ollama has done it natively for ages, with `keep_alive`, LRU
-eviction and more than one model resident; runner keeps exactly one and is not
-trying to win that. What is harder to find anywhere is the placement side:
-`--caps` emits a machine report (cores, RAM, GPU, compute capability, the quant
-lists the CPU and GPU each support) for a scheduler to read *before* dispatching
-work, `--reserve P` caps the process at a percentage of total VRAM and RAM with
-the context auto-fit to what is left, and `--parent-pid` ties the process's life
-to its supervisor. The llama.cpp equivalent of the whole set is llama-server +
-llama-swap + supervision scripts.
+**One file to ship, and enough information to place it.** llamafile reached
+driver-only GPU first by bundling tinyBLAS beside the model; runner embeds the
+**PTX in the executable** instead — no toolkit, no cuBLAS, no DLLs to version
+alongside. Copy it to a node with a Turing-or-newer NVIDIA GPU and a driver and
+it offloads; anything else runs the CPU path. Then the half nobody ships:
+`--caps` reports cores, RAM, GPU, compute capability and the quant lists CPU and
+GPU each support, so a scheduler can decide *before* dispatching; `--reserve P`
+caps the process at a percentage of total VRAM and RAM with the context auto-fit
+to the remainder; `--parent-pid` ties its life to its supervisor. (Swapping
+models is table stakes — Ollama does it natively and better. Placement is the
+harder half.)
 
 **No `--host` flag to get wrong.** runner binds `127.0.0.1` with no override —
-no flag, no env var, no config key. The defaults match llama-server and
-Ollama; the difference is they kept the escape hatch. (SentinelLABS and Censys
-found **175,000 Ollama hosts reachable from the internet** across 130 countries
-in January 2026, *nearly half with tool calling enabled* — an open shell, where
-those are also unauthenticated; a separate LeakIX scan confirmed zero auth on
-12,269 of them. One afternoon's `0.0.0.0` at a time.) It's a gate, not a hope:
-`tests/test_bind.c` and `tests/conformance/test_loopback_bind.py` fail the build
-if the bind ever moves. Remote access belongs behind a reverse proxy, SSH
-tunnel, or Tailscale — where auth and TLS live, not hand-rolled in an inference
-engine.
+no flag, no environment variable, no config key. llama-server and Ollama default
+to loopback too; they just kept the escape hatch. SentinelLABS and Censys found
+**175,000 Ollama hosts reachable from the internet** across 130 countries in
+January 2026, nearly half with tool calling enabled — an open shell wherever
+those are also unauthenticated, which a separate LeakIX scan confirmed for
+12,269 of them. One afternoon's `0.0.0.0` at a time. Here it is a gate, not a
+hope: `tests/test_bind.c` and `tests/conformance/test_loopback_bind.py` fail the
+build if the bind ever moves. Remote access belongs behind a reverse proxy, an
+SSH tunnel or Tailscale, where auth and TLS already live.
 
-**The trade is explicit.** llama.cpp wins on raw speed, exotic quants (IQ2/IQ3,
-Vulkan), and architecture breadth — runner does Mixtral/Qwen3 top-k MoE,
+**The trade, and how it is checked.** llama.cpp wins on raw speed, exotic quants
+(IQ2/IQ3, Vulkan) and architecture breadth: runner does Mixtral/Qwen3 top-k MoE,
 gemma-4's dual-branch GELU MoE and gpt-oss's MXFP4 experts, but skips
-shared-expert MoE and most SSMs. runner wins when the engine is a load-bearing
-part of a system that has to trust, extend and debug it.
-
-**Correctness is a gate, not a claim.** GPU output is verified token-identical
-to the CPU path wherever tensor cores are not promoted; the promoted prefill
-path is held to a measured tolerance gate (`test-tc-tol`, run by `make test`)
-rather than an identity claim it cannot have; and certified architectures have
-pinned llama.cpp reference runs. Where a model is too numerically sensitive for
-token identity to mean anything — a KV-precision change inside one build moving
-its output more than switching engines does — that is measured and said, not
-waved at: see `scripts/sensitivity_floor.py`.
+shared-expert MoE and most SSMs. What it does support answers to gates rather
+than adjectives — GPU output verified token-identical to CPU wherever tensor
+cores are not promoted, the promoted prefill path held to a measured tolerance
+gate (`test-tc-tol`, run by `make test`) instead of an identity claim it cannot
+have, certified architectures carrying pinned llama.cpp reference runs. And
+where a model is too numerically unstable for token identity to mean anything —
+a KV-precision change inside one build moving its output further than switching
+engines does — that gets measured and stated, not waved at
+(`scripts/sensitivity_floor.py`).
 
 ## Build and platform support
 
