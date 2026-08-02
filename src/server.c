@@ -44,6 +44,20 @@ static int  sock_recv(sock_t fd, char *buf, size_t n) { return recv(fd, buf, (in
 static int  sock_send(sock_t fd, const char *buf, size_t n) { return send(fd, buf, (int)n, 0); }
 static int  sock_peek(sock_t fd, char *buf, size_t n) { return recv(fd, buf, (int)n, MSG_PEEK); }
 static void sock_close(sock_t fd) { closesocket(fd); }
+// Winsock reports through WSAGetLastError, NOT errno — strerror(errno) here
+// prints "Success" (or a stale unrelated error) for a genuine bind failure,
+// which is worse than no reason at all. FormatMessage gives the real text.
+static const char *sock_errstr(void) {
+    static char buf[256];
+    DWORD e = (DWORD)WSAGetLastError();
+    DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM |
+                             FORMAT_MESSAGE_IGNORE_INSERTS, NULL, e,
+                             MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                             buf, sizeof(buf) - 1, NULL);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
+    if (n == 0) snprintf(buf, sizeof(buf), "winsock error %lu", (unsigned long)e);
+    return buf;
+}
 static void sock_recv_timeout(sock_t fd, double s) {
     DWORD ms = (DWORD)(s * 1000.0);
     if (ms == 0) ms = 1; // 0 would mean "block forever" on winsock
@@ -68,6 +82,7 @@ static int  sock_recv(sock_t fd, char *buf, size_t n) { return (int)read(fd, buf
 static int  sock_send(sock_t fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
 static int  sock_peek(sock_t fd, char *buf, size_t n) { return (int)recv(fd, buf, n, MSG_PEEK); }
 static void sock_close(sock_t fd) { close(fd); }
+static const char *sock_errstr(void) { return strerror(errno); }
 static void sock_recv_timeout(sock_t fd, double s) {
     struct timeval tv;
     tv.tv_sec = (time_t)s;
@@ -4577,12 +4592,13 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons((uint16_t)port);
     if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        fprintf(stderr, "error: cannot bind 127.0.0.1:%d (%s)\n", port, strerror(errno));
+        fprintf(stderr, "error: cannot bind 127.0.0.1:%d (%s)\n", port, sock_errstr());
         sock_close(lfd);
         return 1;
     }
     if (listen(lfd, 64) != 0) {
-        fprintf(stderr, "error: cannot listen on 127.0.0.1:%d\n", port);
+        fprintf(stderr, "error: cannot listen on 127.0.0.1:%d (%s)\n", port,
+                sock_errstr());
         sock_close(lfd);
         return 1;
     }

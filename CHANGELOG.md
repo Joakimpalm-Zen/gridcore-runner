@@ -5,6 +5,14 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Socket errors are reported through the right platform channel.** A failed
+  bind printed `strerror(errno)`, which on Windows is simply the wrong source —
+  Winsock reports through `WSAGetLastError`, so a genuine bind failure printed
+  "Success" or a stale unrelated error, which is worse than printing no reason.
+  `sock_errstr()` now sits beside the other socket shims: `strerror(errno)` on
+  POSIX, `FormatMessage` on Winsock with a numeric fallback. `listen()` reports
+  a reason too, where it previously reported none at all.
+
 - **First published vLLM row on the agent-torture matrix.** Same 100-case
   matrix, same model (SmolLM2-1.7B-Instruct), same box: **Runner 100/100,
   vLLM 0.26.0 20/100**, every vLLM failure in the `protocol` category. Recorded
