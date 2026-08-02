@@ -94,3 +94,5 @@ difftok.exe
 models/.ref/
 test-responses-sm
 test-responses-sm.exe
+test-moe-router
+test-moe-router.exe

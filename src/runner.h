@@ -232,6 +232,10 @@ typedef struct {
     // join the attention softmax DENOMINATOR only — no value row — so the
     // head's output is scaled down without attending anywhere.
     float       *attn_sinks;
+    // Selection-only probability bias (DeepSeek V3 aux-loss-free balancing).
+    // Added to the probabilities for TOP-K SELECTION and deliberately not to
+    // the weights the selected experts are scaled by.
+    float       *exp_probs_b;
     // Gemma-4 E-series per-layer embeddings: a gate into the PLE width, an
     // elementwise product with this layer's slice of the per-layer table, a
     // projection back to n_embd and its own RMS norm.
@@ -314,6 +318,8 @@ typedef struct {
     // sparse-MoE (0 = dense model). n_ff_exp is the per-expert FFN width.
     int       n_expert, n_expert_used, n_ff_exp;
     float    *moe_logits;  // [n_expert] router scratch (forward, single token)
+    float    *moe_sel_scores;   // [n_expert] selection scores when biased/grouped
+    float    *moe_group_score;  // [n_expert_groups] group-limited top-k scratch
     float    *moe_gate;    // [n_ff_exp]
     float    *moe_up;      // [n_ff_exp]
     float    *moe_dexp;    // [n_embd] one expert's down output
@@ -401,6 +407,14 @@ typedef struct {
     // not like that: llama.cpp passes the same freq_base, freq_scale,
     // ext_factor and attn_factor for EVERY layer and varies only the KV
     // window, so its sliding layers must rope exactly like its global ones.
+    // Generalized MoE router (llama.cpp build_moe_ffn). Defaults reproduce the
+    // softmax + top-k + renormalize path every currently-certified MoE uses,
+    // so an arch that sets none of these is bit-for-bit unaffected.
+    int    expert_gating;        // EXPERT_GATE_* above
+    int    n_expert_groups;      // >1 enables group-limited top-k (DeepSeek V3)
+    int    n_group_used;         // groups kept when n_expert_groups > 1
+    float  expert_w_scale;       // 0 or 1 = no scaling
+    bool   expert_norm_w;        // renormalize the selected weights
     bool   swa_rope_global;
     bool   gptoss;           // gpt-oss: attention sinks + swiglu_oai + MoE
                              // biases; no GPU kernels for those yet
@@ -829,6 +843,16 @@ enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
 // Plain SwiGLU here is silently-wrong output, which is why it is its own op.
 enum { ACT_SILU = 0, ACT_GELU = 1, ACT_SWIGLU_OAI = 2 };
 
+// Router gating functions, numbered as llama.cpp's llama_expert_gating_func_type
+// so a GGUF's expert_gating_func value maps across without translation.
+enum {
+    EXPERT_GATE_NONE           = 0,
+    EXPERT_GATE_SOFTMAX        = 1,
+    EXPERT_GATE_SIGMOID        = 2,
+    EXPERT_GATE_SOFTMAX_WEIGHT = 3,  // softmax over the SELECTED weights
+    EXPERT_GATE_SQRT_SOFTPLUS  = 4,
+};
+
 // per-layer geometry accessors: uniform models keep the scalars, heterogeneous
 // archs (gemma4) override per layer
 static inline int model_head_dim(const model_t *m, int l) {
@@ -849,6 +873,16 @@ static inline int model_rope_dim(const model_t *m, int l) {
 // The YaRN magnitude factor for this layer. One definition, because the CPU
 // and CUDA rope paths both need it and a disagreement between them would be
 // invisible in output that still looks fluent.
+// Does this model's routing need anything the device k_moe_route cannot do?
+// That kernel is hardcoded to softmax + top-k + renormalize and takes no bias,
+// so any other gating function, a selection-only bias, group-limited top-k, or
+// a weight scale must route on the host. The router bias is exempt: it rides
+// the matvec tail and never reaches the kernel.
+static inline bool model_moe_router_is_plain(const model_t *m) {
+    return m->expert_gating == EXPERT_GATE_SOFTMAX &&
+           m->n_expert_groups <= 1 && m->expert_norm_w &&
+           (m->expert_w_scale == 0.0f || m->expert_w_scale == 1.0f);
+}
 static inline float model_rope_mscale(const model_t *m, int l) {
     bool local = m->l_is_swa != NULL && m->l_is_swa[l];
     return (local && !m->swa_rope_global) ? 1.0f : m->rope_mscale;

@@ -893,6 +893,37 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
                     m->n_expert, m->n_expert_used, m->n_ff_exp);
             return false;
         }
+        // Generalized router knobs. Every default below reproduces the
+        // Mixtral/Qwen3 path exactly, so a GGUF that declares none of them
+        // routes bit-for-bit as before.
+        m->expert_gating   = (int)gguf_get_u32(g, AK("expert_gating_func"),
+                                               EXPERT_GATE_SOFTMAX);
+        if (m->expert_gating == EXPERT_GATE_NONE)
+            m->expert_gating = EXPERT_GATE_SOFTMAX;
+        m->n_expert_groups = (int)gguf_get_u32(g, AK("expert_group_count"), 1);
+        m->n_group_used    = (int)gguf_get_u32(g, AK("expert_group_used_count"), 1);
+        m->expert_w_scale  = gguf_get_f32(g, AK("expert_weights_scale"), 1.0f);
+        m->expert_norm_w   = gguf_get_bool(g, AK("expert_weights_norm"), true);
+        if (m->expert_gating < EXPERT_GATE_NONE ||
+            m->expert_gating > EXPERT_GATE_SQRT_SOFTPLUS) {
+            fprintf(stderr, "error: unknown expert_gating_func %d\n",
+                    m->expert_gating);
+            return false;
+        }
+        // Group-limited top-k needs the experts to divide evenly into groups
+        // and to keep at least enough groups to hold n_expert_used picks.
+        if (m->n_expert_groups < 1 || m->n_group_used < 1 ||
+            m->n_group_used > m->n_expert_groups ||
+            m->n_expert % m->n_expert_groups != 0 ||
+            (long)m->n_group_used * (m->n_expert / m->n_expert_groups)
+                < m->n_expert_used) {
+            fprintf(stderr, "error: invalid MoE expert grouping "
+                    "(experts=%d groups=%d used_groups=%d used=%d)\n",
+                    m->n_expert, m->n_expert_groups, m->n_group_used,
+                    m->n_expert_used);
+            return false;
+        }
+
         // Only the Mixtral/Qwen3 convention is implemented: softmax-over-all
         // gating, top-k, renormalized weights, no shared expert. A shared-expert
         // MoE (Qwen2-MoE / DeepSeek) would load its standard experts and
@@ -1095,6 +1126,9 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
             // dense gate/up/down for this layer
             l->is_moe = true;
             l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
+            // Optional selection-only bias; absent on every arch certified so far.
+            l->exp_probs_b   = tensor_to_f32(
+                opt_tensor(g, "blk.%d.exp_probs_b.weight", i), &ok);
             l->ffn_gate_up_exps = opt_tensor(g, "blk.%d.ffn_gate_up_exps.weight", i);
             if (l->ffn_gate_up_exps) {
                 // gemma-4 dual-branch MoE: gate+up fused in one 3D tensor, a
@@ -1431,6 +1465,9 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     if (m->n_expert > 0) {
         // per-token MoE scratch (decode routes each token independently)
         m->moe_logits = malloc(sizeof(float) * (size_t)m->n_expert);
+        m->moe_sel_scores = malloc(sizeof(float) * (size_t)m->n_expert);
+        m->moe_group_score = malloc(sizeof(float) * (size_t)m->n_expert_groups);
+        if (!m->moe_sel_scores || !m->moe_group_score) return false;
         m->moe_gate   = malloc(sizeof(float) * (size_t)m->n_ff_exp);
         m->moe_up     = malloc(sizeof(float) * (size_t)m->n_ff_exp);
         m->moe_dexp   = malloc(sizeof(float) * (size_t)m->n_embd);
@@ -1532,7 +1569,7 @@ void model_free(model_t *m) {
         free(l->post_attn_norm_w); free(l->post_ffn_norm_w);
         free(l->down_exps_scale); free(l->gate_inp_scale);
         free(l->attn_sinks);
-        free(l->ffn_gate_inp_b); free(l->ffn_gate_exps_b);
+        free(l->ffn_gate_inp_b); free(l->ffn_gate_exps_b); free(l->exp_probs_b);
         free(l->ffn_up_exps_b);  free(l->ffn_down_exps_b);
         free(l->ffn_pre_norm2_w); free(l->ffn_post_norm1_w); free(l->ffn_post_norm2_w);
         free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
@@ -1561,7 +1598,8 @@ void model_free(model_t *m) {
     free(m->ssm_cw);
     free(m->ssm_conv_state); free(m->ssm_state_mem);
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
-    free(m->moe_logits); free(m->moe_gate); free(m->moe_up);
+    free(m->moe_logits); free(m->moe_sel_scores); free(m->moe_group_score);
+    free(m->moe_gate); free(m->moe_up);
     free(m->moe_dexp); free(m->moe_out);
     free(m->moe_out_b); free(m->moe_gath); free(m->moe_gate_b);
     free(m->moe_up_b); free(m->moe_dexp_b); free(m->moe_sel);
@@ -1961,36 +1999,100 @@ gguf_tensor moe_expert_weight(const layer_t *ly, int which, int e,
 // to sum to 1 (Mixtral / Qwen3 convention). Writes sel[used]/selw[used].
 static void moe_route(model_t *m, const layer_t *ly, const float *xin,
                       int n_embd, int ne, int used, int *sel, float *selw) {
-    matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, xin,
-             n_embd, n_embd, ne, NULL, 1);
+    float *probs = m->moe_logits;
+    matvec_b(m->tp, probs, ne, ly->ffn_gate_inp, xin, n_embd, n_embd, ne, NULL, 1);
     if (dbg_act_now())
-        dbg_stat("moe-logits-raw", (int)(ly - m->layers), m->moe_logits, ne);
-    // gpt-oss carries a router bias. It is added to the LOGITS, before both
-    // the top-k selection and the weight softmax (llama.cpp build_moe_ffn).
+        dbg_stat("moe-logits-raw", (int)(ly - m->layers), probs, ne);
+    // Router bias (gpt-oss) applies to the LOGITS, before gating.
     if (ly->ffn_gate_inp_b)
-        for (int e = 0; e < ne; e++) m->moe_logits[e] += ly->ffn_gate_inp_b[e];
-    float mx = m->moe_logits[0];
-    for (int e = 1; e < ne; e++)
-        if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
-    float ssum = 0.0f;
-    for (int e = 0; e < ne; e++) {
-        float p = expf(m->moe_logits[e] - mx);
-        m->moe_logits[e] = p;
-        ssum += p;
+        for (int e = 0; e < ne; e++) probs[e] += ly->ffn_gate_inp_b[e];
+
+    // --- gating: logits -> probabilities. SOFTMAX_WEIGHT deliberately leaves
+    // the logits alone here; its softmax runs over the SELECTED weights below.
+    switch (m->expert_gating) {
+    case EXPERT_GATE_SIGMOID:
+        for (int e = 0; e < ne; e++) probs[e] = 1.0f / (1.0f + expf(-probs[e]));
+        break;
+    case EXPERT_GATE_SQRT_SOFTPLUS:
+        for (int e = 0; e < ne; e++) {
+            // log1p(exp(x)) with the standard large-x guard: for big x the
+            // softplus is x to within fp32, and expf would overflow.
+            float x = probs[e];
+            probs[e] = sqrtf(x > 20.0f ? x : log1pf(expf(x)));
+        }
+        break;
+    case EXPERT_GATE_SOFTMAX_WEIGHT:
+        break;
+    default: {   // EXPERT_GATE_SOFTMAX
+        float mx = probs[0];
+        for (int e = 1; e < ne; e++) if (probs[e] > mx) mx = probs[e];
+        float ssum = 0.0f;
+        for (int e = 0; e < ne; e++) { float p = expf(probs[e] - mx); probs[e] = p; ssum += p; }
+        for (int e = 0; e < ne; e++) probs[e] /= ssum;
+        break;
     }
-    for (int e = 0; e < ne; e++) m->moe_logits[e] /= ssum;
+    }
+
+    // --- selection scores. exp_probs_b biases SELECTION ONLY: the weights the
+    // chosen experts are scaled by come from the unbiased probabilities, which
+    // is the whole point of DeepSeek V3's aux-loss-free balancing.
+    float *scores = probs;
+    if (ly->exp_probs_b || m->n_expert_groups > 1) {
+        scores = m->moe_sel_scores;
+        for (int e = 0; e < ne; e++)
+            scores[e] = probs[e] + (ly->exp_probs_b ? ly->exp_probs_b[e] : 0.0f);
+    }
+
+    // --- group-limited top-k: keep the n_group_used groups with the largest
+    // sum of their top-2 scores, and mask the rest out of selection entirely.
+    if (m->n_expert_groups > 1) {
+        int per = ne / m->n_expert_groups;
+        float *gs = m->moe_group_score;
+        for (int gi = 0; gi < m->n_expert_groups; gi++) {
+            float b1 = -INFINITY, b2 = -INFINITY;
+            for (int e = gi * per; e < (gi + 1) * per; e++) {
+                if (scores[e] > b1) { b2 = b1; b1 = scores[e]; }
+                else if (scores[e] > b2) b2 = scores[e];
+            }
+            gs[gi] = b1 + (per > 1 ? b2 : 0.0f);
+        }
+        for (int k = 0; k < m->n_expert_groups - m->n_group_used; k++) {
+            int worst = -1;
+            for (int gi = 0; gi < m->n_expert_groups; gi++)
+                if (gs[gi] != -INFINITY && (worst < 0 || gs[gi] < gs[worst])) worst = gi;
+            if (worst < 0) break;
+            gs[worst] = -INFINITY;
+            for (int e = worst * per; e < (worst + 1) * per; e++) scores[e] = -INFINITY;
+        }
+    }
+
+    // --- top-k over the selection scores, weights read from `probs`
     float denom = 0.0f;
     for (int t = 0; t < used; t++) {
         int best = 0;
-        float bp = -1.0f;
+        float bs = -INFINITY;
         for (int e = 0; e < ne; e++)
-            if (m->moe_logits[e] > bp) { bp = m->moe_logits[e]; best = e; }
-        sel[t] = best;
-        selw[t] = bp;
-        denom += bp;
-        m->moe_logits[best] = -1.0f;                     // exclude from next round
+            if (scores[e] > bs) { bs = scores[e]; best = e; }
+        sel[t]  = best;
+        selw[t] = probs[best];
+        denom  += selw[t];
+        scores[best] = -INFINITY;               // exclude from the next round
     }
-    for (int t = 0; t < used; t++) selw[t] /= denom;     // renormalized weight
+
+    if (m->expert_gating == EXPERT_GATE_SOFTMAX_WEIGHT) {
+        float mx = selw[0];
+        for (int t = 1; t < used; t++) if (selw[t] > mx) mx = selw[t];
+        float ssum = 0.0f;
+        for (int t = 0; t < used; t++) { selw[t] = expf(selw[t] - mx); ssum += selw[t]; }
+        for (int t = 0; t < used; t++) selw[t] /= ssum;
+    } else if (m->expert_norm_w) {
+        // Clamped exactly as the reference: the smallest normal fp16, so a
+        // degenerate all-zero row cannot divide by zero.
+        if (denom < 6.103515625e-5f) denom = 6.103515625e-5f;
+        for (int t = 0; t < used; t++) selw[t] /= denom;
+    }
+    if (m->expert_w_scale != 0.0f && m->expert_w_scale != 1.0f)
+        for (int t = 0; t < used; t++) selw[t] *= m->expert_w_scale;
 }
 
 // Gemma-4 E-series per-layer embeddings, computed once per batch before the

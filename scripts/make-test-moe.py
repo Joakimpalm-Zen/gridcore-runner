@@ -207,3 +207,109 @@ for i in range(LAYERS):
     moe4 += moe_ffn_routed(i, 4)
 write(f"{OUT}.moe4.gguf", moe4,
       base_meta("llama", [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2)]))
+
+def moe_ffn_n(i, downs, probs_b=None):
+    """N experts sharing the dense gate/up, each with its own `down` row block.
+
+    Scaling only `down` keeps every expert a clean multiple of the dense FFN
+    (down is linear, so down*k gives output*k exactly in fp32), which is what
+    lets each router knob below be checked against the dense oracle.
+    """
+    n = len(downs)
+    tensors = [
+        (f"blk.{i}.ffn_gate_inp.weight", [E, n], zeros(E * n)),   # zero router
+        (f"blk.{i}.ffn_gate_exps.weight", [E, FF, n], pack(ffn[i]["gate"] * n)),
+        (f"blk.{i}.ffn_up_exps.weight", [E, FF, n], pack(ffn[i]["up"] * n)),
+        (f"blk.{i}.ffn_down_exps.weight", [FF, E, n], pack(sum(downs, []))),
+    ]
+    if probs_b is not None:
+        tensors.append((f"blk.{i}.exp_probs_b.weight", [n], pack(probs_b)))
+    return tensors
+
+
+def dn(i, k):
+    """the dense down block scaled by k"""
+    return [x * k for x in ffn[i]["down"]]
+
+
+ZERO = None  # placeholder replaced per layer below
+
+
+def emit(name, downs_fn, extra, probs_b=None):
+    ts = list(shared)
+    for i in range(LAYERS):
+        ts += moe_ffn_n(i, downs_fn(i), probs_b)
+    write(f"{OUT}.{name}.gguf", ts, base_meta("llama", extra))
+
+
+ZEROS_FF_E = [0.0] * (FF * E)
+
+# --- generalized-router knobs. Every fixture is built to come out EXACTLY
+# equal to the dense oracle, so a knob that is ignored, applied twice, or
+# applied to the wrong quantity shows up as a text mismatch.
+
+# sigmoid gating: zero router -> sigmoid(0) = 0.5 for both, renormalized to
+# 0.5/0.5. Both experts are the dense FFN, so 0.5y + 0.5y == y.
+emit("gsigmoid", lambda i: [dn(i, 1.0), dn(i, 1.0)],
+     [ku("llama.expert_count", 2), ku("llama.expert_used_count", 2),
+      ku("llama.expert_gating_func", 2)])
+
+# sqrt(softplus) gating: both experts score sqrt(ln 2); renormalization makes
+# that 0.5/0.5 again. Checks the branch runs and still normalizes.
+emit("gsqrtsp", lambda i: [dn(i, 1.0), dn(i, 1.0)],
+     [ku("llama.expert_count", 2), ku("llama.expert_used_count", 2),
+      ku("llama.expert_gating_func", 4)])
+
+# softmax-over-weights: logits pass through ungated, and the softmax runs on
+# the two SELECTED weights (0,0) -> 0.5/0.5.
+emit("gsmw", lambda i: [dn(i, 1.0), dn(i, 1.0)],
+     [ku("llama.expert_count", 2), ku("llama.expert_used_count", 2),
+      ku("llama.expert_gating_func", 3)])
+
+# expert_weights_norm = false: 4 experts, top-2, softmax gives 0.25 each and
+# NOTHING renormalizes them. Experts are 2x the dense FFN, so
+# 0.25*2y + 0.25*2y == y. If the renormalize ran anyway the weights would be
+# 0.5 each and the output would come out 2x.
+emit("gnonorm", lambda i: [dn(i, 2.0)] * 4,
+     [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2),
+      kb("llama.expert_weights_norm", False)])
+
+# expert_weights_scale = 2: weights 0.5/0.5 become 1.0/1.0 against half-sized
+# experts, so 1.0*(y/2) + 1.0*(y/2) == y.
+emit("gscale", lambda i: [dn(i, 0.5), dn(i, 0.5)],
+     [ku("llama.expert_count", 2), ku("llama.expert_used_count", 2),
+      kf("llama.expert_weights_scale", 2.0)])
+
+# exp_probs_b steers SELECTION ONLY. Expert 0 is zeros and expert 1 is the
+# dense FFN; the bias [-1, +1] must flip top-1 from index 0 to index 1. The
+# weight still comes from the UNBIASED probability (0.5, renormalized to 1.0),
+# so a bias that leaked into the weights would change the magnitude too.
+emit("gprobsb", lambda i: [ZEROS_FF_E, dn(i, 1.0)],
+     [ku("llama.expert_count", 2), ku("llama.expert_used_count", 1)],
+     probs_b=[-1.0, 1.0])
+
+# group-limited top-k: 4 experts in 2 groups, one group kept. The bias makes
+# group 1 win on its top-2 sum, so selection must land on expert 2 — the only
+# non-zero one. Getting the grouping wrong selects a zero expert and the
+# output collapses.
+emit("ggroup", lambda i: [ZEROS_FF_E, ZEROS_FF_E, dn(i, 1.0), ZEROS_FF_E],
+     [ku("llama.expert_count", 4), ku("llama.expert_used_count", 1),
+      ku("llama.expert_group_count", 2), ku("llama.expert_group_used_count", 1)],
+     probs_b=[0.0, 0.0, 1.0, 1.0])
+
+# --- gating-function SENSITIVITY fixtures.
+# The dense-oracle fixtures above cannot discriminate a gating function: with a
+# zero router every expert scores the same, and renormalization then produces
+# 0.5/0.5 whatever function ran. So these use the ROUTED fixture instead — a
+# real router and experts that disagree — where each gating function must yield
+# a visibly different answer. They are not dense-equivalent and are compared
+# against each other, not against dense: the property is "this knob changes the
+# arithmetic", which is exactly what the oracle fixtures cannot show.
+for _tag, _fn in (("rsoft", 1), ("rsigmoid", 2), ("rsmw", 3), ("rsqrtsp", 4)):
+    _ts = list(shared)
+    for _i in range(LAYERS):
+        _ts += moe_ffn_routed(_i, 4)
+    write(f"{OUT}.{_tag}.gguf", _ts,
+          base_meta("llama", [ku("llama.expert_count", 4),
+                              ku("llama.expert_used_count", 2),
+                              ku("llama.expert_gating_func", _fn)]))

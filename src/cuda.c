@@ -1308,6 +1308,23 @@ bool gpu_init(model_t *m) {
     // gpt-oss runs here since the sink-aware attention softmax, the MXFP4
     // kernels, swiglu_oai and the router/expert bias plumbing landed
     // (2026-08-01); the old refusal is gone.
+    // Generalized MoE routing has no device kernel: k_moe_route is softmax +
+    // top-k + renormalize with no bias input, and regenerating kernels_ptx.h
+    // is the CUDA-13.3 machine's job. Refuse the backend rather than route
+    // with the wrong function and produce confident, wrong output.
+    if (m->n_expert > 0 && !model_moe_router_is_plain(m)) {
+        fprintf(stderr, "gpu: this model's MoE router (gating=%d groups=%d "
+                "norm_w=%d scale=%g) has no device kernel — running on CPU\n",
+                m->expert_gating, m->n_expert_groups, (int)m->expert_norm_w,
+                (double)m->expert_w_scale);
+        goto unsupported;
+    }
+    for (int l = 0; l < m->n_layer && m->n_expert > 0; l++)
+        if (m->layers[l].exp_probs_b) {
+            fprintf(stderr, "gpu: MoE selection bias (exp_probs_b) has no "
+                    "device kernel — running on CPU\n");
+            goto unsupported;
+        }
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
