@@ -97,6 +97,11 @@ static void must_not_contain(const char *src, const char *path, const char *need
 
 // The socket must be pinned to 127.0.0.1 by a literal constant, so that no
 // input — argv, a config file, an environment variable — can move it.
+//
+// The transport layer moved to src/http.c in 0.1.5 (RNR-019). The listener
+// itself stayed in server.c, but the forbidden-symbol scan below now covers
+// the transport files too: a resolver call added there would be just as good
+// an escape hatch, and it would be the more natural place to put one.
 static void test_bind_address_is_a_literal_loopback_constant(void) {
     char *src = slurp("src/server.c");
 
@@ -109,6 +114,7 @@ static void test_bind_address_is_a_literal_loopback_constant(void) {
                         "bind address to audit\n", count_of(src, "INADDR_LOOPBACK"));
         exit(1);
     }
+    free(src);
 
     // Every way there is of naming an address that is not the loopback one.
     static const struct { const char *sym, *why; } forbidden[] = {
@@ -122,17 +128,21 @@ static void test_bind_address_is_a_literal_loopback_constant(void) {
         { "gethostbyname", "Resolving a host means the host was configurable." },
         { "SO_BINDTODEVICE", "Binding to a named device means an interface was chosen." },
     };
-    for (size_t i = 0; i < sizeof forbidden / sizeof *forbidden; i++)
-        must_not_contain(src, "src/server.c", forbidden[i].sym, forbidden[i].why);
-
-    free(src);
+    static const char *listeners[] = { "src/server.c", "src/http.c", "src/http.h" };
+    for (size_t f = 0; f < sizeof listeners / sizeof *listeners; f++) {
+        char *s = slurp(listeners[f]);
+        for (size_t i = 0; i < sizeof forbidden / sizeof *forbidden; i++)
+            must_not_contain(s, listeners[f], forbidden[i].sym, forbidden[i].why);
+        free(s);
+    }
 }
 
 // A flag nobody can pass is the whole point: the defaults of llama-server and
 // ollama are loopback too, and it did not save the 175,000 hosts, because both
 // keep an override. runner's guarantee is that there is nothing to override.
 static void test_no_option_reaches_the_bind_address(void) {
-    static const char *files[] = { "src/main.c", "src/server.c" };
+    static const char *files[] = { "src/main.c", "src/server.c", "src/http.c",
+                                   "src/http.h" };
     static const char *opts[] = {
         "--host", "--bind", "--listen", "--address", "--addr",
         "--interface", "--ip", "--public", "--expose",
@@ -155,22 +165,31 @@ static void test_no_option_reaches_the_bind_address(void) {
     }
 }
 
+// Since RNR-019 the handle type is declared in src/http.h and the helpers are
+// defined in src/http.c, while the listener and the admission queue stayed in
+// src/server.c. Each check follows the code it guards rather than the file it
+// used to live in.
 static void test_windows_socket_handles_are_not_truncated(void) {
-    char *src = slurp("src/server.c");
-    static const struct { const char *sym, *why; } forbidden[] = {
-        { "(int)socket(", "A Windows SOCKET is pointer-sized and must not be stored in int." },
-        { "(int)accept(", "Accepted Windows SOCKET handles are pointer-sized." },
-        { "(SOCKET)lfd",  "Casting back from an int listener cannot recover truncated bits." },
-        { "static int  sock_recv(int fd", "Socket helpers must take sock_t, not int." },
-        { "static int  sock_send(int fd", "Socket helpers must take sock_t, not int." },
-        { "int  fds[512]", "The admission queue must store sock_t handles." },
-        { "static int q_pop", "Queue pop must return sock_t, not int." },
+    static const struct { const char *file, *sym, *why; } forbidden[] = {
+        { "src/server.c", "(int)socket(", "A Windows SOCKET is pointer-sized and must not be stored in int." },
+        { "src/server.c", "(int)accept(", "Accepted Windows SOCKET handles are pointer-sized." },
+        { "src/server.c", "(SOCKET)lfd",  "Casting back from an int listener cannot recover truncated bits." },
+        { "src/server.c", "int  fds[512]", "The admission queue must store sock_t handles." },
+        { "src/server.c", "static int q_pop", "Queue pop must return sock_t, not int." },
+        { "src/http.c",   "int  sock_recv(int fd", "Socket helpers must take sock_t, not int." },
+        { "src/http.c",   "int  sock_send(int fd", "Socket helpers must take sock_t, not int." },
+        { "src/http.h",   "int  sock_recv(int fd", "Socket helpers must take sock_t, not int." },
+        { "src/http.h",   "int  sock_send(int fd", "Socket helpers must take sock_t, not int." },
     };
-    for (size_t i = 0; i < sizeof forbidden / sizeof *forbidden; i++)
-        must_not_contain(src, "src/server.c", forbidden[i].sym, forbidden[i].why);
-    must_contain(src, "src/server.c", "typedef SOCKET sock_t;");
-    must_contain(src, "src/server.c", "typedef int sock_t;");
-    free(src);
+    for (size_t i = 0; i < sizeof forbidden / sizeof *forbidden; i++) {
+        char *s = slurp(forbidden[i].file);
+        must_not_contain(s, forbidden[i].file, forbidden[i].sym, forbidden[i].why);
+        free(s);
+    }
+    char *hdr = slurp("src/http.h");
+    must_contain(hdr, "src/http.h", "typedef SOCKET sock_t;");
+    must_contain(hdr, "src/http.h", "typedef int sock_t;");
+    free(hdr);
 }
 
 // The same check through the shipped binary, so a flag added anywhere at all
