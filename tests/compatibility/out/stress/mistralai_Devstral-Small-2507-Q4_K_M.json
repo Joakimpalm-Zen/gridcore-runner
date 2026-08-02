@@ -2,9 +2,10 @@
  "model": "mistralai_Devstral-Small-2507-Q4_K_M.gguf",
  "size_gb": 14.33,
  "context": 1024,
- "generated_utc": "2026-08-01T22:38:25Z",
+ "generated_utc": "2026-08-02T08:39:01Z",
  "faults": [],
  "deviances": [],
+ "moe": false,
  "gpu_run": {
   "command": [
    "-m",
@@ -24,10 +25,9 @@
   "faults": [],
   "refusals": [],
   "split": "gpu-split: budget=7.46GB fixed=0.92GB G=19/40 full=0 used=7.34GB",
-  "wall_s": 29.6,
+  "wall_s": 27.6,
   "stderr_tail": null
  },
- "moe": false,
  "cpu_run": {
   "command": [
    "-m",
@@ -47,7 +47,7 @@
   "faults": [],
   "refusals": [],
   "split": null,
-  "wall_s": 60.4,
+  "wall_s": 51.0,
   "stderr_tail": null
  },
  "cpu_cuda_identical": true,
@@ -64,18 +64,18 @@
    ],
    "faults": [],
    "refusals": [],
-   "wall_s": 157.9,
+   "wall_s": 156.6,
    "split": "gpu-split: budget=7.46GB fixed=0.92GB G=19/40 full=0 used=7.34GB",
-   "prompt_tok_s": 3.589,
-   "decode_tok_s": 1.607,
+   "prompt_tok_s": 3.625,
+   "decode_tok_s": 1.571,
    "prompt_tokens": 512,
    "config": "default"
   }
  ],
  "recommended": {
   "config": "default",
-  "decode_tok_s": 1.607,
-  "prefill_tok_s": 3.589,
+  "decode_tok_s": 1.571,
+  "prefill_tok_s": 3.625,
   "command": [
    "-m",
    "C:\\ProjectGrid\\models\\mistralai_Devstral-Small-2507-Q4_K_M.gguf",

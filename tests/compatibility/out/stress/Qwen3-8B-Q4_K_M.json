@@ -2,9 +2,10 @@
  "model": "Qwen3-8B-Q4_K_M.gguf",
  "size_gb": 5.03,
  "context": 1024,
- "generated_utc": "2026-08-01T22:18:48Z",
+ "generated_utc": "2026-08-02T08:07:19Z",
  "faults": [],
  "deviances": [],
+ "moe": false,
  "gpu_run": {
   "command": [
    "-m",
@@ -27,7 +28,6 @@
   "wall_s": 7.0,
   "stderr_tail": null
  },
- "moe": false,
  "cpu_run": {
   "command": [
    "-m",
@@ -66,8 +66,8 @@
    "refusals": [],
    "wall_s": 6.5,
    "split": "gpu-split: budget=7.46GB fixed=0.89GB G=36/36 full=1 used=5.20GB",
-   "prompt_tok_s": 167.841,
-   "decode_tok_s": 31.746,
+   "prompt_tok_s": 167.56,
+   "decode_tok_s": 31.813,
    "prompt_tokens": 512,
    "config": "default"
   },
@@ -87,16 +87,16 @@
    "refusals": [],
    "wall_s": 6.5,
    "split": "gpu-split: budget=7.46GB fixed=0.89GB G=36/36 full=1 used=5.13GB",
-   "prompt_tok_s": 166.389,
-   "decode_tok_s": 31.391,
+   "prompt_tok_s": 166.453,
+   "decode_tok_s": 31.414,
    "prompt_tokens": 512,
    "config": "kv-q8"
   }
  ],
  "recommended": {
   "config": "default",
-  "decode_tok_s": 31.746,
-  "prefill_tok_s": 167.841,
+  "decode_tok_s": 31.813,
+  "prefill_tok_s": 167.56,
   "command": [
    "-m",
    "C:\\ProjectGrid\\models\\Qwen3-8B-Q4_K_M.gguf",

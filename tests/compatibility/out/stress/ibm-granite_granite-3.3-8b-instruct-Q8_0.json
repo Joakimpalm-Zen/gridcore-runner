@@ -2,9 +2,10 @@
  "model": "ibm-granite_granite-3.3-8b-instruct-Q8_0.gguf",
  "size_gb": 8.68,
  "context": 1024,
- "generated_utc": "2026-08-01T22:25:16Z",
+ "generated_utc": "2026-08-02T08:13:54Z",
  "faults": [],
  "deviances": [],
+ "moe": false,
  "gpu_run": {
   "command": [
    "-m",
@@ -29,7 +30,6 @@
   "wall_s": 0.0,
   "stderr_tail": null
  },
- "moe": false,
  "refused": [
   "unsupported architecture"
  ]

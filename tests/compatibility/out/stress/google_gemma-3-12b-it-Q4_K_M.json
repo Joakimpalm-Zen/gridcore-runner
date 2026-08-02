@@ -2,9 +2,10 @@
  "model": "google_gemma-3-12b-it-Q4_K_M.gguf",
  "size_gb": 7.3,
  "context": 1024,
- "generated_utc": "2026-08-01T22:23:08Z",
+ "generated_utc": "2026-08-02T08:11:44Z",
  "faults": [],
  "deviances": [],
+ "moe": false,
  "gpu_run": {
   "command": [
    "-m",
@@ -24,10 +25,9 @@
   "faults": [],
   "refusals": [],
   "split": "gpu-split: budget=7.46GB fixed=1.37GB G=42/48 full=0 used=7.33GB",
-  "wall_s": 12.3,
+  "wall_s": 12.6,
   "stderr_tail": null
  },
- "moe": false,
  "cpu_run": {
   "command": [
    "-m",
@@ -64,10 +64,10 @@
    ],
    "faults": [],
    "refusals": [],
-   "wall_s": 24.7,
+   "wall_s": 24.6,
    "split": "gpu-split: budget=7.46GB fixed=1.37GB G=42/48 full=0 used=7.33GB",
-   "prompt_tok_s": 29.044,
-   "decode_tok_s": 4.858,
+   "prompt_tok_s": 28.466,
+   "decode_tok_s": 5.511,
    "prompt_tokens": 512,
    "config": "default"
   },
@@ -85,18 +85,18 @@
    ],
    "faults": [],
    "refusals": [],
-   "wall_s": 19.0,
+   "wall_s": 18.8,
    "split": "gpu-split: budget=7.46GB fixed=1.37GB G=44/48 full=0 used=7.46GB",
-   "prompt_tok_s": 39.588,
-   "decode_tok_s": 7.239,
+   "prompt_tok_s": 39.507,
+   "decode_tok_s": 7.489,
    "prompt_tokens": 512,
    "config": "kv-q8"
   }
  ],
  "recommended": {
   "config": "kv-q8",
-  "decode_tok_s": 7.239,
-  "prefill_tok_s": 39.588,
+  "decode_tok_s": 7.489,
+  "prefill_tok_s": 39.507,
   "command": [
    "-m",
    "C:\\ProjectGrid\\models\\google_gemma-3-12b-it-Q4_K_M.gguf",

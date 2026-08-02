@@ -115,6 +115,23 @@ def test_schema_batch_prefix_cancel_and_speculation_compose(report, tmp_path):
             assert telemetry["speculative"] is True
             assert telemetry["prompt_forked_tokens"] > 0
         assert first.content == expected
+
+        # Speculative acceptance has to be PROVABLE here, not lucky. Every
+        # request above is schema-constrained, and the drafter generates
+        # unconstrained — so the grammar refuses most of what it proposes, and
+        # on a random-weight fixture whether ANY draft survives is chance. That
+        # is why the acceptance assertion below failed intermittently in a full
+        # suite run and passed every time in isolation. One unconstrained
+        # greedy request fixes the property rather than the threshold: drafter
+        # and target are the same model at temperature 0, so every token it
+        # drafts must be accepted. Widening the tolerance instead would have
+        # kept the assertion green while measuring nothing.
+        unconstrained = _payload("draft with nothing to refuse it")
+        unconstrained.pop("response_format")
+        plain_spec = client.chat(unconstrained, name="composition-unconstrained")
+        plain_spec.expect_status(200)
+        assert plain_spec.json["runner_telemetry"]["speculative"] is True
+
         composed.assert_alive()
 
     stats = spec_log.read_text(encoding="utf-8")

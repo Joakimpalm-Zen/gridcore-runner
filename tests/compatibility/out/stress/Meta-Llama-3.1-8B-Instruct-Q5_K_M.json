@@ -2,9 +2,10 @@
  "model": "Meta-Llama-3.1-8B-Instruct-Q5_K_M.gguf",
  "size_gb": 5.73,
  "context": 1024,
- "generated_utc": "2026-08-01T22:19:44Z",
+ "generated_utc": "2026-08-02T08:08:18Z",
  "faults": [],
  "deviances": [],
+ "moe": false,
  "gpu_run": {
   "command": [
    "-m",
@@ -24,10 +25,9 @@
   "faults": [],
   "refusals": [],
   "split": "gpu-split: budget=7.46GB fixed=0.90GB G=32/32 full=1 used=5.97GB",
-  "wall_s": 8.3,
+  "wall_s": 8.8,
   "stderr_tail": null
  },
- "moe": false,
  "cpu_run": {
   "command": [
    "-m",
@@ -64,10 +64,10 @@
    ],
    "faults": [],
    "refusals": [],
-   "wall_s": 8.1,
+   "wall_s": 8.0,
    "split": "gpu-split: budget=7.46GB fixed=0.90GB G=32/32 full=1 used=5.97GB",
-   "prompt_tok_s": 108.024,
-   "decode_tok_s": 56.208,
+   "prompt_tok_s": 107.964,
+   "decode_tok_s": 56.774,
    "prompt_tokens": 512,
    "config": "default"
   },
@@ -87,16 +87,16 @@
    "refusals": [],
    "wall_s": 8.1,
    "split": "gpu-split: budget=7.46GB fixed=0.90GB G=32/32 full=1 used=5.91GB",
-   "prompt_tok_s": 107.187,
-   "decode_tok_s": 55.563,
+   "prompt_tok_s": 107.236,
+   "decode_tok_s": 55.598,
    "prompt_tokens": 512,
    "config": "kv-q8"
   }
  ],
  "recommended": {
   "config": "default",
-  "decode_tok_s": 56.208,
-  "prefill_tok_s": 108.024,
+  "decode_tok_s": 56.774,
+  "prefill_tok_s": 107.964,
   "command": [
    "-m",
    "C:\\ProjectGrid\\models\\Meta-Llama-3.1-8B-Instruct-Q5_K_M.gguf",
