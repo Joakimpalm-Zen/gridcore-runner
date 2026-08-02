@@ -5,6 +5,25 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **First published vLLM row on the agent-torture matrix.** Same 100-case
+  matrix, same model (SmolLM2-1.7B-Instruct), same box: **Runner 100/100,
+  vLLM 0.26.0 20/100**, every vLLM failure in the `protocol` category. Recorded
+  with its deviations stated rather than buried — it is the full 100-case
+  matrix, not the 12-case subset the earlier rows used, so it is not comparable
+  to the published `12/12 vs 5/12`; and vLLM ran on CUDA against the fp16
+  checkpoint while Runner ran on CPU against the Q4_K_M GGUF.
+  Evidence: `tests/torture/results/2026-08-02-smollm2-1.7b-vllm/`.
+
+  Getting vLLM to start took three attempts, and the reasons are themselves the
+  comparison: torch/triton JIT-compile at startup and needed a C compiler this
+  box does not have; then flashinfer needed full CUDA toolkit headers, also
+  absent. That chain — a C compiler, a CUDA toolkit and an ~8 GB Python
+  environment before the first token — is what "one file to ship" is measured
+  against.
+
+  **LM Studio remains unrun**: it is a GUI desktop application whose CLI
+  requires the installed app, with no headless server install.
+
 - **Apertus (`apertus`) is admitted: ungated MLP plus xIELU.** Its FFN has no
   `ffn_gate` — it is up → xIELU → down — so the gate tensor became optional
   for the ungated activation and stays required for every other dense arch.
