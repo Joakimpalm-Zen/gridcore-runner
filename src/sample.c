@@ -36,6 +36,40 @@ static int cand_cmp(const void *a, const void *b) {
     return x->id - y->id;   // deterministic order among exact ties
 }
 
+// True top-k by selection instead of by sorting. After this call c[0..k-1]
+// holds the k largest under cand_cmp, in arbitrary order among themselves.
+//
+// This is exact, not approximate: cand_cmp is a TOTAL order (logit descending,
+// then id ascending, and ids are unique), so the k-largest set is unique and
+// sorting just those k reproduces the first k of a full sort element for
+// element. That is what lets top-k skip the O(n log n) sort of a 262k-entry
+// vocabulary for an O(n) partition plus an O(k log k) sort of the survivors.
+//
+// Median-of-three pivots. Real logit vectors are not adversarial, but the
+// quadratic case is cheap to avoid and this runs on every sampled token.
+static void select_topk(cand_t *c, int n, int k) {
+    int lo = 0, hi = n - 1;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        // order lo/mid/hi so c[mid] is the median, then park it at lo as pivot
+        if (cand_cmp(&c[mid], &c[lo]) < 0) { cand_t t = c[lo]; c[lo] = c[mid]; c[mid] = t; }
+        if (cand_cmp(&c[hi], &c[lo]) < 0)  { cand_t t = c[lo]; c[lo] = c[hi]; c[hi] = t; }
+        if (cand_cmp(&c[mid], &c[hi]) < 0) { cand_t t = c[mid]; c[mid] = c[hi]; c[hi] = t; }
+        cand_t pivot = c[lo];
+        int i = lo, j = hi;
+        while (i < j) {
+            while (i < j && cand_cmp(&c[j], &pivot) >= 0) j--;
+            c[i] = c[j];
+            while (i < j && cand_cmp(&c[i], &pivot) <= 0) i++;
+            c[j] = c[i];
+        }
+        c[i] = pivot;
+        // the pivot is now final at i; recurse only into the side holding k
+        if (i >= k) hi = i - 1;
+        else        lo = i + 1;
+    }
+}
+
 // Sample from `k` candidates carrying temperature-scaled logits in descending
 // order: softmax, top-p, min-p, then the roulette pick. `norm_sum` > 0 uses a
 // caller-computed softmax denominator (the head fast path passes the whole
@@ -161,6 +195,30 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
     // Every combination now has a head criterion, so the fast path is always
     // worth attempting; it still retreats to the full sort when the head
     // cannot be shown to contain the survivors.
+    // top-k is served by selection, not by a threshold head. The head could
+    // only satisfy `m >= want_k` by widening until it held k entries, and the
+    // loosening schedule multiplies a NEGATIVE log-threshold by 4 — one step
+    // takes it from p_max/1024 to p_max/e^27, which admits most of the
+    // vocabulary and overflows HEAD_CAP. Measured on Qwen3-8B and
+    // Ministral-8B: the first head carries 99% of the mass in ~11 entries,
+    // fails `m >= 40`, and the next step overflows. Relaxing the criterion is
+    // not available either, because pick_scaled renormalises over exactly the
+    // k it is given, so serving 11 where 40 were asked changes every
+    // probability. Selection gives the true k in O(n) and is exact.
+    if (!ok && s->temp > 0 && want_k < n_vocab) {
+        cand_t *c = malloc(sizeof(cand_t) * n_vocab);
+        if (c) {
+            for (int i = 0; i < n_vocab; i++)
+                c[i] = (cand_t){ logits[i] / temp, i };
+            select_topk(c, n_vocab, want_k);
+            qsort(c, want_k, sizeof(cand_t), cand_cmp);
+            int pick = pick_scaled(s, c, want_k, 0, r_pre, NULL);
+            if (sample_stats()) fprintf(stderr, "[smp select k=%d]", want_k);
+            free(c);
+            return pick;
+        }
+        // allocation failed: fall through to the full-sort path below
+    }
     if (!ok && s->temp > 0 && n_vocab >= 4096) {
         float mx = logits[0] / temp;
         for (int i = 1; i < n_vocab; i++) {
@@ -192,11 +250,9 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
                 // Strictly greater, because the walk takes the first token
                 // with cum > r and equality would leave it just past the end.
                 bool enough;
-                if (want_k < n_vocab)
-                    // top-k needs the true k most likely, because pick_scaled
-                    // renormalises over exactly those k
-                    enough = m >= want_k;
-                else if (s->top_p < 1.0f)
+                // want_k < n_vocab is handled by select_topk above and never
+                // reaches here.
+                if (s->top_p < 1.0f)
                     // the top-p cutoff prefix lies inside a head carrying
                     // top_p of the mass
                     enough = head_mass >= (double)s->top_p * total;

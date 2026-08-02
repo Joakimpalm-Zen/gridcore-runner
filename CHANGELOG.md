@@ -5,6 +5,37 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **`top_k` is served by selection instead of by sorting the vocabulary, and
+  that is most models.** The sampler's head fast path could only satisfy top-k
+  by widening until the head held `k` entries, and its loosening schedule
+  multiplies a *negative* log-threshold by 4 — one step goes from `p_max/1024`
+  to `p_max/e^27`, admitting most of the vocabulary and overflowing the
+  4096-entry head cap. Instrumented on gemma-4-E4B: the first head carries 99%
+  of the mass in 7 entries, fails `m >= 64`, and the next step overflows. It
+  could not be fixed by relaxing the criterion either, because `pick_scaled`
+  renormalises over exactly the `k` it is handed, so serving 7 where 64 were
+  asked changes every probability.
+
+  Now a quickselect partition takes the true top-k in O(n) and only those `k`
+  are sorted. This is **exact, not approximate**: `cand_cmp` is a total order
+  (logit descending, then id ascending, and ids are unique), so the k-largest
+  set is unique and sorting it reproduces the first `k` of a full sort element
+  for element. Verified bit-identical against the previous sampler across
+  seeds on two real models and twelve seeds on the small fixture.
+
+  Decode throughput, same seed, 96 tokens:
+
+  | model | backend | before | after |
+  |---|---|---|---|
+  | gemma-4-E4B-it Q4_K_M | CUDA | 26.1 tok/s | **59.0** |
+  | gemma-4-E4B-it Q4_K_M | CPU | 9.6 | **12.5** |
+  | Qwen2.5-7B Q4_K_M | CUDA | 54.1 | **72.6** |
+  | Qwen2.5-7B Q4_K_M | CPU | 15.2 | **16.4** |
+
+  The win scales with vocabulary size and decode speed, because sampling is a
+  fixed per-token cost: 2.3x on a 262k-vocabulary model that decodes fast, 8%
+  on a slow CPU decode where the model dominates.
+
 - **`--cpu-moe auto` crashed mid-forward on every sparse-MoE model, and the
   first diagnosis was wrong.** It was not a VRAM over-commit. `full` (is
   `output.weight` uploaded) needs the output tensor to fit the budget; `partial`
