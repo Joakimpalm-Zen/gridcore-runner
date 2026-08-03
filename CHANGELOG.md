@@ -5,6 +5,23 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **BREAKING: `/unload` is POST-only.** It was a `GET`, which made it reachable
+  from any web page the user happened to be visiting —
+  `<img src="http://127.0.0.1:PORT/unload">` frees the resident model with no
+  preflight, no CORS check and no DNS rebinding needed, because binding to
+  loopback does not stop a browser. Verified against the old build: `GET`
+  returned 200 and the server logged a real unload. A POST is not a CORS
+  *simple* request unless its `Content-Type` says so, so requiring one restores
+  the preflight that stands between a drive-by page and a freed model.
+
+  `GET /unload` now answers **405** naming the method, not 404, so an existing
+  script says what changed rather than looking like a missing route. A POST
+  carrying a body is refused too — `/unload` takes none, and the accept loop is
+  the only thread calling `accept()`, so it must not sit draining one.
+
+  This is half the fix. `Host` and `Origin` are still unvalidated, which is what
+  DNS rebinding needs, and that is tracked separately.
+
 - **Follow-up to the request-validation hardening: accurate rejection
   messages, and one dead check removed.** The new rules are right and stay;
   what they *said* was not. `max_tokens: 1.5` answered "max_tokens must be a

@@ -560,11 +560,25 @@ static void handle_conn(slot_t *s, sock_t fd) {
         body[content_length] = 0;
     }
 
-    if (!strcmp(method, "GET") && !strcmp(path, "/unload")) {
-        // llama-swap-compatible: free the resident model's memory. Normally
-        // answered straight from the accept loop (see accept_fastpath); this
-        // path still serves a request that slipped past it.
+    if (!strcmp(method, "POST") && !strcmp(path, "/unload")) {
+        // Free the resident model's memory. Normally answered straight from
+        // the accept loop (see accept_fastpath); this path still serves a
+        // request that slipped past it.
         handle_unload(fd);
+    } else if (!strcmp(method, "GET") && !strcmp(path, "/unload")) {
+        // POST-only since 0.1.5-alpha, and the refusal is explicit rather
+        // than a 404 so an operator with the old call sees what changed.
+        //
+        // It was a GET, which made it reachable from any web page the user
+        // happened to be visiting: <img src="http://127.0.0.1:PORT/unload">
+        // frees the model with no preflight, no CORS, and no rebinding needed,
+        // because loopback binding does not stop a browser. A POST is not a
+        // CORS simple request unless its Content-Type says so, so requiring
+        // one restores the preflight that stands between a drive-by page and
+        // a freed model. Host/Origin validation is the other half and is
+        // tracked separately.
+        send_error(fd, 405, "unload is POST-only: GET was reachable from any "
+                            "web page via <img src>. Use POST /unload");
     } else if (!strcmp(method, "GET") &&
                !strcmp(path, "/v1/runner/prefix-cache")) {
         send_prefix_cache(fd);
@@ -673,12 +687,12 @@ static void *slot_worker(void *arg) {
     }
 }
 
-// answer tiny GETs from the accept loop: single-slot serving means one long
-// generation used to block /health until the gridcore watchdog declared a
-// live runner "unhealthy: timed out". /unload is answered here too — it never
-// frees anything a slot is using (handle_unload defers under an active load
-// or generation), and an operator reclaiming memory must not queue behind
-// the very work that holds it. POSTs are handed to a slot untouched.
+// answer tiny requests from the accept loop: single-slot serving means one
+// long generation used to block /health until the gridcore watchdog declared a
+// live runner "unhealthy: timed out". POST /unload is answered here too — it
+// never frees anything a slot is using (handle_unload defers under an active
+// load or generation), and an operator reclaiming memory must not queue behind
+// the very work that holds it. Every other POST is handed to a slot untouched.
 static bool accept_fastpath(sock_t fd) {
 #ifndef _WIN32
     // POSIX fd_set is a fixed-size bitmask indexed by fd value; FD_SET on an
@@ -703,7 +717,11 @@ static bool accept_fastpath(sock_t fd) {
     bool health = !strncmp(hdr, "GET /health ", 12);
     bool models = !strncmp(hdr, "GET /v1/models ", 15);
     bool caps = !strncmp(hdr, "GET /v1/capabilities ", 21);
-    bool unload = !strncmp(hdr, "GET /unload ", 12);
+    bool unload = !strncmp(hdr, "POST /unload ", 13);
+    // The old spelling still has to reach a handler, or an operator's script
+    // gets a 404 that says nothing. It is not answered here — it falls through
+    // to the slot path, which replies 405 with the reason.
+    if (!strncmp(hdr, "GET /unload ", 12)) return false;
     if (!health && !models && !caps && !unload) return false;
     // Drain the request before replying: closing with unread bytes can RST
     // the connection and discard our response. But the accept thread must
@@ -744,6 +762,15 @@ static bool accept_fastpath(sock_t fd) {
         !parse_request_framing(first_header, header_end, &content_length) ||
         content_length > 32u * 1024 * 1024) {
         send_error(fd, 400, "invalid request framing");
+        sock_close(fd);
+        return true;
+    }
+    if (unload && content_length) {
+        // The accept loop must not sit reading a body: it is the only thread
+        // calling accept(), which is the whole reason this fastpath exists.
+        // /unload takes no body, so a request with one is refused rather than
+        // drained.
+        send_error(fd, 400, "unload takes no request body");
         sock_close(fd);
         return true;
     }
@@ -1102,7 +1129,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         }
 
         if (parallel == 1) {
-            // join the registry machinery so GET /unload frees the resident
+            // join the registry machinery so POST /unload frees the resident
             // model (the next request lazily reloads it) and --ttl works.
             // slot 0's containers are the caller's; borrowed avoids freeing
             // them on the first unload

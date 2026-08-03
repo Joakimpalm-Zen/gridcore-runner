@@ -1,7 +1,7 @@
 // Model residency and connection admission. Lifted out of server.c (RNR-019).
 //
 // Residency is the -m swap registry: at most one model resident at a time,
-// loaded on demand, unloaded after --ttl idle seconds or on GET /unload. The
+// loaded on demand, unloaded after --ttl idle seconds or on POST /unload. The
 // load itself deliberately runs without SV.swap_mu held -- a multi-GB mmap or
 // a --wait-for-vram queue wait must never block /unload or shutdown.
 //
@@ -60,7 +60,7 @@ void unload_draft(void) {
     for (int i = 0; i < SV.n_slots; i++) SV.slots[i].e.dm = NULL;
 }
 
-// Answer GET /unload from any thread. The memory is given back immediately
+// Answer POST /unload from any thread. The memory is given back immediately
 // when the server is idle; when a load or a generation is in flight the wish
 // is recorded and honoured at the next safe boundary instead of blocking the
 // caller — /unload exists so an operator can reclaim memory, and "scheduled"

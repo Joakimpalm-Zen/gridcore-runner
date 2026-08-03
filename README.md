@@ -270,9 +270,13 @@ reservation leaves after the weights — a small model grows its window into
 the reserved room (capped at its training context), a big one gets what fits,
 and one that cannot fit at all falls back per the normal rules.
 
-`GET /unload` frees the resident model's memory (single-model serve included)
+`POST /unload` frees the resident model's memory (single-model serve included)
 so the machine can be reclaimed without stopping the server; the next request
-reloads it transparently. `--ttl N` unloads automatically after N idle
+reloads it transparently. **It was a `GET` before 0.1.5-alpha**, which made it
+reachable from any page a user was visiting — `<img src="http://127.0.0.1:PORT/
+unload">` needs no preflight and no DNS rebinding, because binding to loopback
+does not stop a browser. `GET` now answers 405 naming the method rather than
+404, so an existing script says what changed. `--ttl N` unloads automatically after N idle
 seconds (default: 300 in swap mode, never in single-model mode).
 
 ### Serving multiple models (swap mode)
@@ -342,7 +346,7 @@ Endpoints: `POST /v1/chat/completions`, `POST /v1/responses`,
 `POST /v1/completions`,
 `POST /v1/embeddings` (mean-pooled, L2-normalized), `GET /v1/models`,
 `GET /v1/capabilities` (which reports the active family sampling preset),
-`GET /health`, `GET /unload`. Chat completions understand `logprobs` /
+`GET /health`, `POST /unload`. Chat completions understand `logprobs` /
 `top_logprobs`, `min_p`, `repeat_penalty` (send `1` for none), `stop` (a
 string or up to 4 strings, matched across token boundaries and excluded from
 output), OpenAI `tools` (declared

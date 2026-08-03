@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import json
+import urllib.error
 import urllib.request
 
 import pytest
@@ -201,13 +202,13 @@ def test_draft_model_survives_unload():
     with RunnerServer(find_runner(root), model, ctx=1024, parallel=1,
                       extra_args=["--gpu", "off", "--draft", model]) as srv:
         assert _chat(srv.base_url)["runner_telemetry"]["speculative"] is True
-        with urllib.request.urlopen(srv.base_url + "/unload", timeout=5) as r:
+        with urllib.request.urlopen(srv.base_url + "/unload", data=b"", timeout=5) as r:
             assert json.load(r) == {"status": "ok"}
         assert _chat(srv.base_url)["runner_telemetry"]["speculative"] is True
 
 
 def test_unload_answers_promptly_and_defers_under_active_generation():
-    """GET /unload during a generation must answer now and free at the boundary.
+    """POST /unload during a generation must answer now and free at the boundary.
 
     /unload used to queue behind the busy slot, so an operator reclaiming
     memory waited out whatever generation (or --wait-for-vram load) was in
@@ -228,7 +229,7 @@ def test_unload_answers_promptly_and_defers_under_active_generation():
                      ("Content-Length: %d\r\n\r\n" % len(body)).encode() + body)
         assert conn.recv(1), "generation never started"   # stream is live
         started = time.time()
-        with urllib.request.urlopen(srv.base_url + "/unload", timeout=5) as r:
+        with urllib.request.urlopen(srv.base_url + "/unload", data=b"", timeout=5) as r:
             payload = json.load(r)
         assert payload["status"] == "ok"
         assert time.time() - started < 2.0, "/unload must not queue behind the busy slot"
@@ -261,9 +262,39 @@ def test_unload_clears_reported_model_context():
     model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))
     with RunnerServer(find_runner(root), model, ctx=1024, parallel=1,
                       extra_args=["--gpu", "off"]) as srv:
-        with urllib.request.urlopen(srv.base_url + "/unload", timeout=5) as r:
+        with urllib.request.urlopen(srv.base_url + "/unload", data=b"", timeout=5) as r:
             assert json.load(r) == {"status": "ok"}
         with urllib.request.urlopen(srv.base_url + "/v1/capabilities", timeout=5) as r:
             caps = json.load(r)
         assert caps["resident"] is None
         assert caps["context"] == 0
+
+
+def test_unload_rejects_get_so_a_web_page_cannot_free_the_model():
+    """The drive-by vector, closed.
+
+    /unload used to be a GET, which any page the user happened to be visiting
+    could fire with `<img src="http://127.0.0.1:PORT/unload">` — no preflight,
+    no CORS, and no DNS rebinding needed, because binding to loopback does not
+    stop a browser. Verified against the old build: GET returned 200 and the
+    server logged a real unload.
+
+    A POST is not a CORS simple request unless its Content-Type says so, so
+    requiring one restores the preflight. The refusal is a 405 naming the
+    method rather than a 404, so an operator's existing script says what
+    changed instead of looking like a missing route.
+    """
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))
+    with RunnerServer(find_runner(root), model, ctx=256, parallel=1,
+                      extra_args=["--gpu", "off"]) as srv:
+        try:
+            with urllib.request.urlopen(srv.base_url + "/unload", timeout=5):
+                raise AssertionError("GET /unload was accepted")
+        except urllib.error.HTTPError as e:
+            assert e.code == 405, f"expected 405, got {e.code}"
+            assert b"POST" in e.read(), "the refusal does not name the method"
+        # and the endpoint still works the supported way
+        with urllib.request.urlopen(srv.base_url + "/unload", data=b"",
+                                    timeout=5) as r:
+            assert json.load(r) == {"status": "ok"}
