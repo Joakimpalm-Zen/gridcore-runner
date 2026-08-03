@@ -40,12 +40,14 @@ def test_qwen35_legacy_ornith_dt_name_loads(tmp_path):
     assert proc.returncode == 0, proc.stderr.decode(errors="replace")
 
 
-def test_qwen35_hybrid_cuda_matches_cpu(tmp_path):
+def test_qwen35_hybrid_gpu_auto_matches_cpu(tmp_path):
     caps = json.loads(subprocess.run(
         [ROOT / "runner", "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
         check=True, text=True).stdout)
-    if not caps.get("gpu"):
+    gpu_caps = caps.get("gpu")
+    if not gpu_caps:
         return
+    backend = gpu_caps.get("backend")
     model = tmp_path / "ornith-gpu.gguf"
     subprocess.run([sys.executable, ROOT / "scripts/make-test-ornith.py", model],
                    check=True, cwd=ROOT)
@@ -60,14 +62,19 @@ def test_qwen35_hybrid_cuda_matches_cpu(tmp_path):
     assert cpu.returncode == 0, cpu.stderr.decode(errors="replace")
     assert gpu.returncode == 0, gpu.stderr.decode(errors="replace")
     assert gpu.stdout == cpu.stdout
-    assert b"CUDA backend" in gpu.stderr
-    assert b"no kernels for the recurrent" not in gpu.stderr
+    if backend == "cuda":
+        assert b"CUDA backend" in gpu.stderr
+        assert b"no kernels for the recurrent" not in gpu.stderr
+    elif backend == "metal":
+        assert b"not on the metal backend" in gpu.stderr
+        assert b"Metal backend" not in gpu.stderr
 
-    fallback = subprocess.run(
-        [*base, "--gpu", "auto"], cwd=ROOT, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, timeout=20,
-        env={**os.environ, "RUNNER_CUDA_INJECT_FAILURE": "1"},
-    )
-    assert fallback.returncode == 0, fallback.stderr.decode(errors="replace")
-    assert fallback.stdout == cpu.stdout
-    assert b"injected CUDA runtime failure" in fallback.stderr
+    if backend == "cuda":
+        fallback = subprocess.run(
+            [*base, "--gpu", "auto"], cwd=ROOT, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=20,
+            env={**os.environ, "RUNNER_CUDA_INJECT_FAILURE": "1"},
+        )
+        assert fallback.returncode == 0, fallback.stderr.decode(errors="replace")
+        assert fallback.stdout == cpu.stdout
+        assert b"injected CUDA runtime failure" in fallback.stderr

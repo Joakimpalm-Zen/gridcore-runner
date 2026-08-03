@@ -52,6 +52,10 @@ test-gguf-getters
 test-gguf-getters.exe
 test-parse
 test-parse.exe
+test-thread-default
+test-thread-default.exe
+test-metal-ownership
+test-metal-ownership.exe
 test-model-load-failure
 test-model-load-failure.exe
 # per-PID scratch registries left by tests/test_vram_registry.c
@@ -78,6 +82,8 @@ src/kernels.ptx
 src/kernels-*.ptx.tmp
 bench-out.*.txt
 bench-err.*.txt
+metal-*.out
+metal-*.err
 
 # agent worktrees (transient)
 .claude/worktrees/
