@@ -81,8 +81,10 @@ loopback connection.
 
 ## Hardening in place
 
-- Zero third-party dependencies (libc/pthreads only) — no transitive CVE
-  surface, and the release binary is fully static.
+- Zero third-party runtime dependencies — no bundled dependency tree or
+  transitive package surface. Release binaries still use ordinary operating
+  system libraries; Linux builds are dynamically linked to libc/libm and the
+  platform loader rather than being fully static.
 - All request reads are bounded in size and time; buffers are fixed-size
   and NUL-terminated before parsing.
 - CI runs the engine under AddressSanitizer/UBSan on every push, plus

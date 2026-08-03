@@ -1,0 +1,26 @@
+{
+  "schema_version": "gridcore.runner.cpu-cuda.v1",
+  "generated_utc": "2026-08-03",
+  "runner": "runner 0.1.5-alpha",
+  "model": "models/ornith-1.0-9b-Q4_K_M.gguf",
+  "sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
+  "tokens": 128,
+  "context": 2048,
+  "routing": "eager",
+  "cuda_tensor_cores": false,
+  "gpu_split": {
+    "layers_on_gpu": 32,
+    "layers_total": 32,
+    "output_weight_on_gpu": true,
+    "whole_graph": true
+  },
+  "prompts": [
+    {"prompt": "The capital of France is", "identical": true},
+    {"prompt": "def fibonacci(n):", "identical": true},
+    {"prompt": "1 2 3 4 5 6 7 8", "identical": true},
+    {"prompt": "Once upon a time, in a land far away,", "identical": true},
+    {"prompt": "Q: What is 17 * 23?\nA:", "identical": true}
+  ],
+  "totals": {"identical": 5, "total": 5},
+  "status": "pass"
+}

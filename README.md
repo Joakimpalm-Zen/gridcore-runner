@@ -1,7 +1,8 @@
 # Gridcore Runner
 
 A compact **local LLM inference engine written from scratch in plain C** — no
-dependencies beyond libc/pthreads, no ggml, one `make`, one binary. It loads
+third-party runtime dependencies or ggml, one `make`, one binary. It uses only
+the platform C/math/threading/dynamic-loader libraries, loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
@@ -96,11 +97,12 @@ harder half.)
 
 **No `--host` flag to get wrong.** runner binds `127.0.0.1` with no override —
 no flag, no environment variable, no config key. llama-server and Ollama default
-to loopback too; they just kept the escape hatch. SentinelLABS and Censys found
-**175,000 Ollama hosts reachable from the internet** across 130 countries in
-January 2026, nearly half with tool calling enabled — an open shell wherever
-those are also unauthenticated, which a separate LeakIX scan confirmed for
-12,269 of them. One afternoon's `0.0.0.0` at a time. Here it is a gate, not a
+to loopback too; they just kept the escape hatch. [SentinelLABS and Censys
+reported](https://www.sentinelone.com/labs/silent-brothers-ollama-hosts-form-anonymous-ai-network-beyond-platform-guardrails/)
+**175,108 unique internet-reachable Ollama hosts** across 130 countries from
+their 293-day scan ending in January 2026, nearly half with tool-calling
+capability. Exposed stock Ollama APIs have no authentication. One afternoon's
+`0.0.0.0` at a time. Here it is a gate, not a
 hope: `tests/test_bind.c` and `tests/conformance/test_loopback_bind.py` fail the
 build if the bind ever moves. Remote access belongs behind a reverse proxy, an
 SSH tunnel or Tailscale, where auth and TLS already live.
@@ -125,8 +127,10 @@ make          # produces ./runner
 make debug    # ASan/UBSan build for development
 ```
 
-Plain C with a small platform layer (`src/compat.c`) — no dependencies beyond
-libc and pthreads. CI builds and smoke-tests every push on:
+Plain C with a small platform layer (`src/compat.c`) and no third-party runtime
+libraries. The executable uses ordinary platform libraries (including C, math,
+threading and dynamic loading where applicable). CI builds and smoke-tests every
+push on:
 
 | Platform | Toolchain | GPU |
 |---|---|---|
@@ -704,7 +708,7 @@ Rules of thumb, in order of impact:
 
 | Area | Support |
 |---|---|
-| File format | GGUF v2/v3, memory-mapped (weights are never copied) |
+| File format | GGUF v2/v3; host weights are memory-mapped. CUDA copies selected weights into VRAM, while Metal uses zero-copy mapped weights |
 | Architectures | `llama` (Llama 2/3, Mistral, TinyLlama, SmolLM2, …), `qwen2` (QKV biases), `qwen3` (per-head QK norms), dense `qwen35` (Qwen3.5/Ornith hybrid Gated DeltaNet + full attention; CPU + CUDA), `phi3` (fused QKV and gate/up tensors, LongRoPE short/long factors), `gemma3` (QAT and regular: sandwich norms, sliding-window attention with dual rope bases, scaled embeddings), `gemma4` (heterogeneous per-layer KV, V-less global layers, thinking channels, tool calls; verified token-identical to llama.cpp, and CPU/GPU-identical on gemma-4-12B-it) including the **E-series** (E2B/E4B: per-layer embeddings folded into every layer's residual, plus a tail of layers that own no KV cache and read an earlier layer's — CPU + CUDA, byte-identical to each other at full and every partial offload; agreement with llama.cpp is measured at the quantisation noise floor rather than as token identity, see `scripts/token_divergence.py` and `scripts/sensitivity_floor.py`), `gpt-oss` (per-head attention sinks that join the softmax max and denominator with no value row, clamped alpha-sigmoid GLU, router and per-expert biases, MXFP4 experts; CPU + CUDA, GPU/CPU byte-identical at whole-graph offload), `qwen3moe` and Mixtral-style sparse **MoE** (top-k router, renormalized weights, per-expert SwiGLU; fused and legacy-split expert layouts; CPU + CUDA; Qwen3-30B-A3B measured at ~72 tok/s on an RTX PRO 6000 Blackwell 24 GB MIG slice — see docs/moe-support.md and docs/benchmarks.md), plus gemma-4's GELU **dual-branch MoE** (a dense shared GELU FFN summed with routed fused-`gate_up` experts, per-expert down scales, pre/post sandwich norms; CPU + CUDA; CPU/GPU-identical on gemma-4-26B-A4B-it. **Not** gated on token identity against llama.cpp: that model is numerically chaotic — a KV-cache precision change *inside one runner build* moves its greedy output on more prompts than switching engines does — so exact-text agreement is not achievable for it on any engine pair. See `scripts/sensitivity_floor.py` and `tests/compatibility/out/divergence-study-gemma4-moe-2026-08-01.json`). |
 | Tokenizers | SPM (score-based merging, byte fallback, merge-rank reconstruction when a conversion writes all-zero scores) and byte-level BPE, with per-family pre-tokenizer rules selected from `tokenizer.ggml.pre`: `llama-bpe`, `qwen2`, `smollm`, `tekken` (Mistral Nemo/Small and Apertus: case-split letter runs, single digits), and the original GPT-2 regex as the default. gemma4 adds an SPM-style BPE: spaces normalize to U+2581 and merges run over raw UTF-8, with `<0xNN>` byte fallback for characters the vocabulary has no piece for |
 | Tensor types | F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4 (gpt-oss; CPU + CUDA) — every commonly served quant. `--caps` prints the live list, plus a separate `gpu_quants`, because a few are CPU-only |
@@ -712,7 +716,7 @@ Rules of thumb, in order of impact:
 | Transformer | RMSNorm, RoPE (adjacent-pair and NeoX), grouped-query attention, SwiGLU, tied embeddings |
 | Sampling | temperature, top-k, top-p, min-p, repeat penalty, greedy; suppress-token bias; JSON and JSON-Schema constrained decoding; speculative decoding with a draft model |
 | Server | OpenAI-compatible HTTP API, SSE streaming, N parallel slots, multi-model swap with idle TTL + keep_alive, prompt-prefix KV reuse, embeddings, logprobs, tool calls |
-| GPU | CUDA (NVIDIA Turing / compute capability 7.5 or newer): full + partial (layer-split) offload; Metal (Apple Silicon): full forward pass, zero-copy weights — both CPU-identical output |
+| GPU | CUDA (NVIDIA Turing / compute capability 7.5 or newer): full + partial (layer-split) offload, with scalar-path CPU identity recorded per model; Metal (Apple Silicon): full forward pass and zero-copy weights, with CI compile/smoke coverage but hardware parity validation still open |
 | CPU | AVX2/FMA dot kernels for every hot quant format (measured 1.7x scalar end-to-end on a 3B Q4 at 64 threads; see docs/performance.md) |
 | Threading | persistent pthread pool; matmul rows and attention heads run in parallel |
 
@@ -732,9 +736,9 @@ TinyLlama-1.1B, whose three are special-token literal/adjacency cases.
 Apertus's three were combining-mark sequences (Devanagari and Thai) on the
 `tekken` path and are fixed: that regex is the only supported one carrying
 `\p{M}` in its letter classes, so a virama or a Thai vowel sign has to stay
-inside a letter run rather than end it. The rest are not individually
-characterised yet — each is a handful of strings out of 721, and the count is
-what the compatibility manifest records.
+inside a letter run rather than end it. Llama-3.2's residual case is `Tiếng
+Việt`; gemma-3's is a literal doubled U+2581 marker; Phi-3.5's two are
+special-token adjacency cases. The compatibility manifest records the counts.
 
 Mistral-7B-v0.3 differs on 44 of 721, all one known and accepted cause: its
 `Metaspace prepend_scheme=first` replaces a leading space with the U+2581 prefix
@@ -743,9 +747,11 @@ keeps the Llama-2 rule rather than breaking that family. Forty of the 44 begin
 with whitespace and the rest are literal U+2581 inputs, which is the same case
 after normalization.
 
-Greedy generation at temperature 0 is token-identical between CUDA and CPU for
-every model above that loads, on the scalar GEMM path (`RUNNER_CUDA_TC=0`,
-and the default wherever tensor cores are not promoted). On the promoted
+Greedy generation at temperature 0 is compared between CUDA and CPU per model
+on the scalar GEMM path (`RUNNER_CUDA_TC=0`, and the default wherever tensor
+cores are not promoted); identity is an evidence result, not a blanket backend
+property. The 2026-08-03 128-token rerun passed 5/5 for Ornith but only 4/5 for
+Qwen3-4B, whose story prompt diverged late in generation. On the promoted
 dense (Q4_K, arch) combos the default prefill path is the tensor-core GEMM,
 whose guarantee is the tolerance gate — 0/64 teacher-forced top-1 flips and
 ≤0.012% mean logit deviation on every promoted row; in free-running checks
@@ -778,15 +784,19 @@ certifiable if runner *implements its architecture* (see the by-design
 exclusions below); tensor-name compatibility is never treated as proof of
 mathematical compatibility.
 
-**Currently certified** (`load` + `cpu_cuda` for all; `chat`/`tool`/`long_context`
-and `greedy_reference` per the recorded reports):
+**Currently represented in the pinned architecture matrix.** Certification is
+check-specific: consult the manifest and dated reports for `pass`, `fail`, and
+`not_executed`; inclusion here does not mean every check passed. In particular,
+Ornith's older pinned report predates CUDA support; its `cpu_cuda` check was
+regenerated on 2026-08-03 with 5/5 prompts identical over 128 tokens and a
+verified 32/32-layer GPU split.
 
 | Architecture | Family | Pinned model |
 |---|---|---|
 | `llama` | Llama 3 / Mistral | Llama-3.2-3B, Mistral-7B-v0.3 |
 | `qwen2` | Qwen 2.5 | Qwen2.5-32B-Instruct |
-| `qwen3` | Qwen 3 | Qwen3-4B |
-| `qwen35` | Qwen 3.5 / Ornith | Ornith-1.0-9B (CPU + CUDA) |
+| `qwen3` | Qwen 3 | Qwen3-4B (`cpu_cuda` recheck: 4/5 at 128 tokens, recorded failure) |
+| `qwen35` | Qwen 3.5 / Ornith | Ornith-1.0-9B (CPU + CUDA; 5/5 at 128 tokens) |
 | `phi3` | Phi 3 | Phi-3.5-mini-instruct |
 | `gemma3` | Gemma 3 | gemma-3-4b-it |
 | `gemma4` | Gemma 4 (dense) | gemma-4-12B-it |
@@ -829,8 +839,9 @@ stays certified and maintained.
 Sparse MoE covers Mixtral/Qwen3-style top-k SiLU experts (CPU + CUDA; fused and
 legacy-split layouts) **and** gemma-4's GELU dual-branch MoE — a dense shared
 GELU FFN plus routed fused-`gate_up` experts with per-expert down scales and
-the pre/post sandwich norms (CPU + CUDA; verified token-identical to llama.cpp
-and GPU/CPU-identical; see docs/moe-support.md).
+the pre/post sandwich norms (CPU + CUDA; GPU/CPU-identical on the recorded
+model, but deliberately not claimed token-identical to llama.cpp because its
+numeric sensitivity makes exact-text gating unsound; see docs/moe-support.md).
 
 Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
 `expert_shared_count`-style shared-expert MoE / MLA (Qwen2-MoE, DeepSeek/Kimi),
@@ -873,7 +884,10 @@ python/          supported Python endpoint + child-process client for Runner con
 ```
 
 Weights stay quantized in the mmap'd file; matmuls dequantize on the fly, so
-memory use is roughly file size + KV cache + a few MB of activations.
+CPU-only memory use is roughly the mapped file + KV cache + runtime scratch.
+CUDA additionally copies offloaded weights and allocates compute/KV buffers in
+VRAM; `--caps` and the startup placement log are the reliable sizing evidence
+for a particular model and machine.
 
 ## License
 

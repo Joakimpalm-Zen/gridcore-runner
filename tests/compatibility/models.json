@@ -101,11 +101,12 @@
     "load",
     "tokenizer",
     "greedy_reference",
+    "cpu_cuda",
     "chat",
     "tool",
     "long_context"
    ],
-   "notes": "CPU-only in Runner"
+   "notes": "CPU + CUDA; 5/5 scalar-path CPU/CUDA identity over 128 tokens re-verified 2026-08-03"
   },
   {
    "id": "phi-3.5-mini-instruct-q4_k_m",

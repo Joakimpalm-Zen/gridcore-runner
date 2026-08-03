@@ -1,7 +1,7 @@
 # Coding-agent compatibility evidence
 
 This page preserves historical client evidence from earlier alpha runs. Current
-release metadata is `0.1.3-alpha`; new reproducible compatibility gates are in
+release metadata is `0.1.5-alpha`; new reproducible compatibility gates are in
 `docs/compatibility-program.md` and CI.
 
 The original broad sweep below was validated 2026-07-21 with Runner

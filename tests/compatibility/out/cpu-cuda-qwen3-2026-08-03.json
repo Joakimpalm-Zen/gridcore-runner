@@ -1,0 +1,27 @@
+{
+  "schema_version": "gridcore.runner.cpu-cuda.v1",
+  "generated_utc": "2026-08-03",
+  "runner": "runner 0.1.5-alpha",
+  "model": "models/Qwen3-4B-Q4_K_M.gguf",
+  "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+  "tokens": 128,
+  "context": 2048,
+  "routing": "eager",
+  "cuda_tensor_cores": false,
+  "gpu_split": {
+    "layers_on_gpu": 36,
+    "layers_total": 36,
+    "output_weight_on_gpu": true,
+    "whole_graph": true
+  },
+  "prompts": [
+    {"prompt": "The capital of France is", "identical": true},
+    {"prompt": "def fibonacci(n):", "identical": true},
+    {"prompt": "1 2 3 4 5 6 7 8", "identical": true},
+    {"prompt": "Once upon a time, in a land far away,", "identical": false},
+    {"prompt": "Q: What is 17 * 23?\nA:", "identical": true}
+  ],
+  "totals": {"identical": 4, "total": 5},
+  "status": "fail",
+  "note": "CPU and scalar CUDA first differ after the common opening about the king's three daughters; see the raw harness output retained with the audit run."
+}
