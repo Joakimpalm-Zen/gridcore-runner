@@ -489,3 +489,244 @@ kernel void k_add(device float       *x [[buffer(0)]],
                   uint i [[thread_position_in_grid]]) {
     if ((int)i < n) x[i] += d[i];
 }
+
+// -------------------------------------------------------------- sparse MoE
+// Plain router + fused-3D expert layout. This is the Metal twin of the first
+// CUDA MoE slice: softmax -> top-k -> renormalize on device, then one indirect
+// expert matvec launch per projection.
+
+kernel void k_moe_route(device const float *logits [[buffer(0)]],
+                        device int         *sel    [[buffer(1)]],
+                        device float       *selw   [[buffer(2)]],
+                        constant int       &ne     [[buffer(3)]],
+                        constant int       &used   [[buffer(4)]],
+                        constant int       &tokens [[buffer(5)]],
+                        constant int       &ls     [[buffer(6)]],
+                        uint t [[thread_position_in_grid]]) {
+    if ((int)t >= tokens) return;
+    float lg[256];
+    device const float *src = logits + (ulong)t * ls;
+    for (int e = 0; e < ne; e++) lg[e] = src[e];
+
+    float mx = lg[0];
+    for (int e = 1; e < ne; e++)
+        if (lg[e] > mx) mx = lg[e];
+    float sum = 0.0f;
+    for (int e = 0; e < ne; e++) {
+        float p = exp(lg[e] - mx);
+        lg[e] = p;
+        sum += p;
+    }
+    for (int e = 0; e < ne; e++) lg[e] /= sum;
+
+    device int *ts = sel + (ulong)t * used;
+    device float *tw = selw + (ulong)t * used;
+    float denom = 0.0f;
+    for (int s = 0; s < used; s++) {
+        int best = 0;
+        float bp = -1.0f;
+        for (int e = 0; e < ne; e++)
+            if (lg[e] > bp) { bp = lg[e]; best = e; }
+        ts[s] = best;
+        tw[s] = bp;
+        denom += bp;
+        lg[best] = -1.0f;
+    }
+    if (denom < 6.103515625e-5f) denom = 6.103515625e-5f;
+    for (int s = 0; s < used; s++) tw[s] /= denom;
+}
+
+struct moe_args {
+    int   n_in;
+    int   n_out;
+    ulong w_off;
+    ulong estride;
+    int   xs;
+    int   ys;
+};
+
+#define MOE_MV_HEAD \
+    uint row = tgpig.x * (ntg.x / 32) + sgitg; \
+    if (row >= (uint)a.n_out) return; \
+    device const uchar *wbase = wb + a.w_off + (ulong)sel[tgpig.y] * a.estride; \
+    device const float *xp0 = x + (ulong)tgpig.y * a.xs; \
+    float s = 0;
+
+#define MOE_MV_TAIL \
+    s = simd_sum(s); \
+    if (tiisg == 0) y[(ulong)tgpig.y * a.ys + row] = s;
+
+#define MOE_MV_PARAMS \
+    device const uchar *wb  [[buffer(0)]], \
+    device const float *x   [[buffer(1)]], \
+    device float       *y   [[buffer(2)]], \
+    constant moe_args  &a   [[buffer(3)]], \
+    device const int   *sel [[buffer(4)]], \
+    uint  sgitg [[simdgroup_index_in_threadgroup]], \
+    uint  tiisg [[thread_index_in_simdgroup]], \
+    uint3 tgpig [[threadgroup_position_in_grid]], \
+    uint3 ntg   [[threads_per_threadgroup]]
+
+kernel void k_moe_mv_f32(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    device const float *rw = (device const float *)wbase + (ulong)row * a.n_in;
+    for (int i = tiisg; i < a.n_in; i += 32) s += rw[i] * xp0[i];
+    MOE_MV_TAIL;
+}
+
+kernel void k_moe_mv_f16(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    device const half *rw = (device const half *)wbase + (ulong)row * a.n_in;
+    for (int i = tiisg; i < a.n_in; i += 32) s += (float)rw[i] * xp0[i];
+    MOE_MV_TAIL;
+}
+
+kernel void k_moe_mv_q8_0(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 32;
+    device const uchar *rw = wbase + (ulong)row * nb * 34;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 34;
+        float d = (float)*(device const half *)blk;
+        device const char *q = (device const char *)(blk + 2);
+        device const float *xp = xp0 + b * 32;
+        float t = 0;
+        for (int j = 0; j < 32; j++) t += (float)q[j] * xp[j];
+        s += d * t;
+    }
+    MOE_MV_TAIL;
+}
+
+kernel void k_moe_mv_q4_0(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 32;
+    device const uchar *rw = wbase + (ulong)row * nb * 18;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 18;
+        float d = (float)*(device const half *)blk;
+        device const uchar *q = blk + 2;
+        device const float *xp = xp0 + b * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++)
+            t += ((int)(q[j] & 0xF) - 8) * xp[j] + ((int)(q[j] >> 4) - 8) * xp[j + 16];
+        s += d * t;
+    }
+    MOE_MV_TAIL;
+}
+
+kernel void k_moe_mv_q4_K(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 256;
+    device const uchar *rw = wbase + (ulong)row * nb * 144;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 144;
+        float d    = (float)*(device const half *)blk;
+        float dmin = (float)*(device const half *)(blk + 2);
+        device const uchar *sc = blk + 4;
+        device const uchar *q  = blk + 16;
+        device const float *xp = xp0 + b * 256;
+        int is = 0;
+        for (int j = 0; j < 256; j += 64) {
+            uchar s1, m1, s2, m2;
+            get_scale_min_k4(is + 0, sc, &s1, &m1);
+            get_scale_min_k4(is + 1, sc, &s2, &m2);
+            float d1 = d * s1, mm1 = dmin * m1;
+            float d2 = d * s2, mm2 = dmin * m2;
+            float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
+            for (int l = 0; l < 32; l++) {
+                t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
+                t2 += (float)(q[l] >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
+            }
+            s += d1 * t1 - mm1 * sx1 + d2 * t2 - mm2 * sx2;
+            q += 32; is += 2; xp += 64;
+        }
+    }
+    MOE_MV_TAIL;
+}
+
+kernel void k_moe_mv_q5_K(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 256;
+    device const uchar *rw = wbase + (ulong)row * nb * 176;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 176;
+        float d    = (float)*(device const half *)blk;
+        float dmin = (float)*(device const half *)(blk + 2);
+        device const uchar *sc = blk + 4;
+        device const uchar *qh = blk + 16;
+        device const uchar *q  = blk + 48;
+        device const float *xp = xp0 + b * 256;
+        int is = 0;
+        uchar u1 = 1, u2 = 2;
+        for (int j = 0; j < 256; j += 64) {
+            uchar s1, m1, s2, m2;
+            get_scale_min_k4(is + 0, sc, &s1, &m1);
+            get_scale_min_k4(is + 1, sc, &s2, &m2);
+            float d1 = d * s1, mm1 = dmin * m1;
+            float d2 = d * s2, mm2 = dmin * m2;
+            for (int l = 0; l < 32; l++) {
+                s += (d1 * (float)((q[l] & 0xF) + ((qh[l] & u1) ? 16 : 0)) - mm1) * xp[l];
+                s += (d2 * (float)((q[l] >> 4)  + ((qh[l] & u2) ? 16 : 0)) - mm2) * xp[l + 32];
+            }
+            q += 32; is += 2; xp += 64; u1 <<= 2; u2 <<= 2;
+        }
+    }
+    MOE_MV_TAIL;
+}
+
+kernel void k_moe_mv_q6_K(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 256;
+    device const uchar *rw = wbase + (ulong)row * nb * 210;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 210;
+        device const uchar *ql = blk;
+        device const uchar *qh = blk + 128;
+        device const char  *sc = (device const char *)(blk + 192);
+        float d = (float)*(device const half *)(blk + 208);
+        device const float *xp = xp0 + b * 256;
+        for (int half_i = 0; half_i < 2; half_i++) {
+            float t[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+            for (int l = 0; l < 32; l++) {
+                int is = (l / 16) & 1;
+                int q1 = (int)((ql[l]      & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                int q3 = (int)((ql[l]      >> 4)  | (((qh[l] >> 4) & 3) << 4)) - 32;
+                int q4 = (int)((ql[l + 32] >> 4)  | (((qh[l] >> 6) & 3) << 4)) - 32;
+                t[is * 4 + 0] += q1 * xp[l];
+                t[is * 4 + 1] += q2 * xp[l + 32];
+                t[is * 4 + 2] += q3 * xp[l + 64];
+                t[is * 4 + 3] += q4 * xp[l + 96];
+            }
+            s += d * (sc[0] * t[0] + sc[2] * t[1] + sc[4] * t[2] + sc[6] * t[3] +
+                      sc[1] * t[4] + sc[3] * t[5] + sc[5] * t[6] + sc[7] * t[7]);
+            ql += 64; qh += 32; sc += 8; xp += 128;
+        }
+    }
+    MOE_MV_TAIL;
+}
+
+kernel void k_moe_actmul(device float       *gbuf [[buffer(0)]],
+                         device const float *ubuf [[buffer(1)]],
+                         device const float *selw [[buffer(2)]],
+                         constant int       &nff  [[buffer(3)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    int i = gid.x, slot = gid.y;
+    if (i >= nff) return;
+    device float *g = gbuf + (ulong)slot * nff;
+    device const float *u = ubuf + (ulong)slot * nff;
+    float x = g[i];
+    g[i] = (x / (1.0f + exp(-x))) * u[i] * selw[slot];
+}
+
+kernel void k_moe_sum(device float       *out    [[buffer(0)]],
+                      device const float *eout   [[buffer(1)]],
+                      constant int       &n      [[buffer(2)]],
+                      constant int       &nslots [[buffer(3)]],
+                      uint i [[thread_position_in_grid]]) {
+    if ((int)i >= n) return;
+    float s = 0.0f;
+    for (int slot = 0; slot < nslots; slot++)
+        s += eout[(ulong)slot * n + i];
+    out[i] = s;
+}

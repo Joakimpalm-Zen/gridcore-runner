@@ -421,6 +421,26 @@ else
 	@echo "metal q8 KV smoke skipped: macOS-only backend"
 endif
 
+test-metal-moe: runner
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		$(PYTHON) scripts/make-test-moe.py test-moe-fixture; \
+		./$(RUNNER_EXE) -m test-moe-fixture.dense.gguf -p "hello world" -n 12 --temp 0 --gpu off > metal-moe-dense.out 2>/dev/null; \
+		./$(RUNNER_EXE) -m test-moe-fixture.moe1.gguf -p "hello world" -n 12 --temp 0 --gpu auto > metal-moe1.out 2> metal-moe1.err; \
+		cmp -s metal-moe-dense.out metal-moe1.out; \
+		grep -q "Metal backend" metal-moe1.err; \
+		./$(RUNNER_EXE) -m test-moe-fixture.moe2.gguf -p "hello world" -n 12 --temp 0 --gpu auto > metal-moe2.out 2> metal-moe2.err; \
+		cmp -s metal-moe-dense.out metal-moe2.out; \
+		grep -q "Metal backend" metal-moe2.err; \
+		echo "metal MoE ok"; \
+	else \
+		echo "metal MoE smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal MoE smoke skipped: macOS-only backend"
+endif
+
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
@@ -599,7 +619,8 @@ clean:
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
 	rm -f metal-init-fallback.out metal-init-fallback.err
 	rm -f metal-prefill-loop.out metal-prefill-native.out metal-prefill-native.err
-	rm -f metal-kv-q8.err
+	rm -f metal-kv-q8.err metal-moe-dense.out metal-moe1.out metal-moe1.err
+	rm -f metal-moe2.out metal-moe2.err
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 
@@ -610,4 +631,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 smoke release-check fuzz fuzz-build fuzz-run test-shared-asan
+.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe smoke release-check fuzz fuzz-build fuzz-run test-shared-asan

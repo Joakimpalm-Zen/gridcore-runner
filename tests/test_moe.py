@@ -195,10 +195,11 @@ def test_moe_gpu_forward_does_not_fall_back(runner_bin, models):
     CPU: output stayed token-identical (the fallback IS the CPU oracle), so
     only the fallback warning can catch this class. moe2 routes through BOTH
     experts (top-2), so the e>=1 slice descriptors are exercised."""
-    caps = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
-                          stdout=subprocess.PIPE, check=True)
-    if (b'"backend":"cuda"' not in caps.stdout and
-            b'"backend":"metal"' not in caps.stdout):
+    caps = json.loads(subprocess.run(
+        [runner_bin, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
+        check=True, text=True).stdout)
+    backend = (caps.get("gpu") or {}).get("backend")
+    if backend not in ("cuda", "metal"):
         pytest.skip("no GPU backend on this host")
     dense = _generate(runner_bin, f"{models}.dense.gguf")
     for variant in ("moe1", "moe2", "moe3"):
@@ -207,6 +208,10 @@ def test_moe_gpu_forward_does_not_fall_back(runner_bin, models):
         assert b"continuing on CPU" not in proc.stderr, (
             f"{variant} silently fell back to the CPU path:\n"
             + proc.stderr.decode(errors="replace"))
+        if backend == "metal" and variant in ("moe1", "moe2"):
+            assert b"Metal backend" in proc.stderr, (
+                f"{variant} did not initialize the Metal MoE path:\n"
+                + proc.stderr.decode(errors="replace"))
 
 
 def test_caps_advertise_moe_tensor_placement(runner_bin):

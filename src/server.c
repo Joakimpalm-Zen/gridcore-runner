@@ -1231,12 +1231,10 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 
     // Say it in the banner, not only at init.
     //
-    // A backend that cannot run this model's experts prints its reason from
-    // gpu_init(), which scrolls past above the load line and is easy to miss —
-    // and the consequence is not subtle: a Mac user watched gpt-oss-20b run
-    // CPU-only at 0.38 tok/s having read MXFP4 in `--caps` gpu_quants as a
-    // promise it would not be. The banner is the last thing on screen when a
-    // server comes up, so this belongs here too.
+    // A backend that cannot run this model's exact expert variant prints its
+    // reason from gpu_init(), which scrolls past above the load line and is
+    // easy to miss. The banner is the last thing on screen when a server comes
+    // up, so the CPU-expert placement belongs here too.
     if (SV.n_slots > 0 && SV.slots[0].m && SV.slots[0].m->n_expert > 0 &&
         !SV.slots[0].m->gpu)
         fprintf(stderr,

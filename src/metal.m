@@ -14,11 +14,14 @@ typedef struct {
     id<MTLDevice>       dev;
     id<MTLCommandQueue> queue;
     id<MTLComputePipelineState> p_rmsnorm, p_qknorm, p_rope, p_store, p_attn, p_silu, p_add;
+    id<MTLComputePipelineState> p_moe_route, p_moe_actmul, p_moe_sum;
     id<MTLComputePipelineState> p_mv[32];       // indexed by ggml type
+    id<MTLComputePipelineState> p_moe_mv[32];   // indexed by ggml type
     id<MTLBuffer> weights;                      // wraps the model mmap (zero copy)
     bool          weights_copied;
     id<MTLBuffer> kc, vc;
     id<MTLBuffer> x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
+    id<MTLBuffer> moe_logits, moe_sel, moe_selw, moe_hb, moe_hb2, moe_eout;
     id<MTLBuffer> inv_freq, out_norm, dummy;
     id<MTLBuffer> *attn_norm, *ffn_norm;        // per layer
     id<MTLBuffer> *bq, *bk, *bv, *bo;           // per layer, may be nil
@@ -29,6 +32,7 @@ typedef struct {
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
 typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8; } attn_args;
+typedef struct { int n_in, n_out; uint64_t w_off, estride; int xs, ys; } moe_args;
 
 static void gpu_release_state(gpu_t *g, int n_layer) {
     if (!g) return;
@@ -47,12 +51,16 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     free(g->qn); free(g->kn);
     id<MTLBuffer> bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
                              g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
-                             g->logits, g->inv_freq, g->out_norm, g->dummy };
+                             g->logits, g->moe_logits, g->moe_sel, g->moe_selw,
+                             g->moe_hb, g->moe_hb2, g->moe_eout,
+                             g->inv_freq, g->out_norm, g->dummy };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
     for (int i = 0; i < 32; i++) [g->p_mv[i] release];
+    for (int i = 0; i < 32; i++) [g->p_moe_mv[i] release];
     [g->p_rmsnorm release]; [g->p_qknorm release]; [g->p_rope release];
     [g->p_store release]; [g->p_attn release]; [g->p_silu release];
-    [g->p_add release];
+    [g->p_add release]; [g->p_moe_route release]; [g->p_moe_actmul release];
+    [g->p_moe_sum release];
     [g->queue release];
     [g->dev release];
     free(g);
@@ -190,6 +198,68 @@ static bool gpu_type_ok(int type) {
     }
 }
 
+static bool metal_moe_type_ok(int type) {
+    switch (type) {
+        case T_F32: case T_F16: case T_Q8_0: case T_Q4_0:
+        case T_Q4_K: case T_Q5_K: case T_Q6_K:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool metal_moe_supported(const model_t *m) {
+    if (m->n_expert <= 0) return true;
+    if (m->n_expert > 256 || m->n_expert_used < 1 ||
+        m->n_expert_used > 256) {
+        fprintf(stderr, "gpu: this MoE geometry is outside the Metal router limit — using CPU\n");
+        return false;
+    }
+    if (!model_moe_router_is_plain(m)) {
+        fprintf(stderr, "gpu: this model's MoE router has no Metal kernel — using CPU\n");
+        return false;
+    }
+    if (m->n_ff_shexp > 0) {
+        fprintf(stderr, "gpu: shared-expert MoE has no Metal path yet — using CPU\n");
+        return false;
+    }
+    if (m->moe_gemma) {
+        fprintf(stderr, "gpu: Gemma dual-branch MoE is not on the metal backend yet — using CPU\n");
+        return false;
+    }
+    if (m->ffn_act != ACT_SILU) {
+        fprintf(stderr, "gpu: this MoE activation has no Metal kernel yet — using CPU\n");
+        return false;
+    }
+    for (int l = 0; l < m->n_layer; l++) {
+        const layer_t *ly = &m->layers[l];
+        if (!ly->is_moe) continue;
+        if (ly->moe_split) {
+            fprintf(stderr, "gpu: split expert layout is not on the metal backend yet — using CPU\n");
+            return false;
+        }
+        if (ly->exp_probs_b || ly->ffn_gate_inp_b ||
+            ly->ffn_gate_exps_b || ly->ffn_up_exps_b ||
+            ly->ffn_down_exps_b) {
+            fprintf(stderr, "gpu: MoE router/expert bias has no Metal path yet — using CPU\n");
+            return false;
+        }
+        if (!ly->ffn_gate_inp || !ly->ffn_gate_exps ||
+            !ly->ffn_up_exps || !ly->ffn_down_exps) {
+            fprintf(stderr, "gpu: unsupported MoE tensor layout for Metal — using CPU\n");
+            return false;
+        }
+        if (!gpu_type_ok(ly->ffn_gate_inp->type) ||
+            !metal_moe_type_ok(ly->ffn_gate_exps->type) ||
+            !metal_moe_type_ok(ly->ffn_up_exps->type) ||
+            !metal_moe_type_ok(ly->ffn_down_exps->type)) {
+            fprintf(stderr, "gpu: MoE tensor type is not on the metal backend yet — using CPU\n");
+            return false;
+        }
+    }
+    return true;
+}
+
 static id<MTLComputePipelineState> mk_pipeline(id<MTLDevice> dev,
                                                id<MTLLibrary> lib,
                                                NSString *name) {
@@ -218,11 +288,7 @@ void gpu_tc_force(int on) { (void)on; }
 void gpu_moe_eager_force(int on) { (void)on; }
 
 bool gpu_moe_ok(void) {
-    // False, and it matches gpu_init(): a model with experts is refused there
-    // before the quant check runs, so MXFP4 appearing in gpu_quants does NOT
-    // mean gpt-oss runs on this GPU. Reported from a Mac where --caps read as
-    // a promise of GPU MoE and the model then ran CPU-only at 0.38 tok/s.
-    return false;
+    return true;    // plain fused sparse-MoE routes and experts run on Metal
 }
 
 bool gpu_kv_q8_ok(void) {
@@ -234,10 +300,8 @@ bool gpu_init(model_t *m) {
         fprintf(stderr, "gpu: qwen35 hybrid path is not on the metal backend yet — using CPU\n");
         return false;
     }
-    if (m->n_expert > 0) {
-        fprintf(stderr, "gpu: sparse MoE is not on the metal backend yet — using CPU\n");
+    if (!metal_moe_supported(m))
         return false;
-    }
     if (m->swa_window > 0 || m->embd_scale != 1.0f) {
         fprintf(stderr, "gpu: '%s' (sliding-window attention) is not on the metal backend yet — using CPU\n",
                 m->arch);
@@ -250,7 +314,7 @@ bool gpu_init(model_t *m) {
         gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
                               ly->w_gate, ly->w_up, ly->w_down };
         for (int i = 0; i < 7; i++)
-            if (!gpu_type_ok(ws[i]->type)) goto unsupported;
+            if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
     }
 
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
@@ -283,6 +347,9 @@ bool gpu_init(model_t *m) {
     g->p_attn         = mk_pipeline(dev, lib, @"k_attn");
     g->p_silu         = mk_pipeline(dev, lib, @"k_silu_mul");
     g->p_add          = mk_pipeline(dev, lib, @"k_add");
+    g->p_moe_route    = mk_pipeline(dev, lib, @"k_moe_route");
+    g->p_moe_actmul   = mk_pipeline(dev, lib, @"k_moe_actmul");
+    g->p_moe_sum      = mk_pipeline(dev, lib, @"k_moe_sum");
     g->p_mv[T_F32]    = mk_pipeline(dev, lib, @"k_mv_f32");
     g->p_mv[T_F16]    = mk_pipeline(dev, lib, @"k_mv_f16");
     g->p_mv[T_Q8_0]   = mk_pipeline(dev, lib, @"k_mv_q8_0");
@@ -293,15 +360,29 @@ bool gpu_init(model_t *m) {
     g->p_mv[T_Q4_K]   = mk_pipeline(dev, lib, @"k_mv_q4_K");
     g->p_mv[T_Q5_K]   = mk_pipeline(dev, lib, @"k_mv_q5_K");
     g->p_mv[T_Q6_K]   = mk_pipeline(dev, lib, @"k_mv_q6_K");
+    g->p_moe_mv[T_F32]  = mk_pipeline(dev, lib, @"k_moe_mv_f32");
+    g->p_moe_mv[T_F16]  = mk_pipeline(dev, lib, @"k_moe_mv_f16");
+    g->p_moe_mv[T_Q8_0] = mk_pipeline(dev, lib, @"k_moe_mv_q8_0");
+    g->p_moe_mv[T_Q4_0] = mk_pipeline(dev, lib, @"k_moe_mv_q4_0");
+    g->p_moe_mv[T_Q4_K] = mk_pipeline(dev, lib, @"k_moe_mv_q4_K");
+    g->p_moe_mv[T_Q5_K] = mk_pipeline(dev, lib, @"k_moe_mv_q5_K");
+    g->p_moe_mv[T_Q6_K] = mk_pipeline(dev, lib, @"k_moe_mv_q6_K");
     [lib release];
     lib = nil;
     if (!g->p_rmsnorm || !g->p_rope || !g->p_store || !g->p_attn ||
         !g->p_silu || !g->p_add || !g->queue || !g->p_qknorm ||
+        !g->p_moe_route || !g->p_moe_actmul || !g->p_moe_sum ||
         !g->p_mv[T_F32] || !g->p_mv[T_F16] || !g->p_mv[T_Q8_0] ||
         !g->p_mv[T_Q4_0] || !g->p_mv[T_Q4_1] ||
         !g->p_mv[T_Q5_0] || !g->p_mv[T_Q5_1] ||
         !g->p_mv[T_Q4_K] || !g->p_mv[T_Q5_K] || !g->p_mv[T_Q6_K])
         return gpu_init_fail(m, g, lib, "pipeline allocation");
+    if (m->n_expert > 0 &&
+        (!g->p_moe_mv[T_F32] || !g->p_moe_mv[T_F16] ||
+         !g->p_moe_mv[T_Q8_0] || !g->p_moe_mv[T_Q4_0] ||
+         !g->p_moe_mv[T_Q4_K] || !g->p_moe_mv[T_Q5_K] ||
+         !g->p_moe_mv[T_Q6_K]))
+        return gpu_init_fail(m, g, lib, "MoE pipeline allocation");
     if (metal_init_injected("state"))
         return gpu_init_fail(m, g, lib, "injected state allocation failure");
 
@@ -349,6 +430,15 @@ bool gpu_init(model_t *m) {
     g->att    = NEWBUF(sizeof(float) * (size_t)m->n_head * m->n_ctx);
     g->logits = NEWBUF(sizeof(float) * m->n_vocab);
     g->dummy  = NEWBUF(4);
+    if (m->n_expert > 0) {
+        size_t used = (size_t)m->n_expert_used;
+        g->moe_logits = NEWBUF(sizeof(float) * (size_t)m->n_expert);
+        g->moe_sel    = NEWBUF(sizeof(int)   * used);
+        g->moe_selw   = NEWBUF(sizeof(float) * used);
+        g->moe_hb     = NEWBUF(sizeof(float) * used * (size_t)m->n_ff_exp);
+        g->moe_hb2    = NEWBUF(sizeof(float) * used * (size_t)m->n_ff_exp);
+        g->moe_eout   = NEWBUF(sizeof(float) * used * (size_t)m->n_embd);
+    }
     g->batch_cap = 1;
     #undef NEWBUF
     if (!metal_buffer_ok(g->x) || !metal_buffer_ok(g->xb) ||
@@ -356,7 +446,13 @@ bool gpu_init(model_t *m) {
         !metal_buffer_ok(g->kt) || !metal_buffer_ok(g->vt) ||
         !metal_buffer_ok(g->hb) || !metal_buffer_ok(g->hb2) ||
         !metal_buffer_ok(g->att) || !metal_buffer_ok(g->logits) ||
-        !metal_buffer_ok(g->dummy))
+        !metal_buffer_ok(g->dummy) ||
+        (m->n_expert > 0 && (!metal_buffer_ok(g->moe_logits) ||
+                             !metal_buffer_ok(g->moe_sel) ||
+                             !metal_buffer_ok(g->moe_selw) ||
+                             !metal_buffer_ok(g->moe_hb) ||
+                             !metal_buffer_ok(g->moe_hb2) ||
+                             !metal_buffer_ok(g->moe_eout))))
         return gpu_init_fail(m, g, lib, "scratch buffer allocation");
 
     g->inv_freq = f32_buf(dev, m->rope_inv_freq, m->rope_dim / 2);
@@ -489,6 +585,62 @@ static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
+static void enc_moe_route(gpu_t *g, id<MTLComputeCommandEncoder> e,
+                          int ne, int used) {
+    int tokens = 1, ls = ne;
+    [e setComputePipelineState:g->p_moe_route];
+    [e setBuffer:g->moe_logits offset:0 atIndex:0];
+    [e setBuffer:g->moe_sel offset:0 atIndex:1];
+    [e setBuffer:g->moe_selw offset:0 atIndex:2];
+    [e setBytes:&ne length:4 atIndex:3];
+    [e setBytes:&used length:4 atIndex:4];
+    [e setBytes:&tokens length:4 atIndex:5];
+    [e setBytes:&ls length:4 atIndex:6];
+    [e dispatchThreads:MTLSizeMake(1, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+}
+
+static void enc_moe_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                       gguf_tensor *base, uint64_t estride,
+                       id<MTLBuffer> x, NSUInteger x_off,
+                       id<MTLBuffer> y, NSUInteger y_off,
+                       int n_in, int n_out, int nslots, int xs, int ys) {
+    moe_args a = { n_in, n_out,
+                   (uint64_t)((uint8_t *)base->data - (uint8_t *)m->gf.map),
+                   estride, xs, ys };
+    [e setComputePipelineState:g->p_moe_mv[base->type]];
+    [e setBuffer:g->weights offset:0 atIndex:0];
+    [e setBuffer:x offset:x_off atIndex:1];
+    [e setBuffer:y offset:y_off atIndex:2];
+    [e setBytes:&a length:sizeof(a) atIndex:3];
+    [e setBuffer:g->moe_sel offset:0 atIndex:4];
+    [e dispatchThreadgroups:MTLSizeMake((n_out + 3) / 4, nslots, 1)
+      threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+}
+
+static void enc_moe_actmul(gpu_t *g, id<MTLComputeCommandEncoder> e, int nff,
+                           int nslots) {
+    [e setComputePipelineState:g->p_moe_actmul];
+    [e setBuffer:g->moe_hb offset:0 atIndex:0];
+    [e setBuffer:g->moe_hb2 offset:0 atIndex:1];
+    [e setBuffer:g->moe_selw offset:0 atIndex:2];
+    [e setBytes:&nff length:4 atIndex:3];
+    [e dispatchThreads:MTLSizeMake(nff, nslots, 1)
+      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+}
+
+static void enc_moe_sum(gpu_t *g, id<MTLComputeCommandEncoder> e,
+                        id<MTLBuffer> out, NSUInteger out_off,
+                        int n, int nslots) {
+    [e setComputePipelineState:g->p_moe_sum];
+    [e setBuffer:out offset:out_off atIndex:0];
+    [e setBuffer:g->moe_eout offset:0 atIndex:1];
+    [e setBytes:&n length:4 atIndex:2];
+    [e setBytes:&nslots length:4 atIndex:3];
+    [e dispatchThreads:MTLSizeMake(n, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+}
+
 // Metal's KV cache *is* the backend buffer (unified memory: m->kcache points at
 // g->kc.contents), and the CPU path is about to read and overwrite those rows.
 // Releasing the buffers here would pull them out from under the fallback. Keep
@@ -538,7 +690,7 @@ void gpu_free(model_t *m) {
 
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                        bool want_logits, float **logits) {
-    if (n > 1 && metal_batch_enabled()) {
+    if (m->n_expert == 0 && n > 1 && metal_batch_enabled()) {
         if (metal_ensure_batch(m, n)) {
             float *lg = gpu_forward_native_batch(m, tokens, n, pos);
             if (!lg) return false;
@@ -559,6 +711,32 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
 
 static NSUInteger foff(size_t elems) {
     return (NSUInteger)(elems * sizeof(float));
+}
+
+static void enc_moe_ffn(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                        layer_t *ly, NSUInteger xbo) {
+    int n_embd = m->n_embd;
+    int ne = m->n_expert;
+    int used = m->n_expert_used;
+    int nff = m->n_ff_exp;
+    uint64_t gstride = (uint64_t)nff *
+                       ggml_row_size(ly->ffn_gate_exps->type, n_embd);
+    uint64_t ustride = (uint64_t)nff *
+                       ggml_row_size(ly->ffn_up_exps->type, n_embd);
+    uint64_t dstride = (uint64_t)n_embd *
+                       ggml_row_size(ly->ffn_down_exps->type, nff);
+
+    enc_mv(g, e, m, ly->ffn_gate_inp, g->xb, xbo, g->moe_logits, 0,
+           n_embd, ne, nil);
+    enc_moe_route(g, e, ne, used);
+    enc_moe_mv(g, e, m, ly->ffn_gate_exps, gstride, g->xb, xbo,
+               g->moe_hb, 0, n_embd, nff, used, 0, nff);
+    enc_moe_mv(g, e, m, ly->ffn_up_exps, ustride, g->xb, xbo,
+               g->moe_hb2, 0, n_embd, nff, used, 0, nff);
+    enc_moe_actmul(g, e, nff, used);
+    enc_moe_mv(g, e, m, ly->ffn_down_exps, dstride, g->moe_hb, 0,
+               g->moe_eout, 0, nff, n_embd, used, nff, n_embd);
+    enc_moe_sum(g, e, g->xb, xbo, n_embd, used);
 }
 
 static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
@@ -729,10 +907,14 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
 
         enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l], n_embd, m->rms_eps);
-        enc_mv(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0, n_embd, m->n_ff, nil);
-        enc_mv(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0, n_embd, m->n_ff, nil);
-        enc_elem(g, e, g->p_silu, g->hb, 0, g->hb2, 0, m->n_ff);
-        enc_mv(g, e, m, ly->w_down, g->hb, 0, g->xb, 0, m->n_ff, n_embd, nil);
+        if (ly->is_moe) {
+            enc_moe_ffn(g, e, m, ly, 0);
+        } else {
+            enc_mv(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0, n_embd, m->n_ff, nil);
+            enc_mv(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0, n_embd, m->n_ff, nil);
+            enc_elem(g, e, g->p_silu, g->hb, 0, g->hb2, 0, m->n_ff);
+            enc_mv(g, e, m, ly->w_down, g->hb, 0, g->xb, 0, m->n_ff, n_embd, nil);
+        }
         enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
     }
 

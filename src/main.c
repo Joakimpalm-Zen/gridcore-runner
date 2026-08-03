@@ -386,11 +386,10 @@ int main(int argc, char **argv) {
             if (vm)
                 printf(",\"vram_bytes\":%llu,\"vram_free_bytes\":%llu",
                        (unsigned long long)vtotal, (unsigned long long)vfree);
-            // Read this before believing gpu_quants. MXFP4 and the Q*_K family
-            // are listed there on every backend, but Metal refuses a model
-            // with experts before it looks at the quant at all — so "MXFP4 is
-            // a GPU quant" and "gpt-oss runs on the GPU" are different claims,
-            // and only this one answers the second.
+            // Read this alongside gpu_quants. "This backend has a sparse-MoE
+            // path" and "this exact MoE variant's router/layout/activation is
+            // implemented" are different claims; gpu_init() still guards the
+            // latter at load.
             printf(",\"moe\":%s", gpu_moe_ok() ? "true" : "false");
             printf(",\"kv_q8\":%s", gpu_kv_q8_ok() ? "true" : "false");
             printf("}");
