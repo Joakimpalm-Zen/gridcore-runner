@@ -5,6 +5,22 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Phase 8: q8 KV attention is essentially free.** Measured on the now
+  uncontended MIG slice, Qwen2.5-7B-Instruct-Q4_K_M, 512-token prompt and 256
+  generated, full offload (28/28 layers) in every row:
+
+  | KV | context | prefill | decode |
+  |---|---|---|---|
+  | f16 | 4096 / 16384 / 32768 | 129.2 / 129.3 / 129.3 tok/s | 70.51 / 70.44 / 70.59 tok/s |
+  | q8_0 | 4096 / 16384 / 32768 | 128.1 / 128.2 / 128.1 tok/s | 70.06 / 69.73 / 70.12 tok/s |
+
+  **0.9% of prefill and 0.7% of decode**, for half the cache. What this does
+  *not* show, and the reason the context column is flat: `--bench-json`
+  generates 256 tokens whatever the context *capacity* is, so the cache stays
+  nearly empty and this measures the q8 attention kernels, not decode against a
+  full 32k window. The long-context half is the separate 8k→32k retrieval gate,
+  still open.
+
 - **Phase 7 measurements: the fork bottleneck is not the mutex, and an SWA
   snapshot is ~3x larger than it needs to be.** Neither is a code change here;
   both correct a premise the plan was carrying.
