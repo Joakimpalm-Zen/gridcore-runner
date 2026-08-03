@@ -1808,6 +1808,30 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         gpu_mem_info(&vfree_before, &vtotal_before);
         gpu_init(m);                        // sets m->gpu on success
         model_vram_commit(m, vfree_before);
+        // A context that FITS but evicts weights is the silent case. Refusing
+        // one that cannot fit is loud and correct — `-c 1000000` says it needs
+        // 131072 MB of KV cache and exits non-zero. But a context that merely
+        // costs layers is accepted without comment, and the bill arrives as
+        // throughput: `-c 32768` on an 8B model takes decode from 66.5 to
+        // 8.6 tok/s on an 8 GB card, because a 4.3 GB cache pushed layers onto
+        // the host. The split line already reports the placement; nothing
+        // connected it to the context that caused it.
+        //
+        // Only when the KV is actually a big share of what is on the device —
+        // a partial split for any other reason (a model simply larger than the
+        // card) is not a trade the user can take back by lowering -c.
+        if (m->gpu && m->gpu_layers > 0 && m->gpu_layers < m->n_layer) {
+            size_t kv_dev = model_kv_byte_off(m, m->gpu_layers) * 2;
+            uint64_t wb = model_cuda_weight_estimate(m, p);
+            if (kv_dev > 0 && wb > 0 && kv_dev * 4 > (size_t)wb) {
+                fprintf(stderr,
+                        "note: the KV cache for ctx %d is %.2f GB on the device"
+                        " and %d of %d layers ran out of room because of it —"
+                        " a smaller -c%s moves layers back\n",
+                        m->n_ctx, kv_dev / 1e9, m->n_layer - m->gpu_layers,
+                        m->n_layer, m->kv_q8 ? "" : " or --kv q8 (about half)");
+            }
+        }
     }
 
     if (p->verbose) {

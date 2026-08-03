@@ -5,6 +5,49 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **A context that fits but evicts weights now says so.** Refusing a context
+  that cannot fit is loud and correct — `-c 1000000` names the 131072 MB of KV
+  it would need and exits non-zero. A context that merely *costs layers* was
+  accepted in silence, and the bill arrived as throughput: `-c 32768` on an 8B
+  model takes decode from 66.5 to 8.6 tok/s on an 8 GB card because a 4.3 GB
+  cache pushed layers onto the host. The split line already reported the
+  placement; nothing connected it to the context that caused it.
+
+  ```
+  gpu-split: budget=6.34GB fixed=0.91GB G=26/28 full=0 used=6.28GB
+  note: the KV cache for ctx 32768 is 1.74 GB on the device and 2 of 28 layers
+        ran out of room because of it — a smaller -c or --kv q8 (about half)
+        moves layers back
+  ```
+
+  It fires only when the KV is a large share of what is on the device, because
+  a partial split for any other reason — a model simply bigger than the card —
+  is not a trade the user can take back by lowering `-c`. Verified on three
+  cases: the one above fires, a full offload is silent, and Qwen3-Coder-30B at
+  18 of 48 layers on a 7.6 GB budget is silent. Acting on it works and the
+  note then stops: `--kv q8` on the same run recovers a layer (26/28 → 27/28)
+  and goes quiet. Written host-side rather than into the CUDA split banner, so
+  it covers Metal too and leaves `cuda.c` untouched.
+
+- **A filed prefix-cache "inefficiency" was a misread telemetry field.** The
+  note from the flake work said that after a cancellation plus concurrent
+  traffic a sequential request "never forks at all — deterministic, not a
+  race", and filed it as a possible caching inefficiency. Measured: sequential
+  requests after exactly that sequence **do** fork, 930 and 931 tokens.
+
+  The zeros that prompted the note are on the *concurrent* requests, and they
+  do not mean the prefix went unused — those requests report
+  `prompt_cached_tokens` 927 with `prompt_eval_tokens` **1**. The slot's own KV
+  already held the prefix, so `engine_prefix_reuse` declined to fork: its gate
+  is `best > r.keep`, and forking when the snapshot holds no more than the slot
+  does would copy identical rows over themselves. `prompt_forked_tokens` is the
+  subset that came from the *shared snapshot*, not the amount reused.
+
+  `test_agent_runtime_composition.py` now asserts the property that actually
+  matters to a caller — every concurrent request reused the prefix rather than
+  re-prefilling it — alongside the existing "at least one forked", and its
+  comment no longer states the wrong claim as fact.
+
 - **Apertus generated gibberish, and `0.1.5-alpha` shipped it that way.** The
   architecture landed in `d7eda52` with the honest caveat that it was "not yet
   verified against a real checkpoint — the shape is right, the numbers are

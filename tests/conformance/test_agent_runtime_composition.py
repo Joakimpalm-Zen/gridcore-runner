@@ -132,16 +132,29 @@ def test_schema_batch_prefix_cancel_and_speculation_compose(report, tmp_path):
         # prefix survived the poisoning and the cancellation and was still
         # usable under concurrency. That still fails if forking breaks.
         #
-        # A stronger "and a later sequential request forks too" was tried and
-        # removed: it fails every time, not intermittently, because after this
-        # sequence the shared prefix is no longer forkable at all. That is
-        # deterministic engine behaviour rather than a race, and it is filed
-        # separately — it is a possible caching inefficiency, but asserting it
-        # here would have been asserting something the engine does not do.
-        concurrent_forks = [r.json["runner_telemetry"]["prompt_forked_tokens"]
-                            for r in (first, second)]
+        # `prompt_forked_tokens == 0` does NOT mean the prefix went unused, and
+        # reading it that way is what produced an earlier note claiming the
+        # shared prefix became permanently unforkable after this sequence.
+        # Measured, it does not: a sequential request after a cancellation plus
+        # concurrency forks ~930 tokens. What the zeros above mean is that the
+        # slot's OWN KV already held the prefix, so engine_prefix_reuse
+        # declined to fork — its gate is `best > r.keep`, and forking when the
+        # snapshot holds no more than the slot does would copy identical rows
+        # over themselves.
+        #
+        # So both properties are asserted, and the second is the one that
+        # actually matters to a caller: at least one request forked (the shared
+        # snapshot survived the poisoning and the cancellation), and EVERY
+        # request reused the prefix by one path or the other.
+        telem = [r.json["runner_telemetry"] for r in (first, second)]
+        concurrent_forks = [t["prompt_forked_tokens"] for t in telem]
         assert max(concurrent_forks) > 0, (
             f"no concurrent request forked the shared prefix: {concurrent_forks}")
+        for t in telem:
+            reused, fed = t["prompt_cached_tokens"], t["prompt_eval_tokens"]
+            assert reused > 0 and fed < reused, (
+                "a concurrent request re-prefilled a prompt it should have "
+                f"reused: cached={reused} evaluated={fed}")
 
         # Speculative acceptance has to be PROVABLE here, not lucky. Every
         # request above is schema-constrained, and the drafter generates
