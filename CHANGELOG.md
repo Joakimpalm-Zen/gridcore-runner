@@ -5,6 +5,28 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Fixed: `/v1/embeddings` refused every official OpenAI client.** The SDKs
+  send `encoding_format: "base64"` by *default* and decode it themselves;
+  runner answered `400 encoding_format must be float`, so `client.embeddings
+  .create(...)` could not be called at all. base64 is now emitted as
+  little-endian float32, spelled out byte by byte so the wire format does not
+  depend on host endianness. `float` is unchanged and `dimensions` is still
+  refused unless it equals the model's width.
+
+  The conformance suite had a test **asserting the 400** — it pinned the bug in
+  place, and every hand-written embeddings test passed because none of them sent
+  the field the real client sends. It is replaced by a check that the base64
+  payload decodes to the same vector as the float form, which merely accepting
+  the field would not pass.
+
+- **The official OpenAI SDK now has conformance coverage**
+  (`tests/conformance/test_openai_sdk.py`, 11 tests, skipped when the package is
+  absent — the same rule `test_messages.py` applies to `anthropic`, so CI gains
+  no network-installed dependency). It covers models, buffered and streamed
+  chat, `stream_options.include_usage`, tool calls and the tool-result second
+  turn, `json_schema` output, legacy completions, embeddings, and typed errors.
+  The embeddings defect above was found by its first run.
+
 - **A long prefill no longer blocks the other slots for its full length.** On a
   4-slot GPU server, a short request arriving during a 2,891-token prefill
   waited **26.2 s — 110x its 0.237 s solo time**. Prefill now gives the device

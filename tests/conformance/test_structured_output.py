@@ -7,8 +7,10 @@ That is a model-quality outcome, not a protocol one, and the taxonomy exists
 precisely so it can be recorded as such instead of failing the run.
 """
 
+import base64
 import json
 import math
+import struct
 
 import pytest
 
@@ -221,14 +223,50 @@ def test_embeddings_accept_native_output_options(client):
     assert len(r.json["data"][0]["embedding"]) == native_dimensions
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("encoding_format", "base64"),
-    ("dimensions", 1),
-])
-def test_embeddings_reject_unsupported_output_options(client, field, value):
-    client.expect_400({"input": "alpha", field: value},
-                      name=f"embeddings-unsupported-{field}", contains=field,
-                      path="/v1/embeddings")
+def test_embeddings_base64_decodes_to_the_float_vector(client):
+    """base64 is not a variant spelling, it is the DEFAULT the OpenAI SDKs send.
+
+    This test used to assert a 400 here, which is how the refusal survived: the
+    gate pinned the bug. No official client could call /v1/embeddings at all —
+    the SDK asks for base64 and decodes it itself, so every embeddings call
+    came back 400 "encoding_format must be float".
+
+    Checking the bytes decode to the same numbers is the real gate; merely
+    accepting the field would pass while emitting big-endian or f64.
+    """
+    ref = client.embeddings({"input": "alpha"}, name="embeddings-b64-ref")
+    ref.expect_status(200)
+    floats = ref.json["data"][0]["embedding"]
+
+    r = client.embeddings({"input": "alpha", "encoding_format": "base64"},
+                          name="embeddings-base64")
+    r.expect_status(200)
+    payload = r.json["data"][0]["embedding"]
+    if not isinstance(payload, str):
+        raise ProtocolError("base64 encoding_format did not produce a string",
+                            got=type(payload).__name__)
+    raw = base64.b64decode(payload, validate=True)
+    if len(raw) != 4 * len(floats):
+        raise ProtocolError("base64 payload is the wrong width",
+                            bytes=len(raw), expected=4 * len(floats))
+    decoded = struct.unpack(f"<{len(floats)}f", raw)
+    worst = max(abs(a - b) for a, b in zip(decoded, floats))
+    # the JSON form is printed at %.7g, so it is the lossy one here
+    if worst > 1e-5:
+        raise ProtocolError("base64 and float embeddings disagree", worst=worst)
+
+
+def test_embeddings_reject_unsupported_output_options(client):
+    client.expect_400({"input": "alpha", "dimensions": 1},
+                      name="embeddings-unsupported-dimensions",
+                      contains="dimensions", path="/v1/embeddings")
+
+
+def test_embeddings_reject_an_unknown_encoding_format(client):
+    """Supporting base64 must not turn the field into a free-text field."""
+    client.expect_400({"input": "alpha", "encoding_format": "float16"},
+                      name="embeddings-unknown-encoding_format",
+                      contains="encoding_format", path="/v1/embeddings")
 
 
 @pytest.mark.parametrize("payload,label", [

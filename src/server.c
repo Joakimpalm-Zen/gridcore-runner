@@ -198,6 +198,35 @@ static void handle_completion(slot_t *s, sock_t fd, jv *req) {
     run_completion(s, fd, prompt, API_TEXT, req, NULL);
 }
 
+// One byte of the vector as the wire sees it: little-endian float32, spelled
+// out rather than memcpy'd wholesale so a big-endian host emits the same bytes.
+static unsigned char emb_byte(const float *v, size_t i) {
+    uint32_t bits;
+    memcpy(&bits, &v[i >> 2], sizeof bits);
+    return (unsigned char)(bits >> (8 * (i & 3)));
+}
+
+// base64 of that byte stream. Not an optimisation we chose: the OpenAI SDKs
+// send `encoding_format: "base64"` by DEFAULT and decode it client-side, so a
+// server that only speaks "float" cannot be called by an official client at
+// all. Refusing it was a 400 on every SDK embeddings call.
+static void sb_emb_b64(sbuf *r, const float *v, int n) {
+    static const char T[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t nb = (size_t)n * sizeof(float);
+    for (size_t i = 0; i < nb; i += 3) {
+        unsigned char b0 = emb_byte(v, i);
+        unsigned char b1 = i + 1 < nb ? emb_byte(v, i + 1) : 0;
+        unsigned char b2 = i + 2 < nb ? emb_byte(v, i + 2) : 0;
+        char q[4];
+        q[0] = T[b0 >> 2];
+        q[1] = T[((b0 & 0x03) << 4) | (b1 >> 4)];
+        q[2] = i + 1 < nb ? T[((b1 & 0x0F) << 2) | (b2 >> 6)] : '=';
+        q[3] = i + 2 < nb ? T[b2 & 0x3F] : '=';
+        sb_put(r, q, 4);
+    }
+}
+
 static void handle_embeddings(slot_t *s, sock_t fd, jv *req) {
     jv *input = jv_get(req, "input");
     const char *one = jv_str(input, NULL);
@@ -206,10 +235,17 @@ static void handle_embeddings(slot_t *s, sock_t fd, jv *req) {
 
     model_t *m = s->m;
     jv *encoding = jv_get(req, "encoding_format");
-    if (!absent(encoding) &&
-        (encoding->type != J_STR || strcmp(encoding->str, "float") != 0)) {
-        send_error(fd, 400, "encoding_format must be float");
-        return;
+    bool b64 = false;
+    if (!absent(encoding)) {
+        if (encoding->type != J_STR) {
+            send_error(fd, 400, "encoding_format must be float or base64");
+            return;
+        }
+        if (strcmp(encoding->str, "base64") == 0) b64 = true;
+        else if (strcmp(encoding->str, "float") != 0) {
+            send_error(fd, 400, "encoding_format must be float or base64");
+            return;
+        }
     }
     jv *dimensions = jv_get(req, "dimensions");
     if (!absent(dimensions) &&
@@ -260,11 +296,19 @@ static void handle_embeddings(slot_t *s, sock_t fd, jv *req) {
         }
         free(toks);
         total += n;
-        sb_fmt(&r, "%s{\"object\":\"embedding\",\"index\":%d,\"embedding\":[",
+        sb_fmt(&r, "%s{\"object\":\"embedding\",\"index\":%d,\"embedding\":",
                k ? "," : "", k);
-        for (int j = 0; j < m->n_embd; j++)
-            sb_fmt(&r, "%s%.7g", j ? "," : "", emb[j]);
-        sb_lit(&r, "]}");
+        if (b64) {
+            sb_lit(&r, "\"");
+            sb_emb_b64(&r, emb, m->n_embd);
+            sb_lit(&r, "\"");
+        } else {
+            sb_lit(&r, "[");
+            for (int j = 0; j < m->n_embd; j++)
+                sb_fmt(&r, "%s%.7g", j ? "," : "", emb[j]);
+            sb_lit(&r, "]");
+        }
+        sb_lit(&r, "}");
     }
     // model_embed overwrote this slot's KV cache — invalidate the prefix cache
     engine_reset(&s->e);
