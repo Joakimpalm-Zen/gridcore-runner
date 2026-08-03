@@ -28,6 +28,7 @@ E, HEADS, KV, FF, LAYERS = 32, 4, 2, 64, 2
 VOCAB = ["<unk>", "<s>", "</s>"] + [f"<0x{i:02X}>" for i in range(256)]
 TTYPE = [2, 3, 3] + [6] * 256
 U32, F32, STR, ARR, I32, BOOL = 4, 6, 8, 9, 5, 7
+T_F32, T_MXFP4 = 0, 39
 
 
 def s(x):
@@ -57,14 +58,29 @@ def ones(n): return pack([1.0] * n)
 def zeros(n): return pack([0.0] * n)
 
 
+def mxfp4_payload(row_len, rows, seed):
+    """Deterministic MXFP4 tensor payload with row_len as ne[0]."""
+    assert row_len % 32 == 0
+    out = bytearray()
+    for r in range(rows):
+        for b in range(row_len // 32):
+            out.append(124 + ((seed + r + b) & 1))  # scales 2^-3 / 2^-2
+            for j in range(16):
+                lo = (seed + r * 3 + b * 5 + j) & 15
+                hi = (seed + r * 7 + b * 11 + j + 5) & 15
+                out.append((hi << 4) | lo)
+    return bytes(out)
+
+
 def base_meta(arch, extra):
+    p = arch
     kvs = [
-        ks("general.architecture", "llama"),
-        ku("llama.block_count", LAYERS), ku("llama.context_length", 256),
-        ku("llama.embedding_length", E), ku("llama.feed_forward_length", FF),
-        ku("llama.attention.head_count", HEADS), ku("llama.attention.head_count_kv", KV),
-        kf("llama.attention.layer_norm_rms_epsilon", 1e-5),
-        kf("llama.rope.freq_base", 10000.0),
+        ks("general.architecture", arch),
+        ku(f"{p}.block_count", LAYERS), ku(f"{p}.context_length", 256),
+        ku(f"{p}.embedding_length", E), ku(f"{p}.feed_forward_length", FF),
+        ku(f"{p}.attention.head_count", HEADS), ku(f"{p}.attention.head_count_kv", KV),
+        kf(f"{p}.attention.layer_norm_rms_epsilon", 1e-5),
+        kf(f"{p}.rope.freq_base", 10000.0),
     ] + extra + [
         ks("tokenizer.ggml.model", "llama"), kas("tokenizer.ggml.tokens", VOCAB),
         kaf("tokenizer.ggml.scores", [0.0] * len(VOCAB)),
@@ -77,15 +93,21 @@ def base_meta(arch, extra):
 def write(path, tensors, kvs):
     meta = b"".join(kvs)
     info, off = b"", 0
-    for name, dims, payload in tensors:
+    for item in tensors:
+        if len(item) == 3:
+            name, dims, payload = item
+            typ = T_F32
+        else:
+            name, dims, payload, typ = item
         info += s(name) + struct.pack("<I", len(dims))
         info += b"".join(struct.pack("<Q", d) for d in dims)
-        info += struct.pack("<IQ", 0, off)  # type F32, offset
+        info += struct.pack("<IQ", typ, off)
         off = (off + len(payload) + 31) & ~31
     head = struct.pack("<IIQQ", 0x46554747, 3, len(tensors), len(kvs)) + meta + info
     with open(path, "wb") as f:
         f.write(head + b"\0" * ((-len(head)) % 32))
-        for _, _, payload in tensors:
+        for item in tensors:
+            payload = item[2]
             f.write(payload)
             f.write(b"\0" * ((-len(payload)) % 32))
     print(f"wrote {path}")
@@ -344,3 +366,45 @@ for _tag, _gated in (("shexp", False), ("shexpg", True)):
                               ku("llama.expert_used_count", 1),
                               ku("llama.expert_shared_count", 1),
                               ku("llama.expert_shared_feed_forward_length", FF)]))
+
+
+# --- gpt-oss advanced MoE fixture. This one is not dense-equivalent: the CPU
+# backend is the oracle, and the Metal smoke compares the same file on CPU vs
+# GPU. It covers the gpt-oss-specific contract: post_attention_norm as the FFN
+# input norm, attention sinks, OAI SwiGLU, router bias, gate/up/down expert
+# biases, SWA-pattern metadata, and MXFP4 expert tensors.
+gptoss = [
+    ("token_embd.weight", [E, len(VOCAB)], pack(flist(E * len(VOCAB)))),
+    ("output_norm.weight", [E], ones(E)),
+]
+for _i in range(LAYERS):
+    gptoss += [
+        (f"blk.{_i}.attn_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.attn_q.weight", [E, E], pack(flist(E * E))),
+        (f"blk.{_i}.attn_k.weight", [E, kv_dim], pack(flist(E * kv_dim))),
+        (f"blk.{_i}.attn_v.weight", [E, kv_dim], pack(flist(E * kv_dim))),
+        (f"blk.{_i}.attn_output.weight", [E, E], pack(flist(E * E))),
+        (f"blk.{_i}.post_attention_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.attn_sinks.weight", [HEADS],
+         pack([0.25, -0.15, 0.10, -0.05])),
+        (f"blk.{_i}.ffn_gate_inp.weight", [E, 2], pack(flist(E * 2))),
+        (f"blk.{_i}.ffn_gate_inp.bias", [2], pack([0.45, -0.20])),
+        (f"blk.{_i}.ffn_gate_exps.weight", [E, FF, 2],
+         mxfp4_payload(E, FF * 2, 11 + _i), T_MXFP4),
+        (f"blk.{_i}.ffn_up_exps.weight", [E, FF, 2],
+         mxfp4_payload(E, FF * 2, 37 + _i), T_MXFP4),
+        (f"blk.{_i}.ffn_down_exps.weight", [FF, E, 2],
+         mxfp4_payload(FF, E * 2, 71 + _i), T_MXFP4),
+        (f"blk.{_i}.ffn_gate_exps.bias", [FF, 2],
+         pack([0.03 * (((j + _i) % 5) - 2) for j in range(FF * 2)])),
+        (f"blk.{_i}.ffn_up_exps.bias", [FF, 2],
+         pack([0.02 * (((j + 2 * _i) % 7) - 3) for j in range(FF * 2)])),
+        (f"blk.{_i}.ffn_down_exps.bias", [E, 2],
+         pack([0.015 * (((j + 3 * _i) % 7) - 3) for j in range(E * 2)])),
+    ]
+write(f"{OUT}.gptoss-mxfp4.gguf", gptoss,
+      base_meta("gpt-oss", [ku("gpt-oss.expert_count", 2),
+                            ku("gpt-oss.expert_used_count", 2),
+                            ku("gpt-oss.expert_feed_forward_length", FF),
+                            ku("gpt-oss.attention.sliding_window", 8),
+                            ku("gpt-oss.attention.sliding_window_pattern", 2)]))

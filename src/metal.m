@@ -10,13 +10,15 @@
 #include <stdint.h>
 #include <string.h>
 
+enum { METAL_TYPE_SLOTS = T_MXFP4 + 1 };
+
 typedef struct {
     id<MTLDevice>       dev;
     id<MTLCommandQueue> queue;
     id<MTLComputePipelineState> p_rmsnorm, p_qknorm, p_rope, p_store, p_attn, p_silu, p_add;
     id<MTLComputePipelineState> p_moe_route, p_moe_actmul, p_moe_sum;
-    id<MTLComputePipelineState> p_mv[32];       // indexed by ggml type
-    id<MTLComputePipelineState> p_moe_mv[32];   // indexed by ggml type
+    id<MTLComputePipelineState> p_mv[METAL_TYPE_SLOTS];       // indexed by ggml type
+    id<MTLComputePipelineState> p_moe_mv[METAL_TYPE_SLOTS];   // indexed by ggml type
     id<MTLBuffer> weights;                      // wraps the model mmap (zero copy)
     bool          weights_copied;
     id<MTLBuffer> kc, vc;
@@ -26,13 +28,15 @@ typedef struct {
     id<MTLBuffer> *attn_norm, *ffn_norm;        // per layer
     id<MTLBuffer> *bq, *bk, *bv, *bo;           // per layer, may be nil
     id<MTLBuffer> *qn, *kn;                     // qwen3 per-head q/k norms
+    id<MTLBuffer> *sinks;                       // gpt-oss attention sinks
+    id<MTLBuffer> *gib, *geb, *ueb, *deb;       // gpt-oss MoE biases
     int batch_cap;                              // scratch rows allocated
 } gpu_t;
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8, window; } attn_args;
-typedef struct { int n_in, n_out; uint64_t w_off, estride; int xs, ys; } moe_args;
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8, window, has_sinks; } attn_args;
+typedef struct { int n_in, n_out; uint64_t w_off, estride; int xs, ys, has_bias, bias_stride; } moe_args;
 
 static void gpu_release_state(gpu_t *g, int n_layer) {
     if (!g) return;
@@ -45,18 +49,24 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
         if (g->bo) [g->bo[l] release];
         if (g->qn) [g->qn[l] release];
         if (g->kn) [g->kn[l] release];
+        if (g->sinks) [g->sinks[l] release];
+        if (g->gib) [g->gib[l] release];
+        if (g->geb) [g->geb[l] release];
+        if (g->ueb) [g->ueb[l] release];
+        if (g->deb) [g->deb[l] release];
     }
     free(g->attn_norm); free(g->ffn_norm);
     free(g->bq); free(g->bk); free(g->bv); free(g->bo);
     free(g->qn); free(g->kn);
+    free(g->sinks); free(g->gib); free(g->geb); free(g->ueb); free(g->deb);
     id<MTLBuffer> bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
                              g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                              g->logits, g->moe_logits, g->moe_sel, g->moe_selw,
                              g->moe_hb, g->moe_hb2, g->moe_eout,
                              g->inv_freq, g->inv_freq_local, g->out_norm, g->dummy };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
-    for (int i = 0; i < 32; i++) [g->p_mv[i] release];
-    for (int i = 0; i < 32; i++) [g->p_moe_mv[i] release];
+    for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mv[i] release];
+    for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_moe_mv[i] release];
     [g->p_rmsnorm release]; [g->p_qknorm release]; [g->p_rope release];
     [g->p_store release]; [g->p_attn release]; [g->p_silu release];
     [g->p_add release]; [g->p_moe_route release]; [g->p_moe_actmul release];
@@ -192,6 +202,7 @@ static bool gpu_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:
         case T_Q5_0: case T_Q5_1: case T_Q4_K: case T_Q5_K: case T_Q6_K:
+        case T_MXFP4:
             return true;
         default:
             return false;
@@ -201,7 +212,7 @@ static bool gpu_type_ok(int type) {
 static bool metal_moe_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0:
-        case T_Q4_K: case T_Q5_K: case T_Q6_K:
+        case T_Q4_K: case T_Q5_K: case T_Q6_K: case T_MXFP4:
             return true;
         default:
             return false;
@@ -227,7 +238,7 @@ static bool metal_moe_supported(const model_t *m) {
         fprintf(stderr, "gpu: Gemma dual-branch MoE is not on the metal backend yet — using CPU\n");
         return false;
     }
-    if (m->ffn_act != ACT_SILU) {
+    if (m->ffn_act != ACT_SILU && !(m->gptoss && m->ffn_act == ACT_SWIGLU_OAI)) {
         fprintf(stderr, "gpu: this MoE activation has no Metal kernel yet — using CPU\n");
         return false;
     }
@@ -238,9 +249,7 @@ static bool metal_moe_supported(const model_t *m) {
             fprintf(stderr, "gpu: split expert layout is not on the metal backend yet — using CPU\n");
             return false;
         }
-        if (ly->exp_probs_b || ly->ffn_gate_inp_b ||
-            ly->ffn_gate_exps_b || ly->ffn_up_exps_b ||
-            ly->ffn_down_exps_b) {
+        if (ly->exp_probs_b) {
             fprintf(stderr, "gpu: MoE router/expert bias has no Metal path yet — using CPU\n");
             return false;
         }
@@ -307,7 +316,8 @@ bool gpu_init(model_t *m) {
                 m->arch);
         return false;
     }
-    if (m->ffn_act != ACT_SILU) {
+    if (m->ffn_act != ACT_SILU && !(m->n_expert > 0 && m->gptoss &&
+                                    m->ffn_act == ACT_SWIGLU_OAI)) {
         fprintf(stderr, "gpu: '%s' FFN activation is not on the metal backend yet — using CPU\n",
                 m->arch);
         return false;
@@ -322,8 +332,7 @@ bool gpu_init(model_t *m) {
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
         if (ly->post_attn_norm_w || ly->post_ffn_norm_w ||
-            ly->ple_gate || ly->out_scale != 1.0f || !ly->wv ||
-            ly->attn_sinks) {
+            ly->ple_gate || ly->out_scale != 1.0f || !ly->wv) {
             fprintf(stderr, "gpu: '%s' layer layout is not on the metal backend yet — using CPU\n",
                     m->arch);
             return false;
@@ -388,6 +397,7 @@ bool gpu_init(model_t *m) {
     g->p_mv[T_Q4_K]   = mk_pipeline(dev, lib, @"k_mv_q4_K");
     g->p_mv[T_Q5_K]   = mk_pipeline(dev, lib, @"k_mv_q5_K");
     g->p_mv[T_Q6_K]   = mk_pipeline(dev, lib, @"k_mv_q6_K");
+    g->p_mv[T_MXFP4]  = mk_pipeline(dev, lib, @"k_mv_mxfp4");
     g->p_moe_mv[T_F32]  = mk_pipeline(dev, lib, @"k_moe_mv_f32");
     g->p_moe_mv[T_F16]  = mk_pipeline(dev, lib, @"k_moe_mv_f16");
     g->p_moe_mv[T_Q8_0] = mk_pipeline(dev, lib, @"k_moe_mv_q8_0");
@@ -395,6 +405,7 @@ bool gpu_init(model_t *m) {
     g->p_moe_mv[T_Q4_K] = mk_pipeline(dev, lib, @"k_moe_mv_q4_K");
     g->p_moe_mv[T_Q5_K] = mk_pipeline(dev, lib, @"k_moe_mv_q5_K");
     g->p_moe_mv[T_Q6_K] = mk_pipeline(dev, lib, @"k_moe_mv_q6_K");
+    g->p_moe_mv[T_MXFP4] = mk_pipeline(dev, lib, @"k_moe_mv_mxfp4");
     [lib release];
     lib = nil;
     if (!g->p_rmsnorm || !g->p_rope || !g->p_store || !g->p_attn ||
@@ -403,13 +414,14 @@ bool gpu_init(model_t *m) {
         !g->p_mv[T_F32] || !g->p_mv[T_F16] || !g->p_mv[T_Q8_0] ||
         !g->p_mv[T_Q4_0] || !g->p_mv[T_Q4_1] ||
         !g->p_mv[T_Q5_0] || !g->p_mv[T_Q5_1] ||
-        !g->p_mv[T_Q4_K] || !g->p_mv[T_Q5_K] || !g->p_mv[T_Q6_K])
+        !g->p_mv[T_Q4_K] || !g->p_mv[T_Q5_K] || !g->p_mv[T_Q6_K] ||
+        !g->p_mv[T_MXFP4])
         return gpu_init_fail(m, g, lib, "pipeline allocation");
     if (m->n_expert > 0 &&
         (!g->p_moe_mv[T_F32] || !g->p_moe_mv[T_F16] ||
          !g->p_moe_mv[T_Q8_0] || !g->p_moe_mv[T_Q4_0] ||
          !g->p_moe_mv[T_Q4_K] || !g->p_moe_mv[T_Q5_K] ||
-         !g->p_moe_mv[T_Q6_K]))
+         !g->p_moe_mv[T_Q6_K] || !g->p_moe_mv[T_MXFP4]))
         return gpu_init_fail(m, g, lib, "MoE pipeline allocation");
     if (metal_init_injected("state"))
         return gpu_init_fail(m, g, lib, "injected state allocation failure");
@@ -498,8 +510,14 @@ bool gpu_init(model_t *m) {
     g->bo = calloc(m->n_layer, sizeof(id));
     g->qn = calloc(m->n_layer, sizeof(id));
     g->kn = calloc(m->n_layer, sizeof(id));
+    g->sinks = calloc(m->n_layer, sizeof(id));
+    g->gib = calloc(m->n_layer, sizeof(id));
+    g->geb = calloc(m->n_layer, sizeof(id));
+    g->ueb = calloc(m->n_layer, sizeof(id));
+    g->deb = calloc(m->n_layer, sizeof(id));
     if (!g->attn_norm || !g->ffn_norm || !g->bq || !g->bk || !g->bv ||
-        !g->bo || !g->qn || !g->kn)
+        !g->bo || !g->qn || !g->kn || !g->sinks || !g->gib || !g->geb ||
+        !g->ueb || !g->deb)
         return gpu_init_fail(m, g, lib, "per-layer table allocation");
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
@@ -513,6 +531,14 @@ bool gpu_init(model_t *m) {
         g->bo[l] = f32_buf(dev, ly->bo, m->n_embd);
         g->qn[l] = f32_buf(dev, ly->qnorm_w, l_hd);
         g->kn[l] = f32_buf(dev, ly->knorm_w, l_hd);
+        g->sinks[l] = f32_buf(dev, ly->attn_sinks, m->n_head);
+        g->gib[l] = f32_buf(dev, ly->ffn_gate_inp_b, m->n_expert);
+        g->geb[l] = f32_buf(dev, ly->ffn_gate_exps_b,
+                            (size_t)m->n_expert * (size_t)m->n_ff_exp);
+        g->ueb[l] = f32_buf(dev, ly->ffn_up_exps_b,
+                            (size_t)m->n_expert * (size_t)m->n_ff_exp);
+        g->deb[l] = f32_buf(dev, ly->ffn_down_exps_b,
+                            (size_t)m->n_expert * (size_t)m->n_embd);
         if (!metal_buffer_ok(g->attn_norm[l]) ||
             !metal_buffer_ok(g->ffn_norm[l]) ||
             (ly->bq && !metal_buffer_ok(g->bq[l])) ||
@@ -520,7 +546,12 @@ bool gpu_init(model_t *m) {
             (ly->bv && !metal_buffer_ok(g->bv[l])) ||
             (ly->bo && !metal_buffer_ok(g->bo[l])) ||
             (ly->qnorm_w && !metal_buffer_ok(g->qn[l])) ||
-            (ly->knorm_w && !metal_buffer_ok(g->kn[l])))
+            (ly->knorm_w && !metal_buffer_ok(g->kn[l])) ||
+            (ly->attn_sinks && !metal_buffer_ok(g->sinks[l])) ||
+            (ly->ffn_gate_inp_b && !metal_buffer_ok(g->gib[l])) ||
+            (ly->ffn_gate_exps_b && !metal_buffer_ok(g->geb[l])) ||
+            (ly->ffn_up_exps_b && !metal_buffer_ok(g->ueb[l])) ||
+            (ly->ffn_down_exps_b && !metal_buffer_ok(g->deb[l])))
             return gpu_init_fail(m, g, lib, "per-layer buffer allocation");
     }
 
@@ -641,27 +672,29 @@ static void enc_moe_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
                        gguf_tensor *base, uint64_t estride,
                        id<MTLBuffer> x, NSUInteger x_off,
                        id<MTLBuffer> y, NSUInteger y_off,
-                       int n_in, int n_out, int nslots, int xs, int ys) {
+                       int n_in, int n_out, int nslots, int xs, int ys,
+                       id<MTLBuffer> bias, int bias_stride) {
     moe_args a = { n_in, n_out,
                    (uint64_t)((uint8_t *)base->data - (uint8_t *)m->gf.map),
-                   estride, xs, ys };
+                   estride, xs, ys, bias != nil, bias_stride };
     [e setComputePipelineState:g->p_moe_mv[base->type]];
     [e setBuffer:g->weights offset:0 atIndex:0];
     [e setBuffer:x offset:x_off atIndex:1];
     [e setBuffer:y offset:y_off atIndex:2];
     [e setBytes:&a length:sizeof(a) atIndex:3];
     [e setBuffer:g->moe_sel offset:0 atIndex:4];
+    [e setBuffer:bias ? bias : g->dummy offset:0 atIndex:5];
     [e dispatchThreadgroups:MTLSizeMake((n_out + 3) / 4, nslots, 1)
       threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 }
 
 static void enc_moe_actmul(gpu_t *g, id<MTLComputeCommandEncoder> e, int nff,
-                           int nslots) {
+                           int nslots, int act) {
     [e setComputePipelineState:g->p_moe_actmul];
     [e setBuffer:g->moe_hb offset:0 atIndex:0];
     [e setBuffer:g->moe_hb2 offset:0 atIndex:1];
-    [e setBuffer:g->moe_selw offset:0 atIndex:2];
-    [e setBytes:&nff length:4 atIndex:3];
+    [e setBytes:&nff length:4 atIndex:2];
+    [e setBytes:&act length:4 atIndex:3];
     [e dispatchThreads:MTLSizeMake(nff, nslots, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
@@ -672,8 +705,9 @@ static void enc_moe_sum(gpu_t *g, id<MTLComputeCommandEncoder> e,
     [e setComputePipelineState:g->p_moe_sum];
     [e setBuffer:out offset:out_off atIndex:0];
     [e setBuffer:g->moe_eout offset:0 atIndex:1];
-    [e setBytes:&n length:4 atIndex:2];
-    [e setBytes:&nslots length:4 atIndex:3];
+    [e setBuffer:g->moe_selw offset:0 atIndex:2];
+    [e setBytes:&n length:4 atIndex:3];
+    [e setBytes:&nslots length:4 atIndex:4];
     [e dispatchThreads:MTLSizeMake(n, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
@@ -763,16 +797,18 @@ static void enc_moe_ffn(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     uint64_t dstride = (uint64_t)n_embd *
                        ggml_row_size(ly->ffn_down_exps->type, nff);
 
+    int l = (int)(ly - m->layers);
     enc_mv(g, e, m, ly->ffn_gate_inp, g->xb, xbo, g->moe_logits, 0,
-           n_embd, ne, nil);
+           n_embd, ne, g->gib[l]);
     enc_moe_route(g, e, ne, used);
     enc_moe_mv(g, e, m, ly->ffn_gate_exps, gstride, g->xb, xbo,
-               g->moe_hb, 0, n_embd, nff, used, 0, nff);
+               g->moe_hb, 0, n_embd, nff, used, 0, nff, g->geb[l], nff);
     enc_moe_mv(g, e, m, ly->ffn_up_exps, ustride, g->xb, xbo,
-               g->moe_hb2, 0, n_embd, nff, used, 0, nff);
-    enc_moe_actmul(g, e, nff, used);
+               g->moe_hb2, 0, n_embd, nff, used, 0, nff, g->ueb[l], nff);
+    enc_moe_actmul(g, e, nff, used, m->ffn_act);
     enc_moe_mv(g, e, m, ly->ffn_down_exps, dstride, g->moe_hb, 0,
-               g->moe_eout, 0, nff, n_embd, used, nff, n_embd);
+               g->moe_eout, 0, nff, n_embd, used, nff, n_embd,
+               g->deb[l], n_embd);
     enc_moe_sum(g, e, g->xb, xbo, n_embd, used);
 }
 
@@ -844,7 +880,8 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
 
             attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, p,
                              (uint64_t)model_kv_byte_off(m, l),
-                             model_attn_scale(m, l), q8, window };
+                             model_attn_scale(m, l), q8, window,
+                             g->sinks[l] != nil };
             [e setComputePipelineState:g->p_attn];
             [e setBuffer:g->q   offset:qo atIndex:0];
             [e setBuffer:g->kc  offset:0 atIndex:1];
@@ -852,6 +889,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             [e setBuffer:g->att offset:atto atIndex:3];
             [e setBuffer:g->xb2 offset:xb2o atIndex:4];
             [e setBytes:&aa length:sizeof(aa) atIndex:5];
+            [e setBuffer:g->sinks[l] ? g->sinks[l] : g->dummy offset:0 atIndex:6];
             [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 
@@ -937,7 +975,8 @@ static float *gpu_forward(model_t *m, int token, int pos) {
 
         attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
                          (uint64_t)model_kv_byte_off(m, l),
-                         model_attn_scale(m, l), q8, window };
+                         model_attn_scale(m, l), q8, window,
+                         g->sinks[l] != nil };
         [e setComputePipelineState:g->p_attn];
         [e setBuffer:g->q   offset:0 atIndex:0];
         [e setBuffer:g->kc  offset:0 atIndex:1];
@@ -945,6 +984,7 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         [e setBuffer:g->att offset:0 atIndex:3];
         [e setBuffer:g->xb2 offset:0 atIndex:4];
         [e setBytes:&aa length:sizeof(aa) atIndex:5];
+        [e setBuffer:g->sinks[l] ? g->sinks[l] : g->dummy offset:0 atIndex:6];
         [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 

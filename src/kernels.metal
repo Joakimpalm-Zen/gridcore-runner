@@ -301,6 +301,31 @@ kernel void k_mv_q6_K(MV_PARAMS) {
     MV_TAIL;
 }
 
+constant float kv_mxfp4[16] = {
+     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+     0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+};
+
+kernel void k_mv_mxfp4(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 32;
+    device const uchar *rw = wb + a.w_off + (ulong)row * nb * 17;
+    float s = 0;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 17;
+        float d = ldexp(1.0f, (int)blk[0] - 127);
+        device const uchar *q = blk + 1;
+        device const float *xp = x + b * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++) {
+            t += kv_mxfp4[q[j] & 0xF] * xp[j];
+            t += kv_mxfp4[q[j] >> 4]  * xp[j + 16];
+        }
+        s += d * t;
+    }
+    MV_TAIL;
+}
+
 // ---------------------------------------------------------------- rope
 
 struct rope_args {
@@ -412,6 +437,7 @@ struct attn_args {
     float scale;
     int   q8;
     int   window;     // sliding-window size for this layer (0 = full)
+    int   has_sinks;  // gpt-oss: per-head sink joins softmax denominator only
 };
 
 kernel void k_attn(device const float *q   [[buffer(0)]],
@@ -420,6 +446,7 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
                    device float       *att [[buffer(3)]],
                    device float       *out [[buffer(4)]],
                    constant attn_args &a   [[buffer(5)]],
+                   device const float *sinks [[buffer(6)]],
                    uint h   [[threadgroup_position_in_grid]],
                    uint tid [[thread_position_in_threadgroup]],
                    uint tpg [[threads_per_threadgroup]]) {
@@ -442,6 +469,7 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
     // max
     float mx = -1e30f;
     for (int t = t0 + tid; t <= a.pos; t += tpg) mx = max(mx, ah[t]);
+    if (a.has_sinks && tid == 0) mx = max(mx, sinks[h]);
     red[tid] = mx;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint off = tpg / 2; off > 0; off >>= 1) {
@@ -457,6 +485,7 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
         ah[t] = e;
         sum += e;
     }
+    if (a.has_sinks && tid == 0) sum += exp(sinks[h] - mx);
     red[tid] = sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint off = tpg / 2; off > 0; off >>= 1) {
@@ -546,6 +575,8 @@ struct moe_args {
     ulong estride;
     int   xs;
     int   ys;
+    int   has_bias;
+    int   bias_stride;
 };
 
 #define MOE_MV_HEAD \
@@ -557,7 +588,10 @@ struct moe_args {
 
 #define MOE_MV_TAIL \
     s = simd_sum(s); \
-    if (tiisg == 0) y[(ulong)tgpig.y * a.ys + row] = s;
+    if (tiisg == 0) { \
+        if (a.has_bias) s += bias[(ulong)sel[tgpig.y] * a.bias_stride + row]; \
+        y[(ulong)tgpig.y * a.ys + row] = s; \
+    }
 
 #define MOE_MV_PARAMS \
     device const uchar *wb  [[buffer(0)]], \
@@ -565,6 +599,7 @@ struct moe_args {
     device float       *y   [[buffer(2)]], \
     constant moe_args  &a   [[buffer(3)]], \
     device const int   *sel [[buffer(4)]], \
+    device const float *bias [[buffer(5)]], \
     uint  sgitg [[simdgroup_index_in_threadgroup]], \
     uint  tiisg [[thread_index_in_simdgroup]], \
     uint3 tgpig [[threadgroup_position_in_grid]], \
@@ -709,27 +744,62 @@ kernel void k_moe_mv_q6_K(MOE_MV_PARAMS) {
     MOE_MV_TAIL;
 }
 
+kernel void k_moe_mv_mxfp4(MOE_MV_PARAMS) {
+    MOE_MV_HEAD;
+    int nb = a.n_in / 32;
+    device const uchar *rw = wbase + (ulong)row * nb * 17;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 17;
+        float d = ldexp(1.0f, (int)blk[0] - 127);
+        device const uchar *q = blk + 1;
+        device const float *xp = xp0 + b * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++) {
+            t += kv_mxfp4[q[j] & 0xF] * xp[j];
+            t += kv_mxfp4[q[j] >> 4]  * xp[j + 16];
+        }
+        s += d * t;
+    }
+    MOE_MV_TAIL;
+}
+
+static inline float swiglu_oai(float g, float u) {
+    const float alpha = 1.702f, limit = 7.0f;
+    float x = g < limit ? g : limit;
+    float y = clamp(u, -limit, limit);
+    float gl = x < -50.0f ? 0.0f : x / (1.0f + exp(alpha * -x));
+    return gl * (y + 1.0f);
+}
+
 kernel void k_moe_actmul(device float       *gbuf [[buffer(0)]],
                          device const float *ubuf [[buffer(1)]],
-                         device const float *selw [[buffer(2)]],
-                         constant int       &nff  [[buffer(3)]],
+                         constant int       &nff  [[buffer(2)]],
+                         constant int       &act  [[buffer(3)]],
                          uint2 gid [[thread_position_in_grid]]) {
     int i = gid.x, slot = gid.y;
     if (i >= nff) return;
     device float *g = gbuf + (ulong)slot * nff;
     device const float *u = ubuf + (ulong)slot * nff;
     float x = g[i];
-    g[i] = (x / (1.0f + exp(-x))) * u[i] * selw[slot];
+    if (act == 2) {
+        g[i] = swiglu_oai(x, u[i]);
+    } else if (act == 1) {
+        float t = tanh(0.7978845608f * (x + 0.044715f * x * x * x));
+        g[i] = 0.5f * x * (1.0f + t) * u[i];
+    } else {
+        g[i] = (x / (1.0f + exp(-x))) * u[i];
+    }
 }
 
 kernel void k_moe_sum(device float       *out    [[buffer(0)]],
                       device const float *eout   [[buffer(1)]],
-                      constant int       &n      [[buffer(2)]],
-                      constant int       &nslots [[buffer(3)]],
+                      device const float *selw   [[buffer(2)]],
+                      constant int       &n      [[buffer(3)]],
+                      constant int       &nslots [[buffer(4)]],
                       uint i [[thread_position_in_grid]]) {
     if ((int)i >= n) return;
     float s = 0.0f;
     for (int slot = 0; slot < nslots; slot++)
-        s += eout[(ulong)slot * n + i];
+        s += selw[slot] * eout[(ulong)slot * n + i];
     out[i] = s;
 }

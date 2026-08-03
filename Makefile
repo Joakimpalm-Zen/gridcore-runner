@@ -441,6 +441,23 @@ else
 	@echo "metal MoE smoke skipped: macOS-only backend"
 endif
 
+test-metal-gptoss-moe: runner
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		$(PYTHON) scripts/make-test-moe.py test-moe-fixture; \
+		./$(RUNNER_EXE) -m test-moe-fixture.gptoss-mxfp4.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-gptoss-moe-cpu.out 2>/dev/null; \
+		./$(RUNNER_EXE) -m test-moe-fixture.gptoss-mxfp4.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-gptoss-moe-gpu.out 2> metal-gptoss-moe-gpu.err; \
+		cmp -s metal-gptoss-moe-cpu.out metal-gptoss-moe-gpu.out; \
+		grep -q "Metal backend" metal-gptoss-moe-gpu.err; \
+		echo "metal gpt-oss MoE ok"; \
+	else \
+		echo "metal gpt-oss MoE smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal gpt-oss MoE smoke skipped: macOS-only backend"
+endif
+
 test-metal-swa: runner
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
@@ -638,6 +655,7 @@ clean:
 	rm -f metal-prefill-loop.out metal-prefill-native.out metal-prefill-native.err
 	rm -f metal-kv-q8.err metal-moe-dense.out metal-moe1.out metal-moe1.err
 	rm -f metal-moe2.out metal-moe2.err
+	rm -f metal-gptoss-moe-cpu.out metal-gptoss-moe-gpu.out metal-gptoss-moe-gpu.err
 	rm -f metal-swa-cpu.out metal-swa-gpu.out metal-swa-gpu.err test-swa.gguf
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
@@ -649,4 +667,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan
+.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan
