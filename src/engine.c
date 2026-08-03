@@ -683,7 +683,9 @@ model_t *spec_draft_load(const char *path, const model_t *target,
     }
     model_params dmp = *mp;
     dmp.n_ctx = target->n_ctx; // draft must cover the target's positions
-    dmp.kv_q8 = false;
+    // Draft KV may use the requested q8 storage too. It can change which
+    // tokens the draft proposes (and therefore acceptance/throughput), but the
+    // target still verifies every proposal and defines the final output.
     dmp.gpu_mode = GPU_AUTO;   // a small draft usually fits VRAM whole
     model_t *dm = malloc(sizeof(model_t));
     if (!dm) {

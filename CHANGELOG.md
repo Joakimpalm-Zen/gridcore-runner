@@ -5,6 +5,14 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Speculative draft models now honor `--kv q8`.** Draft KV had been forced to
+  f16 without explanation even when q8 was requested. The target verifies every
+  proposal, so draft-cache loss can affect acceptance and speed but cannot alter
+  the target-defined result. On the real Qwen2.5 7B/0.5B pair, 64-token greedy
+  speculative output exactly matched plain decoding under both cache types;
+  drafting was non-vacuous (92 proposals, 41 accepted with f16 and 42 with q8),
+  while draft GPU allocation fell from 0.98 GB to 0.96 GB.
+
 - **Ambiguous duplicate JSON object keys are rejected.** The parser now hashes
   decoded member names while reading each object, so literal duplicates and
   escape-equivalent spellings such as `model` / `m\u006fdel` fail in expected
