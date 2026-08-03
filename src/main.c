@@ -476,6 +476,13 @@ int main(int argc, char **argv) {
 
     model_t m;
     tokenizer tok;
+    // A reservation is a budget for the whole server, so the -c 0 auto-fit has
+    // to know how many slots will divide it. Set before the FIRST load, not
+    // just for the slots server_run creates: slot 0 is this model, and a slot 0
+    // that sized itself alone would both over-commit and — because the CUDA
+    // shared-weight registry keys on context — disagree with its peers and
+    // force a second upload of the same weights.
+    if (serve) mp.n_seq = parallel;
     if (!registry) {
         double t1 = now_s();
         if (!model_load(&m, model_path, &mp)) return 1;

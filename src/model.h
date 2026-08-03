@@ -397,6 +397,12 @@ typedef struct {
     // stay a leading run, matching the leading-layer split's direction).
     int   cpu_moe_layers;
     int   reserve_ram_pct;
+    // How many sequences will share this reservation. A reservation is a
+    // budget for the whole server, and its two halves scale differently: the
+    // weights are uploaded once and shared, the KV cache and activation head
+    // are paid per slot. 0 or 1 means a lone sequence. Only the -c 0 auto-fit
+    // reads it; an explicit -c is the caller's own arithmetic.
+    int   n_seq;
     // --wait-for-vram: seconds to queue behind other registered runners rather
     // than refusing outright. 0 = refuse immediately (the default).
     int   vram_wait_secs;

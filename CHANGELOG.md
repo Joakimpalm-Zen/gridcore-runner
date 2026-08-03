@@ -5,6 +5,30 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Phase 5 — a reservation is a budget for the server, not for one slot.**
+  `--reserve-vram P` with `-c 0` auto-fits the context to whatever the
+  reservation leaves after the weights. Every slot ran that arithmetic alone,
+  which billed **the weights N times and the KV cache once** — backwards on
+  both halves, and the KV half is the dangerous direction. Measured on
+  Qwen2.5-7B, `--reserve-vram 40 --parallel 4 -c 0` on a 25.37 GB device
+  (10.15 GB budget): all four slots independently auto-fit to 32768 and each
+  allocated its own 1.88 GB cache, for **12.47 GB — 23% over the
+  reservation**. The only thing that kept it from being far worse is that the
+  train context capped the window; a model with a longer train context would
+  have overrun by close to the slot count.
+
+  `model_params` gains `n_seq`, and the auto-fit now divides the KV and the
+  activation head by it while still counting one weights copy. Same
+  configuration after: context 19139, **9.25 GB, inside the budget**. A
+  single slot and the one-shot CLI are unchanged (still 32768).
+
+  Worth recording because it was measured rather than assumed: setting `n_seq`
+  only for the slots `server_run` creates made it **worse, not better** —
+  14.75 GB. Slot 0 is the model `main.c` preloaded, so it kept sizing itself
+  alone at 32768 while slots 1–3 chose 19139, and the CUDA shared-weight
+  registry keys on context — so the disagreement forced a *second* 4.7 GB
+  upload of the same weights. The flag is set before the first load.
+
 - **Phase 5 — one parse per file, not one per slot.** `model_t` fused the
   weight side and the per-sequence side, and the header had said so for a
   while: *"the struct itself is not yet split into two types… the sharing was

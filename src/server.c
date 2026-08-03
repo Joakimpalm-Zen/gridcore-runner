@@ -928,6 +928,9 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         model_params slot_mp = *mp;
         slot_mp.verbose = false;
         slot_mp.n_threads = threads_per_slot;
+        // a reservation is a budget for the server, and every slot pays its
+        // own KV cache out of it -- see the auto-fit in model_alloc_runtime
+        slot_mp.n_seq = parallel;
         // each slot gets its share of the CPU-forced fallback cap too
         slot_mp.cpu_fallback_threads = mp->cpu_fallback_threads / parallel;
 
