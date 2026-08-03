@@ -162,6 +162,30 @@ def degenerate(text):
     return None
 
 
+def parse_resource_caps(text):
+    """Return decimal RAM/VRAM GB from `runner --caps`, or unknowns.
+
+    Tiering and placement are machine decisions. Hard-coding the resources of
+    the box where this script was written silently gives the wrong token budget
+    and candidate sweep everywhere else.
+    """
+    try:
+        caps = json.loads(text)
+        ram = float(caps["ram_bytes"]) / 1e9
+        gpu = caps.get("gpu") or {}
+        vram = float(gpu.get("vram_bytes", 0)) / 1e9
+        return ram, vram
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None, None
+
+
+def detect_resources(runner):
+    result = run([str(runner), "--caps"], 15)
+    if result["rc"] != 0:
+        return None, None
+    return parse_resource_caps(result["stdout"])
+
+
 def tier(size_gb, ram_gb):
     """Token budgets. The host leg of a model bigger than RAM pages from disk
     on every token, so it gets a smaller budget rather than the same one."""
@@ -238,8 +262,10 @@ def main():
                     default=str(ROOT / ("runner.exe" if os.name == "nt" else "runner")))
     ap.add_argument("--out-dir", default=str(ROOT / "tests/compatibility/out/stress"))
     ap.add_argument("--ctx", type=int, default=1024)
-    ap.add_argument("--ram-gb", type=float, default=15.9)
-    ap.add_argument("--vram-gb", type=float, default=8.0)
+    ap.add_argument("--ram-gb", type=float,
+                    help="override RAM used for run tiering (default: --caps)")
+    ap.add_argument("--vram-gb", type=float,
+                    help="override VRAM used for placement sweep (default: --caps)")
     ap.add_argument("--only", help="substring filter on the filename")
     ap.add_argument("--skip-done", action="store_true")
     ap.add_argument("--no-sweep", action="store_true",
@@ -254,6 +280,17 @@ def main():
         print(f"error: no runner binary at {args.runner} (build it, or pass "
               f"--runner)", file=sys.stderr)
         return 2
+    detected_ram, detected_vram = detect_resources(args.runner)
+    if args.ram_gb is None:
+        args.ram_gb = detected_ram
+    if args.vram_gb is None:
+        args.vram_gb = detected_vram
+    if args.ram_gb is None or args.vram_gb is None:
+        print("error: could not read machine resources from runner --caps; "
+              "pass --ram-gb and --vram-gb explicitly", file=sys.stderr)
+        return 2
+    print(f"machine resources: {args.ram_gb:.1f} GB RAM, "
+          f"{args.vram_gb:.1f} GB VRAM", flush=True)
     shelf = Path(args.models_dir)
     models = sorted(shelf.glob("*.gguf"), key=lambda p: p.stat().st_size)
     found = len(models)

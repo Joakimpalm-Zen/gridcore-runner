@@ -5,6 +5,12 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **The model-shelf stress harness now measures the machine it runs on.** Its
+  RAM/VRAM defaults were still hard-coded to the earlier 16 GB / 8 GB test box,
+  so tiering and placement recommendations were wrong elsewhere. It now reads
+  both budgets from `runner --caps`, reports them, and keeps explicit overrides
+  for controlled comparisons.
+
 - **Speculative draft models now honor `--kv q8`.** Draft KV had been forced to
   f16 without explanation even when q8 was requested. The target verifies every
   proposal, so draft-cache loss can affect acceptance and speed but cannot alter

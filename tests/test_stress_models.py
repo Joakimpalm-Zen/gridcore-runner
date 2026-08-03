@@ -109,3 +109,15 @@ def test_degenerate_output_is_an_observation_not_a_fault():
     assert sm.degenerate("") == "empty output"
     assert sm.degenerate("a a a a a a a a a") is not None
     assert sm.degenerate("Paris is the capital and largest city of France") is None
+
+
+def test_machine_resources_come_from_runner_caps():
+    ram, vram = sm.parse_resource_caps(
+        '{"ram_bytes":268000000000,"gpu":{"vram_bytes":25000000000}}')
+    assert ram == 268.0
+    assert vram == 25.0
+
+
+def test_machine_resources_tolerate_cpu_only_or_bad_caps():
+    assert sm.parse_resource_caps('{"ram_bytes":16000000000,"gpu":null}') == (16.0, 0.0)
+    assert sm.parse_resource_caps("not json") == (None, None)
