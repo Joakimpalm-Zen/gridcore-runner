@@ -16,8 +16,9 @@ results: **Qwen3-30B-A3B (Q4_K_M, 128 experts, top-8) loads in 18.6 GB, fits a
 GGUF. That number is a hardware-specific measurement, not a representative
 claim for every 24 GB consumer GPU. On simulated 8/12/16 GB budgets it
 partially offloads (19/29/39 of 48 layers on GPU) with identical output. Both
-supported MoE families (qwen3moe fused, Mixtral/llama split) and both expert
-layouts are covered.
+supported MoE families are covered on CPU and CUDA. Metal now has gated decode
+coverage for fused plain MoE, gpt-oss MXFP4/bias-bearing experts, and Gemma-4's
+dual-branch MoE; split expert layout and shared-expert MoE remain refused there.
 
 ## What is supported
 
@@ -33,11 +34,10 @@ weighted sum. Concretely:
   per-expert 2D** tensors (`ffn_gate.{e}.weight`, older Mixtral GGUFs). One
   shared `moe_expert_weight()` accessor serves both; no forward code branches
   on the layout.
-- **Execution:** CPU and GPU. On the GPU the whole model file is uploaded as
-  one buffer and each expert's slice offset is used directly by the matvec
-  kernel; routing runs on the host from router logits read back per token, and
-  the expert SwiGLU matmuls run on the GPU. MoE layers use the eager path
-  (host-dependent routing cannot be CUDA-graph-captured).
+- **Execution:** CPU, CUDA, and Metal for the fused layouts. CUDA also covers
+  legacy split experts and partial expert placement; Metal currently covers the
+  fused device-routing path for plain/gpt-oss/Gemma-4 MoE and refuses split or
+  shared-expert layouts rather than silently falling back to wrong math.
 
 ### gemma-4 GELU dual-branch MoE (`gemma4-moe`)
 
@@ -57,13 +57,13 @@ Both branches read the un-normed post-attention residual directly (they do their
 own norms), and the summed result feeds the outer `post_ffn_norm` + residual.
 The activation is the tanh-GELU approximation, shared with the dense gemma FFN
 via one `gated_act()` so the GELU path cannot silently diverge from SiLU MoE.
-**Execution: CPU and CUDA** — the GPU kernel (`gpu_gemma_moe_ffn`) mirrors the
-CPU forward token-for-token (dense written straight into the layer output;
-`selw · down_scale` folded into one pre-down `enc_scale`; the router's
-`1/√n_embd` folded into the uploaded `gate_inp_scale`), verified token-identical
-to llama.cpp b10076 and GPU/CPU-identical on **gemma-4-26B-A4B-it** (128 experts,
-top-8; ~23 tok/s full-offload in the 24 GB slice). Like the other MoE families
-it uses the eager path (router readback).
+**Execution: CPU, CUDA, and Metal.** CUDA is verified GPU/CPU-identical on
+**gemma-4-26B-A4B-it** (128 experts, top-8; ~23 tok/s full-offload in the
+24 GB slice). Metal is gated on the Mac synthetic `gemma4-moe` fixture
+(`make test-metal-gemma4-moe`), covering scaled embeddings, GELU, fused
+`gate_up` experts, branch norms, down scales, post norms, layer scale, V
+RMSNorm and final logit softcap; large real-model Metal validation is still
+hardware-capacity dependent.
 
 ### Deliberately refused (no silent wrong output)
 
@@ -270,14 +270,13 @@ GPU numbers. CI continues to exercise the harness with fixtures.
 
 ## Known limitations / future work
 
-- **gpt-oss architecture — now supported on CPU and CUDA** (this entry kept
-  for history; it used to say "unsupported"). The CPU path landed 2026-07-31
-  (sinks, swiglu_oai, biases, SWA layout), the SWA-rope regime fix brought
-  greedy agreement with llama.cpp b10076 to at-or-under the model's own
-  sensitivity floor, and the CUDA half (MXFP4 kernels, sink-aware attention
-  softmax, swiglu_oai, router/expert biases) landed 2026-08-01 from the
-  13.3 box. Metal still refuses it via the existing `n_expert > 0` guard.
-- **GELU dual-branch MoE** (gemma-4) is now **implemented** (CPU + CUDA) — see
+- **gpt-oss architecture — now supported on CPU, CUDA and Metal.** The Metal
+  path is smoke-gated by `make test-metal-gptoss-moe`, which exercises sink-aware
+  attention, MXFP4 expert tensors, OAI SwiGLU, router bias, per-expert biases
+  and SWA-pattern metadata on a small Mac-runnable fixture. Real
+  `gpt-oss-20b-MXFP4.gguf` Metal validation still needs a Mac with enough
+  unified memory.
+- **GELU dual-branch MoE** (gemma-4) is implemented on CPU, CUDA and Metal; see
   the `gemma4-moe` section above. `expert_shared_count`-style shared-expert MoE
   (Qwen2-MoE / DeepSeek) remains refused, behind its own validation.
 - **MoE GPU decode** still forces the eager path (host-side routing readback per
