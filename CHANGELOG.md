@@ -5,6 +5,22 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **The Claude Code end-to-end check is a script now**
+  (`scripts/claude-code-e2e.sh`), and re-run against **Claude Code 2.1.220**:
+  PASS. It starts a server, writes a fixture holding a sentinel generated for
+  that run, points the real CLI at Runner via `ANTHROPIC_BASE_URL`, and
+  requires the sentinel back — so the README's compatibility claim rests on
+  something repeatable rather than on one manual validation against one
+  version. Runner served the loop with 22,942 of 22,943 prompt tokens coming
+  from the prefix cache.
+
+  Two things the script had to learn the hard way, both recorded in it:
+  `--allowedTools` governs permission, not what is *declared*, so Claude Code
+  sends its entire built-in tool set on the first request and does not fit in
+  a 16k context; and the model has to be named explicitly or the CLI keeps
+  whatever model the developer's own session is configured with and dies before
+  making a request.
+
 - **Torture matrix v2: seven families, 105 cases** (`scripts/agent-torture.py`).
   Two new families, both request-level so other runtimes can be asked the same
   questions: `reasoning_then_tool` (an assistant turn of prose already in the

@@ -399,7 +399,7 @@ they prove different things.
 | Cline CLI 3.0.46 | PASS | Normal 24-tool Plan request, `read_files` call, tool result and final answer over streaming Chat Completions |
 | pi 0.81.1 | PASS | Complete Read loop on each of Chat Completions, Responses and Anthropic Messages |
 | Continue CLI 1.5.47 | PASS | Read-only CLI, ten declared tools, tool-result history and final answer over Chat Completions |
-| Claude Code 2.1.217 | PASS | Complete two-turn built-in Read loop over Anthropic Messages; its separately captured full built-in schema set also compiles |
+| Claude Code 2.1.220 | PASS | Complete two-turn built-in Read loop over Anthropic Messages; its separately captured full built-in schema set also compiles |
 | Aider 0.86.2 | PASS, model profile required | OpenAI-compatible inference and fixture result under `--dry-run`; unknown local models fall back to Aider's `whole` edit format, which is model/edit-protocol behavior rather than HTTP tool calling |
 | Codex CLI 0.144.6 | CONDITIONAL | A lean Responses tool set completes a real `exec_command` loop. Feature-rich installations can expand tool namespaces beyond Runner's current 59-tool envelope; disable unused apps/multi-agent tools or provide a smaller tool set |
 
@@ -588,10 +588,20 @@ typed class and `get_final_message()` returns the parsed turn, including its
 tool call and, on a thinking-tagged model, its `ThinkingBlock`.
 
 Claude Code is also verified end to end, rather than inferred from SDK
-compatibility. Claude Code 2.1.217, pointed directly at Runner with
-`ANTHROPIC_BASE_URL`, completed a two-turn built-in `Read` tool loop against
-Qwen3-4B and returned the fixture sentinel. The validation used `--tools Read`
-to make the model-quality test deterministic. Separately, a captured request
+compatibility, and the check is a script rather than a shell history:
+`scripts/claude-code-e2e.sh` starts a server, writes a fixture containing a
+sentinel generated for that run, points Claude Code at Runner with
+`ANTHROPIC_BASE_URL`, and requires the sentinel back. Re-run against **Claude
+Code 2.1.220** on 2026-08-03 with Qwen3-4B: PASS. The task is trivial and tools
+are restricted to `Read` on purpose, so a failure means a protocol problem
+rather than a small model wandering off.
+
+Two things that run needs, both learned by getting them wrong: `--allowedTools`
+governs *permission*, not what is declared, so Claude Code sends its whole
+built-in tool set on the first request — 22.9k prompt tokens, which does not
+fit in a 16k context. And the model must be named explicitly, or the CLI keeps
+whatever model the developer's own session uses and dies before it makes a
+single request. Separately, a captured request
 containing Claude Code's full built-in tool declaration set compiles without
 schema weakening. Runner accepts its `/v1/messages?beta=true` target,
 `thinking.type: "adaptive"`, client-inserted system turn, open metadata object,
