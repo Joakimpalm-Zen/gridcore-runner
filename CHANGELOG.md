@@ -91,6 +91,29 @@ protocol and CLI may still change between alpha releases.
   one `--draft` slot still stalls every other slot for its full length. Taking
   the turn per forward needs `engine_generate` to call a hook around each one.
 
+- **Not done: the per-forward device turn on GPU.** `sched_generate` holds
+  `dev_mu` for a whole speculative generation, so on a GPU one `--draft` slot
+  stalls every other slot for its full length. The fix was built — a
+  `engine_set_device_turn()` hook the scheduler hands down, wrapping each of
+  the five forwards a speculative round issues, deliberately per-call rather
+  than per-round because that loop exits through several `goto`s and a missed
+  release is a deadlock — and then **reverted, because two measurements
+  disagreed**:
+
+  | run | whole-generation hold | per-forward hold |
+  |---|---|---|
+  | 1 | worst concurrent request 3.0x solo | 2.1x |
+  | 2 | 2.3x | 3.0x |
+
+  Contradictory results are not evidence, and the change costs a lock/unlock
+  per decoded token on the hot path. What defeated the measurement is that a
+  schema-constrained generation completes its object and stops early, so no
+  configuration available here produced a speculative generation long enough
+  for the hold to dominate — which is exactly the case the theory is about (an
+  unbounded hold versus one bounded by a single forward). A conclusive test
+  needs either a schema that does not self-terminate or a real draft/target
+  pair, neither of which is on this box. Patch and numbers filed.
+
 - **Prefix snapshots survive a restart (`runner.prefix.v1`).** A warm prefix
   cache is worth minutes of prefill and it died with the process.
   `prefix_cache_save()` / `prefix_cache_load()` write it to a file and read it
