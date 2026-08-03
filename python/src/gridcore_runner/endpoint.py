@@ -158,7 +158,13 @@ class RunnerEndpoint:
                             self._stall_message(idle, window),
                             partial="".join(text_parts),
                         )
-                    line = raw_line.decode("utf-8", "replace").strip()
+                    try:
+                        line = raw_line.decode("utf-8").strip()
+                    except UnicodeDecodeError as error:
+                        raise RunnerProtocolError(
+                            "runner sent a non-UTF-8 SSE frame",
+                            partial="".join(text_parts),
+                        ) from error
                     if not line.startswith("data:"):
                         continue
                     data = line[5:].strip()

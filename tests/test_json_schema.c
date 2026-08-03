@@ -67,6 +67,19 @@ static void test_json_rejects_ill_formed_raw_utf8(void) {
     jv_free(v);
 }
 
+static void test_json_rejects_embedded_nul(void) {
+    const char *bad[] = {
+        "\"a\\u0000b\"",
+        "{\"model\\u0000shadow\":1}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++)
+        assert(json_parse(bad[i], strlen(bad[i])) == NULL);
+
+    char out[4];
+    int outn = -1;
+    assert(json_unescape("\\u0000", 6, out, &outn) == -1);
+}
+
 static void test_json_close_partial_string(void) {
     jsonv v;
     jsonv_init(&v);
@@ -1129,6 +1142,7 @@ int main(void) {
     test_strict_bounded_numbers();
     test_json_rejects_unpaired_utf16_surrogates();
     test_json_rejects_ill_formed_raw_utf8();
+    test_json_rejects_embedded_nul();
     test_json_close_partial_string();
     test_schema_required_close();
     test_leading_whitespace_is_refused_but_interior_is_kept();

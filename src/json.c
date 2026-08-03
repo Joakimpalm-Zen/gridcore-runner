@@ -93,6 +93,10 @@ int json_unescape(const char *s, size_t n, char out[4], int *outn) {
     if (n < 6) return 0;
     int cp = hex4(s + 2);
     if (cp < 0) return -1;
+    // jv strings are NUL-terminated and intentionally do not carry a byte
+    // length. Accepting U+0000 would make every consumer see a silently
+    // truncated value/key, so this representation must reject it.
+    if (cp == 0) return -1;
     size_t used = 6;
     if (cp >= 0xD800 && cp <= 0xDBFF) {
         // a high surrogate is only half a character: peek for its pair, but
@@ -149,6 +153,7 @@ static char *parse_string(jcur *c) {
                     if (c->p + 4 > c->end) goto fail;
                     int cp = hex4(c->p);
                     if (cp < 0) goto fail;
+                    if (cp == 0) goto fail;
                     c->p += 4;
                     if (cp >= 0xD800 && cp <= 0xDBFF) {
                         if (c->p + 6 > c->end || c->p[0] != '\\' ||

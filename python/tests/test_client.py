@@ -345,6 +345,21 @@ class EndpointTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.partial, "good")
 
+    def test_invalid_utf8_frame_is_not_silently_replaced(self):
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: _Response([
+                b'data: {"choices":[{"delta":{"content":"good"}}]}\n',
+                b'data: {"choices":[{"delta":{"content":"\xff"},'
+                b'"finish_reason":"stop"}]}\n',
+            ]),
+        )
+
+        with self.assertRaises(RunnerProtocolError) as caught:
+            endpoint.stream_chat({"messages": []})
+
+        self.assertEqual(caught.exception.partial, "good")
+
     def test_chunk_without_choices_raises_instead_of_completing_the_stream(self):
         """The dangerous shape: a corrupt frame skipped, then a later
         finish_reason marks a truncated stream "finished"."""
