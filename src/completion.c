@@ -959,10 +959,20 @@ static bool whole_number(double n) {
     return n == floor(n);
 }
 
+// Largest double strictly below 2^64, i.e. 2^64 - 2048: the next representable
+// double IS 2^64, and converting that to uint64_t is undefined. Naming it lets
+// the assertion below guarantee the cast rather than a runtime check that can
+// never fire -- the range check already rejects anything above this, so a
+// second `seed >= 2^64` test downstream would be dead code. If anyone widens
+// this bound, the build stops instead of the behaviour going quietly undefined.
+#define SEED_MAX 18446744073709549568.0
+_Static_assert(SEED_MAX < 18446744073709551616.0,
+               "seed bound must stay below 2^64 so the uint64_t cast is defined");
+
 // negative sentinels: MT_UNLIMITED clamps to the context window later,
 // the other sentinels are request errors with distinct messages
-enum { MT_NEGATIVE = -4, MT_BAD_TYPE = -3, MT_NON_FINITE = -2,
-       MT_UNLIMITED = -1 };
+enum { MT_FRACTIONAL = -5, MT_NEGATIVE = -4, MT_BAD_TYPE = -3,
+       MT_NON_FINITE = -2, MT_UNLIMITED = -1 };
 
 static int request_max_tokens(jv *req, int dflt) {
     jv *v = jv_get(req, "max_tokens");
@@ -974,7 +984,7 @@ static int request_max_tokens(jv *req, int dflt) {
     if (!isfinite(v->num)) return MT_NON_FINITE;
     if (v->num < 0) return MT_NEGATIVE;
     if (v->num > INT_MAX) return INT_MAX;
-    if (!whole_number(v->num)) return MT_BAD_TYPE;
+    if (!whole_number(v->num)) return MT_FRACTIONAL;
     return (int)v->num;
 }
 
@@ -1131,17 +1141,17 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         // as "off": the penalty divides by it.
         !request_number(req, "repeat_penalty", s->smp_base.repeat_penalty,
                         FLT_MIN, FLT_MAX, &repeat_penalty) ||
-        !request_number(req, "seed", 0, 0, 18446744073709549568.0, &seed)) {
+        !request_number(req, "seed", 0, 0, SEED_MAX, &seed)) {
         send_error(fd, 400, "numeric sampling parameter out of range");
         return;
     }
-    // These fields are represented by integer engine state. Accepting 2.5 and
-    // silently truncating it to 2 makes the response use settings the caller
-    // did not request. Keep seed strictly below 2^64 before its uint64_t cast;
-    // converting that boundary value is undefined C behavior.
-    if (!whole_number(top_k) || !whole_number(seed) ||
-        seed >= 18446744073709551616.0) {
-        send_error(fd, 400, "numeric sampling parameter out of range");
+    // top_k and seed are held as integer engine state, so accepting 2.5 and
+    // truncating it to 2 would run the request with settings the caller did
+    // not ask for.
+    if (!whole_number(top_k) || !whole_number(seed)) {
+        // Not "out of range": 2.5 is inside every bound top_k has, and saying
+        // otherwise sends a caller hunting for a limit they never exceeded.
+        send_error(fd, 400, "top_k and seed must be whole numbers");
         return;
     }
     uint64_t rng_state = s->smp.rng;
@@ -1160,6 +1170,13 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     }
     if (max_tokens == MT_BAD_TYPE) {
         send_error(fd, 400, "max_tokens must be a number");
+        return;
+    }
+    // Distinct from MT_BAD_TYPE on purpose: 1.5 *is* a number, so telling a
+    // caller it is not sends them looking for a type bug they do not have.
+    // Name the actual rule.
+    if (max_tokens == MT_FRACTIONAL) {
+        send_error(fd, 400, "max_tokens must be a whole number");
         return;
     }
     if (max_tokens == MT_NEGATIVE) {

@@ -90,8 +90,14 @@ def test_unsupported_schema_construct_is_rejected(client):
     ("keep_alive", "300", "keep_alive"),
     ("top_logprobs", "2", "top_logprobs"),
     ("logprobs", "true", "logprobs"),
-    ("top_k", 2.5, "sampling"),
-    ("seed", 1.5, "sampling"),
+    # A fractional value is rejected for being fractional, not for being out
+    # of range -- 2.5 is inside every bound top_k has. The message has to say
+    # which, or a caller goes looking for a limit they never exceeded, so the
+    # substring asserted here is the rule and not just the field name.
+    ("top_k", 2.5, "whole number"),
+    ("seed", 1.5, "whole number"),
+    # This one IS a range rejection: the seed bound is the largest double below
+    # 2^64, so 2^64 itself never reaches the uint64_t cast.
     ("seed", 18446744073709551616, "sampling"),
     ("max_tokens", 1.5, "max_tokens"),
     ("keep_alive", 1.5, "keep_alive"),

@@ -5,6 +5,22 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Follow-up to the request-validation hardening: accurate rejection
+  messages, and one dead check removed.** The new rules are right and stay;
+  what they *said* was not. `max_tokens: 1.5` answered "max_tokens must be a
+  number" — 1.5 is a number, so that sends a caller looking for a type bug they
+  do not have — and `top_k: 2.5` answered "out of range" when 2.5 is inside
+  every bound `top_k` has. They now say "must be a whole number", with a
+  separate sentinel so a genuine type error still reads as one.
+
+  The added `seed >= 2^64` guard was **unreachable**: `request_number` already
+  caps seed at 18446744073709549568.0, which is 2^64 − 2048, the largest double
+  below 2^64 — so the `uint64_t` cast was never at risk and the branch could
+  not fire. Verified at the boundary (2^64 − 2048 → 200, 2^64 → 400). Replaced
+  with a named `SEED_MAX` and a `_Static_assert` tying the bound to the cast's
+  safety, so widening it stops the build instead of quietly reintroducing the
+  undefined conversion. Confirmed the assertion fires when the bound is raised.
+
 From a field report on an M2 Pro / 16 GB MacBook Pro driving Continue in
 VS Code — the second outside install. The Metal-side findings need a Mac and are
 filed; these are the ones that did not.
