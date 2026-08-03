@@ -91,6 +91,41 @@ protocol and CLI may still change between alpha releases.
   one `--draft` slot still stalls every other slot for its full length. Taking
   the turn per forward needs `engine_generate` to call a hook around each one.
 
+- **Prefix snapshots survive a restart (`runner.prefix.v1`).** A warm prefix
+  cache is worth minutes of prefill and it died with the process.
+  `prefix_cache_save()` / `prefix_cache_load()` write it to a file and read it
+  back, so a restarted server answers the first agent request at fork speed.
+
+  The trust question is the whole design, and it is answered by refusal rather
+  than by adaptation. A snapshot is raw KV bytes: installing one that does not
+  belong to this model does not error, it produces fluent wrong output — the
+  same hazard `engine_prefix_reuse` was built around, now with a file as the
+  surface. So the file carries the engine's `model_key`, which already binds
+  the weights, the geometry, the tokenizer, the context length and the KV
+  element type, and **every entry whose key does not match is dropped, not
+  fitted**. The file is also checked for a magic, a length-consistent body and
+  a payload digest before any of it is believed, and a failure discards the
+  whole load rather than keeping the part that parsed — a partial load of a
+  corrupt file is the worst outcome, because it looks like success. It is
+  opt-in with an explicit path and no discovery: a cache directory someone else
+  can write is a way to hand this process someone else's KV.
+
+  `tests/test_prefix_persist.c` is fifteen checks and most of them are
+  refusals: a foreign model key, a mismatched entry width, a file that is not
+  ours, a truncated file, a single flipped byte. The round trip is checked by
+  **content** — a fresh engine must fork the reloaded snapshot — because a
+  save/load pair that wrote zeros would still keep the entry count.
+
+  Landed only after a detour worth recording. The test segfaulted 8 times out
+  of 8 at `-O2` and above while passing at `-O0`, `-O1`, and under ASan at both
+  — the signature of corruption ASan cannot see. It was **not the feature**:
+  `engine_init` calls `free(e->hist)` on entry (its comment says "e must be
+  zeroed"), and the test declared `engine e;` on the stack uninitialized, so
+  each init freed a wild pointer. `engine e = {0}` and it is 5/5 clean at full
+  optimization. The feature was reverted once on the strength of that crash
+  before the cause was known, which was the right call at the time and the
+  wrong conclusion.
+
 - **Phase 8: the 8k→32k retrieval gate — a q8 cache does not cost recall.**
   Needle-in-a-haystack on Qwen2.5-7B: a unique fact planted at 10%, 50% and 90%
   depth in a filler context, two codes per depth, scored on exact digits.

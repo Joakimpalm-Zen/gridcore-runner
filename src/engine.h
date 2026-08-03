@@ -198,4 +198,31 @@ void   prefix_cache_clear(void);
 // host bytes one n-token snapshot of this model would occupy
 size_t prefix_cache_entry_bytes(const model_t *m, int n);
 
+// ---- snapshot persistence (runner.prefix.v1) --------------------------
+//
+// A warm prefix cache is worth minutes of prefill and it dies with the
+// process. These write it to a file and read it back, so a restarted server
+// answers the first agent request at fork speed instead of prefill speed.
+//
+// The trust question is the whole design. A snapshot is raw KV bytes: loading
+// one that does not belong to this model does not error, it produces a
+// confident wrong answer, which is the single failure mode this cache's
+// lookup path was built to avoid. So the file carries the engine's
+// `model_key` -- which already binds the weights, the geometry, the tokenizer,
+// the context length and the KV element type -- and every entry whose key does
+// not match the live engine is refused, not adapted. The file is also checked
+// for a magic, a version, a length-consistent body and a payload digest before
+// any of it is believed; a truncated or edited file loads nothing.
+//
+// It is opt-in and explicit. There is no default path and no automatic
+// discovery: a cache directory that another user can write is a way to hand
+// this process someone else's KV, and the way not to have that problem is not
+// to go looking for files nobody asked for.
+//
+// Returns the number of entries written / loaded, or -1 on an I/O or format
+// error (with a reason on stderr). Loading is additive and skips anything that
+// does not fit the live budget.
+int prefix_cache_save(const char *path);
+int prefix_cache_load(const char *path, const engine *e);
+
 #endif // RUNNER_ENGINE_H

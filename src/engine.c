@@ -539,6 +539,138 @@ void engine_prefix_publish(engine *e, const int32_t *toks, int n,
     pthread_mutex_unlock(&PFX.mu);
 }
 
+// ---------------------------------------------------- snapshot persistence
+
+#define PFX_MAGIC   "runner.prefix.v1"
+#define PFX_MAGIC_N 16
+
+// FNV-1a over the body. Not a security primitive -- it is here so a truncated
+// or half-written file is refused rather than believed. The refusal that
+// matters (wrong model) is the key check, which a digest cannot do.
+static uint64_t pfx_digest(const void *p, size_t n) {
+    const uint8_t *b = p;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 0x100000001b3ull; }
+    return h;
+}
+
+static bool wr(FILE *f, const void *p, size_t n) { return fwrite(p, 1, n, f) == n; }
+static bool rd(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
+
+int prefix_cache_save(const char *path) {
+    if (!path || !*path) return -1;
+    // write beside and rename, so a crash mid-write cannot leave a file that
+    // passes its own digest over half a cache
+    char tmp[1024];
+    if (snprintf(tmp, sizeof(tmp), "%s.partial", path) >= (int)sizeof(tmp)) return -1;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { fprintf(stderr, "prefix: cannot write %s\n", tmp); return -1; }
+
+    pthread_mutex_lock(&PFX.mu);
+    uint32_t count = 0;
+    for (pfx_entry *p = PFX.head; p; p = p->next) count++;
+
+    uint64_t digest = 0xcbf29ce484222325ull;
+    bool ok = wr(f, PFX_MAGIC, PFX_MAGIC_N) && wr(f, &count, sizeof count);
+    for (pfx_entry *p = PFX.head; ok && p; p = p->next) {
+        uint64_t key = p->key, bytes = p->bytes;
+        int32_t  n   = p->n;
+        ok = wr(f, &key, sizeof key) && wr(f, &n, sizeof n) &&
+             wr(f, &bytes, sizeof bytes) &&
+             wr(f, p->toks, sizeof(int32_t) * (size_t)n) && wr(f, p->kv, p->bytes);
+        // the digest covers exactly what a load will read back
+        digest ^= pfx_digest(&key, sizeof key);   digest *= 0x100000001b3ull;
+        digest ^= pfx_digest(p->toks, sizeof(int32_t) * (size_t)n);
+        digest *= 0x100000001b3ull;
+        digest ^= pfx_digest(p->kv, p->bytes);    digest *= 0x100000001b3ull;
+    }
+    pthread_mutex_unlock(&PFX.mu);
+
+    ok = ok && wr(f, &digest, sizeof digest);
+    if (fclose(f) != 0) ok = false;
+    if (!ok || rename(tmp, path) != 0) {
+        remove(tmp);
+        fprintf(stderr, "prefix: failed to write %s\n", path);
+        return -1;
+    }
+    return (int)count;
+}
+
+int prefix_cache_load(const char *path, const engine *e) {
+    if (!path || !*path || !e || !e->m) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;                 // absent is not an error worth shouting
+
+    char magic[PFX_MAGIC_N];
+    uint32_t count = 0;
+    if (!rd(f, magic, PFX_MAGIC_N) || memcmp(magic, PFX_MAGIC, PFX_MAGIC_N) != 0 ||
+        !rd(f, &count, sizeof count)) {
+        fprintf(stderr, "prefix: %s is not a %s file\n", path, PFX_MAGIC);
+        fclose(f);
+        return -1;
+    }
+
+    pthread_mutex_lock(&PFX.mu);
+    pfx_defaults();
+    double now = now_s();
+    int loaded = 0, refused = 0;
+    uint64_t digest = 0xcbf29ce484222325ull;
+    bool bad = false;
+    for (uint32_t i = 0; i < count && !bad; i++) {
+        uint64_t key = 0, bytes = 0;
+        int32_t  n = 0;
+        if (!rd(f, &key, sizeof key) || !rd(f, &n, sizeof n) ||
+            !rd(f, &bytes, sizeof bytes) || n < PFX_MIN_TOKENS ||
+            bytes == 0 || bytes > (uint64_t)1 << 40) { bad = true; break; }
+        int32_t *toks = malloc(sizeof(int32_t) * (size_t)n);
+        uint8_t *kv   = malloc((size_t)bytes);
+        if (!toks || !kv || !rd(f, toks, sizeof(int32_t) * (size_t)n) ||
+            !rd(f, kv, (size_t)bytes)) { free(toks); free(kv); bad = true; break; }
+        digest ^= pfx_digest(&key, sizeof key);  digest *= 0x100000001b3ull;
+        digest ^= pfx_digest(toks, sizeof(int32_t) * (size_t)n);
+        digest *= 0x100000001b3ull;
+        digest ^= pfx_digest(kv, (size_t)bytes); digest *= 0x100000001b3ull;
+
+        // The refusal that matters. A snapshot from another model, another
+        // context length or another KV dtype is not adapted -- it is dropped.
+        // Adapting it would be inventing KV rows, which reads as fluent output
+        // and is wrong.
+        if (key != e->model_key ||
+            bytes != prefix_cache_entry_bytes(e->m, n)) {
+            free(toks); free(kv); refused++;
+            continue;
+        }
+        pfx_entry *ne = calloc(1, sizeof(*ne));
+        if (!ne) { free(toks); free(kv); bad = true; break; }
+        pfx_trim((size_t)bytes);
+        if (PFX.bytes + bytes > PFX.budget) {   // does not fit the live budget
+            free(toks); free(kv); free(ne);
+            continue;
+        }
+        ne->key = key; ne->toks = toks; ne->n = n;
+        ne->kv = kv; ne->bytes = (size_t)bytes; ne->used = now;
+        ne->next = PFX.head; PFX.head = ne;
+        PFX.bytes += (size_t)bytes;
+        loaded++;
+    }
+    uint64_t want = 0;
+    bool have_digest = rd(f, &want, sizeof want);
+    pthread_mutex_unlock(&PFX.mu);
+    fclose(f);
+
+    if (bad || !have_digest || want != digest) {
+        // Everything read so far is suspect, so none of it is kept. A partial
+        // load of a corrupt file is the worst outcome: it looks like success.
+        prefix_cache_clear();
+        fprintf(stderr, "prefix: %s is truncated or corrupt — nothing loaded\n", path);
+        return -1;
+    }
+    if (refused)
+        fprintf(stderr, "prefix: %d snapshot(s) in %s belong to a different "
+                "model or context — refused\n", refused, path);
+    return loaded;
+}
+
 // load a draft model for speculative decoding, with the same gates in CLI
 // and server mode: the target must keep a CPU verify path, and the vocabs
 // must match modulo family padding. NULL (with a stderr note) = run plain.
