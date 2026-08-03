@@ -5,6 +5,50 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **`server_run` could not run twice, and a SIGTERM could fail to wake
+  `accept()`.** RNR-019's remaining half was "de-globalise `SV`". Rather than
+  start from the shape, the property was written down first: *a server must be
+  able to start, serve, stop and start again in one process.* A global
+  initialized once and torn down once can hide an asymmetry forever, because
+  nothing ever asks the state to come back. `tests/test_server_restart.c` asks,
+  twice — and found two defects, neither of which any existing test could see.
+
+  **The state had no lifetime.** `q.shutdown`, `shutdown` and `load_cancel` are
+  raised during teardown and never lowered, and `reaper_started` stayed true
+  next to a `reaper_th` whose thread had already been joined. A second
+  `server_run` therefore listened, accepted connections, and generated nothing:
+  every slot worker saw a shut-down queue and exited at once. `server_run` now
+  resets the state at entry, as the documented counterpart of the teardown at
+  the bottom.
+
+  **A SIGTERM could leave the server parked in `accept()`.** The handler closed
+  the listener and the comment said that "wakes accept()". It does not — a
+  blocked `accept()` is woken by the signal only in the thread the signal was
+  *delivered to*, and a process may deliver SIGTERM to any thread that has it
+  unblocked: a slot worker, the decode thread, the TTL reaper. Observed
+  directly in `/proc`: the accept thread sat in `inet_csk_accept` long after
+  the handler had run and closed the fd. `shutdown(fd, SHUT_RDWR)` now precedes
+  the `close()`; both are async-signal-safe. This is a **plausible but
+  unproven** explanation for the `test_signal_during_startup` sighting above —
+  "server survived a SIGTERM" is exactly the symptom, and its rarity matches
+  delivery usually landing on the main thread — but it was never reproduced, so
+  the link is offered, not claimed.
+
+  Both fixes are demonstrated load-bearing: without the reset the second cycle
+  fails with *"no worker answered a completion"*; without `shutdown()` the
+  first cycle hangs in `pthread_join`. The gate had to be strengthened to show
+  the first — its initial version asked for `/v1/models`, which
+  `accept_fastpath` answers on the accept path with no worker involved, so it
+  passed against the very bug it was written for. A gate that cannot fail is
+  worse than none.
+
+  What this is **not**: `SV` is still one global, so two servers in one process
+  would still share it. What changed is that its lifetime is now explicit and
+  its init/teardown symmetry is tested. Threading a per-instance context
+  through six translation units is the remaining half, filed rather than done —
+  nothing needs two servers in a process today, and the defects above were the
+  part that was actually costing something.
+
 - **The `test_signal_during_startup` flake did not reproduce, and the test now
   records enough to chase the next one.** It was seen once on 2026-08-02 at the
   2 ms delay and estimated at "~1 in 20 runs" from that single sighting — which

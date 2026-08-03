@@ -727,7 +727,20 @@ static void stop_handler(int sig) {
     int fd = (int)listener_fd;
     if (fd >= 0) {
         listener_fd = -1;
-        close(fd); // async-signal-safe; wakes accept()
+        // shutdown() BEFORE close(), and it is not belt-and-braces.
+        //
+        // A blocked accept() is woken by the signal only in the thread the
+        // signal was delivered to, and a process may deliver SIGTERM to any
+        // thread that has it unblocked — a slot worker, the decode thread, the
+        // TTL reaper. Closing the descriptor from one of those does NOT wake a
+        // thread already parked in accept() on Linux; it stays there until a
+        // connection happens to arrive. Observed directly: with the accept loop
+        // on a non-main thread, /proc showed it in inet_csk_accept long after
+        // the handler had run and closed the fd.
+        //
+        // shutdown() does wake it, and both calls are async-signal-safe.
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
     }
 }
 
@@ -792,6 +805,27 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const sampler_override *ov, int port, int parallel,
                int n_threads, int ttl, const char *draft_path, int draft_k) {
     sock_init();
+    // The shared server state gets a lifetime, and it is this call. Everything
+    // below sets fields on SV and the teardown at the bottom releases them, but
+    // until now nothing reset the ones that are only ever *set* — and there are
+    // several: `q.shutdown` and `shutdown` are raised during teardown and never
+    // lowered, `load_cancel` is left at 1, and `reaper_started` stays true
+    // alongside a `reaper_th` whose thread has already been joined.
+    //
+    // A second server_run therefore did not work. Its slot workers saw a
+    // shut-down queue and exited immediately, so the server listened, accepted
+    // connections and answered nothing but `/health` — which is served on the
+    // accept path and needs no worker, and is exactly why a casual check
+    // looked fine. Teardown then joined an already-joined thread handle.
+    //
+    // This is what the RNR-019 finding meant by global state making
+    // initialization and teardown hard: nothing ever asked the state to come
+    // back, so the asymmetry could not be observed. tests/test_server_restart.c
+    // now asks, twice. Note this makes the state's lifetime explicit, NOT
+    // per-instance — two servers in one process would still share it. That
+    // half is filed; nothing needs it today, and it costs threading a context
+    // through six translation units.
+    memset(&SV, 0, sizeof(SV));
 #ifndef _WIN32
     stop_requested = 0;
     listener_fd = -1;
