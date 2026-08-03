@@ -404,6 +404,23 @@ else
 	@echo "metal prompt batch smoke skipped: macOS-only backend"
 endif
 
+test-metal-kv-q8: runner $(TEST_KV_TOL)
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		model="$${ASAN_MODEL:-models/SmolLM2-135M-Instruct-Q8_0.gguf}"; \
+		if [ ! -f "$$model" ]; then echo "metal q8 KV smoke skipped: $$model not found"; exit 0; fi; \
+		./$(RUNNER_EXE) -m "$$model" -p "hello" -n 1 --kv q8 --gpu auto -v 2> metal-kv-q8.err >/dev/null; \
+		grep -q "q8_0" metal-kv-q8.err; \
+		./$(TEST_KV_TOL) "$$model"; \
+		echo "metal q8 KV ok"; \
+	else \
+		echo "metal q8 KV smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal q8 KV smoke skipped: macOS-only backend"
+endif
+
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
@@ -582,6 +599,7 @@ clean:
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
 	rm -f metal-init-fallback.out metal-init-fallback.err
 	rm -f metal-prefill-loop.out metal-prefill-native.out metal-prefill-native.err
+	rm -f metal-kv-q8.err
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 
@@ -592,4 +610,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill smoke release-check fuzz fuzz-build fuzz-run test-shared-asan
+.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 smoke release-check fuzz fuzz-build fuzz-run test-shared-asan

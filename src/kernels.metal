@@ -325,17 +325,81 @@ kernel void k_rope(device float       *v  [[buffer(0)]],
 }
 
 // ---------------------------------------------------------------- kv store
+// The KV cache is either fp16 (2 bytes/value) or q8_0 (32 values per 34-byte
+// block: one fp16 scale + 32 int8 quants). Offsets are byte offsets so the CPU
+// and Metal paths share the same cache layout.
+
+static inline ulong kv_row_bytes(int kv_dim, int q8) {
+    return q8 ? (ulong)(kv_dim / 32) * 34 : (ulong)kv_dim * 2;
+}
+
+static inline ulong kv_head_off(int kvh, int hd, int q8) {
+    return q8 ? (ulong)(kvh * hd / 32) * 34 : (ulong)(kvh * hd) * 2;
+}
+
+static inline void kv_store_row(device uchar *cache, device const float *src,
+                                int q8, uint i) {
+    if (q8) {
+        device uchar *blk = cache + (ulong)i * 34;
+        device half *dptr = (device half *)blk;
+        device char *q = (device char *)(blk + 2);
+        device const float *x = src + i * 32;
+        float amax = 0;
+        for (int j = 0; j < 32; j++) amax = max(amax, fabs(x[j]));
+        float d = amax / 127.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        *dptr = (half)d;
+        for (int j = 0; j < 32; j++) q[j] = (char)round(x[j] * id);
+    } else {
+        ((device half *)cache)[i] = (half)src[i];
+    }
+}
+
+static inline float kv_dot(device const uchar *row, device const float *qh,
+                           int hd, int q8) {
+    float s = 0;
+    if (q8) {
+        for (int b = 0; b < hd / 32; b++) {
+            device const uchar *blk = row + (ulong)b * 34;
+            float d = (float)*(device const half *)blk;
+            device const char *q = (device const char *)(blk + 2);
+            device const float *xp = qh + b * 32;
+            float t = 0;
+            for (int j = 0; j < 32; j += 2)
+                t += xp[j] * (float)q[j] + xp[j + 1] * (float)q[j + 1];
+            s += d * t;
+        }
+    } else {
+        device const half *k = (device const half *)row;
+        for (int i = 0; i < hd; i++) s += qh[i] * (float)k[i];
+    }
+    return s;
+}
+
+static inline float2 kv_pair(device const uchar *row, int i2, int q8) {
+    if (q8) {
+        device const uchar *blk = row + (ulong)(i2 / 16) * 34;
+        float d = (float)*(device const half *)blk;
+        device const char *q = (device const char *)(blk + 2);
+        int j = (2 * i2) & 31;
+        return float2(d * (float)q[j], d * (float)q[j + 1]);
+    }
+    device const half *h = (device const half *)row + 2 * i2;
+    return float2((float)h[0], (float)h[1]);
+}
 
 kernel void k_store_kv(device const float *k  [[buffer(0)]],
                        device const float *v  [[buffer(1)]],
-                       device half        *kc [[buffer(2)]],
-                       device half        *vc [[buffer(3)]],
+                       device uchar       *kc [[buffer(2)]],
+                       device uchar       *vc [[buffer(3)]],
                        constant int       &kv_dim [[buffer(4)]],
                        constant ulong     &off    [[buffer(5)]],
+                       constant int       &q8     [[buffer(6)]],
                        uint i [[thread_position_in_grid]]) {
-    if ((int)i < kv_dim) {
-        kc[off + i] = (half)k[i];
-        vc[off + i] = (half)v[i];
+    int n = q8 ? kv_dim / 32 : kv_dim;
+    if ((int)i < n) {
+        kv_store_row(kc + off, k, q8, i);
+        kv_store_row(vc + off, v, q8, i);
     }
 }
 
@@ -344,13 +408,14 @@ kernel void k_store_kv(device const float *k  [[buffer(0)]],
 
 struct attn_args {
     int   head_dim, n_head, n_head_kv, n_ctx, pos;
-    ulong l_off;      // this layer's element offset into the kv cache
+    ulong l_off;      // this layer's byte offset into the kv cache
     float scale;
+    int   q8;
 };
 
 kernel void k_attn(device const float *q   [[buffer(0)]],
-                   device const half  *kc  [[buffer(1)]],
-                   device const half  *vc  [[buffer(2)]],
+                   device const uchar *kc  [[buffer(1)]],
+                   device const uchar *vc  [[buffer(2)]],
                    device float       *att [[buffer(3)]],
                    device float       *out [[buffer(4)]],
                    constant attn_args &a   [[buffer(5)]],
@@ -361,14 +426,13 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
     int hd = a.head_dim;
     int kvh = h / (a.n_head / a.n_head_kv);
     int kv_dim = a.n_head_kv * hd;
+    ulong row_b = kv_row_bytes(kv_dim, a.q8);
+    ulong base = a.l_off + kv_head_off(kvh, hd, a.q8);
     device const float *qh = q + h * hd;
     device float *ah = att + (ulong)h * a.n_ctx;
 
     for (int t = tid; t <= a.pos; t += tpg) {
-        device const half *kt = kc + a.l_off + (ulong)t * kv_dim + kvh * hd;
-        float s = 0;
-        for (int i = 0; i < hd; i++) s += qh[i] * (float)kt[i];
-        ah[t] = s * a.scale;
+        ah[t] = kv_dot(kc + base + (ulong)t * row_b, qh, hd, a.q8) * a.scale;
     }
     threadgroup_barrier(mem_flags::mem_device);
 
@@ -402,7 +466,7 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
     for (int i = tid; i < hd; i += tpg) {
         float o = 0;
         for (int t = 0; t <= a.pos; t++)
-            o += ah[t] * (float)vc[a.l_off + (ulong)t * kv_dim + kvh * hd + i];
+            o += ah[t] * kv_pair(vc + base + (ulong)t * row_b, i / 2, a.q8)[i & 1];
         out[h * hd + i] = o / sum;
     }
 }

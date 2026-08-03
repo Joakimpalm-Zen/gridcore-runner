@@ -28,7 +28,7 @@ typedef struct {
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; } attn_args;
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8; } attn_args;
 
 static void gpu_release_state(gpu_t *g, int n_layer) {
     if (!g) return;
@@ -226,38 +226,7 @@ bool gpu_moe_ok(void) {
 }
 
 bool gpu_kv_q8_ok(void) {
-    // FALSE ON PURPOSE, and not a placeholder to be flipped casually.
-    //
-    // The Metal kernels speak fp16 KV only, so `--kv q8` falls back to an f16
-    // cache here (with a stderr note) instead of handing q8_0 blocks to an
-    // fp16 reader. macOS users still get the full context win from a q8 cache
-    // via `--gpu off`, which uses the CPU path that has always supported it.
-    //
-    // Why this was left as a fallback rather than ported blind: there is no
-    // macOS machine on this project, and Metal compiles its shaders at
-    // *runtime* from the source string in kernels_metal.h — so an untested
-    // port would not even fail at build time. It would fail on a user's Mac,
-    // and the likely failure (a wrong block stride, a wrong scale, a head
-    // slice landing off a 32-value block boundary) does not crash: it returns
-    // fluent, plausible, subtly wrong text. That is strictly worse than not
-    // offering the feature. tests/test_kv_tol.c asserts the invariant this
-    // function exists to provide, on every platform.
-    //
-    // A port needs exactly three things, all of which CUDA already did and
-    // can be copied from (src/kernels.cu, src/cuda.c):
-    //   1. k_store_kv (kernels_metal.h) must quantize each row to q8_0 —
-    //      amax/127 per 32-value block, roundf, fp16 scale — matching
-    //      q8_quant_row() in src/quants.c bit for bit.
-    //   2. k_attn must read K and V as q8_0 blocks. Every head slice starts
-    //      at kvh*head_dim, which is why model_load already requires head_dim
-    //      to be a multiple of 32 before enabling q8 at all.
-    //   3. The kv_off arithmetic in gpu_forward below is an *element* offset
-    //      (l * n_ctx + pos) * kv_dim, which is only valid for fp16. It must
-    //      become the byte offset the shared layout helpers give:
-    //      model_kv_byte_off(m, l) and model_kv_row_bytes(m, l). Host and
-    //      device must agree on one layout, or the hybrid CPU/GPU split
-    //      silently reads the wrong rows.
-    return false;
+    return true;
 }
 
 bool gpu_init(model_t *m) {
@@ -353,7 +322,7 @@ bool gpu_init(model_t *m) {
     int q_dim  = m->n_head * m->head_dim;
     int kv_dim = m->n_head_kv * m->head_dim;
     int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
-    size_t kv_bytes = (size_t)m->n_layer * m->n_ctx * kv_dim * sizeof(f16_t);
+    size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
 
     #define NEWBUF(n) [dev newBufferWithLength:(n) options:MTLResourceStorageModeShared]
     g->kc = NEWBUF(kv_bytes);
@@ -620,7 +589,10 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             NSUInteger hb2o = foff((size_t)b * m->n_ff);
             NSUInteger atto = foff((size_t)b * (size_t)m->n_head * m->n_ctx);
             NSUInteger logo = foff((size_t)b * m->n_vocab);
-            uint64_t kv_off = ((uint64_t)l * m->n_ctx + p) * kv_dim;
+            size_t row_b = model_kv_row_bytes(m, l);
+            uint64_t kv_off = model_kv_byte_off(m, l) + (uint64_t)p * row_b;
+            int q8 = m->kv_q8;
+            int kv_units = q8 ? kv_dim / 32 : kv_dim;
 
             enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->attn_norm[l],
                         n_embd, m->rms_eps);
@@ -642,12 +614,13 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             [e setBuffer:g->vc offset:0 atIndex:3];
             [e setBytes:&kv_dim length:4 atIndex:4];
             [e setBytes:&kv_off length:8 atIndex:5];
-            [e dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
+            [e setBytes:&q8 length:4 atIndex:6];
+            [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
             attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, p,
-                             (uint64_t)l * m->n_ctx * kv_dim,
-                             1.0f / sqrtf((float)m->head_dim) };
+                             (uint64_t)model_kv_byte_off(m, l),
+                             1.0f / sqrtf((float)m->head_dim), q8 };
             [e setComputePipelineState:g->p_attn];
             [e setBuffer:g->q   offset:qo atIndex:0];
             [e setBuffer:g->kc  offset:0 atIndex:1];
@@ -710,7 +683,10 @@ static float *gpu_forward(model_t *m, int token, int pos) {
 
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
-        uint64_t kv_off = ((uint64_t)l * m->n_ctx + pos) * kv_dim;
+        size_t row_b = model_kv_row_bytes(m, l);
+        uint64_t kv_off = model_kv_byte_off(m, l) + (uint64_t)pos * row_b;
+        int q8 = m->kv_q8;
+        int kv_units = q8 ? kv_dim / 32 : kv_dim;
 
         enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->attn_norm[l], n_embd, m->rms_eps);
         enc_mv(g, e, m, ly->wq, g->xb, 0, g->q,  0, n_embd, q_dim,  g->bq[l]);
@@ -728,12 +704,13 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         [e setBuffer:g->vc offset:0 atIndex:3];
         [e setBytes:&kv_dim length:4 atIndex:4];
         [e setBytes:&kv_off length:8 atIndex:5];
-        [e dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
+        [e setBytes:&q8 length:4 atIndex:6];
+        [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
         attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, pos,
-                         (uint64_t)l * m->n_ctx * kv_dim,
-                         1.0f / sqrtf((float)m->head_dim) };
+                         (uint64_t)model_kv_byte_off(m, l),
+                         1.0f / sqrtf((float)m->head_dim), q8 };
         [e setComputePipelineState:g->p_attn];
         [e setBuffer:g->q   offset:0 atIndex:0];
         [e setBuffer:g->kc  offset:0 atIndex:1];
