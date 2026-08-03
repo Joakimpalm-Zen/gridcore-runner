@@ -5,6 +5,9 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- `--gpu off` now also keeps a speculative draft model on CPU instead of
+  silently auto-offloading the draft and consuming VRAM.
+
 - **One-shot and interactive CLI runs now release their model state.** Running
   the README's `make debug` binary under LeakSanitizer found about 240 KB of
   tokenizer, runtime, engine-history, schema/draft, and prompt allocations left

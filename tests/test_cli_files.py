@@ -51,3 +51,13 @@ def test_readable_prompt_file_loads(runner_bin, model, tmp_path):
     pf.write_text("Hello from a file")
     proc = _run(runner_bin, model, "-f", str(pf), "-n", "1", "--temp", "0")
     assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+
+
+def test_gpu_off_also_applies_to_speculative_draft(runner_bin, model):
+    proc = _run(runner_bin, model, "-p", "hi", "--draft", str(model),
+                "--draft-k", "2", "-n", "2", "--temp", "0")
+    stderr = proc.stderr.decode(errors="replace")
+    assert proc.returncode == 0, stderr
+    assert "draft:" in stderr
+    assert "gpu-split:" not in stderr
+    assert "gpu: CUDA backend" not in stderr

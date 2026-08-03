@@ -686,7 +686,9 @@ model_t *spec_draft_load(const char *path, const model_t *target,
     // Draft KV may use the requested q8 storage too. It can change which
     // tokens the draft proposes (and therefore acceptance/throughput), but the
     // target still verifies every proposal and defines the final output.
-    dmp.gpu_mode = GPU_AUTO;   // a small draft usually fits VRAM whole
+    // Respect the caller's backend policy. In particular, --gpu off is a
+    // process-wide promise; silently auto-offloading the draft consumed VRAM
+    // even though the target correctly stayed on CPU.
     model_t *dm = malloc(sizeof(model_t));
     if (!dm) {
         fprintf(stderr, "draft: out of memory — ignoring --draft\n");
