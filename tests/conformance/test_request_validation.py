@@ -90,6 +90,12 @@ def test_unsupported_schema_construct_is_rejected(client):
     ("keep_alive", "300", "keep_alive"),
     ("top_logprobs", "2", "top_logprobs"),
     ("logprobs", "true", "logprobs"),
+    ("top_k", 2.5, "sampling"),
+    ("seed", 1.5, "sampling"),
+    ("seed", 18446744073709551616, "sampling"),
+    ("max_tokens", 1.5, "max_tokens"),
+    ("keep_alive", 1.5, "keep_alive"),
+    ("top_logprobs", 1.5, "top_logprobs"),
 ])
 def test_out_of_range_scalar_is_rejected(client, field, value, contains):
     payload = dict(CHAT, **{field: value})

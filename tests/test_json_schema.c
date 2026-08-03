@@ -26,6 +26,47 @@ static void test_strict_bounded_numbers(void) {
     jv_free(v);
 }
 
+static void test_json_rejects_unpaired_utf16_surrogates(void) {
+    const char *bad[] = {
+        "\"\\uD800\"",          // lone high surrogate
+        "\"\\uD800x\"",         // high surrogate followed by ordinary text
+        "\"\\uD800\\u0041\"",  // high surrogate followed by a non-low escape
+        "\"\\uDC00\"",          // lone low surrogate
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++)
+        assert(json_parse(bad[i], strlen(bad[i])) == NULL);
+
+    jv *paired = json_parse("\"\\uD83D\\uDE00\"", 14);
+    assert(paired != NULL);
+    assert(!strcmp(paired->str, "\xF0\x9F\x98\x80"));
+    jv_free(paired);
+
+    char out[4];
+    int outn = -1;
+    assert(json_unescape("\\uDC00", 6, out, &outn) == -1);
+    assert(json_unescape("\\uD800x", 7, out, &outn) == -1);
+    assert(json_unescape("\\uD800\\u0041", 12, out, &outn) == -1);
+    assert(json_unescape("\\uD83D\\uDE00", 12, out, &outn) == 12);
+    assert(outn == 4 && !memcmp(out, "\xF0\x9F\x98\x80", 4));
+}
+
+static void test_json_rejects_ill_formed_raw_utf8(void) {
+    const char *bad[] = {
+        "\"\x80\"",             // bare continuation
+        "\"\xC0\x80\"",         // overlong NUL
+        "\"\xED\xA0\x80\"",     // UTF-8 encoding of a surrogate
+        "\"\xF4\x90\x80\x80\"", // beyond U+10FFFF
+        "\"\xE2\x82\"",         // truncated sequence
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++)
+        assert(json_parse(bad[i], strlen(bad[i])) == NULL);
+
+    const char good[] = "\"caf\xC3\xA9 \xF0\x9F\x98\x80\"";
+    jv *v = json_parse(good, strlen(good));
+    assert(v != NULL);
+    jv_free(v);
+}
+
 static void test_json_close_partial_string(void) {
     jsonv v;
     jsonv_init(&v);
@@ -1086,6 +1127,8 @@ static void test_escape_replaces_ill_formed_utf8(void) {
 
 int main(void) {
     test_strict_bounded_numbers();
+    test_json_rejects_unpaired_utf16_surrogates();
+    test_json_rejects_ill_formed_raw_utf8();
     test_json_close_partial_string();
     test_schema_required_close();
     test_leading_whitespace_is_refused_but_interior_is_kept();

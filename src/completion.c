@@ -955,6 +955,10 @@ static bool request_number(jv *req, const char *key, double dflt,
     return true;
 }
 
+static bool whole_number(double n) {
+    return n == floor(n);
+}
+
 // negative sentinels: MT_UNLIMITED clamps to the context window later,
 // the other sentinels are request errors with distinct messages
 enum { MT_NEGATIVE = -4, MT_BAD_TYPE = -3, MT_NON_FINITE = -2,
@@ -970,6 +974,7 @@ static int request_max_tokens(jv *req, int dflt) {
     if (!isfinite(v->num)) return MT_NON_FINITE;
     if (v->num < 0) return MT_NEGATIVE;
     if (v->num > INT_MAX) return INT_MAX;
+    if (!whole_number(v->num)) return MT_BAD_TYPE;
     return (int)v->num;
 }
 
@@ -978,7 +983,8 @@ bool request_keep_alive(jv *req, bool *present, int *seconds) {
     if (!absent(v) && v->type != J_NUM) return false;
     *present = !absent(v);
     if (!*present) return true;
-    if (!isfinite(v->num) || v->num > INT_MAX) return false;
+    if (!isfinite(v->num) || v->num > INT_MAX || !whole_number(v->num))
+        return false;
     *seconds = v->num < 0 ? -1 : (int)v->num;
     return true;
 }
@@ -1129,6 +1135,15 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         send_error(fd, 400, "numeric sampling parameter out of range");
         return;
     }
+    // These fields are represented by integer engine state. Accepting 2.5 and
+    // silently truncating it to 2 makes the response use settings the caller
+    // did not request. Keep seed strictly below 2^64 before its uint64_t cast;
+    // converting that boundary value is undefined C behavior.
+    if (!whole_number(top_k) || !whole_number(seed) ||
+        seed >= 18446744073709551616.0) {
+        send_error(fd, 400, "numeric sampling parameter out of range");
+        return;
+    }
     uint64_t rng_state = s->smp.rng;
     s->smp = s->smp_base;
     s->smp.rng = rng_state;
@@ -1171,14 +1186,16 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     }
     double lp_num = 0;
     if (api == API_TEXT &&
-        !request_number(req, "logprobs", 0, 0, 20, &lp_num)) {
+        (!request_number(req, "logprobs", 0, 0, 20, &lp_num) ||
+         !whole_number(lp_num))) {
         send_error(fd, 400, "logprobs out of range");
         return;
     }
     bool want_lp = (api == API_CHAT && lp_on) ||
                    (api == API_TEXT && lp_num > 0);
     if (api == API_CHAT && want_lp &&
-        !request_number(req, "top_logprobs", 0, 0, 20, &lp_num)) {
+        (!request_number(req, "top_logprobs", 0, 0, 20, &lp_num) ||
+         !whole_number(lp_num))) {
         send_error(fd, 400, "top_logprobs out of range");
         return;
     }
@@ -1195,8 +1212,9 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         return;
     }
     double cl_probe_d = 32;
-    if (cl_on && !request_number(req, "choice_logprobs_probe", 32, 8, 64,
-                                 &cl_probe_d)) {
+    if (cl_on && (!request_number(req, "choice_logprobs_probe", 32, 8, 64,
+                                  &cl_probe_d) ||
+                  !whole_number(cl_probe_d))) {
         send_error(fd, 400, "choice_logprobs_probe out of range (8..64)");
         return;
     }

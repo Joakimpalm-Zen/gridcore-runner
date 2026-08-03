@@ -13,6 +13,8 @@
 
 typedef struct { const char *p, *end; int depth; } jcur;
 
+static size_t utf8_seq(const char *s, size_t i, size_t n);
+
 static void skip_ws(jcur *c) {
     while (c->p < c->end && (*c->p == ' ' || *c->p == '\t' ||
                              *c->p == '\n' || *c->p == '\r')) c->p++;
@@ -104,10 +106,10 @@ int json_unescape(const char *s, size_t n, char out[4], int *outn) {
                 if (lo >= 0xDC00 && lo <= 0xDFFF) {
                     cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                     used = 12;
-                }
+                } else return -1;
             }
-        }
-    }
+        } else return -1;
+    } else if (cp >= 0xDC00 && cp <= 0xDFFF) return -1;
     *outn = u8_emit((unsigned)cp, out);
     return (int)used;
 }
@@ -148,13 +150,15 @@ static char *parse_string(jcur *c) {
                     int cp = hex4(c->p);
                     if (cp < 0) goto fail;
                     c->p += 4;
-                    if (cp >= 0xD800 && cp <= 0xDBFF && c->p + 6 <= c->end &&
-                        c->p[0] == '\\' && c->p[1] == 'u') {
+                    if (cp >= 0xD800 && cp <= 0xDBFF) {
+                        if (c->p + 6 > c->end || c->p[0] != '\\' ||
+                            c->p[1] != 'u') goto fail;
                         int lo = hex4(c->p + 2);
-                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                            c->p += 6;
-                        }
+                        if (lo < 0xDC00 || lo > 0xDFFF) goto fail;
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        c->p += 6;
+                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                        goto fail;
                     }
                     m += u8_emit((unsigned)cp, out + m);
                     break;
@@ -163,9 +167,15 @@ static char *parse_string(jcur *c) {
             }
         } else if (ch < 0x20) {
             goto fail;
-        } else {
+        } else if (ch < 0x80) {
             out[m++] = (char)ch;
             c->p++;
+        } else {
+            size_t len = utf8_seq(c->p, 0, (size_t)(c->end - c->p));
+            if (len == 0) goto fail;
+            memcpy(out + m, c->p, len);
+            m += len;
+            c->p += len;
         }
     }
 fail:
