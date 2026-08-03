@@ -1,0 +1,11 @@
+{
+  "schema_version": "gridcore.runner.sensitivity-floor.v1",
+  "model": "models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+  "mode": "runner f16-KV vs runner q8-KV",
+  "tokens_per_prompt": 48,
+  "prompts": 16,
+  "identical": 4,
+  "mean_tokens_before_divergence": 22.19,
+  "max_logprob_delta": 0.4596,
+  "mean_logprob_delta": 0.03975
+}

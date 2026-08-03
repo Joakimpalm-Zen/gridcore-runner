@@ -706,11 +706,14 @@ Tokenizer output is checked against each model's own HuggingFace reference
 tokenizer over the committed 721-string corpus in
 `tests/fixtures/tokenizer-corpus.txt` (regenerate with
 `scripts/tokenizer-corpus.py`, run with `scripts/difftok.py`). Exact for
-SmolLM2-1.7B, Qwen2.5-32B, Qwen3-4B, Ornith-1.0-9B and gemma-4-12B; 1 of 721
-for Llama-3.2-3B and gemma-3-4b, 2 of 721 for Phi-3.5-mini, and 3 of 721 for
-Apertus-8B-Instruct and TinyLlama-1.1B. TinyLlama's three are special-token
-literal/adjacency cases; Apertus's three are combining-mark sequences
-(Devanagari and Thai) on the `tekken` path. The rest are not individually
+SmolLM2-1.7B, Qwen2.5-32B, Qwen3-4B, Ornith-1.0-9B, gemma-4-12B,
+Mistral-Nemo and — since 2026-08-03 — Apertus-8B-Instruct; 1 of 721 for
+Llama-3.2-3B and gemma-3-4b, 2 of 721 for Phi-3.5-mini, and 3 of 721 for
+TinyLlama-1.1B, whose three are special-token literal/adjacency cases.
+Apertus's three were combining-mark sequences (Devanagari and Thai) on the
+`tekken` path and are fixed: that regex is the only supported one carrying
+`\p{M}` in its letter classes, so a virama or a Thai vowel sign has to stay
+inside a letter run rather than end it. The rest are not individually
 characterised yet — each is a handful of strings out of 721, and the count is
 what the compatibility manifest records.
 

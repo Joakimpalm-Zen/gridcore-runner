@@ -112,9 +112,18 @@ independent-engine gate compares logits only over the shared history. The
 committed reports under `tests/compatibility/out/qwen3-30b-a3b-*` record both
 the passing gate and the exact point where generated text diverges.
 
-The model manifest deliberately excludes Apertus from forward-pass coverage.
-Runner supports its `tekken` tokenizer and chat template, but not the Apertus
-tensor architecture; treating it as a Qwen2 model would be a false positive.
+Apertus joined forward-pass coverage on 2026-08-03. The architecture landed
+2026-08-02 (`d7eda52`) but was only checked for shape, not for numbers, and it
+was **wrong**: the first run against a real checkpoint produced fluent-looking
+gibberish, because `ggml_xielu` transforms alpha_n and alpha_p before
+`op_xielu` ever sees them and runner had transcribed only the leaf function.
+See the CHANGELOG. It carries `load` and `chat` but **not** `greedy_reference`,
+for the same measured reason as the two models below: its own floor is a
+0.4596-nat max log-probability delta with 4 of 16 prompts identical, against a
+0.4148-nat cross-engine delta — the disagreement with llama.cpp is smaller than
+the model's disagreement with itself under a KV precision change. Evidence:
+`out/sensitivity-apertus-2026-08-03.json`,
+`out/divergence-apertus-2026-08-03.json`.
 
 The manifest also, since 2026-08-01, deliberately omits `greedy_reference` for
 `gemma-4-26b-a4b-it-q4_0`. This is a different kind of omission from Apertus:

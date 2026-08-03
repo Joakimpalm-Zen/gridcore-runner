@@ -19,9 +19,19 @@ typedef enum {
 // Plain SwiGLU here is silently-wrong output, which is why it is its own op.
 enum { ACT_SILU = 0, ACT_GELU = 1, ACT_SWIGLU_OAI = 2, ACT_XIELU = 3 };
 
+// softplus, in ggml's exact form including the linear cutover at 20 — above
+// it log1p(exp(x)) is the identity to float precision and expf overflows.
+static inline float softplus_f32(float x) {
+    return x > 20.0f ? x : logf(1.0f + expf(x));
+}
+
 // xIELU (Apertus). Transcribed from ggml's op_xielu:
 //   x >  0 : alpha_p * x^2 + beta * x
 //   x <= 0 : (expm1(min(x, eps)) - x) * alpha_n + beta * x
+// `an` and `ap` are the EFFECTIVE parameters, already through the transform
+// ggml_xielu applies when it builds the node (softplus, and beta folded into
+// alpha_n); model_load does that once per layer. Passing the file's raw values
+// here is the bug this signature exists to prevent -- see model.c.
 // Unlike every other activation here it is UNGATED — Apertus has no
 // ffn_gate tensor, so the FFN is up -> xielu -> down.
 static inline float xielu(float x, float an, float ap, float b, float eps) {
@@ -122,10 +132,11 @@ gguf_tensor moe_expert_weight(const layer_t *ly, int which, int e,
 //   PER-SEQUENCE (state side) — written by every forward pass. Never share:
 //   two sequences writing one KV cache is silent cross-contamination.
 //
-// The struct itself is not yet split into two types. Doing that changes the
-// public interface every caller uses (server slots, model swap, speculative
-// draft models), so the sharing was pushed into the backend first, where the
-// duplication actually cost gigabytes.
+// The struct is still one type, but the OWNERSHIP is split: everything in the
+// immutable section belongs to a refcounted `model_weights` record shared by
+// every instance loaded from the same file with the same weight-side
+// parameters, and the pointers here alias into it. Keeping one struct is what
+// let that happen without touching a single field access in the backends.
 typedef struct {
     // ---- immutable: file and geometry ----
     gguf_file gf;

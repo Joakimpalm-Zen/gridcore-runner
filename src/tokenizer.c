@@ -688,12 +688,23 @@ static bool cp_lower(uint32_t c) {
 }
 
 // [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}] -- a letter that is not lowercase
+// Used only by tekken, and \p{M} is the reason they exist separately. The
+// comments here have always spelled the class with \p{M} in it, but cp_letter
+// deliberately excludes combining marks -- correct for llama3, qwen2 and
+// smollm, whose regexes all say a plain \p{L}+, and wrong for tekken, which
+// carries \p{M} in both its letter classes:
+//
+//   [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+
+//
+// so a Devanagari virama or a Thai vowel sign must stay INSIDE the run rather
+// than ending it. Excluding them split three of the 721 differential strings
+// away from the reference: नमस्ते, हिन्दी and สวัสดี.
 static bool cp_letter_upperish(uint32_t c) {
-    return cp_letter(c) && !cp_lower(c);
+    return (cp_letter(c) || cp_mark(c)) && !cp_lower(c);
 }
 // [\p{Ll}\p{Lm}\p{Lo}\p{M}] -- a letter that is not uppercase
 static bool cp_letter_lowerish(uint32_t c) {
-    return cp_letter(c) && !cp_upper(c);
+    return (cp_letter(c) || cp_mark(c)) && !cp_upper(c);
 }
 
 // The two letter alternatives of the tekken regex, tried in order at i:
@@ -710,7 +721,9 @@ static int tekken_letters(const uint32_t *cp, int i, int ncp) {
     int s = i;
     if (!cp_letter(cp[i]) && !cp_digit(cp[i]) && cp[i] != '\r' && cp[i] != '\n')
         s = i + 1;
-    if (s >= ncp || !cp_letter(cp[s])) return i;
+    // a mark can open the run under tekken's classes, so the fast bail has to
+    // admit one too or the loops below never get to see it
+    if (s >= ncp || !(cp_letter(cp[s]) || cp_mark(cp[s]))) return i;
 
     // upperish* is greedy, but must leave at least one lowerish for alt 1.
     // Backtracking is unnecessary: a lowerish that is also upperish (caseless)

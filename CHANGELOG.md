@@ -5,6 +5,58 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Apertus generated gibberish, and `0.1.5-alpha` shipped it that way.** The
+  architecture landed in `d7eda52` with the honest caveat that it was "not yet
+  verified against a real checkpoint — the shape is right, the numbers are
+  unconfirmed". They were wrong. The first run against
+  `Apertus-8B-Instruct-2509-Q4_K_M` produced
+  *"The capital of Switzerland isus ROIgg Sylosl Suombe…"* where llama.cpp on
+  the same file produces *"Bern, which is also the country's largest city"*.
+
+  `ggml_xielu` does not pass the file's parameters to `op_xielu`. It transforms
+  them when it builds the node — `alpha_p` becomes `softplus(alpha_p)`, and
+  `alpha_n` becomes `beta + softplus(alpha_n)` — and only the transformed
+  values reach the activation. Runner transcribed `op_xielu`, the leaf
+  function, and fed it the raw values. **Read the graph, not the op**, which is
+  the second time this exact lesson has been recorded here (the E-series PLE
+  injection point was the first).
+
+  It hid well. `softplus` is the identity above ~20 to float precision, and
+  most of Apertus-8B's alphas are in the tens or hundreds — layer 0 has
+  `alpha_p` 166.0, which needs no correction at all. The middle layers are
+  where it bites: layer 15 has `alpha_n` **0.00296** against an effective
+  **1.19463**, a factor of 403. Folded at load time, once per layer, so the
+  hot path is unchanged.
+
+  Now verified rather than asserted. The residual disagreement with llama.cpp
+  is **below the model's own noise floor**: a max log-probability delta of
+  0.4148 nats cross-engine against 0.4596 nats for runner-versus-runner under
+  a KV precision change, with 7 of 16 divergences landing on a tie. So Apertus
+  carries `load` and `chat` but not `greedy_reference`, for the same measured
+  reason as gemma-4-26B and gemma-4-E4B. Evidence:
+  `tests/compatibility/out/sensitivity-apertus-2026-08-03.json` and
+  `divergence-apertus-2026-08-03.json`.
+
+- **Apertus tokenizer: 3 of 721 → 0 of 721.** The three known divergences
+  (नमस्ते, हिन्दी, สวัสดี) were combining-mark sequences, and the cause was a
+  correct fix applied one regex too widely. `cp_mark` exists because treating
+  every non-symbol codepoint above ASCII as a letter glued Indic and Thai vowel
+  signs into `\p{L}+` runs — right for `llama-bpe`, `qwen2` and `smollm`, whose
+  regexes all spell a plain `\p{L}+`. **`tekken` is the exception**: it carries
+  `\p{M}` in both letter classes,
+
+  ```
+  [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+
+  ```
+
+  so a virama or a Thai vowel sign has to stay *inside* the run. The comments
+  on `cp_letter_upperish` / `cp_letter_lowerish` had spelled the class with
+  `\p{M}` in it all along; only the code disagreed. Marks now count as letters
+  in the tekken split alone. Verified against the HuggingFace references:
+  Apertus 0/721, and Mistral-Nemo — the other `tekken` model — still 0/721,
+  with Qwen2.5-7B and gemma-4-E4B spot-checked at 0/721 to confirm the other
+  families are untouched.
+
 - **The merge loops were quadratic in the length of one segment.** Phase 5
   asked for shared *tokenized* prefixes, on the theory that re-tokenizing the
   same system prompt every request was the cost. Measuring first found

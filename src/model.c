@@ -954,6 +954,24 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 dst[XK[k].off][i] = v;
             }
         }
+        // The file's alpha_n and alpha_p are NOT what the activation consumes.
+        // ggml_xielu transforms them when it builds the node — alpha_p becomes
+        // softplus(alpha_p) and alpha_n becomes beta + softplus(alpha_n) —
+        // and only then does op_xielu see them. Transcribing op_xielu without
+        // that step, which is what runner did, feeds the raw values straight
+        // in. It is invisible wherever the raw value is large, because
+        // softplus saturates to the identity above ~20 and most of Apertus-8B's
+        // alphas are in the tens or hundreds; it is catastrophic in the middle
+        // layers, where layer 15 has alpha_n 0.00296 against an effective
+        // 1.19463 — a factor of 403. The model generated fluent-looking
+        // gibberish.
+        //
+        // Folded here rather than in xielu() so the hot path is unchanged and
+        // the transform happens once per layer instead of once per element.
+        for (int i = 0; i < m->n_layer; i++) {
+            m->xielu_ap[i] = softplus_f32(m->xielu_ap[i]);
+            m->xielu_an[i] = m->xielu_b[i] + softplus_f32(m->xielu_an[i]);
+        }
     }
     if (strcmp(arch, "gemma4") == 0) {
         // gemma4 (reference: llama.cpp src/models/gemma4.cpp): heterogeneous
