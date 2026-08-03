@@ -102,6 +102,7 @@ TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
 TEST_PARSE = $(TEST_BATCH:test-batch%=test-parse%)
 TEST_METAL_OWNERSHIP = $(TEST_BATCH:test-batch%=test-metal-ownership%)
 TEST_MODEL_LOAD_FAILURE = $(TEST_BATCH:test-batch%=test-model-load-failure%)
+TEST_THREAD_DEFAULT = $(TEST_BATCH:test-batch%=test-thread-default%)
 
 # Every module header, so a change to any of them rebuilds. runner.h was one
 # file until 0.1.5; the split (RNR-018) would otherwise have quietly narrowed
@@ -339,6 +340,9 @@ $(TEST_GGUF_GETTERS): tests/test_gguf_getters.c src/gguf.c src/compat.c src/quan
 $(TEST_PARSE): tests/test_parse.c src/compat.c src/compat.h
 	$(CC) $(CFLAGS) -I src tests/test_parse.c src/compat.c -o $@ $(LDFLAGS)
 
+$(TEST_THREAD_DEFAULT): tests/test_thread_default.c src/compat.c src/compat.h
+	$(CC) $(CFLAGS) -I src tests/test_thread_default.c src/compat.c -o $@ $(LDFLAGS)
+
 TEST_MODEL_LOAD_FAILURE_SRC = tests/test_model_load_failure.c src/gguf.c \
                               src/compat.c src/quants.c src/model.c \
                               src/vramreg.c $(GPU_SRC)
@@ -389,6 +393,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
+      $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) runner test.gguf
 	./$(TEST_BIND)
@@ -431,6 +436,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_VRAM_ROLLBACK)
 	./$(TEST_GGUF_GETTERS)
 	./$(TEST_PARSE)
+	./$(TEST_THREAD_DEFAULT)
 	./$(TEST_MODEL_LOAD_FAILURE)
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
@@ -554,7 +560,7 @@ clean:
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
-	      $(TEST_PARSE) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
+	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
 	rm -rf test-attn
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
 	rm -f metal-init-fallback.out metal-init-fallback.err

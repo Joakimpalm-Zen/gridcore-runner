@@ -473,7 +473,6 @@ int main(int argc, char **argv) {
     if (smp.rng == 0) smp.rng = (uint64_t)time(NULL) ^ 0x9E3779B97F4A7C15ull;
 
     if (n_threads <= 0) {
-        int nc = plat_cpu_count();
         // Default to a physical-core proxy (nc/2 under the near-universal 2-way
         // SMT of the many-core x86 boxes this targets), capped so a very large
         // box does not over-spawn. SMT siblings add nothing to a compute-bound
@@ -481,15 +480,14 @@ int main(int argc, char **argv) {
         // no gain. The old min(8,nc) default left big boxes badly underused
         // (measured 32.2s -> 9.9s, a 3.2x speedup, at -t 64 vs -t 8 on a 3B Q4,
         // 64-core box; token-identical across thread counts). Scope a shared box
-        // with --reserve-cpu, or pin exactly with -t. This mirrors the physical-
-        // core cap already used below for the CPU-forced fallback path.
-        n_threads = nc >= 4 ? nc / 2 : nc;
-        if (n_threads > 64) n_threads = 64;
-        if (n_threads < 1) n_threads = 1;
+        // with --reserve-cpu, or pin exactly with -t. On Apple Silicon the
+        // platform layer returns the performance-core count instead of the
+        // logical/2 proxy, because asymmetric cores are not SMT siblings.
+        n_threads = plat_default_thread_count();
         // If the model turns out to be CPU-forced (recurrent qwen3.5 path),
         // model_load may raise a defaulted count to this cap; a pinned -t
         // or CPU reservation leaves it 0 and is never overridden.
-        int cap = nc / 2 < 64 ? nc / 2 : 64;
+        int cap = plat_default_thread_count();
         mp.cpu_fallback_threads = cap > n_threads ? cap : n_threads;
     }
     mp.verbose = verbose;

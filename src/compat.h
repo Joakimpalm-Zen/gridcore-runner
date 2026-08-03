@@ -26,6 +26,7 @@ void  *plat_mmap_ro(const char *path, size_t *size);
 void   plat_munmap(void *p, size_t size);
 
 int         plat_cpu_count(void);
+int         plat_default_thread_count(void);
 uint64_t    plat_ram_bytes(void);
 
 // --- weight residency -----------------------------------------------------

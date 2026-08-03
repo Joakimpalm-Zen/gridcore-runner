@@ -38,6 +38,13 @@ int plat_cpu_count(void) {
     return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
 }
 
+int plat_default_thread_count(void) {
+    int nc = plat_cpu_count();
+    int n = nc >= 4 ? nc / 2 : nc;
+    if (n > 64) n = 64;
+    return n > 0 ? n : 1;
+}
+
 uint64_t plat_ram_bytes(void) {
     MEMORYSTATUSEX ms = { .dwLength = sizeof(ms) };
     GlobalMemoryStatusEx(&ms);
@@ -295,6 +302,26 @@ void plat_munmap(void *p, size_t size) {
 int plat_cpu_count(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
+}
+
+int plat_default_thread_count(void) {
+    int nc = plat_cpu_count();
+    bool perf_known = false;
+#ifdef __APPLE__
+    int perf = 0;
+    size_t len = sizeof(perf);
+    if (sysctlbyname("hw.perflevel0.physicalcpu", &perf, &len, NULL, 0) == 0 &&
+        len == sizeof(perf) && perf > 0) {
+        nc = perf;
+        perf_known = true;
+    }
+#endif
+    int n = nc >= 4 ? nc / 2 : nc;
+#ifdef __APPLE__
+    if (perf_known) n = nc;
+#endif
+    if (n > 64) n = 64;
+    return n > 0 ? n : 1;
 }
 
 uint64_t plat_ram_bytes(void) {
