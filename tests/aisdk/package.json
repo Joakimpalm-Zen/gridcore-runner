@@ -1,0 +1,12 @@
+{
+  "name": "gridcore-runner-aisdk-smoke",
+  "private": true,
+  "type": "module",
+  "description": "Vercel AI SDK conformance smoke. Not part of the C build; see smoke.mjs.",
+  "scripts": { "smoke": "node smoke.mjs" },
+  "dependencies": {
+    "ai": "^7.0.48",
+    "@ai-sdk/openai": "^3.0.0",
+    "zod": "^4.0.0"
+  }
+}

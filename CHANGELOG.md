@@ -19,8 +19,18 @@ protocol and CLI may still change between alpha releases.
   payload decodes to the same vector as the float form, which merely accepting
   the field would not pass.
 
+- **A second, independent client too: the Vercel AI SDK**
+  (`tests/aisdk/smoke.mjs`, driven by `tests/conformance/test_ai_sdk.py`).
+  `ai` + `@ai-sdk/openai` is what most local-model tooling actually uses — Cline,
+  Continue, anything on Next.js — and it has its own request builder and stream
+  parser, so it is a real second opinion rather than a restatement of the first.
+  Eight cases: text, streamed text, streamed usage, a tool call, a two-turn tool
+  round trip with the result replayed, `generateObject` typechecked against a
+  zod schema, batched embeddings, and a typed error. All pass. Skipped unless
+  `tests/aisdk/node_modules` exists, so CI gains no npm step.
+
 - **The official OpenAI SDK now has conformance coverage**
-  (`tests/conformance/test_openai_sdk.py`, 11 tests, skipped when the package is
+  (`tests/conformance/test_openai_sdk.py`, 10 tests, skipped when the package is
   absent — the same rule `test_messages.py` applies to `anthropic`, so CI gains
   no network-installed dependency). It covers models, buffered and streamed
   chat, `stream_options.include_usage`, tool calls and the tool-result second
