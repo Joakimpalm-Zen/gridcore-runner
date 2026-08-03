@@ -118,6 +118,14 @@ SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sampl
 runner: $(SRC) $(HDR) src/kernels_ptx.h
 	$(CC) $(CFLAGS) $(SRC) -o $@ $(LDFLAGS)
 
+# Local negative controls for scripts/write-stall.py. These compile from the
+# same sources and embedded kernels as runner; they are not release artifacts.
+runner-no-write-timeout: $(SRC) $(HDR) src/kernels_ptx.h
+	$(CC) $(CFLAGS) -DRUNNER_TEST_NO_WRITE_TIMEOUT $(SRC) -o $@ $(LDFLAGS)
+
+runner-sigpipe-default: $(SRC) $(HDR) src/kernels_ptx.h
+	$(CC) $(CFLAGS) -DRUNNER_TEST_SIGPIPE_DEFAULT $(SRC) -o $@ $(LDFLAGS)
+
 debug: $(SRC) $(HDR)
 	$(CC) -O0 -g -fsanitize=address,undefined -std=gnu11 -Wall $(SRC) -o runner-debug $(LDFLAGS)
 

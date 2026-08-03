@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#ifdef __linux__
+#include <netinet/tcp.h>
+#endif
 
 #ifdef _WIN32
 void sock_init(void) {
@@ -36,12 +39,20 @@ void sock_recv_timeout(sock_t fd, double s) {
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof(ms));
 }
 void sock_send_timeout(sock_t fd, double s) {
+#ifdef RUNNER_TEST_NO_WRITE_TIMEOUT
+    (void)fd; (void)s;
+#else
     DWORD ms = (DWORD)(s * 1000.0);
     if (ms == 0) ms = 1;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms, sizeof(ms));
+#endif
 }
 #else
-void sock_init(void) { signal(SIGPIPE, SIG_IGN); }
+void sock_init(void) {
+#ifndef RUNNER_TEST_SIGPIPE_DEFAULT
+    signal(SIGPIPE, SIG_IGN);
+#endif
+}
 int  sock_recv(sock_t fd, char *buf, size_t n) { return (int)read(fd, buf, n); }
 int  sock_send(sock_t fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
 int  sock_peek(sock_t fd, char *buf, size_t n) { return (int)recv(fd, buf, n, MSG_PEEK); }
@@ -55,11 +66,24 @@ void sock_recv_timeout(sock_t fd, double s) {
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 void sock_send_timeout(sock_t fd, double s) {
+#ifdef RUNNER_TEST_NO_WRITE_TIMEOUT
+    (void)fd; (void)s;
+#else
     struct timeval tv;
     tv.tv_sec = (time_t)s;
     tv.tv_usec = (suseconds_t)((s - (double)tv.tv_sec) * 1e6);
     if (tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1000;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#ifdef __linux__
+    // SO_SNDTIMEO bounds one blocking write, but Linux can keep a zero-window
+    // connection alive indefinitely through probes / tiny partial progress.
+    // TCP_USER_TIMEOUT gives the same 30 s policy to data stranded by a peer
+    // that advertises no receive window, which is the real dead-reader stall.
+    unsigned int ms = (unsigned int)(s * 1000.0);
+    if (ms == 0) ms = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &ms, sizeof(ms));
+#endif
+#endif
 }
 #endif
 

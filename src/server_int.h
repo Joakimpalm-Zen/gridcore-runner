@@ -85,6 +85,7 @@ typedef struct {
     const char *preset_name;
     // default wall-clock ceiling per generation, 0 = none (RUNNER_REQUEST_TIMEOUT)
     double      req_timeout;
+    bool        ignore_eos;   // process-level --ignore-eos, including reloads
 } server_state;
 
 extern server_state SV;

@@ -1,5 +1,7 @@
 runner
 runner.exe
+runner-no-write-timeout
+runner-sigpipe-default
 runner-debug
 runner-debug.exe
 test-json-schema

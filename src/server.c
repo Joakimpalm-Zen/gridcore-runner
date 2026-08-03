@@ -874,7 +874,8 @@ static bool stop_was_requested(void) { return win_stop_requested != 0; }
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults,
                const sampler_override *ov, int port, int parallel,
-               int n_threads, int ttl, const char *draft_path, int draft_k) {
+               int n_threads, int ttl, const char *draft_path, int draft_k,
+               bool ignore_eos) {
     sock_init();
     // The shared server state gets a lifetime, and it is this call. Everything
     // below sets fields on SV and the teardown at the bottom releases them, but
@@ -902,6 +903,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     listener_fd = -1;
 #endif
     install_stop_handlers(); // resets the stop flag + listener on both platforms
+    SV.ignore_eos = ignore_eos;
     if (ov) SV.ov = *ov;
     // `defaults` arrives already resolved against the preloaded model; in swap
     // mode there is no model yet and swap_to resolves per load
@@ -1120,6 +1122,9 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                 fprintf(stderr, "error: out of memory initializing slot %d engine\n", i);
                 return 1;
             }
+            // CLI generation applies this after engine_init; server slots are
+            // separate engines and must receive the same process-level flag.
+            s->e.ignore_eos = ignore_eos;
             if (draft_path) {
                 // per-slot draft context: each slot owns a full draft KV;
                 // weights dedupe through the page cache like slot models

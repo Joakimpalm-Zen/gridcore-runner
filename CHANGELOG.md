@@ -5,6 +5,26 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **The real write-side stall is now reproducible and gated locally.**
+  `scripts/write-stall.py` uses Qwen2.5-7B at 32k context plus a minimum-length
+  structured stream to exceed the actual loopback buffers, and reads the exact
+  connection's `/proc/net/tcp` transmit queue before judging either path. With
+  a 2,304-byte effective client receive buffer, the production timeout run
+  queued **396,365 bytes**, released its socket/slot in **31.062 s**, and served
+  the next request; the SIGPIPE run queued **267,300 bytes**, survived the
+  installed signal disposition, reset the stalled peer, and served again in
+  **1.339 s**.
+
+  The experiment found and fixed two bugs. `--ignore-eos` was silently dropped
+  by `--serve` because only the one-shot engine received it; an EOS-only server
+  fixture now reaches its exact requested limit. And Linux `SO_SNDTIMEO` alone
+  left the measured zero-window slot wedged beyond 50 seconds, so Linux now
+  applies `TCP_USER_TIMEOUT` at the same 30-second bound as well. The timeout-
+  blind negative build stayed wedged at 570,154 queued bytes; the SIGPIPE-
+  default build died with signal 13. RST/FIN attempts produced `ECONNRESET`,
+  not a kernel-delivered SIGPIPE, so the deterministic signal gate injects
+  SIGPIPE only after real queue pressure is proved and records that fact.
+
 - **Published competitor rows now have a scheduled freshness alarm.** A cheap
   weekly workflow reads runtime name/version metadata from the committed
   agent-torture reports and compares each competitor's newest published row

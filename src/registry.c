@@ -189,6 +189,7 @@ int swap_to(const char *want) {
             pthread_mutex_unlock(&SV.swap_mu);
             return SWAP_LOAD_FAILED;
         }
+        s->e.ignore_eos = SV.ignore_eos;
         context_store(s->m->n_ctx);
         if (SV.single && !SV.draft && SV.draft_path) {
             // /unload freed the draft with the target; a draft configured at

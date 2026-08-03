@@ -16,7 +16,9 @@ and delivered to a client that never calls `recv()` once. A SIG_DFL build was
 also constructed and run against these tests; all of them still pass, because
 the write has already completed by the time the peer resets. Producing either
 case needs a real model and a large context, i.e. a `scripts/`-sized experiment
-rather than a conformance test. That is filed rather than faked here.
+rather than a conformance test. `scripts/write-stall.py` is that local Linux
+gate; this fast portable suite deliberately remains the interrupted-client
+half instead of duplicating or weakening it.
 
 What these four do cover is the reachable and still-real half: an interrupted
 client does not kill the process, strand its slot, or corrupt what the server

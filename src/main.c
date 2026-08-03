@@ -16,7 +16,8 @@
 int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults,
                const sampler_override *ov, int port, int parallel,
-               int n_threads, int ttl, const char *draft_path, int draft_k);
+               int n_threads, int ttl, const char *draft_path, int draft_k,
+               bool ignore_eos);
 // quantize_gguf is declared in runner.h
 
 // ---------------------------------------------------------------- misc
@@ -542,7 +543,7 @@ int main(int argc, char **argv) {
     if (serve)
         return server_run(registry ? NULL : &m, registry ? NULL : &tok,
                           model_path, &mp, smp, &ov, port, parallel, n_threads,
-                          ttl, draft_path, draft_k);
+                          ttl, draft_path, draft_k, ignore_eos);
 
     engine e = {0};
     if (!engine_init(&e, &m, &tok, &smp)) { // e zero-initialized at declaration

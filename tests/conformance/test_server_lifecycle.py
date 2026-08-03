@@ -14,6 +14,39 @@ import pytest
 from harness import RunnerServer, find_runner, free_port
 
 
+def test_server_ignore_eos_reaches_each_slot_engine(tmp_path):
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = tmp_path / "eos-only.gguf"
+    subprocess.run([sys.executable, os.path.join(root, "scripts", "make-test-model.py"),
+                    "--suppress-all-but-eos", str(model)], check=True, cwd=root)
+    with RunnerServer(find_runner(root), str(model), ctx=64, parallel=1,
+                      extra_args=["--gpu", "off", "--ignore-eos"]) as srv:
+        payload = json.dumps({
+            "messages": [{"role": "user", "content": "keep going"}],
+            "max_tokens": 20, "temperature": 0,
+            "cache_prompt": False,
+        }).encode()
+        def complete():
+            request = urllib.request.Request(
+                srv.base_url + "/v1/chat/completions", data=payload,
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return json.load(response)
+
+        def assert_ignored():
+            body = complete()
+            assert body["usage"]["completion_tokens"] == 20
+            assert body["choices"][0]["finish_reason"] == "length"
+
+        assert_ignored()
+        # A one-slot server can unload/reload its sole model. engine_init()
+        # runs again on reload and must not silently erase the process flag.
+        with urllib.request.urlopen(srv.base_url + "/unload", data=b"",
+                                    timeout=10) as response:
+            assert json.load(response) == {"status": "ok"}
+        assert_ignored()
+
+
 def test_agent_profile_is_admitted_and_exposed(tmp_path):
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     model = tmp_path / "profile.gguf"
