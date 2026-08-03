@@ -13,6 +13,7 @@ beta = 1, which makes xIELU the identity; `REAL` uses non-trivial parameters.
 Comparing them is what shows the parameters are actually read — a build that
 ignored them would produce the same output for both.
 """
+import json
 import pathlib
 import subprocess
 import sys
@@ -59,10 +60,24 @@ def test_xielu_parameters_are_applied(runner_bin, tmp_path):
     assert ident != real, "xIELU parameters are being ignored"
 
 
-def test_gpu_declines_rather_than_dropping_the_activation(runner_bin, tmp_path):
+def test_cuda_xielu_matches_cpu(runner_bin, tmp_path):
+    caps = json.loads(subprocess.run(
+        [runner_bin, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
+        check=True, text=True).stdout)
+    if (caps.get("gpu") or {}).get("backend") != "cuda":
+        pytest.skip("CUDA device not available")
+
     model = _make(tmp_path, "REAL")
-    err = subprocess.run(
-        [runner_bin, "-m", str(model), "-p", "hi", "-n", "1", "--gpu", "auto"],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        timeout=120).stderr.decode(errors="replace")
-    assert "xIELU" in err and "CPU" in err
+    base = [runner_bin, "-m", str(model), "-p", "hello world", "-n", "12",
+            "--temp", "0"]
+    cpu = subprocess.run(
+        [*base, "--gpu", "off"], cwd=ROOT, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=120)
+    cuda = subprocess.run(
+        [*base, "--gpu", "auto"], cwd=ROOT, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=120)
+    assert cpu.returncode == 0, cpu.stderr.decode(errors="replace")
+    assert cuda.returncode == 0, cuda.stderr.decode(errors="replace")
+    assert b"CUDA backend" in cuda.stderr
+    assert b"xIELU / ungated MLP has no device kernel" not in cuda.stderr
+    assert cuda.stdout == cpu.stdout

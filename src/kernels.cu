@@ -2793,3 +2793,21 @@ extern "C" __global__ void k_q35_delta(float *cv, const float *z,
         yo[j] = yo[j] * rms * norm[j] * (zv / (1.0f + expf(-zv)));
     }
 }
+
+// Apertus ungated activation, matching model.h:xielu(). `an` and `ap` are
+// already the effective softplus-transformed parameters from model_load.
+// Kept after the existing kernels so adding it does not renumber their PTX
+// labels and obscure review of the generated header.
+extern "C" __global__ void k_xielu(float *x, int n, float an, float ap,
+                                    float b, float eps) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float v = x[i];
+        if (v > 0.0f) {
+            x[i] = ap * v * v + b * v;
+        } else {
+            float mn = v < eps ? v : eps;
+            x[i] = (expm1f(mn) - v) * an + b * v;
+        }
+    }
+}

@@ -246,6 +246,25 @@
    "notes": "Per-head attention sinks, clamped alpha-sigmoid GLU (swiglu_oai), router and per-expert biases, MXFP4 expert tensors, SWA layers roped in the GLOBAL regime. CUDA support landed 2026-08-01 with the MXFP4 matmul kernels and the sink-aware attention softmax; before that the backend refused the architecture at load. cpu_cuda measured the same day: 5/5 prompts byte-identical at 16 tokens, eager routing, RUNNER_CUDA_TC=0, on an 8 GB RTX 3070 at a 13/24 layer split - full offload is not reachable for a 12.1 GB model on that card, so the 11 host layers were identical by construction in both runs and the gate covers the device kernels for 13 layers. greedy_reference is NOT declared: after the SWA-rope fix the cross-engine residual is 9/16 prompts token-identical at 16 tokens with a worst-case logprob delta of 0.151, which is BELOW this model's own 0.272 sensitivity floor (runner vs itself under a KV-precision change) - i.e. at the noise floor rather than at token identity, the same standard applied to gemma-4-E4B. Measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap. Evidence: out/gpt-oss-cpu-cuda-2026-08-01.json, out/gpt-oss-swa-rope-fix-2026-08-01.json"
   },
   {
+   "id": "apertus-8b-instruct-2509-q4_k_m",
+   "architecture": "apertus",
+   "family": "Apertus (Swiss AI)",
+   "file": "models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+   "sha256": "5901007f15aec9aabeea401cbe65559671166fc851bbdf8c26f56c2b61e9cd1d",
+   "tokenizer_reference": "swiss-ai/Apertus-8B-Instruct-2509",
+   "reference": {
+    "implementation": "llama.cpp",
+    "revision": "b10076"
+   },
+   "checks": [
+    "load",
+    "tokenizer",
+    "cpu_cuda",
+    "chat"
+   ],
+   "notes": "Source: bartowski/swiss-ai_Apertus-8B-Instruct-2509-GGUF at a5d1742307bf949e2cd95f253e8776539e19d1fc, published filename swiss-ai_Apertus-8B-Instruct-2509-Q4_K_M.gguf. CUDA support is full-graph: 32/32 layers plus output weight on the 8 GB RTX 3070, with 5/5 CPU/CUDA-identical prompts at 128 tokens and RUNNER_CUDA_TC=0. greedy_reference deliberately remains undeclared because the cross-engine delta is below the model's measured self-sensitivity floor. Evidence: out/apertus-cpu-cuda-2026-08-03.json, out/divergence-apertus-2026-08-03.json, out/sensitivity-apertus-2026-08-03.json"
+  },
+  {
    "id": "eurollm-9b-instruct-q4_k_m",
    "architecture": "llama",
    "family": "EuroLLM (EU consortium)",

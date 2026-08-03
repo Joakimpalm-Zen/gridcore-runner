@@ -5,6 +5,12 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Apertus now runs on CUDA.** The dense device forward path handles its
+  ungated `up -> xIELU -> down` FFN and evaluates the four effective per-layer
+  xIELU parameters in a native CUDA kernel. The pinned 8B Q4_K_M checkpoint
+  fully offloaded 32/32 layers on an RTX 3070 and matched CPU greedy output on
+  all five 128-token `cpu_cuda` prompts.
+
 - `--gpu off` now also keeps a speculative draft model on CPU instead of
   silently auto-offloading the draft and consuming VRAM.
 

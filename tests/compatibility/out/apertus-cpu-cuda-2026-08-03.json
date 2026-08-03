@@ -1,0 +1,47 @@
+{
+ "model": "models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 32,
+  "layers_total": 32,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 5,
+ "total": 5,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris, which is also the country's largest city. thus, the answer is Paris. \n\nThe capital of France is Paris. Paris is also the largest city in France. Therefore, the answer is Paris. \n\nThe capital of France is Paris. Paris is the largest city in France. Hence, the answer is Paris. \n\nThe capital of France is Paris. Paris is the largest city in the country. Thus, the answer is Paris. \n\nThe capital of France is Paris. Paris is the largest city in France. In conclusion, the answer is Paris. \n\nThe capital of France is Paris. Paris is",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": "\rdef fibonacci(n):    if n <= 1: then return n    else return fibonacci(n-1) + fibonacci(n-2)    end if    end def    print fibonacci(10)    print fibonacci(20)    print fibonacci(30)    print fibonacci(40)    print fibonacci(50)    print fibonacci(60)    print fibonacci(70)    print fibonacci(80)    print fibonacci(90)    print fibonacci(100)    print fibonacci(110)",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " there lived a young man named Jack. Jack was a kind and gentle soul, but he was also a bit of a dreamer. He spent most of his days lost in thought, imagining all the things he could do if only he had the courage to try.\n\nOne day, Jack met a wise old man who told him about a magical kingdom hidden deep within a dense forest. The kingdom was said to be ruled by a wise and just king who possessed a powerful magic that could grant any wish. Jack was immediately captivated by the idea of this magical kingdom and decided to embark on a journey to find it.\n\nThe journey was long and",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 391\n\nExplanation: To find the product of 17 and 23, we can use the multiplication table or simply multiply the numbers together. 17 * 23 = 391.\n\n### Similar Questions\n\n1. What is 18 * 25?\n2. What is 22 * 33?\n3. What is 19 * 24?\n4. What is 20 * 26?\n5. What is 21 * 27?\n\nThese questions can be solved using basic multiplication skills. For example, to find 1",
+   "gpu": null
+  }
+ ]
+}

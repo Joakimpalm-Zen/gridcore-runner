@@ -357,6 +357,9 @@ test.gguf: scripts/make-test-model.py
 test-ornith-cpu: runner
 	$(PYTHON) -m pytest -q tests/test_ornith_cpu.py
 
+test-apertus: runner
+	$(PYTHON) -m pytest -q tests/test_apertus.py
+
 test-moe: runner
 	$(PYTHON) -m pytest -q tests/test_moe.py
 
@@ -547,7 +550,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		set -e; \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
-		$(PYTHON) -m pytest -q tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_bench_json.py tests/test_mtp_admission.py tests/test_compare_llamacpp.py tests/test_release_check.py tests/test_eseries.py tests/test_stress_models.py; \
+		$(PYTHON) -m pytest -q tests/test_apertus.py tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_bench_json.py tests/test_mtp_admission.py tests/test_compare_llamacpp.py tests/test_release_check.py tests/test_eseries.py tests/test_stress_models.py; \
 		$(MAKE) --no-print-directory test-moe PYTHON=$(PYTHON); \
 	else \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
@@ -685,4 +688,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan
+.PHONY: clean debug ptx test test-apertus test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan

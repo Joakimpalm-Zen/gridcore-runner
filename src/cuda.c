@@ -268,7 +268,7 @@ typedef struct gpu_weights {
     CUdevice    dev;
     CUmodule    mod;
     CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu,
-                f_swiglu, f_add, f_scale;
+                f_swiglu, f_xielu, f_add, f_scale;
     CUfunction  f_q35_split, f_q35_gate, f_q35_conv, f_q35_delta;
     CUfunction  f_attn_dec, f_attn_merge;   // flash-decoding attention (decode)
     // kernel tables indexed by ggml tensor type; sized past the largest
@@ -1027,6 +1027,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_attn_dec,   "k_attn_dec" },  { &w->f_attn_merge, "k_attn_merge" },
             { &w->f_gelu,       "k_gelu_mul" },  { &w->f_add,    "k_add" },
             { &w->f_swiglu,     "k_swiglu_oai_mul" },
+            { &w->f_xielu,      "k_xielu" },
             { &w->f_scale,      "k_scale" },
             { &w->f_q35_split,  "k_q35_split_q" },
             { &w->f_q35_gate,   "k_q35_attn_gate" },
@@ -1333,13 +1334,6 @@ bool gpu_init(model_t *m) {
     // kernels write the FFN output and nothing adds a second dense branch.
     if (m->n_ff_shexp > 0) {
         fprintf(stderr, "gpu: shared-expert MoE has no device path — "
-                "running on CPU\n");
-        goto unsupported;
-    }
-    // xIELU has no device kernel, and an ungated MLP has no device path
-    // either (the dense FFN encoder always issues a gate matvec).
-    if (m->ffn_act == ACT_XIELU) {
-        fprintf(stderr, "gpu: xIELU / ungated MLP has no device kernel — "
                 "running on CPU\n");
         goto unsupported;
     }
@@ -1874,6 +1868,15 @@ static bool enc_actmul(gpu_t *g, model_t *m, CUdeviceptr a, CUdeviceptr b, int n
                  : m->ffn_act == ACT_GELU       ? g->sw->f_gelu
                                                 : g->sw->f_silu;
     return launch(g, f, (n + 255) / 256, 1, 1, 256, p);
+}
+
+// Apertus's dense FFN is ungated: up -> xIELU -> down. The four effective
+// parameters were transformed once at model load and are passed by value for
+// the current layer, matching the CPU xielu() helper without device tables.
+static bool enc_xielu(gpu_t *g, CUdeviceptr x, int n,
+                      float an, float ap, float b, float eps) {
+    void *p[] = { &x, &n, &an, &ap, &b, &eps };
+    return launch(g, g->sw->f_xielu, (n + 255) / 256, 1, 1, 256, p);
 }
 
 // Per-sequence teardown. The shared weights are not touched here beyond
@@ -2881,11 +2884,23 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && gpu_moe_ffn(g, m, ly, tn, xdim);  // writes FFN output into g->xb
             prof_mark(g, PH_MATVEC);
         } else {
-        ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
-        ok = ok && enc_mv(g, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
-        prof_mark(g, PH_MATVEC);
-        ok = ok && enc_actmul(g, m, g->hb, g->hb2, tn * m->n_ff);
-        prof_mark(g, PH_ELEM);
+        if (!ly->w_gate) {
+            ok = ok && enc_mv(g, m, ly->w_up, g->xb, g->hb,
+                              n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
+            prof_mark(g, PH_MATVEC);
+            ok = ok && enc_xielu(g, g->hb, tn * m->n_ff,
+                                 m->xielu_an[l], m->xielu_ap[l],
+                                 m->xielu_b[l], m->xielu_eps[l]);
+            prof_mark(g, PH_ELEM);
+        } else {
+            ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,
+                              n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
+            ok = ok && enc_mv(g, m, ly->w_up, g->xb, g->hb2,
+                              n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
+            prof_mark(g, PH_MATVEC);
+            ok = ok && enc_actmul(g, m, g->hb, g->hb2, tn * m->n_ff);
+            prof_mark(g, PH_ELEM);
+        }
         ok = ok && enc_mv(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
         prof_mark(g, PH_MATVEC);
         }

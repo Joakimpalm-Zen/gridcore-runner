@@ -117,13 +117,17 @@ Apertus joined forward-pass coverage on 2026-08-03. The architecture landed
 was **wrong**: the first run against a real checkpoint produced fluent-looking
 gibberish, because `ggml_xielu` transforms alpha_n and alpha_p before
 `op_xielu` ever sees them and runner had transcribed only the leaf function.
-See the CHANGELOG. It carries `load` and `chat` but **not** `greedy_reference`,
-for the same measured reason as the two models below: its own floor is a
-0.4596-nat max log-probability delta with 4 of 16 prompts identical, against a
-0.4148-nat cross-engine delta — the disagreement with llama.cpp is smaller than
-the model's disagreement with itself under a KV precision change. Evidence:
+See the CHANGELOG. It carries `load`, `cpu_cuda`, and `chat` but **not**
+`greedy_reference`, for the same measured reason as the two models below: its
+own floor is a 0.4596-nat max log-probability delta with 4 of 16 prompts
+identical, against a 0.4148-nat cross-engine delta — the disagreement with
+llama.cpp is smaller than the model's disagreement with itself under a KV
+precision change. Evidence:
 `out/sensitivity-apertus-2026-08-03.json`,
-`out/divergence-apertus-2026-08-03.json`.
+`out/divergence-apertus-2026-08-03.json`. CUDA support followed on 2026-08-03:
+the pinned Q4_K_M artifact fully offloaded 32/32 layers on an RTX 3070 and
+matched CPU greedy output on 5/5 prompts at 128 tokens. Evidence:
+`out/apertus-cpu-cuda-2026-08-03.json`.
 
 The manifest also, since 2026-08-01, deliberately omits `greedy_reference` for
 `gemma-4-26b-a4b-it-q4_0`. This is a different kind of omission from Apertus:
