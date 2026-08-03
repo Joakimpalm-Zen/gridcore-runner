@@ -81,6 +81,22 @@ static char *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
+// One-shot and interactive CLI state has a shorter lifetime than the process
+// in embedding/tests. Keep its teardown explicit instead of relying on exit(2)
+// to reclaim it; that also makes the documented sanitizer command a real leak
+// gate. Server mode owns and frees the same objects inside server_run().
+static void cli_cleanup(engine *e, int32_t *toks, tokenizer *tok, model_t *m) {
+    if (e) {
+        schema_free((snode *)e->schema);
+        if (e->dm) { model_free(e->dm); free(e->dm); }
+        free(e->hist);
+    }
+    free(toks);
+    tokenizer_free(tok);
+    model_free(m);
+    prefix_cache_clear();
+}
+
 static char *unescape(const char *s) {
     char *out = malloc(strlen(s) + 1);
     if (!out) { fprintf(stderr, "error: out of memory\n"); exit(1); }
@@ -213,6 +229,7 @@ static int chat_cb(void *ud, const char *bytes, int n) {
 
 int main(int argc, char **argv) {
     const char *model_path = NULL, *prompt = NULL, *system_prompt = NULL;
+    char *owned_prompt = NULL;
     const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
     const char *quant_out = NULL, *quant_type = "q4_0";
     int n_predict = 256, n_threads = 0, tmpl = -1, reserve_cpu_pct = 0;
@@ -446,7 +463,7 @@ int main(int argc, char **argv) {
         memcpy(fbuf + plen, fdata, flen);
         fbuf[plen + flen] = 0;
         free(fdata);
-        prompt = fbuf;
+        prompt = owned_prompt = fbuf;
     }
     if (!prompt && !interactive && !serve && !quant_out && !bench_json) {
         fprintf(stderr, "error: need -p PROMPT, -i, or --serve\n");
@@ -540,10 +557,13 @@ int main(int argc, char **argv) {
         sampler_resolve(&smp, NULL, NULL, &ov);
     }
 
-    if (serve)
-        return server_run(registry ? NULL : &m, registry ? NULL : &tok,
-                          model_path, &mp, smp, &ov, port, parallel, n_threads,
-                          ttl, draft_path, draft_k, ignore_eos);
+    if (serve) {
+        int rc = server_run(registry ? NULL : &m, registry ? NULL : &tok,
+                            model_path, &mp, smp, &ov, port, parallel, n_threads,
+                            ttl, draft_path, draft_k, ignore_eos);
+        free(owned_prompt);
+        return rc;
+    }
 
     engine e = {0};
     if (!engine_init(&e, &m, &tok, &smp)) { // e zero-initialized at declaration
@@ -659,6 +679,8 @@ int main(int argc, char **argv) {
                n_prompt / (ptime > 0 ? ptime : 1e-9),
                n_gen / (gtime > 0 ? gtime : 1e-9), ptime, gtime);
         free(p);
+        cli_cleanup(&e, toks, &tok, &m);
+        free(owned_prompt);
         return 0;
     }
 
@@ -694,6 +716,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "\nprompt: %d tok, %.2f tok/s | gen: %d tok, %.2f tok/s\n",
                 n_prompt, n_prompt / (ptime > 0 ? ptime : 1e-9),
                 n_gen, n_gen / (gtime > 0 ? gtime : 1e-9));
+        cli_cleanup(&e, toks, &tok, &m);
+        free(owned_prompt);
         return 0;
     }
 
@@ -746,5 +770,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[%d tok, %.1f tok/s]\n",
                 n_gen, n_gen / (gtime > 0 ? gtime : 1e-9));
     }
+    cli_cleanup(&e, toks, &tok, &m);
+    free(owned_prompt);
     return 0;
 }

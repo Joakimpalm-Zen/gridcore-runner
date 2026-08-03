@@ -5,6 +5,12 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **One-shot and interactive CLI runs now release their model state.** Running
+  the README's `make debug` binary under LeakSanitizer found about 240 KB of
+  tokenizer, runtime, engine-history, schema/draft, and prompt allocations left
+  for process exit. Normal CLI teardown is now explicit, and Linux CI includes
+  a leak-enabled CPU smoke (the CUDA driver itself has process-lifetime noise).
+
 - **The model-shelf stress harness now measures the machine it runs on.** Its
   RAM/VRAM defaults were still hard-coded to the earlier 16 GB / 8 GB test box,
   so tiering and placement recommendations were wrong elsewhere. It now reads

@@ -416,13 +416,18 @@ jobs:
           kill %1
           echo "server spec ok"
       - name: sanitizer build + run
-        # model weights/vocab live for the whole process and are freed by
-        # exit; leak detection would flag them, so keep only error detection
+        # The GPU smoke keeps leak detection off because the loaded driver owns
+        # process-lifetime allocations. The Linux CPU smoke has no such noise
+        # and is the leak gate for CLI-owned model/tokenizer/engine state.
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           make debug
           ./runner-debug -m test.gguf -p "hello" -n 8 --temp 0
+          if [ "$(uname -s)" = Linux ]; then
+            ASAN_OPTIONS=detect_leaks=1 ./runner-debug -m test.gguf \
+              -p "hello" -n 8 --temp 0 --gpu off
+          fi
 
   # libFuzzer harnesses for the hand-written parsers that eat untrusted input.
   # Bounded by design: this is a regression gate that has to finish in a couple
