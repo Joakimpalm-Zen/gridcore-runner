@@ -5,6 +5,27 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **The `test_signal_during_startup` flake did not reproduce, and the test now
+  records enough to chase the next one.** It was seen once on 2026-08-02 at the
+  2 ms delay and estimated at "~1 in 20 runs" from that single sighting — which
+  is the same mistake the earlier speculation flake was corrected for, since
+  one occurrence establishes no rate. Not reproduced in **960 spawns**: 240 on
+  an idle box, 240 with 24 spinners loading it, 120 on the pre-Phase-5 binary
+  and 120 on the current one, plus 20 consecutive whole-suite runs (307/307
+  each), whose 240 in-suite spawns are included. Rule of three puts the 95%
+  upper bound on the per-spawn rate at 0.31%, just under the 0.42% the original
+  estimate implies.
+
+  A guess that Phase 5's faster loads had shortened the window was **wrong**
+  and measured as wrong: startup to `listening` is 2.7 ms before and 2.4 ms
+  after, because the test fixture's vocabulary is trivial and the parse saving
+  needs a real one.
+
+  Left open rather than closed — absence over 960 spawns is not proof of a
+  fix. What changed is that the test no longer discards the survivor's output,
+  so a future occurrence says how far startup had got instead of only that it
+  happened.
+
 - **A context that fits but evicts weights now says so.** Refusing a context
   that cannot fit is loud and correct — `-c 1000000` names the 131072 MB of KV
   it would need and exits non-zero. A context that merely *costs layers* was

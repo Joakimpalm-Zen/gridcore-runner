@@ -115,23 +115,38 @@ def test_signal_during_startup_aborts_startup():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))
     exe = find_runner(root)
+    # Output is captured rather than discarded so that a survivor is
+    # DIAGNOSABLE. One was reported on 2026-08-02 at the 2 ms delay and
+    # estimated at "~1 in 20 runs" from that single sighting; it left no
+    # record of how far startup had got, which is most of why it could not be
+    # chased afterwards. It has not been reproduced since — 960 spawns across
+    # idle and loaded boxes and two builds, plus 20 whole-suite runs, all
+    # clean — and a rate cannot be established from one occurrence anyway.
+    # The next one will at least say where it was.
     for delay in [0.0003, 0.0005, 0.0008, 0.001, 0.002, 0.005] * 2:
         proc = subprocess.Popen(
             [exe, "-m", model, "--serve", "--port", str(free_port()),
              "--parallel", "2", "-c", "1024", "--gpu", "off"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
             time.sleep(delay)
             proc.send_signal(signal.SIGTERM)
             try:
                 rc = proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                pytest.fail("server survived a SIGTERM sent %.1fms after spawn"
-                            % (delay * 1000))
+                proc.kill()
+                proc.wait()
+                out = proc.stdout.read().decode("utf-8", "replace")
+                pytest.fail(
+                    "server survived a SIGTERM sent %.1fms after spawn.\n"
+                    "startup output was:\n%s"
+                    % (delay * 1000, out or "  (nothing — it had not got as "
+                       "far as printing anything)"))
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+            proc.stdout.close()
         assert rc in (0, -signal.SIGTERM)
 
 
