@@ -5,6 +5,41 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **A certified `cpu_cuda` claim does not hold at the documented token count,
+  and the tool's default hides it. OWNER call.** Chasing the plan's "Qwen3-4B
+  CPU/GPU divergence at token 24" turned up something broader.
+
+  `docs/compatibility-program.md` states the contract as *"Exact 128-token
+  identity is required between Runner CPU and GPU."* `scripts/cpu_cuda_check.py`
+  defaults to **`--tokens 16`**. On Qwen3-4B-Q4_K_M — which declares `cpu_cuda`
+  and whose file matches the manifest's pinned sha256 — the two answers differ:
+
+  | tokens | result |
+  |---|---|
+  | 16 (the default) | 5/5 identical |
+  | 32 | 5/5 identical |
+  | 48, 64, 96, 128 | **4/5** |
+
+  **Pre-existing, not from this release's work**: the published `v0.1.5-alpha`
+  build, rebuilt from the tag, gives the same 4/5. So the certification passes
+  because the tool checks 16 tokens, not because the claim holds at 128.
+
+  What it is *not*, measured: not the GPU split (both runs reach `G=36/36
+  full=1`), not `RUNNER_MOE_EAGER=1` (5/5 with it set — and Qwen3-4B is dense
+  anyway), not cross-request KV reuse (5/5 with `cache_prompt:false`), and not
+  simply arithmetic — the failing prompt is byte-identical CPU vs GPU when run
+  alone on a fresh server, and a reproduction matching the harness's request
+  body exactly also gives 5/5. It is **intermittent on the GPU side** and so far
+  reproduces only inside the tool's own process.
+
+  Two things follow, and the first is not mine to decide: whether to re-certify
+  Qwen3-4B, raise the tool's default to the documented 128, or amend the
+  documented contract, is a **certification decision — surfaced, not taken**.
+  The second is a plain tool bug: the report records `"gpu_split": null` even
+  though the line is present in the log it reads, so a report cannot say what
+  was actually certified — which is exactly what `read_split`'s own docstring
+  says it exists to prevent.
+
 - **A CPU server no longer serializes on a device turn it does not have.** The
   scheduler's `dev_mu` exists for one reason, stated in its own comment: a
   microbatch captures a CUDA graph on its lead sequence's stream, and any other
