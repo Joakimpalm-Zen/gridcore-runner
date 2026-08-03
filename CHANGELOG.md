@@ -5,6 +5,68 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **The merge loops were quadratic in the length of one segment.** Phase 5
+  asked for shared *tokenized* prefixes, on the theory that re-tokenizing the
+  same system prompt every request was the cost. Measuring first found
+  something worse: tokenization was **O(n²)**, and a cache would have hidden
+  it rather than fixed it.
+
+  Both merge loops rescanned every adjacent pair after every merge. That is
+  fine when the loop is handed a word at a time, which is what a GPT-2 style
+  pre-tokenizer does — but the SentencePiece path never splits at all, and
+  gemma-4's BPE path splits only on newline runs, so **one long line is one
+  unit**. On 4,000 characters of prose in a single line:
+
+  | tokenizer | before | after |
+  |---|---|---|
+  | gemma-4 (26B, E4B) | 71.6 ms | 0.87 ms (**82×**) |
+  | Lucie-7B | 30.5 ms | 0.44 ms (69×) |
+  | Teuken-7B | 30.0 ms | 0.56 ms (54×) |
+  | salamandra-7B | 31.0 ms | 1.28 ms (24×) |
+  | TildeOpen-30b | 30.8 ms | 1.70 ms (18×) |
+  | EuroLLM-9B | 31.6 ms | 2.13 ms (15×) |
+  | Qwen2.5 / Qwen3-Coder / gpt-oss / OLMo-2 / granite | 0.31–0.34 ms | 0.27–0.30 ms (1.1×) |
+
+  Nine of the fourteen models on the bench box were affected, including **five
+  of the six certified European models**. It is genuinely quadratic — `ms/n²`
+  is flat at 4.5 across a 30× range of input — so 16,000 characters on one
+  line took **940 ms** on gemma-4, single-threaded, before a token is
+  generated, on every request. End to end, a warm one-token request with a
+  4,000-character single-line prompt on gemma-4-E4B goes **110 ms → 39 ms**.
+
+  The fix is a priority queue of merge candidates, O(n log n). It must be
+  **exact** — ids are load-bearing, and every `greedy_reference` certification
+  is a claim about output that shifting one id would invalidate — so ordering
+  reproduces the old scan exactly: best key first, leftmost on a tie, because
+  the old loops compared with a strict `>` / `<` while walking left to right.
+  Verified byte-identical against the previous implementation on all 14 local
+  models over 1,965 records × 4 flag combinations = **110,040 comparisons**
+  per model, covering prose, source, JSON, CJK, Devanagari, Thai combining
+  marks, emoji ZWJ sequences and adversarial no-space runs.
+
+  It did not start out exact, and the harness is why that was caught: an
+  absorbed symbol keeps its length and its `next` pointer, so a queued
+  candidate naming a symbol that had itself been swallowed as somebody's
+  right-hand side still passed the liveness test and merged a symbol no longer
+  in the list. On EuroLLM that turned `"  index."` into three ids instead of
+  two, in 1,100 of 7,860 dumps. Absorbed symbols now have their length zeroed.
+  `tests/test_tokenizer_merge.c` is the permanent gate: `tok_merge_force()`
+  runs both paths on one binary and requires identical ids across every
+  committed vocabulary fixture, the 721-line corpus and the adversarial
+  shapes. Confirmed it fails on the pre-fix build.
+
+  Short segments keep the rescan (`MERGE_QUEUE_MIN`), because the first
+  measured version was **20% slower** on Qwen2.5 and gpt-oss while being 82×
+  faster on gemma-4 — a queue costs more than re-reading three pairs. With the
+  threshold and one allocation instead of four, the short-word models come out
+  ~1.1× faster rather than slower.
+
+  Also measured and **declined**: caching compiled schemas. A realistic strict
+  tool envelope parses and compiles in 10 µs (3 tools) to 35 µs (12 tools),
+  against requests that run for hundreds of milliseconds. A cache would add a
+  key, an eviction policy and a lifetime hazard — the `snode` is live for the
+  whole generation — to save 0.003% of a request.
+
 - **Phase 5 — a reservation is a budget for the server, not for one slot.**
   `--reserve-vram P` with `-c 0` auto-fits the context to whatever the
   reservation leaves after the weights. Every slot ran that arithmetic alone,

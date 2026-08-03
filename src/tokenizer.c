@@ -279,6 +279,138 @@ void tokenizer_free(tokenizer *t) {
 // greedy highest-score bigram merging over a doubly linked symbol list
 typedef struct { int start, len, prev, next; } sym_t;
 
+// ------------------------------------------------------- merge candidates
+//
+// Both merge loops used to rescan every adjacent pair after every merge, which
+// is O(n^2) in the length of one segment — and a segment is not a word. The
+// SentencePiece path never splits at all, and the gemma-4 BPE path splits only
+// on newline runs, so one long line is one unit. Measured on 4,000 characters
+// of ordinary prose in a single line: 31 ms on the certified European
+// SentencePiece models, 62 ms on gemma-4-E4B, against 0.31 ms on Qwen2.5,
+// whose GPT-2 pre-tokenizer hands these loops a word at a time. At 16,000
+// characters gemma-4 took 940 ms. Nine of the fourteen models on the bench box
+// are affected, including five of the six certified European ones.
+//
+// The queue makes it O(n log n) and is required to be EXACT: the tokenizer
+// feeds ids to the model, so any change of output would invalidate every
+// greedy_reference certification. Ordering therefore reproduces the old scan
+// exactly — best key first, and on a tie the leftmost pair, because the old
+// loops compared with a strict `>` / `<` while walking left to right.
+//
+// `key` is "smaller is better": the negated piece score for SentencePiece, the
+// merge rank for BPE. Ranks are far below 2^24 so a float holds them exactly.
+typedef struct { float key; int l, r, len_l, len_r; } mcand;
+
+static bool mc_better(const mcand *a, const mcand *b) {
+    if (a->key != b->key) return a->key < b->key;
+    return a->l < b->l;
+}
+
+// The queue starts in a fixed buffer. A GPT-2 style pre-tokenizer hands these
+// loops a word at a time — three or four symbols — and for those the malloc
+// was the whole cost: the first measured version of this change was 20% SLOWER
+// on Qwen2.5 and gpt-oss while being 80x faster on gemma-4. Nothing allocates
+// until a segment actually produces more candidates than fit here.
+// Below this many symbols the rescan wins outright: a GPT-2 pre-tokenizer
+// hands these loops three or four symbols, where the queue's push/pop
+// bookkeeping costs more than re-reading every pair. Measured on a 4,000-char
+// prompt: Qwen2.5 0.31 ms rescan against 0.39 ms queue. Both paths are
+// verified byte-identical over the differential corpus, so which one runs is
+// purely a cost decision.
+#define MERGE_QUEUE_MIN 24
+#define MH_FIXED 64
+
+// Test hook: force the rescan (0) or the queue (1) regardless of segment
+// length; -1 restores the length rule. The two paths are required to agree on
+// every input, and tests/test_tokenizer_merge.c is that requirement -- without
+// a way to run both on one binary the only gate would be a diff against an old
+// build, which nobody runs.
+static int g_merge_force = -1;
+void tok_merge_force(int on) { g_merge_force = on; }
+static bool use_merge_queue(int n_sym) {
+    return g_merge_force >= 0 ? g_merge_force != 0 : n_sym >= MERGE_QUEUE_MIN;
+}
+typedef struct { mcand *e; int n, cap; mcand fixed[MH_FIXED]; } mheap;
+
+static void mh_init(mheap *h) { h->e = h->fixed; h->n = 0; h->cap = MH_FIXED; }
+static void mh_free(mheap *h) { if (h->e != h->fixed) free(h->e); }
+
+static bool mh_push(mheap *h, mcand c) {
+    if (h->n == h->cap) {
+        int cap = h->cap * 2;
+        mcand *e;
+        if (h->e == h->fixed) {
+            e = malloc(sizeof(mcand) * (size_t)cap);
+            if (e) memcpy(e, h->fixed, sizeof(mcand) * (size_t)h->n);
+        } else {
+            e = realloc(h->e, sizeof(mcand) * (size_t)cap);
+        }
+        if (!e) return false;
+        h->e = e;
+        h->cap = cap;
+    }
+    int i = h->n++;
+    h->e[i] = c;
+    while (i > 0) {
+        int p = (i - 1) / 2;
+        if (!mc_better(&h->e[i], &h->e[p])) break;
+        mcand tmp = h->e[p]; h->e[p] = h->e[i]; h->e[i] = tmp;
+        i = p;
+    }
+    return true;
+}
+
+static bool mh_pop(mheap *h, mcand *out) {
+    if (h->n == 0) return false;
+    *out = h->e[0];
+    h->e[0] = h->e[--h->n];
+    for (int i = 0;;) {
+        int a = 2 * i + 1, b = a + 1, best = i;
+        if (a < h->n && mc_better(&h->e[a], &h->e[best])) best = a;
+        if (b < h->n && mc_better(&h->e[b], &h->e[best])) best = b;
+        if (best == i) break;
+        mcand tmp = h->e[best]; h->e[best] = h->e[i]; h->e[i] = tmp;
+        i = best;
+    }
+    return true;
+}
+
+// A popped candidate is stale when either side has since been merged into
+// something longer. Lengths grow strictly and indices never move, so the pair
+// plus the two lengths it was pushed with identifies it uniquely — which is
+// what lets superseded entries stay in the queue instead of being hunted down.
+//
+// That holds only because an ABSORBED symbol has its length zeroed. Absorbing
+// updates the surviving left symbol and leaves the right one untouched, so a
+// symbol that was itself swallowed as somebody's right-hand side would keep
+// both its old length and its old `next` — and a candidate naming it would
+// still pass this test and then merge a symbol no longer in the list. The
+// rescanning loops this replaced could not hit that, because they only ever
+// looked at symbols they could reach. Caught by the differential harness on
+// EuroLLM, where "  index." tokenized as three ids instead of two.
+#define MC_LIVE_SYM(c, SYM) \
+    ((SYM)[(c).l].next == (c).r && (SYM)[(c).l].len == (c).len_l && \
+     (SYM)[(c).r].len == (c).len_r)
+#define MC_LIVE(c, LN, NEXT) \
+    ((NEXT)[(c).l] == (c).r && (LN)[(c).l] == (c).len_l && (LN)[(c).r] == (c).len_r)
+
+// The score floor the old scan started from. A piece that is no merge's result
+// carries -INFINITY (see spm_scores_from_merges) and must never be merged;
+// the old loop excluded it by initialising best_score to -1e30f, so the same
+// constant is the admission test here.
+#define SPM_SCORE_FLOOR (-1e30f)
+
+static bool spm_push_pair(tokenizer *t, const char *text, const sym_t *sym,
+                          mheap *h, int l) {
+    if (l < 0) return true;
+    int r = sym[l].next;
+    if (r < 0) return true;
+    int id = hmap_get(&t->vocab, text + sym[l].start, sym[l].len + sym[r].len);
+    if (id < 0 || !(t->scores[id] > SPM_SCORE_FLOOR)) return true;
+    mcand c = { -t->scores[id], l, r, sym[l].len, sym[r].len };
+    return mh_push(h, c);
+}
+
 static int spm_encode(tokenizer *t, const char *text, size_t n,
                       int32_t *out, int cap, int n_out) {
     if (n == 0) return n_out;
@@ -295,22 +427,46 @@ static int spm_encode(tokenizer *t, const char *text, size_t n,
     }
     if (n_sym > 0) sym[n_sym - 1].next = -1;
 
-    for (;;) {
-        float best_score = -1e30f;
-        int best = -1;
-        for (int i = 0; i != -1 && sym[i].next != -1; i = sym[i].next) {
-            int j = sym[i].next;
-            int id = hmap_get(&t->vocab, text + sym[i].start, sym[i].len + sym[j].len);
-            if (id >= 0 && t->scores && t->scores[id] > best_score) {
-                best_score = t->scores[id];
-                best = i;
+    // With no scores the old scan could never select a pair, so nothing merges.
+    if (t->scores && !use_merge_queue(n_sym)) {
+        for (;;) {
+            float best_score = SPM_SCORE_FLOOR;
+            int best = -1;
+            for (int i = 0; i != -1 && sym[i].next != -1; i = sym[i].next) {
+                int j = sym[i].next;
+                int id = hmap_get(&t->vocab, text + sym[i].start,
+                                  sym[i].len + sym[j].len);
+                if (id >= 0 && t->scores[id] > best_score) {
+                    best_score = t->scores[id];
+                    best = i;
+                }
             }
+            if (best < 0) break;
+            int j = sym[best].next;
+            sym[best].len += sym[j].len;
+            sym[best].next = sym[j].next;
+            if (sym[j].next != -1) sym[sym[j].next].prev = best;
         }
-        if (best < 0) break;
-        int j = sym[best].next;
-        sym[best].len += sym[j].len;
-        sym[best].next = sym[j].next;
-        if (sym[j].next != -1) sym[sym[j].next].prev = best;
+    } else if (t->scores) {
+        mheap h;
+        mh_init(&h);
+        bool oom = false;
+        for (int i = 0; i != -1 && sym[i].next != -1; i = sym[i].next)
+            if (!spm_push_pair(t, text, sym, &h, i)) { oom = true; break; }
+        mcand c;
+        while (!oom && mh_pop(&h, &c)) {
+            if (!MC_LIVE_SYM(c, sym)) continue;   // superseded by an earlier merge
+            int j = sym[c.l].next;
+            sym[c.l].len += sym[j].len;
+            sym[c.l].next = sym[j].next;
+            if (sym[j].next != -1) sym[sym[j].next].prev = c.l;
+            sym[j].len = 0;               // absorbed: fails MC_LIVE from here on
+            // only the merged symbol's two neighbours are new pairs
+            if (!spm_push_pair(t, text, sym, &h, sym[c.l].prev) ||
+                !spm_push_pair(t, text, sym, &h, c.l)) { oom = true; break; }
+        }
+        mh_free(&h);
+        if (oom) { free(sym); t->encode_oom = true; return n_out; }
     }
 
     for (int i = 0; i != -1; i = sym[i].next) {
@@ -622,37 +778,88 @@ static int smollm_split_next(const uint32_t *cp, int i, int ncp) {
 }
 
 // BPE merge within one pre-token (already byte->unicode mapped, utf8 string)
+// Same candidate rule as the SentencePiece side, keyed on merge rank.
+static bool bpe_push_pair(tokenizer *t, const char *w, const int *st,
+                          const int *ln, const int *next, mheap *h, int l) {
+    if (l < 0) return true;
+    int r = next[l];
+    if (r < 0) return true;
+    int kl = ln[l] + 1 + ln[r];
+    if (kl >= 512) return true;      // the old scan skipped over-long keys too
+    char key[512];
+    memcpy(key, w + st[l], (size_t)ln[l]);
+    key[ln[l]] = ' ';
+    memcpy(key + ln[l] + 1, w + st[r], (size_t)ln[r]);
+    int rank = hmap_get(&t->merges, key, (size_t)kl);
+    if (rank < 0) return true;
+    mcand c = { (float)rank, l, r, ln[l], ln[r] };
+    return mh_push(h, c);
+}
+
 static int bpe_word(tokenizer *t, const char *w, int n, int32_t *out, int cap, int n_out) {
     if (n <= 0) return n_out;
     size_t max_sym = (size_t)n + 1;
-    int *st = malloc(sizeof(int) * max_sym), *ln = malloc(sizeof(int) * max_sym);
-    if (!st || !ln) { free(st); free(ln); t->encode_oom = true; return n_out; }
+    // one block, four slices: the linked list needs two arrays the compacting
+    // version did not, and four separate mallocs per pre-token showed up
+    int *mem = malloc(sizeof(int) * max_sym * 4);
+    if (!mem) { t->encode_oom = true; return n_out; }
+    int *st = mem, *ln = mem + max_sym, *next = mem + 2 * max_sym,
+        *prev = mem + 3 * max_sym;
     int ns = 0;
     for (int i = 0; i < n; ) {
         int l = u8_len((uint8_t)w[i]);
         if (i + l > n) l = 1;
-        st[ns] = i; ln[ns] = l; ns++;
+        st[ns] = i; ln[ns] = l;
+        prev[ns] = ns - 1; next[ns] = ns + 1;
+        ns++;
         i += l;
     }
-    char key[512];
-    while (ns > 1) {
-        int best_rank = INT_MAX, best = -1;
-        for (int i = 0; i < ns - 1; i++) {
-            int kl = ln[i] + 1 + ln[i + 1];
-            if (kl >= (int)sizeof(key)) continue;
-            memcpy(key, w + st[i], ln[i]);
-            key[ln[i]] = ' ';
-            memcpy(key + ln[i] + 1, w + st[i + 1], ln[i + 1]);
-            int r = hmap_get(&t->merges, key, kl);
-            if (r >= 0 && r < best_rank) { best_rank = r; best = i; }
+    if (ns > 0) next[ns - 1] = -1;
+    // A linked list rather than a compacted array: the queue holds indices, so
+    // they have to stay put. Order along the list is still left to right, which
+    // is what makes "smaller index" the same tie-break the old scan had.
+    if (!use_merge_queue(ns)) {
+        char key[512];
+        while (ns > 1) {
+            int best_rank = INT_MAX, best = -1;
+            for (int i = 0; i != -1 && next[i] != -1; i = next[i]) {
+                int j = next[i];
+                int kl = ln[i] + 1 + ln[j];
+                if (kl >= (int)sizeof(key)) continue;
+                memcpy(key, w + st[i], (size_t)ln[i]);
+                key[ln[i]] = ' ';
+                memcpy(key + ln[i] + 1, w + st[j], (size_t)ln[j]);
+                int r = hmap_get(&t->merges, key, (size_t)kl);
+                if (r >= 0 && r < best_rank) { best_rank = r; best = i; }
+            }
+            if (best < 0) break;
+            int j = next[best];
+            ln[best] += ln[j];
+            next[best] = next[j];
+            if (next[j] != -1) prev[next[j]] = best;
+            ns--;
         }
-        if (best < 0) break;
-        ln[best] += ln[best + 1];
-        memmove(st + best + 1, st + best + 2, sizeof(int) * (ns - best - 2));
-        memmove(ln + best + 1, ln + best + 2, sizeof(int) * (ns - best - 2));
-        ns--;
+    } else {
+        mheap h;
+        mh_init(&h);
+        bool oom = false;
+        for (int i = 0; i != -1 && next[i] != -1; i = next[i])
+            if (!bpe_push_pair(t, w, st, ln, next, &h, i)) { oom = true; break; }
+        mcand c;
+        while (!oom && mh_pop(&h, &c)) {
+            if (!MC_LIVE(c, ln, next)) continue;
+            int j = next[c.l];
+            ln[c.l] += ln[j];
+            next[c.l] = next[j];
+            if (next[j] != -1) prev[next[j]] = c.l;
+            ln[j] = 0;                    // absorbed: fails MC_LIVE from here on
+            if (!bpe_push_pair(t, w, st, ln, next, &h, prev[c.l]) ||
+                !bpe_push_pair(t, w, st, ln, next, &h, c.l)) { oom = true; break; }
+        }
+        mh_free(&h);
+        if (oom) { free(mem); t->encode_oom = true; return n_out; }
     }
-    for (int i = 0; i < ns; i++) {
+    for (int i = 0; i != -1; i = next[i]) {
         int id = hmap_get(&t->vocab, w + st[i], ln[i]);
         if (id < 0) {
             // fall back to per-character lookup, then to the <0xNN> byte
@@ -683,7 +890,7 @@ static int bpe_word(tokenizer *t, const char *w, int n, int32_t *out, int cap, i
             out[n_out++] = id;
         }
     }
-    free(st); free(ln);
+    free(mem);
     return n_out;
 }
 

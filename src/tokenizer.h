@@ -53,5 +53,10 @@ int  tok_decode(tokenizer *t, int id, char *buf, int cap);
 const char *tok_raw(tokenizer *t, int id);
 bool tok_is_control(tokenizer *t, int id);
 int  tok_find(tokenizer *t, const char *s); // exact vocab lookup, -1 if absent
+// Test hook for the merge gate: force the linear rescan (0) or the candidate
+// queue (1) regardless of segment length; -1 returns to the length rule. The
+// two must produce identical ids on every input -- see
+// tests/test_tokenizer_merge.c.
+void tok_merge_force(int on);
 
 #endif // RUNNER_TOKENIZER_H

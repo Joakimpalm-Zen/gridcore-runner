@@ -130,6 +130,13 @@ TEST_TOK_SRC = tests/test_tokenizer.c src/gguf.c src/tokenizer.c src/compat.c sr
 $(TEST_TOKENIZER): $(TEST_TOK_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_SRC) -o $@ -lm
 
+# the two merge implementations must agree on every input; see the test's header
+TEST_TOK_MERGE = $(TEST_BATCH:test-batch%=test-tokenizer-merge%)
+TEST_TOK_MERGE_SRC = tests/test_tokenizer_merge.c src/gguf.c src/tokenizer.c \
+                     src/compat.c src/quants.c
+$(TEST_TOK_MERGE): $(TEST_TOK_MERGE_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_TOK_MERGE_SRC) -o $@ -lm
+
 # difftok: tokenizer differential harness. Not part of `make test` -- it needs a
 # real multi-GB model GGUF, which models/ is gitignored for. scripts/difftok.py
 # builds it on demand and compares against the HuggingFace reference.
@@ -319,7 +326,7 @@ else
 endif
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
-      $(TEST_TOKENIZER) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
+      $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTIZE) \
@@ -332,6 +339,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_SCHEMA_OOM)
 	./$(TEST_SAMPLER)
 	./$(TEST_TOKENIZER)
+	./$(TEST_TOK_MERGE)
 	./$(TEST_TOKENIZER_OOM)
 	./$(TEST_TEMPLATE)
 	./$(TEST_TOOLS)
