@@ -91,6 +91,27 @@ protocol and CLI may still change between alpha releases.
   one `--draft` slot still stalls every other slot for its full length. Taking
   the turn per forward needs `engine_generate` to call a hook around each one.
 
+- **Phase 8: the 8k→32k retrieval gate — a q8 cache does not cost recall.**
+  Needle-in-a-haystack on Qwen2.5-7B: a unique fact planted at 10%, 50% and 90%
+  depth in a filler context, two codes per depth, scored on exact digits.
+
+  | KV | context | prompt tokens | recalled |
+  |---|---|---|---|
+  | f16 | 8k | ~5,237 | 6/6 |
+  | f16 | 32k | ~20,817 | 6/6 |
+  | q8_0 | 8k | ~5,237 | 6/6 |
+  | q8_0 | 32k | ~20,817 | **6/6** |
+
+  Together with the throughput row below — q8 costs 0.9% prefill and 0.7%
+  decode — the case for a q8 cache is that it halves the KV for no measured
+  loss on either axis. Whether it becomes a default is still an owner call, and
+  the clu item asking for that decision is unchanged.
+
+  The scorer was wrong first and reported 4/9 for answers that were all
+  correct: it demanded the hyphens in `62-05-31` from a prompt that asked for
+  "the digits only". Scoring on digits is the fix. A gate that marks correct
+  answers wrong is the same class of defect as one that cannot fail.
+
 - **Phase 8: q8 KV attention is essentially free.** Measured on the now
   uncontended MIG slice, Qwen2.5-7B-Instruct-Q4_K_M, 512-token prompt and 256
   generated, full offload (28/28 layers) in every row:
