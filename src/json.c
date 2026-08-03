@@ -190,6 +190,53 @@ fail:
 
 static jv *parse_value(jcur *c);
 
+// Object member names are already decoded by parse_string(), so hashing those
+// names catches both literal duplicates and equivalent escape spellings.  Keep
+// this separate from jv's compact public representation: the table exists only
+// while an object is being parsed and makes duplicate detection O(n) expected
+// time instead of turning large request bodies into an O(n^2) scan.
+typedef struct {
+    const char **slots;
+    size_t cap, used;
+} keyset;
+
+static uint64_t key_hash(const char *s) {
+    uint64_t h = UINT64_C(1469598103934665603);
+    for (; *s; s++) {
+        h ^= (unsigned char)*s;
+        h *= UINT64_C(1099511628211);
+    }
+    return h;
+}
+
+// Returns 1 when inserted, 0 for a duplicate, and -1 on allocation failure.
+static int keyset_insert(keyset *set, const char *key) {
+    if (set->used + 1 > set->cap / 2) {
+        size_t cap = set->cap ? set->cap * 2 : 16;
+        if (cap < set->cap || cap > SIZE_MAX / sizeof(*set->slots)) return -1;
+        const char **slots = calloc(cap, sizeof(*slots));
+        if (!slots) return -1;
+        for (size_t i = 0; i < set->cap; i++) {
+            const char *old = set->slots[i];
+            if (!old) continue;
+            size_t at = (size_t)key_hash(old) & (cap - 1);
+            while (slots[at]) at = (at + 1) & (cap - 1);
+            slots[at] = old;
+        }
+        free(set->slots);
+        set->slots = slots;
+        set->cap = cap;
+    }
+    size_t at = (size_t)key_hash(key) & (set->cap - 1);
+    while (set->slots[at]) {
+        if (!strcmp(set->slots[at], key)) return 0;
+        at = (at + 1) & (set->cap - 1);
+    }
+    set->slots[at] = key;
+    set->used++;
+    return 1;
+}
+
 static jv *parse_number(jcur *c) {
     const char *start = c->p;
     const char *p = start;
@@ -242,6 +289,7 @@ static jv *parse_number(jcur *c) {
 static jv *parse_container(jcur *c, char open) {
     char close = open == '{' ? '}' : ']';
     jv *v = jv_new(open == '{' ? J_OBJ : J_ARR);
+    keyset keys = {0};
     if (!v) return NULL;
     c->p++; // consume open
     skip_ws(c);
@@ -252,6 +300,7 @@ static jv *parse_container(jcur *c, char open) {
             skip_ws(c);
             key = parse_string(c);
             if (!key) goto fail;
+            if (keyset_insert(&keys, key) != 1) { free(key); goto fail; }
             skip_ws(c);
             if (c->p >= c->end || *c->p != ':') { free(key); goto fail; }
             c->p++;
@@ -273,10 +322,15 @@ static jv *parse_container(jcur *c, char open) {
         v->n++;
         skip_ws(c);
         if (c->p < c->end && *c->p == ',') { c->p++; continue; }
-        if (c->p < c->end && *c->p == close) { c->p++; return v; }
+        if (c->p < c->end && *c->p == close) {
+            c->p++;
+            free(keys.slots);
+            return v;
+        }
         goto fail;
     }
 fail:
+    free(keys.slots);
     jv_free(v);
     return NULL;
 }

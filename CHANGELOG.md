@@ -5,6 +5,13 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Ambiguous duplicate JSON object keys are rejected.** The parser now hashes
+  decoded member names while reading each object, so literal duplicates and
+  escape-equivalent spellings such as `model` / `m\u006fdel` fail in expected
+  O(n) time. This prevents runner's former first-key interpretation from
+  disagreeing with last-key-wins clients or proxies. Unit and live HTTP gates
+  cover top-level, nested, escaped, and separate-object cases.
+
 - **DNS rebinding and drive-by browser traffic are rejected at the HTTP
   boundary.** Every route, including accept-loop fast paths such as `/health`
   and `/v1/models`, now requires exactly one loopback `Host`; an `Origin`, when

@@ -160,8 +160,16 @@ def test_malformed_stop_is_rejected(client, stop, label):
 
 # ----------------------------------------------------------- body/routing
 def test_invalid_json_body_is_rejected(client):
-    for body, label in ((b"{", "truncated"), (b"not json", "garbage"),
-                        (b"[]", "array-not-object"), (b"", "empty")):
+    for body, label in (
+        (b"{", "truncated"),
+        (b"not json", "garbage"),
+        (b"[]", "array-not-object"),
+        (b"", "empty"),
+        (b'{"messages":[],"max_tokens":4,"max_tokens":4096}',
+         "duplicate-key"),
+        (b'{"messages":[],"model":1,"m\\u006fdel":2}',
+         "escaped-duplicate-key"),
+    ):
         r = client.post_bytes(f"bad-body-{label}", "/v1/chat/completions", body)
         if r.status == 200:
             raise ProtocolError("invalid JSON body accepted", case=label,

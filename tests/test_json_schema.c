@@ -80,6 +80,22 @@ static void test_json_rejects_embedded_nul(void) {
     assert(json_unescape("\\u0000", 6, out, &outn) == -1);
 }
 
+static void test_json_rejects_duplicate_object_keys(void) {
+    const char *bad[] = {
+        "{\"max_tokens\":4,\"max_tokens\":4096}",
+        "{\"outer\":{\"model\":\"safe\",\"model\":\"shadow\"}}",
+        "{\"model\":1,\"m\\u006fdel\":2}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++)
+        assert(json_parse(bad[i], strlen(bad[i])) == NULL);
+
+    // Reusing a name in different objects is not a duplicate.
+    const char *good = "[{\"id\":1},{\"id\":2}]";
+    jv *v = json_parse(good, strlen(good));
+    assert(v != NULL);
+    jv_free(v);
+}
+
 static void test_json_close_partial_string(void) {
     jsonv v;
     jsonv_init(&v);
@@ -1143,6 +1159,7 @@ int main(void) {
     test_json_rejects_unpaired_utf16_surrogates();
     test_json_rejects_ill_formed_raw_utf8();
     test_json_rejects_embedded_nul();
+    test_json_rejects_duplicate_object_keys();
     test_json_close_partial_string();
     test_schema_required_close();
     test_leading_whitespace_is_refused_but_interior_is_kept();
