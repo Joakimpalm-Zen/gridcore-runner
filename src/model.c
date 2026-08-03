@@ -949,6 +949,20 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         return false;
     }
     m->n_layer -= m->mtp_layers;
+    if (!m->l_is_swa) {
+        int sw = (int)gguf_get_u32(g, AK("attention.sliding_window"), 0);
+        if (sw > 0) {
+            int pattern = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 2);
+            if (pattern < 1) pattern = 2;
+            m->swa_window = sw;
+            m->l_is_swa = calloc(m->n_layer, sizeof(bool));
+            if (!m->l_is_swa) return false;
+            if (!swa_pattern_array(g, AK("attention.sliding_window_pattern"),
+                                   m->l_is_swa, m->n_layer))
+                for (int i = 0; i < m->n_layer; i++)
+                    m->l_is_swa[i] = ((i + 1) % pattern) != 0;
+        }
+    }
     if (strcmp(arch, "qwen35") == 0) {
         // Qwen3.5 dense (the architecture used by Ornith-1.0-9B) alternates
         // three Gated DeltaNet layers with one conventional attention layer.

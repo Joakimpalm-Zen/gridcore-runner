@@ -411,6 +411,7 @@ struct attn_args {
     ulong l_off;      // this layer's byte offset into the kv cache
     float scale;
     int   q8;
+    int   window;     // sliding-window size for this layer (0 = full)
 };
 
 kernel void k_attn(device const float *q   [[buffer(0)]],
@@ -430,15 +431,17 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
     ulong base = a.l_off + kv_head_off(kvh, hd, a.q8);
     device const float *qh = q + h * hd;
     device float *ah = att + (ulong)h * a.n_ctx;
+    int t0 = 0;
+    if (a.window > 0 && a.pos - a.window + 1 > 0) t0 = a.pos - a.window + 1;
 
-    for (int t = tid; t <= a.pos; t += tpg) {
+    for (int t = t0 + tid; t <= a.pos; t += tpg) {
         ah[t] = kv_dot(kc + base + (ulong)t * row_b, qh, hd, a.q8) * a.scale;
     }
     threadgroup_barrier(mem_flags::mem_device);
 
     // max
     float mx = -1e30f;
-    for (int t = tid; t <= a.pos; t += tpg) mx = max(mx, ah[t]);
+    for (int t = t0 + tid; t <= a.pos; t += tpg) mx = max(mx, ah[t]);
     red[tid] = mx;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint off = tpg / 2; off > 0; off >>= 1) {
@@ -449,7 +452,7 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // exp + sum
     float sum = 0;
-    for (int t = tid; t <= a.pos; t += tpg) {
+    for (int t = t0 + tid; t <= a.pos; t += tpg) {
         float e = exp(ah[t] - mx);
         ah[t] = e;
         sum += e;
@@ -465,7 +468,7 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
 
     for (int i = tid; i < hd; i += tpg) {
         float o = 0;
-        for (int t = 0; t <= a.pos; t++)
+        for (int t = t0; t <= a.pos; t++)
             o += ah[t] * kv_pair(vc + base + (ulong)t * row_b, i / 2, a.q8)[i & 1];
         out[h * hd + i] = o / sum;
     }

@@ -23,6 +23,8 @@ MTP_LAYERS = 0   # extra trailing blocks declared as NextN/MTP predictor heads
 APERTUS = None
 ATTN_NOPE_STEP = 0
 ATTN_TEMP_SCALE = 0.0
+SWA_WINDOW = 0
+SWA_PATTERN = 0
 ESERIES_SHARED_KV = 0
 ESERIES_PLE = 0
 args = sys.argv[1:]
@@ -57,6 +59,13 @@ while i < len(args):
         i += 1
         _st, _ts = args[i].split(",")
         ATTN_NOPE_STEP, ATTN_TEMP_SCALE = int(_st), float(_ts)
+    elif a == "--swa":
+        # "WINDOW,PATTERN" — every PATTERN-th layer is full attention, the
+        # others slide. This is intentionally arch-neutral so small Qwen-style
+        # fixtures can exercise SWA without Gemma's unrelated GELU/norms.
+        i += 1
+        _win, _pat = args[i].split(",")
+        SWA_WINDOW, SWA_PATTERN = int(_win), int(_pat)
     elif a == "--eseries":
         # --eseries SHARED_KV,PLE_DIM  (e.g. "3,16" on the default 6 layers)
         i += 1
@@ -231,6 +240,11 @@ if ATTN_NOPE_STEP:
         kv_u32(f"{ARCH}.attention.attn_temp_floor_scale", 8192),
         kv_f32(f"{ARCH}.attention.attn_temp_scale", ATTN_TEMP_SCALE),
         kv_f32(f"{ARCH}.attention.attn_temp_offset", 1.0),
+    ]
+if SWA_WINDOW:
+    meta_kvs += [
+        kv_u32(f"{ARCH}.attention.sliding_window", SWA_WINDOW),
+        kv_u32(f"{ARCH}.attention.sliding_window_pattern", SWA_PATTERN or 2),
     ]
 if MTP_LAYERS:
     meta_kvs.append(kv_u32(f"{ARCH}.nextn_predict_layers", MTP_LAYERS))

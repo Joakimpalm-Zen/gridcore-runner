@@ -441,6 +441,23 @@ else
 	@echo "metal MoE smoke skipped: macOS-only backend"
 endif
 
+test-metal-swa: runner
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		$(PYTHON) scripts/make-test-model.py --arch qwen3 --swa 8,2 test-swa.gguf; \
+		./$(RUNNER_EXE) -m test-swa.gguf -p "abcdefghijklmnopqrstuvwxyz0123456789" -n 12 --temp 0 --gpu off > metal-swa-cpu.out 2>/dev/null; \
+		./$(RUNNER_EXE) -m test-swa.gguf -p "abcdefghijklmnopqrstuvwxyz0123456789" -n 12 --temp 0 --gpu auto > metal-swa-gpu.out 2> metal-swa-gpu.err; \
+		cmp -s metal-swa-cpu.out metal-swa-gpu.out; \
+		grep -q "Metal backend" metal-swa-gpu.err; \
+		echo "metal SWA ok"; \
+	else \
+		echo "metal SWA smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal SWA smoke skipped: macOS-only backend"
+endif
+
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
@@ -621,6 +638,7 @@ clean:
 	rm -f metal-prefill-loop.out metal-prefill-native.out metal-prefill-native.err
 	rm -f metal-kv-q8.err metal-moe-dense.out metal-moe1.out metal-moe1.err
 	rm -f metal-moe2.out metal-moe2.err
+	rm -f metal-swa-cpu.out metal-swa-gpu.out metal-swa-gpu.err test-swa.gguf
 	rm -f $(addprefix fuzz-,$(FUZZ_TARGETS))
 	rm -rf fuzz-corpus
 
@@ -631,4 +649,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe smoke release-check fuzz fuzz-build fuzz-run test-shared-asan
+.PHONY: clean debug ptx test test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan

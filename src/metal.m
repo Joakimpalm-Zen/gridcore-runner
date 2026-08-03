@@ -22,7 +22,7 @@ typedef struct {
     id<MTLBuffer> kc, vc;
     id<MTLBuffer> x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
     id<MTLBuffer> moe_logits, moe_sel, moe_selw, moe_hb, moe_hb2, moe_eout;
-    id<MTLBuffer> inv_freq, out_norm, dummy;
+    id<MTLBuffer> inv_freq, inv_freq_local, out_norm, dummy;
     id<MTLBuffer> *attn_norm, *ffn_norm;        // per layer
     id<MTLBuffer> *bq, *bk, *bv, *bo;           // per layer, may be nil
     id<MTLBuffer> *qn, *kn;                     // qwen3 per-head q/k norms
@@ -31,7 +31,7 @@ typedef struct {
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8; } attn_args;
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8, window; } attn_args;
 typedef struct { int n_in, n_out; uint64_t w_off, estride; int xs, ys; } moe_args;
 
 static void gpu_release_state(gpu_t *g, int n_layer) {
@@ -53,7 +53,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
                              g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                              g->logits, g->moe_logits, g->moe_sel, g->moe_selw,
                              g->moe_hb, g->moe_hb2, g->moe_eout,
-                             g->inv_freq, g->out_norm, g->dummy };
+                             g->inv_freq, g->inv_freq_local, g->out_norm, g->dummy };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
     for (int i = 0; i < 32; i++) [g->p_mv[i] release];
     for (int i = 0; i < 32; i++) [g->p_moe_mv[i] release];
@@ -302,8 +302,18 @@ bool gpu_init(model_t *m) {
     }
     if (!metal_moe_supported(m))
         return false;
-    if (m->swa_window > 0 || m->embd_scale != 1.0f) {
-        fprintf(stderr, "gpu: '%s' (sliding-window attention) is not on the metal backend yet — using CPU\n",
+    if (m->embd_scale != 1.0f) {
+        fprintf(stderr, "gpu: '%s' scaled embeddings are not on the metal backend yet — using CPU\n",
+                m->arch);
+        return false;
+    }
+    if (m->ffn_act != ACT_SILU) {
+        fprintf(stderr, "gpu: '%s' FFN activation is not on the metal backend yet — using CPU\n",
+                m->arch);
+        return false;
+    }
+    if (m->no_rope_layer_step > 0 || m->attn_temp_scale != 0.0f) {
+        fprintf(stderr, "gpu: '%s' NoPE/attention-temperature knobs are not on the metal backend yet — using CPU\n",
                 m->arch);
         return false;
     }
@@ -311,6 +321,24 @@ bool gpu_init(model_t *m) {
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
+        if (ly->post_attn_norm_w || ly->post_ffn_norm_w ||
+            ly->ple_gate || ly->out_scale != 1.0f || !ly->wv ||
+            ly->attn_sinks) {
+            fprintf(stderr, "gpu: '%s' layer layout is not on the metal backend yet — using CPU\n",
+                    m->arch);
+            return false;
+        }
+        if ((model_head_dim(m, l) != m->head_dim) ||
+            (model_n_head_kv(m, l) != m->n_head_kv)) {
+            fprintf(stderr, "gpu: '%s' heterogeneous attention geometry is not on the metal backend yet — using CPU\n",
+                    m->arch);
+            return false;
+        }
+        if (model_is_swa(m, l) && !m->rope_inv_freq_local) {
+            fprintf(stderr, "gpu: '%s' sliding-window rope table is missing — using CPU\n",
+                    m->arch);
+            return false;
+        }
         gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
                               ly->w_gate, ly->w_up, ly->w_down };
         for (int i = 0; i < 7; i++)
@@ -456,8 +484,11 @@ bool gpu_init(model_t *m) {
         return gpu_init_fail(m, g, lib, "scratch buffer allocation");
 
     g->inv_freq = f32_buf(dev, m->rope_inv_freq, m->rope_dim / 2);
+    g->inv_freq_local = f32_buf(dev, m->rope_inv_freq_local,
+                                m->rope_dim_local / 2);
     g->out_norm = f32_buf(dev, m->out_norm_w, m->n_embd);
-    if (!metal_buffer_ok(g->inv_freq) || !metal_buffer_ok(g->out_norm))
+    if (!metal_buffer_ok(g->inv_freq) || !metal_buffer_ok(g->out_norm) ||
+        (m->rope_inv_freq_local && !metal_buffer_ok(g->inv_freq_local)))
         return gpu_init_fail(m, g, lib, "shared constant allocation");
     g->attn_norm = calloc(m->n_layer, sizeof(id));
     g->ffn_norm  = calloc(m->n_layer, sizeof(id));
@@ -474,12 +505,14 @@ bool gpu_init(model_t *m) {
         layer_t *ly = &m->layers[l];
         g->attn_norm[l] = f32_buf(dev, ly->attn_norm_w, m->n_embd);
         g->ffn_norm[l]  = f32_buf(dev, ly->ffn_norm_w, m->n_embd);
+        int l_hd = model_head_dim(m, l);
+        int l_kv_dim = model_kv_dim(m, l);
         g->bq[l] = f32_buf(dev, ly->bq, q_dim);
-        g->bk[l] = f32_buf(dev, ly->bk, kv_dim);
-        g->bv[l] = f32_buf(dev, ly->bv, kv_dim);
+        g->bk[l] = f32_buf(dev, ly->bk, l_kv_dim);
+        g->bv[l] = f32_buf(dev, ly->bv, l_kv_dim);
         g->bo[l] = f32_buf(dev, ly->bo, m->n_embd);
-        g->qn[l] = f32_buf(dev, ly->qnorm_w, m->head_dim);
-        g->kn[l] = f32_buf(dev, ly->knorm_w, m->head_dim);
+        g->qn[l] = f32_buf(dev, ly->qnorm_w, l_hd);
+        g->kn[l] = f32_buf(dev, ly->knorm_w, l_hd);
         if (!metal_buffer_ok(g->attn_norm[l]) ||
             !metal_buffer_ok(g->ffn_norm[l]) ||
             (ly->bq && !metal_buffer_ok(g->bq[l])) ||
@@ -549,9 +582,8 @@ static void enc_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
 
 static void enc_qknorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
                        id<MTLBuffer> v, NSUInteger v_off, id<MTLBuffer> w,
-                       int n_heads) {
+                       int n_heads, int hd) {
     float eps = m->rms_eps;
-    int hd = m->head_dim;
     [e setComputePipelineState:g->p_qknorm];
     [e setBuffer:v offset:v_off atIndex:0];
     [e setBuffer:w offset:0 atIndex:1];
@@ -562,12 +594,17 @@ static void enc_qknorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
 }
 
 static void enc_rope(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                     id<MTLBuffer> v, NSUInteger v_off, int n_heads, int pos) {
-    rope_args a = { m->head_dim, n_heads, m->rope_dim / 2, pos,
-                    m->rope_neox, m->rope_mscale };
+                     id<MTLBuffer> v, NSUInteger v_off, int n_heads, int pos,
+                     int layer) {
+    bool local = model_is_swa(m, layer);
+    int hd = model_head_dim(m, layer);
+    int rope_dim = model_rope_dim(m, layer);
+    rope_args a = { hd, n_heads, rope_dim / 2, pos,
+                    m->rope_neox, model_rope_mscale(m, layer) };
     [e setComputePipelineState:g->p_rope];
     [e setBuffer:v offset:v_off atIndex:0];
-    [e setBuffer:g->inv_freq offset:0 atIndex:1];
+    [e setBuffer:(local && g->inv_freq_local) ? g->inv_freq_local : g->inv_freq
+          offset:0 atIndex:1];
     [e setBytes:&a length:sizeof(a) atIndex:2];
     [e dispatchThreads:MTLSizeMake(a.half_dim, n_heads, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -759,6 +796,11 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
 
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
+        int hd = model_head_dim(m, l);
+        int n_kv = model_n_head_kv(m, l);
+        int q_dim_l = model_q_dim(m, l);
+        int kv_dim_l = model_kv_dim(m, l);
+        int window = model_is_swa(m, l) ? m->swa_window : 0;
         for (int b = 0; b < n; b++) {
             int p = pos + b;
             NSUInteger xo = foff((size_t)b * n_embd);
@@ -774,35 +816,35 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             size_t row_b = model_kv_row_bytes(m, l);
             uint64_t kv_off = model_kv_byte_off(m, l) + (uint64_t)p * row_b;
             int q8 = m->kv_q8;
-            int kv_units = q8 ? kv_dim / 32 : kv_dim;
+            int kv_units = q8 ? kv_dim_l / 32 : kv_dim_l;
 
             enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->attn_norm[l],
                         n_embd, m->rms_eps);
             enc_mv(g, e, m, ly->wq, g->xb, xbo, g->q,  qo,
-                   n_embd, q_dim,  g->bq[l]);
+                   n_embd, q_dim_l,  g->bq[l]);
             enc_mv(g, e, m, ly->wk, g->xb, xbo, g->kt, kto,
-                   n_embd, kv_dim, g->bk[l]);
+                   n_embd, kv_dim_l, g->bk[l]);
             enc_mv(g, e, m, ly->wv, g->xb, xbo, g->vt, vto,
-                   n_embd, kv_dim, g->bv[l]);
-            if (g->qn[l]) enc_qknorm(g, e, m, g->q,  qo,  g->qn[l], m->n_head);
-            if (g->kn[l]) enc_qknorm(g, e, m, g->kt, kto, g->kn[l], m->n_head_kv);
-            enc_rope(g, e, m, g->q,  qo,  m->n_head,    p);
-            enc_rope(g, e, m, g->kt, kto, m->n_head_kv, p);
+                   n_embd, kv_dim_l, g->bv[l]);
+            if (g->qn[l]) enc_qknorm(g, e, m, g->q,  qo,  g->qn[l], m->n_head, hd);
+            if (g->kn[l]) enc_qknorm(g, e, m, g->kt, kto, g->kn[l], n_kv, hd);
+            enc_rope(g, e, m, g->q,  qo,  m->n_head, p, l);
+            enc_rope(g, e, m, g->kt, kto, n_kv,      p, l);
 
             [e setComputePipelineState:g->p_store];
             [e setBuffer:g->kt offset:kto atIndex:0];
             [e setBuffer:g->vt offset:vto atIndex:1];
             [e setBuffer:g->kc offset:0 atIndex:2];
             [e setBuffer:g->vc offset:0 atIndex:3];
-            [e setBytes:&kv_dim length:4 atIndex:4];
+            [e setBytes:&kv_dim_l length:4 atIndex:4];
             [e setBytes:&kv_off length:8 atIndex:5];
             [e setBytes:&q8 length:4 atIndex:6];
             [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
               threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
-            attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, p,
+            attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, p,
                              (uint64_t)model_kv_byte_off(m, l),
-                             1.0f / sqrtf((float)m->head_dim), q8 };
+                             model_attn_scale(m, l), q8, window };
             [e setComputePipelineState:g->p_attn];
             [e setBuffer:g->q   offset:qo atIndex:0];
             [e setBuffer:g->kc  offset:0 atIndex:1];
@@ -814,7 +856,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
               threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 
             enc_mv(g, e, m, ly->wo, g->xb2, xb2o, g->xb, xbo,
-                   q_dim, n_embd, g->bo[l]);
+                   q_dim_l, n_embd, g->bo[l]);
             enc_elem(g, e, g->p_add, g->x, xo, g->xb, xbo, n_embd);
 
             enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->ffn_norm[l],
@@ -851,8 +893,6 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
 static float *gpu_forward(model_t *m, int token, int pos) {
     gpu_t *g = m->gpu;
     int n_embd = m->n_embd;
-    int q_dim  = m->n_head * m->head_dim;
-    int kv_dim = m->n_head_kv * m->head_dim;
 
     // token embedding on CPU (one row), straight into the shared buffer
     size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
@@ -865,34 +905,39 @@ static float *gpu_forward(model_t *m, int token, int pos) {
 
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
+        int hd = model_head_dim(m, l);
+        int n_kv = model_n_head_kv(m, l);
+        int q_dim_l = model_q_dim(m, l);
+        int kv_dim_l = model_kv_dim(m, l);
+        int window = model_is_swa(m, l) ? m->swa_window : 0;
         size_t row_b = model_kv_row_bytes(m, l);
         uint64_t kv_off = model_kv_byte_off(m, l) + (uint64_t)pos * row_b;
         int q8 = m->kv_q8;
-        int kv_units = q8 ? kv_dim / 32 : kv_dim;
+        int kv_units = q8 ? kv_dim_l / 32 : kv_dim_l;
 
         enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->attn_norm[l], n_embd, m->rms_eps);
-        enc_mv(g, e, m, ly->wq, g->xb, 0, g->q,  0, n_embd, q_dim,  g->bq[l]);
-        enc_mv(g, e, m, ly->wk, g->xb, 0, g->kt, 0, n_embd, kv_dim, g->bk[l]);
-        enc_mv(g, e, m, ly->wv, g->xb, 0, g->vt, 0, n_embd, kv_dim, g->bv[l]);
-        if (g->qn[l]) enc_qknorm(g, e, m, g->q,  0, g->qn[l], m->n_head);
-        if (g->kn[l]) enc_qknorm(g, e, m, g->kt, 0, g->kn[l], m->n_head_kv);
-        enc_rope(g, e, m, g->q,  0, m->n_head,    pos);
-        enc_rope(g, e, m, g->kt, 0, m->n_head_kv, pos);
+        enc_mv(g, e, m, ly->wq, g->xb, 0, g->q,  0, n_embd, q_dim_l,  g->bq[l]);
+        enc_mv(g, e, m, ly->wk, g->xb, 0, g->kt, 0, n_embd, kv_dim_l, g->bk[l]);
+        enc_mv(g, e, m, ly->wv, g->xb, 0, g->vt, 0, n_embd, kv_dim_l, g->bv[l]);
+        if (g->qn[l]) enc_qknorm(g, e, m, g->q,  0, g->qn[l], m->n_head, hd);
+        if (g->kn[l]) enc_qknorm(g, e, m, g->kt, 0, g->kn[l], n_kv, hd);
+        enc_rope(g, e, m, g->q,  0, m->n_head, pos, l);
+        enc_rope(g, e, m, g->kt, 0, n_kv,      pos, l);
 
         [e setComputePipelineState:g->p_store];
         [e setBuffer:g->kt offset:0 atIndex:0];
         [e setBuffer:g->vt offset:0 atIndex:1];
         [e setBuffer:g->kc offset:0 atIndex:2];
         [e setBuffer:g->vc offset:0 atIndex:3];
-        [e setBytes:&kv_dim length:4 atIndex:4];
+        [e setBytes:&kv_dim_l length:4 atIndex:4];
         [e setBytes:&kv_off length:8 atIndex:5];
         [e setBytes:&q8 length:4 atIndex:6];
         [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
-        attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, pos,
+        attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
                          (uint64_t)model_kv_byte_off(m, l),
-                         1.0f / sqrtf((float)m->head_dim), q8 };
+                         model_attn_scale(m, l), q8, window };
         [e setComputePipelineState:g->p_attn];
         [e setBuffer:g->q   offset:0 atIndex:0];
         [e setBuffer:g->kc  offset:0 atIndex:1];
@@ -903,7 +948,7 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 
-        enc_mv(g, e, m, ly->wo, g->xb2, 0, g->xb, 0, q_dim, n_embd, g->bo[l]);
+        enc_mv(g, e, m, ly->wo, g->xb2, 0, g->xb, 0, q_dim_l, n_embd, g->bo[l]);
         enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
 
         enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l], n_embd, m->rms_eps);
