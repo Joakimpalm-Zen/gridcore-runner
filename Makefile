@@ -78,6 +78,7 @@ endif
 # same .exe suffix rule as every other test binary, without repeating the
 # three-way platform branch above
 TEST_PREFIX = $(TEST_BATCH:test-batch%=test-prefix%)
+TEST_HOST_HEADER = $(TEST_BATCH:test-batch%=test-host-header%)
 TEST_GRAMMAR_FF = $(TEST_BATCH:test-batch%=test-grammar-ff%)
 TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
@@ -219,6 +220,10 @@ $(TEST_BATCH): $(TEST_BATCH_SRC) $(HDR)
 # of the check needs the shipped binary rather than a comment about it.
 $(TEST_BIND): tests/test_bind.c src/server.c src/main.c
 	$(CC) $(CFLAGS) -I src tests/test_bind.c -o $@
+
+$(TEST_HOST_HEADER): tests/test_host_header.c src/http.c src/json.c src/compat.c $(HDR)
+	$(CC) $(CFLAGS) -I src tests/test_host_header.c src/http.c src/json.c \
+		src/compat.c -o $@ $(LDFLAGS)
 
 # forkable KV prefixes: needs the real model, the real tokenizer and the real
 # engine, because the property under test is that a forked cache produces the
@@ -380,13 +385,14 @@ endif
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
-      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) \
+      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) runner test.gguf
 	./$(TEST_BIND)
+	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)
 	./$(TEST_RESTART)
 	./$(TEST_PFX_PERSIST)
@@ -545,7 +551,7 @@ clean:
 	rm -f test-moe-fixture.*.gguf runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
-	      $(TEST_BATCH) $(TEST_BIND) $(TEST_VRAMREG) test-shared-asan-bin \
+	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)

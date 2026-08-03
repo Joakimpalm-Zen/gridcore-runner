@@ -98,6 +98,71 @@ static int ci_ncmp(const char *a, const char *b, size_t n) {
     return 0;
 }
 
+static bool local_authority(const char *s, size_t n) {
+    while (n && (*s == ' ' || *s == '\t')) { s++; n--; }
+    while (n && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
+    size_t host_n;
+    const char *port = NULL;
+    if (n && s[0] == '[') {
+        const char *close = memchr(s, ']', n);
+        if (!close) return false;
+        host_n = (size_t)(close - s + 1);
+        if (host_n < n) {
+            if (s[host_n] != ':') return false;
+            port = s + host_n + 1;
+        }
+    } else {
+        const char *colon = memchr(s, ':', n);
+        host_n = colon ? (size_t)(colon - s) : n;
+        if (colon) port = colon + 1;
+    }
+    bool local = (host_n == 9 && ci_ncmp(s, "localhost", 9) == 0) ||
+                 (host_n == 9 && memcmp(s, "127.0.0.1", 9) == 0) ||
+                 (host_n == 5 && memcmp(s, "[::1]", 5) == 0);
+    if (!local) return false;
+    if (!port) return true;
+    size_t port_n = n - (size_t)(port - s);
+    if (!port_n || port_n > 5) return false;
+    unsigned value = 0;
+    for (size_t i = 0; i < port_n; i++) {
+        if (port[i] < '0' || port[i] > '9') return false;
+        value = value * 10 + (unsigned)(port[i] - '0');
+    }
+    return value >= 1 && value <= 65535;
+}
+
+bool validate_request_authority(char *first_header, char *header_end) {
+    int hosts = 0, origins = 0;
+    for (char *line = first_header; line < header_end;) {
+        char *end = strstr(line, "\r\n");
+        if (!end || end > header_end) return false;
+        char *colon = memchr(line, ':', (size_t)(end - line));
+        if (colon) {
+            size_t name_n = (size_t)(colon - line);
+            const char *value = colon + 1;
+            size_t value_n = (size_t)(end - value);
+            if (name_n == 4 && ci_ncmp(line, "Host", 4) == 0) {
+                if (++hosts != 1 || !local_authority(value, value_n)) return false;
+            } else if (name_n == 6 && ci_ncmp(line, "Origin", 6) == 0) {
+                if (++origins != 1) return false;
+                while (value_n && (*value == ' ' || *value == '\t')) {
+                    value++; value_n--;
+                }
+                while (value_n && (value[value_n - 1] == ' ' ||
+                                   value[value_n - 1] == '\t')) value_n--;
+                size_t scheme_n = value_n >= 7 && ci_ncmp(value, "http://", 7) == 0
+                                  ? 7 : value_n >= 8 &&
+                                    ci_ncmp(value, "https://", 8) == 0 ? 8 : 0;
+                if (!scheme_n || !local_authority(value + scheme_n,
+                                                   value_n - scheme_n))
+                    return false;
+            }
+        }
+        line = end + 2;
+    }
+    return hosts == 1;
+}
+
 // Parse the two HTTP fields that determine request framing. Header names are
 // compared as complete, line-anchored fields: text inside another field's
 // value must never influence framing. Runner does not implement transfer
@@ -183,6 +248,7 @@ const char *reason_phrase(int code) {
     switch (code) {
         case 200: return "OK";
         case 400: return "Bad Request";
+        case 403: return "Forbidden";
         case 404: return "Not Found";
         case 408: return "Request Timeout";
         case 500: return "Internal Server Error";

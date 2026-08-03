@@ -47,7 +47,7 @@ def _connect(server, payload, rcvbuf=None):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
     s.connect(("127.0.0.1", server.port))
     body = json.dumps(payload).encode()
-    s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+    s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
               b"Content-Type: application/json\r\n"
               b"Content-Length: %d\r\n\r\n" % len(body) + body)
     return s

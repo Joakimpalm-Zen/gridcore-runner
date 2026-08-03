@@ -51,6 +51,7 @@ bool parse_request_framing(char *first_header, char *header_end,
 // Split "METHOD path HTTP/1.x" and point first_header at the line after it.
 bool parse_request_line(char *hdr, char method[8], char path[256],
                         char **first_header);
+bool validate_request_authority(char *first_header, char *header_end);
 
 bool send_all(sock_t fd, const char *s, size_t n);
 const char *reason_phrase(int code);

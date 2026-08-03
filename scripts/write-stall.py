@@ -54,7 +54,7 @@ def request(port, payload, *, receive=True, rcvbuf=None, timeout=60):
     sock.settimeout(timeout)
     sock.connect(("127.0.0.1", port))
     body = json.dumps(payload).encode()
-    sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+    sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n"
                  b"Content-Type: application/json\r\nConnection: close\r\n"
                  b"Content-Length: %d\r\n\r\n" % len(body) + body)
     if not receive:
@@ -78,7 +78,7 @@ def wait_healthy(proc, port, deadline):
             raise RuntimeError(f"runner exited during startup ({proc.returncode})")
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1) as sock:
-                sock.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n"
+                sock.sendall(b"GET /health HTTP/1.1\r\nHost: localhost\r\n"
                              b"Connection: close\r\n\r\n")
                 if b" 200 " in sock.recv(64):
                     return

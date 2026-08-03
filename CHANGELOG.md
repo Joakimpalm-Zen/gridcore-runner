@@ -5,6 +5,15 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **DNS rebinding and drive-by browser traffic are rejected at the HTTP
+  boundary.** Every route, including accept-loop fast paths such as `/health`
+  and `/v1/models`, now requires exactly one loopback `Host`; an `Origin`, when
+  present, must be an HTTP(S) loopback origin too. Foreign, missing, duplicated,
+  malformed, userinfo-bearing, and path-bearing authorities fail with 403.
+  This closes the remaining browser-exposure half after `/unload` became
+  POST-only. A table-driven C gate exercises the parser directly and live
+  conformance checks both fast-path and slot-handled requests.
+
 - **The real write-side stall is now reproducible and gated locally.**
   `scripts/write-stall.py` uses Qwen2.5-7B at 32k context plus a minimum-length
   structured stream to exceed the actual loopback buffers, and reads the exact

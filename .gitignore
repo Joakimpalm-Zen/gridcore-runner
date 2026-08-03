@@ -24,6 +24,8 @@ test-shared-weights
 test-shared-weights.exe
 test-bind
 test-bind.exe
+test-host-header
+test-host-header.exe
 test-batch
 test-batch.exe
 test-prefix

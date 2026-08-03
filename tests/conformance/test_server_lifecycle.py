@@ -258,6 +258,7 @@ def test_unload_answers_promptly_and_defers_under_active_generation():
         body = json.dumps({"messages": [{"role": "user", "content": "hi"}],
                            "max_tokens": 900, "stream": True}).encode()
         conn.sendall(b"POST /v1/chat/completions HTTP/1.1\r\n"
+                     b"Host: localhost\r\n"
                      b"Content-Type: application/json\r\n" +
                      ("Content-Length: %d\r\n\r\n" % len(body)).encode() + body)
         assert conn.recv(1), "generation never started"   # stream is live

@@ -517,6 +517,10 @@ static void handle_conn(slot_t *s, sock_t fd) {
         send_error(fd, 400, "malformed request line");
         return;
     }
+    if (!validate_request_authority(first_header, header_end)) {
+        send_error(fd, 403, "Host and Origin must be loopback");
+        return;
+    }
     // Route on the path component. SDKs use query parameters for protocol
     // feature selection — Claude Code, for example, sends
     // `/v1/messages?beta=true`. The query does not rename the resource and is
@@ -762,6 +766,11 @@ static bool accept_fastpath(sock_t fd) {
         !parse_request_framing(first_header, header_end, &content_length) ||
         content_length > 32u * 1024 * 1024) {
         send_error(fd, 400, "invalid request framing");
+        sock_close(fd);
+        return true;
+    }
+    if (!validate_request_authority(first_header, header_end)) {
+        send_error(fd, 403, "Host and Origin must be loopback");
         sock_close(fd);
         return true;
     }

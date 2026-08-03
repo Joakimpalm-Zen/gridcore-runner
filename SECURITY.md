@@ -16,6 +16,11 @@ boundary is the operating-system user account, not the network:
   socket can use the API — the same set of processes that could already
   read your files or burn your GPU. Auth belongs to whatever layer you put
   in front of runner, not inside it.
+- **Browser authority is validated.** Every request must carry exactly one
+  `Host` naming `localhost`, `127.0.0.1`, or `[::1]` (with an optional valid
+  port). When `Origin` is present it must name the same loopback set. This
+  blocks a public web page or DNS-rebinding hostname from treating the local,
+  unauthenticated API as its own origin.
 - **Clients are assumed cooperative but not perfect.** The server defends
   against accidents (stalls, oversized requests, malformed JSON), not
   against a hostile local process — a hostile local process already has
@@ -29,7 +34,8 @@ network input.
 ## The HTTP surface
 
 The built-in server is a deliberate subset of HTTP/1.1, kept in one source
-module (`src/server.c`) so its behavior can be audited as a unit. It is not a
+layer (`src/http.c` plus the routing in `src/server.c`) so its behavior can be
+audited as a unit. It is not a
 general-purpose web server and does not try to be:
 
 | Property | Behavior |
@@ -37,6 +43,7 @@ general-purpose web server and does not try to be:
 | Body framing | `Content-Length` only — no chunked transfer-encoding |
 | Connection lifecycle | `Connection: close` on every response, no keep-alive |
 | Request header | capped at 16 KB |
+| Request authority | one loopback `Host`; optional `Origin` must be loopback |
 | Request body | capped at 32 MB |
 | Request read deadline | header + body must arrive within 10 s, else `408` and the inference slot is released |
 | TLS | none — loopback traffic only |
