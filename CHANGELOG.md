@@ -5,6 +5,35 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **The prefix cache stores to the divergence point, not to the end of the
+  prompt.** Agent traffic is a system prompt, a tool list and a schema, then a
+  request that differs. Publishing each turn whole held the shared block once
+  per turn. Measured on Qwen2.5-7B with six sibling prompts over a ~2,300-token
+  shared prefix:
+
+  | | entries | bytes | evictions |
+  |---|---|---|---|
+  | before | 4 | 532.4 MB | 2 |
+  | after | **1** | **133.1 MB** | **0** |
+
+  Reuse is unchanged — every sibling reuses 2,314 of 2,321 tokens either way —
+  so this is 4x less memory for the same work, and the two evictions it removes
+  were the cache throwing away a genuinely shared block in order to store tails
+  nobody shares.
+
+  The tail past the divergence point is exactly the part another request has
+  been *observed* not to share, and it is also the part a repeat of the same
+  prompt recovers for free from its own slot via `engine_rewind`. Truncating is
+  free in correctness terms for the same reason the existing half-budget cap
+  is: a prefix of a prefix is still a valid prefix.
+
+  The new conformance gate was **vacuous on its first version** and only caught
+  it by checking: its five sibling tails were of different lengths, so one was
+  a prefix of another and the pre-existing "strictly extends" branch collapsed
+  them to one entry for a reason unrelated to this policy — it passed against a
+  build with the policy compiled out. With equal-length tails that diverge
+  early it now fails without the policy and passes with it.
+
 - **A certified `cpu_cuda` claim does not hold at the documented token count,
   and the tool's default hides it. OWNER call.** Chasing the plan's "Qwen3-4B
   CPU/GPU divergence at token 24" turned up something broader.

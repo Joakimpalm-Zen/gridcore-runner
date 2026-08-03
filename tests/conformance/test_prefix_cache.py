@@ -307,3 +307,43 @@ def test_clear_releases_the_snapshots(client):
     assert after["entries"] == 0
     assert after["bytes"] == 0
     assert after["hits"] == 0 and after["stores"] == 0
+
+
+def test_siblings_share_one_entry_at_the_divergence_point(cold):
+    """Sibling prompts must not each hold their own copy of the shared block.
+
+    Agent traffic is a system prompt, a tool list and a schema, then a request
+    that differs. Storing each turn whole held the shared block once per turn:
+    measured with four siblings over a ~2,300-token prefix, the cache held four
+    entries totalling 530 MB of a 512 MB budget for one 132 MB block of shared
+    KV, and the fourth store evicted the first. Publishing truncates to the
+    divergence point instead -- the tail past it is exactly the part another
+    request has been observed NOT to share.
+
+    The property is entry COUNT, not bytes, so this does not depend on the KV
+    geometry of whatever fixture runs it. Reuse is asserted alongside, because
+    a policy that stored nothing would also score one entry.
+    """
+    # Tails must be the SAME LENGTH and differ early, or one is a prefix of
+    # another and the "strictly extends" branch collapses them for a reason
+    # that has nothing to do with this policy -- which is how the first version
+    # of this test passed against a build with the policy compiled out.
+    tails = ["alpha bravo charlie delta echo foxtrot golf hotel india juliet",
+             "kilo lima mike november oscar papa quebec romeo sierra tango",
+             "uniform victor whiskey xray yankee zulu alpha bravo charlie one",
+             "two three four five six seven eight nine ten eleven twelve now",
+             "red orange yellow green blue indigo violet white black grey up"]
+    for i, tail in enumerate(tails):
+        cold.chat(_payload(SYSTEM, tail), name=f"prefix-sibling-{i}")
+    stats = cold.get("/v1/runner/prefix-cache", name="prefix-sibling-stats").json
+    assert stats["entries"] == 1, (
+        f"five siblings over one shared prefix produced {stats['entries']} "
+        "entries; the shared block is being stored once per turn")
+    assert stats["evictions"] == 0, (
+        f"{stats['evictions']} evictions while storing siblings of one prefix")
+
+    t = _telemetry(cold.chat(_payload(SYSTEM, "one more sibling"),
+                             name="prefix-sibling-reuse"))
+    assert t["prompt_cached_tokens"] > 0, "the shared prefix was not reused"
+    assert t["prompt_eval_tokens"] < t["prompt_cached_tokens"], (
+        "more tokens were re-prefilled than reused")

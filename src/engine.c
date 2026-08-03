@@ -472,6 +472,7 @@ void engine_prefix_publish(engine *e, const int32_t *toks, int n,
 
     // Already covered? Refresh it. A strict extension of an existing entry
     // replaces it rather than sitting beside it.
+    int diverge_at = 0;   // longest prefix shared with an entry we diverge from
     for (pfx_entry **pp = &PFX.head; *pp; ) {
         pfx_entry *p = *pp;
         int lim = p->n < store_n ? p->n : store_n, c = 0;
@@ -483,7 +484,37 @@ void engine_prefix_publish(engine *e, const int32_t *toks, int n,
             return;
         }
         if (c == lim) pfx_drop(pp);          // ours strictly extends p
-        else pp = &p->next;
+        else {
+            if (c > diverge_at) diverge_at = c;
+            pp = &p->next;
+        }
+    }
+
+    // Store to the DIVERGENCE POINT, not to the end of the prompt.
+    //
+    // Two requests in an agent session share a system prompt, a tool list and
+    // a schema, then differ. Storing each one whole means the shared block is
+    // held once per request: measured with four sibling prompts over a
+    // ~2,300-token shared prefix, the cache held four entries totalling
+    // 530 MB of a 512 MB budget for what is one 132 MB block of shared KV, and
+    // the fourth store evicted the first.
+    //
+    // The tail past `diverge_at` is exactly the part another request has
+    // already been observed NOT to share, so it is the part least worth a slot
+    // in a fixed budget. It is also the part a repeat of this same prompt
+    // recovers for free from its own slot's KV via engine_rewind. Truncating
+    // is free in correctness terms for the same reason the half-budget cap
+    // above is: a prefix of a prefix is still a valid prefix.
+    if (diverge_at >= PFX_MIN_TOKENS && diverge_at < store_n) {
+        store_n = diverge_at;
+        // ...unless that exact prefix is already stored, in which case there
+        // is nothing to add and the scan above would have said so.
+        for (pfx_entry *p = PFX.head; p; p = p->next) {
+            if (p->key != e->model_key || p->n < store_n) continue;
+            int c = 0;
+            while (c < store_n && p->toks[c] == toks[c]) c++;
+            if (c == store_n) { p->used = now; pthread_mutex_unlock(&PFX.mu); return; }
+        }
     }
 
     size_t need = prefix_cache_entry_bytes(e->m, store_n);
