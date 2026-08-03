@@ -225,8 +225,17 @@ def candidates(model_path, size_gb, vram_gb, moe):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models-dir", default="C:/ProjectGrid/models")
-    ap.add_argument("--runner", default=str(ROOT / "runner.exe"))
+    # The shelf is per-machine. The default is the repo's own models/ because
+    # that path exists on every box this runs on; the previous default was one
+    # machine's absolute Windows path, which on any other host matched nothing
+    # and printed "done".
+    ap.add_argument("--models-dir",
+                    default=str(Path(__file__).resolve().parent.parent / "models"))
+    # Same portability trap as --models-dir above: the default was Windows-only,
+    # so on any other host this failed with a FileNotFoundError deep inside
+    # subprocess rather than saying which binary it wanted.
+    ap.add_argument("--runner",
+                    default=str(ROOT / ("runner.exe" if os.name == "nt" else "runner")))
     ap.add_argument("--out-dir", default=str(ROOT / "tests/compatibility/out/stress"))
     ap.add_argument("--ctx", type=int, default=1024)
     ap.add_argument("--ram-gb", type=float, default=15.9)
@@ -241,10 +250,29 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     # Smallest first: a long pass should have covered the cheap models before
     # it spends an hour paging an 18 GB file, and --skip-done resumes there.
-    models = sorted(Path(args.models_dir).glob("*.gguf"),
-                    key=lambda p: p.stat().st_size)
+    if not Path(args.runner).exists():
+        print(f"error: no runner binary at {args.runner} (build it, or pass "
+              f"--runner)", file=sys.stderr)
+        return 2
+    shelf = Path(args.models_dir)
+    models = sorted(shelf.glob("*.gguf"), key=lambda p: p.stat().st_size)
+    found = len(models)
     if args.only:
         models = [m for m in models if args.only.lower() in m.name.lower()]
+
+    # Zero models is a FAILURE, not a fast pass. This script's whole output on
+    # a wrong --models-dir used to be the word "done", which is exactly what a
+    # clean run of the whole shelf also prints -- so a pass over nothing was
+    # indistinguishable from a pass over everything.
+    if not models:
+        if not shelf.is_dir():
+            print(f"error: no model shelf at {shelf}", file=sys.stderr)
+        elif found == 0:
+            print(f"error: no .gguf files under {shelf}", file=sys.stderr)
+        else:
+            print(f"error: --only {args.only!r} matched none of the "
+                  f"{found} models under {shelf}", file=sys.stderr)
+        return 2
 
     for model in models:
         report_path = out_dir / (model.stem + ".json")

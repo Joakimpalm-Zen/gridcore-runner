@@ -1,0 +1,110 @@
+{
+ "model": "Qwen3-4B-Q4_K_M.gguf",
+ "size_gb": 2.5,
+ "context": 1024,
+ "generated_utc": "2026-08-03T10:33:24Z",
+ "faults": [],
+ "deviances": [],
+ "moe": false,
+ "gpu_run": {
+  "command": [
+   "-m",
+   "/home/lab/workspace/Gridcore/gridcore-runner/models/Qwen3-4B-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris. The capital of Germany is Berlin. The capital of Italy is Rome.\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=9.21GB fixed=0.86GB G=36/36 full=1 used=3.18GB",
+  "wall_s": 1.6,
+  "stderr_tail": null
+ },
+ "cpu_run": {
+  "command": [
+   "-m",
+   "/home/lab/workspace/Gridcore/gridcore-runner/models/Qwen3-4B-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris. The capital of Germany is Berlin. The capital of Italy is Rome.\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 0.9,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "/home/lab/workspace/Gridcore/gridcore-runner/models/Qwen3-4B-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 5.0,
+   "split": "gpu-split: budget=9.21GB fixed=0.86GB G=36/36 full=1 used=3.18GB",
+   "prompt_tok_s": 165.761,
+   "decode_tok_s": 42.971,
+   "prompt_tokens": 512,
+   "config": "default"
+  },
+  {
+   "command": [
+    "-m",
+    "/home/lab/workspace/Gridcore/gridcore-runner/models/Qwen3-4B-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32",
+    "--kv",
+    "q8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 5.2,
+   "split": "gpu-split: budget=9.21GB fixed=0.86GB G=36/36 full=1 used=3.11GB",
+   "prompt_tok_s": 155.909,
+   "decode_tok_s": 42.476,
+   "prompt_tokens": 512,
+   "config": "kv-q8"
+  }
+ ],
+ "recommended": {
+  "config": "default",
+  "decode_tok_s": 42.971,
+  "prefill_tok_s": 165.761,
+  "command": [
+   "-m",
+   "/home/lab/workspace/Gridcore/gridcore-runner/models/Qwen3-4B-Q4_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "32"
+  ]
+ }
+}

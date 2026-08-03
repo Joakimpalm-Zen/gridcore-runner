@@ -1,0 +1,112 @@
+{
+ "model": "Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+ "size_gb": 5.06,
+ "context": 1024,
+ "generated_utc": "2026-08-03T10:33:46Z",
+ "faults": [],
+ "deviances": [],
+ "moe": false,
+ "gpu_run": {
+  "command": [
+   "-m",
+   "/home/lab/workspace/Gridcore/gridcore-runner/models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris, which is also the country's largest city. region, and cultural center\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 1.8,
+  "stderr_tail": null
+ },
+ "cpu_run": {
+  "command": [
+   "-m",
+   "/home/lab/workspace/Gridcore/gridcore-runner/models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris, which is also the country's largest city. region, and cultural center\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 1.1,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "sweep": [
+  {
+   "command": [
+    "-m",
+    "/home/lab/workspace/Gridcore/gridcore-runner/models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 11.6,
+   "split": null,
+   "prompt_tok_s": 58.53,
+   "decode_tok_s": 14.873,
+   "prompt_tokens": 512,
+   "config": "default"
+  },
+  {
+   "command": [
+    "-m",
+    "/home/lab/workspace/Gridcore/gridcore-runner/models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+    "--bench-json",
+    "-c",
+    "1024",
+    "-n",
+    "32",
+    "--kv",
+    "q8"
+   ],
+   "faults": [],
+   "refusals": [],
+   "wall_s": 11.1,
+   "split": null,
+   "prompt_tok_s": 61.871,
+   "decode_tok_s": 14.943,
+   "prompt_tokens": 512,
+   "config": "kv-q8"
+  }
+ ],
+ "recommended": {
+  "config": "kv-q8",
+  "decode_tok_s": 14.943,
+  "prefill_tok_s": 61.871,
+  "command": [
+   "-m",
+   "/home/lab/workspace/Gridcore/gridcore-runner/models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+   "--bench-json",
+   "-c",
+   "1024",
+   "-n",
+   "32",
+   "--kv",
+   "q8"
+  ]
+ }
+}
