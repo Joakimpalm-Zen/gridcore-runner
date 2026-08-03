@@ -5,6 +5,29 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Anthropic prompt caching and replayed reasoning are now gated** (5 tests in
+  `tests/conformance/test_messages.py`). Both behaviours already worked and
+  neither had a test, which is the state in which a behaviour quietly stops
+  being true.
+
+  `cache_control` is accepted wherever the Anthropic SDK and Claude Code put it
+  — on system blocks, on message content, and on a tool — because refusing the
+  marker would make runner unusable with those clients rather than merely
+  uncached. The matching *decision* is pinned too: runner still does not claim
+  `cache_read_input_tokens` / `cache_creation_input_tokens`, since those carry
+  Anthropic's semantics (`input_tokens` excludes what they cover) and filling
+  them with runner's unrelated prefix-cache figures would misstate a client's
+  accounting. That figure stays in `runner_telemetry`. **Owner call if it
+  should change** — the test now says so out loud instead of the code saying it
+  in a comment.
+
+  Replayed `thinking` / `redacted_thinking` blocks are accepted and dropped.
+  The test that matters is not the 200 but the cost: via `count_tokens`, an
+  assistant turn carrying a long thinking block counts **identically** to the
+  same turn without one, with the same text sent as a `text` block as the
+  control — without it the test would pass against a server that ignored
+  content blocks entirely.
+
 - **Fixed: `/v1/embeddings` refused every official OpenAI client.** The SDKs
   send `encoding_format: "base64"` by *default* and decode it themselves;
   runner answered `400 encoding_format must be float`, so `client.embeddings

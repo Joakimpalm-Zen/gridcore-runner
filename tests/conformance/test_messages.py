@@ -709,3 +709,113 @@ def test_messages_accepts_claude_code_system_turn(client):
     r = client.messages(payload, name="messages-system-turn")
     r.expect_status(200)
     assert r.json["type"] == "message"
+
+
+# --------------------------------------------------------------------------
+# Prompt caching and replayed reasoning.
+#
+# Both were implemented and neither was gated, which is the state in which a
+# behaviour quietly stops being true. The tests below pin what runner does now,
+# and one of them pins something it deliberately does NOT do.
+
+CACHED = {"type": "ephemeral"}
+
+
+def test_cache_control_is_accepted_wherever_anthropic_puts_it(client):
+    """`cache_control` marks a prefix breakpoint for Anthropic's caching
+    product. Runner has its own prefix cache and does not implement theirs, but
+    a client that sends the marker must not be refused for it: Claude Code and
+    the Anthropic SDK put it on system blocks, on message content and on the
+    last tool by default, and a 400 on any of those makes runner unusable with
+    them rather than merely uncached."""
+    payload = {
+        "model": "local", "max_tokens": 8, "temperature": 0,
+        "system": [{"type": "text", "text": "be terse", "cache_control": CACHED}],
+        "tools": [dict(WEATHER, cache_control=CACHED)],
+        "messages": [{"role": "user",
+                      "content": [{"type": "text", "text": "hello",
+                                   "cache_control": CACHED}]}],
+    }
+    r = client.messages(payload, name="messages-cache-control")
+    r.expect_status(200)
+
+
+def test_cache_usage_fields_are_not_claimed(client):
+    """The other half of the decision, pinned so it cannot drift silently.
+
+    Runner reports its own prefix-cache reuse under `runner_telemetry` and does
+    NOT populate `cache_read_input_tokens` / `cache_creation_input_tokens`,
+    because those describe Anthropic's product with Anthropic's semantics
+    (`input_tokens` excludes what they cover) and reporting runner's unrelated
+    numbers there would misstate a client's accounting rather than inform it.
+    Changing this is an owner decision, not a refactor — hence a test.
+    """
+    r = client.messages({"model": "local", "max_tokens": 8, "temperature": 0,
+                         "messages": [{"role": "user", "content": "hello"}]},
+                        name="messages-cache-usage-absent")
+    r.expect_status(200)
+    usage = r.json["usage"]
+    claimed = [k for k in ("cache_read_input_tokens",
+                           "cache_creation_input_tokens") if k in usage]
+    if claimed:
+        raise ProtocolError(
+            "runner now claims Anthropic's cache usage fields; if that is "
+            "intended, their semantics must be honoured (input_tokens excludes "
+            "cached tokens) and this test updated deliberately",
+            claimed=claimed, usage=usage)
+
+
+@pytest.mark.parametrize("block,label", [
+    ({"type": "thinking", "thinking": "scratch " * 40, "signature": "sig"},
+     "thinking"),
+    ({"type": "redacted_thinking", "data": "AAAAdGVzdA=="}, "redacted"),
+])
+def test_replayed_reasoning_is_accepted(client, block, label):
+    """A thinking-capable client replays the assistant's reasoning blocks in
+    the next turn. Anthropic wants them back to verify a signature; there is
+    nothing to verify locally, so runner accepts and drops them. Refusing would
+    break the second turn of every such conversation."""
+    r = client.messages(
+        {"model": "local", "max_tokens": 8, "temperature": 0,
+         "messages": [{"role": "user", "content": "hi"},
+                      {"role": "assistant", "content": [block]},
+                      {"role": "user", "content": "go on"}]},
+        name=f"messages-replay-{label}")
+    r.expect_status(200)
+
+
+def test_replayed_reasoning_costs_nothing(client):
+    """Accepting the block is the weak half; not putting it in the prompt is
+    the half that matters, and a test that only checked for a 200 would pass
+    just as well if the scratch work were prepended to every turn.
+
+    count_tokens makes it exact: an assistant turn carrying a long thinking
+    block must count the same as the same turn without one, while the same text
+    sent as a `text` block must count more — otherwise this test would pass
+    against a server that ignored content blocks altogether.
+    """
+    scratch = "a very long private scratch pad " * 8
+    base = [{"role": "user", "content": "hi"}]
+
+    def count(content, name):
+        r = client.count_tokens(
+            {"model": "local",
+             "messages": base + [{"role": "assistant", "content": content}]},
+            name=name)
+        r.expect_status(200)
+        return r.json["input_tokens"]
+
+    plain = count([{"type": "text", "text": "ok"}], "count-plain")
+    think = count([{"type": "thinking", "thinking": scratch, "signature": "s"},
+                   {"type": "text", "text": "ok"}], "count-thinking")
+    as_text = count([{"type": "text", "text": scratch},
+                     {"type": "text", "text": "ok"}], "count-as-text")
+
+    if think != plain:
+        raise ProtocolError("a replayed thinking block changed the prompt",
+                            plain=plain, with_thinking=think)
+    if as_text <= plain:
+        raise ProtocolError(
+            "the control failed: that much text should cost tokens, so the "
+            "test above proves nothing about thinking blocks",
+            plain=plain, as_text=as_text)
