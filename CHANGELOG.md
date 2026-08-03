@@ -5,6 +5,28 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **A CPU server no longer serializes on a device turn it does not have.** The
+  scheduler's `dev_mu` exists for one reason, stated in its own comment: a
+  microbatch captures a CUDA graph on its lead sequence's stream, and any other
+  launch in that context breaks the capture. So prefill, decode and any solo
+  generation take turns. A **CPU** build has no capture and no shared device
+  context — every `model_t` owns its activation scratch and its thread pool,
+  and the weights are read-only — so the turn buys nothing there and costs a
+  lot.
+
+  Measured on Qwen2.5-7B, `--gpu off --parallel 4`, with a grammar-fast-forward
+  request holding the turn for its whole generation: a plain request arriving
+  during it waited **10.3 s against 4.8 s alone**, i.e. for the entire
+  generation. After gating the turn on `m->gpu != NULL`: **4.3 s, 1.0x**. The
+  constrained request itself goes 6.8 → 7.7 s, which is the correct trade — it
+  is now sharing the box instead of monopolising it.
+
+  Untouched on the GPU path, where the capture hazard is real. And the bigger
+  half is still open and now says so in the code: `sched_generate` holds the
+  turn for a whole speculative generation rather than per forward, so on a GPU
+  one `--draft` slot still stalls every other slot for its full length. Taking
+  the turn per forward needs `engine_generate` to call a hook around each one.
+
 - **Phase 8: q8 KV attention is essentially free.** Measured on the now
   uncontended MIG slice, Qwen2.5-7B-Instruct-Q4_K_M, 512-token prompt and 256
   generated, full offload (28/28 layers) in every row:

@@ -76,6 +76,16 @@ static struct {
     // Serializing them costs nothing real anyway: both saturate the device,
     // so overlapping them only trades one's latency for the other's.
     pthread_mutex_t dev_mu;
+    // Whether the device turn is needed at all. Its entire justification is
+    // CUDA graph capture: a microbatch captures a graph on its lead sequence's
+    // stream, and any other launch in that context breaks the capture. A CPU
+    // build has no capture and no shared device context -- every model_t owns
+    // its activation scratch and its thread pool, and the weights are read-only
+    // (Phase 5 made that explicit) -- so serializing there buys nothing and
+    // costs a lot. Measured on Qwen2.5-7B CPU, --parallel 4: a plain request
+    // arriving during a grammar-fast-forward generation waited for the WHOLE
+    // generation, 10.3 s against 4.8 s alone.
+    bool device_turn;
     // decode worker's microbatch scratch [n_slots], owned by sched_start so the
     // worker never allocates and can never fail startup (RNR-005)
     int    *w_idx;
@@ -143,7 +153,7 @@ static void *decode_worker(void *unused) {
 
         // Take the device turn. SCH.mu is deliberately released first: these
         // two locks are never held together, in either order.
-        pthread_mutex_lock(&SCH.dev_mu);
+        if (SCH.device_turn) pthread_mutex_lock(&SCH.dev_mu);
         bool ok = model_batch_decode(SCH.batch, idx, tk, ps, nb, out);
         // out[i] is only valid until the next decode, and the slot threads
         // read it after this one returns — so each row is copied home first.
@@ -151,7 +161,7 @@ static void *decode_worker(void *unused) {
             for (int i = 0; i < nb; i++)
                 memcpy(SCH.seq[idx[i]].logits, out[i],
                        sizeof(float) * (size_t)n_vocab);
-        pthread_mutex_unlock(&SCH.dev_mu);
+        if (SCH.device_turn) pthread_mutex_unlock(&SCH.dev_mu);
         atomic_fetch_add(&SCH.steps, 1);
         atomic_fetch_add(&SCH.seqs_batched, nb);
 
@@ -203,6 +213,8 @@ bool sched_start(void) {
         SCH.seq[i].logits = malloc(sizeof(float) * (size_t)n_vocab);
         if (!SCH.seq[i].logits) { free(ms); sched_free_buffers(); return false; }
     }
+    // Only a GPU-backed model needs the device turn; see the field's comment.
+    SCH.device_turn = SV.slots[0].m->gpu != NULL;
     SCH.batch = model_batch_create(ms, n);
     free(ms);
     if (!SCH.batch) { sched_free_buffers(); return false; }
@@ -242,11 +254,11 @@ bool sched_start(void) {
 // different kernel shapes. The sequence is simply absent from the batch while
 // this is held, which costs nothing — it is named per step, not enrolled.
 void sched_prefill_begin(void) {
-    if (sched_on()) pthread_mutex_lock(&SCH.dev_mu);
+    if (sched_on() && SCH.device_turn) pthread_mutex_lock(&SCH.dev_mu);
 }
 
 void sched_prefill_end(void) {
-    if (sched_on()) pthread_mutex_unlock(&SCH.dev_mu);
+    if (sched_on() && SCH.device_turn) pthread_mutex_unlock(&SCH.dev_mu);
 }
 
 // Hand one forward to the decode thread and wait for this sequence's logits.
@@ -297,8 +309,12 @@ int sched_generate(slot_t *s, float *logits, int max_new,
         // A solo generation on a batching server still has to take the device
         // turn: its model_forward launches would break a concurrent
         // microbatch's graph capture just as a prefill would.
-        if (!sched_on())
+        if (!sched_on() || !SCH.device_turn)
             return engine_generate(e, logits, max_new, cb, ud, gen_time);
+        // NOTE: this holds the turn for the WHOLE generation, not per forward,
+        // so on a GPU one speculative request still stalls every other slot for
+        // its full length. Taking the turn per forward needs engine_generate to
+        // call a hook around each one; filed, not done.
         pthread_mutex_lock(&SCH.dev_mu);
         int n = engine_generate(e, logits, max_new, cb, ud, gen_time);
         pthread_mutex_unlock(&SCH.dev_mu);
