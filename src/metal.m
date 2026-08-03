@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 typedef struct {
@@ -22,6 +23,7 @@ typedef struct {
     id<MTLBuffer> *attn_norm, *ffn_norm;        // per layer
     id<MTLBuffer> *bq, *bk, *bv, *bo;           // per layer, may be nil
     id<MTLBuffer> *qn, *kn;                     // qwen3 per-head q/k norms
+    int batch_cap;                              // scratch rows allocated
 } gpu_t;
 
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
@@ -62,6 +64,16 @@ static bool metal_init_injected(const char *point) {
            (!strcmp(inject, "always") || !strcmp(inject, point));
 }
 
+static bool metal_env_on(const char *name) {
+    const char *v = getenv(name);
+    return v && *v && strcmp(v, "0");
+}
+
+static bool metal_batch_enabled(void) {
+    const char *v = getenv("RUNNER_METAL_BATCH");
+    return !(v && *v && !strcmp(v, "0"));
+}
+
 static bool gpu_init_fail(model_t *m, gpu_t *g, id<MTLLibrary> lib,
                           const char *why) {
     if (why && *why)
@@ -75,6 +87,64 @@ static bool gpu_init_fail(model_t *m, gpu_t *g, id<MTLLibrary> lib,
 
 static bool metal_buffer_ok(id<MTLBuffer> b) {
     return b != nil && b.contents != NULL;
+}
+
+static bool metal_command_failed(id<MTLCommandBuffer> cb) {
+    const char *inject = getenv("RUNNER_METAL_INJECT_FAILURE");
+    static int injected_once = 0;
+    bool injected = inject && *inject && strcmp(inject, "0") &&
+                    (!injected_once || strcmp(inject, "always") == 0);
+    if (injected) injected_once = 1;
+    return injected || cb.status == MTLCommandBufferStatusError;
+}
+
+static id<MTLBuffer> new_f32_scratch(id<MTLDevice> dev, size_t n) {
+    if (n > SIZE_MAX / sizeof(float)) return nil;
+    return [dev newBufferWithLength:n * sizeof(float)
+                            options:MTLResourceStorageModeShared];
+}
+
+static void release_buf(id<MTLBuffer> b) {
+    [b release];
+}
+
+static bool metal_ensure_batch(model_t *m, int n) {
+    gpu_t *g = (gpu_t *)m->gpu;
+    if (!g || n <= g->batch_cap) return true;
+    int q_dim  = m->n_head * m->head_dim;
+    int kv_dim = m->n_head_kv * m->head_dim;
+    int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
+    size_t nb = (size_t)n;
+
+    id<MTLBuffer> x      = new_f32_scratch(g->dev, nb * (size_t)m->n_embd);
+    id<MTLBuffer> xb     = new_f32_scratch(g->dev, nb * (size_t)xdim);
+    id<MTLBuffer> xb2    = new_f32_scratch(g->dev, nb * (size_t)xdim);
+    id<MTLBuffer> q      = new_f32_scratch(g->dev, nb * (size_t)q_dim);
+    id<MTLBuffer> kt     = new_f32_scratch(g->dev, nb * (size_t)kv_dim);
+    id<MTLBuffer> vt     = new_f32_scratch(g->dev, nb * (size_t)kv_dim);
+    id<MTLBuffer> hb     = new_f32_scratch(g->dev, nb * (size_t)m->n_ff);
+    id<MTLBuffer> hb2    = new_f32_scratch(g->dev, nb * (size_t)m->n_ff);
+    id<MTLBuffer> att    = new_f32_scratch(g->dev, nb * (size_t)m->n_head *
+                                                   (size_t)m->n_ctx);
+    id<MTLBuffer> logits = new_f32_scratch(g->dev, nb * (size_t)m->n_vocab);
+    if (!metal_buffer_ok(x) || !metal_buffer_ok(xb) || !metal_buffer_ok(xb2) ||
+        !metal_buffer_ok(q) || !metal_buffer_ok(kt) || !metal_buffer_ok(vt) ||
+        !metal_buffer_ok(hb) || !metal_buffer_ok(hb2) || !metal_buffer_ok(att) ||
+        !metal_buffer_ok(logits)) {
+        release_buf(x); release_buf(xb); release_buf(xb2); release_buf(q);
+        release_buf(kt); release_buf(vt); release_buf(hb); release_buf(hb2);
+        release_buf(att); release_buf(logits);
+        return false;
+    }
+
+    release_buf(g->x); release_buf(g->xb); release_buf(g->xb2);
+    release_buf(g->q); release_buf(g->kt); release_buf(g->vt);
+    release_buf(g->hb); release_buf(g->hb2); release_buf(g->att);
+    release_buf(g->logits);
+    g->x = x; g->xb = xb; g->xb2 = xb2; g->q = q; g->kt = kt; g->vt = vt;
+    g->hb = hb; g->hb2 = hb2; g->att = att; g->logits = logits;
+    g->batch_cap = n;
+    return true;
 }
 
 bool gpu_available(char *name, int cap) {
@@ -140,6 +210,8 @@ static id<MTLBuffer> f32_buf(id<MTLDevice> dev, const float *src, size_t n) {
 }
 
 static float *gpu_forward(model_t *m, int token, int pos);
+static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
+                                       int n, int pos);
 
 // No tensor-core GEMM path on Metal; the TC tolerance gate self-skips.
 void gpu_tc_force(int on) { (void)on; }
@@ -304,6 +376,7 @@ bool gpu_init(model_t *m) {
     g->att    = NEWBUF(sizeof(float) * (size_t)m->n_head * m->n_ctx);
     g->logits = NEWBUF(sizeof(float) * m->n_vocab);
     g->dummy  = NEWBUF(4);
+    g->batch_cap = 1;
     #undef NEWBUF
     if (!metal_buffer_ok(g->x) || !metal_buffer_ok(g->xb) ||
         !metal_buffer_ok(g->xb2) || !metal_buffer_ok(g->q) ||
@@ -374,11 +447,12 @@ unsupported:
 // ---------------------------------------------------------------- encoding
 
 static void enc_rmsnorm(gpu_t *g, id<MTLComputeCommandEncoder> e,
-                        id<MTLBuffer> x, id<MTLBuffer> y, id<MTLBuffer> w,
+                        id<MTLBuffer> x, NSUInteger x_off,
+                        id<MTLBuffer> y, NSUInteger y_off, id<MTLBuffer> w,
                         int n, float eps) {
     [e setComputePipelineState:g->p_rmsnorm];
-    [e setBuffer:x offset:0 atIndex:0];
-    [e setBuffer:y offset:0 atIndex:1];
+    [e setBuffer:x offset:x_off atIndex:0];
+    [e setBuffer:y offset:y_off atIndex:1];
     [e setBuffer:w offset:0 atIndex:2];
     [e setBytes:&n length:4 atIndex:3];
     [e setBytes:&eps length:4 atIndex:4];
@@ -387,15 +461,16 @@ static void enc_rmsnorm(gpu_t *g, id<MTLComputeCommandEncoder> e,
 }
 
 static void enc_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                   gguf_tensor *w, id<MTLBuffer> x, id<MTLBuffer> y,
+                   gguf_tensor *w, id<MTLBuffer> x, NSUInteger x_off,
+                   id<MTLBuffer> y, NSUInteger y_off,
                    int n_in, int n_out, id<MTLBuffer> bias) {
     mv_args a = { n_in, n_out,
                   (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
                   bias != nil };
     [e setComputePipelineState:g->p_mv[w->type]];
     [e setBuffer:g->weights offset:0 atIndex:0];
-    [e setBuffer:x offset:0 atIndex:1];
-    [e setBuffer:y offset:0 atIndex:2];
+    [e setBuffer:x offset:x_off atIndex:1];
+    [e setBuffer:y offset:y_off atIndex:2];
     [e setBytes:&a length:sizeof(a) atIndex:3];
     [e setBuffer:bias ? bias : g->dummy offset:0 atIndex:4];
     // 128 threads = 4 simdgroups = 4 rows per threadgroup
@@ -404,11 +479,12 @@ static void enc_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
 }
 
 static void enc_qknorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                       id<MTLBuffer> v, id<MTLBuffer> w, int n_heads) {
+                       id<MTLBuffer> v, NSUInteger v_off, id<MTLBuffer> w,
+                       int n_heads) {
     float eps = m->rms_eps;
     int hd = m->head_dim;
     [e setComputePipelineState:g->p_qknorm];
-    [e setBuffer:v offset:0 atIndex:0];
+    [e setBuffer:v offset:v_off atIndex:0];
     [e setBuffer:w offset:0 atIndex:1];
     [e setBytes:&hd length:4 atIndex:2];
     [e setBytes:&eps length:4 atIndex:3];
@@ -417,11 +493,11 @@ static void enc_qknorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
 }
 
 static void enc_rope(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                     id<MTLBuffer> v, int n_heads, int pos) {
+                     id<MTLBuffer> v, NSUInteger v_off, int n_heads, int pos) {
     rope_args a = { m->head_dim, n_heads, m->rope_dim / 2, pos,
                     m->rope_neox, m->rope_mscale };
     [e setComputePipelineState:g->p_rope];
-    [e setBuffer:v offset:0 atIndex:0];
+    [e setBuffer:v offset:v_off atIndex:0];
     [e setBuffer:g->inv_freq offset:0 atIndex:1];
     [e setBytes:&a length:sizeof(a) atIndex:2];
     [e dispatchThreads:MTLSizeMake(a.half_dim, n_heads, 1)
@@ -430,10 +506,11 @@ static void enc_rope(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
 
 static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
                      id<MTLComputePipelineState> p,
-                     id<MTLBuffer> a, id<MTLBuffer> b, int n) {
+                     id<MTLBuffer> a, NSUInteger a_off,
+                     id<MTLBuffer> b, NSUInteger b_off, int n) {
     [e setComputePipelineState:p];
-    [e setBuffer:a offset:0 atIndex:0];
-    [e setBuffer:b offset:0 atIndex:1];
+    [e setBuffer:a offset:a_off atIndex:0];
+    [e setBuffer:b offset:b_off atIndex:1];
     [e setBytes:&n length:4 atIndex:2];
     [e dispatchThreads:MTLSizeMake(n, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -488,8 +565,16 @@ void gpu_free(model_t *m) {
 
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                        bool want_logits, float **logits) {
-    // Unified memory makes the per-token loop cheap here; a natively batched
-    // encoder (one command buffer for the whole batch) is a later optimization.
+    if (n > 1 && metal_batch_enabled()) {
+        if (metal_ensure_batch(m, n)) {
+            float *lg = gpu_forward_native_batch(m, tokens, n, pos);
+            if (!lg) return false;
+            if (logits) *logits = want_logits ? lg : NULL;
+            return true;
+        }
+        fprintf(stderr, "gpu: Metal prompt batch scratch allocation failed — "
+                "using per-token submits\n");
+    }
     float *lg = NULL;
     for (int b = 0; b < n; b++) {
         lg = gpu_forward(m, tokens[b], pos + b);
@@ -497,6 +582,115 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     }
     if (logits) *logits = want_logits ? lg : NULL;
     return true;
+}
+
+static NSUInteger foff(size_t elems) {
+    return (NSUInteger)(elems * sizeof(float));
+}
+
+static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
+                                       int n, int pos) {
+    gpu_t *g = m->gpu;
+    int n_embd = m->n_embd;
+    int q_dim  = m->n_head * m->head_dim;
+    int kv_dim = m->n_head_kv * m->head_dim;
+    int xdim   = q_dim > n_embd ? q_dim : n_embd;
+
+    size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
+    for (int b = 0; b < n; b++) {
+        dequant_row(m->tok_embd->type,
+                    (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
+                    (float *)g->x.contents + (size_t)b * n_embd, n_embd);
+    }
+
+    id<MTLCommandBuffer> cb = [g->queue commandBuffer];
+    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+
+    for (int l = 0; l < m->n_layer; l++) {
+        layer_t *ly = &m->layers[l];
+        for (int b = 0; b < n; b++) {
+            int p = pos + b;
+            NSUInteger xo = foff((size_t)b * n_embd);
+            NSUInteger xbo = foff((size_t)b * xdim);
+            NSUInteger xb2o = foff((size_t)b * xdim);
+            NSUInteger qo = foff((size_t)b * q_dim);
+            NSUInteger kto = foff((size_t)b * kv_dim);
+            NSUInteger vto = foff((size_t)b * kv_dim);
+            NSUInteger hbo = foff((size_t)b * m->n_ff);
+            NSUInteger hb2o = foff((size_t)b * m->n_ff);
+            NSUInteger atto = foff((size_t)b * (size_t)m->n_head * m->n_ctx);
+            NSUInteger logo = foff((size_t)b * m->n_vocab);
+            uint64_t kv_off = ((uint64_t)l * m->n_ctx + p) * kv_dim;
+
+            enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->attn_norm[l],
+                        n_embd, m->rms_eps);
+            enc_mv(g, e, m, ly->wq, g->xb, xbo, g->q,  qo,
+                   n_embd, q_dim,  g->bq[l]);
+            enc_mv(g, e, m, ly->wk, g->xb, xbo, g->kt, kto,
+                   n_embd, kv_dim, g->bk[l]);
+            enc_mv(g, e, m, ly->wv, g->xb, xbo, g->vt, vto,
+                   n_embd, kv_dim, g->bv[l]);
+            if (g->qn[l]) enc_qknorm(g, e, m, g->q,  qo,  g->qn[l], m->n_head);
+            if (g->kn[l]) enc_qknorm(g, e, m, g->kt, kto, g->kn[l], m->n_head_kv);
+            enc_rope(g, e, m, g->q,  qo,  m->n_head,    p);
+            enc_rope(g, e, m, g->kt, kto, m->n_head_kv, p);
+
+            [e setComputePipelineState:g->p_store];
+            [e setBuffer:g->kt offset:kto atIndex:0];
+            [e setBuffer:g->vt offset:vto atIndex:1];
+            [e setBuffer:g->kc offset:0 atIndex:2];
+            [e setBuffer:g->vc offset:0 atIndex:3];
+            [e setBytes:&kv_dim length:4 atIndex:4];
+            [e setBytes:&kv_off length:8 atIndex:5];
+            [e dispatchThreads:MTLSizeMake(kv_dim, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+
+            attn_args aa = { m->head_dim, m->n_head, m->n_head_kv, m->n_ctx, p,
+                             (uint64_t)l * m->n_ctx * kv_dim,
+                             1.0f / sqrtf((float)m->head_dim) };
+            [e setComputePipelineState:g->p_attn];
+            [e setBuffer:g->q   offset:qo atIndex:0];
+            [e setBuffer:g->kc  offset:0 atIndex:1];
+            [e setBuffer:g->vc  offset:0 atIndex:2];
+            [e setBuffer:g->att offset:atto atIndex:3];
+            [e setBuffer:g->xb2 offset:xb2o atIndex:4];
+            [e setBytes:&aa length:sizeof(aa) atIndex:5];
+            [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+
+            enc_mv(g, e, m, ly->wo, g->xb2, xb2o, g->xb, xbo,
+                   q_dim, n_embd, g->bo[l]);
+            enc_elem(g, e, g->p_add, g->x, xo, g->xb, xbo, n_embd);
+
+            enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->ffn_norm[l],
+                        n_embd, m->rms_eps);
+            enc_mv(g, e, m, ly->w_gate, g->xb, xbo, g->hb,  hbo,
+                   n_embd, m->n_ff, nil);
+            enc_mv(g, e, m, ly->w_up,   g->xb, xbo, g->hb2, hb2o,
+                   n_embd, m->n_ff, nil);
+            enc_elem(g, e, g->p_silu, g->hb, hbo, g->hb2, hb2o, m->n_ff);
+            enc_mv(g, e, m, ly->w_down, g->hb, hbo, g->xb, xbo,
+                   m->n_ff, n_embd, nil);
+            enc_elem(g, e, g->p_add, g->x, xo, g->xb, xbo, n_embd);
+            if (l == m->n_layer - 1) {
+                enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->out_norm,
+                            n_embd, m->rms_eps);
+                enc_mv(g, e, m, m->output, g->xb, xbo, g->logits, logo,
+                       n_embd, m->n_vocab, nil);
+            }
+        }
+    }
+
+    [e endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (metal_command_failed(cb)) {
+        fprintf(stderr, "gpu: command buffer failed — falling back to CPU\n");
+        return NULL;
+    }
+    if (metal_env_on("RUNNER_METAL_STATS"))
+        fprintf(stderr, "metal: native prompt batch n=%d command_buffers=1\n", n);
+    return (float *)g->logits.contents + (size_t)(n - 1) * m->n_vocab;
 }
 
 static float *gpu_forward(model_t *m, int token, int pos) {
@@ -518,14 +712,14 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         layer_t *ly = &m->layers[l];
         uint64_t kv_off = ((uint64_t)l * m->n_ctx + pos) * kv_dim;
 
-        enc_rmsnorm(g, e, g->x, g->xb, g->attn_norm[l], n_embd, m->rms_eps);
-        enc_mv(g, e, m, ly->wq, g->xb, g->q,  n_embd, q_dim,  g->bq[l]);
-        enc_mv(g, e, m, ly->wk, g->xb, g->kt, n_embd, kv_dim, g->bk[l]);
-        enc_mv(g, e, m, ly->wv, g->xb, g->vt, n_embd, kv_dim, g->bv[l]);
-        if (g->qn[l]) enc_qknorm(g, e, m, g->q,  g->qn[l], m->n_head);
-        if (g->kn[l]) enc_qknorm(g, e, m, g->kt, g->kn[l], m->n_head_kv);
-        enc_rope(g, e, m, g->q,  m->n_head,    pos);
-        enc_rope(g, e, m, g->kt, m->n_head_kv, pos);
+        enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->attn_norm[l], n_embd, m->rms_eps);
+        enc_mv(g, e, m, ly->wq, g->xb, 0, g->q,  0, n_embd, q_dim,  g->bq[l]);
+        enc_mv(g, e, m, ly->wk, g->xb, 0, g->kt, 0, n_embd, kv_dim, g->bk[l]);
+        enc_mv(g, e, m, ly->wv, g->xb, 0, g->vt, 0, n_embd, kv_dim, g->bv[l]);
+        if (g->qn[l]) enc_qknorm(g, e, m, g->q,  0, g->qn[l], m->n_head);
+        if (g->kn[l]) enc_qknorm(g, e, m, g->kt, 0, g->kn[l], m->n_head_kv);
+        enc_rope(g, e, m, g->q,  0, m->n_head,    pos);
+        enc_rope(g, e, m, g->kt, 0, m->n_head_kv, pos);
 
         [e setComputePipelineState:g->p_store];
         [e setBuffer:g->kt offset:0 atIndex:0];
@@ -550,29 +744,24 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 
-        enc_mv(g, e, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->bo[l]);
-        enc_elem(g, e, g->p_add, g->x, g->xb, n_embd);
+        enc_mv(g, e, m, ly->wo, g->xb2, 0, g->xb, 0, q_dim, n_embd, g->bo[l]);
+        enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
 
-        enc_rmsnorm(g, e, g->x, g->xb, g->ffn_norm[l], n_embd, m->rms_eps);
-        enc_mv(g, e, m, ly->w_gate, g->xb, g->hb,  n_embd, m->n_ff, nil);
-        enc_mv(g, e, m, ly->w_up,   g->xb, g->hb2, n_embd, m->n_ff, nil);
-        enc_elem(g, e, g->p_silu, g->hb, g->hb2, m->n_ff);
-        enc_mv(g, e, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, nil);
-        enc_elem(g, e, g->p_add, g->x, g->xb, n_embd);
+        enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l], n_embd, m->rms_eps);
+        enc_mv(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0, n_embd, m->n_ff, nil);
+        enc_mv(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0, n_embd, m->n_ff, nil);
+        enc_elem(g, e, g->p_silu, g->hb, 0, g->hb2, 0, m->n_ff);
+        enc_mv(g, e, m, ly->w_down, g->hb, 0, g->xb, 0, m->n_ff, n_embd, nil);
+        enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
     }
 
-    enc_rmsnorm(g, e, g->x, g->xb, g->out_norm, n_embd, m->rms_eps);
-    enc_mv(g, e, m, m->output, g->xb, g->logits, n_embd, m->n_vocab, nil);
+    enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->out_norm, n_embd, m->rms_eps);
+    enc_mv(g, e, m, m->output, g->xb, 0, g->logits, 0, n_embd, m->n_vocab, nil);
 
     [e endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
-    const char *inject = getenv("RUNNER_METAL_INJECT_FAILURE");
-    static int injected_once = 0;
-    bool injected = inject && *inject && strcmp(inject, "0") &&
-                    (!injected_once || strcmp(inject, "always") == 0);
-    if (injected) injected_once = 1;
-    if (injected || cb.status == MTLCommandBufferStatusError) {
+    if (metal_command_failed(cb)) {
         fprintf(stderr, "gpu: command buffer failed — falling back to CPU\n");
         return NULL;
     }
