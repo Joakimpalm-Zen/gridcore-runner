@@ -5,6 +5,23 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Write-side coverage: an interrupted client cannot take the server with it**
+  (`tests/conformance/test_write_side.py`, 4 tests). A client that RSTs
+  mid-stream, one that RSTs before reading a byte, ten in a row, and one that
+  stops reading entirely — after each, the process is alive and both slots
+  still serve.
+
+  **Two things this deliberately does not claim.** The write *stall* — a
+  `send()` that blocks until the 30 s `SO_SNDTIMEO` fires — cannot be produced
+  in this harness: the suite model is capped by `n_ctx` at ~68 KB of SSE, and
+  on loopback that fits in the socket buffers even with the client's
+  `SO_RCVBUF` pinned to 1 KB (measured — the whole response is delivered to a
+  client that never calls `recv()` once). For the same reason it does **not**
+  gate `signal(SIGPIPE, SIG_IGN)`: a build with the handler at `SIG_DFL` was
+  constructed and passes all four, because the write completes before the peer
+  resets. Both need a real model and a large context, which is a `scripts/`
+  experiment rather than a conformance test, and is filed as such.
+
 - **Anthropic prompt caching and replayed reasoning are now gated** (5 tests in
   `tests/conformance/test_messages.py`). Both behaviours already worked and
   neither had a test, which is the state in which a behaviour quietly stops
