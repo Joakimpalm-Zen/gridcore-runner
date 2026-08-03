@@ -7,13 +7,14 @@ import sys
 import os
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+RUNNER = ROOT / ("runner.exe" if sys.platform == "win32" else "runner")
 
 def test_qwen35_hybrid_loads_and_decodes(tmp_path):
     model = tmp_path / "ornith.gguf"
     subprocess.run([sys.executable, ROOT / "scripts/make-test-ornith.py", model],
                    check=True, cwd=ROOT)
     proc = subprocess.run(
-        [ROOT / "runner", "-m", model, "-p", "hi", "-n", "2",
+        [RUNNER, "-m", model, "-p", "hi", "-n", "2",
          "--temp", "0", "--gpu", "off", "-c", "32"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=20,
@@ -33,7 +34,7 @@ def test_qwen35_legacy_ornith_dt_name_loads(tmp_path):
     subprocess.run([sys.executable, ROOT / "scripts/make-test-ornith.py", model],
                    check=True, cwd=ROOT, env=env)
     proc = subprocess.run(
-        [ROOT / "runner", "-m", model, "-p", "hi", "-n", "1",
+        [RUNNER, "-m", model, "-p", "hi", "-n", "1",
          "--temp", "0", "--gpu", "off", "-c", "32"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
     )
@@ -42,7 +43,7 @@ def test_qwen35_legacy_ornith_dt_name_loads(tmp_path):
 
 def test_qwen35_hybrid_gpu_auto_matches_cpu(tmp_path):
     caps = json.loads(subprocess.run(
-        [ROOT / "runner", "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
+        [RUNNER, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
         check=True, text=True).stdout)
     gpu_caps = caps.get("gpu")
     if not gpu_caps:
@@ -51,7 +52,7 @@ def test_qwen35_hybrid_gpu_auto_matches_cpu(tmp_path):
     model = tmp_path / "ornith-gpu.gguf"
     subprocess.run([sys.executable, ROOT / "scripts/make-test-ornith.py", model],
                    check=True, cwd=ROOT)
-    base = [ROOT / "runner", "-m", model, "-p", "hi", "-n", "2",
+    base = [RUNNER, "-m", model, "-p", "hi", "-n", "2",
             "--temp", "0", "-c", "32"]
     cpu = subprocess.run([*base, "--gpu", "off"], cwd=ROOT,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,

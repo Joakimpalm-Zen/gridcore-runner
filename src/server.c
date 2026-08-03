@@ -21,6 +21,7 @@
 #include "scheduler.h"
 #include "completion.h"
 #include "api.h"
+#include "server.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -797,8 +798,7 @@ static bool accept_fastpath(sock_t fd) {
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t listener_fd = -1;
 
-static void stop_handler(int sig) {
-    (void)sig;
+void server_request_stop(void) {
     // A second signal is the operator overruling the drain: exit now. _exit is
     // async-signal-safe (128+SIGINT — the shell's convention for a Ctrl-C kill),
     // where the alternative on a pinned drain was reaching for SIGKILL.
@@ -824,6 +824,11 @@ static void stop_handler(int sig) {
     }
 }
 
+static void stop_handler(int sig) {
+    (void)sig;
+    server_request_stop();
+}
+
 static void install_stop_handlers(void) {
     struct sigaction sa = {0};
     sa.sa_handler = stop_handler;
@@ -844,6 +849,15 @@ static bool stop_was_requested(void) { return stop_requested != 0; }
 static volatile LONG win_stop_requested;
 static volatile SOCKET win_listener_socket = INVALID_SOCKET;
 
+void server_request_stop(void) {
+    if (InterlockedExchange(&win_stop_requested, 1)) _exit(130);
+    SOCKET s = win_listener_socket;
+    if (s != INVALID_SOCKET) {
+        win_listener_socket = INVALID_SOCKET;
+        closesocket(s); // wakes accept()
+    }
+}
+
 static BOOL WINAPI win_stop_handler(DWORD ctrl_type) {
     switch (ctrl_type) {
     case CTRL_C_EVENT:
@@ -852,12 +866,7 @@ static BOOL WINAPI win_stop_handler(DWORD ctrl_type) {
     case CTRL_SHUTDOWN_EVENT: {
         // A second Ctrl-C is the operator overruling the drain: exit now,
         // with the shell's 128+SIGINT convention for parity with POSIX.
-        if (InterlockedExchange(&win_stop_requested, 1)) _exit(130);
-        SOCKET s = win_listener_socket;
-        if (s != INVALID_SOCKET) {
-            win_listener_socket = INVALID_SOCKET;
-            closesocket(s); // wakes accept()
-        }
+        server_request_stop();
         if (ctrl_type == CTRL_CLOSE_EVENT || ctrl_type == CTRL_SHUTDOWN_EVENT) {
             // Returning from these lets Windows terminate the process
             // immediately; hold the handler thread briefly so the drain in

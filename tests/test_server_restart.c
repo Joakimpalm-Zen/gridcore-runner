@@ -8,9 +8,9 @@
 // nothing ever asks it to come back.
 //
 // So this asks. Two cycles, each one: start the server on its own thread, wait
-// until it answers /health, serve a request, SIGTERM it, join. If startup and
-// teardown are symmetric both cycles behave identically; if any state survives
-// a teardown, the second cycle is where it shows.
+// until it answers /health, serve a request, request a graceful stop, join. If
+// startup and teardown are symmetric both cycles behave identically; if any
+// state survives a teardown, the second cycle is where it shows.
 //
 // It fails before the fix. `SV.shutdown` and `SV.q.shutdown` are set true at
 // teardown and never cleared, so on a second call every slot worker sees a
@@ -18,23 +18,14 @@
 // answers nothing. The first cycle passes, which is exactly why a
 // once-per-process global could carry this indefinitely.
 #include "runner.h"
+#include "compat.h"
+#include "http.h"
+#include "server.h"
 
-#include <errno.h>
-#include <netinet/in.h>
 #include <pthread.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <time.h>
-#include <unistd.h>
-
-int server_run(model_t *base, tokenizer *tok, const char *model_path,
-               const model_params *mp, sampler defaults,
-               const sampler_override *ov, int port, int parallel,
-               int n_threads, int ttl, const char *draft_path, int draft_k);
 
 static const char *g_model = "test.gguf";
 static int g_port = 18099;
@@ -66,14 +57,12 @@ static void *serve_thread(void *arg) {
     memset(&ov, 0, sizeof(ov));
     sampler_resolve(&smp, c->m.arch, NULL, &ov);
     c->rc = server_run(&c->m, &c->tok, g_model, &p, smp, &ov, g_port,
-                       1, 1, -1, NULL, 0);
+                       1, 1, -1, NULL, 0, false);
     return NULL;
 }
 
 static double mono_s(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec * 1e-9;
+    return plat_now();
 }
 
 // Connect, send one request, return the response (caller frees) or NULL.
@@ -84,23 +73,21 @@ static double mono_s(void) {
 static char *http_req(const char *path, const char *body, double budget_s) {
     double deadline = mono_s() + budget_s;
     while (mono_s() < deadline) {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) return NULL;
+        sock_t fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd == SOCK_INVALID) return NULL;
         struct sockaddr_in a;
         memset(&a, 0, sizeof(a));
         a.sin_family = AF_INET;
         a.sin_port   = htons((uint16_t)g_port);
         a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        if (connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
-            close(fd);
-            struct timespec ts = { 0, 10 * 1000 * 1000 };
-            nanosleep(&ts, NULL);
+        if (connect(fd, (struct sockaddr *)&a, (int)sizeof(a)) != 0) {
+            sock_close(fd);
+            plat_sleep_ms(10);
             continue;
         }
         double left = deadline - mono_s();
         if (left < 0.25) left = 0.25;
-        struct timeval tv = { (time_t)left, (suseconds_t)((left - (int)left) * 1e6) };
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        sock_recv_timeout(fd, left);
         char req[512];
         int n = body
             ? snprintf(req, sizeof(req),
@@ -110,18 +97,18 @@ static char *http_req(const char *path, const char *body, double budget_s) {
                        path, strlen(body), body)
             : snprintf(req, sizeof(req),
                        "GET %s HTTP/1.1\r\nHost: localhost\r\n\r\n", path);
-        if (write(fd, req, (size_t)n) != n) { close(fd); return NULL; }
+        if (sock_send(fd, req, (size_t)n) != n) { sock_close(fd); return NULL; }
         char *buf = malloc(65536);
-        if (!buf) { close(fd); return NULL; }
+        if (!buf) { sock_close(fd); return NULL; }
         size_t len = 0;
         for (;;) {
-            ssize_t r = read(fd, buf + len, 65535 - len);
+            int r = sock_recv(fd, buf + len, 65535 - len);
             if (r <= 0) break;
             len += (size_t)r;
             if (len >= 65535) break;
         }
         buf[len] = 0;
-        close(fd);
+        sock_close(fd);
         if (len == 0) { free(buf); return NULL; }
         return buf;
     }
@@ -179,8 +166,8 @@ static void cycle(int n) {
         free(gen);
     }
 
-    step(n, "sending SIGTERM");
-    kill(getpid(), SIGTERM);
+    step(n, "requesting graceful stop");
+    server_request_stop();
     step(n, "joining");
     pthread_join(th, NULL);
     snprintf(msg, sizeof(msg), "cycle %d: server_run returned 0", n);
@@ -191,6 +178,7 @@ int main(int argc, char **argv) {
     if (argc > 1) g_model = argv[1];
     if (argc > 2) g_port = atoi(argv[2]);
     f16_init();
+    sock_init();
     cycle(1);
     cycle(2);
     if (g_fail) {

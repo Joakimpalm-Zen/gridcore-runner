@@ -3,6 +3,7 @@
 
 #include "compat.h"
 #include "json.h"
+#include "server.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,11 +14,6 @@
 #include <limits.h>
 #include <math.h>
 
-int server_run(model_t *base, tokenizer *tok, const char *model_path,
-               const model_params *mp, sampler defaults,
-               const sampler_override *ov, int port, int parallel,
-               int n_threads, int ttl, const char *draft_path, int draft_k,
-               bool ignore_eos);
 // quantize_gguf is declared in runner.h
 
 // ---------------------------------------------------------------- misc
