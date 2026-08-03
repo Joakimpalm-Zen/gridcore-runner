@@ -23,7 +23,9 @@ import argparse
 import base64
 from collections import Counter
 import json
+import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -38,6 +40,9 @@ from harness import (Client, ProtocolError, RunnerServer,  # noqa: E402
                      rss_kind, validate_against_schema)
 
 SCHEMA_VERSION = "gridcore.agent-torture.v2"
+SPEC_STATS_RE = re.compile(
+    r"spec: (\d+) rounds, (\d+) drafted, (\d+) accepted .*"
+    r"grammar (\d+)/(\d+)")
 
 
 class RemoteTarget:
@@ -428,6 +433,60 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def read_spec_stats(path):
+    """Sum the per-request counters emitted with RUNNER_SPEC_STATS=1."""
+    totals = [0, 0, 0, 0, 0]
+    if Path(path).is_file():
+        for match in SPEC_STATS_RE.finditer(
+                Path(path).read_text(errors="replace")):
+            rounds, drafted, accepted, gr_accepted, gr_drafted = map(
+                int, match.groups())
+            for index, value in enumerate(
+                    (rounds, drafted, accepted, gr_drafted, gr_accepted)):
+                totals[index] += value
+    rounds, drafted, accepted, gr_drafted, gr_accepted = totals
+    return {"rounds": rounds, "drafted": drafted, "accepted": accepted,
+            "acceptance_rate": round(accepted / drafted, 6) if drafted else 0,
+            "grammar_drafted": gr_drafted,
+            "grammar_accepted": gr_accepted}
+
+
+def speculation_was_exercised(stats):
+    """A draft-axis run is invalid if no proposal reached target verify."""
+    return stats["drafted"] > 0
+
+
+def compare_verdicts(baseline, draft):
+    """Return case IDs whose pass/fail verdict changed under speculation."""
+    plain = {case["id"]: case["status"] for case in baseline["cases"]}
+    spec = {case["id"]: case["status"] for case in draft["cases"]}
+    mismatches = []
+    for case_id in sorted(set(plain) | set(spec)):
+        if plain.get(case_id) != spec.get(case_id):
+            mismatches.append({"id": case_id,
+                               "baseline": plain.get(case_id, "missing"),
+                               "draft": spec.get(case_id, "missing")})
+    return mismatches
+
+
+def runner_extra_args(draft, draft_k):
+    extra = ["--gpu", "off"]
+    if draft:
+        if draft_k < 1:
+            raise ValueError("--draft-k must be positive")
+        extra += ["--draft", str(draft), "--draft-k", str(draft_k)]
+    return extra
+
+
+def spawned_target(exe, model, out, draft=None, draft_k=4):
+    env = os.environ.copy()
+    if draft:
+        env["RUNNER_SPEC_STATS"] = "1"
+    return RunnerServer(str(exe), str(model), ctx=4096, parallel=2,
+                        extra_args=runner_extra_args(draft, draft_k),
+                        log_path=str(out / "runner.log"), env=env)
+
+
 def _version(exe):
     proc = subprocess.run([str(exe), "--version"], text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -507,6 +566,11 @@ def main(argv=None):
                         help="version string for the report when --endpoint "
                              "is used")
     parser.add_argument("--runner", type=Path)
+    parser.add_argument("--draft", type=Path,
+                        help="spawn Runner with this draft model and compare "
+                             "all verdicts with a target-only baseline")
+    parser.add_argument("--draft-k", type=int, default=4,
+                        help="draft proposals per speculative round (default: 4)")
     parser.add_argument("--model-name", dest="model_name",
                         help="OpenAI `model` field to set on every request "
                              "(required for Ollama, which routes on it; Runner "
@@ -516,6 +580,13 @@ def main(argv=None):
                         default=ROOT / "tests" / "torture" / "out")
     parser.add_argument("--cases", type=int, default=105)
     args = parser.parse_args(argv)
+
+    if args.draft and args.endpoint:
+        parser.error("--draft is only valid when spawning Runner")
+    if args.draft and not args.draft.is_file():
+        parser.error(f"draft model not found: {args.draft}")
+    if args.draft_k < 1:
+        parser.error("--draft-k must be positive")
 
     if args.endpoint:
         try:
@@ -539,22 +610,39 @@ def main(argv=None):
         # (native ctx 256), pushes the rendered prompt past 1024. A bigger ctx
         # on the spawned runner is free (the fixture is 2 layers) and keeps the
         # torture matrix runnable against it.
-        target = RunnerServer(str(exe), str(args.model), ctx=4096, parallel=2,
-                              extra_args=["--gpu", "off"],
-                              log_path=str(args.out / "runner.log"))
         args.out.mkdir(parents=True, exist_ok=True)
         runtime_name = args.runtime or "runner"
         version = _version(exe)
         model_label = str(args.model)
+        if args.draft:
+            baseline_out = args.out / "baseline"
+            baseline = run(spawned_target(exe, args.model, baseline_out),
+                           runtime_name, version, model_label, baseline_out,
+                           args.cases, request_model=args.model_name)
+        target = spawned_target(exe, args.model, args.out, args.draft,
+                                args.draft_k)
 
     report = run(target, runtime_name, version, model_label, args.out,
                  args.cases, request_model=args.model_name)
+    mismatches = []
+    speculation_active = True
+    if args.draft:
+        mismatches = compare_verdicts(baseline, report)
+        report["configuration"]["draft"] = str(args.draft)
+        report["configuration"]["draft_k"] = args.draft_k
+        report["speculative_decode"] = read_spec_stats(args.out / "runner.log")
+        report["speculative_decode"]["verdict_mismatches"] = mismatches
+        speculation_active = speculation_was_exercised(
+            report["speculative_decode"])
+        report["speculative_decode"]["exercised"] = speculation_active
+        write_json(args.out / "report.json", report)
     print(f"report: {args.out / 'report.json'}")
     print(f"raw: {args.out / 'raw.jsonl'}")
     print(f"runtime={report['runtime']['name']} "
           f"requests={report['totals']['requests']} "
           f"passed={report['totals']['passed']} failed={report['totals']['failed']}")
-    return 1 if report["totals"]["failed"] else 0
+    return 1 if (report["totals"]["failed"] or mismatches or
+                 not speculation_active) else 0
 
 
 if __name__ == "__main__":

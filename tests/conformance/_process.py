@@ -57,7 +57,7 @@ class RunnerServer:
     """A running ``runner --serve``. Use as a context manager."""
 
     def __init__(self, exe, model, *, extra_args=(), ctx=1024, parallel=1,
-                 start_timeout=60.0, log_path=None):
+                 start_timeout=60.0, log_path=None, env=None):
         self.exe = str(exe)
         self.model = str(model)
         self.extra_args = list(extra_args)
@@ -65,6 +65,7 @@ class RunnerServer:
         self.parallel = parallel
         self.start_timeout = start_timeout
         self.log_path = log_path
+        self.env = env
         self.port = None
         self.proc = None
         self._log = None
@@ -88,7 +89,8 @@ class RunnerServer:
                 "--port", str(self.port), "--parallel", str(self.parallel),
                 "-c", str(self.ctx)] + self.extra_args
         self._log = open(self.log_path, "wb") if self.log_path else subprocess.DEVNULL
-        self.proc = subprocess.Popen(argv, stdout=self._log, stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen(argv, stdout=self._log,
+                                     stderr=subprocess.STDOUT, env=self.env)
         deadline = time.monotonic() + self.start_timeout
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:

@@ -5,6 +5,22 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Speculative decoding is now a first-class agent-torture runtime axis.**
+  `scripts/agent-torture.py --draft PATH --draft-k N` runs the unchanged
+  provider-neutral matrix once without and once with the draft server flags,
+  then compares every pass/fail verdict by case ID. Any change is a failing
+  result because speculation is an optimization, not a new capability row.
+  The report records total proposed/accepted tokens, acceptance rate, grammar
+  counters, and mismatches; the baseline report and raw evidence are retained
+  alongside it. A negative-control unit test changes one draft verdict and
+  proves the comparator fails instead of accidentally comparing the baseline
+  to itself; a zero-proposal run also fails, catching ignored draft flags.
+  Measured on Qwen2.5-7B-Instruct Q4_K_M plus the same-tokenizer
+  Qwen2.5-0.5B-Instruct Q4_K_M draft: **105/105 matched case for case**, with
+  2,325/4,044 proposals accepted (**57.49%**). The CPU-target run took 369.1 s
+  versus 337.0 s target-only, so this pair proves correctness and real draft
+  activity but is not a speed win on this hardware/configuration.
+
 - **BREAKING: `/unload` is POST-only.** It was a `GET`, which made it reachable
   from any web page the user happened to be visiting —
   `<img src="http://127.0.0.1:PORT/unload">` frees the resident model with no

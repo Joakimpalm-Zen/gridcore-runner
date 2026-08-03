@@ -22,12 +22,19 @@ how the bytes were chunked."
 | `forced_truncation` | A hard token ceiling landing *inside* a tool call — the arguments must still be valid JSON. |
 | `stream_normalization` | SSE that normalizes to the same result regardless of TCP segmentation, ends with `[DONE]`, and carries a real finish reason. |
 | `large_enum_selection` | A single-choice label from a ~50-member enum — the structured-labeling task small models fail by emitting a plausible near-miss outside the enum; schema-constrained decode must force an exact member. |
+| `reasoning_then_tool` | Earlier assistant prose must not bleed into the subsequent forced tool-call turn. |
+| `structured_final` | A schema-constrained final answer exercises `response_format`, independently of the tool path. |
 
 ## Run it
 
 ```bash
 # Runner (spawned locally on the CPU, deterministic):
 python3 scripts/agent-torture.py --model path/to/model.gguf --cases 100
+
+# Runner speculative-decode runtime axis. This runs a target-only baseline,
+# then the identical cases with the draft, and fails if any verdict changes:
+python3 scripts/agent-torture.py --model qwen2.5-7b.gguf \
+    --draft qwen2.5-0.5b.gguf --draft-k 4
 
 # Any OpenAI-compatible server already listening on localhost:
 python3 scripts/agent-torture.py --endpoint 127.0.0.1:8080 \
@@ -75,6 +82,15 @@ Two files under `--out` (default `tests/torture/out/`):
   (base64, so nothing is lost or reinterpreted), the normalized stream where
   applicable, and the failure category on a miss. Every verdict is auditable
   from this file alone.
+
+With `--draft`, `baseline/report.json` and `baseline/raw.jsonl` preserve the
+target-only control. The top-level report adds `speculative_decode` counters
+(`drafted`, `accepted`, acceptance rate, and grammar counters) and a
+`verdict_mismatches` list. A mismatch makes the command fail: speculation is
+an optimization axis, never a different test family or an excuse for a changed
+answer. A run with zero proposals also fails, so an ignored or accidentally
+dropped draft flag cannot produce a vacuous green result. `--draft` therefore
+applies only to locally spawned Runner, not an arbitrary `--endpoint`.
 
 ## Reproduce and compare
 
