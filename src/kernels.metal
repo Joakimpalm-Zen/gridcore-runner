@@ -47,6 +47,31 @@ kernel void k_qknorm(device float       *v   [[buffer(0)]],
     for (int i = tid; i < hd; i += tpg) x[i] = x[i] * r * w[i];
 }
 
+kernel void k_head_rmsnorm(device const float *src [[buffer(0)]],
+                           device float       *dst [[buffer(1)]],
+                           device const float *w   [[buffer(2)]],
+                           constant int       &hd  [[buffer(3)]],
+                           constant float     &eps [[buffer(4)]],
+                           constant int       &has_weight [[buffer(5)]],
+                           uint h   [[threadgroup_position_in_grid]],
+                           uint tid [[thread_position_in_threadgroup]],
+                           uint tpg [[threads_per_threadgroup]]) {
+    threadgroup float red[128];
+    device const float *x = src + h * hd;
+    device float *y = dst + h * hd;
+    float s = 0;
+    for (int i = tid; i < hd; i += tpg) s += x[i] * x[i];
+    red[tid] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint off = tpg / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] += red[tid + off];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float r = rsqrt(red[0] / hd + eps);
+    for (int i = tid; i < hd; i += tpg)
+        y[i] = x[i] * r * (has_weight ? w[i] : 1.0f);
+}
+
 // ---------------------------------------------------------------- matvec
 // One simdgroup (32 lanes) per output row; lanes stride over blocks.
 
@@ -515,11 +540,43 @@ kernel void k_silu_mul(device float       *g [[buffer(0)]],
     }
 }
 
+kernel void k_gelu_mul(device float       *g [[buffer(0)]],
+                       device const float *u [[buffer(1)]],
+                       constant int       &n [[buffer(2)]],
+                       uint i [[thread_position_in_grid]]) {
+    if ((int)i < n) {
+        float x = g[i];
+        float t = tanh(0.7978845608f * (x + 0.044715f * x * x * x));
+        g[i] = 0.5f * x * (1.0f + t) * u[i];
+    }
+}
+
 kernel void k_add(device float       *x [[buffer(0)]],
                   device const float *d [[buffer(1)]],
                   constant int       &n [[buffer(2)]],
                   uint i [[thread_position_in_grid]]) {
     if ((int)i < n) x[i] += d[i];
+}
+
+kernel void k_scale(device float       *x [[buffer(0)]],
+                    constant float     &s [[buffer(1)]],
+                    constant int       &n [[buffer(2)]],
+                    uint i [[thread_position_in_grid]]) {
+    if ((int)i < n) x[i] *= s;
+}
+
+kernel void k_head_transform(device float     *logits [[buffer(0)]],
+                             device const int *suppress [[buffer(1)]],
+                             constant int     &nv [[buffer(2)]],
+                             constant float   &softcap [[buffer(3)]],
+                             constant int     &ns [[buffer(4)]],
+                             uint i [[thread_position_in_grid]]) {
+    if ((int)i < nv && softcap > 0.0f)
+        logits[i] = softcap * tanh(logits[i] / softcap);
+    if ((int)i < ns) {
+        int tok = suppress[i];
+        if (tok >= 0 && tok < nv) logits[tok] = -1e30f;
+    }
 }
 
 // -------------------------------------------------------------- sparse MoE
@@ -773,13 +830,13 @@ static inline float swiglu_oai(float g, float u) {
 
 kernel void k_moe_actmul(device float       *gbuf [[buffer(0)]],
                          device const float *ubuf [[buffer(1)]],
-                         constant int       &nff  [[buffer(2)]],
-                         constant int       &act  [[buffer(3)]],
+                         constant int4      &args [[buffer(2)]],
                          uint2 gid [[thread_position_in_grid]]) {
+    int nff = args.x, gss = args.y, uss = args.z, act = args.w;
     int i = gid.x, slot = gid.y;
     if (i >= nff) return;
-    device float *g = gbuf + (ulong)slot * nff;
-    device const float *u = ubuf + (ulong)slot * nff;
+    device float *g = gbuf + (ulong)slot * gss;
+    device const float *u = ubuf + (ulong)slot * uss;
     float x = g[i];
     if (act == 2) {
         g[i] = swiglu_oai(x, u[i]);
@@ -794,12 +851,18 @@ kernel void k_moe_actmul(device float       *gbuf [[buffer(0)]],
 kernel void k_moe_sum(device float       *out    [[buffer(0)]],
                       device const float *eout   [[buffer(1)]],
                       device const float *selw   [[buffer(2)]],
-                      constant int       &n      [[buffer(3)]],
-                      constant int       &nslots [[buffer(4)]],
+                      device const float *dscale [[buffer(3)]],
+                      device const int   *sel    [[buffer(4)]],
+                      constant int       &n      [[buffer(5)]],
+                      constant int       &nslots [[buffer(6)]],
+                      constant int       &es     [[buffer(7)]],
+                      constant int       &has_dscale [[buffer(8)]],
                       uint i [[thread_position_in_grid]]) {
     if ((int)i >= n) return;
     float s = 0.0f;
-    for (int slot = 0; slot < nslots; slot++)
-        s += selw[slot] * eout[(ulong)slot * n + i];
+    for (int slot = 0; slot < nslots; slot++) {
+        float w = selw[slot] * (has_dscale ? dscale[sel[slot]] : 1.0f);
+        s += w * eout[(ulong)slot * es + i];
+    }
     out[i] = s;
 }

@@ -408,3 +408,48 @@ write(f"{OUT}.gptoss-mxfp4.gguf", gptoss,
                             ku("gpt-oss.expert_feed_forward_length", FF),
                             ku("gpt-oss.attention.sliding_window", 8),
                             ku("gpt-oss.attention.sliding_window_pattern", 2)]))
+
+
+# --- gemma-4 dual-branch MoE fixture. CPU is the oracle here too. The fixture
+# exercises the gemma-only FFN shape: dense GELU branch plus routed GELU experts
+# with fused gate_up_exps, router-input scale, down-expert scale, pre/post
+# branch norms, post-attention/post-FFN norms, embedding scale and logit softcap.
+gemma4 = [
+    ("token_embd.weight", [E, len(VOCAB)], pack(flist(E * len(VOCAB)))),
+    ("output_norm.weight", [E], ones(E)),
+]
+for _i in range(LAYERS):
+    gemma4 += [
+        (f"blk.{_i}.attn_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.attn_q.weight", [E, E], pack(flist(E * E))),
+        (f"blk.{_i}.attn_k.weight", [E, kv_dim], pack(flist(E * kv_dim))),
+        (f"blk.{_i}.attn_v.weight", [E, kv_dim], pack(flist(E * kv_dim))),
+        (f"blk.{_i}.attn_output.weight", [E, E], pack(flist(E * E))),
+        (f"blk.{_i}.attn_q_norm.weight", [E // HEADS], ones(E // HEADS)),
+        (f"blk.{_i}.attn_k_norm.weight", [E // HEADS], ones(E // HEADS)),
+        (f"blk.{_i}.post_attention_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.ffn_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.post_ffw_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.ffn_gate.weight", [E, FF], pack([v * 2 for v in flist(E * FF)])),
+        (f"blk.{_i}.ffn_up.weight", [E, FF], pack([v * 2 for v in flist(E * FF)])),
+        (f"blk.{_i}.ffn_down.weight", [FF, E], pack([v * 2 for v in flist(FF * E)])),
+        (f"blk.{_i}.ffn_gate_inp.weight", [E, 2], pack(flist(E * 2))),
+        (f"blk.{_i}.ffn_gate_inp.scale", [E],
+         pack([0.9 + 0.01 * ((j + _i) % 5) for j in range(E)])),
+        (f"blk.{_i}.ffn_gate_up_exps.weight", [E, 2 * FF, 2],
+         pack([v * 2 for v in flist(E * 2 * FF * 2)])),
+        (f"blk.{_i}.ffn_down_exps.weight", [FF, E, 2],
+         pack([v * 2 for v in flist(FF * E * 2)])),
+        (f"blk.{_i}.ffn_down_exps.scale", [2], pack([0.85, 1.15])),
+        (f"blk.{_i}.post_ffw_norm_1.weight", [E], ones(E)),
+        (f"blk.{_i}.pre_ffw_norm_2.weight", [E], ones(E)),
+        (f"blk.{_i}.post_ffw_norm_2.weight", [E], ones(E)),
+        (f"blk.{_i}.layer_output_scale.weight", [1], pack([0.92 + 0.03 * _i])),
+    ]
+write(f"{OUT}.gemma4-moe.gguf", gemma4,
+      base_meta("gemma4", [ku("gemma4.expert_count", 2),
+                           ku("gemma4.expert_used_count", 2),
+                           ku("gemma4.expert_feed_forward_length", FF),
+                           ku("gemma4.attention.key_length", E // HEADS),
+                           ku("gemma4.rope.dimension_count", E // HEADS),
+                           kf("gemma4.final_logit_softcapping", 30.0)]))
