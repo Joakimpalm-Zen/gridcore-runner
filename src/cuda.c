@@ -600,6 +600,10 @@ bool gpu_kv_q8_ok(void) {
     return true;    // k_store_kv / k_attn / k_attn_dec all read q8_0 blocks
 }
 
+bool gpu_moe_ok(void) {
+    return true;    // expert banks upload and route on the device
+}
+
 // ------------------------------------------------- shared-weight registry
 //
 // Resident uploads, refcounted and keyed on model identity. The lock is held

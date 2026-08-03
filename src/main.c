@@ -161,6 +161,11 @@ static void usage(const char *prog) {
         "  --kv f16|q8    KV cache storage (default f16). q8 roughly halves the\n"
         "                 cache, so it about doubles the context that fits, but\n"
         "                 it is lossy: output differs from an f16 cache\n"
+        "  --mlock        wire the weights into RAM so the OS cannot evict them.\n"
+        "                 Off by default and allowed to fail: on a machine with\n"
+        "                 little headroom, locking the model can cause the very\n"
+        "                 pressure it avoids. Without it a loaded machine can\n"
+        "                 page the weights out and every token reads from disk\n"
         "  --draft PATH   small same-vocab GGUF for speculative decoding\n"
         "                 (one-shot, chat, and single-model --serve)\n"
         "  --draft-k N    draft tokens per round (default 4)\n"
@@ -268,6 +273,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(v, "f16")) mp.kv_q8 = false;
             else { fprintf(stderr, "error: --kv expects f16 or q8\n"); return 1; }
         }
+        else if (!strcmp(a, "--mlock")) mp.mlock = true;
         else if (!strcmp(a, "--draft"))   draft_path = NEXT;
         else if (!strcmp(a, "--draft-k")) draft_k = (int)int_arg(a, NEXT, 1, 15);
         else if (!strcmp(a, "--bench-json")) bench_json = true;
@@ -323,7 +329,7 @@ int main(int argc, char **argv) {
         char gname[128];
         bool has_gpu = gpu_available(gname, sizeof(gname));
         printf("{\"version\":\"%s\",\"os\":\"%s\",\"arch\":\"%s\",\"cpu_cores\":%d,"
-               "\"ram_bytes\":%llu,\"gpu\":",
+               "\"ram_bytes\":%llu,\"ram_available_bytes\":%llu,\"gpu\":",
                RUNNER_VERSION,
 #if defined(_WIN32)
                "windows",
@@ -339,7 +345,12 @@ int main(int argc, char **argv) {
 #else
                "other",
 #endif
-               plat_cpu_count(), (unsigned long long)plat_ram_bytes());
+               plat_cpu_count(), (unsigned long long)plat_ram_bytes(),
+               // Not total RAM: "model file size <= RAM" is the test that
+               // passes right before a machine starts thrashing. A launcher
+               // needs to know what is actually free plus reclaimable, so it
+               // can refuse a model that will not stay resident.
+               (unsigned long long)plat_ram_available_bytes());
         if (has_gpu) {
             size_t vfree = 0, vtotal = 0;
             bool vm = gpu_mem_info(&vfree, &vtotal);
@@ -357,6 +368,13 @@ int main(int argc, char **argv) {
             if (vm)
                 printf(",\"vram_bytes\":%llu,\"vram_free_bytes\":%llu",
                        (unsigned long long)vtotal, (unsigned long long)vfree);
+            // Read this before believing gpu_quants. MXFP4 and the Q*_K family
+            // are listed there on every backend, but Metal refuses a model
+            // with experts before it looks at the quant at all — so "MXFP4 is
+            // a GPU quant" and "gpt-oss runs on the GPU" are different claims,
+            // and only this one answers the second.
+            printf(",\"moe\":%s", gpu_moe_ok() ? "true" : "false");
+            printf(",\"kv_q8\":%s", gpu_kv_q8_ok() ? "true" : "false");
             printf("}");
         } else
             printf("null");
@@ -461,7 +479,17 @@ int main(int argc, char **argv) {
 
     f16_init();
 
-    bool registry = serve && strchr(model_path, '=') != NULL;
+    // `-m name=path` with --parallel > 1 is one named model, not a swap set.
+    // Swap mode is genuinely single-slot (ensure_resident loads slots[0]
+    // alone), but with one entry there is nothing to swap to, so the caller
+    // keeps their slots and gives up /unload and --ttl instead. server_run
+    // still receives the name=path form and keeps the name for /v1/models;
+    // what has to happen HERE is the preload, which needs the bare path.
+    const char *eq_one = strchr(model_path, '=');
+    bool one_named = serve && parallel > 1 && eq_one && eq_one != model_path &&
+                     eq_one[1] && !strchr(model_path, ',');
+    const char *load_path = one_named ? eq_one + 1 : model_path;
+    bool registry = serve && eq_one != NULL && !one_named;
 
     if (quant_out) {
         int tt = !strcmp(quant_type, "q8_0") ? T_Q8_0 :
@@ -485,10 +513,10 @@ int main(int argc, char **argv) {
     if (serve) mp.n_seq = parallel;
     if (!registry) {
         double t1 = now_s();
-        if (!model_load(&m, model_path, &mp)) return 1;
+        if (!model_load(&m, load_path, &mp)) return 1;
         if (!tokenizer_init(&tok, &m.gf)) return 1;
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
-                model_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
+                load_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
         if (m.mtp_layers)
             fprintf(stderr, "mtp: %d predictor block(s) declared and excluded "

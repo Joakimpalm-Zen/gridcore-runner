@@ -5,6 +5,67 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+From a field report on a work MacBook Pro M2 Pro / 16 GB driving Continue in
+VS Code — the second outside install. The Metal-side findings need a Mac and are
+filed; these are the ones that did not.
+
+- **Runner can now tell you its weights are being paged, instead of looking
+  healthy while it stalls.** This was the report's worst finding, because every
+  signal stayed green through it: on a loaded 16 GB machine an 8B sat at ~0.5 GB
+  RSS against a 4.9 GB file and a five-token reply took **53 s at 0.0% CPU**;
+  later a 1,200-token prompt returned **nothing in 300 s** while `/v1/models`
+  answered instantly and warm-prefix chats came back in 1.5 s. A health check
+  and a smoke test both pass while the real workload is dead. Four additions:
+
+  - **`--mlock`** wires the mapping into RAM. Opt-in and fail-soft on purpose —
+    locking 5 GB on a 16 GB laptop can cause the pressure it was meant to avoid,
+    so a refusal is reported and the load continues.
+  - **A load-time warning** when the weights are larger than the RAM actually
+    available, because *file size ≤ total RAM* is the test that passes right
+    before a machine starts thrashing.
+  - **A per-request paging signal.** `runner_telemetry.major_page_faults`, and a
+    `[N page-ins — weights not resident]` note on the `[slot]` line when N is
+    nonzero. Major faults are the mechanism itself, so a slow request that took
+    none was slow for some other reason — better than inferring paging from
+    wall-clock.
+  - **`ram_available_bytes` in `--caps`**, so a launcher can refuse a model that
+    will not stay resident rather than discovering it later.
+
+- **A request that never finishes now leaves a trace.** The `[slot]` line was
+  printed on completion only, so the 300-second stall above produced an empty
+  log for five minutes. Every request now logs a start line carrying its id,
+  prompt length and cache hit, and the id is allocated before any work so both
+  lines share one name.
+
+- **`-m name=path` no longer silently costs you `--parallel`.** Naming one model
+  to pin the `/v1/models` id — which is what the reporter wanted for a Continue
+  config — put the server in swap mode and dropped `--parallel 2` without
+  asking. Swap mode really is single-slot, but with one entry there is nothing
+  to swap to, so runner now keeps the slots and gives up the registry instead,
+  and says which: `/unload` and `--ttl` need more than one model. Two or more
+  entries behave exactly as before.
+
+- **`--caps` no longer implies GPU MoE where there is none.** It listed `MXFP4`
+  and the `Q*_K` family under `gpu_quants` on every backend, but Metal's
+  `gpu_init()` refuses a model with experts *before* it looks at the quant — so
+  a Mac user read that as a promise and watched gpt-oss-20b run CPU-only at 0.38
+  tok/s. The GPU block now carries `moe` and `kv_q8` booleans, and a
+  sparse-MoE model whose experts fell back to the CPU says so in the serve
+  banner rather than only in an init line that scrolls past.
+
+- **The JSON-schema test now builds `schema.c` the way the binary does.** It was
+  compiled with neither `-O3` nor `-ffast-math`, so `exclusiveMinimum` /
+  `exclusiveMaximum` — which use `nextafter(x, ±INFINITY)` — were gated in a
+  configuration that does not ship. Measured on gcc the results are identical
+  either way, so this is gate integrity rather than a bug fix; but clang warns
+  here (`-Wnan-infinity-disabled`) and clang is what a Mac uses, so the test
+  should be what finds out.
+
+- **README: verify the byte size of a downloaded model.** `download-model.sh`
+  already does. A hand-rolled wrapper did not, and an 8B download truncated at
+  290 MB by an HF-CDN reset still reported success, because `curl` exited 56
+  inside a compound command that returned 0.
+
 - **The Claude Code end-to-end check is a script now**
   (`scripts/claude-code-e2e.sh`), and re-run against **Claude Code 2.1.220**:
   PASS. It starts a server, writes a fixture holding a sentinel generated for

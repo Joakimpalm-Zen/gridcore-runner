@@ -26,7 +26,7 @@ LDFLAGS  = -lm -lpthread
 ifeq ($(OS),Windows_NT)
 # -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
 # shell (otherwise it dies at load with STATUS_DLL_NOT_FOUND on libwinpthread-1.dll)
-LDFLAGS += -lws2_32 -static
+LDFLAGS += -lws2_32 -lpsapi -static   # psapi: QueryWorkingSetEx / GetProcessMemoryInfo
 GPU_SRC  = src/cuda.c
 RUNNER_EXE = runner.exe
 TEST_JSON_SCHEMA = test-json-schema.exe
@@ -121,8 +121,16 @@ runner: $(SRC) $(HDR) src/kernels_ptx.h
 debug: $(SRC) $(HDR)
 	$(CC) -O0 -g -fsanitize=address,undefined -std=gnu11 -Wall $(SRC) -o runner-debug $(LDFLAGS)
 
-$(TEST_JSON_SCHEMA): tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c
-	$(CC) -std=gnu11 -Wall -Wextra -I src tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c -o $@ -lm
+# $(CFLAGS), not a hand-rolled flag list: schema.c implements exclusiveMinimum
+# and exclusiveMaximum with nextafter(x, +/-INFINITY), and the binary compiles
+# it with -ffast-math (which implies -ffinite-math-only). Building the test
+# without those flags gated the bounds behaviour in a configuration that does
+# not ship. Measured on gcc the results are byte-identical either way, so this
+# is a gate-integrity fix rather than a bug fix -- but clang warns here
+# (-Wnan-infinity-disabled) and clang is what a Mac uses, so the test should be
+# the one to find out, not a user.
+$(TEST_JSON_SCHEMA): tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c $(HDR)
+	$(CC) $(CFLAGS) -I src tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c -o $@ -lm
 
 # quants.c is needed for the ggml_type_* helpers gguf.c links against; CFLAGS
 # (not the plainer flags above) so the AVX2 paths match a real build
@@ -278,6 +286,12 @@ TEST_RESTART_SRC = tests/test_server_restart.c src/gguf.c src/compat.c \
 $(TEST_RESTART): $(TEST_RESTART_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_RESTART_SRC) -o $@ $(LDFLAGS)
 
+# the weight-residency platform layer: mlock, mincore, major faults, available
+# RAM. compat.c only -- these are platform shims, not engine code.
+TEST_RESIDENCY = $(TEST_BATCH:test-batch%=test-residency%)
+$(TEST_RESIDENCY): tests/test_residency.c src/compat.c $(HDR)
+	$(CC) $(CFLAGS) -I src tests/test_residency.c src/compat.c -o $@ $(LDFLAGS)
+
 # the device turn is FIFO, not just exclusive. scheduler.c is #included by the
 # test (the turnstile is static) so it is NOT linked here.
 TEST_SCHED_TURN = $(TEST_BATCH:test-batch%=test-sched-turn%)
@@ -363,8 +377,9 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
-      $(TEST_SCHED_TURN) runner test.gguf
+      $(TEST_SCHED_TURN) $(TEST_RESIDENCY) runner test.gguf
 	./$(TEST_BIND)
+	./$(TEST_RESIDENCY)
 	./$(TEST_RESTART)
 	./$(TEST_PFX_PERSIST)
 	./$(TEST_SCHED_TURN)

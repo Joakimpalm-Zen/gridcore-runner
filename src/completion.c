@@ -601,6 +601,9 @@ typedef struct {
     double      saved_s;
     double      gtime;
     bool        schema, json_mode, spec;
+    // Major page faults taken while serving this request. Nonzero means the
+    // time went to disk, not to arithmetic.
+    uint64_t    major_faults;
     jv         *req;         // echoed request fields
 } resp_doc;
 
@@ -613,10 +616,12 @@ static void telemetry_json(sbuf *r, const resp_doc *d) {
               "\"prompt_forked_tokens\":%d,\"prompt_eval_tokens\":%d,"
               "\"prefix_cache_saved_seconds\":%.6f,"
               "\"generation_seconds\":%.6f,"
-              "\"generation_tok_s\":%.3f,\"json_mode\":%s,"
+              "\"generation_tok_s\":%.3f,\"major_page_faults\":%llu,"
+              "\"json_mode\":%s,"
               "\"schema\":%s,\"speculative\":%s}",
            d->cached, d->forked, d->n_prompt - d->cached, d->saved_s, d->gtime,
            d->n_gen / (d->gtime > 0 ? d->gtime : 1e-9),
+           (unsigned long long)d->major_faults,
            d->json_mode ? "true" : "false", d->schema ? "true" : "false",
            d->spec ? "true" : "false");
 }
@@ -1068,6 +1073,20 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     bool chat = api != API_TEXT; // chat-shaped: thinking channels, tools
     model_t *m = s->m;
     engine *e = &s->e;
+    // Major faults are page-ins that went to disk, so the delta across a
+    // request IS the paging stall rather than an inference from wall-clock: a
+    // slow request that took no major faults was slow for some other reason.
+    // Without this, a machine whose weights have been evicted reports a
+    // cheerful tok/s while a five-token reply takes a minute.
+    uint64_t faults_at_start = plat_major_faults();
+    // Allocated here rather than beside the response struct, so the start line
+    // below and the completion line share one name.
+    char req_id[48];
+    snprintf(req_id, sizeof(req_id), "%s%d",
+             api == API_RESPONSES ? "resp_" : api == API_MESSAGES ? "msg_"
+                                            : api == API_CHAT ? "chatcmpl-"
+                                                              : "cmpl-",
+             atomic_fetch_add(&SV.req_counter, 1));
 
     const char *unsupported = unsupported_completion_field(req);
     if (unsupported) {
@@ -1382,6 +1401,18 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         engine_reset(e);
     int keep = reuse.keep;
     double prefill_t0 = now_s();
+    // Name the request BEFORE any work, and say it started.
+    //
+    // The completion line below is printed on completion only, so a request
+    // that never finishes leaves no trace at all — reported from a Mac where a
+    // 1,200-token prompt returned nothing in 300 s and the server log was
+    // empty for the whole five minutes. A start line costs one stderr write
+    // per request and makes that case visible; it also carries the prompt
+    // length and how much of it the cache covered, which is what says whether
+    // a long silence is a cold prefill or something worse.
+    fprintf(stderr, "[slot %d] %s: start, %d prompt (%d cached)\n",
+            s->id, req_id, n_prompt, keep);
+
     float *logits = engine_feed(e, toks + keep, n_prompt - keep);
     double prefill_s = now_s() - prefill_t0;
     sched_prefill_end();
@@ -1404,11 +1435,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
                   .stop_strs = stops, .n_stop = n_stops,
                   .created = (long)time(NULL) };
-    snprintf(g.id, sizeof(g.id), "%s%d",
-             api == API_RESPONSES ? "resp_" : api == API_MESSAGES ? "msg_"
-                                            : api == API_CHAT ? "chatcmpl-"
-                                                              : "cmpl-",
-             atomic_fetch_add(&SV.req_counter, 1));
+    snprintf(g.id, sizeof(g.id), "%s", req_id);
     // split thinking channels out of chat responses; raw completions stay raw
     if (chat && s->tmpl == TMPL_ORNITH)
         think_init_reasoning(&g.ts, m->think_open, m->think_close);
@@ -1512,7 +1539,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            .with_usage = true,
                            .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
                            .forked = reuse.forked, .saved_s = reuse.saved_s,
-                           .gtime = gtime, .schema = schema != NULL,
+                           .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
+                           .schema = schema != NULL,
                            .json_mode = e->json_mode, .spec = e->dm != NULL,
                            .req = req };
             sbuf f = {0};
@@ -1640,7 +1668,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            .with_usage = true,
                            .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
                            .forked = reuse.forked, .saved_s = reuse.saved_s,
-                           .gtime = gtime, .schema = schema != NULL,
+                           .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
+                           .schema = schema != NULL,
                            .json_mode = e->json_mode, .spec = e->dm != NULL,
                            .req = req };
             sbuf r = {0};
@@ -1668,7 +1697,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            .with_usage = true,
                            .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
                            .forked = reuse.forked, .saved_s = reuse.saved_s,
-                           .gtime = gtime, .schema = schema != NULL,
+                           .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
+                           .schema = schema != NULL,
                            .json_mode = e->json_mode, .spec = e->dm != NULL,
                            .req = req };
             sbuf r = {0};
@@ -1761,7 +1791,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                finish, n_prompt, n_gen, n_prompt + n_gen);
         resp_doc td = { .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
                         .forked = reuse.forked, .saved_s = reuse.saved_s,
-                        .gtime = gtime, .schema = schema != NULL,
+                        .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
+                           .schema = schema != NULL,
                         .json_mode = e->json_mode, .spec = e->dm != NULL };
         telemetry_json(&r, &td);
         sb_lit(&r, "}");
@@ -1769,10 +1800,21 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         free(r.s);
     }
 done:
-    fprintf(stderr, "[slot %d] %s: %d prompt (%d cached) + %d gen tok (%.1f tok/s)%s%s\n",
+    // A paging note only when there was paging. Silence is the normal case and
+    // a per-request "0 page-ins" would be noise, but when the weights have been
+    // evicted this line is the only thing that says the time went to the disk
+    // rather than to the model.
+    uint64_t faults = plat_major_faults() - faults_at_start;
+    char paging[80];
+    paging[0] = '\0';
+    if (faults)
+        snprintf(paging, sizeof(paging),
+                 " [%llu page-ins — weights not resident]",
+                 (unsigned long long)faults);
+    fprintf(stderr, "[slot %d] %s: %d prompt (%d cached) + %d gen tok (%.1f tok/s)%s%s%s\n",
             s->id, g.id, n_prompt, keep, n_gen,
             n_gen / (gtime > 0 ? gtime : 1e-9),
             schema ? " [schema]" : e->json_mode ? " [json]" : e->dm ? " [spec]" : "",
-            g.dead ? " [client gone]" : "");
+            g.dead ? " [client gone]" : "", paging);
     completion_cleanup(e, schema, &g);
 }

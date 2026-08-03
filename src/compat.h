@@ -27,6 +27,37 @@ void   plat_munmap(void *p, size_t size);
 
 int         plat_cpu_count(void);
 uint64_t    plat_ram_bytes(void);
+
+// --- weight residency -----------------------------------------------------
+//
+// runner mmaps its weights and the OS is free to evict them. On a machine
+// under real memory pressure that turns every token into SSD paging, and it is
+// invisible: tok/s, /health and --caps all stay green while a five-token reply
+// takes a minute. Reported from a 16 GB M2 Pro driving an IDE, where a 1.2k
+// prompt produced zero tokens in 300 s at 0% CPU. These four are what let
+// runner say so.
+
+// Wire the mapping into RAM. OPT-IN and expected to fail: locking 5 GB on a
+// 16 GB machine can create the pressure it was meant to avoid, so a false
+// return is a normal outcome to report, not an error to abort on.
+bool        plat_mlock(void *p, size_t size);
+void        plat_munlock(void *p, size_t size);
+
+// Fraction of the mapping currently in physical memory, or -1.0 where the
+// platform will not say. This is the direct answer to "is the model resident",
+// which model *file size* cannot give: residency is a property of the moment.
+double      plat_resident_fraction(const void *p, size_t size);
+
+// Major faults this process has taken — page-ins that went to disk. The delta
+// across a request is the exact mechanism behind a paging stall, which beats
+// inferring one from wall-clock: a slow request that took no major faults was
+// slow for some other reason. 0 where unavailable.
+uint64_t    plat_major_faults(void);
+
+// Physically available RAM: free plus what the OS would reclaim on demand. NOT
+// total RAM, because "model fits in RAM" is the test that passes right before
+// the machine starts thrashing. 0 where unavailable.
+uint64_t    plat_ram_available_bytes(void);
 bool        plat_file_readable(const char *path);
 double      plat_now(void);        // monotonic seconds
 

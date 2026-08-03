@@ -9,6 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <io.h>
+#include <psapi.h>
 
 void *plat_mmap_ro(const char *path, size_t *size) {
     HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
@@ -41,6 +42,67 @@ uint64_t plat_ram_bytes(void) {
     MEMORYSTATUSEX ms = { .dwLength = sizeof(ms) };
     GlobalMemoryStatusEx(&ms);
     return ms.ullTotalPhys;
+}
+
+bool plat_mlock(void *p, size_t size) {
+    if (!p || !size) return false;
+    // The default working-set maximum is far below a model, so raise it first
+    // or VirtualLock fails on anything worth locking. Both calls are allowed
+    // to fail: this is opt-in and reported, never fatal.
+    SIZE_T lo = 0, hi = 0;
+    HANDLE self = GetCurrentProcess();
+    if (GetProcessWorkingSetSize(self, &lo, &hi)) {
+        SIZE_T want = (SIZE_T)size + (64u << 20);   // headroom for everything else
+        if (hi < want) SetProcessWorkingSetSize(self, want, want);
+    }
+    return VirtualLock(p, size) != 0;
+}
+
+void plat_munlock(void *p, size_t size) {
+    if (p && size) VirtualUnlock(p, size);
+}
+
+double plat_resident_fraction(const void *p, size_t size) {
+    if (!p || !size) return -1.0;
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    size_t psz = si.dwPageSize ? si.dwPageSize : 4096;
+    size_t pages = (size + psz - 1) / psz;
+    enum { WINDOW = 4096 };
+    PSAPI_WORKING_SET_EX_INFORMATION *info =
+        malloc(sizeof(*info) * WINDOW);
+    if (!info) return -1.0;
+    size_t resident = 0, done = 0;
+    while (done < pages) {
+        size_t n = pages - done < WINDOW ? pages - done : WINDOW;
+        for (size_t i = 0; i < n; i++)
+            info[i].VirtualAddress = (PVOID)((const char *)p + (done + i) * psz);
+        if (!QueryWorkingSetEx(GetCurrentProcess(), info,
+                               (DWORD)(sizeof(*info) * n))) {
+            free(info);
+            return -1.0;
+        }
+        for (size_t i = 0; i < n; i++)
+            if (info[i].VirtualAttributes.Valid) resident++;
+        done += n;
+    }
+    free(info);
+    return pages ? (double)resident / (double)pages : -1.0;
+}
+
+uint64_t plat_major_faults(void) {
+    // Windows does not separate hard from soft faults here, so this counts
+    // both. The delta is still the right shape of signal, but a nonzero value
+    // means less than it does on POSIX -- said plainly rather than papered over.
+    PROCESS_MEMORY_COUNTERS pmc = { .cb = sizeof(pmc) };
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0;
+    return (uint64_t)pmc.PageFaultCount;
+}
+
+uint64_t plat_ram_available_bytes(void) {
+    MEMORYSTATUSEX ms = { .dwLength = sizeof(ms) };
+    if (!GlobalMemoryStatusEx(&ms)) return 0;
+    return ms.ullAvailPhys;
 }
 
 bool plat_file_readable(const char *path) {
@@ -202,8 +264,13 @@ void plat_parent_watch(long pid) {
 #include <sys/prctl.h>
 #endif
 
+#include <sys/mman.h>
+#include <sys/resource.h>
+
 #ifdef __APPLE__
 #include <sys/sysctl.h>
+#include <mach/mach.h>
+#include <mach/mach_host.h>
 #endif
 
 void *plat_mmap_ro(const char *path, size_t *size) {
@@ -234,6 +301,88 @@ uint64_t plat_ram_bytes(void) {
     long pages = sysconf(_SC_PHYS_PAGES);
     long psz   = sysconf(_SC_PAGE_SIZE);
     return pages > 0 && psz > 0 ? (uint64_t)pages * (uint64_t)psz : 0;
+}
+
+bool plat_mlock(void *p, size_t size) {
+    if (!p || !size) return false;
+    return mlock(p, size) == 0;
+}
+
+void plat_munlock(void *p, size_t size) {
+    if (p && size) munlock(p, size);
+}
+
+double plat_resident_fraction(const void *p, size_t size) {
+    if (!p || !size) return -1.0;
+    long psz = sysconf(_SC_PAGE_SIZE);
+    if (psz <= 0) return -1.0;
+    size_t pages = (size + (size_t)psz - 1) / (size_t)psz;
+    // Walk the mapping in windows rather than allocating one byte per page: a
+    // 5 GB model is 1.28M pages, and asking about residency should not itself
+    // be a megabyte of allocation.
+    enum { WINDOW = 64u << 10 };            // pages described per call
+    unsigned char *vec = malloc(WINDOW);
+    if (!vec) return -1.0;
+    size_t resident = 0, done = 0;
+    while (done < pages) {
+        size_t n = pages - done < WINDOW ? pages - done : WINDOW;
+        const char *base = (const char *)p + done * (size_t)psz;
+        size_t span = n * (size_t)psz;
+        if (span > size - done * (size_t)psz) span = size - done * (size_t)psz;
+#ifdef __APPLE__
+        if (mincore((void *)(uintptr_t)base, span, (char *)vec) != 0) {
+#else
+        if (mincore((void *)(uintptr_t)base, span, vec) != 0) {
+#endif
+            free(vec);
+            return -1.0;
+        }
+        for (size_t i = 0; i < n; i++) if (vec[i] & 1) resident++;
+        done += n;
+    }
+    free(vec);
+    return pages ? (double)resident / (double)pages : -1.0;
+}
+
+uint64_t plat_major_faults(void) {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+    return (uint64_t)ru.ru_majflt;
+}
+
+uint64_t plat_ram_available_bytes(void) {
+#ifdef __APPLE__
+    // free + inactive + purgeable is what the kernel can hand back without
+    // swapping; vm.page_free_count alone reads near zero on a healthy Mac and
+    // would make every model look unloadable.
+    mach_port_t host = mach_host_self();
+    vm_size_t psz = 0;
+    vm_statistics64_data_t vm;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_page_size(host, &psz) != KERN_SUCCESS) return 0;
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &count)
+        != KERN_SUCCESS) return 0;
+    uint64_t pages = (uint64_t)vm.free_count + vm.inactive_count + vm.purgeable_count;
+    return pages * (uint64_t)psz;
+#else
+    // MemAvailable is the kernel's own estimate of what a new allocation can
+    // get without swapping. MemFree is not the same thing and is usually much
+    // smaller, since the page cache is counted as used.
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            unsigned long long kb;
+            if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1) {
+                fclose(f);
+                return (uint64_t)kb * 1024u;
+            }
+        }
+        fclose(f);
+    }
+    long avail = sysconf(_SC_AVPHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE);
+    return avail > 0 && psz > 0 ? (uint64_t)avail * (uint64_t)psz : 0;
+#endif
 }
 
 bool plat_file_readable(const char *path) {

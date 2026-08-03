@@ -140,6 +140,10 @@ gguf_tensor moe_expert_weight(const layer_t *ly, int which, int e,
 typedef struct {
     // ---- immutable: file and geometry ----
     gguf_file gf;
+    // --mlock succeeded for this mapping, so model_free must unlock it before
+    // unmapping. Tracked rather than re-derived: an munlock of a mapping that
+    // was never locked is a silent no-op that would hide a failed lock.
+    bool      weights_locked;
     char     *path;          // owned copy of the load path (shared-weight key)
     bool      file_id_ok;    // stat-backed identity below is valid
     uint64_t  file_size, file_ino;
@@ -427,9 +431,19 @@ typedef struct {
     // Lossy — output is NOT token-identical to an fp16 cache — so f16 stays
     // the default. Requires every layer's head_dim to be a multiple of 32.
     bool  kv_q8;
+    // --mlock: wire the mmap'd weights into RAM so the OS cannot reclaim them.
+    // Opt-in and fail-soft by design: locking 5 GB on a 16 GB laptop can cause
+    // the pressure it was meant to prevent, so a refusal is reported and the
+    // load continues. Without it, weights are clean file-backed pages and are
+    // the first thing a loaded machine evicts.
+    bool  mlock;
 } model_params;
 
 bool   model_load(model_t *m, const char *path, const model_params *p);
+
+// Fraction of this model's mapped weights currently in physical memory, or
+// -1.0 when the platform will not say. Cheap enough to call per request.
+double model_resident_fraction(const model_t *m);
 // The architecture admission allowlist, exposed so `--caps` publishes exactly
 // what `model_load` accepts (one source of truth). Wrong-math archs
 // (granite/gemma2/gemma) are deliberately absent — they load but miscompute.

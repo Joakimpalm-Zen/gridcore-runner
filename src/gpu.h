@@ -19,6 +19,12 @@ bool   gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
 // can; a backend that cannot forces the cache back to f16 rather than
 // handing q8_0 blocks to kernels that would read them as fp16.
 bool   gpu_kv_q8_ok(void);
+// Does this backend run sparse MoE on the device? Metal does not — gpu_init()
+// refuses any model with experts before it ever looks at the quant — so
+// advertising MXFP4 and the Q*_K family in `gpu_quants` there implies a GPU
+// path for gpt-oss and Gemma-4-MoE that does not exist. A user picking a model
+// from `--caps` on a Mac needs this to say no.
+bool   gpu_moe_ok(void);
 // test hook for the TC tolerance gate: force the tensor-core GEMM opt-in on
 // (1) or off (0) regardless of RUNNER_CUDA_TC; -1 returns to the env default.
 // A no-op on backends without a TC path (Metal, CPU-only builds).

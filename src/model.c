@@ -1,5 +1,7 @@
 // Llama-family transformer: weight wiring + batched forward pass.
 #include "model.h"
+
+#include <errno.h>
 #include "gpu.h"
 #include "vramreg.h"
 #include "compat.h"
@@ -617,6 +619,14 @@ static void model_free_weights(model_t *m) {
     free(m->path);
     free(m->fused_splits);
     free(m->out_norm_w);
+    // Unlock before unmapping, and only the mapping this model_t actually
+    // locked: with shared weights several model_t alias one map, and munlock
+    // on a mapping we never locked is a silent no-op that would hide a failed
+    // lock rather than report it.
+    if (m->weights_locked && m->gf.map && m->gf.map_size) {
+        plat_munlock(m->gf.map, m->gf.map_size);
+        m->weights_locked = false;
+    }
     gguf_close(&m->gf);
 }
 
@@ -677,12 +687,53 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     return model_alloc_runtime(m, p);
 }
 
+double model_resident_fraction(const model_t *m) {
+    if (!m || !m->gf.map || !m->gf.map_size) return -1.0;
+    return plat_resident_fraction(m->gf.map, m->gf.map_size);
+}
+
+// Say so at load time when the weights cannot fit in what the machine has
+// left, because every signal downstream stays green while they page: the tok/s
+// counter, /health and --caps all look fine while a five-token reply takes a
+// minute. Reported from a 16 GB Mac where a 1.2k-token prompt returned nothing
+// in 300 s at 0% CPU. Advisory only -- the load continues either way, since
+// the estimate can be wrong and a model that fits today may not fit at noon.
+static void warn_if_it_will_not_stay_resident(const model_t *m, bool locked) {
+    uint64_t need = m->gf.map_size;
+    uint64_t have = plat_ram_available_bytes();
+    if (!need || !have || need <= have) return;
+    fprintf(stderr,
+            "warning: weights are %.1f GB but only %.1f GB of RAM is available"
+            " — expect the model to be evicted and every token to page from"
+            " disk.%s\n",
+            (double)need / 1e9, (double)have / 1e9,
+            locked ? "" : " --mlock pins them; a smaller model is the other fix.");
+}
+
 bool model_load(model_t *m, const char *path, const model_params *p) {
     memset(m, 0, sizeof(*m));
     if (!model_load_inner(m, path, p)) {
         model_free(m);
         return false;
     }
+    bool locked = false;
+    if (p && p->mlock && m->gf.map && m->gf.map_size) {
+        locked = plat_mlock(m->gf.map, m->gf.map_size);
+        if (locked) {
+            m->weights_locked = true;
+            fprintf(stderr, "mlock: %.1f GB of weights wired into RAM\n",
+                    (double)m->gf.map_size / 1e9);
+        } else {
+            // Not fatal, and not silent. A refusal here usually means the
+            // process cannot raise its locked-memory limit (RLIMIT_MEMLOCK),
+            // which is the common case on a stock Linux box.
+            fprintf(stderr,
+                    "warning: --mlock could not wire %.1f GB (%s); continuing"
+                    " without it, so the weights can still be evicted\n",
+                    (double)m->gf.map_size / 1e9, strerror(errno));
+        }
+    }
+    warn_if_it_will_not_stay_resident(m, locked);
     return true;
 }
 

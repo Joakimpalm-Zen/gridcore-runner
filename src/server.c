@@ -888,6 +888,41 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     }
     if (parallel < 1) parallel = 1;
     if (parallel > 16) parallel = 16;
+    // One named model is not a swap set, and asking for a name should not
+    // silently cost the caller their slots.
+    //
+    // `-m llama=path` is the documented way to pin the /v1/models id for a
+    // client config, and a Continue user did exactly that and lost
+    // --parallel 2 without ever asking for swapping. Registry mode genuinely
+    // is single-slot — ensure_resident() loads into slots[0] alone — but with
+    // one entry there is nothing to swap *to*, so the honest trade is to give
+    // up the registry rather than the slots. Plain `-m path --parallel 2`
+    // already forgoes the registry for the same reason, so this lands in an
+    // existing configuration rather than a new one.
+    //
+    // Done HERE, ahead of swap_mode, so everything downstream that keys off it
+    // — the --ttl default, the --draft refusal, the registry setup — sees the
+    // truth rather than being unwound afterwards.
+    char single_path[sizeof(SV.reg[0].path)];
+    const char *forced_name = NULL;
+    const char *eq1 = strchr(model_path, '=');
+    if (eq1 && parallel > 1 && !strchr(model_path, ',') &&
+        eq1 != model_path && eq1[1] &&
+        (size_t)(eq1 - model_path) < sizeof(SV.reg[0].name) &&
+        strlen(eq1 + 1) < sizeof(single_path)) {
+        static char single_name[sizeof(SV.reg[0].name)];
+        snprintf(single_name, sizeof(single_name), "%.*s",
+                 (int)(eq1 - model_path), model_path);
+        snprintf(single_path, sizeof(single_path), "%s", eq1 + 1);
+        forced_name = single_name;
+        model_path  = single_path;
+        fprintf(stderr,
+                "note: one model named '%s' with --parallel %d — serving it on"
+                " %d slots. /unload and --ttl are swap-mode features and need"
+                " more than one model.\n",
+                forced_name, parallel, parallel);
+    }
+
     bool swap_mode = strchr(model_path, '=') != NULL;
     if (ttl < 0) ttl = swap_mode ? 300 : 0; // single-model default: never unload
     if (draft_path && swap_mode) {
@@ -960,7 +995,9 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
     const char *name = strrchr(model_path, '/');
     const char *bsname = strrchr(model_path, '\\'); // Windows path separator
     if (bsname && (!name || bsname > name)) name = bsname;
-    SV.model_name = SV.n_reg > 0 ? SV.reg[0].name : (name ? name + 1 : model_path);
+    SV.model_name = SV.n_reg > 0 ? SV.reg[0].name
+                  : forced_name  ? forced_name
+                                 : (name ? name + 1 : model_path);
     SV.n_predict_cap = 1024;
     SV.q.limit = (int)(sizeof(SV.q.fds) / sizeof(sock_t));
     // a queue bound may only lower the fixed fd capacity, never raise it
@@ -1150,6 +1187,20 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                 "  GET /v1/models | GET /v1/capabilities | GET /health\n",
                 port, parallel, parallel > 1 ? "s" : "", threads_per_slot,
                 batched ? ", continuous batching" : "");
+
+    // Say it in the banner, not only at init.
+    //
+    // A backend that cannot run this model's experts prints its reason from
+    // gpu_init(), which scrolls past above the load line and is easy to miss —
+    // and the consequence is not subtle: a Mac user watched gpt-oss-20b run
+    // CPU-only at 0.38 tok/s having read MXFP4 in `--caps` gpu_quants as a
+    // promise it would not be. The banner is the last thing on screen when a
+    // server comes up, so this belongs here too.
+    if (SV.n_slots > 0 && SV.slots[0].m && SV.slots[0].m->n_expert > 0 &&
+        !SV.slots[0].m->gpu)
+        fprintf(stderr,
+                "  note: this is a sparse-MoE model and its experts are running"
+                " on the CPU — expect a fraction of dense throughput\n");
 
     for (;;) {
         // covers the race where the signal landed after the socket-creation

@@ -147,6 +147,11 @@ Two ways:
    ```
    curl -L -O "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf"
    ```
+   **Check the byte size afterwards.** `download-model.sh` does; a hand-rolled
+   wrapper usually does not. A reported 8B download was cut off at 290 MB by an
+   HF-CDN `Connection reset by peer` — `curl` exited 56, but the surrounding
+   compound command still returned 0, so nothing noticed until the load failed.
+   `$?` of a pipeline is not a download check.
 
 Note: safetensors checkpoints must be converted to GGUF first — runner runs
 the converted GGUF.

@@ -145,6 +145,14 @@ static float *gpu_forward(model_t *m, int token, int pos);
 void gpu_tc_force(int on) { (void)on; }
 void gpu_moe_eager_force(int on) { (void)on; }
 
+bool gpu_moe_ok(void) {
+    // False, and it matches gpu_init(): a model with experts is refused there
+    // before the quant check runs, so MXFP4 appearing in gpu_quants does NOT
+    // mean gpt-oss runs on this GPU. Reported from a Mac where --caps read as
+    // a promise of GPU MoE and the model then ran CPU-only at 0.38 tok/s.
+    return false;
+}
+
 bool gpu_kv_q8_ok(void) {
     // FALSE ON PURPOSE, and not a placeholder to be flipped casually.
     //
