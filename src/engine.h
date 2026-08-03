@@ -96,11 +96,27 @@ typedef struct {
     // in-flight generation budget, owned by engine_gen_begin/step/end
     int      gen_max, gen_count;
     double   gen_t0;
+    // yielded between prefill chunks (see engine_set_prefill_yield)
+    void (*prefill_yield)(void *ud);
+    void *prefill_ud;
     // identity of everything that decides what this engine's KV bytes mean:
     // the weights, the geometry, the tokenizer and the cache element type.
     // Computed once by engine_init; see engine_prefix_reuse.
     uint64_t model_key;
 } engine;
+
+// Called between prefill chunks so a caller holding the device turn can drop
+// it and let someone else in.
+//
+// Prefill is the longest single thing a slot does, and it used to hold that
+// turn for all of it: measured on Qwen2.5-7B, a short request arriving during
+// a 2,300-token prefill waited 26.2 s against 0.237 s alone -- 110x, i.e. the
+// whole prefill. engine_feed already walks the prompt in n_batch chunks, so
+// the fix is to let the caller yield between them; the hold becomes one chunk
+// instead of one prompt.
+//
+// Unset is a no-op: the CLI, and any server without a scheduler running.
+void engine_set_prefill_yield(engine *e, void (*yield)(void *ud), void *ud);
 
 // True when this request should take the speculative walk (a draft model
 // and/or grammar fast-forward under an active constraint) — shared by

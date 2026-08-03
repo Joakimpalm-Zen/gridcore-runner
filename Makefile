@@ -278,6 +278,16 @@ TEST_RESTART_SRC = tests/test_server_restart.c src/gguf.c src/compat.c \
 $(TEST_RESTART): $(TEST_RESTART_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_RESTART_SRC) -o $@ $(LDFLAGS)
 
+# the device turn is FIFO, not just exclusive. scheduler.c is #included by the
+# test (the turnstile is static) so it is NOT linked here.
+TEST_SCHED_TURN = $(TEST_BATCH:test-batch%=test-sched-turn%)
+TEST_SCHED_TURN_SRC = tests/test_sched_turn.c src/gguf.c src/compat.c \
+                      src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                      src/jsonmode.c src/schema.c src/json.c src/engine.c \
+                      src/template.c src/vramreg.c src/http.c src/registry.c $(GPU_SRC)
+$(TEST_SCHED_TURN): $(TEST_SCHED_TURN_SRC) src/scheduler.c $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_SCHED_TURN_SRC) -o $@ $(LDFLAGS)
+
 # snapshot persistence: the round trip, and the refusals that matter more
 TEST_PFX_PERSIST = $(TEST_BATCH:test-batch%=test-prefix-persist%)
 TEST_PFX_PERSIST_SRC = tests/test_prefix_persist.c src/gguf.c src/compat.c \
@@ -352,10 +362,12 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
-      $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) runner test.gguf
+      $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
+      $(TEST_SCHED_TURN) runner test.gguf
 	./$(TEST_BIND)
 	./$(TEST_RESTART)
 	./$(TEST_PFX_PERSIST)
+	./$(TEST_SCHED_TURN)
 	./$(TEST_VRAMREG)
 	./$(TEST_JSON_SCHEMA)
 	./$(TEST_JSON_OOM)

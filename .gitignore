@@ -97,3 +97,11 @@ test-responses-sm.exe
 test-moe-router
 test-moe-router.exe
 test-attn/
+test-sched-turn
+test-sched-turn.exe
+test-prefix-persist
+test-prefix-persist.exe
+test-server-restart
+test-server-restart.exe
+test-tokenizer-merge
+test-tokenizer-merge.exe

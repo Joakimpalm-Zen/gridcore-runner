@@ -5,6 +5,30 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **A long prefill no longer blocks the other slots for its full length.** On a
+  4-slot GPU server, a short request arriving during a 2,891-token prefill
+  waited **26.2 s — 110x its 0.237 s solo time**. Prefill now gives the device
+  turn back between chunks:
+
+  | | long request | worst short during it | vs solo |
+  |---|---|---|---|
+  | before | 26.50 s | 26.17 s | 110x |
+  | after | 27.01 s | **5.45 s** | **23x** |
+
+  The remaining 5.4 s is the honest cost of fair interleaving, not a defect: a
+  short request decodes 8 tokens and each queues behind one 64-token prefill
+  chunk. Prefill itself pays 1.9%. CPU builds are unaffected — the device turn
+  only exists where CUDA graph capture does.
+
+  **Yielding the turn was not enough, and shipping it alone would have been a
+  no-op.** `dev_mu` was a plain mutex, and a plain mutex is not a hand-off: the
+  releasing thread is already on-CPU with its threadpool hot and re-acquires
+  before the woken waiter is scheduled. The waiter lost 44 of 45 races and
+  still waited 25.3 s. `sched_yield()` before retaking changed nothing. The
+  turn is now a FIFO ticket turnstile, so giving it back means giving it up.
+  `tests/test_sched_turn.c` guards the ordering by reproducing the barge —
+  it fails against a plain-mutex build and passes against the turnstile.
+
 - **The prefix cache stores to the divergence point, not to the end of the
   prompt.** Agent traffic is a system prompt, a tool list and a schema, then a
   request that differs. Publishing each turn whole held the shared block once

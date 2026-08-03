@@ -1,6 +1,7 @@
 // Generation and wire framing. Lifted out of server.c (RNR-019); see completion.h.
 #include "completion.h"
 #include "compat.h"
+
 #include "http.h"
 #include "scheduler.h"
 
@@ -1047,6 +1048,21 @@ static bool request_json_mode(jv *req) {
 // `env` is the strict tool-call envelope when the request opted into one; it
 // replaces the response_format schema, having already absorbed it as the
 // shape of its `final` branch.
+// Drop the device turn and immediately ask for it back. A waiter that has been
+// blocked gets the mutex ahead of us on any fair-ish implementation, and on an
+// unfair one this still bounds the hold to one chunk rather than one prompt.
+static void prefill_yield_turn(void *ud) {
+    (void)ud;
+    // end() then begin() puts this prefill at the BACK of the device queue,
+    // so a request that arrived mid-prefill runs at the next chunk boundary
+    // instead of after the whole prompt. That only works because the turn is
+    // FIFO (see sched_prefill_begin): with a plain mutex the releasing thread
+    // barges straight back in -- measured, the waiter lost 44 of 45 races and
+    // still waited 25.3 s of a 26.4 s prefill.
+    sched_prefill_end();
+    sched_prefill_begin();
+}
+
 void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            jv *req, const tool_envelope *env) {
     bool chat = api != API_TEXT; // chat-shaped: thinking channels, tools
@@ -1353,6 +1369,10 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     // a batch below, after prefill has returned. Forking a prefix is prefill
     // work (it touches this slot's KV, and on CUDA it issues a forward), so it
     // belongs inside the same device turn.
+    // Yield the device turn between prefill chunks. Without it a long prompt
+    // holds it for the whole prefill and every other slot waits: measured at
+    // 26.2 s for a short request arriving during a 2,300-token prefill.
+    engine_set_prefill_yield(e, prefill_yield_turn, NULL);
     sched_prefill_begin();
     if (cache_prompt && share_prefix)
         reuse = engine_prefix_reuse(e, toks, n_prompt);
@@ -1365,6 +1385,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     float *logits = engine_feed(e, toks + keep, n_prompt - keep);
     double prefill_s = now_s() - prefill_t0;
     sched_prefill_end();
+    engine_set_prefill_yield(e, NULL, NULL);
     // Publish outside the device turn: it is a host-memory copy, and this
     // sequence is the only writer of its own KV between prefill and decode.
     if (logits && cache_prompt && share_prefix)

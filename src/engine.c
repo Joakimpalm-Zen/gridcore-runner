@@ -724,6 +724,11 @@ static bool is_stop(engine *e, int id) {
 // batch that did fit. pos then pointed past rows belonging to this request
 // over hist entries belonging to the *previous* one, and the next request's
 // engine_rewind happily "kept" a prefix that matched nothing in the cache.
+void engine_set_prefill_yield(engine *e, void (*yield)(void *), void *ud) {
+    e->prefill_yield = yield;
+    e->prefill_ud    = ud;
+}
+
 float *engine_feed(engine *e, const int32_t *toks, int n) {
     float *logits = NULL;
     model_t *m = e->m;
@@ -738,6 +743,12 @@ float *engine_feed(engine *e, const int32_t *toks, int n) {
         i += chunk;
         if (e->progress && n > 512 && (i % 512 < m->n_batch || last))
             fprintf(stderr, "\rprompt: %d/%d tokens%s", i, n, last ? "\n" : "");
+        // Between chunks, never inside one: a chunk is one model_forward_batch
+        // and splitting that is the backend's business, not this loop's. Not
+        // after the last chunk either -- the caller still owns the turn when
+        // engine_feed returns, and releasing it here would leave the pairing
+        // to be reasoned about at every call site instead of one.
+        if (!last && e->prefill_yield) e->prefill_yield(e->prefill_ud);
     }
     return logits;
 }

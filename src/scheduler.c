@@ -76,6 +76,8 @@ static struct {
     // Serializing them costs nothing real anyway: both saturate the device,
     // so overlapping them only trades one's latency for the other's.
     pthread_mutex_t dev_mu;
+    pthread_cond_t  dev_cv;
+    unsigned        dev_next, dev_serving;   // FIFO tickets, see dev_take
     // Whether the device turn is needed at all. Its entire justification is
     // CUDA graph capture: a microbatch captures a graph on its lead sequence's
     // stream, and any other launch in that context breaks the capture. A CPU
@@ -95,6 +97,32 @@ static struct {
     // metrics
     atomic_long steps, seqs_batched;
 } SCH;
+
+// The device turn is a FIFO turnstile, not a mutex.
+//
+// It has to be. A prefill yields the turn between chunks so a request that
+// arrives mid-prompt does not wait for the whole thing, and that is only a
+// hand-off if the queue is ordered: a pthread mutex lets the releasing thread
+// -- already on-CPU, with its whole threadpool hot -- re-acquire before the
+// woken waiter is scheduled. Measured on Qwen2.5-7B, 2891 prompt tokens:
+// release-then-reacquire lost 44 of 45 races and the short request still
+// waited 25.3 s of the 26.4 s prefill. sched_yield() did not change it.
+//
+// Tickets make the order explicit, so giving the turn back means giving it up.
+static void dev_take(void) {
+    pthread_mutex_lock(&SCH.dev_mu);
+    unsigned mine = SCH.dev_next++;
+    while (mine != SCH.dev_serving)
+        pthread_cond_wait(&SCH.dev_cv, &SCH.dev_mu);
+    pthread_mutex_unlock(&SCH.dev_mu);
+}
+
+static void dev_give(void) {
+    pthread_mutex_lock(&SCH.dev_mu);
+    SCH.dev_serving++;
+    pthread_cond_broadcast(&SCH.dev_cv);
+    pthread_mutex_unlock(&SCH.dev_mu);
+}
 
 bool sched_on(void) { return SCH.running; }
 
@@ -153,7 +181,7 @@ static void *decode_worker(void *unused) {
 
         // Take the device turn. SCH.mu is deliberately released first: these
         // two locks are never held together, in either order.
-        if (SCH.device_turn) pthread_mutex_lock(&SCH.dev_mu);
+        if (SCH.device_turn) dev_take();
         bool ok = model_batch_decode(SCH.batch, idx, tk, ps, nb, out);
         // out[i] is only valid until the next decode, and the slot threads
         // read it after this one returns — so each row is copied home first.
@@ -161,7 +189,7 @@ static void *decode_worker(void *unused) {
             for (int i = 0; i < nb; i++)
                 memcpy(SCH.seq[idx[i]].logits, out[i],
                        sizeof(float) * (size_t)n_vocab);
-        if (SCH.device_turn) pthread_mutex_unlock(&SCH.dev_mu);
+        if (SCH.device_turn) dev_give();
         atomic_fetch_add(&SCH.steps, 1);
         atomic_fetch_add(&SCH.seqs_batched, nb);
 
@@ -221,17 +249,24 @@ bool sched_start(void) {
 
     // sync primitives — torn down in reverse on any subsequent failure
     if (pthread_mutex_init(&SCH.mu, NULL) != 0) { sched_free_buffers(); return false; }
-    if (pthread_mutex_init(&SCH.dev_mu, NULL) != 0) {
+    SCH.dev_next = SCH.dev_serving = 0;
+    if (pthread_cond_init(&SCH.dev_cv, NULL) != 0) {
         pthread_mutex_destroy(&SCH.mu);
         sched_free_buffers(); return false;
     }
+    if (pthread_mutex_init(&SCH.dev_mu, NULL) != 0) {
+        pthread_cond_destroy(&SCH.dev_cv); pthread_mutex_destroy(&SCH.mu);
+        sched_free_buffers(); return false;
+    }
     if (pthread_cond_init(&SCH.dec_cv, NULL) != 0) {
+        pthread_cond_destroy(&SCH.dev_cv);
         pthread_mutex_destroy(&SCH.dev_mu); pthread_mutex_destroy(&SCH.mu);
         sched_free_buffers(); return false;
     }
     if (pthread_cond_init(&SCH.slot_cv, NULL) != 0) {
         pthread_cond_destroy(&SCH.dec_cv);
-        pthread_mutex_destroy(&SCH.dev_mu); pthread_mutex_destroy(&SCH.mu);
+        pthread_cond_destroy(&SCH.dev_cv);
+    pthread_mutex_destroy(&SCH.dev_mu); pthread_mutex_destroy(&SCH.mu);
         sched_free_buffers(); return false;
     }
 
@@ -242,7 +277,8 @@ bool sched_start(void) {
     if (pthread_create(&SCH.th, NULL, decode_worker, NULL) != 0) {
         SCH.running = false;
         pthread_cond_destroy(&SCH.slot_cv); pthread_cond_destroy(&SCH.dec_cv);
-        pthread_mutex_destroy(&SCH.dev_mu); pthread_mutex_destroy(&SCH.mu);
+        pthread_cond_destroy(&SCH.dev_cv);
+    pthread_mutex_destroy(&SCH.dev_mu); pthread_mutex_destroy(&SCH.mu);
         sched_free_buffers();
         return false;
     }
@@ -254,11 +290,11 @@ bool sched_start(void) {
 // different kernel shapes. The sequence is simply absent from the batch while
 // this is held, which costs nothing — it is named per step, not enrolled.
 void sched_prefill_begin(void) {
-    if (sched_on() && SCH.device_turn) pthread_mutex_lock(&SCH.dev_mu);
+    if (sched_on() && SCH.device_turn) dev_take();
 }
 
 void sched_prefill_end(void) {
-    if (sched_on() && SCH.device_turn) pthread_mutex_unlock(&SCH.dev_mu);
+    if (sched_on() && SCH.device_turn) dev_give();
 }
 
 // Hand one forward to the decode thread and wait for this sequence's logits.
@@ -315,9 +351,9 @@ int sched_generate(slot_t *s, float *logits, int max_new,
         // so on a GPU one speculative request still stalls every other slot for
         // its full length. Taking the turn per forward needs engine_generate to
         // call a hook around each one; filed, not done.
-        pthread_mutex_lock(&SCH.dev_mu);
+        dev_take();
         int n = engine_generate(e, logits, max_new, cb, ud, gen_time);
-        pthread_mutex_unlock(&SCH.dev_mu);
+        dev_give();
         return n;
     }
 
@@ -352,6 +388,7 @@ void sched_shutdown(void) {
     pthread_join(SCH.th, NULL);
     pthread_cond_destroy(&SCH.slot_cv);
     pthread_cond_destroy(&SCH.dec_cv);
+    pthread_cond_destroy(&SCH.dev_cv);
     pthread_mutex_destroy(&SCH.dev_mu);
     pthread_mutex_destroy(&SCH.mu);
     sched_free_buffers();
