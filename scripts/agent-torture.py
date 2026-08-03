@@ -37,7 +37,7 @@ from harness import (Client, ProtocolError, RunnerServer,  # noqa: E402
                      categorize, decode_events, find_runner, parse_stream,
                      rss_kind, validate_against_schema)
 
-SCHEMA_VERSION = "gridcore.agent-torture.v1"
+SCHEMA_VERSION = "gridcore.agent-torture.v2"
 
 
 class RemoteTarget:
@@ -163,14 +163,59 @@ CLASSIFY_SCHEMA = {
 CLASSIFY_TOOL = _tool("classify_ticket", CLASSIFY_SCHEMA,
                       "assign exactly one routing label from the fixed taxonomy")
 
+# --- families added in v2 -------------------------------------------------
+#
+# Both are deliberately request-level and provider-neutral, because this matrix
+# is run against other runtimes for comparison (see tests/torture/results/) and
+# a family that only one server can answer measures the harness, not the field.
 
-def build_cases(count=100):
+# reasoning_then_tool: the model has already produced prose in an earlier turn
+# and must now emit a call and nothing else. The failure this catches is a
+# server that lets the earlier assistant text bleed into the call turn --
+# content alongside tool_calls, or a call that never comes because the model
+# keeps talking. Ordinary OpenAI history, so any runtime can be asked.
+REASON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "hypothesis": {"type": "string", "minLength": 1},
+        "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+    },
+    "required": ["hypothesis", "confidence"],
+    "additionalProperties": False,
+}
+REASON_TOOL = _tool("record_conclusion", REASON_SCHEMA,
+                    "record the conclusion reached in the reasoning above")
+
+# structured_final: a schema-constrained FINAL answer rather than a tool call.
+# The tool path and the response_format path reach the sampler differently, and
+# until now only the tool path was tortured. `additionalProperties: false` plus
+# a nested required object is the shape small models break.
+FINAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "owner": {
+            "type": "object",
+            "properties": {"team": {"type": "string", "minLength": 1},
+                           "oncall": {"type": "boolean"}},
+            "required": ["team", "oncall"],
+            "additionalProperties": False,
+        },
+    },
+    "required": ["summary", "severity", "owner"],
+    "additionalProperties": False,
+}
+
+
+def build_cases(count=105):
     """Return the stable public request matrix (round-robin by category)."""
     if count < 1:
         raise ValueError("count must be positive")
     cases = []
     categories = ("nested_arguments", "tool_selection", "forced_truncation",
-                  "stream_normalization", "large_enum_selection")
+                  "stream_normalization", "large_enum_selection",
+                  "reasoning_then_tool", "structured_final")
     ordinals = Counter()
     for index in range(count):
         category = categories[index % len(categories)]
@@ -204,6 +249,29 @@ def build_cases(count=100):
                 messages=[{"role": "user", "content":
                            f"Route this ticket. It sounds like a '{hint}' "
                            f"problem. torture case {index:03d}"}])
+        elif category == "reasoning_then_tool":
+            payload = dict(
+                base, max_tokens=64, tools=[REASON_TOOL],
+                tool_choice={"type": "function",
+                             "function": {"name": "record_conclusion"}},
+                messages=[
+                    {"role": "user", "content":
+                     f"Diagnose incident {index:03d} and think it through."},
+                    {"role": "assistant", "content":
+                     "The latency spike began after the cache was flushed, so "
+                     "the most likely cause is cold-start misses on the "
+                     "read path."},
+                    {"role": "user", "content":
+                     "Now record that conclusion with the tool, nothing else."},
+                ])
+        elif category == "structured_final":
+            payload = dict(
+                base, max_tokens=128,
+                response_format={"type": "json_schema",
+                                 "json_schema": {"name": "incident",
+                                                 "schema": FINAL_SCHEMA}},
+                messages=[{"role": "user", "content":
+                           f"Summarise incident {index:03d} as JSON."}])
         else:
             payload = dict(base, max_tokens=4 + ordinal % 5, stream=True)
         cases.append({"id": f"runner-{index:03d}-{category}",
@@ -243,9 +311,43 @@ def _only_tool(response):
     return function.get("name"), parsed
 
 
+def _verify_structured_final(response):
+    """A schema-constrained final answer: content is the document, and there
+    must be no tool call hiding in the turn."""
+    message = response.choice.get("message") or {}
+    if message.get("tool_calls"):
+        raise ProtocolError("a structured final answer emitted a tool call",
+                            got=message.get("tool_calls"))
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ProtocolError("structured final produced no content",
+                            got=repr(content)[:200])
+    try:
+        document = json.loads(content)
+    except ValueError as exc:
+        raise ProtocolError("structured final is not JSON",
+                            content=content[:200]) from exc
+    validate_against_schema(document, FINAL_SCHEMA)
+
+
 def _verify_buffered(case, response):
     response.expect_status(200)
+    if case["category"] == "structured_final":
+        _verify_structured_final(response)
+        return
     name, arguments = _only_tool(response)
+    if case["category"] == "reasoning_then_tool":
+        if name != "record_conclusion":
+            raise ProtocolError("wrong tool selected",
+                                expected="record_conclusion", got=name)
+        validate_against_schema(arguments, REASON_SCHEMA)
+        # the point of the family: prose from the earlier turn must not ride
+        # along with the call
+        content = (response.choice.get("message") or {}).get("content")
+        if content not in (None, "", []):
+            raise ProtocolError("content leaked into a tool-call turn",
+                                got=repr(content)[:200])
+        return
     if case["category"] in ("nested_arguments", "forced_truncation"):
         if name != "dispatch_job":
             raise ProtocolError("wrong tool selected", expected="dispatch_job",
@@ -412,7 +514,7 @@ def main(argv=None):
     parser.add_argument("--model", type=Path, default=ROOT / "test.gguf")
     parser.add_argument("--out", type=Path,
                         default=ROOT / "tests" / "torture" / "out")
-    parser.add_argument("--cases", type=int, default=100)
+    parser.add_argument("--cases", type=int, default=105)
     args = parser.parse_args(argv)
 
     if args.endpoint:

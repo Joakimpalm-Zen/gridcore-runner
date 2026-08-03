@@ -1,5 +1,14 @@
 # vLLM vs Runner — SmolLM2-1.7B-Instruct, 2026-08-02
 
+> **CORRECTED 2026-08-03 — do not quote the 20/100 below.** vLLM was started
+> without `--tool-call-parser`, and it *refuses* `tool_choice` outright in that
+> state: all 80 tool cases came back `400 ... requires --tool-call-parser to be
+> set` before the model was asked anything. The 20 that passed are exactly the
+> 20 `stream_normalization` cases, the only family that sends no `tools`.
+> Re-run correctly on the v2 matrix, vLLM scores **80/105**, not 20%. See
+> `../2026-08-03-smollm2-1.7b-v2/`, which keeps a reproduction of the
+> misconfigured run alongside the fixed one. The Runner column is unaffected.
+
 The first published vLLM row. Same 100-case matrix, same model, same box.
 
 | runtime | version | passed | failed | failure category |

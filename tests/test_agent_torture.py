@@ -10,18 +10,60 @@ MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
 
 
-def test_default_matrix_is_repeatable_and_covers_100_cases():
-    first = MOD.build_cases(100)
-    second = MOD.build_cases(100)
+def test_default_matrix_is_repeatable_and_balanced():
+    """105, not 100: seven families divide evenly into it and the published bar
+    is a >=100-request matrix. v1's 100/5 results stay valid on their own terms
+    but are not case-for-case comparable with v2 — hence the SCHEMA_VERSION
+    bump, which is what tells a reader which matrix a result file describes."""
+    first = MOD.build_cases()
+    second = MOD.build_cases()
     assert first == second
-    assert len(first) == 100
-    assert len({case["id"] for case in first}) == 100
+    assert len(first) == 105
+    assert len({case["id"] for case in first}) == 105
     assert {case["category"] for case in first} == {
         "nested_arguments", "tool_selection", "forced_truncation",
         "stream_normalization", "large_enum_selection",
+        "reasoning_then_tool", "structured_final",
     }
-    assert all(sum(c["category"] == category for c in first) == 20
+    assert all(sum(c["category"] == category for c in first) == 15
                for category in {c["category"] for c in first})
+
+
+def test_reasoning_then_tool_replays_prose_before_demanding_a_call():
+    """The family exists to catch content bleeding into a call turn, so the
+    request must actually carry an earlier assistant turn — a version that
+    forgot it would still pass a 'one tool call' check while testing nothing."""
+    cases = [c for c in MOD.build_cases() if c["category"] == "reasoning_then_tool"]
+    assert cases
+    messages = cases[0]["request"]["messages"]
+    roles = [m["role"] for m in messages]
+    assert roles == ["user", "assistant", "user"], roles
+    assert len(messages[1]["content"]) > 40, "the replayed reasoning is trivial"
+    assert cases[0]["request"]["tool_choice"]["function"]["name"] == "record_conclusion"
+
+
+def test_structured_final_constrains_a_final_answer_not_a_call():
+    """The other new family goes through response_format, which reaches the
+    sampler by a different path than tools do."""
+    cases = [c for c in MOD.build_cases() if c["category"] == "structured_final"]
+    assert cases
+    request = cases[0]["request"]
+    assert "tools" not in request, "a structured final must not offer tools"
+    schema = request["response_format"]["json_schema"]["schema"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["owner"]["required"] == ["team", "oncall"]
+    # a valid document passes and a near-miss fails, so the verifier is real
+    MOD.validate_against_schema(
+        {"summary": "s", "severity": "high",
+         "owner": {"team": "core", "oncall": True}}, MOD.FINAL_SCHEMA)
+    try:
+        MOD.validate_against_schema(
+            {"summary": "s", "severity": "critical",
+             "owner": {"team": "core", "oncall": True}}, MOD.FINAL_SCHEMA)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("severity outside the enum was accepted")
 
 
 def test_large_enum_case_constrains_to_an_exact_taxonomy_member():
@@ -59,7 +101,7 @@ def test_report_schema_and_totals(tmp_path):
     MOD.write_json(path, report)
     decoded = json.loads(path.read_text())
 
-    assert decoded["schema_version"] == "gridcore.agent-torture.v1"
+    assert decoded["schema_version"] == "gridcore.agent-torture.v2"
     assert decoded["runtime"] == {"name": "runner", "version": "runner test"}
     assert decoded["configuration"]["model"] == "fixture.gguf"
     assert decoded["totals"] == {

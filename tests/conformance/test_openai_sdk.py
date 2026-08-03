@@ -93,7 +93,15 @@ def test_sdk_parses_a_buffered_chat_turn(sdk, model):
     choice = c.choices[0]
     if choice.message.role != "assistant":
         raise ProtocolError("SDK deserialised the wrong role", got=choice.message.role)
-    if choice.finish_reason not in ("stop", "length", "tool_calls", "content_filter"):
+    # "reasoning_limit" is runner's own value, added deliberately (`2866c89`)
+    # to distinguish a budget exhausted while a thinking model was still in its
+    # prelude from ordinary truncation. It is accepted here rather than treated
+    # as a defect, because the alternative would be this test failing for
+    # anyone who points RUNNER_TEST_MODEL at a thinking model — but it is NOT
+    # an OpenAI value, and a typed client whose finish_reason is a closed union
+    # will not have a case for it.
+    if choice.finish_reason not in ("stop", "length", "tool_calls",
+                                    "content_filter", "reasoning_limit"):
         raise ProtocolError("SDK deserialised an invalid finish_reason",
                             got=choice.finish_reason)
     if not isinstance(c.usage.prompt_tokens, int) or c.usage.prompt_tokens <= 0:

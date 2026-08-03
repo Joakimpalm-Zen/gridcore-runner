@@ -1,0 +1,864 @@
+{
+  "cases": [
+    {
+      "category": "nested_arguments",
+      "id": "runner-000-nested_arguments",
+      "latency_ms": 800.44,
+      "ordinal": 0,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-001-tool_selection",
+      "latency_ms": 387.99,
+      "ordinal": 1,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-002-forced_truncation",
+      "latency_ms": 18.73,
+      "ordinal": 2,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-003-stream_normalization",
+      "latency_ms": 42.24,
+      "ordinal": 3,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-004-large_enum_selection",
+      "latency_ms": 298.74,
+      "ordinal": 4,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-005-reasoning_then_tool",
+      "latency_ms": 591.6,
+      "ordinal": 5,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-006-structured_final",
+      "latency_ms": 840.68,
+      "ordinal": 6,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-007-nested_arguments",
+      "latency_ms": 674.65,
+      "ordinal": 7,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-008-tool_selection",
+      "latency_ms": 405.84,
+      "ordinal": 8,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-009-forced_truncation",
+      "latency_ms": 28.09,
+      "ordinal": 9,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-010-stream_normalization",
+      "latency_ms": 49.19,
+      "ordinal": 10,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-011-large_enum_selection",
+      "latency_ms": 296.13,
+      "ordinal": 11,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-012-reasoning_then_tool",
+      "latency_ms": 580.66,
+      "ordinal": 12,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-013-structured_final",
+      "latency_ms": 606.18,
+      "ordinal": 13,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-014-nested_arguments",
+      "latency_ms": 665.46,
+      "ordinal": 14,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-015-tool_selection",
+      "latency_ms": 387.47,
+      "ordinal": 15,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-016-forced_truncation",
+      "latency_ms": 36.53,
+      "ordinal": 16,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-017-stream_normalization",
+      "latency_ms": 57.76,
+      "ordinal": 17,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-018-large_enum_selection",
+      "latency_ms": 291.92,
+      "ordinal": 18,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-019-reasoning_then_tool",
+      "latency_ms": 580.64,
+      "ordinal": 19,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-020-structured_final",
+      "latency_ms": 605.84,
+      "ordinal": 20,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-021-nested_arguments",
+      "latency_ms": 665.75,
+      "ordinal": 21,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-022-tool_selection",
+      "latency_ms": 405.15,
+      "ordinal": 22,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-023-forced_truncation",
+      "latency_ms": 55.42,
+      "ordinal": 23,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-024-stream_normalization",
+      "latency_ms": 66.59,
+      "ordinal": 24,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-025-large_enum_selection",
+      "latency_ms": 292.04,
+      "ordinal": 25,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-026-reasoning_then_tool",
+      "latency_ms": 580.27,
+      "ordinal": 26,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-027-structured_final",
+      "latency_ms": 570.05,
+      "ordinal": 27,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-028-nested_arguments",
+      "latency_ms": 873.39,
+      "ordinal": 28,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-029-tool_selection",
+      "latency_ms": 383.88,
+      "ordinal": 29,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-030-forced_truncation",
+      "latency_ms": 82.14,
+      "ordinal": 30,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-031-stream_normalization",
+      "latency_ms": 75.73,
+      "ordinal": 31,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-032-large_enum_selection",
+      "latency_ms": 292.52,
+      "ordinal": 32,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-033-reasoning_then_tool",
+      "latency_ms": 580.9,
+      "ordinal": 33,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-034-structured_final",
+      "latency_ms": 606.05,
+      "ordinal": 34,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-035-nested_arguments",
+      "latency_ms": 871.43,
+      "ordinal": 35,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-036-tool_selection",
+      "latency_ms": 399.43,
+      "ordinal": 36,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-037-forced_truncation",
+      "latency_ms": 19.0,
+      "ordinal": 37,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-038-stream_normalization",
+      "latency_ms": 39.44,
+      "ordinal": 38,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-039-large_enum_selection",
+      "latency_ms": 291.43,
+      "ordinal": 39,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-040-reasoning_then_tool",
+      "latency_ms": 580.39,
+      "ordinal": 40,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-041-structured_final",
+      "latency_ms": 578.93,
+      "ordinal": 41,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-042-nested_arguments",
+      "latency_ms": 666.19,
+      "ordinal": 42,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-043-tool_selection",
+      "latency_ms": 387.43,
+      "ordinal": 43,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-044-forced_truncation",
+      "latency_ms": 27.94,
+      "ordinal": 44,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-045-stream_normalization",
+      "latency_ms": 48.78,
+      "ordinal": 45,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-046-large_enum_selection",
+      "latency_ms": 291.83,
+      "ordinal": 46,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-047-reasoning_then_tool",
+      "latency_ms": 580.48,
+      "ordinal": 47,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-048-structured_final",
+      "latency_ms": 578.84,
+      "ordinal": 48,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-049-nested_arguments",
+      "latency_ms": 674.53,
+      "ordinal": 49,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-050-tool_selection",
+      "latency_ms": 405.16,
+      "ordinal": 50,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-051-forced_truncation",
+      "latency_ms": 37.54,
+      "ordinal": 51,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-052-stream_normalization",
+      "latency_ms": 58.53,
+      "ordinal": 52,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-053-large_enum_selection",
+      "latency_ms": 292.22,
+      "ordinal": 53,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-054-reasoning_then_tool",
+      "latency_ms": 580.76,
+      "ordinal": 54,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-055-structured_final",
+      "latency_ms": 731.96,
+      "ordinal": 55,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-056-nested_arguments",
+      "latency_ms": 872.18,
+      "ordinal": 56,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-057-tool_selection",
+      "latency_ms": 382.24,
+      "ordinal": 57,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-058-forced_truncation",
+      "latency_ms": 56.18,
+      "ordinal": 58,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-059-stream_normalization",
+      "latency_ms": 67.28,
+      "ordinal": 59,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-060-large_enum_selection",
+      "latency_ms": 292.26,
+      "ordinal": 60,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-061-reasoning_then_tool",
+      "latency_ms": 580.13,
+      "ordinal": 61,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-062-structured_final",
+      "latency_ms": 552.37,
+      "ordinal": 62,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-063-nested_arguments",
+      "latency_ms": 773.03,
+      "ordinal": 63,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-064-tool_selection",
+      "latency_ms": 405.66,
+      "ordinal": 64,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-065-forced_truncation",
+      "latency_ms": 82.62,
+      "ordinal": 65,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-066-stream_normalization",
+      "latency_ms": 76.68,
+      "ordinal": 66,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-067-large_enum_selection",
+      "latency_ms": 293.27,
+      "ordinal": 67,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-068-reasoning_then_tool",
+      "latency_ms": 580.84,
+      "ordinal": 68,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-069-structured_final",
+      "latency_ms": 579.01,
+      "ordinal": 69,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-070-nested_arguments",
+      "latency_ms": 674.35,
+      "ordinal": 70,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-071-tool_selection",
+      "latency_ms": 387.02,
+      "ordinal": 71,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-072-forced_truncation",
+      "latency_ms": 19.05,
+      "ordinal": 72,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-073-stream_normalization",
+      "latency_ms": 39.65,
+      "ordinal": 73,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-074-large_enum_selection",
+      "latency_ms": 292.23,
+      "ordinal": 74,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-075-reasoning_then_tool",
+      "latency_ms": 580.44,
+      "ordinal": 75,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-076-structured_final",
+      "latency_ms": 839.2,
+      "ordinal": 76,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-077-nested_arguments",
+      "latency_ms": 675.08,
+      "ordinal": 77,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-078-tool_selection",
+      "latency_ms": 405.29,
+      "ordinal": 78,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-079-forced_truncation",
+      "latency_ms": 27.64,
+      "ordinal": 79,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-080-stream_normalization",
+      "latency_ms": 48.52,
+      "ordinal": 80,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-081-large_enum_selection",
+      "latency_ms": 291.9,
+      "ordinal": 81,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-082-reasoning_then_tool",
+      "latency_ms": 581.18,
+      "ordinal": 82,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-083-structured_final",
+      "latency_ms": 560.86,
+      "ordinal": 83,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-084-nested_arguments",
+      "latency_ms": 674.92,
+      "ordinal": 84,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-085-tool_selection",
+      "latency_ms": 387.28,
+      "ordinal": 85,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-086-forced_truncation",
+      "latency_ms": 36.9,
+      "ordinal": 86,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-087-stream_normalization",
+      "latency_ms": 57.77,
+      "ordinal": 87,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-088-large_enum_selection",
+      "latency_ms": 291.99,
+      "ordinal": 88,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-089-reasoning_then_tool",
+      "latency_ms": 580.15,
+      "ordinal": 89,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-090-structured_final",
+      "latency_ms": 633.48,
+      "ordinal": 90,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-091-nested_arguments",
+      "latency_ms": 674.27,
+      "ordinal": 91,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-092-tool_selection",
+      "latency_ms": 405.19,
+      "ordinal": 92,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-093-forced_truncation",
+      "latency_ms": 56.04,
+      "ordinal": 93,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-094-stream_normalization",
+      "latency_ms": 66.9,
+      "ordinal": 94,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-095-large_enum_selection",
+      "latency_ms": 293.05,
+      "ordinal": 95,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-096-reasoning_then_tool",
+      "latency_ms": 580.36,
+      "ordinal": 96,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-097-structured_final",
+      "latency_ms": 830.5,
+      "ordinal": 97,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-098-nested_arguments",
+      "latency_ms": 674.41,
+      "ordinal": 98,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-099-tool_selection",
+      "latency_ms": 387.6,
+      "ordinal": 99,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-100-forced_truncation",
+      "latency_ms": 82.37,
+      "ordinal": 100,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-101-stream_normalization",
+      "latency_ms": 76.26,
+      "ordinal": 101,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-102-large_enum_selection",
+      "latency_ms": 292.48,
+      "ordinal": 102,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-103-reasoning_then_tool",
+      "latency_ms": 581.35,
+      "ordinal": 103,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-104-structured_final",
+      "latency_ms": 849.05,
+      "ordinal": 104,
+      "status": "passed"
+    }
+  ],
+  "configuration": {
+    "model": "/home/lab/workspace/Gridcore/gridcore-runner/test.gguf",
+    "temperature": 0
+  },
+  "metrics": {
+    "elapsed_ms": 41448.46,
+    "valid_structured_tasks_per_second": 1.93
+  },
+  "resources": {
+    "peak_rss_kb": null,
+    "peak_rss_kind": "peak"
+  },
+  "runtime": {
+    "name": "vllm",
+    "version": "0.26.0 (--tool-call-parser hermes)"
+  },
+  "schema_version": "gridcore.agent-torture.v2",
+  "totals": {
+    "failed": 25,
+    "failures_by_category": {
+      "protocol": 25
+    },
+    "passed": 80,
+    "requests": 105
+  }
+}

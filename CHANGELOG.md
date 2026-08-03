@@ -5,6 +5,36 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Torture matrix v2: seven families, 105 cases** (`scripts/agent-torture.py`).
+  Two new families, both request-level so other runtimes can be asked the same
+  questions: `reasoning_then_tool` (an assistant turn of prose already in the
+  history, then a forced call — the failure it catches is content bleeding into
+  the call turn) and `structured_final` (a schema-constrained *final answer*
+  via `response_format`, which reaches the sampler by a different path than
+  tools do and had no torture coverage). 105 = 7 x 15; `SCHEMA_VERSION` is
+  bumped to v2 because v1's 100/5 results are not case-for-case comparable.
+
+- **A published benchmark result is corrected: vLLM scores 80/105, not 20/100.**
+  The `2026-08-02` row started vLLM without `--tool-call-parser`, and vLLM
+  *refuses* `tool_choice` outright in that state — all 80 tool cases came back
+  `400 ... requires --tool-call-parser to be set` before the model was asked
+  anything. The 20 that passed are exactly the 20 cases that send no `tools`.
+  Started correctly it scores **80/105** on the harder v2 matrix. The old
+  README now carries the correction, and the new result keeps a reproduction of
+  the misconfigured run beside the fixed one so the claim is checkable. Runner
+  is 105/105 on the same matrix and its column is unaffected.
+
+  A comparison harness that lets the competitor fail at admission and files it
+  as a capability difference is measuring its own setup.
+
+- **First cross-runtime resource footprint**
+  (`tests/torture/results/2026-08-03-smollm2-1.7b-v2/`), with the differences
+  in kind stated rather than averaged away: runner 1.1 GB weights + 0.81 GB KV
+  in VRAM and 1.10 GB host RSS, against vLLM's 3.19 GiB bf16 weights, a 9.57
+  GiB KV pool **preallocated by policy rather than need**, and 3.36 GB host RSS
+  across its two processes — measuring only the process named `vllm` reports
+  1.01 GB and understates it by more than half.
+
 - **Write-side coverage: an interrupted client cannot take the server with it**
   (`tests/conformance/test_write_side.py`, 4 tests). A client that RSTs
   mid-stream, one that RSTs before reading a byte, ten in a row, and one that

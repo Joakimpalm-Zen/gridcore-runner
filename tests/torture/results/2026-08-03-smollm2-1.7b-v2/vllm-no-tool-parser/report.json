@@ -1,0 +1,1064 @@
+{
+  "cases": [
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-000-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-000-nested_arguments",
+      "latency_ms": 2.72,
+      "ordinal": 0,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-001-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"lookup_weather\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-001-tool_selection",
+      "latency_ms": 0.6,
+      "ordinal": 1,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-002-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-002-forced_truncation",
+      "latency_ms": 0.49,
+      "ordinal": 2,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-003-stream_normalization",
+      "latency_ms": 118.04,
+      "ordinal": 3,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-004-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-004-large_enum_selection",
+      "latency_ms": 1.11,
+      "ordinal": 4,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-005-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-005-reasoning_then_tool",
+      "latency_ms": 0.52,
+      "ordinal": 5,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-006-structured_final",
+      "latency_ms": 942.4,
+      "ordinal": 6,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-007-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-007-nested_arguments",
+      "latency_ms": 0.98,
+      "ordinal": 7,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-008-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"sum_values\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-008-tool_selection",
+      "latency_ms": 0.49,
+      "ordinal": 8,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-009-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-009-forced_truncation",
+      "latency_ms": 0.43,
+      "ordinal": 9,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-010-stream_normalization",
+      "latency_ms": 52.68,
+      "ordinal": 10,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-011-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-011-large_enum_selection",
+      "latency_ms": 0.83,
+      "ordinal": 11,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-012-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-012-reasoning_then_tool",
+      "latency_ms": 0.5,
+      "ordinal": 12,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-013-structured_final",
+      "latency_ms": 606.02,
+      "ordinal": 13,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-014-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-014-nested_arguments",
+      "latency_ms": 0.93,
+      "ordinal": 14,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-015-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"lookup_weather\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-015-tool_selection",
+      "latency_ms": 0.54,
+      "ordinal": 15,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-016-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-016-forced_truncation",
+      "latency_ms": 0.45,
+      "ordinal": 16,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-017-stream_normalization",
+      "latency_ms": 61.71,
+      "ordinal": 17,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-018-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-018-large_enum_selection",
+      "latency_ms": 0.75,
+      "ordinal": 18,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-019-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-019-reasoning_then_tool",
+      "latency_ms": 0.5,
+      "ordinal": 19,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-020-structured_final",
+      "latency_ms": 605.55,
+      "ordinal": 20,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-021-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-021-nested_arguments",
+      "latency_ms": 0.82,
+      "ordinal": 21,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-022-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"sum_values\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-022-tool_selection",
+      "latency_ms": 0.71,
+      "ordinal": 22,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-023-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-023-forced_truncation",
+      "latency_ms": 0.6,
+      "ordinal": 23,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-024-stream_normalization",
+      "latency_ms": 71.1,
+      "ordinal": 24,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-025-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-025-large_enum_selection",
+      "latency_ms": 1.37,
+      "ordinal": 25,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-026-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-026-reasoning_then_tool",
+      "latency_ms": 0.62,
+      "ordinal": 26,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-027-structured_final",
+      "latency_ms": 570.08,
+      "ordinal": 27,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-028-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-028-nested_arguments",
+      "latency_ms": 0.61,
+      "ordinal": 28,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-029-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"lookup_weather\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-029-tool_selection",
+      "latency_ms": 0.47,
+      "ordinal": 29,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-030-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-030-forced_truncation",
+      "latency_ms": 0.42,
+      "ordinal": 30,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-031-stream_normalization",
+      "latency_ms": 80.31,
+      "ordinal": 31,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-032-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-032-large_enum_selection",
+      "latency_ms": 0.9,
+      "ordinal": 32,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-033-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-033-reasoning_then_tool",
+      "latency_ms": 0.49,
+      "ordinal": 33,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-034-structured_final",
+      "latency_ms": 605.67,
+      "ordinal": 34,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-035-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-035-nested_arguments",
+      "latency_ms": 0.73,
+      "ordinal": 35,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-036-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"sum_values\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-036-tool_selection",
+      "latency_ms": 0.48,
+      "ordinal": 36,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-037-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-037-forced_truncation",
+      "latency_ms": 0.42,
+      "ordinal": 37,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-038-stream_normalization",
+      "latency_ms": 44.13,
+      "ordinal": 38,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-039-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-039-large_enum_selection",
+      "latency_ms": 0.86,
+      "ordinal": 39,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-040-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-040-reasoning_then_tool",
+      "latency_ms": 0.49,
+      "ordinal": 40,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-041-structured_final",
+      "latency_ms": 578.14,
+      "ordinal": 41,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-042-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-042-nested_arguments",
+      "latency_ms": 0.82,
+      "ordinal": 42,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-043-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"lookup_weather\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-043-tool_selection",
+      "latency_ms": 0.46,
+      "ordinal": 43,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-044-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-044-forced_truncation",
+      "latency_ms": 0.42,
+      "ordinal": 44,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-045-stream_normalization",
+      "latency_ms": 53.17,
+      "ordinal": 45,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-046-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-046-large_enum_selection",
+      "latency_ms": 0.91,
+      "ordinal": 46,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-047-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-047-reasoning_then_tool",
+      "latency_ms": 0.5,
+      "ordinal": 47,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-048-structured_final",
+      "latency_ms": 578.41,
+      "ordinal": 48,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-049-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-049-nested_arguments",
+      "latency_ms": 0.65,
+      "ordinal": 49,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-050-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"sum_values\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-050-tool_selection",
+      "latency_ms": 0.48,
+      "ordinal": 50,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-051-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-051-forced_truncation",
+      "latency_ms": 0.43,
+      "ordinal": 51,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-052-stream_normalization",
+      "latency_ms": 62.41,
+      "ordinal": 52,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-053-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-053-large_enum_selection",
+      "latency_ms": 0.87,
+      "ordinal": 53,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-054-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-054-reasoning_then_tool",
+      "latency_ms": 0.51,
+      "ordinal": 54,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-055-structured_final",
+      "latency_ms": 730.93,
+      "ordinal": 55,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-056-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-056-nested_arguments",
+      "latency_ms": 0.64,
+      "ordinal": 56,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-057-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"lookup_weather\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-057-tool_selection",
+      "latency_ms": 0.47,
+      "ordinal": 57,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-058-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-058-forced_truncation",
+      "latency_ms": 0.42,
+      "ordinal": 58,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-059-stream_normalization",
+      "latency_ms": 71.66,
+      "ordinal": 59,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-060-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-060-large_enum_selection",
+      "latency_ms": 0.73,
+      "ordinal": 60,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-061-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-061-reasoning_then_tool",
+      "latency_ms": 0.54,
+      "ordinal": 61,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-062-structured_final",
+      "latency_ms": 551.51,
+      "ordinal": 62,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-063-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-063-nested_arguments",
+      "latency_ms": 0.64,
+      "ordinal": 63,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-064-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"sum_values\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-064-tool_selection",
+      "latency_ms": 0.46,
+      "ordinal": 64,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-065-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-065-forced_truncation",
+      "latency_ms": 0.42,
+      "ordinal": 65,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-066-stream_normalization",
+      "latency_ms": 80.7,
+      "ordinal": 66,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-067-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-067-large_enum_selection",
+      "latency_ms": 0.7,
+      "ordinal": 67,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-068-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-068-reasoning_then_tool",
+      "latency_ms": 0.55,
+      "ordinal": 68,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-069-structured_final",
+      "latency_ms": 578.58,
+      "ordinal": 69,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-070-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-070-nested_arguments",
+      "latency_ms": 0.66,
+      "ordinal": 70,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-071-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"lookup_weather\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-071-tool_selection",
+      "latency_ms": 0.46,
+      "ordinal": 71,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-072-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-072-forced_truncation",
+      "latency_ms": 0.42,
+      "ordinal": 72,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-073-stream_normalization",
+      "latency_ms": 44.54,
+      "ordinal": 73,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-074-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-074-large_enum_selection",
+      "latency_ms": 0.72,
+      "ordinal": 74,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-075-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-075-reasoning_then_tool",
+      "latency_ms": 0.54,
+      "ordinal": 75,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-076-structured_final",
+      "latency_ms": 838.8,
+      "ordinal": 76,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-077-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-077-nested_arguments",
+      "latency_ms": 0.71,
+      "ordinal": 77,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-078-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"sum_values\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-078-tool_selection",
+      "latency_ms": 0.56,
+      "ordinal": 78,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-079-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-079-forced_truncation",
+      "latency_ms": 0.44,
+      "ordinal": 79,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-080-stream_normalization",
+      "latency_ms": 53.32,
+      "ordinal": 80,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-081-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-081-large_enum_selection",
+      "latency_ms": 0.94,
+      "ordinal": 81,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-082-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-082-reasoning_then_tool",
+      "latency_ms": 0.66,
+      "ordinal": 82,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-083-structured_final",
+      "latency_ms": 560.74,
+      "ordinal": 83,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-084-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-084-nested_arguments",
+      "latency_ms": 0.73,
+      "ordinal": 84,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-085-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"lookup_weather\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-085-tool_selection",
+      "latency_ms": 0.47,
+      "ordinal": 85,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-086-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-086-forced_truncation",
+      "latency_ms": 0.41,
+      "ordinal": 86,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-087-stream_normalization",
+      "latency_ms": 62.48,
+      "ordinal": 87,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-088-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-088-large_enum_selection",
+      "latency_ms": 0.95,
+      "ordinal": 88,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-089-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-089-reasoning_then_tool",
+      "latency_ms": 0.48,
+      "ordinal": 89,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-090-structured_final",
+      "latency_ms": 632.74,
+      "ordinal": 90,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-091-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-091-nested_arguments",
+      "latency_ms": 1.01,
+      "ordinal": 91,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-092-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"sum_values\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-092-tool_selection",
+      "latency_ms": 0.51,
+      "ordinal": 92,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-093-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-093-forced_truncation",
+      "latency_ms": 0.43,
+      "ordinal": 93,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-094-stream_normalization",
+      "latency_ms": 70.78,
+      "ordinal": 94,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-095-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-095-large_enum_selection",
+      "latency_ms": 0.68,
+      "ordinal": 95,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-096-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-096-reasoning_then_tool",
+      "latency_ms": 0.49,
+      "ordinal": 96,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-097-structured_final",
+      "latency_ms": 830.65,
+      "ordinal": 97,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-098-nested_arguments'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"dispatch_job\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-098-nested_arguments",
+      "latency_ms": 0.95,
+      "ordinal": 98,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-099-tool_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"lookup_weather\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-099-tool_selection",
+      "latency_ms": 0.51,
+      "ordinal": 99,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-100-forced_truncation'\n    body = '{\"error\":{\"message\":\"tool_choice=\\\\\"required\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-100-forced_truncation",
+      "latency_ms": 0.43,
+      "ordinal": 100,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-101-stream_normalization",
+      "latency_ms": 79.62,
+      "ordinal": 101,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-102-large_enum_selection'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"classify_ticket\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-102-large_enum_selection",
+      "latency_ms": 0.68,
+      "ordinal": 102,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-103-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"tool_choice=function \\\\\"record_conclusion\\\\\" requires --tool-call-parser to be set\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}'"
+      },
+      "id": "runner-103-reasoning_then_tool",
+      "latency_ms": 0.48,
+      "ordinal": 103,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-104-structured_final",
+      "latency_ms": 848.02,
+      "ordinal": 104,
+      "status": "passed"
+    }
+  ],
+  "configuration": {
+    "model": "/home/lab/workspace/Gridcore/gridcore-runner/test.gguf",
+    "temperature": 0
+  },
+  "metrics": {
+    "elapsed_ms": 11114.61,
+    "valid_structured_tasks_per_second": 2.699
+  },
+  "resources": {
+    "peak_rss_kb": null,
+    "peak_rss_kind": "peak"
+  },
+  "runtime": {
+    "name": "vllm",
+    "version": "0.26.0"
+  },
+  "schema_version": "gridcore.agent-torture.v2",
+  "totals": {
+    "failed": 75,
+    "failures_by_category": {
+      "protocol": 75
+    },
+    "passed": 30,
+    "requests": 105
+  }
+}
