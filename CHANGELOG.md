@@ -5,6 +5,40 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Phase 7 measurements: the fork bottleneck is not the mutex, and an SWA
+  snapshot is ~3x larger than it needs to be.** Neither is a code change here;
+  both correct a premise the plan was carrying.
+
+  **The "snapshot/fork mutex as a scaling bottleneck" names the wrong mutex.**
+  Measured on Qwen2.5-7B with a 2,310-token shared prefix and `--parallel 4`:
+  one fork takes 0.095 s, four concurrent forks take 0.44 s in a clean
+  staircase (0.385 / 0.422 / 0.422 / 0.437) — fully serialized. Moving the
+  132 MB snapshot copy out from under `PFX.mu`, with a pin/dead refcount so
+  eviction cannot free an entry mid-copy, was implemented and measured:
+  **0.433 s. No improvement.** So it was reverted rather than shipped as
+  unmeasured complexity.
+
+  The real serializer is one line up in `completion.c`: `engine_prefix_reuse`
+  runs **inside `sched_prefill_begin()/sched_prefill_end()`**, the device turn.
+  The comment there justifies it — "on CUDA it issues a forward" — and that is
+  true of exactly one single-token forward needed to break the device KV
+  mirror. The other 132 MB is a host memcpy holding a device lock. Confirmed on
+  the CPU path too, where there is no device work at all and four forks still
+  take 4.2x one. The fix is to take the turn around the sync forward alone,
+  which needs `engine_prefix_reuse` split into a lookup half and a copy half;
+  filed rather than attempted, because a fork that lands wrong produces a
+  plausible wrong answer rather than an error.
+
+  **SWA prefixes, measured separately as the plan asked.** gemma-4-E4B has 42
+  layers of which **35 are sliding-window with a 512-token window**, and
+  `prefix_cache_entry_bytes` stores the full prefix length for every
+  KV-owning layer regardless. For a 2,310-token prefix that is 2,310 rows per
+  sliding layer where only 512 can ever be attended to. Storing the window
+  instead would take the snapshot from 42x2310 row-equivalents to
+  7x2310 + 35x512 — **2.85x smaller**, which is also 2.85x more prefixes inside
+  the same 512 MB budget. Filed: the KV layout is absolute-indexed, so this is
+  a placement change rather than a smaller `memcpy`.
+
 - **`server_run` could not run twice, and a SIGTERM could fail to wake
   `accept()`.** RNR-019's remaining half was "de-globalise `SV`". Rather than
   start from the shape, the property was written down first: *a server must be
