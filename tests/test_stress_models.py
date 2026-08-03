@@ -54,6 +54,18 @@ def test_empty_output_is_never_reported_as_agreement():
     assert not sm.same_greedy_output("anything", "", gpu_gen=8, cpu_gen=8)
 
 
+def test_cpu_only_auto_run_is_not_reported_as_cpu_cuda_identity():
+    gpu = {"text": "same", "split": None, "faults": []}
+    cpu = {"text": "same", "split": None, "faults": []}
+    assert sm.cpu_cuda_identity(gpu, cpu, gpu_gen=8, cpu_gen=8) is None
+
+
+def test_real_gpu_run_can_prove_cpu_cuda_identity():
+    gpu = {"text": "same", "split": "gpu-split: G=2/2", "faults": []}
+    cpu = {"text": "same", "split": None, "faults": []}
+    assert sm.cpu_cuda_identity(gpu, cpu, gpu_gen=8, cpu_gen=8) is True
+
+
 def _gguf(path, kv):
     """Minimal GGUF v3 header with string/uint32 KV entries and no tensors."""
     def s(text):

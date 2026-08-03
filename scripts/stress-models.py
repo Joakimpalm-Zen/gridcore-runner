@@ -146,6 +146,19 @@ def same_greedy_output(gpu_text, cpu_text, gpu_gen, cpu_gen):
     return bool(shorter) and longer.startswith(shorter)
 
 
+def cpu_cuda_identity(gpu, cpu, gpu_gen, cpu_gen):
+    """Return identity only when the auto leg demonstrably used CUDA.
+
+    A supported CPU-only architecture can answer `--gpu auto` successfully.
+    Comparing that answer with `--gpu off` is CPU-vs-CPU and proves nothing
+    about CUDA, even when the strings match.
+    """
+    if not gpu.get("split") or gpu.get("faults") or cpu.get("faults"):
+        return None
+    return same_greedy_output(gpu.get("text"), cpu.get("text"),
+                              gpu_gen, cpu_gen)
+
+
 def degenerate(text):
     """Obvious garbage: one token repeated, or nothing at all.
 
@@ -360,14 +373,20 @@ def main():
             report["faults"].append({"where": "cpu_run", "what": f})
         gpu_txt = (gpu["text"] or "").rstrip()
         cpu_txt = (cpu["text"] or "").rstrip()
-        identical = same_greedy_output(gpu["text"], cpu["text"],
-                                       t["gen"], t["cpu_gen"])
+        identical = cpu_cuda_identity(gpu, cpu, t["gen"], t["cpu_gen"])
         report["cpu_cuda_identical"] = identical
-        if not identical and not cpu["faults"] and not gpu["faults"]:
+        report["cpu_cuda_status"] = (
+            "pass" if identical is True else
+            "deviance" if identical is False else "not_executed")
+        if identical is False:
             report["deviances"].append({
                 "what": "cpu_cuda text mismatch",
                 "gpu": gpu_txt[:400], "cpu": cpu_txt[:400]})
-        print(f"  cpu==gpu: {identical}", flush=True)
+        if identical is None:
+            print("  cpu==gpu: not executed (auto leg did not engage CUDA)",
+                  flush=True)
+        else:
+            print(f"  cpu==gpu: {identical}", flush=True)
 
         # --- 3. settings sweep
         if not args.no_sweep:

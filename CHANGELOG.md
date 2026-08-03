@@ -9,7 +9,10 @@ protocol and CLI may still change between alpha releases.
   RAM/VRAM defaults were still hard-coded to the earlier 16 GB / 8 GB test box,
   so tiering and placement recommendations were wrong elsewhere. It now reads
   both budgets from `runner --caps`, reports them, and keeps explicit overrides
-  for controlled comparisons.
+  for controlled comparisons. It also no longer calls a CPU-only `--gpu auto`
+  run CPU/CUDA identity: CUDA evidence is recorded only when the log proves an
+  actual GPU split. Apertus now correctly reports `not_executed`, not a vacuous
+  pass from comparing CPU with itself.
 
 - **Speculative draft models now honor `--kv q8`.** Draft KV had been forced to
   f16 without explanation even when q8 was requested. The target verifies every
