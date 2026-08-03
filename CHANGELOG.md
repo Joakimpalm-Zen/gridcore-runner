@@ -5,6 +5,16 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Published competitor rows now have a scheduled freshness alarm.** A cheap
+  weekly workflow reads runtime name/version metadata from the committed
+  agent-torture reports and compares each competitor's newest published row
+  with official llama.cpp/Ollama GitHub releases and vLLM's PyPI release. It
+  performs no inference in GitHub CI. Stale rows open or update one tracking
+  issue and make the job red; unreachable registries are explicit skips, while
+  malformed committed reports remain hard errors. The first live metadata
+  check found llama.cpp **b10076 → b10241** and Ollama **0.32.1 → 0.32.5**
+  stale; vLLM **0.26.0** is current.
+
 - **Speculative decoding is now a first-class agent-torture runtime axis.**
   `scripts/agent-torture.py --draft PATH --draft-k N` runs the unchanged
   provider-neutral matrix once without and once with the draft server flags,

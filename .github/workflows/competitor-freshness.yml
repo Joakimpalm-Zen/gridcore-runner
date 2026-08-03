@@ -1,0 +1,60 @@
+name: competitor result freshness
+
+on:
+  schedule:
+    - cron: "17 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compare published rows with upstream releases
+        id: freshness
+        shell: bash
+        run: |
+          set +e
+          python3 scripts/competitor-freshness.py --json > competitor-freshness.json
+          status=$?
+          set -e
+          cat competitor-freshness.json
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" -gt 1 ]; then
+            exit "$status"
+          fi
+      - name: Open or update the stale-results issue
+        if: steps.freshness.outputs.status == '1'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('competitor-freshness.json', 'utf8'));
+            const title = 'Agent-torture competitor results are stale';
+            const rows = report.stale.map(row =>
+              `- **${row.runtime}**: published ${row.published}, upstream ${row.upstream}`
+            ).join('\n');
+            const body = `${rows}\n\nRefresh the affected comparison rows on identical local hardware. ` +
+              `This workflow checks release metadata only and deliberately does not run inference in GitHub CI.`;
+            const {data: issues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', per_page: 100
+            });
+            const existing = issues.find(issue => !issue.pull_request && issue.title === title);
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: existing.number, body
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo, title, body
+              });
+            }
+      - name: Fail loudly when a published row is stale
+        if: steps.freshness.outputs.status == '1'
+        run: exit 1

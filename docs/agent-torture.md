@@ -112,6 +112,19 @@ python3 scripts/torture-compare.py results/*/report.json          # text
 python3 scripts/torture-compare.py --md results/*/report.json     # Markdown
 ```
 
+Published competitor rows are checked weekly against the runtimes' official
+release metadata by `.github/workflows/competitor-freshness.yml`. The workflow
+does not install runtimes, load models, or run inference: it reads
+`runtime.name` / `runtime.version` from the reports and queries GitHub Releases
+for llama.cpp and Ollama and PyPI for vLLM. A stale newest row opens or updates
+an issue and fails loudly. An unreachable registry is printed as `SKIP` and
+keeps the run green; malformed committed report metadata is still an error.
+Run the same inexpensive check locally with:
+
+```bash
+python3 scripts/competitor-freshness.py
+```
+
 ## Published comparisons
 
 Both runs below predate the `large_enum_selection` category (added 2026-07-24),
