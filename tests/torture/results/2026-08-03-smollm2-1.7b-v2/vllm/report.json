@@ -837,7 +837,7 @@
     }
   ],
   "configuration": {
-    "model": "/home/lab/workspace/Gridcore/gridcore-runner/test.gguf",
+    "model": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
     "temperature": 0
   },
   "metrics": {

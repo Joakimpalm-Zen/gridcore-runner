@@ -525,7 +525,11 @@ def main(argv=None):
         target = RemoteTarget(port)
         runtime_name = args.runtime or "openai-compatible"
         version = args.runtime_version
-        model_label = str(args.model)
+        # What the ENDPOINT serves, not the local --model default. Falling back
+        # to --model recorded a path to a GGUF on this machine that the remote
+        # runtime never opened -- a published result then names the wrong model
+        # and leaks a local path with it.
+        model_label = args.model_name or str(args.model)
     else:
         exe = args.runner or Path(find_runner(str(ROOT)))
         if not args.model.is_file():

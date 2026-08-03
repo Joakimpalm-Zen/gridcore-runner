@@ -5,7 +5,7 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
-From a field report on a work MacBook Pro M2 Pro / 16 GB driving Continue in
+From a field report on an M2 Pro / 16 GB MacBook Pro driving Continue in
 VS Code — the second outside install. The Metal-side findings need a Mac and are
 filed; these are the ones that did not.
 
