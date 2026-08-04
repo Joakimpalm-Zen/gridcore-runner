@@ -470,7 +470,8 @@ def compare_verdicts(baseline, draft):
 
 
 def runner_extra_args(draft, draft_k):
-    extra = ["--gpu", "off"]
+    extra = ["--gpu", os.environ.get("TORTURE_GPU", "off")]
+    extra += os.environ.get("TORTURE_EXTRA_ARGS", "").split()
     if draft:
         if draft_k < 1:
             raise ValueError("--draft-k must be positive")
