@@ -84,6 +84,7 @@ bench-out.*.txt
 bench-err.*.txt
 metal-*.out
 metal-*.err
+shared-noid.out
 
 # agent worktrees (transient)
 .claude/worktrees/
