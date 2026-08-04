@@ -42,6 +42,46 @@ def run(cmd, timeout):
         return None, e.stdout or "", e.stderr or ""
 
 
+def notes_from(stderr):
+    """Every line the engine wrote to explain itself, in order.
+
+    `last_stderr` is the throughput line, so a probe that kept only that could
+    not see the one message that answers its own question — the note naming
+    what a large -c cost in offloaded layers.
+    """
+    return [ln.strip() for ln in (stderr or "").splitlines()
+            if ln.strip().startswith(("note:", "warning:", "error:"))]
+
+
+def refused_architecture(rows):
+    """True when the model never reached context handling at all.
+
+    An unsupported architecture is refused by name before any context is
+    sized, so scoring that refusal against context keywords says nothing about
+    context accounting. It is a classification, not a finding.
+    """
+    return bool(rows) and all(
+        "unsupported architecture" in (r.get("last_stderr") or "").lower()
+        for r in rows)
+
+
+def findings_for(rows):
+    """Context-accounting findings, or none if context was never reached."""
+    if refused_architecture(rows):
+        return []
+    out = []
+    absurd = rows[-1]
+    # An absurd context must not be silently accepted.
+    if absurd["rc"] == 0 and absurd["resolved_ctx"] and \
+            absurd["resolved_ctx"] >= 1000000:
+        out.append("accepted a 1,000,000-token context without capping it")
+    if absurd["rc"] not in (0, None) and not absurd["explains_itself"]:
+        out.append("refused a too-large context without saying why")
+    if rows[0]["rc"] != 0:
+        out.append("--ctx 0 (auto-fit) did not run")
+    return out
+
+
 def probe(runner, model, ctx, timeout, extra=()):
     cmd = [str(runner), "-m", str(model), "-p", "Hello", "-n", "4",
            "--temp", "0", "-c", str(ctx), "-v", *extra]
@@ -56,6 +96,7 @@ def probe(runner, model, ctx, timeout, extra=()):
         "kv_mb": float(kv.group(1)) if kv else None,
         "generated": (out or "").strip()[:60],
         "last_stderr": tail[-1][:200] if tail else "",
+        "notes": notes_from(err),
         "explains_itself": any(
             k in (err or "").lower()
             for k in ("context", "ctx", "kv", "fit", "reserve", "too large",
@@ -92,19 +133,13 @@ def main():
             print(f"  -c {ctx:<8} rc={r['rc']} resolved={r['resolved_ctx']} "
                   f"kv={r['kv_mb']}MB explains={r['explains_itself']} "
                   f"| {r['last_stderr'][:90]}", flush=True)
-        entry = {"model": model.name, "probes": rows, "findings": []}
-        # An absurd context must not be silently accepted.
-        absurd = rows[-1]
-        if absurd["rc"] == 0 and absurd["resolved_ctx"] and \
-                absurd["resolved_ctx"] >= 1000000:
-            entry["findings"].append(
-                "accepted a 1,000,000-token context without capping it")
-        if absurd["rc"] not in (0, None) and not absurd["explains_itself"]:
-            entry["findings"].append(
-                "refused a too-large context without saying why")
-        if rows[0]["rc"] != 0:
-            entry["findings"].append("--ctx 0 (auto-fit) did not run")
+        entry = {"model": model.name, "probes": rows,
+                 "refused_architecture": refused_architecture(rows),
+                 "findings": findings_for(rows)}
         report["models"].append(entry)
+        if entry["refused_architecture"]:
+            print("  refused at the architecture gate — context never reached",
+                  flush=True)
         for f in entry["findings"]:
             print(f"  FINDING: {f}", flush=True)
 

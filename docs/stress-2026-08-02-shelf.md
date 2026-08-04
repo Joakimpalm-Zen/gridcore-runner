@@ -153,10 +153,13 @@ path for all of them.
   `cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)` — and
   exits non-zero. The suite plan's open item on large-context KV budgeting
   describes this as "failing opaquely"; on this build it does not.
-- One real usability gap: **`-c 32768` is accepted silently and costs ~8× decode**
+- ~~One real usability gap: **`-c 32768` is accepted silently and costs ~8× decode**
   (Llama-3.1-8B: 66.5 → 8.6 tok/s), because a 4.3 GB KV cache evicts the weights
   that were fitting in VRAM. The engine prints the KV size but never connects it
-  to the slowdown.
+  to the slowdown.~~ **Closed the next day by `2633d0b`**, which prints a note
+  naming the KV size, how many layers it displaced and two remedies. The
+  measurement above still stands; only the silence is gone. Re-verified in
+  [`stress-2026-08-04-f27e7bb.md`](stress-2026-08-04-f27e7bb.md).
 
 ## The fix this pass validates
 
