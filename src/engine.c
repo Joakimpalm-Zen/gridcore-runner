@@ -1050,6 +1050,67 @@ static int grammar_forced_bytes(const engine *e, bool schema,
     return n;
 }
 
+// JC-R2 Phase 0 trace: one JSONL record per grammar round, emitted when the
+// verify walk resolves it. Byte fields are hex-encoded so arbitrary pinned
+// bytes never fight JSON escaping; the analysis script decodes them. Same
+// opt-in shape as RUNNER_MOE_TRACE (cached getenv + FILE*, off by default).
+static FILE *gtrace_file(void) {
+    static FILE *fp = NULL;
+    static int opened = 0;
+    if (!opened) {
+        opened = 1;
+        const char *path = getenv("RUNNER_GRAMMAR_TRACE");
+        if (path && *path) {
+            fp = fopen(path, "a");
+            if (!fp)
+                fprintf(stderr, "warning: RUNNER_GRAMMAR_TRACE=%s: "
+                                "could not open for append\n", path);
+        }
+    }
+    return fp;
+}
+
+static void gtrace_hex(FILE *fp, const char *b, int n) {
+    for (int i = 0; i < n; i++) fprintf(fp, "%02x", (unsigned char)b[i]);
+}
+
+// div_i < 0: every draft accepted. Otherwise the walk diverged at draft
+// index div_i: exp is the draft's token, act the target's actual pick, and
+// their decoded bytes are logged so the classifier needs no tokenizer.
+static void gtrace_emit(engine *e, int accepted, int div_i, int exp, int act) {
+    FILE *fp = gtrace_file();
+    if (!fp || e->gtr_nd <= 0) return;
+    fprintf(fp, "{\"pos\":%d,\"pin\":\"", e->pos);
+    gtrace_hex(fp, e->gtr_pin, e->gtr_plen);
+    fprintf(fp, "\",\"draft\":[");
+    for (int i = 0; i < e->gtr_nd; i++)
+        fprintf(fp, "%s%d", i ? "," : "", e->gtr_d[i]);
+    fprintf(fp, "],\"accepted\":%d", accepted);
+    if (div_i >= 0) {
+        char tb[512];
+        int tn, off = 0;
+        // byte offset of the diverged draft position inside the pinned run,
+        // so the analyzer can separate within-pin from beyond-pin merges
+        // without needing the tokenizer
+        for (int i = 0; i < div_i; i++) {
+            tn = tok_decode(e->tok, e->gtr_d[i], tb, sizeof(tb));
+            if (tn > 0) off += tn;
+        }
+        fprintf(fp, ",\"div\":%d,\"off\":%d,\"exp\":%d,\"act\":%d,\"exp_b\":\"",
+                div_i, off, exp, act);
+        tn = exp >= 0 ? tok_decode(e->tok, exp, tb, sizeof(tb)) : 0;
+        gtrace_hex(fp, tb, tn > 0 ? tn : 0);
+        fprintf(fp, "\",\"act_b\":\"");
+        tn = act >= 0 ? tok_decode(e->tok, act, tb, sizeof(tb)) : 0;
+        gtrace_hex(fp, tb, tn > 0 ? tn : 0);
+        fprintf(fp, "\"");
+    }
+    fprintf(fp, "}\n");
+    fflush(fp);   // durable across a killed server, same reasoning as the
+                  // MoE routing trace
+    e->gtr_nd = 0;
+}
+
 // tokenize a pinned byte run into draft proposals, keeping only the token
 // prefix that provably round-trips to a prefix of the pinned bytes — any
 // tokenizer normalization the raw encode still leaks (or a byte the vocab
@@ -1069,6 +1130,12 @@ static int grammar_draft(engine *e, int32_t *d, int max_d) {
         if (tn <= 0 || off + tn > fn || memcmp(fb + off, tb, tn) != 0) break;
         off += tn;
         keep++;
+    }
+    if (keep > 0 && gtrace_file()) {
+        memcpy(e->gtr_pin, fb, fn);
+        e->gtr_plen = fn;
+        memcpy(e->gtr_d, d, sizeof(int32_t) * (size_t)keep);
+        e->gtr_nd = keep;
     }
     return keep;
 }
@@ -1227,6 +1294,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                 st_accepted++;
                 if (gr) st_gr_accepted++;
                 if (constrained_done) {
+                    if (gr) gtrace_emit(e, i + 1, -1, -1, -1);
                     e->hit_stop = true;
                     e->pos += i + 1;
                     if (e->dpos > e->pos) e->dpos = e->pos;
@@ -1237,6 +1305,10 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                 continue;
             }
             // mismatch, bonus position, or aborted: forward the real token
+            if (gr) gtrace_emit(e, i < nd ? i : nd,
+                                i < nd ? i : -1,
+                                i < nd ? d[i] : -1,
+                                i < nd ? tok : -1);
             e->pos += i;
             if (constrained_done) {
                 e->hit_stop = true;

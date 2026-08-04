@@ -93,6 +93,14 @@ typedef struct {
     struct { int rounds, drafted, accepted,      // all drafts (either source)
                  gr_drafted, gr_accepted; }      // grammar-pinned drafts only
              spec_st;                            // reset per generation
+    // JC-R2 Phase 0 trace (RUNNER_GRAMMAR_TRACE=path): the current grammar
+    // round's pinned bytes + drafted ids, stashed at draft time and emitted
+    // as one JSONL record when the verify walk resolves the round. Slot-safe
+    // (per-engine, not file-static) because --serve runs parallel slots.
+    char     gtr_pin[96];  // pinned bytes (GRAM_FF_BYTES)
+    int      gtr_plen;
+    int32_t  gtr_d[16];    // drafted ids (SPEC_DRAFT_MAX)
+    int      gtr_nd;
     // in-flight generation budget, owned by engine_gen_begin/step/end
     int      gen_max, gen_count;
     double   gen_t0;
