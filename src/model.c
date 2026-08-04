@@ -62,41 +62,20 @@ static int64_t filetime_unix_ns(FILETIME ft) {
 #endif
 
 static void model_record_file_id(model_t *m, const char *path) {
-#ifdef _WIN32
-    // MinGW's struct stat exposes only whole-second timestamps. That can make
-    // two different GGUF revisions loaded in the same second share a prefix-
-    // cache key. Native file information gives the stable file index and the
-    // filesystem's 100 ns last-write timestamp without hashing multi-GB files.
-    HANDLE h = path ? CreateFileA(path, FILE_READ_ATTRIBUTES,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                  FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-                                  FILE_ATTRIBUTE_NORMAL, NULL)
-                    : INVALID_HANDLE_VALUE;
-    BY_HANDLE_FILE_INFORMATION info;
-    if (h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &info)) {
+    // One notion of what a file *is*, shared with the weight registries: the
+    // prefix-cache key and the sharing key deciding identity differently is
+    // how the 2026-08-04 defect stayed invisible (the cache keyed real
+    // checkpoints fine while the sharing lookup silently missed on them).
+    // registry=NULL keeps this call quiet — on this same load path the loss
+    // has already been reported by the host-weights lookup.
+    uint64_t size = 0, ino = 0;
+    int64_t mtime = 0, fctime = 0;
+    if (model_file_identity(path, NULL, &size, &ino, &mtime, &fctime)) {
         m->file_id_ok = true;
-        m->file_size = ((uint64_t)info.nFileSizeHigh << 32) |
-                       info.nFileSizeLow;
-        m->file_ino = ((uint64_t)info.nFileIndexHigh << 32) |
-                      info.nFileIndexLow;
-        m->file_mtime_ns = filetime_unix_ns(info.ftLastWriteTime);
-        m->file_ctime_ns = filetime_unix_ns(info.ftCreationTime);
-        CloseHandle(h);
-        return;
-    }
-    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-#endif
-    struct stat st;
-    if (path && stat(path, &st) == 0) {
-        m->file_id_ok = true;
-        m->file_size = (uint64_t)st.st_size;
-#ifndef _WIN32
-        m->file_ino = (uint64_t)st.st_ino;
-#else
-        m->file_ino = 0;
-#endif
-        m->file_mtime_ns = stat_mtime_ns(&st);
-        m->file_ctime_ns = stat_ctime_ns(&st);
+        m->file_size = size;
+        m->file_ino = ino;
+        m->file_mtime_ns = mtime;
+        m->file_ctime_ns = fctime;
     } else {
         // Still include the mapped length in identities on platforms where
         // stat failed, rather than falling back to path alone.
@@ -584,19 +563,56 @@ bool model_file_identity(const char *path, const char *registry,
     // can provoke this branch, so the fallback would be untestable and the
     // sharing gate unfalsifiable. Same role as RUNNER_TEST_GPU_OFF.
     if (getenv("RUNNER_TEST_NO_FILE_ID")) {
-        warn_no_file_id(path, registry, "injected by RUNNER_TEST_NO_FILE_ID");
+        if (registry)
+            warn_no_file_id(path, registry,
+                            "injected by RUNNER_TEST_NO_FILE_ID");
         return false;
     }
+    if (!path) {
+        if (registry) warn_no_file_id(path, registry, "no path");
+        return false;
+    }
+#ifdef _WIN32
+    // MinGW's stat() is the wrong tool here twice over: st_size is 32-bit, so
+    // every real checkpoint (>2 GB) fails with EOVERFLOW and the identity is
+    // lost — every --parallel slot then loads privately and re-decides its
+    // own CPU/GPU split, which is the 2026-08-04 defect — and its timestamps
+    // are whole seconds, which can alias two GGUF revisions written in the
+    // same second. Native file information gives the stable 64-bit file index
+    // and the filesystem's 100 ns timestamps without hashing multi-GB files.
+    HANDLE h = CreateFileA(path, FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE |
+                           FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    BY_HANDLE_FILE_INFORMATION info;
+    if (h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &info)) {
+        *size  = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+        *ino   = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+        *mtime = filetime_unix_ns(info.ftLastWriteTime);
+        if (ctime) *ctime = filetime_unix_ns(info.ftCreationTime);
+        CloseHandle(h);
+        return true;
+    }
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+#endif
     struct stat st;
-    if (!path || stat(path, &st) != 0) {
-        char why[128];
-        if (!path) snprintf(why, sizeof(why), "no path");
-        else snprintf(why, sizeof(why), "stat: %s", strerror(errno));
-        warn_no_file_id(path, registry, why);
+    if (stat(path, &st) != 0) {
+        if (registry) {
+            char why[128];
+            snprintf(why, sizeof(why), "stat: %s", strerror(errno));
+            warn_no_file_id(path, registry, why);
+        }
         return false;
     }
     *size  = (uint64_t)st.st_size;
+#ifdef _WIN32
+    // stat succeeded where native file information did not (non-NTFS volume,
+    // exotic redirector). No stable index on this path; the remaining fields
+    // still key, just ino=0 for every such file.
+    *ino   = 0;
+#else
     *ino   = (uint64_t)st.st_ino;
+#endif
     *mtime = stat_mtime_ns(&st);
     if (ctime) *ctime = stat_ctime_ns(&st);
     return true;

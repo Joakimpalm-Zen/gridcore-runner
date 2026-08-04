@@ -230,6 +230,15 @@ test-shared-noid: $(TEST_SHARED)
 		cat shared-noid.out; exit 1; }; \
 	echo "shared-weights no-identity gate ok (red as required, and said why)"
 
+# file identity at real-checkpoint size: model_file_identity() must key a
+# 5 GB file, because losing the identity is what silently unshares weights
+# (the fixture-scale gates can never see the >2 GB stat() cliff that did it)
+TEST_FILE_ID = $(TEST_BATCH:test-batch%=test-file-identity%)
+TEST_FILE_ID_SRC = tests/test_file_identity.c src/gguf.c src/compat.c \
+                   src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
+$(TEST_FILE_ID): $(TEST_FILE_ID_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_FILE_ID_SRC) -o $@ $(LDFLAGS)
+
 # batched decode: same sources as the shared-weights test (real model +
 # backend), because the property under test is a backend property
 TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
@@ -519,7 +528,7 @@ endif
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
-      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
+      $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
@@ -543,6 +552,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TEMPLATE)
 	./$(TEST_TOOLS)
 	./$(TEST_SHARED)
+	./$(TEST_FILE_ID)
 	./$(TEST_BATCH)
 	./$(TEST_PREFIX)
 	./$(TEST_GRAMMAR_FF)
@@ -690,7 +700,8 @@ clean:
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
-	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
+	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE) \
+	      $(TEST_FILE_ID) test-file-identity.tmp
 	rm -rf test-attn
 	rm -f shared-noid.out
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err

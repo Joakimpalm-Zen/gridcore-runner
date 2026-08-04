@@ -442,9 +442,11 @@ typedef struct {
 bool   model_load(model_t *m, const char *path, const model_params *p);
 
 // The identity a shared-weights record is keyed on: which file this actually
-// is, beyond the path it was spelled with. Both registries — the host parse in
-// model.c and the device upload in cuda.c — key on it, so it lives in one place
-// and reports its own failures. `ctime` is optional (nullable).
+// is, beyond the path it was spelled with. Every keyed view of a file — the
+// host parse in model.c, the device upload in cuda.c, and the prefix-cache key
+// — goes through it, so it lives in one place and reports its own failures.
+// `ctime` is optional (nullable). A NULL `registry` suppresses the diagnostic
+// for callers whose load path has already reported the loss.
 //
 // Returns false when the file cannot be identified, and SAYS SO on stderr with
 // the errno, naming `registry` and the consequence. That diagnostic is the
