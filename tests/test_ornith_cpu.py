@@ -6,6 +6,8 @@ import subprocess
 import sys
 import os
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ("runner.exe" if sys.platform == "win32" else "runner")
 
@@ -47,7 +49,7 @@ def test_qwen35_hybrid_gpu_auto_matches_cpu(tmp_path):
         check=True, text=True).stdout)
     gpu_caps = caps.get("gpu")
     if not gpu_caps:
-        return
+        pytest.skip("no GPU backend: this test asserts a device/host match")
     backend = gpu_caps.get("backend")
     model = tmp_path / "ornith-gpu.gguf"
     subprocess.run([sys.executable, ROOT / "scripts/make-test-ornith.py", model],
@@ -99,7 +101,7 @@ def test_qwen35_cuda_failure_after_recurrent_state_accumulates(tmp_path):
         [RUNNER, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
         check=True, text=True).stdout)
     if (caps.get("gpu") or {}).get("backend") != "cuda":
-        return
+        pytest.skip("CUDA device not available")
 
     model = tmp_path / "ornith-late-fail.gguf"
     subprocess.run([sys.executable, ROOT / "scripts/make-test-ornith.py", model],
