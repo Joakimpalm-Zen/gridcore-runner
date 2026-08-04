@@ -1023,7 +1023,8 @@ static void cl_capture(engine *e, const float *logits) {
 // never correctness. Probing is by trial on validator copies — the same
 // validator-by-trial design the sampler filter uses, no materialized mask.
 static int grammar_forced_bytes(const engine *e, bool schema,
-                                char *out, int cap) {
+                                char *out, int cap, bool *doc_done) {
+    *doc_done = false;
     if (e->constraint_phase != CP_OUTPUT) return 0;
     sval  sv = e->sv;
     jsonv jv = e->jv;
@@ -1045,7 +1046,7 @@ static int grammar_forced_bytes(const engine *e, bool schema,
         if (!(schema ? sval_feed(&sv, &b, 1) : jsonv_feed(&jv, &b, 1)))
             return n;
         out[n++] = b;
-        if (schema ? sv.done : jv.done) return n;
+        if (schema ? sv.done : jv.done) { *doc_done = true; return n; }
     }
     return n;
 }
@@ -1118,7 +1119,9 @@ static void gtrace_emit(engine *e, int accepted, int div_i, int exp, int act) {
 static int grammar_draft(engine *e, int32_t *d, int max_d) {
     enum { GRAM_FF_BYTES = 96 };
     char fb[GRAM_FF_BYTES], tb[512];
-    int fn = grammar_forced_bytes(e, e->schema != NULL, fb, GRAM_FF_BYTES);
+    bool doc_done;
+    int fn = grammar_forced_bytes(e, e->schema != NULL, fb, GRAM_FF_BYTES,
+                                  &doc_done);
     if (fn <= 0) return 0;
     int nd = tok_encode_raw(e->tok, fb, fn, d, max_d);
     if (e->tok->encode_oom) return 0;
@@ -1131,6 +1134,16 @@ static int grammar_draft(engine *e, int32_t *d, int max_d) {
         off += tn;
         keep++;
     }
+    // Tail withholding (measured 2026-08-04, gemma-4-E4B over the torture
+    // suite: 100% of draft rejections were the model merging the final
+    // pinned token with the free bytes that follow the pin). Unless the pin
+    // completes the document — nothing follows, so no merge is possible —
+    // don't draft the token that ends exactly at the pin boundary; it is
+    // the one position the target tokenizes unpredictably. Only when at
+    // least one draft survives: a single-token draft keeps the round alive
+    // (a rejected slot costs no more than the plain decode it replaces),
+    // and zeroing rounds would also blind the engagement gate.
+    if (!doc_done && keep > 1 && off == fn) keep--;
     if (keep > 0 && gtrace_file()) {
         memcpy(e->gtr_pin, fb, fn);
         e->gtr_plen = fn;
