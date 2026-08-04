@@ -42,7 +42,10 @@ so acceptance rose sharply and the wall-clock deficit narrowed (-8.5% →
 `../2026-08-04-gemma4-26b-grammar-ff/` was measured at `021e5bc`, predates
 this fix the same way, and was **not** re-run this trip (out of scope here;
 flagging it as now-stale rather than silently re-measuring someone else's
-delivered result).
+delivered result). **Update (trip 3):** it was re-measured — see that
+directory's "Gen 2": 46.8%→75.87% acceptance, -3.6%→-1.43% wall-clock. Same
+shape as this file's update, smaller absolute narrowing in percentage-point
+terms but the model still nets a loss at high acceptance either way.
 
 Machine: 128 logical cores, 268.7 GB RAM (CPU run). Toolchain: conda
 `ccbuild` env, `CC=x86_64-conda-linux-gnu-gcc`, per the precedent in

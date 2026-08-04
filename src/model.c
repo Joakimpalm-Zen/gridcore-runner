@@ -2335,15 +2335,20 @@ static void moe_probe_emit(int pos, int layer, int lookahead,
 // Shift the probe's 3-deep hidden-state ring and push this layer's post-
 // attention hidden state (the whole current batch) as the newest entry.
 // Lazily sized to [3][n_batch][n_embd] on first use, so a model loaded with
-// RUNNER_MOE_PROBE unset never allocates it.
-static void moe_probe_push(model_t *m, const float *x, int n, int n_embd) {
+// RUNNER_MOE_PROBE unset never allocates it. `stride` is the caller's
+// per-token spacing in `x` (gemma's m->x is packed at n_embd; the generic
+// path's m->xb is packed at m->xdim, which can exceed n_embd) — the ring
+// itself always stores compact n_embd rows regardless of the source stride.
+static void moe_probe_push(model_t *m, const float *x, int n, int n_embd, int stride) {
     if (!m->moe_probe_hist) {
         m->moe_probe_hist = malloc(sizeof(float) * 3 * (size_t)m->n_batch * n_embd);
         if (!m->moe_probe_hist) return;
     }
     size_t slot = (size_t)m->n_batch * n_embd;
     memmove(m->moe_probe_hist + slot, m->moe_probe_hist, sizeof(float) * slot * 2);
-    memcpy(m->moe_probe_hist, x, sizeof(float) * (size_t)n * n_embd);
+    for (int b = 0; b < n; b++)
+        memcpy(m->moe_probe_hist + (size_t)b * n_embd, x + (size_t)b * stride,
+               sizeof(float) * n_embd);
     if (m->moe_probe_depth < 3) m->moe_probe_depth++;
 }
 
@@ -2489,10 +2494,11 @@ gguf_tensor moe_expert_weight(const layer_t *ly, int which, int e,
 // (largest probs; ties to the lowest index) -> renormalize the selected weights
 // to sum to 1 (Mixtral / Qwen3 convention). Writes sel[used]/selw[used].
 static void moe_route(model_t *m, const layer_t *ly, const float *xin,
-                      int n_embd, int ne, int used, int *sel, float *selw) {
+                      int n_embd, int ne, int used, int *sel, float *selw,
+                      bool dbg_dump) {
     float *probs = m->moe_logits;
     matvec_b(m->tp, probs, ne, ly->ffn_gate_inp, xin, n_embd, n_embd, ne, NULL, 1);
-    if (dbg_act_now())
+    if (dbg_dump && dbg_act_now())
         dbg_stat("moe-logits-raw", (int)(ly - m->layers), probs, ne);
     // Router bias (gpt-oss) applies to the LOGITS, before gating.
     if (ly->ffn_gate_inp_b)
@@ -2695,10 +2701,29 @@ static void shexp_add(model_t *m, const layer_t *ly, const float *in,
 static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
+    bool probe = moe_probe_file() != NULL;
+    int layer_idx = (int)(ly - m->layers);
     int   sel[256];
     float selw[256];
-    moe_route(m, ly, xin, n_embd, ne, used, sel, selw);
-    moe_trace_emit(m->fwd_pos, (int)(ly - m->layers), sel, selw, used);
+    moe_route(m, ly, xin, n_embd, ne, used, sel, selw, true);
+    moe_trace_emit(m->fwd_pos, layer_idx, sel, selw, used);
+    // RUNNER_MOE_PROBE: same lookback replay as gemma_route's caller — see
+    // gemma_moe_ffn's comment. xin gets overwritten in place by this
+    // function's last line, so the push below must happen before that, and
+    // the probe's extra moe_route calls (reading history) must happen before
+    // xin's real content is touched at all — both hold here since neither
+    // occurs until after this block.
+    if (probe && m->moe_probe_depth > 0) {
+        size_t slotsz = (size_t)m->n_batch * n_embd;
+        int max_d = m->moe_probe_depth < 3 ? m->moe_probe_depth : 3;
+        for (int d = 1; d <= max_d; d++) {
+            const float *h_old = m->moe_probe_hist + (size_t)(d - 1) * slotsz;
+            int psel[256]; float pselw[256];
+            moe_route(m, ly, h_old, n_embd, ne, used, psel, pselw, false);
+            moe_probe_emit(m->fwd_pos, layer_idx, d, psel, sel, used);
+        }
+    }
+    if (probe) moe_probe_push(m, xin, 1, n_embd, n_embd);
     for (int i = 0; i < n_embd; i++) m->moe_out[i] = 0.0f;
     for (int t = 0; t < used; t++) {
         int e = sel[t];
@@ -2739,15 +2764,32 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
 static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
+    bool probe = moe_probe_file() != NULL;
+    int layer_idx = (int)(ly - m->layers);
     for (int b = 0; b < n; b++) {
         float *xin = m->xb + (size_t)b * xdim;
         moe_route(m, ly, xin, n_embd, ne, used,
-                  m->moe_sel + (size_t)b * used, m->moe_selw + (size_t)b * used);
-        moe_trace_emit(m->fwd_pos + b, (int)(ly - m->layers),
+                  m->moe_sel + (size_t)b * used, m->moe_selw + (size_t)b * used, true);
+        moe_trace_emit(m->fwd_pos + b, layer_idx,
                        m->moe_sel + (size_t)b * used, m->moe_selw + (size_t)b * used, used);
+        // RUNNER_MOE_PROBE: replay against 1/2/3 layers back, before m->xb
+        // is overwritten with this layer's FFN output further below.
+        if (probe && m->moe_probe_depth > 0) {
+            size_t slotsz = (size_t)m->n_batch * n_embd;
+            int max_d = m->moe_probe_depth < 3 ? m->moe_probe_depth : 3;
+            for (int d = 1; d <= max_d; d++) {
+                const float *h_old = m->moe_probe_hist +
+                                     (size_t)(d - 1) * slotsz + (size_t)b * n_embd;
+                int psel[256]; float pselw[256];
+                moe_route(m, ly, h_old, n_embd, ne, used, psel, pselw, false);
+                moe_probe_emit(m->fwd_pos + b, layer_idx, d, psel,
+                               m->moe_sel + (size_t)b * used, used);
+            }
+        }
         float *out = m->moe_out_b + (size_t)b * n_embd;
         for (int i = 0; i < n_embd; i++) out[i] = 0.0f;
     }
+    if (probe) moe_probe_push(m, m->xb, n, n_embd, xdim);
     for (int e = 0; e < ne; e++) {
         int cnt = 0;
         for (int b = 0; b < n; b++) {
@@ -2917,7 +2959,7 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
         float *out = m->xb + (size_t)b * xdim;
         for (int i = 0; i < n_embd; i++) out[i] = mlp[i] + m->moe_out[i];
     }
-    if (probe) moe_probe_push(m, m->x, n, n_embd);
+    if (probe) moe_probe_push(m, m->x, n, n_embd, n_embd);
 }
 
 // Sparse-MoE FFN for one layer. Decode (n==1) keeps the exact per-token path;
