@@ -5,7 +5,27 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
-_Nothing yet._
+- **gemma-4 E-series (E2B/E4B) produced silently wrong output under partial
+  CUDA offload — shipped in `v0.1.5-alpha` and `v0.1.6-alpha`.** Full offload
+  and CPU-only were both correct; any `--gpu-layers N` splitting the model was
+  not, for three independent reasons found while trying to measure grammar
+  fast-forward on the real E4B model (that path needs >=1 CPU layer). (1) the
+  partial-offload upload's byte prefix omitted the per-layer-embedding
+  tensors, so every partial split silently kernel-launch-failed and fell back
+  to CPU — correct output, wrong device, the existing test only ever compared
+  stdout so this went undetected. (2) with that fixed, the CPU-continued
+  tail's per-layer-embedding table went stale/zero, because the prepass that
+  fills it only ran when the CPU handled the *whole* forward. (3) even
+  isolated from per-layer embeddings entirely, the device KV buffer was
+  undersized whenever the split boundary landed on a shared-KV (non-cache-
+  owning) layer — the real E4B case (`shared_kv_layers=18` of 42, so any
+  split in [24,41] hit it) — because the sizing call redirected through "where
+  does this layer's data live" when it needed "how many bytes do the first N
+  layers need". Verified byte-identical to `--gpu off` on the real E4B model
+  at every practical split point; `tests/test_eseries.py` gained an assertion
+  that a partial split's stderr shows no fallback (proven red against the
+  unfixed code). Metal never does partial offload (only full or fully off),
+  so it was never exposed to any of the three.
 
 ## v0.1.6-alpha — 2026-08-04
 
