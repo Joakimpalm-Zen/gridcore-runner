@@ -131,7 +131,12 @@ static void usage(const char *prog) {
         "  --json         constrain output to a single valid JSON object\n"
         "  --json-schema F constrain output to the JSON Schema in file F\n"
         "  --quantize OUT rewrite the model to OUT.gguf (see --quant) and exit\n"
-        "  --quant T      quantize target: q8_0 | q4_0 | f16 (default q4_0)\n"
+        "  --quant T      quantize target: q8_0 | q4_0 | f16 (default q4_0,\n"
+        "                 or unchanged per-tensor if --prune-experts alone)\n"
+        "  --prune-experts LIST.json  drop MoE experts per layer while\n"
+        "                 rewriting: {\"layer_N\":[kept expert ids...]};\n"
+        "                 a layer absent from the file keeps every expert.\n"
+        "                 Combine with --quant to also requantize survivors\n"
         "  -n N           max tokens to generate (default 256, -1 = until EOS)\n"
         "  -c N           context length (default: min(model max, 4096));\n"
         "                 beyond the training context, YaRN rope scaling is\n"
@@ -227,7 +232,7 @@ int main(int argc, char **argv) {
     const char *model_path = NULL, *prompt = NULL, *system_prompt = NULL;
     char *owned_prompt = NULL;
     const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
-    const char *quant_out = NULL, *quant_type = "q4_0";
+    const char *quant_out = NULL, *quant_type = NULL, *prune_experts = NULL;
     int n_predict = 256, n_threads = 0, tmpl = -1, reserve_cpu_pct = 0;
     int port = 8080, parallel = 1, ttl = -1; // -1: 300 for swap mode, never for single
     long parent_pid = 0;
@@ -264,6 +269,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--json-schema")) schema_file = NEXT;
         else if (!strcmp(a, "--quantize")) quant_out = NEXT;
         else if (!strcmp(a, "--quant")) quant_type = NEXT;
+        else if (!strcmp(a, "--prune-experts")) prune_experts = NEXT;
         else if (!strcmp(a, "--temp")) { ov.temp = (float)float_arg(a, NEXT, 0, FLT_MAX); ov.has_temp = true; }
         else if (!strcmp(a, "--top-k")) { ov.top_k = (int)int_arg(a, NEXT, 0, INT_MAX); ov.has_top_k = true; }
         else if (!strcmp(a, "--top-p")) { ov.top_p = (float)float_arg(a, NEXT, 0, 1); ov.has_top_p = true; }
@@ -503,14 +509,26 @@ int main(int argc, char **argv) {
     bool registry = serve && eq_one != NULL && !one_named;
 
     if (quant_out) {
-        int tt = !strcmp(quant_type, "q8_0") ? T_Q8_0 :
+        int tt;
+        if (quant_type) {
+            tt = !strcmp(quant_type, "q8_0") ? T_Q8_0 :
                  !strcmp(quant_type, "q4_0") ? T_Q4_0 :
-                 !strcmp(quant_type, "f16")  ? T_F16 : -1;
-        if (tt < 0) {
-            fprintf(stderr, "error: --quant must be q8_0, q4_0, or f16\n");
-            return 1;
+                 !strcmp(quant_type, "f16")  ? T_F16 : INT_MIN;
+            if (tt == INT_MIN) {
+                fprintf(stderr, "error: --quant must be q8_0, q4_0, or f16\n");
+                return 1;
+            }
+        } else {
+            // No --quant given: --prune-experts alone means "just prune,
+            // don't touch anyone's precision" (T_KEEP); with neither flag
+            // this is plain --quantize, whose long-standing default is q4_0.
+            tt = prune_experts ? T_KEEP : T_Q4_0;
         }
-        return quantize_gguf(model_path, quant_out, tt);
+        return quantize_gguf(model_path, quant_out, tt, prune_experts);
+    }
+    if (prune_experts) {
+        fprintf(stderr, "error: --prune-experts requires --quantize OUT\n");
+        return 1;
     }
 
     model_t m;

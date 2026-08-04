@@ -25,10 +25,16 @@ static inline size_t ggml_row_size(int type, int64_t n) {
 
 // dequantize a full row of n elements
 void  dequant_row(int type, const void *src, float *dst, int n);
+// target == T_KEEP: every tensor keeps its own on-disk type (--prune-experts
+// with no --quant — geometry changes, precision doesn't).
+#define T_KEEP (-1)
 // Requantize a GGUF at in_path to out_path (written beside + atomically
-// renamed). Returns 0 on success, nonzero on failure with the destination
-// left untouched. Declared here so tests can drive it without main.c.
-int   quantize_gguf(const char *in_path, const char *out_path, int target);
+// renamed), optionally pruning MoE experts per prune_path first (NULL =
+// no pruning; see quantize.c's prune_plan_load for the LIST.json shape).
+// Returns 0 on success, nonzero on failure with the destination left
+// untouched. Declared here so tests can drive it without main.c.
+int   quantize_gguf(const char *in_path, const char *out_path, int target,
+                    const char *prune_path);
 // dot(row, x) over n elements
 float vec_dot(int type, const void *row, const float *x, int n);
 // out[b] = dot(w, x + b*x_stride) for nb columns sharing one weight row

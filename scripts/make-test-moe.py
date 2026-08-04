@@ -319,6 +319,22 @@ emit("ggroup", lambda i: [ZEROS_FF_E, ZEROS_FF_E, dn(i, 1.0), ZEROS_FF_E],
       ku("llama.expert_group_count", 2), ku("llama.expert_group_used_count", 1)],
      probs_b=[0.0, 0.0, 1.0, 1.0])
 
+# --- --prune-experts oracle-equivalence fixture. A zero router makes every
+# expert's raw probability equal REGARDLESS OF INPUT (dot(0, x) == 0 for any
+# x), so exp_probs_b alone decides top-k selection — PROVABLY, not just
+# empirically for whatever prompt a test happens to try. Bias
+# [1000, 500, 0, -1000] with top-2 of 4 always selects {0, 1} and NEVER
+# {2, 3}, for every token at every position. Each expert's down projection
+# is its own independent pseudo-random vector (NOT a scalar multiple of the
+# others — a shared direction scaled differently survives the layer's
+# post-FFN RMSNorm unchanged, which the first version of this fixture
+# learned the hard way: it picked a real used expert and still produced a
+# byte-identical generation). Distinct directions have no such escape:
+# swapping which two get averaged changes the normalized output.
+emit("pruneprobe", lambda i: [flist(FF * E) for _ in range(4)],
+     [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2)],
+     probs_b=[1000.0, 500.0, 0.0, -1000.0])
+
 # --- gating-function SENSITIVITY fixtures.
 # The dense-oracle fixtures above cannot discriminate a gating function: with a
 # zero router every expert scores the same, and renormalization then produces

@@ -57,6 +57,15 @@ typedef struct {
     // expert_count experts, each a SwiGLU FFN, weighted-summed. When is_moe is
     // set these replace w_gate/w_up/w_down for this layer.
     bool         is_moe;
+    int          n_expert;      // THIS layer's expert count, read from its own
+                                 // router tensor's ne[1] at load time — usually
+                                 // equals model_t.n_expert, but --prune-experts
+                                 // writes fused expert tensors with fewer
+                                 // blocks for pruned layers, and every MoE
+                                 // forward path routes over n_expert, not the
+                                 // model-wide count (model.c's check_shape3
+                                 // calls require every one of a layer's expert
+                                 // tensors to agree on this exact value)
     gguf_tensor *ffn_gate_inp;   // router: n_embd -> n_expert logits (F32)
     // modern fused 3D expert tensors ({.., n_expert}); NULL when split
     // gpt-oss: per-head learned attention-sink logits [n_head], F32. They

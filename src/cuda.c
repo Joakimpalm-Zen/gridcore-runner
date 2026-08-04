@@ -1374,6 +1374,20 @@ bool gpu_init(model_t *m) {
                     "device kernel — running on CPU\n");
             goto unsupported;
         }
+    // Every device MoE path (weight upload sizing, k_moe_route's expert
+    // count, the gather/scatter kernels) assumes one uniform n_expert for
+    // the whole model. --prune-experts can write a SMALLER expert count for
+    // individual layers (model.c reads it per layer into layer_t.n_expert);
+    // a model with any such layer would upload the wrong slice or route
+    // against the wrong count on-device — refuse rather than risk that.
+    for (int l = 0; l < m->n_layer; l++)
+        if (m->layers[l].is_moe && m->layers[l].n_expert != m->n_expert) {
+            fprintf(stderr, "gpu: blk.%d has %d experts, model declares %d "
+                    "(pruned model) — no device kernel assumes non-uniform "
+                    "per-layer expert counts, running on CPU\n",
+                    l, m->layers[l].n_expert, m->n_expert);
+            goto unsupported;
+        }
     // The shared always-on expert has no device path: the routed MoE
     // kernels write the FFN output and nothing adds a second dense branch.
     if (m->n_ff_shexp > 0) {

@@ -159,16 +159,22 @@ static bool check_shape(gguf_tensor *t, int n_in, int n_out,
 // A fused 3D MoE expert tensor: ne[0]/ne[1] must be EXACT (they are the row
 // length and per-expert row count the forward pass slices with — see
 // moe_expert_weight — so a mismatch drifts every expert's offset, not just the
-// last), and ne[2] must hold at least n_expert expert blocks. Without this a
-// crafted GGUF whose expert tensors are smaller than the declared geometry
-// loads clean and is then read out of bounds at decode time (RNC-1).
+// last), and ne[2] must hold EXACTLY n_expert expert blocks — the caller
+// passes the layer's own n_expert (from its router tensor, possibly smaller
+// than the model's declared expert_count when --prune-experts wrote this
+// layer), and every one of a layer's expert tensors must agree on it exactly:
+// a mismatch between, say, ffn_gate_exps and ffn_down_exps silently drifts
+// one of them out of alignment with the router's selection indices. Without
+// this a crafted (or partially-pruned) GGUF whose expert tensors disagree
+// with the declared geometry loads clean and is then read out of bounds or
+// misaligned at decode time (RNC-1).
 static bool check_shape3(gguf_tensor *t, int ne0, int ne1, int n_expert,
                          const char *what, int layer) {
     if (!t) return true;
     if ((int64_t)t->ne[0] != ne0 || (int64_t)t->ne[1] != ne1 ||
-        (int64_t)t->ne[2] < n_expert) {
+        (int64_t)t->ne[2] != n_expert) {
         fprintf(stderr, "error: MoE tensor %s in blk.%d has shape "
-                "[%llu,%llu,%llu], expected [%d,%d,>=%d]\n",
+                "[%llu,%llu,%llu], expected [%d,%d,%d]\n",
                 what, layer, (unsigned long long)t->ne[0],
                 (unsigned long long)t->ne[1], (unsigned long long)t->ne[2],
                 ne0, ne1, n_expert);
@@ -1569,16 +1575,37 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 // stay in bounds (RNC-1). The router reads n_expert rows of
                 // length n_embd; each expert's gate/up is {n_embd, n_ff_exp}
                 // and down is {n_ff_exp, n_embd}.
-                if (!check_shape(l->ffn_gate_inp, m->n_embd, m->n_expert,
-                                 "ffn_gate_inp", i))
+                //
+                // l->n_expert is THIS layer's real count, read from its own
+                // router tensor rather than assumed to equal the model-wide
+                // m->n_expert: --prune-experts writes a shorter router (and
+                // shorter fused expert tensors) for a pruned layer, same
+                // names, same n_embd/n_ff_exp, fewer expert blocks. Every
+                // expert tensor in the layer must agree on this count exactly
+                // (check_shape3 below requires ne[2] == l->n_expert, not
+                // merely >=) — moe_split (the legacy per-expert-tensor
+                // layout) does not support pruning and keeps m->n_expert.
+                if (!l->ffn_gate_inp || (int64_t)l->ffn_gate_inp->ne[0] != m->n_embd) {
+                    fprintf(stderr, "error: ffn_gate_inp in blk.%d has ne[0]=%llu, "
+                            "expected %d\n", i, l->ffn_gate_inp ?
+                            (unsigned long long)l->ffn_gate_inp->ne[0] : 0, m->n_embd);
                     return false;
+                }
+                l->n_expert = l->moe_split ? m->n_expert : (int)l->ffn_gate_inp->ne[1];
+                if (l->n_expert < m->n_expert_used || l->n_expert > m->n_expert) {
+                    fprintf(stderr, "error: blk.%d declares %d experts via "
+                            "ffn_gate_inp, outside [n_expert_used=%d, "
+                            "expert_count=%d]\n", i, l->n_expert,
+                            m->n_expert_used, m->n_expert);
+                    return false;
+                }
                 if (l->moe_gemma) {
                     // gate and up are fused: {n_embd, 2*n_ff_exp, n_expert}
                     if (!check_shape3(l->ffn_gate_up_exps, m->n_embd,
-                                      2 * m->n_ff_exp, m->n_expert,
+                                      2 * m->n_ff_exp, l->n_expert,
                                       "ffn_gate_up_exps", i) ||
                         !check_shape3(l->ffn_down_exps, m->n_ff_exp, m->n_embd,
-                                      m->n_expert, "ffn_down_exps", i))
+                                      l->n_expert, "ffn_down_exps", i))
                         return false;
                 } else if (l->moe_split) {
                     for (int e = 0; e < m->n_expert; e++) {
@@ -1592,11 +1619,11 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                     }
                 } else {
                     if (!check_shape3(l->ffn_gate_exps, m->n_embd, m->n_ff_exp,
-                                      m->n_expert, "ffn_gate_exps", i) ||
+                                      l->n_expert, "ffn_gate_exps", i) ||
                         !check_shape3(l->ffn_up_exps, m->n_embd, m->n_ff_exp,
-                                      m->n_expert, "ffn_up_exps", i) ||
+                                      l->n_expert, "ffn_up_exps", i) ||
                         !check_shape3(l->ffn_down_exps, m->n_ff_exp, m->n_embd,
-                                      m->n_expert, "ffn_down_exps", i))
+                                      l->n_expert, "ffn_down_exps", i))
                         return false;
                 }
             }
@@ -2699,7 +2726,7 @@ static void shexp_add(model_t *m, const layer_t *ly, const float *in,
 }
 
 static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
-    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int n_embd = m->n_embd, ne = ly->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
     bool probe = moe_probe_file() != NULL;
     int layer_idx = (int)(ly - m->layers);
@@ -2762,7 +2789,7 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
 // which for the dense-oracle configs equals the per-token order — so greedy
 // output is preserved. Big prefill throughput win; decode is untouched.
 static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
-    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int n_embd = m->n_embd, ne = ly->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
     bool probe = moe_probe_file() != NULL;
     int layer_idx = (int)(ly - m->layers);
@@ -2899,7 +2926,7 @@ static void gemma_route(model_t *m, const layer_t *ly, const float *h,
 // (the caller then applies post_ffw_norm + the residual add). Per token; decode
 // is n==1. Verified token-identical to llama.cpp gemma4.cpp.
 static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
-    int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
+    int n_embd = m->n_embd, ne = ly->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp, dff = m->n_ff;           // dff = dense shared-FFN size
     bool probe = moe_probe_file() != NULL;
     int layer_idx = (int)(ly - m->layers);

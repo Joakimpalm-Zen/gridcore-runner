@@ -197,7 +197,7 @@ int main(void) {
 
     // RNR-002: alignment honored end-to-end + round-trip
     make_fixture(in, 0);
-    assert(quantize_gguf(in, out, T_Q8_0) == 0);
+    assert(quantize_gguf(in, out, T_Q8_0, NULL) == 0);
     check_valid_q8(out);
     assert(!exists("q_out.gguf.partial"));        // temp cleaned up on success
     printf("ok: alignment honored, round-trips, no leftover .partial\n");
@@ -205,7 +205,7 @@ int main(void) {
     // RNR-015: in-place requant must not truncate its own input
     const char *inplace = "q_inplace.gguf";
     cp(in, inplace);
-    assert(quantize_gguf(inplace, inplace, T_Q8_0) == 0);
+    assert(quantize_gguf(inplace, inplace, T_Q8_0, NULL) == 0);
     check_valid_q8(inplace);
     printf("ok: in-place requant preserved and converted the model\n");
 
@@ -217,7 +217,7 @@ int main(void) {
     fclose(df);
     const char *bad = "q_bad.gguf";
     make_fixture(bad, 1);                          // unsupported tensor type
-    assert(quantize_gguf(bad, dest, T_Q8_0) != 0); // must reject
+    assert(quantize_gguf(bad, dest, T_Q8_0, NULL) != 0); // must reject
     check_bytes(dest, sentinel, sizeof(sentinel));
     printf("ok: failed requant left the destination untouched\n");
 
@@ -228,7 +228,7 @@ int main(void) {
     assert(fwrite(sentinel, 1, sizeof(sentinel), late) == sizeof(sentinel));
     fclose(late);
     env_set("RUNNER_QUANTIZE_INSTALL_FAIL", "1");
-    assert(quantize_gguf(in, dest, T_Q8_0) != 0);
+    assert(quantize_gguf(in, dest, T_Q8_0, NULL) != 0);
     env_unset("RUNNER_QUANTIZE_INSTALL_FAIL");
     check_bytes(dest, sentinel, sizeof(sentinel));
     assert(!exists("q_keep.gguf.partial"));
