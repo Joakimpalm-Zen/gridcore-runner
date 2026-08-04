@@ -2259,6 +2259,39 @@ static void dbg_stat_f16(const char *tag, int layer, const f16_t *v, size_t n) {
             layer, tag, n, absmx, n_inf, n_nan);
 }
 
+// ------------------------------------------------------ MoE routing trace
+// RUNNER_MOE_TRACE=path appends one JSONL record per routed token per MoE
+// layer: {"pos":N,"layer":L,"experts":[...],"gates":[...]}. Off by default;
+// zero cost when unset (one cached getenv + a cached FILE*, same shape as
+// dbg_act_mode above). CPU path only — the CUDA MoE kernels route on-device
+// and never reach this call site.
+static FILE *moe_trace_file(void) {
+    static FILE *fp = NULL;
+    static int opened = 0;
+    if (!opened) {
+        opened = 1;
+        const char *path = getenv("RUNNER_MOE_TRACE");
+        if (path && *path) {
+            fp = fopen(path, "a");
+            if (!fp)
+                fprintf(stderr, "warning: RUNNER_MOE_TRACE=%s: could not open for append\n", path);
+        }
+    }
+    return fp;
+}
+
+static void moe_trace_emit(int pos, int layer, const int *sel, const float *selw, int used) {
+    FILE *fp = moe_trace_file();
+    if (!fp) return;
+    fprintf(fp, "{\"pos\":%d,\"layer\":%d,\"experts\":[", pos, layer);
+    for (int t = 0; t < used; t++) fprintf(fp, "%s%d", t ? "," : "", sel[t]);
+    fprintf(fp, "],\"gates\":[");
+    for (int t = 0; t < used; t++) fprintf(fp, "%s%.6g", t ? "," : "", selw[t]);
+    fprintf(fp, "]}\n");
+    fflush(fp);   // durable across a killed server: --serve traces run for the
+                   // process's whole lifetime, not to a matching fclose
+}
+
 // ---------------------------------------------------------------- forward
 
 // suppress_tokens checkpoint workaround: a large finite constant instead of
@@ -2610,6 +2643,7 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
     int   sel[256];
     float selw[256];
     moe_route(m, ly, xin, n_embd, ne, used, sel, selw);
+    moe_trace_emit(m->fwd_pos, (int)(ly - m->layers), sel, selw, used);
     for (int i = 0; i < n_embd; i++) m->moe_out[i] = 0.0f;
     for (int t = 0; t < used; t++) {
         int e = sel[t];
@@ -2654,6 +2688,8 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
         float *xin = m->xb + (size_t)b * xdim;
         moe_route(m, ly, xin, n_embd, ne, used,
                   m->moe_sel + (size_t)b * used, m->moe_selw + (size_t)b * used);
+        moe_trace_emit(m->fwd_pos + b, (int)(ly - m->layers),
+                       m->moe_sel + (size_t)b * used, m->moe_selw + (size_t)b * used, used);
         float *out = m->moe_out_b + (size_t)b * n_embd;
         for (int i = 0; i < n_embd; i++) out[i] = 0.0f;
     }
@@ -2769,6 +2805,7 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
             sel[t] = best; selw[t] = bp; denom += bp; m->moe_logits[best] = -1.0f;
         }
         for (int t = 0; t < used; t++) selw[t] /= denom;
+        moe_trace_emit(m->fwd_pos + b, (int)(ly - m->layers), sel, selw, used);
         if (dbg_act_now() && b == n - 1) {
             fprintf(stderr, "ACT L%-3d %-16s", (int)(ly - m->layers), "moe-experts");
             for (int t = 0; t < used; t++)
@@ -2840,6 +2877,7 @@ bool model_moe_ffn_cpu(model_t *m, int layer, int n) {
 
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
+    m->fwd_pos = pos;
     if (m->qwen35 && pos == 0) {
         int convdim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
         int hv = m->ssm_inner / m->ssm_v_heads;

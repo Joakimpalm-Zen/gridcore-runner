@@ -178,6 +178,9 @@ typedef struct {
     float    *moe_selw;    // [n_batch][n_expert_used] per-token renormalized weights
     int      *moe_gidx;    // [n_batch] current expert's token indices
     float    *moe_gw;      // [n_batch] current expert's per-token weights
+    int       fwd_pos;     // starting KV position of the batch this forward call
+                            // is processing; RUNNER_MOE_TRACE reads it to log
+                            // each routed token's absolute sequence position
     bool      rope_neox;     // NeoX-style rotation (qwen2) vs adjacent pairs (llama)
     float     rms_eps, rope_base;
     float     rope_mscale;   // YaRN attention magnitude scale (1.0 = off)
