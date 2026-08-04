@@ -1,0 +1,55 @@
+{
+ "model": "mistralai_Devstral-Small-2507-Q4_K_M.gguf",
+ "size_gb": 14.33,
+ "context": 1024,
+ "generated_utc": "2026-08-03T22:03:27Z",
+ "faults": [],
+ "deviances": [],
+ "moe": false,
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\mistralai_Devstral-Small-2507-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "8",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris. It is the largest city in\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=0.92GB G=19/40 full=0 used=7.34GB",
+  "wall_s": 24.9,
+  "stderr_tail": null
+ },
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\mistralai_Devstral-Small-2507-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "4",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris. It is\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 53.9,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "cpu_cuda_status": "pass"
+}

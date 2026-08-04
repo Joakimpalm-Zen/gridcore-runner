@@ -1,0 +1,36 @@
+{
+ "model": "ibm-granite_granite-3.3-8b-instruct-Q8_0.gguf",
+ "size_gb": 8.68,
+ "context": 1024,
+ "generated_utc": "2026-08-03T22:00:18Z",
+ "faults": [],
+ "deviances": [],
+ "moe": false,
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\ibm-granite_granite-3.3-8b-instruct-Q8_0.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "",
+  "faults": [],
+  "refusals": [
+   "unsupported architecture"
+  ],
+  "split": null,
+  "wall_s": 0.0,
+  "stderr_tail": null
+ },
+ "refused": [
+  "unsupported architecture"
+ ]
+}

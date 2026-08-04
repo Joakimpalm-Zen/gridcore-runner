@@ -1,0 +1,55 @@
+{
+ "model": "gemma-4-26B-A4B-it-Q4_0.gguf",
+ "size_gb": 14.44,
+ "context": 1024,
+ "generated_utc": "2026-08-03T22:04:47Z",
+ "faults": [],
+ "deviances": [],
+ "moe": true,
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\gemma-4-26B-A4B-it-Q4_0.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "8",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris.\n<|channel>1\n2\n\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=1.15GB G=13/30 full=0 used=7.23GB",
+  "wall_s": 14.9,
+  "stderr_tail": null
+ },
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\gemma-4-26B-A4B-it-Q4_0.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "4",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris.\n<|channel>\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 2.3,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "cpu_cuda_status": "pass"
+}

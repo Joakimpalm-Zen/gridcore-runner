@@ -1,0 +1,11 @@
+gemma4: E-series (per-layer embeddings + shared KV) — verified against llama.cpp at the Q4_K noise floor rather than token-identically
+rope: using model frequency factors (rope_freqs.weight)
+gpu-split: budget=7.46GB fixed=0.92GB G=42/42 full=1 used=3.61GB
+gpu: CUDA backend on NVIDIA GeForce RTX 3070 (5.0 GB weights in VRAM)
+gpu: VRAM 2.41 GB free of 8.59 GB after init (kv 0.06 GB + scratch 0.00 GB this instance)
+loaded C:/ProjectGrid/models/gemma-4-E4B-it-Q4_K_M.gguf | gemma4 | 42 layers | ctx 1024 | 4 threads | 1.88s
+sampling: gemma3 (temp 0.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)
+chat mode (template: gemma4) — Ctrl-D or /exit to quit
+
+> The capital of France is **Paris**.[8 tok, 57.6 tok/s]
+> 

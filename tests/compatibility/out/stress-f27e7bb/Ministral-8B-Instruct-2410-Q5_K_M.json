@@ -1,0 +1,55 @@
+{
+ "model": "Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+ "size_gb": 5.72,
+ "context": 1024,
+ "generated_utc": "2026-08-03T21:58:49Z",
+ "faults": [],
+ "deviances": [],
+ "moe": false,
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris. It is the most populous city in France, with over 2\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=0.91GB G=36/36 full=1 used=5.97GB",
+  "wall_s": 7.7,
+  "stderr_tail": null
+ },
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris. It is the most populous city in France, with over 2\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 7.6,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "cpu_cuda_status": "pass"
+}

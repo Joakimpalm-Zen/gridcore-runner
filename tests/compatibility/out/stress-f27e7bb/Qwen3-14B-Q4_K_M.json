@@ -1,0 +1,55 @@
+{
+ "model": "Qwen3-14B-Q4_K_M.gguf",
+ "size_gb": 9.0,
+ "context": 1024,
+ "generated_utc": "2026-08-03T22:00:42Z",
+ "faults": [],
+ "deviances": [],
+ "moe": false,
+ "gpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Qwen3-14B-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "16",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "auto"
+  ],
+  "text": "The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid.\n",
+  "faults": [],
+  "refusals": [],
+  "split": "gpu-split: budget=7.46GB fixed=0.98GB G=32/40 full=0 used=7.40GB",
+  "wall_s": 14.9,
+  "stderr_tail": null
+ },
+ "cpu_run": {
+  "command": [
+   "-m",
+   "C:\\ProjectGrid\\models\\Qwen3-14B-Q4_K_M.gguf",
+   "-p",
+   "The capital of France is",
+   "-n",
+   "8",
+   "--temp",
+   "0",
+   "-c",
+   "1024",
+   "--gpu",
+   "off"
+  ],
+  "text": "The capital of France is Paris. The capital of Italy is Rome\n",
+  "faults": [],
+  "refusals": [],
+  "split": null,
+  "wall_s": 7.4,
+  "stderr_tail": null
+ },
+ "cpu_cuda_identical": true,
+ "cpu_cuda_status": "pass"
+}
