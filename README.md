@@ -231,7 +231,7 @@ driver just uses the CPU. The embedded PTX target is `sm_75`, so GPU offload is
 supported on NVIDIA Turing / compute capability 7.5 or newer; older or
 unsupported NVIDIA GPUs fall back to CPU. Weights are copied to VRAM once, the
 KV cache (fp16 or q8_0, see `--kv`) lives in VRAM with the
-host copy kept authoritative, and prompt batches run as 8-token tiles that
+host copy kept authoritative, and prompt batches run as 16-token tiles that
 decode each weight once for all tokens. A model too large for VRAM is
 **partially offloaded** — as many leading layers as fit run on the GPU and
 the CPU finishes the rest, so oversized models still get a speedup instead

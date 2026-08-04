@@ -1,7 +1,7 @@
 """Guards for the two harness bugs that produced false engine bugs.
 
-Both are recorded in docs/stress-2026-08-02-shelf.md. Neither was an engine
-defect; both would have been published as one.
+Both were found by the 2026-08-02 shelf pass (recorded in the CHANGELOG).
+Neither was an engine defect; both would have been published as one.
 """
 import importlib.util
 import pathlib

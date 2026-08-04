@@ -57,3 +57,10 @@ historical — ALiBi attention would be a new knob, low priority).
 - Candidate admission order stays evidence-first: gate/certify with the same
   program regardless of origin — this policy chooses *which* families enter
   the queue, never how strictly they are checked.
+
+> **Update (2026-08-04):** three of the calls above have since resolved the
+> way the policy pointed. gpt-oss shipped — CPU (2026-07-31), CUDA
+> (2026-08-01), and a Metal smoke — and is a certified architecture in the
+> README. The generalized MoE router landed (it now covers the Llama-4 /
+> DeepSeek-V3 knobs). TildeOpen-30b moved from candidate to the SHA-pinned
+> European roster with cpu_cuda byte-identity. The policy itself is unchanged.

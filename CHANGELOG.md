@@ -56,7 +56,7 @@ protocol and CLI may still change between alpha releases.
   without a file identity: the sharing gate had never been shown capable of
   failing, and at the 370 KB default fixture it could not. Under the hook it now
   fails on all four sharing invariants, which is the same host-side signature
-  reported from the RTX 3070 box in `docs/stress-2026-08-04-f27e7bb.md`.
+  the 2026-08-04 RTX 3070 shelf pass reported when it found the defect.
 
   Diagnostic and gate only at the time it landed; the underlying split defect
   (Follow-up 3/3a) is fixed by the Windows file-identity entry above.

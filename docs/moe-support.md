@@ -279,5 +279,9 @@ GPU numbers. CI continues to exercise the harness with fixtures.
 - **GELU dual-branch MoE** (gemma-4) is implemented on CPU, CUDA and Metal; see
   the `gemma4-moe` section above. `expert_shared_count`-style shared-expert MoE
   (Qwen2-MoE / DeepSeek) remains refused, behind its own validation.
-- **MoE GPU decode** still forces the eager path (host-side routing readback per
-  token), so MoE GPU throughput trails a dense model of the same active size.
+- **MoE GPU decode** *(resolved 2026-07-29)*: earlier versions forced the eager
+  path (host-side routing readback per token). Device-side routing with fused
+  indirect expert matvecs is now the default; the eager path remains pinned for
+  byte-identity certification runs (see `docs/compatibility-program.md`) and
+  the updated MoE rows in `docs/benchmarks.md` supersede the throughput
+  figures above.

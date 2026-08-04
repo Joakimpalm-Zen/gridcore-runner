@@ -49,8 +49,9 @@ dependency-free.
 
 **Prefill is llama.cpp's win, and we publish it as such.** llama.cpp's prefill
 throughput comes from a mature tensor-core GEMM stack across every quant.
-Runner's TC path currently covers Q4_K and lifts promoted dense models from
-~3% to ~4–6% of llama.cpp; the Q8_0 twin and further coverage are tracked
+Runner's TC path covers Q4_K, Q8_0 and Q4_0 (the latter two twins landed
+2026-08-01) and lifts promoted dense models from
+~3% to ~4–6% of llama.cpp; further coverage is tracked
 work, and the gap is reported, not hidden.
 
 **Known-slow rows are kept in the table.** Q3_K decode (12%) uses a

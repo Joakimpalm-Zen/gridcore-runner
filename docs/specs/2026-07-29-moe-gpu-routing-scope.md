@@ -1,9 +1,12 @@
 # MoE GPU decode/prefill: device routing + expert batching — scope & design
 
-Status: **designed, not started** (2026-07-29, Blackwell box). Implementation
-belongs on the CUDA 13.3 / RTX 3070 machine — every lever below is
-`kernels.cu` work requiring PTX header regeneration (`make ptx`), and the
-3070 is also the small-GPU deployment the work primarily serves.
+Status: **P1, P2 and P3 all landed 2026-07-29** on the CUDA 13.3 / RTX 3070
+machine (runner `505d19f..a1f9f71`): device-side routing + fused indirect
+expert matvecs shipped as the default decode path (qwen3moe decode 48% → 67%
+of llama.cpp, see `docs/benchmarks.md`), expert-grouped prefill landed, and
+the Q8_0/Q4_0 TC twins exist. The eager path stays pinned for byte-identity
+certification (`docs/compatibility-program.md`). The design below is kept as
+written for the reasoning; the baseline table is the *pre*-work state.
 
 ## Why (owner direction)
 

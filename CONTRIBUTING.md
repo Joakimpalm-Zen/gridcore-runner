@@ -13,10 +13,16 @@ separate distributable with no build-time coupling to the C header.
 
 Every change must hold these invariants, in CI and locally:
 
-1. **GPU output is token-identical to the CPU path.** Any kernel or
-   offload change must produce byte-identical temp-0 output vs `--gpu off`.
-2. **gemma4 stays token-identical to llama.cpp** (the architecture was
-   verified against the reference; don't drift).
+1. **GPU output is token-identical to the CPU path on the certified scalar
+   route.** Any kernel or offload change must produce byte-identical temp-0
+   output vs `--gpu off` with the scalar/eager paths pinned (the tensor-core
+   prefill default and fused MoE routing are separately held to their
+   tolerance gates — `make test-tc-tol`, `make test-moe-tol`; see
+   `docs/benchmarks.md` for the framing).
+2. **gemma4 stays verified against llama.cpp** — token identity for the dense
+   models; gemma-4-26B-A4B and the E-series are gated at the measured
+   sensitivity floor instead (see `docs/compatibility-program.md` for why
+   token identity is not claimable there). Don't drift.
 3. **The CI matrix passes on Linux, macOS, and Windows** — including the
    sanitizer build (`make debug`, ASan/UBSan) and every smoke test.
 4. **Schema guarantees are load-bearing.** Keys emit in declared order and

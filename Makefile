@@ -214,7 +214,7 @@ test-shared-asan: $(TEST_SHARED_SRC) $(HDR) test.gguf
 # test-shared-weights MUST go red — and it must go red for the sharing reason,
 # not something incidental. A green run here means the gate can no longer
 # detect lost sharing, which is the state it was in for its whole life before
-# 2026-08-04 (see docs/stress-2026-08-04-f27e7bb.md, Follow-up 3a).
+# 2026-08-04 (see the CHANGELOG entries for the shared-weights split fix).
 test-shared-noid: $(TEST_SHARED)
 	@set -e; \
 	if RUNNER_TEST_NO_FILE_ID=1 ./$(TEST_SHARED) $(ASAN_MODEL) > shared-noid.out 2>&1; then \

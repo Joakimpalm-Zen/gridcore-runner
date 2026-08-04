@@ -142,6 +142,20 @@ so their totals cover the four original categories.
   — still lands every call. The wedge widens as the model weakens; the readout
   is explicit that this is a mechanism difference, not the model reasoning better.
 
+Three newer result sets use the v2 matrix (105 cases, seven categories):
+
+- [2026-08-03 — Runner vs vLLM, SmolLM2-1.7B, v2 matrix](../tests/torture/results/2026-08-03-smollm2-1.7b-v2/README.md):
+  Runner 105/105, vLLM (`--tool-call-parser hermes`) 80/105. **This is the
+  correction of record** for the withdrawn 2026-08-02 run below.
+- [2026-08-02 — Runner vs vLLM (WITHDRAWN)](../tests/torture/results/2026-08-02-smollm2-1.7b-vllm/README.md):
+  do not quote its 20/100 — vLLM was started without a tool-call parser, so 80
+  cases failed at admission; correctly configured it scores 80/105. Kept, with
+  its correction banner, so the correction is checkable.
+- [2026-08-03 — Runner-only, Qwen2.5-7B, v2 matrix](../tests/torture/results/2026-08-03-qwen2.5-7b-v2-matrix/README.md):
+  105/105, plus the finding that the matrix's token budgets measure
+  non-thinking models (Qwen3-4B scores 15/105 because its thinking prelude
+  consumes the constrained budget).
+
 ## Submit a result
 
 Bring your nastiest tool schema and your hardware. Open an

@@ -1,7 +1,7 @@
 """Guards for two context-probe bugs that produced false engine findings.
 
-Both are recorded in docs/stress-2026-08-04-f27e7bb.md. Neither was an engine
-defect; the first was published by the probe as two.
+Both were found by the 2026-08-04 shelf pass (recorded in the CHANGELOG).
+Neither was an engine defect; the first was published by the probe as two.
 """
 import importlib.util
 import pathlib

@@ -455,8 +455,8 @@ bool   model_load(model_t *m, const char *path, const model_params *p);
 // CPU/GPU split. Nothing else on either platform notices — the Windows mmap
 // path uses GetFileSizeEx and the POSIX one fstat, so a broken stat() shows up
 // nowhere else in a load. A correctness difference hiding inside an
-// optimization's fallback is exactly the defect in
-// docs/stress-2026-08-04-f27e7bb.md (Follow-up 3/3a).
+// optimization's fallback is exactly the 2026-08-04 shared-weights split
+// defect (see the CHANGELOG entry for the fix).
 //
 // RUNNER_TEST_NO_FILE_ID forces the failure so the fallback is reachable from a
 // test on a machine where stat() works; see `make test-shared-noid`.

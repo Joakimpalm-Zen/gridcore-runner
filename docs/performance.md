@@ -87,11 +87,12 @@ are the honest next steps, scoped here rather than half-landed.
    would use the AVX-512 + VNNI silicon this box has and the current kernels
    ignore. Large rewrite of the matvec path; must stay token-identical.
 
-2. **GPU: tensor-core matmul — measured, currently a no-go at N=8.** Phase 1
-   (WMMA `k_gemm_q4_K_tc`) was correct but ~7× slower than scalar at the
-   runner's 8-token batch; the prerequisite is widening the batch tile to ≥16,
-   with a prefill-only ~3× ceiling. See the TC scope spec for the evidence and
-   the go/no-go framing.
+2. **GPU: tensor-core matmul — LANDED (2026-07-28/29), kept here for the
+   history.** Phase 1 (WMMA `k_gemm_q4_K_tc`) was correct but ~7× slower than
+   scalar at the then-8-token batch; the prerequisite — widening the batch
+   tile to 16 — was met on 2026-07-28, and the MMQ-style rewrite was promoted
+   to the default prefill path on 2026-07-29 (the update block above). See the
+   TC scope spec for the full evidence chain. Only lever 1 remains open.
 
 Widening the *existing* f32 dot to `__m512` was considered and de-prioritized:
 the decode matvec is largely memory-bandwidth bound (dequantized weights), so
