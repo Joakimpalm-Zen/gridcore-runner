@@ -37,3 +37,11 @@ quantization of the model, not verified-identical-to-release behavior.
 
 Directories `26b-off/`, `26b-on/` hold each arm's `report.json`,
 `raw.jsonl`, and `runner.log`; `*.stdout.log` are the driver stdouts.
+
+**Update (trip 2, same day):** `8a7804a` changed grammar-FF's draft-token
+selection after this measurement was taken (`021e5bc`) — see
+`../2026-08-04-gptoss-20b-grammar-ff/README.md`'s "Caught mid-session" for
+what changed. That fix raised gpt-oss's acceptance from 40.0% to 60.65% and
+narrowed its wall-clock deficit from -8.5% to -4.75%; this file's 46.8%/
+-3.6% numbers likely moved too but were not re-measured this trip — treat
+them as pre-fix, not current-main.

@@ -181,6 +181,12 @@ typedef struct {
     int       fwd_pos;     // starting KV position of the batch this forward call
                             // is processing; RUNNER_MOE_TRACE reads it to log
                             // each routed token's absolute sequence position
+    float    *moe_probe_hist;  // [3][n_batch][n_embd] ring of the last three
+                                // gemma-4 layers' post-attention hidden states,
+                                // for RUNNER_MOE_PROBE's lookahead router replay
+    int       moe_probe_depth; // how many of the 3 ring slots are valid for
+                                // the forward call in progress (reset with
+                                // fwd_pos; layer 0 always sees 0)
     bool      rope_neox;     // NeoX-style rotation (qwen2) vs adjacent pairs (llama)
     float     rms_eps, rope_base;
     float     rope_mscale;   // YaRN attention magnitude scale (1.0 = off)

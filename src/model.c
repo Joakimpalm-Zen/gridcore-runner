@@ -2001,6 +2001,7 @@ void model_free(model_t *m) {
     free(m->moe_out_b); free(m->moe_gath); free(m->moe_gate_b);
     free(m->moe_up_b); free(m->moe_dexp_b); free(m->moe_sel);
     free(m->moe_selw); free(m->moe_gidx); free(m->moe_gw);
+    free(m->moe_probe_hist);
     tpool_destroy(m->tp);
     // ---- the shared half. A published load hands its reference back and the
     // last holder frees the buffers; an unpublished one (stat failed, or the
@@ -2290,6 +2291,60 @@ static void moe_trace_emit(int pos, int layer, const int *sel, const float *selw
     fprintf(fp, "]}\n");
     fflush(fp);   // durable across a killed server: --serve traces run for the
                    // process's whole lifetime, not to a matching fclose
+}
+
+// ------------------------------------------------------ MoE gate-reuse probe
+// RUNNER_MOE_PROBE=path appends one JSONL record per (token, layer, lookahead
+// in 1..3): {"pos":N,"layer":L,"lookahead":K,"predicted":[8],"actual":[8]}.
+// "predicted" is layer L's OWN router applied to the hidden state from K
+// layers back instead of L's own — the real gate-reuse/prefetch question,
+// not trip 1's raw expert-set-overlap proxy (that proxy checked whether two
+// DIFFERENT layers' routers happened to agree on the SAME hidden state; this
+// checks whether ONE layer's router already knows the answer EARLY, from an
+// OLDER hidden state — the thing an actual prefetcher would exploit). Off by
+// default, zero cost when unset. gemma-4 only (gemma_moe_ffn below) — the
+// only architecture this trip's dev task targets.
+static FILE *moe_probe_file(void) {
+    static FILE *fp = NULL;
+    static int opened = 0;
+    if (!opened) {
+        opened = 1;
+        const char *path = getenv("RUNNER_MOE_PROBE");
+        if (path && *path) {
+            fp = fopen(path, "a");
+            if (!fp)
+                fprintf(stderr, "warning: RUNNER_MOE_PROBE=%s: could not open for append\n", path);
+        }
+    }
+    return fp;
+}
+
+static void moe_probe_emit(int pos, int layer, int lookahead,
+                            const int *predicted, const int *actual, int used) {
+    FILE *fp = moe_probe_file();
+    if (!fp) return;
+    fprintf(fp, "{\"pos\":%d,\"layer\":%d,\"lookahead\":%d,\"predicted\":[",
+            pos, layer, lookahead);
+    for (int t = 0; t < used; t++) fprintf(fp, "%s%d", t ? "," : "", predicted[t]);
+    fprintf(fp, "],\"actual\":[");
+    for (int t = 0; t < used; t++) fprintf(fp, "%s%d", t ? "," : "", actual[t]);
+    fprintf(fp, "]}\n");
+    fflush(fp);
+}
+
+// Shift the probe's 3-deep hidden-state ring and push this layer's post-
+// attention hidden state (the whole current batch) as the newest entry.
+// Lazily sized to [3][n_batch][n_embd] on first use, so a model loaded with
+// RUNNER_MOE_PROBE unset never allocates it.
+static void moe_probe_push(model_t *m, const float *x, int n, int n_embd) {
+    if (!m->moe_probe_hist) {
+        m->moe_probe_hist = malloc(sizeof(float) * 3 * (size_t)m->n_batch * n_embd);
+        if (!m->moe_probe_hist) return;
+    }
+    size_t slot = (size_t)m->n_batch * n_embd;
+    memmove(m->moe_probe_hist + slot, m->moe_probe_hist, sizeof(float) * slot * 2);
+    memcpy(m->moe_probe_hist, x, sizeof(float) * (size_t)n * n_embd);
+    if (m->moe_probe_depth < 3) m->moe_probe_depth++;
 }
 
 // ---------------------------------------------------------------- forward
@@ -2759,6 +2814,43 @@ static gguf_tensor gemma_gate_up_weight(const layer_t *ly, int e, int n_embd,
     return v;
 }
 
+// Gemma-4's routed-branch router, alone: weightless-rmsnorm(h) [rss over h,
+// no learned weight] * (1/sqrt(n_embd)) * gate_inp_scale -> matvec
+// ffn_gate_inp -> softmax -> top-k. Factored out of gemma_moe_ffn's inline
+// router so RUNNER_MOE_PROBE can replay layer `ly`'s router against an
+// earlier layer's hidden state `h` without a second, driftable copy of the
+// math. `dbg_dump` reproduces the original moe-logits ACT dump exactly where
+// the inline version fired it (pre-softmax, real router call only — probe
+// replays never dump). Uses m->moe_logits as scratch, like the original.
+static void gemma_route(model_t *m, const layer_t *ly, const float *h,
+                         int n_embd, int ne, int used, int *sel, float *selw,
+                         bool dbg_dump) {
+    float rin[n_embd];
+    float inv = 1.0f / sqrtf((float)n_embd);
+    float rss = 0.0f;
+    for (int i = 0; i < n_embd; i++) rss += h[i] * h[i];
+    rss = 1.0f / sqrtf(rss / n_embd + m->rms_eps);
+    for (int i = 0; i < n_embd; i++)
+        rin[i] = h[i] * rss * inv * (ly->gate_inp_scale ? ly->gate_inp_scale[i] : 1.0f);
+    matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, rin, n_embd, n_embd, ne, NULL, 1);
+    // Router logits before the softmax, matching llama.cpp's
+    // ffn_moe_logits-N so an expert-selection flip can be seen directly.
+    if (dbg_dump && dbg_act_now())
+        dbg_stat("moe-logits", (int)(ly - m->layers), m->moe_logits, ne);
+    float mx = m->moe_logits[0];
+    for (int e = 1; e < ne; e++) if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
+    float ssum = 0.0f;
+    for (int e = 0; e < ne; e++) { float p = expf(m->moe_logits[e] - mx); m->moe_logits[e] = p; ssum += p; }
+    for (int e = 0; e < ne; e++) m->moe_logits[e] /= ssum;
+    float denom = 0.0f;
+    for (int t = 0; t < used; t++) {
+        int best = 0; float bp = -1.0f;
+        for (int e = 0; e < ne; e++) if (m->moe_logits[e] > bp) { bp = m->moe_logits[e]; best = e; }
+        sel[t] = best; selw[t] = bp; denom += bp; m->moe_logits[best] = -1.0f;
+    }
+    for (int t = 0; t < used; t++) selw[t] /= denom;
+}
+
 // gemma-4 dual-branch MoE FFN for one layer: a dense GELU shared expert AND a
 // routed top-k GELU expert set, each with its own pre/post RMSNorm sandwich,
 // summed. attn_out is m->x (post-attention residual); writes the sum to m->xb
@@ -2767,10 +2859,11 @@ static gguf_tensor gemma_gate_up_weight(const layer_t *ly, int e, int n_embd,
 static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
     int n_embd = m->n_embd, ne = m->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp, dff = m->n_ff;           // dff = dense shared-FFN size
-    float inv = 1.0f / sqrtf((float)n_embd);
+    bool probe = moe_probe_file() != NULL;
+    int layer_idx = (int)(ly - m->layers);
     for (int b = 0; b < n; b++) {
         const float *attn = m->x + (size_t)b * n_embd;
-        float xn[n_embd], mlp[n_embd], xn2[n_embd], rin[n_embd];
+        float xn[n_embd], mlp[n_embd], xn2[n_embd];
         // --- dense shared MLP: rmsnorm(ffn_norm) -> GELU SwiGLU -> post_ffw_norm_1
         rmsnorm(xn, attn, ly->ffn_norm_w, n_embd, m->rms_eps);
         matvec_b(m->tp, m->hb,  dff, ly->w_gate, xn, n_embd, n_embd, dff, NULL, 1);
@@ -2778,34 +2871,29 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
         for (int j = 0; j < dff; j++) m->hb[j] = gated_act(ACT_GELU, m->hb[j], m->hb2[j]);
         matvec_b(m->tp, mlp, n_embd, ly->w_down, m->hb, dff, dff, n_embd, NULL, 1);
         rmsnorm(mlp, mlp, ly->ffn_post_norm1_w, n_embd, m->rms_eps);
-        // --- routed experts: pre-norm the branch input; router runs on a
-        //     SEPARATE weightless-rmsnorm(attn_out) * (1/sqrt(n_embd)) * gate_inp_scale
+        // --- routed experts: pre-norm the branch input (still needed as the
+        //     expert FFN's own input — the router below uses a SEPARATE
+        //     weightless norm of attn_out, computed inside gemma_route)
         rmsnorm(xn2, attn, ly->ffn_pre_norm2_w, n_embd, m->rms_eps);
-        float rss = 0.0f;
-        for (int i = 0; i < n_embd; i++) rss += attn[i] * attn[i];
-        rss = 1.0f / sqrtf(rss / n_embd + m->rms_eps);
-        for (int i = 0; i < n_embd; i++)
-            rin[i] = attn[i] * rss * inv *
-                     (ly->gate_inp_scale ? ly->gate_inp_scale[i] : 1.0f);
-        matvec_b(m->tp, m->moe_logits, ne, ly->ffn_gate_inp, rin, n_embd, n_embd, ne, NULL, 1);
-        // Router logits before the softmax, matching llama.cpp's
-        // ffn_moe_logits-N so an expert-selection flip can be seen directly.
-        if (dbg_act_now() && b == n - 1)
-            dbg_stat("moe-logits", ly - m->layers, m->moe_logits, ne);
-        // softmax over all experts, top-k, renormalized (same as moe_route)
-        float mx = m->moe_logits[0];
-        for (int e = 1; e < ne; e++) if (m->moe_logits[e] > mx) mx = m->moe_logits[e];
-        float ssum = 0.0f;
-        for (int e = 0; e < ne; e++) { float p = expf(m->moe_logits[e] - mx); m->moe_logits[e] = p; ssum += p; }
-        for (int e = 0; e < ne; e++) m->moe_logits[e] /= ssum;
-        int sel[256]; float selw[256], denom = 0.0f;
-        for (int t = 0; t < used; t++) {
-            int best = 0; float bp = -1.0f;
-            for (int e = 0; e < ne; e++) if (m->moe_logits[e] > bp) { bp = m->moe_logits[e]; best = e; }
-            sel[t] = best; selw[t] = bp; denom += bp; m->moe_logits[best] = -1.0f;
+        int sel[256]; float selw[256];
+        gemma_route(m, ly, attn, n_embd, ne, used, sel, selw, b == n - 1);
+        moe_trace_emit(m->fwd_pos + b, layer_idx, sel, selw, used);
+        // RUNNER_MOE_PROBE: replay THIS layer's router against the 1/2/3
+        // layers-back hidden state instead of attn, and record whether that
+        // earlier-and-cheaper prediction covers what attn's router actually
+        // picked. moe_probe_depth counts how many prior layers this forward
+        // call has pushed so far (capped at 3; 0 at layer 0).
+        if (probe && m->moe_probe_depth > 0) {
+            size_t slotsz = (size_t)m->n_batch * n_embd;
+            int max_d = m->moe_probe_depth < 3 ? m->moe_probe_depth : 3;
+            for (int d = 1; d <= max_d; d++) {
+                const float *h_old = m->moe_probe_hist +
+                                     (size_t)(d - 1) * slotsz + (size_t)b * n_embd;
+                int psel[256]; float pselw[256];
+                gemma_route(m, ly, h_old, n_embd, ne, used, psel, pselw, false);
+                moe_probe_emit(m->fwd_pos + b, layer_idx, d, psel, sel, used);
+            }
         }
-        for (int t = 0; t < used; t++) selw[t] /= denom;
-        moe_trace_emit(m->fwd_pos + b, (int)(ly - m->layers), sel, selw, used);
         if (dbg_act_now() && b == n - 1) {
             fprintf(stderr, "ACT L%-3d %-16s", (int)(ly - m->layers), "moe-experts");
             for (int t = 0; t < used; t++)
@@ -2829,6 +2917,7 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
         float *out = m->xb + (size_t)b * xdim;
         for (int i = 0; i < n_embd; i++) out[i] = mlp[i] + m->moe_out[i];
     }
+    if (probe) moe_probe_push(m, m->x, n, n_embd);
 }
 
 // Sparse-MoE FFN for one layer. Decode (n==1) keeps the exact per-token path;
@@ -2878,6 +2967,8 @@ bool model_moe_ffn_cpu(model_t *m, int layer, int n) {
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
     m->fwd_pos = pos;
+    m->moe_probe_depth = 0;   // the ring is scoped to one top-to-bottom layer
+                              // pass, not carried across forward() calls
     if (m->qwen35 && pos == 0) {
         int convdim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
         int hv = m->ssm_inner / m->ssm_v_heads;

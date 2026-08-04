@@ -1,0 +1,272 @@
+{
+  "cases": [
+    {
+      "category": "nested_arguments",
+      "id": "runner-000-nested_arguments",
+      "latency_ms": 6472.41,
+      "ordinal": 0,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-001-tool_selection",
+      "latency_ms": 1974.76,
+      "ordinal": 1,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-002-forced_truncation",
+      "latency_ms": 2642.69,
+      "ordinal": 2,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-003-stream_normalization",
+      "latency_ms": 731.4,
+      "ordinal": 3,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-004-large_enum_selection",
+      "latency_ms": 6561.62,
+      "ordinal": 4,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-005-reasoning_then_tool",
+      "latency_ms": 6202.67,
+      "ordinal": 5,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-006-structured_final",
+      "latency_ms": 9988.06,
+      "ordinal": 6,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-007-nested_arguments",
+      "latency_ms": 5888.22,
+      "ordinal": 7,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-008-tool_selection",
+      "latency_ms": 3299.91,
+      "ordinal": 8,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-009-forced_truncation",
+      "latency_ms": 2839.47,
+      "ordinal": 9,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-010-stream_normalization",
+      "latency_ms": 856.85,
+      "ordinal": 10,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-011-large_enum_selection",
+      "latency_ms": 6590.7,
+      "ordinal": 11,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-012-reasoning_then_tool",
+      "latency_ms": 5194.82,
+      "ordinal": 12,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-013-structured_final",
+      "latency_ms": 12235.02,
+      "ordinal": 13,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-014-nested_arguments",
+      "latency_ms": 3763.39,
+      "ordinal": 14,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-015-tool_selection",
+      "latency_ms": 2156.81,
+      "ordinal": 15,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-016-forced_truncation",
+      "latency_ms": 3027.93,
+      "ordinal": 16,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-017-stream_normalization",
+      "latency_ms": 1002.57,
+      "ordinal": 17,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-018-large_enum_selection",
+      "latency_ms": 6757.11,
+      "ordinal": 18,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-019-reasoning_then_tool",
+      "latency_ms": 5597.84,
+      "ordinal": 19,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-020-structured_final",
+      "latency_ms": 12476.15,
+      "ordinal": 20,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-021-nested_arguments",
+      "latency_ms": 3638.6,
+      "ordinal": 21,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-022-tool_selection",
+      "latency_ms": 3240.05,
+      "ordinal": 22,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-023-forced_truncation",
+      "latency_ms": 2954.87,
+      "ordinal": 23,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-024-stream_normalization",
+      "latency_ms": 1040.35,
+      "ordinal": 24,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-025-large_enum_selection",
+      "latency_ms": 6483.14,
+      "ordinal": 25,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-026-reasoning_then_tool",
+      "latency_ms": 5366.82,
+      "ordinal": 26,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-027-structured_final",
+      "latency_ms": 10547.23,
+      "ordinal": 27,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-028-nested_arguments",
+      "latency_ms": 3664.14,
+      "ordinal": 28,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-029-tool_selection",
+      "latency_ms": 2057.02,
+      "ordinal": 29,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-030-forced_truncation",
+      "latency_ms": 3237.71,
+      "ordinal": 30,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-031-stream_normalization",
+      "latency_ms": 1116.39,
+      "ordinal": 31,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "id": "runner-032-large_enum_selection",
+      "latency_ms": 6869.26,
+      "ordinal": 32,
+      "status": "passed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "id": "runner-033-reasoning_then_tool",
+      "latency_ms": 5722.56,
+      "ordinal": 33,
+      "status": "passed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-034-structured_final",
+      "latency_ms": 12683.12,
+      "ordinal": 34,
+      "status": "passed"
+    }
+  ],
+  "configuration": {
+    "model": "models/gpt-oss-20b-MXFP4.gguf",
+    "temperature": 0
+  },
+  "metrics": {
+    "elapsed_ms": 175147.4,
+    "valid_structured_tasks_per_second": 0.2
+  },
+  "resources": {
+    "peak_rss_kb": 11067960,
+    "peak_rss_kind": "peak"
+  },
+  "runtime": {
+    "name": "runner",
+    "version": "runner 0.1.6-alpha"
+  },
+  "schema_version": "gridcore.agent-torture.v2",
+  "totals": {
+    "failed": 0,
+    "failures_by_category": {},
+    "passed": 35,
+    "requests": 35
+  }
+}

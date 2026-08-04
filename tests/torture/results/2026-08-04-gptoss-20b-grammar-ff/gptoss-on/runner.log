@@ -1,0 +1,108 @@
+rope: YaRN scaling x32.00 (model metadata)
+loaded models/gpt-oss-20b-MXFP4.gguf | gpt-oss | 24 layers | ctx 4096 | 1 threads | 0.04s
+sampling: gpt-oss (temp 1.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.00)
+rope: YaRN scaling x32.00 (model metadata)
+server listening on http://127.0.0.1:44631 — 2 slots x 32 threads, continuous batching
+  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
+  GET /v1/models | GET /v1/capabilities | GET /health
+  note: this is a sparse-MoE model and its experts are running on the CPU — expect a fraction of dense throughput
+[slot 0] chatcmpl-0: start, 211 prompt (0 cached)
+spec: 26 rounds, 15 drafted, 10 accepted (1.38 tok/round), grammar 10/15
+[slot 0] chatcmpl-0: 211 prompt (0 cached) + 36 gen tok (9.9 tok/s) [schema]
+[slot 1] chatcmpl-1: start, 123 prompt (66 cached)
+spec: 9 rounds, 8 drafted, 4 accepted (1.44 tok/round), grammar 4/8
+[slot 1] chatcmpl-1: 123 prompt (66 cached) + 13 gen tok (8.9 tok/s) [schema]
+[slot 0] chatcmpl-2: start, 202 prompt (44 cached)
+spec: 1 rounds, 1 drafted, 0 accepted (1.00 tok/round), grammar 0/1
+[slot 0] chatcmpl-2: 202 prompt (44 cached) + 1 gen tok (4.6 tok/s) [schema]
+[slot 1] chatcmpl-3: start, 15 prompt (3 cached)
+[slot 1] chatcmpl-3: 15 prompt (3 cached) + 4 gen tok (10.4 tok/s)
+[slot 0] chatcmpl-4: start, 407 prompt (66 cached)
+spec: 10 rounds, 11 drafted, 5 accepted (1.50 tok/round), grammar 5/11
+[slot 0] chatcmpl-4: 407 prompt (66 cached) + 15 gen tok (8.5 tok/s) [schema]
+[slot 1] chatcmpl-5: start, 196 prompt (66 cached)
+spec: 29 rounds, 11 drafted, 7 accepted (1.24 tok/round), grammar 7/11
+[slot 1] chatcmpl-5: 196 prompt (66 cached) + 36 gen tok (10.1 tok/s) [schema]
+[slot 0] chatcmpl-6: start, 15 prompt (3 cached)
+spec: 89 rounds, 8 drafted, 6 accepted (1.07 tok/round), grammar 6/8
+[slot 0] chatcmpl-6: 15 prompt (3 cached) + 95 gen tok (10.3 tok/s) [schema]
+[slot 1] chatcmpl-7: start, 211 prompt (202 cached)
+spec: 42 rounds, 21 drafted, 16 accepted (1.38 tok/round), grammar 16/21
+[slot 1] chatcmpl-7: 211 prompt (202 cached) + 58 gen tok (9.9 tok/s) [schema]
+[slot 0] chatcmpl-8: start, 134 prompt (66 cached)
+spec: 16 rounds, 7 drafted, 6 accepted (1.38 tok/round), grammar 6/7
+[slot 0] chatcmpl-8: 134 prompt (66 cached) + 22 gen tok (10.9 tok/s) [schema]
+[slot 1] chatcmpl-9: start, 202 prompt (44 cached)
+spec: 2 rounds, 2 drafted, 1 accepted (1.00 tok/round), grammar 1/2
+[slot 1] chatcmpl-9: 202 prompt (44 cached) + 2 gen tok (6.7 tok/s) [schema]
+[slot 0] chatcmpl-10: start, 15 prompt (3 cached)
+[slot 0] chatcmpl-10: 15 prompt (3 cached) + 5 gen tok (10.8 tok/s)
+[slot 1] chatcmpl-11: start, 409 prompt (66 cached)
+spec: 10 rounds, 12 drafted, 7 accepted (1.70 tok/round), grammar 7/12
+[slot 1] chatcmpl-11: 409 prompt (66 cached) + 17 gen tok (8.9 tok/s) [schema]
+[slot 0] chatcmpl-12: start, 196 prompt (66 cached)
+spec: 28 rounds, 11 drafted, 7 accepted (1.25 tok/round), grammar 7/11
+[slot 0] chatcmpl-12: 196 prompt (66 cached) + 35 gen tok (9.9 tok/s) [schema]
+[slot 1] chatcmpl-13: start, 15 prompt (3 cached)
+spec: 126 rounds, 3 drafted, 2 accepted (1.02 tok/round), grammar 2/3
+[slot 1] chatcmpl-13: 15 prompt (3 cached) + 128 gen tok (9.9 tok/s) [schema]
+[slot 0] chatcmpl-14: start, 211 prompt (202 cached)
+spec: 26 rounds, 15 drafted, 10 accepted (1.38 tok/round), grammar 10/15
+[slot 0] chatcmpl-14: 211 prompt (202 cached) + 36 gen tok (10.0 tok/s) [schema]
+[slot 1] chatcmpl-15: start, 123 prompt (66 cached)
+spec: 9 rounds, 8 drafted, 4 accepted (1.44 tok/round), grammar 4/8
+[slot 1] chatcmpl-15: 123 prompt (66 cached) + 13 gen tok (8.8 tok/s) [schema]
+[slot 0] chatcmpl-16: start, 202 prompt (44 cached)
+spec: 2 rounds, 2 drafted, 1 accepted (1.50 tok/round), grammar 1/2
+[slot 0] chatcmpl-16: 202 prompt (44 cached) + 3 gen tok (7.5 tok/s) [schema]
+[slot 1] chatcmpl-17: start, 15 prompt (3 cached)
+[slot 1] chatcmpl-17: 15 prompt (3 cached) + 6 gen tok (11.6 tok/s)
+[slot 0] chatcmpl-18: start, 409 prompt (66 cached)
+spec: 11 rounds, 13 drafted, 5 accepted (1.45 tok/round), grammar 5/13
+[slot 0] chatcmpl-18: 409 prompt (66 cached) + 16 gen tok (8.0 tok/s) [schema]
+[slot 1] chatcmpl-19: start, 196 prompt (66 cached)
+spec: 29 rounds, 11 drafted, 7 accepted (1.24 tok/round), grammar 7/11
+[slot 1] chatcmpl-19: 196 prompt (66 cached) + 36 gen tok (10.3 tok/s) [schema]
+[slot 0] chatcmpl-20: start, 15 prompt (3 cached)
+spec: 127 rounds, 2 drafted, 1 accepted (1.01 tok/round), grammar 1/2
+[slot 0] chatcmpl-20: 15 prompt (3 cached) + 128 gen tok (10.7 tok/s) [schema]
+[slot 1] chatcmpl-21: start, 211 prompt (202 cached)
+spec: 26 rounds, 15 drafted, 10 accepted (1.38 tok/round), grammar 10/15
+[slot 1] chatcmpl-21: 211 prompt (202 cached) + 36 gen tok (9.8 tok/s) [schema]
+[slot 0] chatcmpl-22: start, 134 prompt (66 cached)
+spec: 16 rounds, 7 drafted, 6 accepted (1.38 tok/round), grammar 6/7
+[slot 0] chatcmpl-22: 134 prompt (66 cached) + 22 gen tok (10.8 tok/s) [schema]
+[slot 1] chatcmpl-23: start, 202 prompt (44 cached)
+spec: 3 rounds, 4 drafted, 2 accepted (1.67 tok/round), grammar 2/4
+[slot 1] chatcmpl-23: 202 prompt (44 cached) + 5 gen tok (8.1 tok/s) [schema]
+[slot 0] chatcmpl-24: start, 15 prompt (3 cached)
+[slot 0] chatcmpl-24: 15 prompt (3 cached) + 7 gen tok (11.0 tok/s)
+[slot 1] chatcmpl-25: start, 409 prompt (66 cached)
+spec: 10 rounds, 12 drafted, 8 accepted (1.80 tok/round), grammar 8/12
+[slot 1] chatcmpl-25: 409 prompt (66 cached) + 18 gen tok (10.1 tok/s) [schema]
+[slot 0] chatcmpl-26: start, 196 prompt (66 cached)
+spec: 29 rounds, 11 drafted, 7 accepted (1.24 tok/round), grammar 7/11
+[slot 0] chatcmpl-26: 196 prompt (66 cached) + 36 gen tok (10.5 tok/s) [schema]
+[slot 1] chatcmpl-27: start, 15 prompt (3 cached)
+spec: 104 rounds, 8 drafted, 6 accepted (1.06 tok/round), grammar 6/8
+[slot 1] chatcmpl-27: 15 prompt (3 cached) + 110 gen tok (10.2 tok/s) [schema]
+[slot 0] chatcmpl-28: start, 211 prompt (202 cached)
+spec: 28 rounds, 15 drafted, 10 accepted (1.36 tok/round), grammar 10/15
+[slot 0] chatcmpl-28: 211 prompt (202 cached) + 38 gen tok (9.7 tok/s) [schema]
+[slot 1] chatcmpl-29: start, 123 prompt (66 cached)
+spec: 9 rounds, 8 drafted, 4 accepted (1.44 tok/round), grammar 4/8
+[slot 1] chatcmpl-29: 123 prompt (66 cached) + 13 gen tok (7.7 tok/s) [schema]
+[slot 0] chatcmpl-30: start, 202 prompt (44 cached)
+spec: 5 rounds, 7 drafted, 3 accepted (1.60 tok/round), grammar 3/7
+[slot 0] chatcmpl-30: 202 prompt (44 cached) + 8 gen tok (7.5 tok/s) [schema]
+[slot 1] chatcmpl-31: start, 15 prompt (3 cached)
+[slot 1] chatcmpl-31: 15 prompt (3 cached) + 8 gen tok (10.5 tok/s)
+[slot 0] chatcmpl-32: start, 409 prompt (66 cached)
+spec: 11 rounds, 16 drafted, 5 accepted (1.45 tok/round), grammar 5/16
+[slot 0] chatcmpl-32: 409 prompt (66 cached) + 16 gen tok (7.3 tok/s) [schema]
+[slot 1] chatcmpl-33: start, 196 prompt (66 cached)
+spec: 29 rounds, 11 drafted, 7 accepted (1.24 tok/round), grammar 7/11
+[slot 1] chatcmpl-33: 196 prompt (66 cached) + 36 gen tok (10.2 tok/s) [schema]
+[slot 0] chatcmpl-34: start, 15 prompt (3 cached)
+spec: 127 rounds, 2 drafted, 1 accepted (1.01 tok/round), grammar 1/2
+[slot 0] chatcmpl-34: 15 prompt (3 cached) + 128 gen tok (10.8 tok/s) [schema]

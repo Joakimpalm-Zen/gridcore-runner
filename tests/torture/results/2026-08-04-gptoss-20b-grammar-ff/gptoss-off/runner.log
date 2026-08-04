@@ -1,0 +1,78 @@
+rope: YaRN scaling x32.00 (model metadata)
+loaded models/gpt-oss-20b-MXFP4.gguf | gpt-oss | 24 layers | ctx 4096 | 1 threads | 0.05s
+sampling: gpt-oss (temp 1.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.00)
+rope: YaRN scaling x32.00 (model metadata)
+server listening on http://127.0.0.1:51969 — 2 slots x 32 threads, continuous batching
+  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
+  GET /v1/models | GET /v1/capabilities | GET /health
+  note: this is a sparse-MoE model and its experts are running on the CPU — expect a fraction of dense throughput
+[slot 0] chatcmpl-0: start, 211 prompt (0 cached)
+[slot 0] chatcmpl-0: 211 prompt (0 cached) + 36 gen tok (10.9 tok/s) [schema]
+[slot 1] chatcmpl-1: start, 123 prompt (66 cached)
+[slot 1] chatcmpl-1: 123 prompt (66 cached) + 13 gen tok (11.3 tok/s) [schema]
+[slot 0] chatcmpl-2: start, 202 prompt (44 cached)
+[slot 0] chatcmpl-2: 202 prompt (44 cached) + 1 gen tok (8.4 tok/s) [schema]
+[slot 1] chatcmpl-3: start, 15 prompt (3 cached)
+[slot 1] chatcmpl-3: 15 prompt (3 cached) + 4 gen tok (10.8 tok/s)
+[slot 0] chatcmpl-4: start, 407 prompt (66 cached)
+[slot 0] chatcmpl-4: 407 prompt (66 cached) + 15 gen tok (10.9 tok/s) [schema]
+[slot 1] chatcmpl-5: start, 196 prompt (66 cached)
+[slot 1] chatcmpl-5: 196 prompt (66 cached) + 36 gen tok (9.5 tok/s) [schema]
+[slot 0] chatcmpl-6: start, 15 prompt (3 cached)
+[slot 0] chatcmpl-6: 15 prompt (3 cached) + 95 gen tok (10.0 tok/s) [schema]
+[slot 1] chatcmpl-7: start, 211 prompt (202 cached)
+[slot 1] chatcmpl-7: 211 prompt (202 cached) + 58 gen tok (10.5 tok/s) [schema]
+[slot 0] chatcmpl-8: start, 134 prompt (66 cached)
+[slot 0] chatcmpl-8: 134 prompt (66 cached) + 22 gen tok (11.0 tok/s) [schema]
+[slot 1] chatcmpl-9: start, 202 prompt (44 cached)
+[slot 1] chatcmpl-9: 202 prompt (44 cached) + 2 gen tok (8.8 tok/s) [schema]
+[slot 0] chatcmpl-10: start, 15 prompt (3 cached)
+[slot 0] chatcmpl-10: 15 prompt (3 cached) + 5 gen tok (10.8 tok/s)
+[slot 1] chatcmpl-11: start, 409 prompt (66 cached)
+[slot 1] chatcmpl-11: 409 prompt (66 cached) + 17 gen tok (10.9 tok/s) [schema]
+[slot 0] chatcmpl-12: start, 196 prompt (66 cached)
+[slot 0] chatcmpl-12: 196 prompt (66 cached) + 35 gen tok (11.1 tok/s) [schema]
+[slot 1] chatcmpl-13: start, 15 prompt (3 cached)
+[slot 1] chatcmpl-13: 15 prompt (3 cached) + 128 gen tok (10.8 tok/s) [schema]
+[slot 0] chatcmpl-14: start, 211 prompt (202 cached)
+[slot 0] chatcmpl-14: 211 prompt (202 cached) + 36 gen tok (10.6 tok/s) [schema]
+[slot 1] chatcmpl-15: start, 123 prompt (66 cached)
+[slot 1] chatcmpl-15: 123 prompt (66 cached) + 13 gen tok (10.8 tok/s) [schema]
+[slot 0] chatcmpl-16: start, 202 prompt (44 cached)
+[slot 0] chatcmpl-16: 202 prompt (44 cached) + 3 gen tok (9.0 tok/s) [schema]
+[slot 1] chatcmpl-17: start, 15 prompt (3 cached)
+[slot 1] chatcmpl-17: 15 prompt (3 cached) + 6 gen tok (10.1 tok/s)
+[slot 0] chatcmpl-18: start, 409 prompt (66 cached)
+[slot 0] chatcmpl-18: 409 prompt (66 cached) + 16 gen tok (10.4 tok/s) [schema]
+[slot 1] chatcmpl-19: start, 196 prompt (66 cached)
+[slot 1] chatcmpl-19: 196 prompt (66 cached) + 36 gen tok (10.7 tok/s) [schema]
+[slot 0] chatcmpl-20: start, 15 prompt (3 cached)
+[slot 0] chatcmpl-20: 15 prompt (3 cached) + 128 gen tok (10.6 tok/s) [schema]
+[slot 1] chatcmpl-21: start, 211 prompt (202 cached)
+[slot 1] chatcmpl-21: 211 prompt (202 cached) + 36 gen tok (11.0 tok/s) [schema]
+[slot 0] chatcmpl-22: start, 134 prompt (66 cached)
+[slot 0] chatcmpl-22: 134 prompt (66 cached) + 22 gen tok (11.3 tok/s) [schema]
+[slot 1] chatcmpl-23: start, 202 prompt (44 cached)
+[slot 1] chatcmpl-23: 202 prompt (44 cached) + 5 gen tok (10.4 tok/s) [schema]
+[slot 0] chatcmpl-24: start, 15 prompt (3 cached)
+[slot 0] chatcmpl-24: 15 prompt (3 cached) + 7 gen tok (10.6 tok/s)
+[slot 1] chatcmpl-25: start, 409 prompt (66 cached)
+[slot 1] chatcmpl-25: 409 prompt (66 cached) + 18 gen tok (11.2 tok/s) [schema]
+[slot 0] chatcmpl-26: start, 196 prompt (66 cached)
+[slot 0] chatcmpl-26: 196 prompt (66 cached) + 36 gen tok (11.2 tok/s) [schema]
+[slot 1] chatcmpl-27: start, 15 prompt (3 cached)
+[slot 1] chatcmpl-27: 15 prompt (3 cached) + 110 gen tok (10.9 tok/s) [schema]
+[slot 0] chatcmpl-28: start, 211 prompt (202 cached)
+[slot 0] chatcmpl-28: 211 prompt (202 cached) + 38 gen tok (11.3 tok/s) [schema]
+[slot 1] chatcmpl-29: start, 123 prompt (66 cached)
+[slot 1] chatcmpl-29: 123 prompt (66 cached) + 13 gen tok (11.1 tok/s) [schema]
+[slot 0] chatcmpl-30: start, 202 prompt (44 cached)
+[slot 0] chatcmpl-30: 202 prompt (44 cached) + 8 gen tok (10.6 tok/s) [schema]
+[slot 1] chatcmpl-31: start, 15 prompt (3 cached)
+[slot 1] chatcmpl-31: 15 prompt (3 cached) + 8 gen tok (10.6 tok/s)
+[slot 0] chatcmpl-32: start, 409 prompt (66 cached)
+[slot 0] chatcmpl-32: 409 prompt (66 cached) + 16 gen tok (10.5 tok/s) [schema]
+[slot 1] chatcmpl-33: start, 196 prompt (66 cached)
+[slot 1] chatcmpl-33: 196 prompt (66 cached) + 36 gen tok (10.4 tok/s) [schema]
+[slot 0] chatcmpl-34: start, 15 prompt (3 cached)
+[slot 0] chatcmpl-34: 15 prompt (3 cached) + 128 gen tok (10.5 tok/s) [schema]
