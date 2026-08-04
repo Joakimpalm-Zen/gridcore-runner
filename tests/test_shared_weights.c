@@ -23,6 +23,7 @@
 
 static const char *g_path = "test.gguf";
 static int g_fail = 0;
+static bool g_gpu_off = false;
 
 static void ck(int cond, const char *what) {
     if (!cond) { fprintf(stderr, "FAIL: %s\n", what); g_fail = 1; }
@@ -31,7 +32,7 @@ static void ck(int cond, const char *what) {
 static model_params base_params(void) {
     model_params p;
     memset(&p, 0, sizeof(p));
-    p.gpu_mode  = GPU_AUTO;
+    p.gpu_mode  = g_gpu_off ? GPU_OFF : GPU_AUTO;
     p.n_threads = 1;
     p.n_ctx     = 128;
     p.n_batch   = 8;
@@ -69,6 +70,7 @@ static float *copy_logits(const float *src, int n) {
 
 int main(int argc, char **argv) {
     if (argc > 1) g_path = argv[1];
+    g_gpu_off = getenv("RUNNER_TEST_GPU_OFF") != NULL;
     f16_init();
     model_params p = base_params();
 
@@ -78,7 +80,7 @@ int main(int argc, char **argv) {
     // load hits the cache — and only shows up as VRAM that never comes back
     // after the final unload, which is exactly what breaks model swap.
     size_t vram_start = 0, vram_total = 0;
-    bool have_vram = gpu_mem_info(&vram_start, &vram_total);
+    bool have_vram = !g_gpu_off && gpu_mem_info(&vram_start, &vram_total);
 
     // --- reference: one model, one sequence, nothing else running ---
     model_t ref;
@@ -128,14 +130,17 @@ int main(int argc, char **argv) {
 
     // ...and only when the parameters the bind phase reads agree. gpu_mode
     // decides whether a q8 KV cache is accepted, which is settled before the
-    // seam, so a GPU_OFF load must get its own record rather than a set of
-    // buffers built under a different answer. A key that ignored this would
-    // hand one instance the other's decision.
+    // seam, so a differing request must get its own record rather than buffers
+    // built under another answer. The sanitizer target already runs GPU_OFF,
+    // so it changes the other bind-time key (the requested KV type) instead.
+    // A key that ignored either would hand one instance the other's decision.
     {
-        model_params off = p;
-        off.gpu_mode = GPU_OFF;
+        model_params distinct = p;
+        if (g_gpu_off) distinct.kv_q8 = !p.kv_q8;
+        else           distinct.gpu_mode = GPU_OFF;
         model_t d;
-        ck(model_load(&d, g_path, &off), "instance with a different gpu_mode loads");
+        ck(model_load(&d, g_path, &distinct),
+           "instance with a different weight-side parameter loads");
         ck(d.layers != a.layers,
            "a differing weight-side parameter gets its own parse");
         model_free(&d);
@@ -189,12 +194,12 @@ int main(int argc, char **argv) {
 
     // --- device memory is returned, exactly once, every cycle ---
     //
-    // ASan cannot see this: it instruments the host heap, and on this box the
-    // CUDA driver will not even enumerate devices under ASan, so the sanitized
-    // run of this test is a CPU run. The device-side equivalent of a leak check
-    // is the driver's own accounting — load and unload repeatedly and require
-    // free VRAM to come back. A missing MemFree makes this drift down; a double
-    // free would already have aborted the run.
+    // ASan cannot see this: it instruments the host heap. The sanitized target
+    // explicitly forces CPU because current NVIDIA drivers retain unattributed
+    // process-lifetime allocations that LSan cannot suppress narrowly. The
+    // ordinary target runs this device-side equivalent of a leak check: load
+    // and unload repeatedly and require free VRAM to come back. A missing
+    // MemFree makes this drift down; a double free would already have aborted.
     size_t f0 = 0, f1 = 0, f2 = 0, total = 0;
     if (have_vram && gpu_mem_info(&f0, &total)) {
         cycles(&p, 3);

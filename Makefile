@@ -206,7 +206,8 @@ $(TEST_SHARED): $(TEST_SHARED_SRC) $(HDR)
 test-shared-asan: $(TEST_SHARED_SRC) $(HDR) test.gguf
 	$(CC) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
 	    -std=gnu11 -Wall -I src $(TEST_SHARED_SRC) -o test-shared-asan-bin $(LDFLAGS)
-	LSAN_OPTIONS=suppressions=tests/lsan.supp ./test-shared-asan-bin $(ASAN_MODEL)
+	RUNNER_TEST_GPU_OFF=1 LSAN_OPTIONS=suppressions=tests/lsan.supp \
+	    ./test-shared-asan-bin $(ASAN_MODEL)
 
 # batched decode: same sources as the shared-weights test (real model +
 # backend), because the property under test is a backend property
