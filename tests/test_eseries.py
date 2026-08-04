@@ -155,4 +155,13 @@ def test_partial_offload_matches_cpu_across_the_shared_kv_boundary(
     model = _requires_gpu(runner_bin, tmp_path)
     cpu = _run(runner_bin, model, "--temp", "0", tokens=12, prompt=GPU_PROMPT)
     gpu = _gpu_run(runner_bin, model, "--gpu-layers", str(gpu_layers))
+    # A silent mid-generation fallback also produces stdout that matches CPU
+    # (the fallback IS the CPU oracle), so a stdout-only comparison cannot
+    # tell "the GPU path ran and agreed" from "the GPU path never really ran
+    # this split and CPU quietly did all the work". A missing per-layer
+    # embedding tensor binding shipped exactly that way once: every partial
+    # split fell back and every one of these parametrizations still passed.
+    err = gpu.stderr.decode(errors="replace")
+    assert "falling back to CPU" not in err, err
+    assert "not resident on the device" not in err, err
     assert gpu.stdout == cpu.stdout

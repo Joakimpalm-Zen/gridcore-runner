@@ -1789,7 +1789,7 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         // its owner's rows. Its own kv_off entry is never read as a start.
         m->kv_off[l + 1] = m->kv_off[l] +
             (model_kv_owner(m, l) == l ? (size_t)n_ctx * model_kv_dim(m, l) : 0);
-    size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
+    size_t kv_bytes = model_kv_boundary_bytes(m, m->n_layer);
     m->kcache = calloc(1, kv_bytes);
     m->vcache = calloc(1, kv_bytes);
     m->kv_owner = KV_OWNER_MALLOC;
@@ -1930,7 +1930,7 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         // a partial split for any other reason (a model simply larger than the
         // card) is not a trade the user can take back by lowering -c.
         if (m->gpu && m->gpu_layers > 0 && m->gpu_layers < m->n_layer) {
-            size_t kv_dev = model_kv_byte_off(m, m->gpu_layers) * 2;
+            size_t kv_dev = model_kv_boundary_bytes(m, m->gpu_layers) * 2;
             uint64_t wb = model_cuda_weight_estimate(m, p);
             if (kv_dev > 0 && wb > 0 && kv_dev * 4 > (size_t)wb) {
                 fprintf(stderr,
@@ -3036,6 +3036,33 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 "kv_q8=%d n_suppress=%d\n",
                 n, pos, m->arch, m->embd_scale, m->rms_eps, m->attn_scale,
                 m->logit_softcap, (int)m->v_rmsnorm, (int)m->kv_q8, m->n_suppress);
+    int n_embd = m->n_embd;
+    // gemma-4 E-series: a partial GPU split hands off to the CPU loop below
+    // starting at layer `gpu_layers`, and that hand-off overwrites m->x with
+    // the boundary hidden state -- by the time the loop reads m->ple the raw
+    // embedding it must be built from is already gone. Compute it up front,
+    // before dispatch, with the same host arithmetic the CUDA backend's own
+    // stage_ple() runs for its leading layers (model_ple_prepass depends only
+    // on tokens, so the two copies agree). Full offload never reaches the
+    // loop below and stages its own copy on the device side, so this would
+    // be wasted work there -- skip it. Previously this table was only filled
+    // when `start == 0` (CPU-only or GPU-off), so a partial split silently
+    // fed the CPU-continued layers a stale/zero per-layer-embedding table.
+    if (m->n_embd_ple > 0 && m->gpu && m->gpu_layers > 0 &&
+        m->gpu_layers < m->n_layer) {
+        size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
+        for (int b = 0; b < n; b++) {
+            int32_t id = tokens[b];
+            if (id < 0 || id >= m->n_vocab) id = 0;
+            dequant_row(m->tok_embd->type,
+                        (uint8_t *)m->tok_embd->data + (size_t)id * ers,
+                        m->x + (size_t)b * n_embd, n_embd);
+            if (m->embd_scale != 1.0f)
+                for (int i = 0; i < n_embd; i++)
+                    m->x[(size_t)b * n_embd + i] *= m->embd_scale;
+        }
+        model_ple_prepass(m, tokens, n, m->x, m->ple, m->ple_tmp);
+    }
     if (m->gpu) {
         if (m->gpu_layers >= m->n_layer) {
             float *lg = NULL;
@@ -3060,7 +3087,6 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             gpu_disable(m);
         }
     }
-    int n_embd = m->n_embd;
     int xdim = m->xdim;   // cached at load (RNC-3)
 
     if (start == 0) {

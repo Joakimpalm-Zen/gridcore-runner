@@ -845,6 +845,11 @@ static size_t layer_weight_end(const layer_t *ly, int n_expert, const uint8_t *m
     WEND(ly->wq); WEND(ly->wk); WEND(ly->wv); WEND(ly->wo);
     WEND(ly->wqkv); WEND(ly->wq_gate); WEND(ly->ssm_conv);
     WEND(ly->ssm_beta); WEND(ly->ssm_alpha); WEND(ly->ssm_out);
+    // gemma-4 E-series per-layer embeddings: real mmap tensors (unlike the
+    // f32-converted ple_post_norm), so the partial-offload byte-prefix must
+    // reach them too or the upload leaves them unmapped -- see cuda.c:1145
+    // where the cpu_moe binding path already treats them as required.
+    WEND(ly->ple_gate); WEND(ly->ple_proj);
     if (ly->is_moe) {
         WEND(ly->ffn_gate_inp);
         WEND(ly->ffn_gate_up_exps);
@@ -1459,8 +1464,10 @@ bool gpu_init(model_t *m) {
         m->gpu_layers = g->sw->gpu_layers;
         CK(cu.CtxSetCurrent(g->sw->ctx));
 
-        // device KV holds only the offloaded layers [0, gpu_layers)
-        size_t kv_bytes = model_kv_byte_off(m, m->gpu_layers);
+        // device KV holds only the offloaded layers [0, gpu_layers) -- the
+        // raw cumulative boundary, not layer gpu_layers's own (possibly
+        // redirected) storage location. See model_kv_boundary_bytes().
+        size_t kv_bytes = model_kv_boundary_bytes(m, m->gpu_layers);
         CK(cu.MemAlloc(&g->kc, kv_bytes));
         CK(cu.MemAlloc(&g->vc, kv_bytes));
         CK(cu.MemsetD8(g->kc, 0, kv_bytes));
@@ -1617,7 +1624,7 @@ bool gpu_init(model_t *m) {
             fprintf(stderr, "gpu: VRAM %.2f GB free of %.2f GB after init "
                     "(kv %.2f GB + scratch %.2f GB this instance)\n",
                     vfree / 1e9, vtotal / 1e9,
-                    2.0 * model_kv_byte_off(m, m->gpu_layers) / 1e9,
+                    2.0 * model_kv_boundary_bytes(m, m->gpu_layers) / 1e9,
                     act_bytes / 1e9);
     }
 

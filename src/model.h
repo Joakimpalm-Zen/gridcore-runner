@@ -383,6 +383,18 @@ static inline size_t model_kv_byte_off(const model_t *m, int l) {
     size_t e = m->kv_off[model_kv_owner(m, l)];
     return m->kv_q8 ? e / 32 * 34 : e * sizeof(f16_t);
 }
+// Bytes covering the first `l` layers' cache rows -- the raw cumulative
+// boundary. Unlike model_kv_byte_off(), this does NOT redirect through
+// model_kv_owner(): that redirect answers "where does layer l's own data
+// live", which is wrong for a boundary/count question. Sizing the whole host
+// cache (l = n_layer) or a partial device split's buffer (l = gpu_layers)
+// needs this one -- calling model_kv_byte_off(m, gpu_layers) instead
+// undersizes the buffer whenever gpu_layers itself lands on a shared-KV
+// layer, since it would be redirected back to that layer's (earlier) owner.
+static inline size_t model_kv_boundary_bytes(const model_t *m, int l) {
+    size_t e = m->kv_off[l];
+    return m->kv_q8 ? e / 32 * 34 : e * sizeof(f16_t);
+}
 void        model_ple_prepass(model_t *m, const int32_t *tokens, int n,
                               const float *x, float *out, float *scratch);
 // cpu_moe_layers sentinels; any value >= 0 is a literal host-expert layer count
