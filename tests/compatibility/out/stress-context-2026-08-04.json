@@ -1,0 +1,508 @@
+{
+ "generated_utc": "2026-08-04T06:40:48Z",
+ "models": [
+  {
+   "model": "microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 536.9,
+     "generated": "Hello, I need help",
+     "last_stderr": "prompt: 1 tok, 66.78 tok/s | gen: 4 tok, 80.94 tok/s",
+     "notes": [],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4295.0,
+     "generated": "Hello, I need help",
+     "last_stderr": "prompt: 1 tok, 5.73 tok/s | gen: 4 tok, 18.96 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 3.36 GB on the device and 7 of 32 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "Qwen_Qwen3-4B-Q8_0.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 604.0,
+     "generated": "Hello<3\nHello",
+     "last_stderr": "prompt: 1 tok, 55.66 tok/s | gen: 4 tok, 75.00 tok/s",
+     "notes": [],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4831.8,
+     "generated": "Hello<3\nHello",
+     "last_stderr": "prompt: 1 tok, 4.73 tok/s | gen: 4 tok, 18.11 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 3.49 GB on the device and 10 of 36 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 147456.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 147456.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 536.9,
+     "generated": "Hello fetisch\nI am",
+     "last_stderr": "prompt: 1 tok, 55.77 tok/s | gen: 4 tok, 66.40 tok/s",
+     "notes": [],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4295.0,
+     "generated": "Hello fetisch\nI am",
+     "last_stderr": "prompt: 1 tok, 3.49 tok/s | gen: 4 tok, 9.18 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 3.22 GB on the device and 8 of 32 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "gemma-4-E4B-it-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 234.9,
+     "generated": "Hello! How can I",
+     "last_stderr": "prompt: 2 tok, 31.94 tok/s | gen: 4 tok, 58.77 tok/s",
+     "notes": [],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 1879.0,
+     "generated": "Hello! How can I",
+     "last_stderr": "prompt: 2 tok, 4.06 tok/s | gen: 4 tok, 4.88 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 1.74 GB on the device and 1 of 42 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 57344.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 57344.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "Qwen3-8B-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 604.0,
+     "generated": "Hello, I'm trying",
+     "last_stderr": "prompt: 1 tok, 51.89 tok/s | gen: 4 tok, 63.66 tok/s",
+     "notes": [],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4831.8,
+     "generated": "Hello, I'm trying",
+     "last_stderr": "prompt: 1 tok, 3.52 tok/s | gen: 4 tok, 8.73 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 3.49 GB on the device and 10 of 36 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 147456.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 147456.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "Ministral-8B-Instruct-2410-Q5_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 604.0,
+     "generated": "Hello, I'm a",
+     "last_stderr": "prompt: 2 tok, 6.61 tok/s | gen: 4 tok, 56.85 tok/s",
+     "notes": [],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4831.8,
+     "generated": "Hello, I'm a",
+     "last_stderr": "prompt: 2 tok, 3.33 tok/s | gen: 4 tok, 6.82 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 3.22 GB on the device and 12 of 36 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 147456.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 147456.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "Meta-Llama-3.1-8B-Instruct-Q5_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 536.9,
+     "generated": "Hello sourceMapping",
+     "last_stderr": "prompt: 1 tok, 5.46 tok/s | gen: 1 tok, 19.74 tok/s",
+     "notes": [],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 4295.0,
+     "generated": "Hello sourceMapping",
+     "last_stderr": "prompt: 1 tok, 2.88 tok/s | gen: 1 tok, 7.32 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 2.95 GB on the device and 10 of 32 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 131072.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "gemma-4-12B-it-qat-UD-Q4_K_XL.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 1409.3,
+     "generated": "Hello\u00c3\u00a4ll111",
+     "last_stderr": "prompt: 2 tok, 0.66 tok/s | gen: 4 tok, 5.43 tok/s",
+     "notes": [
+      "warning: weights are 6.7 GB but only 5.8 GB of RAM is available \u00e2\u20ac\u201d expect the model to be evicted and every token to page from disk. --mlock pins them; a smaller model is the other fix."
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 11274.3,
+     "generated": "Hello\u00c3\u00a4ll111",
+     "last_stderr": "prompt: 2 tok, 0.97 tok/s | gen: 4 tok, 4.23 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 3.89 GB on the device and 32 of 48 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 344064.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 344064.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "google_gemma-3-12b-it-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 1610.6,
+     "generated": "Hello**What is",
+     "last_stderr": "prompt: 2 tok, 0.87 tok/s | gen: 4 tok, 4.73 tok/s",
+     "notes": [
+      "warning: weights are 7.3 GB but only 5.9 GB of RAM is available \u00e2\u20ac\u201d expect the model to be evicted and every token to page from disk. --mlock pins them; a smaller model is the other fix."
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 12884.9,
+     "generated": "Hello**What is",
+     "last_stderr": "prompt: 2 tok, 1.76 tok/s | gen: 4 tok, 2.81 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 3.76 GB on the device and 34 of 48 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 393216.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 393216.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "gemma-4-12B-it-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 1409.3,
+     "generated": "Helloal\u00e0\u00a4\u00aa\u00e0\u00a5\u02c6\u00e0\u00a4\u2022\u00e0\u00a5\u20ac<channel|><|channel>",
+     "last_stderr": "prompt: 2 tok, 0.95 tok/s | gen: 4 tok, 3.57 tok/s",
+     "notes": [
+      "warning: weights are 7.4 GB but only 5.7 GB of RAM is available \u00e2\u20ac\u201d expect the model to be evicted and every token to page from disk. --mlock pins them; a smaller model is the other fix."
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 11274.3,
+     "generated": "Helloal\u00e0\u00a4\u00aa\u00e0\u00a5\u02c6\u00e0\u00a4\u2022\u00e0\u00a5\u20ac<channel|><|channel>",
+     "last_stderr": "prompt: 2 tok, 1.79 tok/s | gen: 4 tok, 2.86 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 3.62 GB on the device and 33 of 48 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back"
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 344064.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 344064.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  },
+  {
+   "model": "ibm-granite_granite-3.3-8b-instruct-Q8_0.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 1,
+     "resolved_ctx": null,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: unsupported architecture 'granite' \u00e2\u20ac\u201d it would load but produce incorrect output without its scaling/softcapping",
+     "notes": [
+      "error: unsupported architecture 'granite' \u00e2\u20ac\u201d it would load but produce incorrect output without its scaling/softcapping"
+     ],
+     "explains_itself": false
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 1,
+     "resolved_ctx": null,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: unsupported architecture 'granite' \u00e2\u20ac\u201d it would load but produce incorrect output without its scaling/softcapping",
+     "notes": [
+      "error: unsupported architecture 'granite' \u00e2\u20ac\u201d it would load but produce incorrect output without its scaling/softcapping"
+     ],
+     "explains_itself": false
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": null,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: unsupported architecture 'granite' \u00e2\u20ac\u201d it would load but produce incorrect output without its scaling/softcapping",
+     "notes": [
+      "error: unsupported architecture 'granite' \u00e2\u20ac\u201d it would load but produce incorrect output without its scaling/softcapping"
+     ],
+     "explains_itself": false
+    }
+   ],
+   "refused_architecture": true,
+   "findings": []
+  },
+  {
+   "model": "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+   "probes": [
+    {
+     "requested_ctx": 0,
+     "rc": 0,
+     "resolved_ctx": 4096,
+     "kv_mb": 805.3,
+     "generated": "Hello, I'm trying",
+     "last_stderr": "prompt: 1 tok, 0.35 tok/s | gen: 4 tok, 3.69 tok/s",
+     "notes": [
+      "warning: weights are 9.0 GB but only 4.7 GB of RAM is available \u00e2\u20ac\u201d expect the model to be evicted and every token to page from disk. --mlock pins them; a smaller model is the other fix."
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 32768,
+     "rc": 0,
+     "resolved_ctx": 32768,
+     "kv_mb": 6442.5,
+     "generated": "Hello, I'm trying",
+     "last_stderr": "prompt: 1 tok, 1.30 tok/s | gen: 4 tok, 2.22 tok/s",
+     "notes": [
+      "note: the KV cache for ctx 32768 is 2.82 GB on the device and 27 of 48 layers ran out of room because of it \u00e2\u20ac\u201d a smaller -c or --kv q8 (about half) moves layers back",
+      "warning: weights are 9.0 GB but only 7.0 GB of RAM is available \u00e2\u20ac\u201d expect the model to be evicted and every token to page from disk. --mlock pins them; a smaller model is the other fix."
+     ],
+     "explains_itself": true
+    },
+    {
+     "requested_ctx": 1000000,
+     "rc": 1,
+     "resolved_ctx": 1000000,
+     "kv_mb": null,
+     "generated": "",
+     "last_stderr": "error: cannot allocate buffers (ctx 1000000 needs 196608.0 MB KV cache)",
+     "notes": [
+      "error: cannot allocate buffers (ctx 1000000 needs 196608.0 MB KV cache)"
+     ],
+     "explains_itself": true
+    }
+   ],
+   "refused_architecture": false,
+   "findings": []
+  }
+ ]
+}
