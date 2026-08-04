@@ -1,3 +1,0 @@
-report: out/26b-trace-agent/report.json
-raw: out/26b-trace-agent/raw.jsonl
-runtime=runner requests=35 passed=31 failed=4
