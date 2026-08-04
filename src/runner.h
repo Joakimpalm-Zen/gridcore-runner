@@ -2,7 +2,7 @@
 #ifndef RUNNER_H
 #define RUNNER_H
 
-#define RUNNER_VERSION "0.1.5-alpha"
+#define RUNNER_VERSION "0.1.6-alpha"
 #define RUNNER_CUDA_NVCC_ARCH "compute_75"
 #define RUNNER_CUDA_PTX_TARGET "sm_75"
 #define RUNNER_CUDA_MIN_CC "7.5"

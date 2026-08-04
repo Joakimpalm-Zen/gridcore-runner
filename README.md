@@ -6,18 +6,21 @@ the platform C/math/threading/dynamic-loader libraries, loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**In 0.1.5 — three more architectures, and a sampler that stopped sorting the
-vocabulary.** **gpt-oss** runs end to end (per-head attention sinks, MXFP4
-experts, router and per-expert biases), and so does the **Gemma-4 E-series**
-(per-layer embeddings plus layers that own no KV cache and read an earlier
-layer's); both are GPU/CPU byte-identical at whole-graph offload. **Apertus**
-joins on CPU and CUDA (ungated MLP, xIELU), and the MoE router is now general
-enough for the Llama-4 / DeepSeek-V3 knobs. `top_k` is served by selection rather
-than by sorting the whole vocabulary — gemma-4-E4B decode **26.1 → 59.0
-tok/s**, bit-identical output — and `--cpu-moe auto` no longer crashes
-mid-forward (gemma-4-26B-A4B decode **4.74 → 10.89 tok/s**). Where a model is
-too numerically sensitive for token-identity to mean anything, agreement is
-measured against its own floor instead: `scripts/sensitivity_floor.py` reports
+**In 0.1.6 — `--parallel` on Windows serves real checkpoints correctly, and
+the multi-slot server got a hardening pass.** MinGW's 32-bit `stat()` was
+silently unsharing weights for any file past 2 GB: every slot re-decided its
+own CPU/GPU split under the previous slot's VRAM footprint, and the same
+greedy request could get a different answer depending on which slot took it.
+Files are now keyed by their native 64-bit identity, a guard reports any
+silent split disagreement loudly, and the fix is pinned at real-checkpoint
+scale. Also in: **Apertus on CUDA** with its tokenizer fixed (721-prompt
+mismatches 3 → 0), speculative drafts honoring `--kv q8`, `/v1/embeddings`
+working with the official OpenAI SDK, prefix snapshots that survive a
+restart, a long prefill no longer blocking the other slots, the write-side
+stall reproduced and gated for real, and a corrected published comparison —
+vLLM scores **80/105**, not the 20/100 a misconfigured run reported. Where a
+model is too numerically sensitive for token-identity to mean anything,
+agreement is measured against its own floor: `scripts/sensitivity_floor.py` reports
 what a given model does to a small numeric change, and
 `scripts/token_divergence.py` reports where two engines first disagree and by
 how much.
@@ -40,7 +43,7 @@ NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
 make                 # produces ./runner (GPU auto-detected at runtime)
-./runner --version   # -> runner 0.1.5-alpha
+./runner --version   # -> runner 0.1.6-alpha
 ```
 
 Then point it at any GGUF model:
@@ -54,7 +57,7 @@ Then point it at any GGUF model:
 ./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
 ```
 
-> **Public alpha (`0.1.5-alpha`).** CI-tested on Linux/macOS/Windows and
+> **Public alpha (`0.1.6-alpha`).** CI-tested on Linux/macOS/Windows and
 > daily-driven by the rest of the Gridcore stack, but it has met few machines
 > other than ours — which is what an alpha is for. Run your GGUF models and
 > [open an issue](../../issues) for anything that crashes, misbehaves, or
@@ -276,7 +279,7 @@ and one that cannot fit at all falls back per the normal rules.
 
 `POST /unload` frees the resident model's memory (single-model serve included)
 so the machine can be reclaimed without stopping the server; the next request
-reloads it transparently. **It was a `GET` before 0.1.5-alpha**, which made it
+reloads it transparently. **It was a `GET` in alphas before 0.1.5**, which made it
 reachable from any page a user was visiting — `<img src="http://127.0.0.1:PORT/
 unload">` needs no preflight and no DNS rebinding, because binding to loopback
 does not stop a browser. `GET` now answers 405 naming the method rather than

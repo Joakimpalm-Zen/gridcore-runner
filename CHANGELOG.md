@@ -5,6 +5,10 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+_Nothing yet._
+
+## v0.1.6-alpha — 2026-08-04
+
 - **Windows: real checkpoints share weights between `--parallel` slots again —
   the split defect is fixed.** The trigger was Branch A of the 2026-08-04
   investigation: MinGW's `stat()` has a 32-bit `st_size`, so on any file past
