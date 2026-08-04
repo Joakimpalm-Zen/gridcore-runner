@@ -1,0 +1,10 @@
+rope: using model frequency factors (rope_freqs.weight)
+gpu-split: budget=7.46GB fixed=0.84GB G=32/32 full=1 used=5.16GB
+gpu: CUDA backend on NVIDIA GeForce RTX 3070 (4.9 GB weights in VRAM)
+gpu: VRAM 2.39 GB free of 8.59 GB after init (kv 0.13 GB + scratch 0.01 GB this instance)
+loaded C:/ProjectGrid/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf | llama | 32 layers | ctx 1024 | 4 threads | 1.78s
+sampling: llama3 (temp 0.00, top_p 0.90, top_k 0, min_p 0.00, repeat_penalty 1.10)
+gpu: injected CUDA runtime failure at device forward 5 — falling back to CPU
+gpu: forward failed at runtime — releasing the backend, continuing on CPU
+
+prompt: 5 tok, 57.28 tok/s | gen: 16 tok, 4.02 tok/s

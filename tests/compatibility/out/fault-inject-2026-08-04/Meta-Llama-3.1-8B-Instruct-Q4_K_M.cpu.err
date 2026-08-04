@@ -1,0 +1,5 @@
+rope: using model frequency factors (rope_freqs.weight)
+loaded C:/ProjectGrid/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf | llama | 32 layers | ctx 1024 | 4 threads | 0.07s
+sampling: llama3 (temp 0.00, top_p 0.90, top_k 0, min_p 0.00, repeat_penalty 1.10)
+
+prompt: 5 tok, 0.94 tok/s | gen: 16 tok, 3.37 tok/s

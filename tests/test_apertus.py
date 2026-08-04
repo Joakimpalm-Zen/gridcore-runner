@@ -14,6 +14,7 @@ Comparing them is what shows the parameters are actually read — a build that
 ignored them would produce the same output for both.
 """
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -81,3 +82,38 @@ def test_cuda_xielu_matches_cpu(runner_bin, tmp_path):
     assert b"CUDA backend" in cuda.stderr
     assert b"xIELU / ungated MLP has no device kernel" not in cuda.stderr
     assert cuda.stdout == cpu.stdout
+
+
+def test_cuda_failure_falls_back_without_corrupting_output(runner_bin, tmp_path):
+    """A device failure mid-generation must cost speed, never correctness.
+
+    The injection hook fails *after* the tile's forward has run, so whatever
+    the device already wrote has to be discarded and the same tile recomputed
+    on the host. Apertus is the architecture where that matters twice over:
+    xIELU is the one activation with no gate tensor to fall back through, so a
+    half-applied device result would survive into the host path unnoticed
+    rather than tripping a shape check.
+
+    The equivalent gate for the recurrent hybrid lives in `test_ornith_cpu.py`.
+    """
+    caps = json.loads(subprocess.run(
+        [runner_bin, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
+        check=True, text=True).stdout)
+    if (caps.get("gpu") or {}).get("backend") != "cuda":
+        pytest.skip("CUDA device not available")
+
+    model = _make(tmp_path, "REAL")
+    base = [runner_bin, "-m", str(model), "-p", "hello world", "-n", "12",
+            "--temp", "0"]
+    cpu = subprocess.run(
+        [*base, "--gpu", "off"], cwd=ROOT, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=120)
+    injected = subprocess.run(
+        [*base, "--gpu", "auto"], cwd=ROOT, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=120,
+        env={**os.environ, "RUNNER_CUDA_INJECT_FAILURE": "1"})
+    assert cpu.returncode == 0, cpu.stderr.decode(errors="replace")
+    assert injected.returncode == 0, injected.stderr.decode(errors="replace")
+    assert b"injected CUDA runtime failure" in injected.stderr, \
+        "the hook did not fire; this test would pass vacuously"
+    assert injected.stdout == cpu.stdout

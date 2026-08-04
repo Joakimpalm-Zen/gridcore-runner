@@ -1,0 +1,5 @@
+loaded C:/ProjectGrid/models/Qwen_Qwen3.5-9B-Q8_0.gguf | qwen35 | 32 layers | ctx 1024 | 4 threads | 0.18s
+mtp: 1 predictor block(s) declared and excluded from the backbone (training-only; not consumed)
+sampling: qwen3 (temp 0.00, top_p 0.95, top_k 20, min_p 0.00, repeat_penalty 1.00)
+
+prompt: 5 tok, 0.42 tok/s | gen: 16 tok, 3.83 tok/s

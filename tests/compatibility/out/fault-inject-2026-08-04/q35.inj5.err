@@ -1,0 +1,11 @@
+gpu-split: budget=7.46GB fixed=1.76GB G=24/32 full=0 used=7.39GB
+gpu: CUDA backend on NVIDIA GeForce RTX 3070 (24/32 layers, 7.7 GB in VRAM; CPU runs the rest)
+gpu: VRAM 0.00 GB free of 8.59 GB after init (kv 0.10 GB + scratch 0.15 GB this instance)
+warning: weights are 9.8 GB but only 3.7 GB of RAM is available — expect the model to be evicted and every token to page from disk. --mlock pins them; a smaller model is the other fix.
+loaded C:/ProjectGrid/models/Qwen_Qwen3.5-9B-Q8_0.gguf | qwen35 | 32 layers | ctx 1024 | 4 threads | 2.86s
+mtp: 1 predictor block(s) declared and excluded from the backbone (training-only; not consumed)
+sampling: qwen3 (temp 0.00, top_p 0.95, top_k 20, min_p 0.00, repeat_penalty 1.00)
+gpu: injected CUDA runtime failure at device forward 5 — falling back to CPU
+gpu: forward failed at runtime — releasing the backend, continuing on CPU
+
+prompt: 5 tok, 2.60 tok/s | gen: 16 tok, 3.19 tok/s

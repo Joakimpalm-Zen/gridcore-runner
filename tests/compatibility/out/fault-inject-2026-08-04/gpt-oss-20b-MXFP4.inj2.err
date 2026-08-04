@@ -1,0 +1,11 @@
+rope: YaRN scaling x32.00 (model metadata)
+gpu-split: budget=7.46GB fixed=1.16GB G=13/24 full=0 used=7.06GB
+gpu: CUDA backend on NVIDIA GeForce RTX 3070 (13/24 layers, 7.1 GB in VRAM; CPU runs the rest)
+gpu: VRAM 0.26 GB free of 8.59 GB after init (kv 0.03 GB + scratch 0.01 GB this instance)
+warning: weights are 12.1 GB but only 4.4 GB of RAM is available — expect the model to be evicted and every token to page from disk. --mlock pins them; a smaller model is the other fix.
+loaded C:/ProjectGrid/models/gpt-oss-20b-MXFP4.gguf | gpt-oss | 24 layers | ctx 1024 | 4 threads | 8.67s
+sampling: gpt-oss (temp 0.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.00)
+gpu: injected CUDA runtime failure at device forward 2 — falling back to CPU
+gpu: forward failed at runtime — releasing the backend, continuing on CPU
+
+prompt: 5 tok, 0.49 tok/s | gen: 16 tok, 0.19 tok/s

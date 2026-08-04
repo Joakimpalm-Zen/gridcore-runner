@@ -3314,6 +3314,31 @@ bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
     return true;
 }
 
+// Fault-injection hook, debug builds and torture runs only.
+// RUNNER_CUDA_INJECT_FAILURE=N fails the Nth device forward and returns its
+// ordinal; unset or 0 disables it, and any non-numeric value means 1 so the
+// documented `=1` spelling keeps working.
+//
+// N > 1 is the case worth having. The first device forward of any real
+// generation is the prefill tile, so an unconditional hook can only ever test
+// a failure before one token boundary has been crossed. Failing at decode is
+// what exercises the rollback that matters: the qwen35 recurrent snapshot
+// taken at the top of this function, and a device KV the host must resync.
+//
+// Single-slot only — the counter is a plain static, so a --parallel run would
+// race it. That is acceptable for a hook nothing but tests sets.
+static int inject_fail_ordinal(void) {
+    static int budget = -1;  // -1 unread, 0 disabled
+    static int seen = 0;
+    if (budget < 0) {
+        const char *s = getenv("RUNNER_CUDA_INJECT_FAILURE");
+        budget = s ? (atoi(s) > 0 ? atoi(s) : 1) : 0;
+    }
+    if (budget == 0) return 0;
+    seen++;
+    return --budget == 0 ? seen : 0;
+}
+
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                        bool want_logits, float **logits) {
     gpu_t *g = m->gpu;
@@ -3407,6 +3432,17 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                     prof.wall_ms[m_] += prof_now() - t_fwd0;
                     prof_flush();
                 }
+                // Steady-state decode returns here, so the hook has to be
+                // checked on this path too — otherwise no injected failure can
+                // ever land after prefill, which is the only interesting place
+                // for one to land.
+                int ginj = inject_fail_ordinal();
+                if (ginj) {
+                    fprintf(stderr, "gpu: injected CUDA runtime failure at "
+                                    "device forward %d — falling back to CPU\n",
+                            ginj);
+                    return false;
+                }
                 if (logits) *logits = g->h_logits;
                 return true;
             }
@@ -3432,11 +3468,13 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             fprintf(stderr, "gpu: kernel launch failed — falling back to CPU\n");
             return false;
         }
-        if (getenv("RUNNER_CUDA_INJECT_FAILURE")) {
+        int inj = inject_fail_ordinal();
+        if (inj) {
             // Deterministic ownership/state-machine hook: fail after recurrent
             // state changed, so the caller must restore the pre-forward device
             // snapshot before recomputing this same tile on the CPU.
-            fprintf(stderr, "gpu: injected CUDA runtime failure — falling back to CPU\n");
+            fprintf(stderr, "gpu: injected CUDA runtime failure at device "
+                            "forward %d — falling back to CPU\n", inj);
             return false;
         }
         // partial: copy this tile's post-boundary activation to the host x
