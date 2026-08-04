@@ -239,6 +239,27 @@ TEST_FILE_ID_SRC = tests/test_file_identity.c src/gguf.c src/compat.c \
 $(TEST_FILE_ID): $(TEST_FILE_ID_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_FILE_ID_SRC) -o $@ $(LDFLAGS)
 
+# split-guard harness: same link as the shared-weights test — the guard lives
+# in the GPU registry, so it needs the real backend
+TEST_SPLIT_GUARD = $(TEST_BATCH:test-batch%=test-split-guard%)
+TEST_SPLIT_GUARD_SRC = tests/test_split_guard.c src/gguf.c src/compat.c \
+                       src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
+$(TEST_SPLIT_GUARD): $(TEST_SPLIT_GUARD_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_SPLIT_GUARD_SRC) -o $@ $(LDFLAGS)
+
+# The split guard must be able to fire: a no-identity load of an already-
+# resident path, forced to a different split, must be reported loudly. The
+# harness self-skips (exit 0, says so) without a GPU backend; when it does
+# run, the report line is the gate — delete the guard and this goes red.
+test-split-guard: $(TEST_SPLIT_GUARD) test.gguf
+	@set -e; \
+	./$(TEST_SPLIT_GUARD) $(ASAN_MODEL) > split-guard.out 2>&1; \
+	if grep -q "^skip:" split-guard.out; then cat split-guard.out; exit 0; fi; \
+	grep -q "re-decided the CPU/GPU split without a file identity" split-guard.out || { \
+		echo "FAIL: forced split disagreement produced no loud report"; \
+		cat split-guard.out; exit 1; }; \
+	echo "split guard ok (no-identity split disagreement is reported loudly)"
+
 # batched decode: same sources as the shared-weights test (real model +
 # backend), because the property under test is a backend property
 TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
@@ -701,7 +722,8 @@ clean:
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE) \
-	      $(TEST_FILE_ID) test-file-identity.tmp
+	      $(TEST_FILE_ID) test-file-identity.tmp \
+	      $(TEST_SPLIT_GUARD) split-guard.out
 	rm -rf test-attn
 	rm -f shared-noid.out
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
@@ -722,4 +744,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-apertus test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid
+.PHONY: clean debug ptx test test-apertus test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard

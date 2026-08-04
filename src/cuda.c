@@ -295,6 +295,8 @@ typedef struct gpu_weights {
     gpu_weight_binding *bindings;       // packed non-expert tensors in this mode
     int         n_bindings, cap_bindings;
     int         gpu_layers;             // split decided by the first loader
+    bool        no_id;                  // identity unavailable: listed so the
+                                        // split guard can see it, never matched
     CUdeviceptr inv_freq, inv_freq_local, out_norm, dummy;
     CUdeviceptr ones;                   // weightless V RMS norm (gemma4)
     CUdeviceptr *attn_norm, *ffn_norm;  // per layer
@@ -629,10 +631,7 @@ static bool file_id(const char *path, uint64_t *size, uint64_t *ino,
 // LongRoPE factor set the same way, and --rope-base/--rope-scale override both.
 // Two loads of one file can legitimately want different tables, and a miss here
 // is not an error — that instance just gets its own upload, as before.
-static bool shared_matches(const gpu_weights *w, const model_t *m,
-                           uint64_t size, uint64_t ino, int64_t mtime) {
-    if (!w->path || !m->path || strcmp(w->path, m->path) != 0) return false;
-    if (w->fsize != size || w->fino != ino || w->fmtime != mtime) return false;
+static bool shared_config_matches(const gpu_weights *w, const model_t *m) {
     if (w->n_layer != m->n_layer || w->n_embd != m->n_embd ||
         w->n_head  != m->n_head  || w->n_head_kv != m->n_head_kv ||
         w->head_dim != m->head_dim || w->n_ff != m->n_ff ||
@@ -653,6 +652,42 @@ static bool shared_matches(const gpu_weights *w, const model_t *m,
                sizeof(float) * (size_t)(m->rope_dim_local / 2)) != 0)
         return false;
     return true;
+}
+
+static bool shared_matches(const gpu_weights *w, const model_t *m,
+                           uint64_t size, uint64_t ino, int64_t mtime) {
+    // a no-identity entry is in the list only for the split guard below; its
+    // zeroed identity fields would already refuse a real file, but be explicit
+    if (w->no_id) return false;
+    if (!w->path || !m->path || strcmp(w->path, m->path) != 0) return false;
+    if (w->fsize != size || w->fino != ino || w->fmtime != mtime) return false;
+    return shared_config_matches(w, m);
+}
+
+// The safety net for the load path shared_matches cannot protect: an instance
+// whose file identity is unavailable builds privately and re-decides its own
+// CPU/GPU split — usually under the VRAM pressure of the instance already
+// resident, so it decides DIFFERENTLY, and two slots of one server then answer
+// the same request with different logits. Detect exactly that: same path, same
+// configuration (so the splits had no legitimate reason to differ), identity
+// missing on either side, different split. Loud stderr rather than refusal:
+// failing this load would fall back to CPU, which diverges from the resident
+// GPU instance just as silently.
+static void split_guard(const gpu_weights *w, const model_t *m) {
+    for (const gpu_weights *o = g_shared; o; o = o->next) {
+        if (o == w) continue;
+        if (!o->path || !m->path || strcmp(o->path, m->path) != 0) continue;
+        if (!(w->no_id || o->no_id)) continue;
+        if (!shared_config_matches(o, m)) continue;
+        if (o->gpu_layers == w->gpu_layers) continue;
+        fprintf(stderr,
+                "error: %s re-decided the CPU/GPU split without a file "
+                "identity: this instance put %d/%d layers on the GPU but a "
+                "resident instance of the same path uses %d/%d — two slots "
+                "of one server will answer the same request differently\n",
+                m->path, w->gpu_layers, w->n_layer,
+                o->gpu_layers, o->n_layer);
+    }
 }
 
 static void shared_destroy(gpu_weights *w) {
@@ -1297,9 +1332,15 @@ static gpu_weights *shared_acquire(model_t *m, size_t act_bytes, int max_hd) {
                 "%d instances)\n", w->weights_len / 1e9, w->refs);
     } else {
         w = shared_build(m, act_bytes, max_hd, fsize, fino, fmtime);
-        // an entry with no file identity is private: never listed, so it is
-        // never matched, and shared_release still frees it at refs 0
-        if (w && have_id) { w->next = g_shared; g_shared = w; }
+        // an entry with no file identity stays private — shared_matches never
+        // returns it — but it is listed anyway so the split guard can compare
+        // splits across it; shared_release unlinks it normally at refs 0
+        if (w) {
+            w->no_id = !have_id;
+            split_guard(w, m);
+            w->next = g_shared;
+            g_shared = w;
+        }
     }
     pthread_mutex_unlock(&g_shared_mu);
     return w;

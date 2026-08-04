@@ -85,6 +85,9 @@ bench-err.*.txt
 metal-*.out
 metal-*.err
 shared-noid.out
+split-guard.out
+test-split-guard
+test-split-guard.exe
 
 # agent worktrees (transient)
 .claude/worktrees/
