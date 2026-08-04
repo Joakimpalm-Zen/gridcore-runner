@@ -1,0 +1,13 @@
+Write a detailed, friendly explanation for a curious teenager of how a modern
+large language model turns a sequence of words into a prediction of the next
+word. Cover tokenization, embeddings, attention, and why the model needs so
+much training data. Use a couple of everyday analogies.
+
+Berätta sedan på svenska, med samma vänliga och pedagogiska ton, hur en dator
+kan lära sig ett sådant språkmönster genom att läsa enorma mängder text. Ta
+upp varför flerspråkiga modeller ibland blandar ihop grammatik mellan språk,
+och ge ett konkret exempel på svenska.
+
+Finally, switch back to English and give a short recipe for a simple weekday
+dinner, followed by three follow-up questions a beginner cook might ask about
+substituting ingredients.

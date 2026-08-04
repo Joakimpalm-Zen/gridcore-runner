@@ -1,0 +1,10 @@
+gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files
+rope: using model frequency factors (rope_freqs.weight)
+loaded models/gemma-4-26B-A4B-it-Q4_0.gguf | gemma4 | 30 layers | ctx 8192 | 1 threads | 0.07s
+sampling: gemma3 (temp 1.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)
+server listening on http://127.0.0.1:58125 — 1 slot x 32 threads
+  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
+  GET /v1/models | GET /v1/capabilities | GET /health
+  note: this is a sparse-MoE model and its experts are running on the CPU — expect a fraction of dense throughput
+[slot 0] chatcmpl-0: start, 4466 prompt (0 cached)
+[slot 0] chatcmpl-0: 4466 prompt (0 cached) + 914 gen tok (9.5 tok/s) [1015 page-ins — weights not resident]

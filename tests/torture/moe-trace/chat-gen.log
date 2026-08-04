@@ -1,0 +1,126 @@
+gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files
+rope: using model frequency factors (rope_freqs.weight)
+loaded models/gemma-4-26B-A4B-it-Q4_0.gguf | gemma4 | 30 layers | ctx 4096 | 32 threads | 0.07s
+sampling: gemma3 (temp 0.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)
+ follow English, English, English.
+
+English, English, English.
+
+English, English, English.
+
+English, English, English.
+
+English,English,English.
+
+English, English, English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.0
+
+English, English, English.
+
+English, English, English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.English, English, English, English.
+
+English, English, English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.
+
+English,English,English.English, English, English, English.
+
+English,English,English.
+
+English,English,English.English,English,English,English.
+
+English,English,English.English,English,English,English.
+
+English,English,English.English,English,English,English.English,English,English,English.English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English-English, English, English, English.
+
+English, English, English.
+
+English,English,English.English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,English,Englishthought
+<channel|>### How LLMs Predict the Next Word: A Guide for the Curious
+
+Hey there! So, you’ve probably used ChatGPT or Gemini and wondered, *"How does this thing actually know what to say next? Is there a tiny person inside the computer typing really fast?"* 
+
+The answer is actually much cooler (and a bit more mathematical). It’s not "thinking" like you do; it’s playing the world’s most advanced game of "Complete the Sentence." Here is the step-by-step journey of how a word becomes a prediction.
+
+#### 1. Tokenization: Breaking it down
+Computers are great at math, but they are terrible at reading. They don't see "apple" as a fruit; they see it as a string of letters. To fix this, we use **Tokenization**. 
+
+Think of it like **Lego bricks**. Instead of looking at a whole castle, the computer breaks the sentence into small chunks called "tokens." A token might be a whole word (like "adventure"), or just a part of a word (like "un-" and "happy"). This turns your sentence into a list of ID numbers that the computer can actually process.
+
+#### 2. Embeddings: Giving words "Meaning"
+Now the computer has a list of numbers, but it still doesn't know what they *mean*. This is where **Embeddings** come in. 
+
+Imagine a giant, 3D map of every concept in existence. In this map, words that are similar are placed close together. "King" and "Queen" would be neighbors. "Apple" and "Orange" would be in a different neighborhood. "Apple" and "Car" would be very far apart. 
+
+When the model sees a token, it looks up its "coordinates" on this map. This allows the model to understand that if you're talking about "baking," words like "oven" and "flour" are highly relevant.
+
+#### 3. Attention: The Secret Sauce
+This is the most important part. In a long sentence, not every word is equally important. Take this sentence: *"The **dog**, which was very hungry after a long walk in the park, ate its **food**."*
+
+When the model tries to predict the word after "ate," it needs to know *what* was eaten. The **Attention mechanism** allows the model to "look back" at the sentence and realize that "dog" is the most important word to connect to "ate," even though there are a lot of other words in between. It’s like having a spotlight that shines on the most relevant parts of the sentence to understand the context.
+
+#### 4. Why so much data?
+To build this "map" of meanings and learn how to use that "spotlight," the model needs to see billions of examples. It needs to see how people argue, how they joke, how they write recipes, and how they explain science. It’s like trying to learn how to play a video game by watching a billion hours of gameplay—eventually, you start to predict exactly what the player will do next because you've seen every possible move!
+
+***
+
+### Hur kommer en dator att lära sig språk?
+
+Tänk dig att du skulle lära dig ett helt nytt språk utan att någonsin ha en lärare. Hur skulle du göra? Du skulle förmodligen läsa så otroligt mycket text att du till slut började märka mönster. Det är precis vad en AI gör.
+
+Genom att läsa miljarder meningar på internet börjar datorn räkna på sannolikheter. Den lär sig inte "regler" som i en grammatikbok, utan den lär sig statistiska mönster. Den märker att efter ordet "Jag är..." kommer ofta ord som "glad", "trött" eller "hungrig", men nästan aldrig ordet "blå" (om vi inte pratar om färger).
+
+**Varför blandar de ihop språk?**
+Eftersom modellen lär sig genom mönster och inte genom fasta regler, kan den ibland bli förvirrad om den har läst väldigt mycket av två olika språk. Den kan börja applicera grammatiken från ett språk på ett annat. Detta kallas ibland för "code-switching" eller grammatisk interferens.
+
+**Ett konkret exempel på svenska:**
+Tänk dig att en modell har lärt sig massor av engelska, där man säger *"I am hungry"*. Om modellen sedan skriver på svenska, kan den råka använda en engelsk meningsbyggnad eller ordval som känns lite "fel" men som följer engelsk logik. 
+
+Ett exempel på en sådan "engelska-svenska-mix" kan vara:
+*"Jag är så hungrig att jag kan äta en häst!"* (Detta är ett uttryck, men om modellen översätter direkt från engelskans *"I could eat a horse"*, kan det ibland kännas lite onaturligt i andra sammanhang, eller så kan den råka skriva *"Jag är hungrig för"* istället för *"Jag är hungrig på"*, för att den blandar ihop det engelska *"I am hungry for"* med svenska).
+
+***
+
+### Weekday Dinner: Lemon Garlic Butter Pasta
+
+**Ingredients:**
+*   250g
+prompt: 170 tok, 17.84 tok/s | gen: 1600 tok, 10.28 tok/s
+

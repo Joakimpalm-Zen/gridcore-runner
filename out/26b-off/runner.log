@@ -1,0 +1,79 @@
+gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files
+rope: using model frequency factors (rope_freqs.weight)
+loaded models/gemma-4-26B-A4B-it-Q4_0.gguf | gemma4 | 30 layers | ctx 4096 | 1 threads | 0.04s
+sampling: gemma3 (temp 1.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)
+rope: using model frequency factors (rope_freqs.weight)
+server listening on http://127.0.0.1:53777 — 2 slots x 32 threads, continuous batching
+  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
+  GET /v1/models | GET /v1/capabilities | GET /health
+  note: this is a sparse-MoE model and its experts are running on the CPU — expect a fraction of dense throughput
+[slot 0] chatcmpl-0: start, 205 prompt (0 cached)
+[slot 0] chatcmpl-0: 205 prompt (0 cached) + 47 gen tok (14.0 tok/s) [schema] [741 page-ins — weights not resident]
+[slot 1] chatcmpl-1: start, 119 prompt (63 cached)
+[slot 1] chatcmpl-1: 119 prompt (63 cached) + 22 gen tok (14.8 tok/s) [schema] [57 page-ins — weights not resident]
+[slot 0] chatcmpl-2: start, 196 prompt (41 cached)
+[slot 0] chatcmpl-2: 196 prompt (41 cached) + 1 gen tok (6568.2 tok/s) [schema] [14 page-ins — weights not resident]
+[slot 1] chatcmpl-3: start, 21 prompt (2 cached)
+[slot 1] chatcmpl-3: 21 prompt (2 cached) + 4 gen tok (14.2 tok/s) [27 page-ins — weights not resident]
+[slot 0] chatcmpl-4: start, 392 prompt (63 cached)
+[slot 0] chatcmpl-4: 392 prompt (63 cached) + 23 gen tok (12.9 tok/s) [schema] [92 page-ins — weights not resident]
+[slot 1] chatcmpl-5: start, 193 prompt (63 cached)
+[slot 1] chatcmpl-5: 193 prompt (63 cached) + 46 gen tok (13.5 tok/s) [schema] [74 page-ins — weights not resident]
+[slot 0] chatcmpl-6: start, 19 prompt (2 cached)
+[slot 0] chatcmpl-6: 19 prompt (2 cached) + 115 gen tok (12.8 tok/s) [schema] [16 page-ins — weights not resident]
+[slot 1] chatcmpl-7: start, 205 prompt (194 cached)
+[slot 1] chatcmpl-7: 205 prompt (194 cached) + 51 gen tok (13.4 tok/s) [schema] [3 page-ins — weights not resident]
+[slot 0] chatcmpl-8: start, 130 prompt (63 cached)
+[slot 0] chatcmpl-8: 130 prompt (63 cached) + 22 gen tok (14.8 tok/s) [schema] [8 page-ins — weights not resident]
+[slot 1] chatcmpl-9: start, 196 prompt (41 cached)
+[slot 1] chatcmpl-9: 196 prompt (41 cached) + 1 gen tok (6420.4 tok/s) [schema]
+[slot 0] chatcmpl-10: start, 21 prompt (2 cached)
+[slot 0] chatcmpl-10: 21 prompt (2 cached) + 5 gen tok (15.0 tok/s) [2 page-ins — weights not resident]
+[slot 1] chatcmpl-11: start, 394 prompt (63 cached)
+[slot 1] chatcmpl-11: 394 prompt (63 cached) + 25 gen tok (13.6 tok/s) [schema]
+[slot 0] chatcmpl-12: start, 193 prompt (63 cached)
+[slot 0] chatcmpl-12: 193 prompt (63 cached) + 46 gen tok (14.2 tok/s) [schema] [6 page-ins — weights not resident]
+[slot 1] chatcmpl-13: start, 19 prompt (2 cached)
+[slot 1] chatcmpl-13: 19 prompt (2 cached) + 105 gen tok (13.5 tok/s) [schema]
+[slot 0] chatcmpl-14: start, 205 prompt (193 cached)
+[slot 0] chatcmpl-14: 205 prompt (193 cached) + 52 gen tok (14.1 tok/s) [schema]
+[slot 1] chatcmpl-15: start, 119 prompt (63 cached)
+[slot 1] chatcmpl-15: 119 prompt (63 cached) + 27 gen tok (13.8 tok/s) [schema]
+[slot 0] chatcmpl-16: start, 196 prompt (41 cached)
+[slot 0] chatcmpl-16: 196 prompt (41 cached) + 1 gen tok (6180.0 tok/s) [schema]
+[slot 1] chatcmpl-17: start, 21 prompt (2 cached)
+[slot 1] chatcmpl-17: 21 prompt (2 cached) + 6 gen tok (13.3 tok/s)
+[slot 0] chatcmpl-18: start, 394 prompt (63 cached)
+[slot 0] chatcmpl-18: 394 prompt (63 cached) + 25 gen tok (13.8 tok/s) [schema]
+[slot 1] chatcmpl-19: start, 193 prompt (63 cached)
+[slot 1] chatcmpl-19: 193 prompt (63 cached) + 46 gen tok (14.2 tok/s) [schema]
+[slot 0] chatcmpl-20: start, 19 prompt (2 cached)
+[slot 0] chatcmpl-20: 19 prompt (2 cached) + 108 gen tok (13.0 tok/s) [schema] [3 page-ins — weights not resident]
+[slot 1] chatcmpl-21: start, 205 prompt (193 cached)
+[slot 1] chatcmpl-21: 205 prompt (193 cached) + 52 gen tok (13.1 tok/s) [schema]
+[slot 0] chatcmpl-22: start, 130 prompt (63 cached)
+[slot 0] chatcmpl-22: 130 prompt (63 cached) + 23 gen tok (13.7 tok/s) [schema] [1 page-ins — weights not resident]
+[slot 1] chatcmpl-23: start, 196 prompt (41 cached)
+[slot 1] chatcmpl-23: 196 prompt (41 cached) + 2 gen tok (28.5 tok/s) [schema]
+[slot 0] chatcmpl-24: start, 21 prompt (2 cached)
+[slot 0] chatcmpl-24: 21 prompt (2 cached) + 7 gen tok (14.6 tok/s)
+[slot 1] chatcmpl-25: start, 394 prompt (63 cached)
+[slot 1] chatcmpl-25: 394 prompt (63 cached) + 25 gen tok (13.5 tok/s) [schema] [2 page-ins — weights not resident]
+[slot 0] chatcmpl-26: start, 193 prompt (63 cached)
+[slot 0] chatcmpl-26: 193 prompt (63 cached) + 46 gen tok (14.0 tok/s) [schema]
+[slot 1] chatcmpl-27: start, 19 prompt (2 cached)
+[slot 1] chatcmpl-27: 19 prompt (2 cached) + 108 gen tok (13.0 tok/s) [schema] [1 page-ins — weights not resident]
+[slot 0] chatcmpl-28: start, 205 prompt (193 cached)
+[slot 0] chatcmpl-28: 205 prompt (193 cached) + 52 gen tok (13.4 tok/s) [schema]
+[slot 1] chatcmpl-29: start, 119 prompt (63 cached)
+[slot 1] chatcmpl-29: 119 prompt (63 cached) + 27 gen tok (13.6 tok/s) [schema]
+[slot 0] chatcmpl-30: start, 196 prompt (41 cached)
+[slot 0] chatcmpl-30: 196 prompt (41 cached) + 8 gen tok (13.1 tok/s) [schema]
+[slot 1] chatcmpl-31: start, 21 prompt (2 cached)
+[slot 1] chatcmpl-31: 21 prompt (2 cached) + 8 gen tok (13.5 tok/s) [4 page-ins — weights not resident]
+[slot 0] chatcmpl-32: start, 394 prompt (63 cached)
+[slot 0] chatcmpl-32: 394 prompt (63 cached) + 25 gen tok (13.0 tok/s) [schema] [1 page-ins — weights not resident]
+[slot 1] chatcmpl-33: start, 193 prompt (63 cached)
+[slot 1] chatcmpl-33: 193 prompt (63 cached) + 46 gen tok (13.3 tok/s) [schema]
+[slot 0] chatcmpl-34: start, 19 prompt (2 cached)
+[slot 0] chatcmpl-34: 19 prompt (2 cached) + 108 gen tok (12.8 tok/s) [schema] [1 page-ins — weights not resident]
