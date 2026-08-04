@@ -5,6 +5,38 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **Windows: real checkpoints share weights between `--parallel` slots again —
+  the split defect is fixed.** The trigger was Branch A of the 2026-08-04
+  investigation: MinGW's `stat()` has a 32-bit `st_size`, so on any file past
+  2 GB it fails with `EOVERFLOW` ("value too large"), `model_file_identity()`
+  lost the identity on **every real checkpoint**, and each `--serve --parallel`
+  slot loaded privately and re-decided its own CPU/GPU split under the previous
+  slot's VRAM pressure (measured on Qwen3-4B-Q8: slot A 36/36 layers, slot B
+  20/36, B wrong on 149,477 of 151,936 logits at step 0). `model_file_identity()`
+  now owns the `GetFileInformationByHandle` path that the prefix-cache key
+  already used — 64-bit size, stable file index, 100 ns timestamps — so one
+  function decides what a file is for the host registry, the device registry
+  and the prefix-cache key alike (`stat()` remains the non-NTFS fallback).
+  `tests/test_file_identity.c` pins identity at real-checkpoint size with a
+  sparse 5 GB file (red before the fix, green after; skips loudly when the disk
+  can't spare it). Verified on real weights: `test-shared-weights` exits 0 on
+  Qwen3-4B-Q8 and Phi-4-mini-Q8 with identical splits, and a `--serve
+  --parallel 2` server answered the same greedy request byte-identically from
+  both slots (previously slot-dependent). macOS/Linux were never affected —
+  their `stat()` is 64-bit.
+
+- **A load that re-decides its split without a file identity is now reported
+  loudly.** Even with the Windows trigger fixed, a genuinely unidentifiable
+  file still loads privately and re-decides its split. The GPU registry now
+  keeps no-identity entries visible (flagged, never matched) and
+  `split_guard()` reports, as an `error:` on stderr, any same-path same-config
+  pair whose splits disagree when either side lacks an identity — that
+  disagreement is two slots of one server answering one request differently.
+  A warning rather than a refusal, because refusing would fall back to CPU,
+  which diverges from the resident GPU instance just as silently.
+  `make test-split-guard` gates it (proven falsifiable: the harness goes red
+  against a guard-less build).
+
 - **A model that cannot be identified on disk now says so instead of silently
   giving up weight sharing.** Both shared-weight registries — the host parse in
   `model.c` and the device upload in `cuda.c` — key on a `stat()`-derived file
@@ -26,8 +58,8 @@ protocol and CLI may still change between alpha releases.
   fails on all four sharing invariants, which is the same host-side signature
   reported from the RTX 3070 box in `docs/stress-2026-08-04-f27e7bb.md`.
 
-  Diagnostic and gate only — the underlying split defect (Follow-up 3/3a) is
-  still open and still unfixed.
+  Diagnostic and gate only at the time it landed; the underlying split defect
+  (Follow-up 3/3a) is fixed by the Windows file-identity entry above.
 
 - **Apertus now runs on CUDA.** The dense device forward path handles its
   ungated `up -> xIELU -> down` FFN and evaluates the four effective per-layer
