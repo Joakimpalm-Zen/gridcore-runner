@@ -1900,6 +1900,7 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         m->moe_dexp_b = malloc(sizeof(float) * nb * ne);
         m->moe_sel    = malloc(sizeof(int)   * nb * nu);
         m->moe_selw   = malloc(sizeof(float) * nb * nu);
+        m->moe_trace_norms = malloc(sizeof(float) * nb * nu);
         m->moe_gidx   = malloc(sizeof(int)   * nb);
         m->moe_gw     = malloc(sizeof(float) * nb);
     }
@@ -1910,7 +1911,7 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
                              !m->moe_dexp || !m->moe_out || !m->moe_out_b ||
                              !m->moe_gath || !m->moe_gate_b || !m->moe_up_b ||
                              !m->moe_dexp_b || !m->moe_sel || !m->moe_selw ||
-                             !m->moe_gidx || !m->moe_gw)) ||
+                             !m->moe_trace_norms || !m->moe_gidx || !m->moe_gw)) ||
         (m->qwen35 && (!m->q_gate || !m->ssm_qkv || !m->ssm_z ||
                        !m->ssm_aux || !m->ssm_conv_state ||
                        !m->ssm_state_mem || !m->ssm_cw))) {
@@ -2027,7 +2028,7 @@ void model_free(model_t *m) {
     free(m->moe_dexp); free(m->moe_out);
     free(m->moe_out_b); free(m->moe_gath); free(m->moe_gate_b);
     free(m->moe_up_b); free(m->moe_dexp_b); free(m->moe_sel);
-    free(m->moe_selw); free(m->moe_gidx); free(m->moe_gw);
+    free(m->moe_selw); free(m->moe_trace_norms); free(m->moe_gidx); free(m->moe_gw);
     free(m->moe_probe_hist);
     tpool_destroy(m->tp);
     // ---- the shared half. A published load hands its reference back and the
@@ -2308,13 +2309,23 @@ static FILE *moe_trace_file(void) {
     return fp;
 }
 
-static void moe_trace_emit(int pos, int layer, const int *sel, const float *selw, int used) {
+// `norms` is the L2 norm of each selected expert's own FFN output (after its
+// down-projection + bias, before the routing weight scales and sums it) —
+// NULL is written as an empty array, so an older consumer parsing only
+// "experts"/"gates" is unaffected by the new field (JC-R3 saliency: gate
+// mass alone ranks experts by how often/hard they're picked; gate x norm
+// also weighs how much each pick actually moved the residual stream).
+static void moe_trace_emit(int pos, int layer, const int *sel, const float *selw,
+                           const float *norms, int used) {
     FILE *fp = moe_trace_file();
     if (!fp) return;
     fprintf(fp, "{\"pos\":%d,\"layer\":%d,\"experts\":[", pos, layer);
     for (int t = 0; t < used; t++) fprintf(fp, "%s%d", t ? "," : "", sel[t]);
     fprintf(fp, "],\"gates\":[");
     for (int t = 0; t < used; t++) fprintf(fp, "%s%.6g", t ? "," : "", selw[t]);
+    fprintf(fp, "],\"norms\":[");
+    if (norms)
+        for (int t = 0; t < used; t++) fprintf(fp, "%s%.6g", t ? "," : "", norms[t]);
     fprintf(fp, "]}\n");
     fflush(fp);   // durable across a killed server: --serve traces run for the
                    // process's whole lifetime, not to a matching fclose
@@ -2729,11 +2740,12 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
     int n_embd = m->n_embd, ne = ly->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
     bool probe = moe_probe_file() != NULL;
+    bool trace = moe_trace_file() != NULL;
     int layer_idx = (int)(ly - m->layers);
     int   sel[256];
     float selw[256];
+    float norms[256];
     moe_route(m, ly, xin, n_embd, ne, used, sel, selw, true);
-    moe_trace_emit(m->fwd_pos, layer_idx, sel, selw, used);
     // RUNNER_MOE_PROBE: same lookback replay as gemma_route's caller — see
     // gemma_moe_ffn's comment. xin gets overwritten in place by this
     // function's last line, so the push below must happen before that, and
@@ -2776,8 +2788,14 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
         if (ly->ffn_down_exps_b)
             for (int i = 0; i < n_embd; i++)
                 m->moe_dexp[i] += ly->ffn_down_exps_b[(size_t)e * n_embd + i];
+        if (trace) {
+            float ss = 0.0f;
+            for (int i = 0; i < n_embd; i++) ss += m->moe_dexp[i] * m->moe_dexp[i];
+            norms[t] = sqrtf(ss);
+        }
         for (int i = 0; i < n_embd; i++) m->moe_out[i] += w * m->moe_dexp[i];
     }
+    moe_trace_emit(m->fwd_pos, layer_idx, sel, selw, trace ? norms : NULL, used);
     for (int i = 0; i < n_embd; i++) xin[i] = m->moe_out[i];
 }
 
@@ -2792,13 +2810,12 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
     int n_embd = m->n_embd, ne = ly->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp;
     bool probe = moe_probe_file() != NULL;
+    bool trace = moe_trace_file() != NULL;
     int layer_idx = (int)(ly - m->layers);
     for (int b = 0; b < n; b++) {
         float *xin = m->xb + (size_t)b * xdim;
         moe_route(m, ly, xin, n_embd, ne, used,
                   m->moe_sel + (size_t)b * used, m->moe_selw + (size_t)b * used, true);
-        moe_trace_emit(m->fwd_pos + b, layer_idx,
-                       m->moe_sel + (size_t)b * used, m->moe_selw + (size_t)b * used, used);
         // RUNNER_MOE_PROBE: replay against 1/2/3 layers back, before m->xb
         // is overwritten with this layer's FFN output further below.
         if (probe && m->moe_probe_depth > 0) {
@@ -2859,13 +2876,30 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
         matvec_b(m->tp, m->moe_dexp_b, n_embd, &dv, m->moe_gate_b,
                  nff, nff, n_embd, NULL, cnt);
         for (int c = 0; c < cnt; c++) {
-            float *out = m->moe_out_b + (size_t)m->moe_gidx[c] * n_embd;
+            int b = m->moe_gidx[c];
+            float *out = m->moe_out_b + (size_t)b * n_embd;
             const float *dx = m->moe_dexp_b + (size_t)c * n_embd;
             float w = m->moe_gw[c];
+            if (trace) {
+                float ss = 0.0f;
+                if (db) for (int i = 0; i < n_embd; i++) { float v = dx[i] + db[i]; ss += v * v; }
+                else    for (int i = 0; i < n_embd; i++) ss += dx[i] * dx[i];
+                // this expert is at whichever slot t routed token b picked it
+                // (sel[t]==e) — moe_route's slots are few, a linear search is
+                // cheap and only runs when tracing is already on
+                const int *sel = m->moe_sel + (size_t)b * used;
+                for (int t = 0; t < used; t++)
+                    if (sel[t] == e) { m->moe_trace_norms[(size_t)b * used + t] = sqrtf(ss); break; }
+            }
             if (db) for (int i = 0; i < n_embd; i++) out[i] += w * (dx[i] + db[i]);
             else    for (int i = 0; i < n_embd; i++) out[i] += w * dx[i];
         }
     }
+    if (trace)
+        for (int b = 0; b < n; b++)
+            moe_trace_emit(m->fwd_pos + b, layer_idx, m->moe_sel + (size_t)b * used,
+                           m->moe_selw + (size_t)b * used,
+                           m->moe_trace_norms + (size_t)b * used, used);
     for (int b = 0; b < n; b++)
         memcpy(m->xb + (size_t)b * xdim, m->moe_out_b + (size_t)b * n_embd,
                (size_t)n_embd * sizeof(float));
@@ -2929,6 +2963,7 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
     int n_embd = m->n_embd, ne = ly->n_expert, used = m->n_expert_used;
     int nff = m->n_ff_exp, dff = m->n_ff;           // dff = dense shared-FFN size
     bool probe = moe_probe_file() != NULL;
+    bool trace = moe_trace_file() != NULL;
     int layer_idx = (int)(ly - m->layers);
     for (int b = 0; b < n; b++) {
         const float *attn = m->x + (size_t)b * n_embd;
@@ -2944,9 +2979,8 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
         //     expert FFN's own input — the router below uses a SEPARATE
         //     weightless norm of attn_out, computed inside gemma_route)
         rmsnorm(xn2, attn, ly->ffn_pre_norm2_w, n_embd, m->rms_eps);
-        int sel[256]; float selw[256];
+        int sel[256]; float selw[256], norms[256];
         gemma_route(m, ly, attn, n_embd, ne, used, sel, selw, b == n - 1);
-        moe_trace_emit(m->fwd_pos + b, layer_idx, sel, selw, used);
         // RUNNER_MOE_PROBE: replay THIS layer's router against the 1/2/3
         // layers-back hidden state instead of attn, and record whether that
         // earlier-and-cheaper prediction covers what attn's router actually
@@ -2978,9 +3012,15 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
                 m->moe_gate[j] = gated_act(ACT_GELU, m->hb[j], m->hb[nff + j]);
             gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
             matvec_b(m->tp, m->moe_dexp, n_embd, &dv, m->moe_gate, nff, nff, n_embd, NULL, 1);
+            if (trace) {
+                float ss = 0.0f;
+                for (int i = 0; i < n_embd; i++) ss += m->moe_dexp[i] * m->moe_dexp[i];
+                norms[t] = sqrtf(ss);
+            }
             float sc = selw[t] * (ly->down_exps_scale ? ly->down_exps_scale[e] : 1.0f);
             for (int i = 0; i < n_embd; i++) m->moe_out[i] += sc * m->moe_dexp[i];
         }
+        moe_trace_emit(m->fwd_pos + b, layer_idx, sel, selw, trace ? norms : NULL, used);
         rmsnorm(m->moe_out, m->moe_out, ly->ffn_post_norm2_w, n_embd, m->rms_eps);
         // --- combine
         float *out = m->xb + (size_t)b * xdim;

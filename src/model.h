@@ -185,6 +185,12 @@ typedef struct {
     float    *moe_dexp_b;  // [n_batch][n_embd] batched down output
     int      *moe_sel;     // [n_batch][n_expert_used] per-token selected experts
     float    *moe_selw;    // [n_batch][n_expert_used] per-token renormalized weights
+    float    *moe_trace_norms; // [n_batch][n_expert_used] scratch: L2 norm of
+                                // each selected expert's own FFN output this
+                                // forward, filled only when RUNNER_MOE_TRACE is
+                                // set (moe_ffn_grouped's prefill path needs it
+                                // held across its per-expert loop, since trace
+                                // emission there happens per-token afterward)
     int      *moe_gidx;    // [n_batch] current expert's token indices
     float    *moe_gw;      // [n_batch] current expert's per-token weights
     int       fwd_pos;     // starting KV position of the batch this forward call
