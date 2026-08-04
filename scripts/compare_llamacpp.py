@@ -26,6 +26,36 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROMPT = "The capital of France is"
 
 
+def relativize_path(path: Path | str | None) -> str | None:
+    """Convert absolute path to repo-relative or basename for reproducibility.
+
+    Returns repo-relative path if within ROOT, otherwise basename only.
+    """
+    if path is None:
+        return None
+    p = Path(path).resolve()
+    try:
+        return str(p.relative_to(ROOT))
+    except ValueError:
+        # Path is outside ROOT, use basename only
+        return p.name
+
+
+def relativize_command(cmd: list[str]) -> list[str]:
+    """Relativize all paths in a command line."""
+    result = []
+    for arg in cmd:
+        try:
+            p = Path(arg).resolve()
+            if p.exists() and p.is_file():
+                result.append(relativize_path(p))
+            else:
+                result.append(arg)
+        except (ValueError, OSError):
+            result.append(arg)
+    return result
+
+
 def run(cmd, timeout=20):
     try:
         return subprocess.run(cmd, text=True, capture_output=True,
@@ -377,12 +407,12 @@ def runner_bench_json(runner, model, prompt, ctx, tokens, runner_gpu):
            "-n", str(tokens), "--temp", "0", "--bench-json", "--gpu", runner_gpu]
     proc = run(cmd, timeout=600)
     if isinstance(proc, Exception):
-        return {"command": cmd, "error": str(proc)}
+        return {"command": relativize_command(cmd), "error": str(proc)}
     try:
         parsed = json.loads(proc.stdout)
     except json.JSONDecodeError:
         parsed = None
-    return {"command": cmd, "returncode": proc.returncode, "stdout": proc.stdout,
+    return {"command": relativize_command(cmd), "returncode": proc.returncode, "stdout": proc.stdout,
             "stderr": proc.stderr, "parsed": parsed}
 
 
@@ -410,7 +440,7 @@ def measure_runtime(label, command, log_path, prompt, tokens,
         metrics.update(derived_metrics(stream, metrics["prompt_tokens"]))
         return {
             "label": label,
-            "command": command,
+            "command": relativize_command(command),
             "response": response,
             "generated_text": completion_text(response),
             "stream_text": stream["stream_text"],
@@ -420,7 +450,7 @@ def measure_runtime(label, command, log_path, prompt, tokens,
             "nvidia_smi_before": before,
             "nvidia_smi_after_start": after_start,
             "vram_load_delta_mib": vram_delta(before, after_start),
-            "log": str(log_path),
+            "log": relativize_path(log_path),
         }
     finally:
         stop(process, log)
@@ -837,7 +867,7 @@ def endpoints_only_report(args):
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "status": "endpoints_only",
         "real_results": "captured",
-        "model": {"path": str(args.model) if args.model else None,
+        "model": {"path": relativize_path(args.model) if args.model else None,
                   "sha256": sha256_file(args.model) if args.model else None,
                   "bytes": args.model.stat().st_size if args.model else None},
         "settings": {
@@ -918,7 +948,7 @@ def real_report(args):
         "status": "complete",
         "real_results": "captured",
         "model": {
-            "path": str(args.model),
+            "path": relativize_path(args.model),
             "sha256": sha256_file(args.model),
             "bytes": args.model.stat().st_size,
         },
@@ -935,14 +965,14 @@ def real_report(args):
         "runner": {
             "version": first_line_version(args.runner),
             "commit": git_head(args.runner),
-            "command": runner_cmd,
+            "command": relativize_command(runner_cmd),
             "bench_json": bench,
             **runner,
         },
         "llamacpp": {
             "version": first_line_version(args.llamacpp),
             "commit": args.llamacpp_commit or git_head(args.llamacpp),
-            "command": llama_cmd,
+            "command": relativize_command(llama_cmd),
             **llama,
         },
         "extra_runtimes": extra,
@@ -1010,7 +1040,7 @@ def main(argv=None):
     md_path = args.out_dir / "comparison.md"
     json_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     md_path.write_text(render_markdown(report), encoding="utf-8")
-    print(json.dumps({"json": str(json_path), "markdown": str(md_path),
+    print(json.dumps({"json": relativize_path(json_path), "markdown": relativize_path(md_path),
                       "status": report["status"]}))
     return 1 if report.get("correctness_gate", {}).get("status") == "fail" else 0
 
