@@ -441,6 +441,27 @@ typedef struct {
 
 bool   model_load(model_t *m, const char *path, const model_params *p);
 
+// The identity a shared-weights record is keyed on: which file this actually
+// is, beyond the path it was spelled with. Both registries — the host parse in
+// model.c and the device upload in cuda.c — key on it, so it lives in one place
+// and reports its own failures. `ctime` is optional (nullable).
+//
+// Returns false when the file cannot be identified, and SAYS SO on stderr with
+// the errno, naming `registry` and the consequence. That diagnostic is the
+// point of the function: an unidentifiable file is loaded privately, which
+// silently turns off weight sharing AND lets the instance re-decide its own
+// CPU/GPU split. Nothing else on either platform notices — the Windows mmap
+// path uses GetFileSizeEx and the POSIX one fstat, so a broken stat() shows up
+// nowhere else in a load. A correctness difference hiding inside an
+// optimization's fallback is exactly the defect in
+// docs/stress-2026-08-04-f27e7bb.md (Follow-up 3/3a).
+//
+// RUNNER_TEST_NO_FILE_ID forces the failure so the fallback is reachable from a
+// test on a machine where stat() works; see `make test-shared-noid`.
+bool   model_file_identity(const char *path, const char *registry,
+                           uint64_t *size, uint64_t *ino,
+                           int64_t *mtime, int64_t *ctime);
+
 // Fraction of this model's mapped weights currently in physical memory, or
 // -1.0 when the platform will not say. Cheap enough to call per request.
 double model_resident_fraction(const model_t *m);

@@ -209,6 +209,27 @@ test-shared-asan: $(TEST_SHARED_SRC) $(HDR) test.gguf
 	RUNNER_TEST_GPU_OFF=1 LSAN_OPTIONS=suppressions=tests/lsan.supp \
 	    ./test-shared-asan-bin $(ASAN_MODEL)
 
+# Prove the sharing gate is not vacuous, at fixture scale and on any backend.
+# With the file identity unavailable both instances load privately, so
+# test-shared-weights MUST go red — and it must go red for the sharing reason,
+# not something incidental. A green run here means the gate can no longer
+# detect lost sharing, which is the state it was in for its whole life before
+# 2026-08-04 (see docs/stress-2026-08-04-f27e7bb.md, Follow-up 3a).
+test-shared-noid: $(TEST_SHARED)
+	@set -e; \
+	if RUNNER_TEST_NO_FILE_ID=1 ./$(TEST_SHARED) $(ASAN_MODEL) > shared-noid.out 2>&1; then \
+		echo "FAIL: test-shared-weights passed with no file identity —"; \
+		echo "      the sharing gate cannot detect lost sharing and is vacuous."; \
+		cat shared-noid.out; exit 1; \
+	fi; \
+	grep -q "cannot be keyed by file identity" shared-noid.out || { \
+		echo "FAIL: nothing on stderr named the lost file identity"; \
+		cat shared-noid.out; exit 1; }; \
+	grep -q "instances share one layer array" shared-noid.out || { \
+		echo "FAIL: red, but not for the lost-sharing reason"; \
+		cat shared-noid.out; exit 1; }; \
+	echo "shared-weights no-identity gate ok (red as required, and said why)"
+
 # batched decode: same sources as the shared-weights test (real model +
 # backend), because the property under test is a backend property
 TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
@@ -671,6 +692,7 @@ clean:
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE)
 	rm -rf test-attn
+	rm -f shared-noid.out
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
 	rm -f metal-init-fallback.out metal-init-fallback.err
 	rm -f metal-prefill-loop.out metal-prefill-native.out metal-prefill-native.err
@@ -689,4 +711,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-apertus test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan
+.PHONY: clean debug ptx test test-apertus test-moe test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid

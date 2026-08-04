@@ -564,14 +564,41 @@ typedef struct model_weights {
 static model_weights *g_weights;
 static pthread_mutex_t g_weights_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static bool mw_file_id(const char *path, uint64_t *size, uint64_t *ino,
-                       int64_t *mtime, int64_t *ctime) {
+// Losing the identity is not fatal — the model still loads — so this is the
+// only place it is ever reported. Keep it a warning on stderr rather than a
+// verbose-only line: it means this instance stopped sharing weights and now
+// picks its own CPU/GPU split, which two slots of one server must not do.
+static void warn_no_file_id(const char *path, const char *registry,
+                            const char *why) {
+    fprintf(stderr,
+            "warning: %s cannot be keyed by file identity (%s) — loading it "
+            "privately: %s are not shared with another instance of this model, "
+            "and it re-decides its own CPU/GPU split\n",
+            path ? path : "(null path)", why, registry);
+}
+
+bool model_file_identity(const char *path, const char *registry,
+                         uint64_t *size, uint64_t *ino,
+                         int64_t *mtime, int64_t *ctime) {
+    // Deliberate test hook: on a machine whose stat() works, nothing in a load
+    // can provoke this branch, so the fallback would be untestable and the
+    // sharing gate unfalsifiable. Same role as RUNNER_TEST_GPU_OFF.
+    if (getenv("RUNNER_TEST_NO_FILE_ID")) {
+        warn_no_file_id(path, registry, "injected by RUNNER_TEST_NO_FILE_ID");
+        return false;
+    }
     struct stat st;
-    if (!path || stat(path, &st) != 0) return false;
+    if (!path || stat(path, &st) != 0) {
+        char why[128];
+        if (!path) snprintf(why, sizeof(why), "no path");
+        else snprintf(why, sizeof(why), "stat: %s", strerror(errno));
+        warn_no_file_id(path, registry, why);
+        return false;
+    }
     *size  = (uint64_t)st.st_size;
     *ino   = (uint64_t)st.st_ino;
     *mtime = stat_mtime_ns(&st);
-    *ctime = stat_ctime_ns(&st);
+    if (ctime) *ctime = stat_ctime_ns(&st);
     return true;
 }
 
@@ -647,7 +674,8 @@ static void mw_release(model_weights *w) {
 static bool model_load_inner(model_t *m, const char *path, const model_params *p) {
     uint64_t size = 0, ino = 0;
     int64_t  mtime = 0, ctime = 0;
-    bool id_ok = mw_file_id(path, &size, &ino, &mtime, &ctime);
+    bool id_ok = model_file_identity(path, "host weights", &size, &ino,
+                                     &mtime, &ctime);
 
     // The lock is held across the whole bind, so two slots racing on one file
     // cannot both pay for the parse — the same reason cuda.c holds its

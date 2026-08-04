@@ -614,15 +614,13 @@ static gpu_weights *g_shared;
 static pthread_mutex_t g_shared_mu = PTHREAD_MUTEX_INITIALIZER;
 
 // File identity beyond the path: a model rebuilt on disk between two loads
-// must not be served out of the previous upload.
+// must not be served out of the previous upload. model_file_identity is
+// shared with the host-side registry in model.c so one place decides what a
+// file IS, and one place reports being unable to tell -- losing it here also
+// costs this instance the first one's CPU/GPU split, not just the upload.
 static bool file_id(const char *path, uint64_t *size, uint64_t *ino,
                     int64_t *mtime) {
-    struct stat st;
-    if (!path || stat(path, &st) != 0) return false;
-    *size  = (uint64_t)st.st_size;
-    *ino   = (uint64_t)st.st_ino;
-    *mtime = (int64_t)st.st_mtime;
-    return true;
+    return model_file_identity(path, "device weights", size, ino, mtime, NULL);
 }
 
 // Everything the shared buffers are derived from, compared rather than assumed

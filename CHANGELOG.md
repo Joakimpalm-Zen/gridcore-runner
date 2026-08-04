@@ -5,6 +5,30 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **A model that cannot be identified on disk now says so instead of silently
+  giving up weight sharing.** Both shared-weight registries — the host parse in
+  `model.c` and the device upload in `cuda.c` — key on a `stat()`-derived file
+  identity, and both treated a failed `stat()` as "load this one privately".
+  That fallback is not free: a privately loaded instance also re-decides its own
+  CPU/GPU split against whatever VRAM the earlier instances already took, so two
+  slots of one `--parallel` server can end up running different numbers of
+  layers on the GPU and answering the same request differently. Nothing else in
+  a load touches `stat()` — the Windows mapping path uses `GetFileSizeEx` and
+  the POSIX one `fstat` — so the failure had no other symptom. The two
+  duplicated helpers are now one `model_file_identity()` that reports the path,
+  the `errno`, which registry was lost, and the consequence.
+
+  `RUNNER_TEST_NO_FILE_ID=1` forces the failure, because on a machine whose
+  `stat()` works nothing in a load can reach that branch. `make
+  test-shared-noid` uses it to assert that `test-shared-weights` goes **red**
+  without a file identity: the sharing gate had never been shown capable of
+  failing, and at the 370 KB default fixture it could not. Under the hook it now
+  fails on all four sharing invariants, which is the same host-side signature
+  reported from the RTX 3070 box in `docs/stress-2026-08-04-f27e7bb.md`.
+
+  Diagnostic and gate only — the underlying split defect (Follow-up 3/3a) is
+  still open and still unfixed.
+
 - **Apertus now runs on CUDA.** The dense device forward path handles its
   ungated `up -> xIELU -> down` FFN and evaluates the four effective per-layer
   xIELU parameters in a native CUDA kernel. The pinned 8B Q4_K_M checkpoint
