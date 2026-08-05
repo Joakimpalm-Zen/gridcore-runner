@@ -27,7 +27,11 @@ ifeq ($(OS),Windows_NT)
 # -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
 # shell (otherwise it dies at load with STATUS_DLL_NOT_FOUND on libwinpthread-1.dll)
 LDFLAGS += -lws2_32 -lpsapi -static   # psapi: QueryWorkingSetEx / GetProcessMemoryInfo
+# tray: gdi32 (icon painting) and comdlg32 (GetOpenFileName) are not in the
+# MinGW default lib set; shell32/advapi32 are but stay explicit for clarity
+LDFLAGS += -lshell32 -lgdi32 -lcomdlg32 -ladvapi32
 GPU_SRC  = src/cuda.c
+TRAY_SRC = src/tray.c src/tray_win.c
 RUNNER_EXE = runner.exe
 TEST_JSON_SCHEMA = test-json-schema.exe
 TEST_TOKENIZER = test-tokenizer.exe
@@ -44,6 +48,10 @@ TEST_BIND = test-bind.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
+# AppKit only on Darwin, only for the tray backend; UniformTypeIdentifiers
+# for the non-deprecated NSOpenPanel file filter
+LDFLAGS += -framework AppKit -framework UniformTypeIdentifiers
+TRAY_SRC = src/tray.c src/tray_macos.m
 RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
@@ -60,6 +68,7 @@ TEST_BIND = test-bind
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
+TRAY_SRC = src/tray.c src/tray_stub.c
 RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
@@ -83,6 +92,8 @@ TEST_GRAMMAR_FF = $(TEST_BATCH:test-batch%=test-grammar-ff%)
 TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 TEST_QUANTS_SIMD = $(TEST_BATCH:test-batch%=test-quants-simd%)
+TEST_INSTANCES = $(TEST_BATCH:test-batch%=test-instances%)
+TEST_TRAY_CORE = $(TEST_BATCH:test-batch%=test-tray-core%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_MOE_ROUTER = $(TEST_BATCH:test-batch%=test-moe-router%)
@@ -110,10 +121,10 @@ TEST_THREAD_DEFAULT = $(TEST_BATCH:test-batch%=test-thread-default%)
 # what `make` considers a dependency.
 HDR = $(wildcard src/*.h)
 
-SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
+SRC = src/gguf.c src/compat.c src/quants.c src/instances.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
       src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/http.c src/registry.c src/scheduler.c src/completion.c src/api_responses.c src/api_anthropic.c src/server.c \
-      src/main.c $(GPU_SRC)
+      src/main.c $(GPU_SRC) $(TRAY_SRC)
 
 # kernels_ptx.h is embedded into the binary by cuda.c — a pull that changes
 # ONLY the regenerated PTX header must rebuild, or benchmarks silently run
@@ -316,6 +327,24 @@ $(TEST_KV_TOL): $(TEST_KV_TOL_SRC) $(HDR)
 TEST_QUANTS_SIMD_SRC = tests/test_quants_simd.c src/quants.c
 $(TEST_QUANTS_SIMD): $(TEST_QUANTS_SIMD_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_QUANTS_SIMD_SRC) -o $@ -lm -lpthread
+
+# discovery registry: pure-C, runs against a private HOME/APPDATA
+TEST_INSTANCES_SRC = tests/test_instances.c src/instances.c src/json.c
+$(TEST_INSTANCES): $(TEST_INSTANCES_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_INSTANCES_SRC) -o $@ -lm
+
+# links the stub backend on EVERY platform: this gate tests the portable
+# core (menu model, managed spawn/stop, quit semantics), not the GUI.
+# ws2_32: the core's /v1/models enrichment uses sockets on Windows
+ifeq ($(OS),Windows_NT)
+TRAY_TEST_LIBS = -lws2_32
+else
+TRAY_TEST_LIBS =
+endif
+TEST_TRAY_CORE_SRC = tests/test_tray_core.c src/tray.c src/tray_stub.c \
+                     src/instances.c src/json.c
+$(TEST_TRAY_CORE): $(TEST_TRAY_CORE_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_TRAY_CORE_SRC) -o $@ -lm $(TRAY_TEST_LIBS)
 
 # TC tolerance gate: same shape as the q8-KV gate — teacher-forced logits,
 # top-1 + bounded-deviation criteria, per (type, arch) via the model argument
@@ -562,7 +591,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
-      $(TEST_QUANTS_SIMD) \
+      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_THREAD_DEFAULT) \
@@ -593,6 +622,8 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
 	./$(TEST_QUANTS_SIMD)
+	./$(TEST_INSTANCES)
+	./$(TEST_TRAY_CORE)
 	@# the fused-vs-eager routing gate needs a fixture whose router is not
 	@# zero: the dense-oracle MoE fixtures are 0.5/0.5 either way and can only
 	@# compare a routing path with itself (it self-skips on those, correctly)
@@ -617,8 +648,8 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 		set -e; \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 		$(PYTHON) -m pytest -q tests/test_apertus.py tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_bench_json.py tests/test_mtp_admission.py tests/test_compare_llamacpp.py tests/test_release_check.py tests/test_eseries.py tests/test_stress_models.py tests/test_moe_prune_plan.py tests/test_kld_compare.py; \
-		$(MAKE) --no-print-directory test-moe PYTHON=$(PYTHON); \
-		$(MAKE) --no-print-directory test-prune-experts PYTHON=$(PYTHON); \
+		$(MAKE) --no-print-directory test-moe PYTHON="$(PYTHON)"; \
+		$(MAKE) --no-print-directory test-prune-experts PYTHON="$(PYTHON)"; \
 	else \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
 	fi
@@ -734,7 +765,7 @@ clean:
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
-	      $(TEST_QUANTS_SIMD) \
+	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \

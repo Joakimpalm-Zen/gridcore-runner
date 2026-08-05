@@ -3,6 +3,21 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## Unreleased
+
+- **`--tray`: desktop tray / menu-bar controller (macOS + Windows).** A
+  code-drawn grid icon lists every live runner instance on the machine
+  with its loaded models (swap-mode servers are asked live via
+  `GET /v1/models`), stops any of them, and starts one pre-configured
+  desktop-managed server; login autostart via LaunchAgent / HKCU Run.
+  Backed by a new instance discovery registry: every run-mode process
+  writes `<config>/gridcore/runner/instances/<pid>.json` at startup
+  (atomic, best-effort, swept by readers when the pid dies), so nothing
+  in the serve or inference paths changed. `docs/tray-controller.md`.
+- Makefile: recursive sub-make calls quote `$(PYTHON)`, fixing
+  `make test PYTHON="py -3"` (the Python launcher is the normal recipe
+  on Windows boxes without an MSYS2 python).
+
 ## v0.1.8-alpha — 2026-08-05
 
 - **New architecture: `afmoe` (Arcee Trinity family — Trinity-Nano-Preview,

@@ -1,5 +1,7 @@
 // runner — CLI: one-shot completion, interactive chat, and server launcher.
 #include "runner.h"
+#include "instances.h"
+#include "tray.h"
 
 #include "compat.h"
 #include "json.h"
@@ -122,6 +124,7 @@ static void usage(const char *prog) {
         "  -f FILE        read prompt from file (appended after -p text)\n"
         "  -i             interactive chat mode\n"
         "  --serve        HTTP server mode (OpenAI-compatible API)\n"
+        "  --tray         desktop tray/menu-bar controller (macOS, Windows)\n"
         "  --port N       server port (default 8080)\n"
         "  --parallel N   parallel inference slots in server mode (default 1)\n"
         "                 -m \"name=path,name2=path2\" serves multiple models,\n"
@@ -262,6 +265,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-i")) interactive = true;
         else if (!strcmp(a, "-v")) verbose = true;
         else if (!strcmp(a, "--serve")) serve = true;
+        else if (!strcmp(a, "--tray")) return tray_main();
         else if (!strcmp(a, "--port")) port = (int)int_arg(a, NEXT, 1, 65535);
         else if (!strcmp(a, "--parallel")) parallel = (int)int_arg(a, NEXT, 1, 16);
         else if (!strcmp(a, "--ttl")) ttl = (int)int_arg(a, NEXT, -1, INT_MAX);
@@ -547,6 +551,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 load_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
+        // Discovery registry: run modes announce themselves so the tray (or
+        // any controller) can list every live runner. Best-effort — failure
+        // never affects the run. Utility modes (--quantize/--caps/--bench)
+        // stay unregistered.
+        if (!bench_json && !quant_out) {
+            const char *bn = strrchr(load_path, '/');
+#ifdef _WIN32
+            const char *bn2 = strrchr(load_path, '\\');
+            if (bn2 && (!bn || bn2 > bn)) bn = bn2;
+#endif
+            bn = bn ? bn + 1 : load_path;
+            const char *const names[] = { bn };
+            const char *const paths[] = { load_path };
+            instances_register(serve ? "serve" : "cli", serve ? port : 0,
+                               names, paths, 1);
+            atexit(instances_unregister);
+        }
         if (m.mtp_layers)
             fprintf(stderr, "mtp: %d predictor block(s) declared and excluded "
                     "from the backbone (training-only; not consumed)\n",
@@ -569,6 +590,12 @@ int main(int argc, char **argv) {
     }
 
     if (serve) {
+        if (registry) {
+            // swap-mode server: models come and go at runtime; the record
+            // carries none and readers ask /v1/models live
+            instances_register("serve", port, NULL, NULL, 0);
+            atexit(instances_unregister);
+        }
         int rc = server_run(registry ? NULL : &m, registry ? NULL : &tok,
                             model_path, &mp, smp, &ov, port, parallel, n_threads,
                             ttl, draft_path, draft_k, ignore_eos);
