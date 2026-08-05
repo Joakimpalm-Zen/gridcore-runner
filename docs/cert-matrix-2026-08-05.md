@@ -833,3 +833,76 @@ GPU: {"gpu_layers":43,"layers":43,"prompt_tok_s":15.431,"gen_tok_s":14.553,"prom
 ### Summary
 
 Confirms the goal doc's own suspicion (item 16 was listed as "if one exists") — a real BrainStorm20x layer-duplication release does exist for gpt-oss-20b, expanding 24 to 43 layers while holding expert count fixed. It fails certification for the same chat-coherence reason as the rest of the gpt-oss family, but it is a genuinely different artifact from the rest of the roster at the tensor level: the only gpt-oss row this session where expert tensors were unavoidably moved off native MXFP4, and correspondingly the row with the second-best cross-engine KLD agreement in the family.
+
+## Tier 3 — speculative decoding (MTP)
+
+## 17. Gemma 4 26B-A4B + MTP drafter (HauhauCS)
+
+**Verdict: REFUSED** — the drafter's architecture (`gemma4-assistant`) is not one the runner supports through `--draft`; per the goal doc this is an explicitly acceptable outcome ("unknown drafter arch → REFUSED is a fine result"). The load-bearing finding is that the refusal is **safe**: the runner does not crash and does not silently corrupt output when handed an unsupported drafter — it prints a clear error and falls back to ordinary non-speculative generation, and that fallback path is proven byte-identical to running without `--draft` at all across the full six-prompt protocol.
+
+**Resolved:** main model `HauhauCS/Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-MTP/Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf` (same file as item 15, sha256 `3c13133469e431312fffb8b1d9c85ae42199e6bb5746ea1da84e8ddf2097d73c`, re-downloaded and re-verified) plus drafter `mtp-gemma-4-26B-A4B-it.gguf` from the same repo, sha256 `62bd3af7f66c9308de9a5454233852f8c7324c93767e8dfb824ed45b9179864a` verified, 251,937,728 bytes. Both deleted after this verdict.
+
+### Gate 1 — Drafter identity
+
+```
+gguf version: 3  tensors: 49  kv: 44
+general.architecture: gemma4-assistant
+general.name: 26B A4B Assistant
+gemma4-assistant.block_count: 4
+gemma4-assistant.embedding_length: 1024
+gemma4-assistant.feed_forward_length: 8192
+gemma4-assistant.context_length: 131072
+tokenizer.ggml.model: gemma4   <- same tokenizer family as the main model, satisfies the "same-vocab" precondition for speculative decoding
+
+tensor type histogram (49 tensors): F32 x26, Q4_0 x23
+expert-tensor types: none -- dense model
+```
+
+A genuinely distinct, purpose-built small dense drafter (4 layers, 1024-wide, `gemma4-assistant` arch string — not a truncated copy of the main model under a different name), sharing the main model's tokenizer as speculative decoding requires. Evidence: `docs/cert-matrix-evidence/t3.17-drafter-inspect.json`.
+
+### Gate (a) — Drafter admission: **REFUSED**
+
+Default behavior:
+
+```
+error: unsupported architecture 'gemma4-assistant' — refusing to run it through llama-style math (set RUNNER_ALLOW_UNKNOWN_ARCH=1 to try anyway, EXPERIMENTAL: output may be silently wrong)
+```
+
+The run does not abort — it proceeds to load and generate from the main model alone, ignoring the unusable drafter. Under the documented experimental escape hatch (`RUNNER_ALLOW_UNKNOWN_ARCH=1`, a runtime flag, not a code change), the drafter fails a second, more specific check:
+
+```
+warning: architecture 'gemma4-assistant' is UNSUPPORTED; RUNNER_ALLOW_UNKNOWN_ARCH is set — attempting llama-style load, output may be silently wrong
+error: invalid NextN/MTP layer count 4 for 4 blocks
+```
+
+Confirms this is a real MTP/NextN-style drafter architecture (the runner has an actual NextN-layer-count check it fails, not a generic "unknown arch" catch-all) that the runner's current speculative-decoding path does not yet support even when forced. Both the default and forced paths fall back to plain generation rather than crashing or hanging. Evidence: `docs/cert-matrix-evidence/t3.17-admission.log`, `t3.17-admission-forced.log`.
+
+### Gate (b) — Losslessness: **6/6 byte-identical**
+
+Six-prompt protocol (four 64-token, two repeated at 256), greedy (`--temp 0`), `--gpu off`, comparing `--draft <drafter> --draft-k 4` against no `--draft` flag at all:
+
+```
+a       (64 tok):  IDENTICAL
+b       (64 tok):  IDENTICAL
+c       (64 tok):  IDENTICAL
+d       (64 tok):  IDENTICAL
+b-long  (256 tok): IDENTICAL
+c-long  (256 tok): IDENTICAL
+```
+
+Since the drafter never actually engages, this proves the *shape* of losslessness the goal doc asks for (passing an unsupported `--draft` file cannot corrupt or alter output) rather than losslessness of an active speculative-decoding pipeline — the two are the same test but a materially different result depending on whether the drafter loads. Evidence: `docs/cert-matrix-evidence/t3.17-lossless-summary.txt`.
+
+### Gate (c) — Speedup: **none measurable (as expected)**
+
+```
+CPU without --draft: gen_tok_s 7.076
+CPU with    --draft: gen_tok_s 7.127   (+0.7%, within run-to-run noise)
+GPU without --draft: gen_tok_s 51.120
+GPU with    --draft: gen_tok_s 49.448  (-3.3%, within run-to-run noise)
+```
+
+No speedup and no meaningful slowdown — consistent with gate (a): the drafter is rejected before any speculative-decoding work happens, so `--draft`'s only measurable cost is the drafter file's own (cheap, 252MB) load-and-reject pass. Evidence: `docs/cert-matrix-evidence/t3.17-bench-without-cpu.json`, `t3.17-bench-with-cpu.log`, `t3.17-bench-without-gpu.json`, `t3.17-bench-with-gpu.json`.
+
+### Summary
+
+The goal doc frames a speedup-with-losslessness-proof as a "README-grade result" — this item doesn't produce that, because the one MTP drafter this session could resolve for the Gemma 4 26B-A4B family uses an architecture (`gemma4-assistant`, real NextN/MTP layer semantics) the runner's `--draft` path doesn't yet support. What it does produce is a clean capability-gap finding plus a genuinely reassuring robustness result: an unsupported drafter is refused loudly and specifically (not silently misused), and the fallback to ordinary generation is provably byte-identical to never having passed `--draft` at all. This is the same "record what's actually true and move on" discipline as the rest of the roster — REFUSED, with precise evidence, is the deliverable.

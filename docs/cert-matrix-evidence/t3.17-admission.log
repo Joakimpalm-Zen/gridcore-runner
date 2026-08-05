@@ -1,0 +1,9 @@
+gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files
+rope: using model frequency factors (rope_freqs.weight)
+loaded /home/lab/workspace/Gridcore/cert-matrix-models/t3.17-main.gguf | gemma4 | 30 layers | ctx 4096 | 64 threads | 0.04s
+sampling: gemma3 (temp 1.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)
+error: unsupported architecture 'gemma4-assistant' — refusing to run it through llama-style math (set RUNNER_ALLOW_UNKNOWN_ARCH=1 to try anyway, EXPERIMENTAL: output may be silently wrong)
+The capital of France is the 1s de Paris-sur-lyon-en route.
+
+prompt: 6 tok, 9.28 tok/s | gen: 16 tok, 7.37 tok/s
+

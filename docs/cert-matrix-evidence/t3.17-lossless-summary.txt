@@ -1,0 +1,8 @@
+6-prompt greedy WITH --draft vs WITHOUT --draft, runner CLI, temp 0, --gpu off:
+a       (64 tok):  IDENTICAL
+b       (64 tok):  IDENTICAL
+c       (64 tok):  IDENTICAL
+d       (64 tok):  IDENTICAL
+b-long  (256 tok):  IDENTICAL
+c-long  (256 tok):  IDENTICAL
+6/6 byte-identical

@@ -37,7 +37,7 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 
 | # | artifact | resolved repo/file | verdict | note |
 |---|---|---|---|---|
-| 17 | Gemma 4 26B-A4B/12B + MTP drafter | pending | pending | |
+| 17 | Gemma 4 26B-A4B/12B + MTP drafter | main = item 15 (sha `3c131334...`); drafter `HauhauCS/Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-MTP/mtp-gemma-4-26B-A4B-it.gguf` (sha `62bd3af7...`) | **REFUSED** | drafter arch `gemma4-assistant` (real 4-layer NextN/MTP drafter, confirmed via a distinct "invalid NextN/MTP layer count" error even under the experimental force-load flag) unsupported by runner's `--draft` path; safe fallback confirmed — 6/6 byte-identical greedy output WITH vs WITHOUT `--draft`, no speedup/slowdown outside noise |
 
 ## Tier 4 — big iron
 

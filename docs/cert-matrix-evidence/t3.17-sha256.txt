@@ -1,0 +1,2 @@
+62bd3af7f66c9308de9a5454233852f8c7324c93767e8dfb824ed45b9179864a  mtp-gemma-4-26B-A4B-it.gguf (drafter)
+3c13133469e431312fffb8b1d9c85ae42199e6bb5746ea1da84e8ddf2097d73c  Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf (main, = item 15)
