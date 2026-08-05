@@ -1,0 +1,11 @@
+{
+  "schema_version": "gridcore.runner.sensitivity-floor.v1",
+  "model": "/home/lab/workspace/models/trinity-nano/Trinity-Nano-Preview-Q8_0.gguf",
+  "mode": "llama.cpp cold-cache vs warm-cache",
+  "tokens_per_prompt": 16,
+  "prompts": 16,
+  "identical": 16,
+  "mean_tokens_before_divergence": 16.0,
+  "max_logprob_delta": 0.1026,
+  "mean_logprob_delta": 0.00477
+}

@@ -5,6 +5,24 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **New architecture: `afmoe` (Arcee Trinity family — Trinity-Nano-Preview,
+  Trinity-Mini).** Plain-transformer sparse MoE with muP-scaled embeddings,
+  Qwen-G1 output-gated attention (a per-element sigmoid gate from a separate
+  `attn_gate` projection — shares the qwen35 gate machinery), per-head-dim
+  QK norms, a 3-local:1-global sliding-window pattern whose global layers
+  are NoPE (the Llama-4 knob at step 4), DeepSeek-style sigmoid routing with
+  a selection-only bias plus renormalized weights scaled by
+  `expert_weights_scale`, one always-on shared expert, and leading dense
+  blocks. New `afmoe` pre-tokenizer (right-aligned digit-triplet splitting,
+  CJK/Asian-script isolation, punctuation-letter contractions). CPU only:
+  Metal and CUDA refuse loudly and fall back. Certification record in the
+  README table. Admission gates: tokenizer differential 0/721; layer-0
+  attention path verified vs llama.cpp b10280 to ~2e-4; chat smoke and
+  perf rows green on an 8 GB M1 (Q4_K_M resident: 13.25 tok/s decode
+  CPU-only; Q8_0 under memory pressure: 8.9). Token identity not claimed,
+  with the mechanism measured, not presumed — afmoe's per-branch
+  re-normalization amplifies the engines' by-design quantized-matvec
+  arithmetic difference (docs/afmoe-divergence-triage-2026-08-05.md).
 - The `sampling:` banner at `--temp 0` now says what is actually true —
   greedy argmax, shaping knobs inactive — instead of printing a
   `repeat_penalty` value that does not apply. The penalty was already

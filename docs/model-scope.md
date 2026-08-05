@@ -29,7 +29,7 @@ it is not a removal of anything already shipped.
 
 **US (open weights, runnable here):** Meta Llama · Google Gemma ·
 Microsoft Phi · OpenAI gpt-oss · IBM Granite (currently refused at load with
-an explicit reason — the natural first US addition) · AI2 OLMo/OLMoE ·
+an explicit reason — the natural first US addition) · AI2 OLMo/OLMoE · Arcee (Trinity MoE family — `afmoe`, admitted 2026-08-05) ·
 NVIDIA Nemotron/Minitron · xAI Grok open releases (size-impractical on a
 24 GB slice; listed for completeness).
 
