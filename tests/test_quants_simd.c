@@ -1,0 +1,332 @@
+// SIMD dot/dequant kernels vs an independent reference.
+//
+// vec_dot dispatches to AVX2 or NEON kernels depending on the build; this
+// test checks every supported format against a double-precision dot over
+// dequantized weights. For the formats whose *block dequant* also has a SIMD
+// path (Q8_0, Q4_K, Q6_K, MXFP4), the reference decode is reimplemented here
+// from the format spec so the test does not trust the code under test.
+// q8_quant_row must be byte-identical to the scalar definition on every
+// platform (the KV cache is compared across runs), so that one is exact.
+#include "quants.h"
+#include "fp16.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define QK 32
+#define QK_K 256
+
+// block layouts, copied from quants.c (kept in sync by the size asserts below)
+typedef struct { f16_t d; uint8_t qs[QK / 2]; }                  block_q4_0;
+typedef struct { f16_t d, m; uint8_t qs[QK / 2]; }               block_q4_1;
+typedef struct { f16_t d; uint8_t qh[4]; uint8_t qs[QK / 2]; }   block_q5_0;
+typedef struct { f16_t d, m; uint8_t qh[4]; uint8_t qs[QK / 2]; } block_q5_1;
+typedef struct { f16_t d; int8_t qs[QK]; }                       block_q8_0;
+typedef struct { uint8_t scales[QK_K / 16]; uint8_t qs[QK_K / 4]; f16_t d, dmin; } block_q2_K;
+typedef struct { uint8_t hmask[QK_K / 8]; uint8_t qs[QK_K / 4]; uint8_t scales[12]; f16_t d; } block_q3_K;
+typedef struct { f16_t d, dmin; uint8_t scales[12]; uint8_t qs[QK_K / 2]; } block_q4_K;
+typedef struct { f16_t d, dmin; uint8_t scales[12]; uint8_t qh[QK_K / 8]; uint8_t qs[QK_K / 2]; } block_q5_K;
+typedef struct { uint8_t ql[QK_K / 2]; uint8_t qh[QK_K / 4]; int8_t scales[QK_K / 16]; f16_t d; } block_q6_K;
+typedef struct { f16_t d; uint8_t qs[QK / 2]; }                  block_iq4_nl;
+typedef struct { f16_t d; uint16_t scales_h; uint8_t scales_l[QK_K / 64]; uint8_t qs[QK_K / 2]; } block_iq4_xs;
+typedef struct { uint8_t e; uint8_t qs[QK / 2]; }                block_mxfp4;
+
+static const double kv_mxfp4[16] = {
+    0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6,
+};
+
+static int g_fail = 0;
+#define CHECK(cond, ...) do { if (!(cond)) { \
+    fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); \
+    fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); g_fail++; } } while (0)
+
+// deterministic PRNG so failures reproduce
+static uint64_t g_rng = 0x243F6A8885A308D3ull;
+static uint32_t rnd32(void) {
+    g_rng ^= g_rng << 13; g_rng ^= g_rng >> 7; g_rng ^= g_rng << 17;
+    return (uint32_t)(g_rng >> 32);
+}
+static float frnd(void) { return (float)(int32_t)rnd32() / 2147483648.0f; } // [-1,1)
+static f16_t sane_f16(void) { return f32_to_f16(0.01f + 0.5f * fabsf(frnd())); }
+
+// ------------------------------------------------- independent block decode
+
+static void ref_dq_q8_0(const block_q8_0 *b, double *y) {
+    double d = f16_to_f32(b->d);
+    for (int j = 0; j < QK; j++) y[j] = d * b->qs[j];
+}
+
+static void ref_dq_mxfp4(const block_mxfp4 *b, double *y) {
+    double d = ldexp(1.0, (int)b->e - 127);
+    for (int j = 0; j < 16; j++) {
+        y[j]      = kv_mxfp4[b->qs[j] & 0xF] * d;
+        y[j + 16] = kv_mxfp4[b->qs[j] >> 4]  * d;
+    }
+}
+
+static void ref_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4)  | ((q[j    ] >> 6) << 4);
+    }
+}
+
+static void ref_dq_q4_K(const block_q4_K *b, double *y) {
+    double d = f16_to_f32(b->d), dmin = f16_to_f32(b->dmin);
+    const uint8_t *q = b->qs;
+    int is = 0;
+    for (int j = 0; j < QK_K; j += 64) {
+        uint8_t sc, mn;
+        ref_scale_min_k4(is + 0, b->scales, &sc, &mn);
+        double d1 = d * sc, m1 = dmin * mn;
+        ref_scale_min_k4(is + 1, b->scales, &sc, &mn);
+        double d2 = d * sc, m2 = dmin * mn;
+        for (int l = 0; l < 32; l++) y[l]      = d1 * (q[l] & 0xF) - m1;
+        for (int l = 0; l < 32; l++) y[l + 32] = d2 * (q[l] >> 4)  - m2;
+        q += 32; is += 2; y += 64;
+    }
+}
+
+static void ref_dq_q6_K(const block_q6_K *b, double *y) {
+    double d = f16_to_f32(b->d);
+    const uint8_t *ql = b->ql, *qh = b->qh;
+    const int8_t *sc = b->scales;
+    for (int half = 0; half < 2; half++) {
+        for (int l = 0; l < 32; l++) {
+            int is = l / 16;
+            int q1 = (int)((ql[l]      & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+            int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+            int q3 = (int)((ql[l]      >> 4)  | (((qh[l] >> 4) & 3) << 4)) - 32;
+            int q4 = (int)((ql[l + 32] >> 4)  | (((qh[l] >> 6) & 3) << 4)) - 32;
+            y[l]      = d * sc[is + 0] * q1;
+            y[l + 32] = d * sc[is + 2] * q2;
+            y[l + 64] = d * sc[is + 4] * q3;
+            y[l + 96] = d * sc[is + 6] * q4;
+        }
+        y += 128; ql += 64; qh += 32; sc += 8;
+    }
+}
+
+// ------------------------------------------------------------ row builders
+
+// fill a row of blocks with random payloads and sane scale fields
+static void make_row(int type, uint8_t *row, int n) {
+    int bs = ggml_block_size(type);
+    size_t ts = ggml_type_size(type);
+    for (int i = 0; i < n / bs; i++) {
+        uint8_t *p = row + i * ts;
+        for (size_t j = 0; j < ts; j++) p[j] = (uint8_t)rnd32();
+        switch (type) {
+            case T_F32: case T_F16: case T_BF16: break;
+            case T_Q4_0: ((block_q4_0 *)p)->d = sane_f16(); break;
+            case T_Q4_1: ((block_q4_1 *)p)->d = sane_f16();
+                         ((block_q4_1 *)p)->m = sane_f16(); break;
+            case T_Q5_0: ((block_q5_0 *)p)->d = sane_f16(); break;
+            case T_Q5_1: ((block_q5_1 *)p)->d = sane_f16();
+                         ((block_q5_1 *)p)->m = sane_f16(); break;
+            case T_Q8_0: ((block_q8_0 *)p)->d = sane_f16(); break;
+            case T_Q2_K: ((block_q2_K *)p)->d = sane_f16();
+                         ((block_q2_K *)p)->dmin = sane_f16(); break;
+            case T_Q3_K: ((block_q3_K *)p)->d = sane_f16(); break;
+            case T_Q4_K: ((block_q4_K *)p)->d = sane_f16();
+                         ((block_q4_K *)p)->dmin = sane_f16(); break;
+            case T_Q5_K: ((block_q5_K *)p)->d = sane_f16();
+                         ((block_q5_K *)p)->dmin = sane_f16(); break;
+            case T_Q6_K: ((block_q6_K *)p)->d = sane_f16(); break;
+            case T_IQ4_NL: ((block_iq4_nl *)p)->d = sane_f16(); break;
+            case T_IQ4_XS: ((block_iq4_xs *)p)->d = sane_f16(); break;
+            case T_MXFP4: ((block_mxfp4 *)p)->e = (uint8_t)(117 + rnd32() % 21); break;
+        }
+    }
+    if (type == T_F32) { float *f = (float *)row; for (int i = 0; i < n; i++) f[i] = frnd(); }
+    if (type == T_F16) { f16_t *h = (f16_t *)row; for (int i = 0; i < n; i++) h[i] = f32_to_f16(frnd()); }
+    if (type == T_BF16) {
+        uint16_t *h = (uint16_t *)row;
+        for (int i = 0; i < n; i++) {
+            union { float f; uint32_t u; } v = { .f = frnd() };
+            h[i] = (uint16_t)(v.u >> 16);
+        }
+    }
+}
+
+// reference weights: independent decode where a SIMD dequant exists, the
+// (scalar on the platform under test, or exact) dequant_row elsewhere
+static void ref_weights(int type, const uint8_t *row, double *w, int n) {
+    int bs = ggml_block_size(type);
+    size_t ts = ggml_type_size(type);
+    switch (type) {
+        case T_Q8_0:
+            for (int i = 0; i < n; i += bs) ref_dq_q8_0((const block_q8_0 *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_Q4_K:
+            for (int i = 0; i < n; i += bs) ref_dq_q4_K((const block_q4_K *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_Q6_K:
+            for (int i = 0; i < n; i += bs) ref_dq_q6_K((const block_q6_K *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_MXFP4:
+            for (int i = 0; i < n; i += bs) ref_dq_mxfp4((const block_mxfp4 *)(row + (i / bs) * ts), w + i);
+            return;
+        default: {
+            float *tmp = malloc((size_t)n * sizeof(float));
+            dequant_row(type, row, tmp, n);
+            for (int i = 0; i < n; i++) w[i] = tmp[i];
+            free(tmp);
+        }
+    }
+}
+
+// ------------------------------------------------------------------- tests
+
+static void test_vec_dot(int type, int n) {
+    size_t rowsz = ggml_row_size(type, n);
+    uint8_t *row = malloc(rowsz);
+    float *x = malloc((size_t)n * sizeof(float));
+    double *w = malloc((size_t)n * sizeof(double));
+    for (int trial = 0; trial < 8; trial++) {
+        make_row(type, row, n);
+        for (int i = 0; i < n; i++) x[i] = frnd();
+        ref_weights(type, row, w, n);
+        double ref = 0, mag = 0;
+        for (int i = 0; i < n; i++) { ref += w[i] * x[i]; mag += fabs(w[i] * x[i]); }
+        float got = vec_dot(type, row, x, n);
+        double tol = 5e-5 * mag + 1e-4;
+        CHECK(fabs(got - ref) <= tol, "vec_dot %s n=%d trial=%d: got %g ref %g (tol %g)",
+              ggml_type_name(type), n, trial, (double)got, ref, tol);
+    }
+    free(row); free(x); free(w);
+}
+
+static void test_dequant(int type, int n) {
+    size_t rowsz = ggml_row_size(type, n);
+    uint8_t *row = malloc(rowsz);
+    float *got = malloc((size_t)n * sizeof(float));
+    double *ref = malloc((size_t)n * sizeof(double));
+    for (int trial = 0; trial < 8; trial++) {
+        make_row(type, row, n);
+        ref_weights(type, row, ref, n);
+        dequant_row(type, row, got, n);
+        for (int i = 0; i < n; i++) {
+            double tol = 1e-5 * fabs(ref[i]) + 1e-6;
+            CHECK(fabs(got[i] - ref[i]) <= tol,
+                  "dequant %s trial=%d i=%d: got %g ref %g",
+                  ggml_type_name(type), trial, i, (double)got[i], ref[i]);
+            if (g_fail > 20) return;
+        }
+    }
+    free(row); free(got); free(ref);
+}
+
+// scalar q8_quant_row, verbatim semantics — the SIMD path must match exactly
+static void ref_q8_quant_row(const float *x, block_q8_0 *b, int n) {
+    for (int i = 0; i < n / QK; i++, b++, x += QK) {
+        float amax = 0;
+        for (int j = 0; j < QK; j++) {
+            float a = fabsf(x[j]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 127.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        b->d = f32_to_f16(d);
+        for (int j = 0; j < QK; j++) b->qs[j] = (int8_t)roundf(x[j] * id);
+    }
+}
+
+static void test_q8_kv(int n) {
+    float *x = malloc((size_t)n * sizeof(float));
+    block_q8_0 *got = malloc(ggml_row_size(T_Q8_0, n));
+    block_q8_0 *ref = malloc(ggml_row_size(T_Q8_0, n));
+    for (int trial = 0; trial < 16; trial++) {
+        for (int i = 0; i < n; i++) x[i] = frnd() * (trial + 1);
+        if (trial == 3) memset(x, 0, 32 * sizeof(float)); // all-zero block
+        // exact half-integer products to exercise tie rounding
+        if (trial == 4) for (int i = 0; i < n; i++) x[i] = (float)((int)(rnd32() % 255) - 127) * 0.5f;
+        q8_quant_row(x, got, n);
+        ref_q8_quant_row(x, ref, n);
+        CHECK(memcmp(got, ref, ggml_row_size(T_Q8_0, n)) == 0,
+              "q8_quant_row trial=%d: SIMD and scalar rows differ", trial);
+
+        float acc_got[512], acc_ref[512];
+        for (int i = 0; i < n; i++) acc_got[i] = acc_ref[i] = frnd();
+        float a = frnd();
+        q8_accum_row(got, a, acc_got, n);
+        const block_q8_0 *b = ref;
+        for (int i = 0; i < n / QK; i++, b++)
+            for (int j = 0; j < QK; j++)
+                acc_ref[i * QK + j] += a * f16_to_f32(b->d) * b->qs[j];
+        for (int i = 0; i < n; i++)
+            CHECK(fabsf(acc_got[i] - acc_ref[i]) <= 1e-5f * fabsf(acc_ref[i]) + 1e-6f,
+                  "q8_accum_row trial=%d i=%d: got %g ref %g",
+                  trial, i, (double)acc_got[i], (double)acc_ref[i]);
+    }
+    free(x); free(got); free(ref);
+}
+
+static void test_multi(void) {
+    // nb=7 exercises the 4-column block and the remainder; odd stride and
+    // n not a multiple of the vector width exercise the tails
+    int n = 133, nb = 7, stride = n + 3;
+    float *w = malloc((size_t)n * sizeof(float));
+    float *x = malloc((size_t)nb * stride * sizeof(float));
+    float out[7];
+    for (int trial = 0; trial < 8; trial++) {
+        for (int i = 0; i < n; i++) w[i] = frnd();
+        for (int i = 0; i < nb * stride; i++) x[i] = frnd();
+        vec_dot_f32_multi(w, x, stride, nb, n, out);
+        for (int b = 0; b < nb; b++) {
+            double ref = 0, mag = 0;
+            for (int i = 0; i < n; i++) {
+                ref += (double)w[i] * x[b * stride + i];
+                mag += fabs((double)w[i] * x[b * stride + i]);
+            }
+            CHECK(fabs(out[b] - ref) <= 5e-5 * mag + 1e-4,
+                  "vec_dot_f32_multi trial=%d col=%d: got %g ref %g",
+                  trial, b, (double)out[b], ref);
+        }
+    }
+    free(w); free(x);
+}
+
+int main(void) {
+    f16_init();
+
+    // layout drift between this file's copies and quants.c would invalidate
+    // every reference below
+    CHECK(ggml_type_size(T_Q4_0) == sizeof(block_q4_0), "q4_0 size");
+    CHECK(ggml_type_size(T_Q4_1) == sizeof(block_q4_1), "q4_1 size");
+    CHECK(ggml_type_size(T_Q5_0) == sizeof(block_q5_0), "q5_0 size");
+    CHECK(ggml_type_size(T_Q5_1) == sizeof(block_q5_1), "q5_1 size");
+    CHECK(ggml_type_size(T_Q8_0) == sizeof(block_q8_0), "q8_0 size");
+    CHECK(ggml_type_size(T_Q2_K) == sizeof(block_q2_K), "q2_K size");
+    CHECK(ggml_type_size(T_Q3_K) == sizeof(block_q3_K), "q3_K size");
+    CHECK(ggml_type_size(T_Q4_K) == sizeof(block_q4_K), "q4_K size");
+    CHECK(ggml_type_size(T_Q5_K) == sizeof(block_q5_K), "q5_K size");
+    CHECK(ggml_type_size(T_Q6_K) == sizeof(block_q6_K), "q6_K size");
+    CHECK(ggml_type_size(T_IQ4_NL) == sizeof(block_iq4_nl), "iq4_nl size");
+    CHECK(ggml_type_size(T_IQ4_XS) == sizeof(block_iq4_xs), "iq4_xs size");
+    CHECK(ggml_type_size(T_MXFP4) == sizeof(block_mxfp4), "mxfp4 size");
+
+    static const int types[] = {
+        T_F32, T_F16, T_BF16, T_Q4_0, T_Q4_1, T_Q5_0, T_Q5_1, T_Q8_0,
+        T_Q2_K, T_Q3_K, T_Q4_K, T_Q5_K, T_Q6_K, T_IQ4_NL, T_IQ4_XS, T_MXFP4,
+    };
+    for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+        test_vec_dot(types[t], 4096);
+        test_vec_dot(types[t], 256);   // single K-block / few 32-blocks
+    }
+    test_dequant(T_Q8_0, 4096);
+    test_dequant(T_Q4_K, 4096);
+    test_dequant(T_Q6_K, 4096);
+    test_dequant(T_MXFP4, 4096);
+    test_q8_kv(512);
+    test_multi();
+
+    if (g_fail) { fprintf(stderr, "test_quants_simd: %d FAILURES\n", g_fail); return 1; }
+    printf("test_quants_simd: OK\n");
+    return 0;
+}

@@ -82,6 +82,7 @@ TEST_HOST_HEADER = $(TEST_BATCH:test-batch%=test-host-header%)
 TEST_GRAMMAR_FF = $(TEST_BATCH:test-batch%=test-grammar-ff%)
 TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
+TEST_QUANTS_SIMD = $(TEST_BATCH:test-batch%=test-quants-simd%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_MOE_ROUTER = $(TEST_BATCH:test-batch%=test-moe-router%)
@@ -309,6 +310,12 @@ TEST_KV_TOL_SRC = tests/test_kv_tol.c src/gguf.c src/compat.c src/quants.c \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_KV_TOL): $(TEST_KV_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_KV_TOL_SRC) -o $@ $(LDFLAGS)
+
+# SIMD (AVX2/NEON) dot and dequant kernels vs an independent double-precision
+# reference; also pins q8_quant_row byte-identical to its scalar definition
+TEST_QUANTS_SIMD_SRC = tests/test_quants_simd.c src/quants.c
+$(TEST_QUANTS_SIMD): $(TEST_QUANTS_SIMD_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_QUANTS_SIMD_SRC) -o $@ -lm -lpthread
 
 # TC tolerance gate: same shape as the q8-KV gate — teacher-forced logits,
 # top-1 + bounded-deviation criteria, per (type, arch) via the model argument
@@ -555,6 +562,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
+      $(TEST_QUANTS_SIMD) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_THREAD_DEFAULT) \
@@ -584,6 +592,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(TEST_RESP_SM_RUN)
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
+	./$(TEST_QUANTS_SIMD)
 	@# the fused-vs-eager routing gate needs a fixture whose router is not
 	@# zero: the dense-oracle MoE fixtures are 0.5/0.5 either way and can only
 	@# compare a routing path with itself (it self-skips on those, correctly)
@@ -725,6 +734,7 @@ clean:
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
+	      $(TEST_QUANTS_SIMD) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \

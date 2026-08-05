@@ -40,6 +40,8 @@ test-batch
 test-batch.exe
 test-kv-tol
 test-kv-tol.exe
+test-quants-simd
+test-quants-simd.exe
 test-tc-tol
 test-tc-tol.exe
 test-vram-registry
