@@ -1,6 +1,7 @@
 // runner — CLI: one-shot completion, interactive chat, and server launcher.
 #include "runner.h"
 #include "instances.h"
+#include "tray.h"
 
 #include "compat.h"
 #include "json.h"
@@ -123,6 +124,7 @@ static void usage(const char *prog) {
         "  -f FILE        read prompt from file (appended after -p text)\n"
         "  -i             interactive chat mode\n"
         "  --serve        HTTP server mode (OpenAI-compatible API)\n"
+        "  --tray         desktop tray/menu-bar controller (macOS, Windows)\n"
         "  --port N       server port (default 8080)\n"
         "  --parallel N   parallel inference slots in server mode (default 1)\n"
         "                 -m \"name=path,name2=path2\" serves multiple models,\n"
@@ -263,6 +265,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-i")) interactive = true;
         else if (!strcmp(a, "-v")) verbose = true;
         else if (!strcmp(a, "--serve")) serve = true;
+        else if (!strcmp(a, "--tray")) return tray_main();
         else if (!strcmp(a, "--port")) port = (int)int_arg(a, NEXT, 1, 65535);
         else if (!strcmp(a, "--parallel")) parallel = (int)int_arg(a, NEXT, 1, 16);
         else if (!strcmp(a, "--ttl")) ttl = (int)int_arg(a, NEXT, -1, INT_MAX);

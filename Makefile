@@ -27,7 +27,11 @@ ifeq ($(OS),Windows_NT)
 # -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
 # shell (otherwise it dies at load with STATUS_DLL_NOT_FOUND on libwinpthread-1.dll)
 LDFLAGS += -lws2_32 -lpsapi -static   # psapi: QueryWorkingSetEx / GetProcessMemoryInfo
+# tray: gdi32 (icon painting) and comdlg32 (GetOpenFileName) are not in the
+# MinGW default lib set; shell32/advapi32 are but stay explicit for clarity
+LDFLAGS += -lshell32 -lgdi32 -lcomdlg32 -ladvapi32
 GPU_SRC  = src/cuda.c
+TRAY_SRC = src/tray.c src/tray_win.c
 RUNNER_EXE = runner.exe
 TEST_JSON_SCHEMA = test-json-schema.exe
 TEST_TOKENIZER = test-tokenizer.exe
@@ -44,6 +48,10 @@ TEST_BIND = test-bind.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 LDFLAGS += -framework Metal -framework Foundation
+# AppKit only on Darwin, only for the tray backend; UniformTypeIdentifiers
+# for the non-deprecated NSOpenPanel file filter
+LDFLAGS += -framework AppKit -framework UniformTypeIdentifiers
+TRAY_SRC = src/tray.c src/tray_macos.m
 RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
@@ -60,6 +68,7 @@ TEST_BIND = test-bind
 else
 GPU_SRC  = src/cuda.c
 LDFLAGS += -ldl
+TRAY_SRC = src/tray.c src/tray_stub.c
 RUNNER_EXE = runner
 TEST_JSON_SCHEMA = test-json-schema
 TEST_TOKENIZER = test-tokenizer
@@ -84,6 +93,7 @@ TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 TEST_QUANTS_SIMD = $(TEST_BATCH:test-batch%=test-quants-simd%)
 TEST_INSTANCES = $(TEST_BATCH:test-batch%=test-instances%)
+TEST_TRAY_CORE = $(TEST_BATCH:test-batch%=test-tray-core%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_MOE_ROUTER = $(TEST_BATCH:test-batch%=test-moe-router%)
@@ -114,7 +124,7 @@ HDR = $(wildcard src/*.h)
 SRC = src/gguf.c src/compat.c src/quants.c src/instances.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
       src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/http.c src/registry.c src/scheduler.c src/completion.c src/api_responses.c src/api_anthropic.c src/server.c \
-      src/main.c $(GPU_SRC)
+      src/main.c $(GPU_SRC) $(TRAY_SRC)
 
 # kernels_ptx.h is embedded into the binary by cuda.c — a pull that changes
 # ONLY the regenerated PTX header must rebuild, or benchmarks silently run
@@ -322,6 +332,13 @@ $(TEST_QUANTS_SIMD): $(TEST_QUANTS_SIMD_SRC) $(HDR)
 TEST_INSTANCES_SRC = tests/test_instances.c src/instances.c src/json.c
 $(TEST_INSTANCES): $(TEST_INSTANCES_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_INSTANCES_SRC) -o $@ -lm
+
+# links the stub backend on EVERY platform: this gate tests the portable
+# core (menu model, managed spawn/stop, quit semantics), not the GUI
+TEST_TRAY_CORE_SRC = tests/test_tray_core.c src/tray.c src/tray_stub.c \
+                     src/instances.c src/json.c
+$(TEST_TRAY_CORE): $(TEST_TRAY_CORE_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_TRAY_CORE_SRC) -o $@ -lm
 
 # TC tolerance gate: same shape as the q8-KV gate — teacher-forced logits,
 # top-1 + bounded-deviation criteria, per (type, arch) via the model argument
@@ -568,7 +585,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
-      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) \
+      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_THREAD_DEFAULT) \
@@ -600,6 +617,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TC_TOL)
 	./$(TEST_QUANTS_SIMD)
 	./$(TEST_INSTANCES)
+	./$(TEST_TRAY_CORE)
 	@# the fused-vs-eager routing gate needs a fixture whose router is not
 	@# zero: the dense-oracle MoE fixtures are 0.5/0.5 either way and can only
 	@# compare a routing path with itself (it self-skips on those, correctly)
@@ -741,7 +759,7 @@ clean:
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
-	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) \
+	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \

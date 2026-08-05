@@ -1,0 +1,68 @@
+// Desktop tray/menu-bar controller (v1).
+//
+// All logic lives in the portable core (tray.c): reading the discovery
+// registry, owning the one desktop-managed instance, config, autostart
+// bookkeeping. Platform backends (tray_macos.m, tray_win.c) only render
+// the menu the core describes and forward clicks back. The CLI runner is
+// untouched unless --tray is passed.
+#ifndef RUNNER_TRAY_H
+#define RUNNER_TRAY_H
+
+#include <stdbool.h>
+
+// --tray entry point: initializes the core, then runs the platform loop.
+// Returns a process exit code. Refuses to run if another tray is alive.
+int tray_main(void);
+
+// ------------------------------------------------------------- menu model
+
+enum {
+    TRAY_K_LABEL = 0,     // disabled informational row
+    TRAY_K_ACTION,        // clickable row
+    TRAY_K_CHECK,         // clickable row with a checkmark state
+    TRAY_K_SEP,           // separator
+    TRAY_K_SUB_BEGIN,     // following items nest under the previous row
+    TRAY_K_SUB_END,
+};
+
+enum {
+    TRAY_ACT_NONE = 0,
+    TRAY_ACT_START_MANAGED,   // spawn --serve with the configured model/args
+    TRAY_ACT_PICK_MODEL,      // native file picker, saves last_model
+    TRAY_ACT_STOP_INSTANCE,   // arg = pid
+    TRAY_ACT_TOGGLE_AUTOSTART,
+    TRAY_ACT_QUIT,
+};
+
+typedef struct {
+    char label[512];
+    int  kind;     // TRAY_K_*
+    int  action;   // TRAY_ACT_*
+    long arg;      // pid for STOP_INSTANCE
+    bool checked;  // TRAY_K_CHECK state
+} tray_item;
+
+// Build the current menu into items (at most cap). Called by the backend
+// every time the menu is about to open. Returns the item count.
+int  tray_menu_build(tray_item *items, int cap);
+
+// A menu row was clicked. STOP/START/QUIT/PICK side effects happen here.
+// For TRAY_ACT_PICK_MODEL the backend passes the chosen path (or NULL if
+// the user cancelled); every other action ignores `text`.
+void tray_menu_act(int action, long arg, const char *text);
+
+// True while ≥1 runner instance is live — the backend shows the badge dot.
+bool tray_any_running(void);
+
+// True when the platform loop should exit (set by TRAY_ACT_QUIT).
+bool tray_should_quit(void);
+
+// ------------------------------------------- provided by platform backends
+
+// Run the icon + menu loop until tray_should_quit(). Returns exit code.
+int  tray_platform_run(void);
+// Autostart (login item) state, platform-specific storage.
+bool tray_platform_autostart_get(void);
+bool tray_platform_autostart_set(bool on);
+
+#endif // RUNNER_TRAY_H

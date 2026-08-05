@@ -127,3 +127,5 @@ test-file-identity
 test-file-identity.exe
 # 5 GB scratch file made (and removed) by tests/test_file_identity.c
 test-file-identity.tmp
+test-tray-core
+test-tray-core.exe
