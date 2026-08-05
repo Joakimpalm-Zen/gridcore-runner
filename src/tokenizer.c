@@ -179,6 +179,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     else if (strcmp(pre, "qwen2") == 0 ||
              strcmp(pre, "qwen35") == 0) t->pre = TOK_PRE_QWEN2;
     else if (strcmp(pre, "smollm") == 0) t->pre = TOK_PRE_SMOLLM;
+    else if (strcmp(pre, "afmoe") == 0)  t->pre = TOK_PRE_AFMOE;
     else if (strcmp(pre, "tekken") == 0) t->pre = TOK_PRE_TEKKEN;
     else                                 t->pre = TOK_PRE_GPT2;
 
@@ -779,6 +780,110 @@ static int tekken_split_next(const uint32_t *cp, int i, int ncp) {
     }
 }
 
+// afmoe (Arcee Trinity) composes three passes (llama.cpp
+// unicode_regex_split_custom_afmoe + llama-vocab.cpp pre "afmoe"), folded
+// into one scanner because earlier passes only ever produce fragments the
+// main regex cannot re-merge:
+//   1. every maximal digit run splits into groups of three FROM THE RIGHT
+//      (1234567 -> 1|234|567): first group len%3 (if nonzero), then threes;
+//   2. CJK/Asian-script runs are isolated, so a leading space or Latin
+//      letter can never glue onto them;
+//   3. main regex:  [ascii-punct][A-Za-z]+
+//                 | [^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+
+//                 |  ?[\p{P}\p{S}]+[\r\n]*
+//                 | \s*[\r\n]+ | \s+(?!\S) | \s+
+// \p{P}\p{S} is approximated as cp_other minus marks, matching how this
+// file approximates the classes everywhere else; the differential fixture
+// set is the gate for the approximation.
+static bool cp_afmoe_cjk(uint32_t c) {
+    return (c >= 0x4E00 && c <= 0x9FFF) ||   // CJK Unified
+           (c >= 0x3400 && c <= 0x4DBF) ||   // CJK Ext A
+           (c >= 0xF900 && c <= 0xFAFF) ||   // CJK Compat Ideographs
+           (c >= 0x3040 && c <= 0x309F) ||   // Hiragana
+           (c >= 0x30A0 && c <= 0x30FF) ||   // Katakana
+           (c >= 0xFF65 && c <= 0xFF9F) ||   // Halfwidth Katakana
+           (c >= 0x2F00 && c <= 0x2FDF) ||   // Kangxi Radicals
+           (c >= 0x0E40 && c <= 0x0E7F) ||   // Thai (trailing block)
+           (c >= 0x0E80 && c <= 0x0EFF) ||   // Lao
+           (c >= 0x1780 && c <= 0x17FF) ||   // Khmer
+           (c >= 0x1000 && c <= 0x109F) ||   // Myanmar
+           (c >= 0xAA60 && c <= 0xAA7F) ||   // Myanmar Ext A
+           (c >= 0xA9E0 && c <= 0xA9FF) ||   // Myanmar Ext B
+           (c >= 0xAC00 && c <= 0xD7AF) ||   // Hangul Syllables
+           (c >= 0x1100 && c <= 0x11FF);     // Hangul Jamo
+}
+static bool cp_ascii_punct(uint32_t c) {
+    return (c >= '!' && c <= '/') || (c >= ':' && c <= '@') ||
+           (c >= '[' && c <= '`') || (c >= '{' && c <= '~');
+}
+static bool cp_punct_sym(uint32_t c) {       // ~ [\p{P}\p{S}]
+    return cp_other(c) && !cp_mark(c);
+}
+static int afmoe_split_next(const uint32_t *cp, int i, int ncp) {
+    if (cp_digit(cp[i])) {
+        int L = 0;
+        while (i + L < ncp && cp_digit(cp[i + L])) L++;
+        int first = L % 3;
+        return i + (first ? first : 3);
+    }
+    if (cp_afmoe_cjk(cp[i])) {
+        int j = i;
+        while (j < ncp && cp_afmoe_cjk(cp[j])) j++;
+        return j;
+    }
+    // [ascii-punct][A-Za-z]+  (leads the alternation, so "'s" stays whole)
+    if (cp_ascii_punct(cp[i]) && i + 1 < ncp &&
+        ((cp[i + 1] >= 'a' && cp[i + 1] <= 'z') ||
+         (cp[i + 1] >= 'A' && cp[i + 1] <= 'Z'))) {
+        int j = i + 1;
+        while (j < ncp && ((cp[j] >= 'a' && cp[j] <= 'z') ||
+                           (cp[j] >= 'A' && cp[j] <= 'Z'))) j++;
+        return j;
+    }
+    // [^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+ — one optional "other" char
+    // (space, mark; digits cannot reach here) then a letter/mark run that
+    // stops at CJK, which pass 2 has already made its own fragment
+    {
+        int s = i;
+        uint32_t c = cp[i];
+        if (c != '\r' && c != '\n' && !cp_letter(c) && !cp_punct_sym(c) &&
+            i + 1 < ncp)
+            s = i + 1;
+        if (s < ncp && (cp_letter(cp[s]) || cp_mark(cp[s])) &&
+            !cp_afmoe_cjk(cp[s])) {
+            int j = s;
+            while (j < ncp && (cp_letter(cp[j]) || cp_mark(cp[j])) &&
+                   !cp_afmoe_cjk(cp[j])) j++;
+            if (j > s) return j;
+        }
+    }
+    //  ?[\p{P}\p{S}]+[\r\n]*
+    {
+        int j = (cp[i] == ' ' && i + 1 < ncp && cp_punct_sym(cp[i + 1]))
+                ? i + 1 : i;
+        if (j < ncp && cp_punct_sym(cp[j])) {
+            while (j < ncp && cp_punct_sym(cp[j]) && !cp_afmoe_cjk(cp[j])) j++;
+            while (j < ncp && (cp[j] == '\r' || cp[j] == '\n')) j++;
+            return j;
+        }
+    }
+    // \s*[\r\n]+ | \s+(?!\S) | \s+
+    {
+        int j = i;
+        while (j < ncp && cp_space(cp[j])) j++;
+        int last_nl = -1;
+        for (int k = i; k < j; k++)
+            if (cp[k] == '\r' || cp[k] == '\n') last_nl = k;
+        if (last_nl >= 0) return last_nl + 1;
+        // the digit and CJK passes run BEFORE the main regex in the
+        // reference, so a following digit/CJK char is a fragment boundary
+        // there: \s+(?!\S) sees end-of-fragment and keeps every space
+        if (j < ncp && j - i > 1 &&
+            !cp_digit(cp[j]) && !cp_afmoe_cjk(cp[j])) j--;
+        return j;
+    }
+}
+
 // smollm runs a Digits(individual_digits) pass before the GPT-2 regex, so every
 // digit stands alone and never takes a leading space. Splitting first also
 // bounds the regex: in "  12" the space run ends at the digit and stays whole,
@@ -934,6 +1039,7 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
         int end = t->pre == TOK_PRE_TEKKEN    ? tekken_split_next(cp, i, ncp)
                 : max_digits                  ? pre_split_next(cp, i, ncp, max_digits)
                 : t->pre == TOK_PRE_SMOLLM    ? smollm_split_next(cp, i, ncp)
+                : t->pre == TOK_PRE_AFMOE     ? afmoe_split_next(cp, i, ncp)
                                               : gpt2_split_next(cp, i, ncp);
         if (end <= i) end = i + 1; // never stall
         // map the original bytes of this pre-token through byte->unicode

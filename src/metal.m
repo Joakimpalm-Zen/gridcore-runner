@@ -347,6 +347,10 @@ bool gpu_kv_q8_ok(void) {
 }
 
 bool gpu_init(model_t *m) {
+    if (m->attn_out_gate) {
+        fprintf(stderr, "gpu: gated attention (afmoe) is not on the metal backend yet — using CPU\n");
+        return false;
+    }
     if (m->qwen35) {
         fprintf(stderr, "gpu: qwen35 hybrid path is not on the metal backend yet — using CPU\n");
         return false;

@@ -492,7 +492,7 @@ const char *const *model_supported_archs(size_t *count) {
     static const char *const arches[] = {
         "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
         "smollm", "stablelm", "gemma3", "gemma4", "phi3", "gpt-oss",
-        "apertus",
+        "apertus", "afmoe",
     };
     if (count) *count = sizeof(arches) / sizeof(arches[0]);
     return arches;
@@ -974,6 +974,38 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % swa_period) != 0;
         m->rms_eps = gguf_get_f32(g, AK("attention.layer_norm_rms_epsilon"), 1e-5f);
     }
+    if (strcmp(arch, "afmoe") == 0) {
+        // afmoe (Arcee Trinity, AfmoeForCausalLM). Transcribed from llama.cpp
+        // src/models/afmoe.cpp (PR #16477) + the Trinity GGUF headers:
+        //   * muP embedding scale sqrt(n_embd), hardcoded exactly as llama.cpp
+        //     does for this arch;
+        //   * Qwen-G1 output-gated attention: a separate blk.N.attn_gate
+        //     projection of the normed block input, sigmoid, elementwise on
+        //     the concatenated heads before attn_output (the qwen35 gate math
+        //     with a standalone tensor instead of a fused Q slice);
+        //   * SWA 2048 at period 4 (3 local : 1 global); the global layers
+        //     are NoPE — the Llama-4 no_rope knob with the SAME period, set
+        //     after the generic key read below since the GGUF carries no key;
+        //   * sigmoid routing with a DeepSeek-style selection-only bias
+        //     (exp_probs_b.bias), renormalized weights, then x route_scale —
+        //     all existing generalized-router behavior driven by keys;
+        //   * the first leading_dense_block_count layers are plain dense FFN.
+        m->attn_out_gate = true;
+        m->embd_scale    = sqrtf((float)m->n_embd);
+        m->swa_window    = (int)gguf_get_u32(g, AK("attention.sliding_window"), 2048);
+        int period       = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 4);
+        if (period < 1) period = 4;
+        m->l_is_swa = calloc(m->n_layer, sizeof(bool));
+        if (!m->l_is_swa) return false;
+        for (int i = 0; i < m->n_layer; i++)
+            m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % period) != 0;
+        m->swa_rope_global = true;   // single 10k rope base; globals skip rope
+        m->n_dense_lead  = (int)gguf_get_u32(g, AK("leading_dense_block_count"), 0);
+        int gating = (int)gguf_get_u32(g, AK("expert_gating_func"), 2);
+        m->expert_gating  = gating == 1 ? EXPERT_GATE_SOFTMAX : EXPERT_GATE_SIGMOID;
+        m->expert_w_scale = gguf_get_f32(g, AK("expert_weights_scale"), 0.0f);
+        m->expert_norm_w  = gguf_get_bool(g, AK("expert_weights_norm"), false);
+    }
     if (strcmp(arch, "qwen3") == 0 || strcmp(arch, "qwen3moe") == 0) {
         // Thinking-tuned Qwen3 (dense and sparse-MoE) responses wrap hidden
         // reasoning before the visible answer; shared CLI/server output
@@ -1210,6 +1242,10 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     }
     // Llama-4 attention knobs, off unless the GGUF asks for them.
     m->no_rope_layer_step   = (int)gguf_get_u32(g, AK("attention.no_rope_layer_step"), 0);
+    // afmoe's GGUF carries no no_rope key; llama.cpp defaults the step to the
+    // SWA period (4) for this arch, so the global layers are the NoPE layers.
+    if (m->attn_out_gate && m->no_rope_layer_step == 0)
+        m->no_rope_layer_step = 4;
     m->attn_temp_floor_scale = (int)gguf_get_u32(g, AK("attention.attn_temp_floor_scale"), 0);
     m->attn_temp_scale       = gguf_get_f32(g, AK("attention.attn_temp_scale"), 0.0f);
     m->attn_temp_offset      = gguf_get_f32(g, AK("attention.attn_temp_offset"), 1.0f);
@@ -1269,9 +1305,20 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         // same normed input, summed with the routed output. Supported when the
         // tensors are present; the width falls back to the routed expert width
         // exactly as llama.cpp does.
-        if (gguf_find_tensor(g, "blk.0.ffn_gate_shexp.weight"))
+        char shexp_probe[64];
+        // probe the first MoE layer: afmoe's leading blocks are dense and
+        // carry no shared-expert tensors at all
+        snprintf(shexp_probe, sizeof shexp_probe,
+                 "blk.%d.ffn_gate_shexp.weight", m->n_dense_lead);
+        if (gguf_find_tensor(g, shexp_probe)) {
+            int nsh = (int)gguf_get_u32(g, AK("expert_shared_count"), 1);
+            if (nsh < 1) nsh = 1;
+            // afmoe publishes no shexp width key: the shared expert is
+            // expert_shared_count routed-expert widths wide, per llama.cpp.
             m->n_ff_shexp = (int)gguf_get_u32(
-                g, AK("expert_shared_feed_forward_length"), m->n_ff_exp);
+                g, AK("expert_shared_feed_forward_length"),
+                m->n_ff_exp * nsh);
+        }
         else if (gguf_get_u32(g, AK("expert_shared_count"), 0) > 0) {
             fprintf(stderr, "error: expert_shared_count is set but the shared "
                     "expert tensors are absent\n");
@@ -1458,7 +1505,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             l->wk     = need_tensor(g, "blk.%d.attn_k.weight", i, &ok);
             l->wv     = m->v_rmsnorm ? opt_tensor(g, "blk.%d.attn_v.weight", i)
                                      : need_tensor(g, "blk.%d.attn_v.weight", i, &ok);
-            if (m->n_expert == 0) {
+            if (m->n_expert == 0 || i < m->n_dense_lead) {
                 // Apertus has no ffn_gate: its MLP is up -> xielu -> down.
                 // Every other dense arch here is gated, so the tensor stays
                 // required unless the activation is the ungated one.
@@ -1469,7 +1516,19 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             }
         }
         l->wo     = need_tensor(g, "blk.%d.attn_output.weight", i, &ok);
-        if (m->n_expert > 0) {
+        if (m->attn_out_gate) {
+            l->wq_gate = need_tensor(g, "blk.%d.attn_gate.weight", i, &ok);
+            // same shape as the plain Q projection; a mismatch means a
+            // conversion this code has never seen — refuse, not garble
+            if (l->wq_gate && l->wq &&
+                (l->wq_gate->ne[0] != l->wq->ne[0] ||
+                 l->wq_gate->ne[1] != l->wq->ne[1])) {
+                fprintf(stderr, "error: attn_gate shape differs from attn_q "
+                        "in layer %d\n", i);
+                ok = false;
+            }
+        }
+        if (m->n_expert > 0 && i >= m->n_dense_lead) {
             // sparse-MoE FFN: a router plus fused 3D expert tensors replace the
             // dense gate/up/down for this layer
             l->is_moe = true;
@@ -1483,8 +1542,13 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             }
             l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
             // Optional selection-only bias; absent on every arch certified so far.
-            l->exp_probs_b   = tensor_to_f32(
-                opt_tensor(g, "blk.%d.exp_probs_b.weight", i), &ok);
+            {
+                // DeepSeek exports name this .weight; afmoe's converter
+                // renames expert_bias so the GGUF carries a .bias suffix.
+                gguf_tensor *epb = opt_tensor(g, "blk.%d.exp_probs_b.weight", i);
+                if (!epb) epb = opt_tensor(g, "blk.%d.exp_probs_b.bias", i);
+                l->exp_probs_b = tensor_to_f32(epb, &ok);
+            }
             l->ffn_gate_up_exps = opt_tensor(g, "blk.%d.ffn_gate_up_exps.weight", i);
             if (l->ffn_gate_up_exps) {
                 // gemma-4 dual-branch MoE: gate+up fused in one 3D tensor, a
@@ -1834,6 +1898,10 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         m->ple     = malloc(sizeof(float) * (size_t)B * per_tok);
         m->ple_tmp = malloc(sizeof(float) * (size_t)B * per_tok);
         if (!m->ple || !m->ple_tmp) return false;
+    }
+    if (m->attn_out_gate && !m->q_gate) {
+        m->q_gate = malloc(sizeof(float) * (size_t)B * q_dim);
+        if (!m->q_gate) return false;
     }
     if (m->qwen35) {
         int conv_dim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
@@ -3227,6 +3295,11 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         } else {
             matvec_b(m->tp, m->q, q_dim, ly->wq, m->xb, xdim,
                      n_embd, q_dim, ly->bq, n);
+            // afmoe output gate: projected from the SAME normed input as Q,
+            // consumed after attn_heads by the shared q_gate multiply below
+            if (m->attn_out_gate && ly->wq_gate)
+                matvec_b(m->tp, m->q_gate, q_dim, ly->wq_gate, m->xb, xdim,
+                         n_embd, q_dim, NULL, n);
         }
         // gemma4 E-series shared-KV layers project Q as usual but compute no
         // K/V at all: they attend over the cache an earlier layer already
@@ -3305,7 +3378,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                             m->xb2 + (size_t)b * xdim, p, t0, hd, kv_dim,
                             row_b, m->kv_q8, scale, ly->attn_sinks };
             tpool_run(m->tp, attn_heads, &aj, m->n_head);
-            if (m->qwen35)
+            if (m->qwen35 || (m->attn_out_gate && ly->wq_gate))
                 for (int i = 0; i < q_dim; i++) {
                     float g = m->q_gate[(size_t)b * q_dim + i];
                     m->xb2[(size_t)b * xdim + i] *= 1.0f / (1.0f + expf(-g));

@@ -296,6 +296,14 @@ typedef struct {
     bool   swa_rope_global;
     bool   gptoss;           // gpt-oss: attention sinks + swiglu_oai + MoE
                              // biases; no GPU kernels for those yet
+    bool   attn_out_gate;    // afmoe: per-element sigmoid output gate from a
+                             // separate blk.N.attn_gate projection of the
+                             // normed block input (Qwen "G1"), applied to the
+                             // concatenated heads before attn_output. Reuses
+                             // the qwen35 q_gate scratch; CPU only for now.
+    int    n_dense_lead;     // afmoe leading_dense_block_count: the first N
+                             // layers of an n_expert>0 model are plain dense
+                             // FFN (no router). 0 everywhere else.
     bool   cpu_moe;          // keep sparse expert FFNs on the host while CUDA
                              // runs the remaining tensors/layers
     bool  *moe_host;         // [n_layer] per-layer expert placement under

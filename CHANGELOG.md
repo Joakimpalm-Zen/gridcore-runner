@@ -3,6 +3,21 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## Unreleased
+
+- **New architecture: `afmoe` (Arcee Trinity family — Trinity-Nano-Preview,
+  Trinity-Mini).** Plain-transformer sparse MoE with muP-scaled embeddings,
+  Qwen-G1 output-gated attention (a per-element sigmoid gate from a separate
+  `attn_gate` projection — shares the qwen35 gate machinery), per-head-dim
+  QK norms, a 3-local:1-global sliding-window pattern whose global layers
+  are NoPE (the Llama-4 knob at step 4), DeepSeek-style sigmoid routing with
+  a selection-only bias plus renormalized weights scaled by
+  `expert_weights_scale`, one always-on shared expert, and leading dense
+  blocks. New `afmoe` pre-tokenizer (right-aligned digit-triplet splitting,
+  CJK/Asian-script isolation, punctuation-letter contractions). CPU only:
+  Metal and CUDA refuse loudly and fall back. Certification record in the
+  README table.
+
 ## v0.1.7-alpha — 2026-08-05
 
 ### We found a 13× optimization and rejected it

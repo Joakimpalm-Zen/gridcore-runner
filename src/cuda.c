@@ -1395,6 +1395,12 @@ bool gpu_init(model_t *m) {
                 "running on CPU\n");
         goto unsupported;
     }
+    if (m->attn_out_gate) {
+        // afmoe's per-element attention output gate has no device kernel yet;
+        // running without it would be silently wrong, so the whole model
+        // stays on the host.
+        goto unsupported;
+    }
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
