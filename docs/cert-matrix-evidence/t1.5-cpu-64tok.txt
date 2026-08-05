@@ -1,0 +1,8 @@
+The capital of France is true/falsehood- de-
+  
+        -
+                -
+                <|channel>thought
+<channel|>The capital of France is **Paris**.
+
+Therefore, the statement "The capital of France is Paris" is **true**.

@@ -252,3 +252,58 @@ GPU: {"gpu_layers":30,"layers":30,"prompt_tok_s":23.788,"gen_tok_s":24.127,"prom
 ### Summary
 
 Every gate that measures *implementation correctness* (admission, tokenizer, cpu_cuda, chat) passes cleanly. The one gate that misses its numeric bar (KLD) misses it for a reason already on record for this precise file, not a new defect. This is the cleanest result of the session and squarely supports treating this artifact as the lead QAT+MoE reference the goal doc expected it to be.
+
+## 5. Bartowski gemma-4-26B-A4B-it Q4_K_M — the QAT-vs-PTQ pair
+
+**Verdict: CERTIFIED-WITH-CAVEAT** — same shape of result as item 4 (admission/tokenizer/cpu_cuda/chat all pass, KLD misses the numeric bar for reasons already understood), but this row's real value is the **head-to-head against item 4's QAT build**, which the roster called out as "the whole QAT-vs-PTQ story in one row." It delivers a striking number.
+
+**Resolved:** `bartowski/google_gemma-4-26B-A4B-it-GGUF/google_gemma-4-26B-A4B-it-Q4_K_M.gguf`. Downloaded (17,035,039,872 bytes; one HTTP/2 hiccup mid-transfer, `--http1.1 --retry 5` completed it). sha256 `a07f72221e8e3f77455ab0d7f7652d01a9f63c262b954aa6932a53275a0e895a` verified. Deleted after this verdict; item 4's file was briefly re-symlinked (it costs nothing — it lives on the box already, outside this session's download budget) specifically to run the head-to-head comparison below, then removed again.
+
+### Gate 1 — Identity: **the experts ARE requantized here — the opposite of every gpt-oss row**
+
+**Manifest:** `GEMMA4-MOE / 30L / 128E / top8 / MIXED-PTQ(Q8_0/Q5_0/Q4_K, non-uniform per-layer) / gemma-canonical-chat`
+
+```
+tensor histogram (658 tensors): F32 x392, Q6_K x15, Q8_0 x83, Q5_K x30, Q4_K x106, Q5_0 x32
+expert-tensor types (150 tensors): F32 x90, Q8_0 x14, Q4_K x30, Q5_0 x16   <- MIXED, unlike item 4's uniform Q4_0
+non-uniform expert dtype ACROSS LAYERS: confirmed (some layers' experts sit at Q8_0, others Q5_0, others Q4_K)
+```
+
+This is the mirror image of the gpt-oss mixed-tensor-trap finding: where every gpt-oss conversion leaves MXFP4 experts untouched (because MXFP4 is gpt-oss's native/required format), Bartowski's standard PTQ pipeline for gemma-4 **does** requantize the experts, and does so **non-uniformly per layer** — almost certainly imatrix-guided, giving more bits to layers whose activations are more sensitive. Worth recording precisely: "Q4_K_M" here is not one quant type applied once, it is a per-tensor-role, per-layer decision.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **0/721 diverge** — clean, same as item 4
+
+### Gate 4 — Reference: two numbers, and the interesting one is the comparison between them
+
+**Standard protocol (vs llama.cpp, 400 positions):** `mean_kld: 1.0055, top1_agreement_pct: 65.5, mean_top8_overlap: 0.660`. Misses the bar, and misses it by *more* than item 4 did (item 4: 80.5%/0.126). `docs/cert-matrix-evidence/t1.5-kld-raw.json`.
+
+**Head-to-head, this file vs item 4's QAT build (both runner-served, 400 positions, `kld-compare-raw.py --model-a --model-b` — no third engine involved):**
+
+```json
+{"positions_scored": 400, "mean_kld": 1.9503, "top1_agreement_pct": 37.5, "mean_top8_overlap": 0.351}
+```
+
+**The two "same" 26B-A4B models disagree with EACH OTHER (37.5% top-1) even more than either disagrees with llama.cpp.** This is not a contradiction, and not a harness bug (the tool's self-comparison zero point was independently re-verified during the T1.1 investigation earlier this session, `mean_kld 0.0 / top1 100%`): it is the direct, expected consequence of the already-documented finding for this architecture — top-8-of-128 expert routing is decided by ties as fine as 0.0002 in weight, so ANY precision difference between two builds can flip which experts fire and rewrite up to an eighth of the FFN output. QAT-vs-PTQ is a *much* larger precision difference than the KV-cache-only perturbation the sensitivity-floor study used (which alone produced 11/16 runner-self-disagreements) or than switching inference engines on the *same* weights, so a bigger disagreement here than either of those is the predicted result, not an anomaly.
+
+**The comparative signal worth keeping**: item 4 (QAT) agrees with llama.cpp on 80.5% of positions; item 5 (PTQ) agrees on only 65.5%. Whatever the QAT training does, it makes this model's output *more* consistent with an independent reference implementation than post-hoc quantization of the same architecture does — a real, measurable point in QAT's favor for a model this routing-sensitive, precisely the experiment the roster asked this pairing to run.
+
+### Gate 5 — cpu_cuda: **PASS** — byte-identical (64 tokens; generation ended at 48 tokens via natural EOS on this prompt)
+
+### Gate 6 — Chat smoke: **PASS**
+
+`"What is 2+2? Answer briefly."` -> `"4"`, `finish_reason: "stop"`. Same clean behavior as item 4.
+
+### Gate 7 — Perf row (re-measured on a quiet box after the head-to-head comparison's two concurrent servers exited)
+
+```
+CPU: {"gpu_layers":0,"layers":30,"prompt_tok_s":8.567,"gen_tok_s":6.369,"prompt_s":59.764,"gen_s":40.192}
+GPU: {"gpu_layers":30,"layers":30,"prompt_tok_s":83.562,"gen_tok_s":47.944,"prompt_s":6.127,"gen_s":5.340}
+```
+
+Notably faster on GPU than item 4's QAT build (47.9 vs 24.1 gen tok/s) — plausibly Q4_K's dequant kernels are better optimized on this hardware than Q4_0's, though this was not investigated further (out of scope for a perf-row record).
+
+### Summary
+
+Gates 1-3, 5-6 pass; gate 4 misses the numeric bar for a documented, architecture-level reason. The distinguishing result of this row is the QAT-vs-PTQ head-to-head the roster specifically asked for: two nominally-equivalent 26B-A4B builds disagree with each other more than either disagrees with an independent engine, and the QAT build is measurably closer to that independent engine than the PTQ build is. That is a genuine, actionable data point about which quantization strategy to prefer for this architecture — delivered exactly as the roster's own framing predicted it would be.
