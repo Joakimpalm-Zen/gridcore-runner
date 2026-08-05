@@ -161,6 +161,20 @@ Two ways:
 Note: safetensors checkpoints must be converted to GGUF first — runner runs
 the converted GGUF.
 
+### Published artifacts
+
+Models this project built and certified are published on Hugging Face —
+only artifacts that passed the quality gate (top-1 ≥ 97%, KLD ≤ 0.05 vs
+their parent) get uploaded; failed experiments ship as negative-result
+docs instead:
+
+- [**gpt-oss-20b-keep30-MXFP4**](https://huggingface.co/Joakimpalm-Zen/gpt-oss-20b-keep30-MXFP4-GGUF)
+  (11.5 GB) — gpt-oss-20b with the expert roster pruned 32 → 30 per layer,
+  expert FFNs still native MXFP4. The 16 GB-Mac artifact: the full model's
+  12.1 GB weight wrap exceeds the Metal working-set ceiling on that class
+  (see [docs/moe-support.md](docs/moe-support.md)); this one fits after
+  `sudo sysctl iogpu.wired_limit_mb=13312`.
+
 ### Requantizing to fit a machine
 
 ```
