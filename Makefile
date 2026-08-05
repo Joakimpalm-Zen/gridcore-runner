@@ -648,8 +648,8 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 		set -e; \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
 		$(PYTHON) -m pytest -q tests/test_apertus.py tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_cli_files.py tests/test_bench_json.py tests/test_mtp_admission.py tests/test_compare_llamacpp.py tests/test_release_check.py tests/test_eseries.py tests/test_stress_models.py tests/test_moe_prune_plan.py tests/test_kld_compare.py; \
-		$(MAKE) --no-print-directory test-moe PYTHON=$(PYTHON); \
-		$(MAKE) --no-print-directory test-prune-experts PYTHON=$(PYTHON); \
+		$(MAKE) --no-print-directory test-moe PYTHON="$(PYTHON)"; \
+		$(MAKE) --no-print-directory test-prune-experts PYTHON="$(PYTHON)"; \
 	else \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
 	fi
