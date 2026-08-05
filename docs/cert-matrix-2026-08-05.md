@@ -100,3 +100,52 @@ GPU: {"gpu_layers":24,"layers":24,"prompt_tokens":512,"generated_tokens":256,"pr
 ### Summary
 
 Admission and the file-identity manifest are clean. Three of the remaining four gates surface real, evidence-backed gaps: tokenizer (30.8% divergent), cpu_cuda (not byte-identical on this box's GPU), and chat smoke (runaway, non-coherent completion). The KLD reference gate misses the session's stated numeric bar but matches an already-documented, already-diagnosed characteristic rather than revealing something new. None of this was fixed (STOP rule) — every gate result here is the deliverable.
+
+## 2. Bartowski gpt-oss-20b Q6_K_L
+
+**Verdict: FAILED** — same three gates as item 1 fail (tokenizer, cpu_cuda, chat smoke), for the same underlying reasons. Included in full regardless, per "record with the same care as passes" — a repeat failure with identical root cause is still evidence, and gate 1 is the interesting one here.
+
+**Resolved:** `bartowski/openai_gpt-oss-20b-GGUF/openai_gpt-oss-20b-Q6_K_L.gguf`. Downloaded (curl over HTTP/2 reset mid-transfer once — retried with `--http1.1 --retry 5`, succeeded). sha256 `e729b05fa245760f29e230c71aa7a8afa3065838dd95dea169d50788babb10c5` matches the HF LFS blob exactly, 12,040,998,976 bytes. Deleted after this verdict per disk discipline.
+
+### Gate 1 — Identity: **the mixed-tensor trap, confirmed as the goal doc predicted**
+
+**Manifest:** `GPTOSS / 24L / 32E / top4 / MXFP4_MOE / Harmony` — architecturally identical to item 1.
+
+```
+tensor histogram (459 tensors): Q8_0 x74, F32 x289, Q6_K x24, MXFP4 x72
+expert-tensor types (192 tensors, all 24 layers uniform): F32 x120, MXFP4 x72   <- UNCHANGED from item 1
+non-expert-tensor types: Q8_0 x74, F32 x169, Q6_K x24                          <- 24 tensors moved Q8_0 -> Q6_K vs item 1
+```
+
+Confirmed exactly as the goal doc named this gate: **"Q6_K_L" in the filename refers only to 24 non-expert tensors** (Bartowski's embed/output-layer precision knob); **all 72 expert FFN tensors remain byte-for-byte the same MXFP4_MOE type** as the canonical ggml-org file. File size is actually marginally *smaller* than item 1 (12.04 GB vs 12.11 GB) despite the "Q6_K" name suggesting more precision than Q8_0 — it doesn't; Q6_K is lower-bit than Q8_0, so this is a small size/quality trade on a handful of non-expert tensors only. This is exactly the "record what each file ACTUALLY is, not what its name says" case gate 1 exists for.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **222/721 diverge (30.8%)**, identical count to item 1
+
+Same divergent-string set (CRLF-as-one-token, cross-hyphen merges) — confirms this is a runner-side tokenizer characteristic of the gpt-oss vocab/BPE table, not something introduced by Bartowski's conversion. `docs/cert-matrix-evidence/t1.2-difftok.log`.
+
+### Gate 4 — Reference (KLD, raw-completions protocol): consistent with item 1
+
+400 positions: `mean_kld: 0.1155, top1_agreement_pct: 84.0, mean_top8_overlap: 0.9003`. Within ~1 point of item 1's 83.0%/0.1276 — as expected, since the expert tensors (where the diagnosed MXFP4 `vec_dot_type` mismatch lives) are byte-identical between the two files; the 24 requantized non-expert tensors move the number only slightly. Misses the session's 97%/0.05 bar for the same already-diagnosed reason as item 1. Evidence: `docs/cert-matrix-evidence/t1.2-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **FAIL**, same pattern as item 1
+
+`--gpu off` vs `--gpu auto` diverge at 64 tokens on this box's Blackwell MIG slice (first divergent byte 33: CPU continues `"...Paris."\n\nSure! Here's a simple example..."`, GPU continues `"...Paris."\n    # Test with a non-existent page..."`). Consistent with item 1's finding, not re-litigated as a new mystery.
+
+### Gate 6 — Chat smoke: **FAIL**, same pattern as item 1
+
+`"What is 2+2? Answer briefly."` -> `" Assistant: 4. \nWe need to produce a response that is a single word, no punctuation..."` — answers correctly then continues into unrelated meta-commentary about the response format rather than stopping. Same Harmony-rendering / stop-handling characteristic as item 1. `docs/cert-matrix-evidence/t1.2-chat-smoke.json`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":24,"prompt_tok_s":62.078,"gen_tok_s":12.147,"prompt_s":8.248,"gen_s":21.076}
+GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":37.342,"gen_tok_s":31.568,"prompt_s":13.711,"gen_s":8.110}
+```
+
+Within noise of item 1's numbers, as expected for a file differing in only 24 non-expert tensors.
+
+### Summary
+
+The interesting result here is gate 1, exactly as the goal doc anticipated: Bartowski's "Q6_K_L" name is honest about *quantizing something*, but the experts — the overwhelming majority of the file's parameters and the reason MXFP4 exists at all — are untouched. Gates 3/5/6 reproduce item 1's failures with the same root causes (not re-diagnosed from scratch), which is itself informative: these are properties of the *architecture implementation on this runner build*, not properties of any one file.
