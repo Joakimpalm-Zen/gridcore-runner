@@ -203,3 +203,52 @@ GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":33.061,"gen_tok_s":28.644,"prom
 ### Summary
 
 Three-for-three on the mixed-tensor-trap gate 1 confirmation across independent conversion sources (ggml-org, Bartowski, Unsloth) — the finding generalizes: nobody who converts gpt-oss touches the expert tensors, because MXFP4 is gpt-oss's native/required format and there is no reason to requantize it. Gate 6 is the one genuinely new data point this file adds: Unsloth's documented chat-template patch changes *how* the failure manifests (clean stop vs runaway) without fixing the underlying issue (analysis-channel content leaking into the visible answer) — useful signal for whoever eventually debugs the runner's Harmony handling.
+
+## 4. Google gemma-4-26B-A4B-it QAT Q4_0
+
+**Verdict: CERTIFIED-WITH-CAVEAT** — six of seven gates pass cleanly; the one miss (gate 4, KLD) reproduces an already-documented "numerically chaotic" characteristic for this exact file (not a fresh finding). This is the strongest result of the session so far, and the goal doc's own framing ("QAT + MoE; the single most important new artifact in the list") is borne out.
+
+**Resolved:** `google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf`. Already present on the box (`gridcore-runner/models/gemma-4-26B_q4_0-it.gguf`); sha256 `3eca3b8f6d7baf218a7dd6bba5fb59a56ee25fe2d567b6f5f589b4f697eca51d` verified against the HF LFS blob before symlinking in — no download needed. 14,439,363,584 bytes.
+
+### Gate 1 — Identity
+
+**Manifest:** `GEMMA4-MOE / 30L / 128E / top8 / Q4_0-QAT / gemma-canonical-chat`
+
+```
+architecture: gemma4   block_count: 30   expert_count: 128   expert_used_count: 8
+embedding_length: 2816  feed_forward_length: 2112  expert_feed_forward_length: 704
+context_length: 262144
+tensor histogram (658 tensors): F32 x392, Q6_K x1 (token_embd), Q4_0 x265
+expert-tensor types (150 tensors, fused gate_up_exps + down_exps x30 layers = 60 quantized + 90 F32 aux, uniform): F32 x90, Q4_0 x60
+```
+
+Genuinely QAT: the experts are quantization-*aware*-trained Q4_0, not a post-hoc requant of a bf16 checkpoint — a materially different provenance from every gpt-oss file above, where MXFP4 is native but nothing else in the file is QAT'd.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **0/721 diverge** vs `google/gemma-4-26B-A4B-it` — clean
+
+### Gate 4 — Reference (KLD, gemma4-moe protocol): misses the numeric bar, but matches a documented floor
+
+400 positions (raw-completions protocol, same tool built for the gpt-oss rows): `mean_kld: 0.1255, top1_agreement_pct: 80.5, mean_top8_overlap: 0.841`. Misses 97%/0.05.
+
+**This is not a new finding.** `tests/compatibility/out/divergence-study-gemma4-moe-2026-08-01.json` already measured **this exact file** (sha `3eca3b8f`, listed by name) at 16 prompts x 16 tokens: `self_runner_identical: 3/8 (24 tok)` (i.e. the runner disagrees with *itself* under a KV-precision perturbation more than it disagrees with llama.cpp: `cross_engine_identical: 5/16`). Root cause already diagnosed there: discrete top-8-of-128 expert routing over Q4_0 weights is unstable at ties — layer 2's 6th/7th-ranked experts sat 0.0002 apart, so ordinary rounding flips which expert fires and rewrites an eighth of the FFN output. My 400-position measurement is a more statistically robust confirmation of the same documented chaos, at the same order of magnitude (roughly 1-in-5 disagreement either way). README's existing framing — "too numerically chaotic to gate on token identity" — holds. Evidence: `docs/cert-matrix-evidence/t1.4-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **PASS** — byte-identical
+
+`--gpu off` vs `--gpu auto` (full 30/30 offload, 14.4 GB in VRAM on this box's Blackwell MIG slice) produce **byte-identical** 64-token output. Notably different from every gpt-oss row above (all FAIL this gate on this box) — gemma4's dense+routed dual-branch MoE math evidently reproduces across CPU/CUDA on this specific hardware even though gpt-oss's MXFP4 kernels do not.
+
+### Gate 6 — Chat smoke: **PASS**
+
+`"What is 2+2? Answer briefly."` -> `"4"`, `finish_reason: "stop"`. Clean, direct, correctly terminated — no analysis-channel leakage, no runaway. `docs/cert-matrix-evidence/t1.4-chat-smoke.json`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":30,"prompt_tok_s":8.886,"gen_tok_s":6.638,"prompt_s":57.616,"gen_s":38.566}
+GPU: {"gpu_layers":30,"layers":30,"prompt_tok_s":23.788,"gen_tok_s":24.127,"prompt_s":21.524,"gen_s":10.610}
+```
+
+### Summary
+
+Every gate that measures *implementation correctness* (admission, tokenizer, cpu_cuda, chat) passes cleanly. The one gate that misses its numeric bar (KLD) misses it for a reason already on record for this precise file, not a new defect. This is the cleanest result of the session and squarely supports treating this artifact as the lead QAT+MoE reference the goal doc expected it to be.
