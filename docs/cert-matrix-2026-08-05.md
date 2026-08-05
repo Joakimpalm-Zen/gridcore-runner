@@ -677,3 +677,63 @@ GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":37.144,"gen_tok_s":32.490,"prom
 ### Summary
 
 Two findings worth keeping separate from the rest of the gpt-oss family's now-familiar pattern: cpu_cuda divergence is confirmed prompt-dependent rather than universal (a nuance the earlier all-MXFP4 rows didn't need to establish since they diverged on every prompt tried), and this specific alignment-modified checkpoint leaks a foreign chat-template artifact rather than its own architecture's markup — a more specific, and arguably more concerning, failure than generic incoherence.
+
+## 14. Gemma 4 12B Coder fine-tune (yuxinlu1, "fable5-composer2.5")
+
+**Verdict: FAILED** on the raw-completion identity gate (1/6, a real regression from the base model's 4/6) — but a genuinely good, cleanly-passing chat smoke result, and the divergence pattern points at the merged checkpoint's own stability rather than a runner bug.
+
+**Resolved:** `yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF/gemma4-coding-Q4_K_M.gguf`. Downloaded, sha256 `1fe90b72e105d7bc71650aa59883edece3e84751af489075217a7ae717b1fe8d` verified, 7,381,381,664 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity
+
+**Manifest:** `GEMMA4-DENSE / 48L / Q4_K_M-requant / custom-channel-chat-template`
+
+```
+architecture: gemma4   block_count: 48 (matches item 6's base)   general.name: "Gemma4 Coding Merged Fp16"
+tensor histogram (667 tensors): F32 x338, Q6_K x45, Q4_K x284
+```
+
+`general.name` names this as a **merged** checkpoint (LoRA/delta merge into the base FP16, then requantized) — worth flagging as a provenance detail that turns out to matter below. The chat template is custom (a `format_parameters` Jinja macro for tool schemas), not the standard "Google Gemma 4 Canonical Chat Template" seen in items 6/8.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **0/721 diverge** vs `google/gemma-4-12B-it` — clean
+
+### Gate 4 — Reference: **greedy identity 1/6 — a real regression from the base model's 4/6, but the cause looks like model instability, not a runner bug**
+
+| case | n | identical |
+|---|---:|---|
+| a | 64 | no (diverges at byte 0 — first token) |
+| b | 64 | **yes** |
+| c | 64 | no (byte 185) |
+| d | 64 | no (byte 0) |
+| b-long | 256 | no (byte 397) |
+| c-long | 256 | no (byte 185, same position as the short run) |
+
+The byte-0 divergences are the interesting evidence, not just "worse luck": both engines' *raw, non-chat* completions for prompts (a) and (d) spontaneously emit garbled channel-style markup neither prompt asked for —
+
+```
+ref (a): 'g<|channel>thought\n<|channel>thought\n<channel|>The...'
+run (a): '\n<|channel>thought\nthought: The user is asking for...'
+ref (d): '\n<|channel>thought\n<channel|>Een kvicksilvertermom...'
+run (d): '<channel|><channel|>'
+```
+
+Both sides produce malformed variants of the same channel-token vocabulary (missing/misplaced pipes) — this looks like a checkpoint that has learned a Harmony-like "thinking channel" habit strongly enough that it surfaces even under bare-text continuation (no chat template applied), and the *merge* is not fully clean (a `<channel|><channel|>` degenerate loop on the runner side for prompt (d) is a stability problem in the weights, not obviously an engine disagreement). Prompt (c)'s divergence is much milder — both sides produce fluent, on-topic text that simply phrases the Apollo 11 summary differently from token ~185 on, closer to the "near-tie" shape seen in items 6 and 8. Recorded as a real 1/6 result, with the likely (not confirmed) explanation noted rather than asserted. Evidence: `docs/cert-matrix-evidence/t2.14-greedy-identity.json`.
+
+### Gate 5 — cpu_cuda: **PASS** — byte-identical (64 tokens, full 48/48 offload)
+
+### Gate 6 — Chat smoke: **PASS** — cleanly, despite the raw-completion instability above
+
+`"What is 2+2? Answer briefly."` -> `"2+2 = 4"`, `finish_reason: "stop"`. No channel-markup leakage here. This is a meaningful contrast with gate 4: **the model's own chat template, applied through the normal `/v1/chat/completions` path, produces a clean answer** — the channel-habit behavior surfaced by gate 4's raw-completion protocol does not manifest under realistic chat usage. Worth keeping the two results separate rather than letting one contaminate the other.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":48,"prompt_tok_s":35.944,"gen_tok_s":8.170,"prompt_s":14.244,"gen_s":31.332}
+GPU: {"gpu_layers":48,"layers":48,"prompt_tok_s":76.101,"gen_tok_s":34.473,"prompt_s":6.728,"gen_s":7.426}
+```
+
+### Summary
+
+A real-world fine-tune (merged, not QAT) shows its own instability under the raw-completion identity protocol — likely the merge process, not the runner — while passing cpu_cuda and, notably, the actual chat-usage smoke test cleanly. The lesson worth keeping for future rows: a raw-completion identity gate and a chat-usage smoke gate can legitimately disagree about the same checkpoint, and both numbers are worth recording rather than only the more convenient one.

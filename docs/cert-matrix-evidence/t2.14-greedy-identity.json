@@ -1,0 +1,66 @@
+{
+  "n_pass": 1,
+  "n_total": 6,
+  "results": [
+    {
+      "tag": "a",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 0,
+      "ref_sha256": "6517be3e7b530448778663157214cc758c6966fa09586e2b998437e8387a2ff9",
+      "runner_sha256": "bb61667ef40b0e16d818ae80b7f47977e07053f0b81e6bb24671def30ea0569d",
+      "ref_tail": "g<|channel>thought\n<|channel>thought\n<channel|>The",
+      "runner_tail": "\n<|channel>thought\nthought: The user is asking for"
+    },
+    {
+      "tag": "b",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "283820ca7fc2e8c93c32138d5008300bcaf1a59b14061262742f5244e90c9994",
+      "runner_sha256": "283820ca7fc2e8c93c32138d5008300bcaf1a59b14061262742f5244e90c9994",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "c",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 185,
+      "ref_sha256": "a53b0132960733e9e206326b711a36dc7effe17a48072b24f28547c9d93c0f5e",
+      "runner_sha256": "d6f9e7d5922e535222c010e91d170a127040e0028d88909811e5451a5bd8c110",
+      "ref_tail": "vent drew a global audience of exactly 12,345,67 viewers, wh",
+      "runner_tail": "vent drew the attention of the world, with exactly 12,345,67"
+    },
+    {
+      "tag": "d",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 0,
+      "ref_sha256": "00cd36f9f4eed29bcb10ec6b9906f8cb55e2f9252ada914d9d15aa6a194cdcaf",
+      "runner_sha256": "a2e8e7e708a9f8a24b4d2d96c0deec3acc2bcead0d6988579bf3b54a311ac39b",
+      "ref_tail": "\n<|channel>thought\n<channel|>Een kvicksilvertermom",
+      "runner_tail": "<channel|><channel|>"
+    },
+    {
+      "tag": "b-long",
+      "n": 256,
+      "identical": false,
+      "first_divergent_byte": 397,
+      "ref_sha256": "1bca0fd9947fa2551b3e686c2df4584787af29f8f331d24d6d0a681056b15516",
+      "runner_sha256": "e6ef68f27917f578cd440af0cb42f5f81015e3d4fbf00d3d752b7e71a0fdeb88",
+      "ref_tail": "rr = head\n    \n    while curr:\n        next_node = curr.next",
+      "runner_tail": "rr = head\n\n    while curr:\n        next_node = curr.next  # "
+    },
+    {
+      "tag": "c-long",
+      "n": 256,
+      "identical": false,
+      "first_divergent_byte": 185,
+      "ref_sha256": "b908688fcf054bfadf4b8f0a690355870f00d2c25dd4adbd0a6c55b3e4f2394b",
+      "runner_sha256": "aec33aacf1bb8a29a362a1d385f553def452af05e17c7c450b5bbd77c7ae98aa",
+      "ref_tail": "vent drew a global audience of exactly 12,345,67 viewers, wh",
+      "runner_tail": "vent drew the attention of the world, with exactly 12,345,67"
+    }
+  ]
+}
