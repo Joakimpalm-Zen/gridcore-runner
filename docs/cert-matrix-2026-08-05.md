@@ -534,3 +534,49 @@ Gates 3-7 do not apply; a refused load ends the battery.
 ### Summary
 
 This roster slot ("probably unreachable — prove it with numbers") delivered a different but equally concrete result: the blocker here is a runner-side format gap (no split-GGUF support), not a numbers-based unreachability finding. Multi-part GGUFs are the standard distribution format for anything past roughly the 30-40 GB single-file comfort zone (120B-class models routinely ship this way), so this is a real capability gap worth flagging independent of whether REAP-58B specifically would have passed its other gates.
+
+## 11. gpt-oss-safeguard-20b (Unsloth conversion)
+
+**Verdict: FAILED** — same family pattern as items 1-3: mixed-tensor-trap confirmed, tokenizer/cpu_cuda/chat all fail identically to the base model. The Harmony-specific stress test (no leaked channel tokens into visible content) passes narrowly, but the underlying non-coherent-completion problem is the same one every gpt-oss row has shown.
+
+**Resolved:** `unsloth/gpt-oss-safeguard-20b-GGUF/gpt-oss-safeguard-20b-Q4_K_M.gguf`. Downloaded (11,624,759,232 bytes; the first download attempt via plain `curl` degraded to ~1 MB/s and was abandoned in favor of `hf download`, which completed at normal speed — recorded since it is a real, reproducible tooling difference worth knowing for future sessions on this box). sha256 `7c70a6d00294bafb0a118d4deb1697ee8cf0cef8e65dc5dedcc25cbbe4699bad` verified. Deleted after this verdict.
+
+### Gate 1 — Identity
+
+**Manifest:** `GPTOSS / 24L / 32E / top4 / MXFP4_MOE / Harmony` (specialized safety-classifier fine-tune, same architecture and expert count as the base model)
+
+```
+tensor histogram (459 tensors): Q8_0 x13, F32 x289, Q5_0 x61, Q4_K x24, MXFP4 x72
+expert-tensor types (192 tensors): F32 x120, MXFP4 x72   <- experts unchanged, same as every other gpt-oss row
+```
+
+Fourth confirmation of the mixed-tensor-trap pattern (Unsloth's own "Dynamic" per-tensor-role non-expert quantization, same shape as item 3), now on a specialized fine-tune rather than the base checkpoint.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **222/721 diverge (30.8%)** vs `openai/gpt-oss-safeguard-20b` — identical count to every other gpt-oss row
+
+### Gate 4 — Reference (KLD): `mean_kld: 0.1361, top1_agreement_pct: 73.75, mean_top8_overlap: 0.873`
+
+Within the family's usual range (66-88% top-1 across items 1/2/3/9/11), consistent with the same already-diagnosed MXFP4 activation-quantization mismatch. Evidence: `docs/cert-matrix-evidence/t2.11-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **FAIL**, same pattern as every MXFP4-native gpt-oss row
+
+### Gate 6 — Chat smoke: **the specific Harmony-leak check passes; the coherence bar still fails**
+
+```
+'"\n\nWe need to produce a short answer: 4. But also we need to follow the style guidelines: "You are a helpful assistant. You should respond in a short answer." So answer: 4. Also we might add a short explanation? But the instruction says "Answer briefly." So'
+```
+
+`finish_reason: "length"`. No literal `<|channel|>`/`<|message|>`/`<|start|>`/`<|end|>`/`<|constrain|>` tokens leak into the `content` field — the specific check the goal doc names for this family ("verify no Harmony channel markup leaks into content") is clean. But the response is still not a coherent, direct answer: it is entirely analysis/meta-commentary about how to format a reply, identical in shape to items 1/2/9. Recorded precisely: the Harmony-tag-leak check and the general-coherence check are two different bars, and this file passes only the first. `docs/cert-matrix-evidence/t2.11-chat-smoke.json`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":24,"prompt_tok_s":58.172,"gen_tok_s":11.069,"prompt_s":8.801,"gen_s":23.127}
+GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":33.034,"gen_tok_s":29.794,"prompt_s":15.499,"gen_s":8.592}
+```
+
+### Summary
+
+A specialized fine-tune inherits every characteristic already found in the base architecture on this runner build, unchanged. The one genuinely new check this row ran — no raw Harmony markup leaking into a safety-classifier's visible output — passes, which is worth keeping separate from the broader "is the completion coherent" failure it shares with the rest of the family.
