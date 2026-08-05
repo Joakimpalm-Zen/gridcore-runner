@@ -444,3 +444,59 @@ GPU: {"gpu_layers":60,"layers":60,"prompt_tok_s":2.096,"gen_tok_s":3.250,"prompt
 ### Summary
 
 The identity gates are unambiguously the best of the session (5/6, both long runs exact) for what is also the largest dense model tested. The perf row is the interesting anti-correlated result: bigger and more correct here does not mean faster on this specific, VRAM-constrained GPU slice — a genuinely useful data point for anyone sizing which of these artifacts to run on a small GPU versus CPU.
+
+## 9. GPT-OSS Nano 9B (squ11z1, community ~12-expert prune)
+
+**Verdict: FAILED** — the "expert roster differs from family" admission test the roster wanted: admission itself is a clean, unqualified PASS (the runner's per-layer expert-count handling works correctly on a real third-party pruned file, not just ones pruned by this project's own `--prune-experts`), but the same tokenizer/chat-smoke issues from every gpt-oss row persist, and gate 4 only half-clears its bar.
+
+**Resolved:** `squ11z1/gpt-oss-nano/gpt-oss-9b-q4_k_m.gguf` (base model gpt-oss-20b, per the repo's own `base_model` tag). Downloaded, sha256 `794da0a902b161bc1ba0eb4a7f0e4e5ef804f5ee93ec7f01ba8927b755a278fa` verified, 6,825,064,608 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity: **confirmed 12-expert prune, and a full requant — not a metadata trick**
+
+**Manifest:** `GPTOSS / 24L / 12E / top4 / MIXED-REQUANT(Q8_0/Q5_0, non-uniform per-layer) / Harmony`
+
+```
+gpt-oss.expert_count: 12   (was 32 in every Tier-1 gpt-oss file)   gpt-oss.expert_used_count: 4 (unchanged)
+tensor histogram (459 tensors -- SAME count as the 32-expert files): Q8_0 x25, F32 x289, Q5_0 x121, Q4_K x24
+expert-tensor types (192 tensors): F32 x120, Q8_0 x12, Q5_0 x60   <- NOT MXFP4 at all; fully requantized
+non-uniform expert dtype across layers: confirmed
+```
+
+This is the mirror image of items 1-3's finding: `--prune-experts`-style pruning shrinks each expert tensor's 3rd dimension from 32 to 12 (same 459-tensor file structure, smaller `ne[2]`) *and* the whole file was requantized off MXFP4 onto a mixed Q8_0/Q5_0 scheme in the process — a real dequant-prune-requant pipeline, not a lightweight metadata edit.
+
+### Gate 2 — Admission: **PASS** — the interesting result this row exists to produce
+
+Loads cleanly on both CPU and CUDA with no complaint about the non-standard expert count. This is a genuine, valuable cross-check: the runner's per-layer `n_expert` handling (read from each layer's own router tensor, independent of a model-wide constant — the same mechanism this project's own `--prune-experts` pruning depends on) works correctly on a file pruned by an entirely different, third-party pipeline.
+
+### Gate 3 — Tokenizer: **222/721 diverge (30.8%)** — identical count to every other gpt-oss row
+
+Confirms (again) this is a runner-side vocab/BPE characteristic independent of expert count or quantization.
+
+### Gate 4 — Reference (KLD): **mixed — KLD bar clears, top-1 bar does not**
+
+400 positions: `mean_kld: 0.0402, top1_agreement_pct: 88.0, mean_top8_overlap: 0.901`.
+
+**This is the best KLD result of any gpt-oss file this session** (previous best: item 1's 0.1276), and mean KLD **clears** the session's own 0.05 bar — only top-1 (88.0% vs. 97%) misses. Plausible reading, not confirmed: a 12-expert pool has fewer near-tie routing decisions than a 32-expert pool, so the already-diagnosed MXFP4-vs-fp32 activation-quantization mismatch (see item 1) has fewer opportunities to flip a selection — consistent with, not contradicting, that root cause. Evidence: `docs/cert-matrix-evidence/t2.9-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **PASS** — byte-identical, unlike every native-MXFP4 gpt-oss file
+
+`--gpu off` vs `--gpu auto` (full 24/24 offload) match exactly at 64 tokens. Every Tier-1 gpt-oss row (native MXFP4 experts) failed this gate on this box; this fully-requantized-to-Q8_0/Q5_0 file passes it. Consistent with the item 1 diagnosis being specifically about the MXFP4 kernel path — a file with no MXFP4 tensors left has nothing to disagree about there.
+
+### Gate 6 — Chat smoke: **FAIL** — same shape as items 1/2
+
+```
+'"\n\nWe need to parse the instruction: "What is 2+2? Answer briefly." ... So the answer: 2+2 is 4. The user wants a brief answer. So we should answer: '
+```
+
+`finish_reason: "length"` — runs to the token cap without emitting a clean final answer, though the analysis text shows it "knows" the answer internally ("2+2 is 4"). Same Harmony-rendering characteristic as the base model's own conversions, inherited through the prune. `docs/cert-matrix-evidence/t2.9-chat-smoke.json`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":24,"prompt_tok_s":68.784,"gen_tok_s":9.941,"prompt_s":7.444,"gen_s":25.752}
+GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":35.883,"gen_tok_s":31.762,"prompt_s":14.269,"gen_s":8.060}
+```
+
+### Summary
+
+The admission test the roster designed this row to run — does the runner's per-layer expert-count machinery handle a real third-party expert prune, not just this project's own — is an unqualified yes. That is genuinely valuable evidence for the pruning infrastructure generally. The overall verdict is still FAILED because gate 6 fails and gate 4 only half-clears, both consistent with characteristics already seen across the gpt-oss family rather than new problems specific to pruning.
