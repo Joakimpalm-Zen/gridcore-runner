@@ -1,5 +1,6 @@
 // runner — CLI: one-shot completion, interactive chat, and server launcher.
 #include "runner.h"
+#include "instances.h"
 
 #include "compat.h"
 #include "json.h"
@@ -547,6 +548,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 load_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
+        // Discovery registry: run modes announce themselves so the tray (or
+        // any controller) can list every live runner. Best-effort — failure
+        // never affects the run. Utility modes (--quantize/--caps/--bench)
+        // stay unregistered.
+        if (!bench_json && !quant_out) {
+            const char *bn = strrchr(load_path, '/');
+#ifdef _WIN32
+            const char *bn2 = strrchr(load_path, '\\');
+            if (bn2 && (!bn || bn2 > bn)) bn = bn2;
+#endif
+            bn = bn ? bn + 1 : load_path;
+            const char *const names[] = { bn };
+            const char *const paths[] = { load_path };
+            instances_register(serve ? "serve" : "cli", serve ? port : 0,
+                               names, paths, 1);
+            atexit(instances_unregister);
+        }
         if (m.mtp_layers)
             fprintf(stderr, "mtp: %d predictor block(s) declared and excluded "
                     "from the backbone (training-only; not consumed)\n",
@@ -569,6 +587,12 @@ int main(int argc, char **argv) {
     }
 
     if (serve) {
+        if (registry) {
+            // swap-mode server: models come and go at runtime; the record
+            // carries none and readers ask /v1/models live
+            instances_register("serve", port, NULL, NULL, 0);
+            atexit(instances_unregister);
+        }
         int rc = server_run(registry ? NULL : &m, registry ? NULL : &tok,
                             model_path, &mp, smp, &ov, port, parallel, n_threads,
                             ttl, draft_path, draft_k, ignore_eos);

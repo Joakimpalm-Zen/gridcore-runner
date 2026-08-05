@@ -83,6 +83,7 @@ TEST_GRAMMAR_FF = $(TEST_BATCH:test-batch%=test-grammar-ff%)
 TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
 TEST_KV_TOL = $(TEST_BATCH:test-batch%=test-kv-tol%)
 TEST_QUANTS_SIMD = $(TEST_BATCH:test-batch%=test-quants-simd%)
+TEST_INSTANCES = $(TEST_BATCH:test-batch%=test-instances%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_MOE_ROUTER = $(TEST_BATCH:test-batch%=test-moe-router%)
@@ -110,7 +111,7 @@ TEST_THREAD_DEFAULT = $(TEST_BATCH:test-batch%=test-thread-default%)
 # what `make` considers a dependency.
 HDR = $(wildcard src/*.h)
 
-SRC = src/gguf.c src/compat.c src/quants.c src/tokenizer.c src/model.c src/sample.c \
+SRC = src/gguf.c src/compat.c src/quants.c src/instances.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
       src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/http.c src/registry.c src/scheduler.c src/completion.c src/api_responses.c src/api_anthropic.c src/server.c \
       src/main.c $(GPU_SRC)
@@ -316,6 +317,11 @@ $(TEST_KV_TOL): $(TEST_KV_TOL_SRC) $(HDR)
 TEST_QUANTS_SIMD_SRC = tests/test_quants_simd.c src/quants.c
 $(TEST_QUANTS_SIMD): $(TEST_QUANTS_SIMD_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_QUANTS_SIMD_SRC) -o $@ -lm -lpthread
+
+# discovery registry: pure-C, runs against a private HOME/APPDATA
+TEST_INSTANCES_SRC = tests/test_instances.c src/instances.c src/json.c
+$(TEST_INSTANCES): $(TEST_INSTANCES_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_INSTANCES_SRC) -o $@ -lm
 
 # TC tolerance gate: same shape as the q8-KV gate — teacher-forced logits,
 # top-1 + bounded-deviation criteria, per (type, arch) via the model argument
@@ -562,7 +568,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM_DEP) \
-      $(TEST_QUANTS_SIMD) \
+      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
       $(TEST_THREAD_DEFAULT) \
@@ -593,6 +599,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
 	./$(TEST_QUANTS_SIMD)
+	./$(TEST_INSTANCES)
 	@# the fused-vs-eager routing gate needs a fixture whose router is not
 	@# zero: the dense-oracle MoE fixtures are 0.5/0.5 either way and can only
 	@# compare a routing path with itself (it self-skips on those, correctly)
@@ -734,7 +741,7 @@ clean:
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
-	      $(TEST_QUANTS_SIMD) \
+	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \
