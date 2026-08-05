@@ -66,7 +66,13 @@ static NSImage *grid_icon(bool filled) {
         case TRAY_K_SUB_BEGIN: {
             NSMenu *sub = [[NSMenu alloc] init];
             sub.autoenablesItems = NO;
-            if (last) [cur setSubmenu:sub forItem:last];
+            if (last) {
+                // AppKit refuses to open a submenu hanging off a disabled
+                // item — the parent row must be enabled (it has no action,
+                // so clicking it still does nothing)
+                last.enabled = YES;
+                [cur setSubmenu:sub forItem:last];
+            }
             cur = sub;
             break;
         }
