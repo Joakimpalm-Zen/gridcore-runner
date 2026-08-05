@@ -181,3 +181,39 @@ answers this) and (c) compute/IO overlap; acceptance (a) merely moves us
 along a curve that clears the bar everywhere. Source-hygiene note: the
 same web sweep attributes "TurboQuant" to an SEO cluster shilling a
 patched llama.cpp fork — consistent with note 2's assessment.
+
+## Addendum 3: unknown (b) RESOLVED — scattered reads run at 90% of sequential on the M1
+
+Standalone probe (no engine code): K concurrent page-aligned F_NOCACHE
+preads of 3.25 MiB at random offsets in a real 11.5 GB GGUF, 30
+layer-serialized rounds per pass (the barrier the real engine cannot
+avoid), 3 reps. Measured on the 8 GB M1:
+
+| pattern | sustained | note |
+|---|---|---|
+| K=1 serial (QD1) | 2.07–2.11 GB/s | the SSD saturates at queue depth 1 |
+| K=7 concurrent | 2.13–2.17 GB/s | top-16-cache miss traffic, eff K=2 |
+| K=12 concurrent | 2.10 GB/s | eff K=4 miss traffic |
+| K=21 concurrent | 2.09–2.11 GB/s | no-cache K=4 union |
+
+**Scattered ~3 MB aligned reads cost nothing on this hardware: 90% of
+the 2.35 GB/s sequential figure, at ANY concurrency, layer barriers
+included.** Gemini's proposed probe was directionally right but had a
+10x read-size error (32 MB vs 3.2 MB), strided-not-random offsets (SSD
+prefetch flatters strides), a broken percentage printf, and no layer
+serialization; this probe fixes all four.
+
+I/O-only token rates from the measured runs (pass time / effective K):
+eff K=2 with top-16 cache: 329 ms / 2 = **~6.1 tok/s**; eff K=4:
+585 ms / 4 = **~6.8 tok/s**; no-cache K=4: ~3.9. The cached
+configurations clear the 5 tok/s bar ON MEASURED I/O, not estimates.
+
+Kill-order status: (a) MTP acceptance — pending, item 17; (b) scattered
+bandwidth — **RESOLVED, no penalty**; (c) compute/IO overlap — now the
+live risk, and honestly the bigger one: gemma-26B is ~4B-active, and the
+Blackwell CPU row for it was 6.6 tok/s on 128 threads. Four M1 P-cores
+computing K verify positions must land at or above ~5 tok/s themselves
+for the overlapped pipeline to hold the bar. Next measurement (still no
+engine work): a resident-compute proxy — batch-K CPU forward throughput
+of a 4B-active-class model on the M1 (E4B or a truncated-layer 26B
+slice), overlapped-vs-serial with the probe's I/O pattern.
