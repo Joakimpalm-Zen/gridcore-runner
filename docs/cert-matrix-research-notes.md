@@ -80,3 +80,73 @@ keep-30), and its hit economics are what 0.65 tok/s already includes.
 The unpredictable tail experts are the misses by definition. Overlap of
 I/O with compute is likewise already in the rejected tier. Nothing new
 survives here that item 3's experiment would not subsume.
+
+---
+
+# Addendum (same day): items 3/6 re-measured from archived routing traces — the amortization math clears the bar for gemma-26B
+
+The owner supplied a follow-up proposal set (async zero-syscall I/O,
+token-tree speculative expert prefetch, lock-free ring buffers) aimed at
+the streaming gap, focused on **gemma-4-26B-A4B**. Instead of assessing
+it rhetorically, we computed the answers from the trip2/r0 archived
+routing traces (real gpt-oss-20b and gemma-26B routing decisions, plus
+gemma lookahead probes). Three measured results:
+
+**1. Lookahead expert prediction is confirmed dead** (the wall item 6
+predicted): gemma-26B lookahead-1 probes, predicted-vs-actual top-8:
+**60.0% hit rate** (chat, 127k probes), **53.5%** (agent-torture, 400k
+probes). Any prefetch scheme relying on predicting the *next* token's
+experts stalls on ~40–47% of its reads. Token-tree prefetch "fixes" this
+by fetching the union of several branches — i.e. spending multiples of
+the scarcest resource (bandwidth) to hedge a coin flip. Dead as proposed.
+
+**2. But batch-verify amortization needs NO prediction — and its measured
+ceiling clears the usable bar.** In speculative decoding the K draft
+tokens are *known* during verification; each layer computes routing for
+all K positions, then reads the union of needed experts once. Union
+sizes from real traces (per layer, K consecutive tokens):
+
+gemma-4-26B-A4B QAT Q4_0 (30L, 128E top-8, ~3.2 MB/expert, experts
+~12.3 GB of 14.4 GB) — ceiling at 3 GB/s NVMe, zero expert cache:
+
+| K | mean union (of 128) | GB/token | ceiling tok/s |
+|---|---|---|---|
+| 1 | 8.00 | 0.77 | 3.9 |
+| 2 | ~13 | 0.62 | ~4.8 |
+| 4 | ~20 | 0.49 | ~6.1 |
+| 8 | ~31 | 0.37 | ~8.1 |
+| 16 | ~44 | 0.26 | ~11.5 |
+
+(chat/doc/agent-torture traces agree within ~10%.)
+
+gpt-oss-20b MXFP4 (24L, 32E top-4, ~12.5 MB/expert): K=1 → 1.20 GB/token
+→ 2.5 tok/s; K=8 → 0.50 → ~6.0; K=16 → ~9.4. Worse than gemma at every K
+(fewer, fatter experts share less).
+
+**3. The target machine's real bandwidth:** measured 2.35 GB/s
+sequential on the 8 GB M1's SSD (3 GB cold-ish dd). Scaling: gemma K=1
+→ ~3.0 tok/s, K=4 → ~4.8, K=8 → ~6.4 — **the K≥4 amortized ceiling
+crosses the ≥5 tok/s usable bar on the actual hardware**, before any
+expert-cache hits (standing-committee residency only improves it; gemma's
+always-on dense branch + attention ≈ 2 GB must be resident anyway and
+fits the envelope).
+
+**What this changes:** the expert-cache rejection measured 1-token-per-
+load streaming (0.65 tok/s sealed, gpt-oss). Batch verification changes
+the loads-per-token arithmetic by 2–3×, and gemma-26B has an official
+MTP drafter (roster item 17 tests its losslessness + speedup on this
+very box). The pieces now compose into a falsifiable target:
+
+> **gemma-4-26B-A4B QAT (25B-class MoE) at ≥5 tok/s sustained on an
+> 8 GB M1**, via MTP draft + batch-verify union reads + aligned
+> F_NOCACHE streaming + hot-expert residency.
+
+Honest unknowns that decide it (in kill order): (a) MTP draft acceptance
+rate — effective K is acceptance-scaled, and K=2-3 effective is the bar's
+edge; item 17's measurement answers this; (b) achievable fraction of
+sequential bandwidth with ~3 MB scattered aligned reads (measure with a
+50-line standalone I/O probe before any engine work); (c) compute/I-O
+overlap efficiency on 4 P-cores. The async/ring-buffer engineering from
+the proposal is real but subordinate: it matters only if (a) and (b)
+survive. STOP rule unchanged: no engine work until all three numbers are
+in and the composed ceiling still clears 5 tok/s.
