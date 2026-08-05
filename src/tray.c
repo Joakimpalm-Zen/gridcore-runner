@@ -513,24 +513,13 @@ bool tray_any_running(void) {
 bool tray_should_quit(void) { return g_quit; }
 
 int tray_main(void) {
-    // one tray per machine: a live record with mode "tray" means another
-    // controller owns the icon
-    int n = 0;
-    instance_rec *r = instances_list(&n);
-    for (int i = 0; i < n; i++)
-        if (strcmp(r[i].mode, "tray") == 0 && r[i].pid != (long)getpid()) {
-            fprintf(stderr, "error: another tray controller is running (pid %ld)\n",
-                    r[i].pid);
-            instances_list_free(r, n);
-            return 1;
-        }
-    instances_list_free(r, n);
-
     cfg_load();
 
     // headless validation seam: dump the menu the backend would render and
     // exit. Lets CI and the remote Windows box assert menu content without
-    // a display; also what the human-click checklist diffs against.
+    // a display; also what the human-click checklist diffs against. Runs
+    // BEFORE the single-instance guard — it is read-only, and the checklist
+    // diffs it against a tray that is currently up.
     if (getenv("GRIDCORE_TRAY_DUMP")) {
         tray_item items[128];
         int ni2 = tray_menu_build(items, 128);
@@ -550,6 +539,19 @@ int tray_main(void) {
         }
         return 0;
     }
+
+    // one tray per machine: a live record with mode "tray" means another
+    // controller owns the icon
+    int ng = 0;
+    instance_rec *rg = instances_list(&ng);
+    for (int i = 0; i < ng; i++)
+        if (strcmp(rg[i].mode, "tray") == 0 && rg[i].pid != (long)getpid()) {
+            fprintf(stderr, "error: another tray controller is running (pid %ld)\n",
+                    rg[i].pid);
+            instances_list_free(rg, ng);
+            return 1;
+        }
+    instances_list_free(rg, ng);
 
     instances_register("tray", 0, NULL, NULL, 0);
     atexit(instances_unregister);
