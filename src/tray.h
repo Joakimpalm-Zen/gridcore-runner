@@ -31,6 +31,7 @@ enum {
     TRAY_ACT_PICK_MODEL,      // native file picker, saves last_model
     TRAY_ACT_STOP_INSTANCE,   // arg = pid
     TRAY_ACT_TOGGLE_AUTOSTART,
+    TRAY_ACT_OPEN_LOG,        // open the managed instance's log file
     TRAY_ACT_QUIT,
 };
 

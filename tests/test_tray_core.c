@@ -18,6 +18,7 @@
 #define setenv_compat(k, v) _putenv_s(k, v)
 static void msleep(int ms) { Sleep(ms); }
 #else
+#include <signal.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -134,6 +135,52 @@ int main(int argc, char **argv) {
     CHECK(strstr(args, "-c 512") != NULL, "child got last_args tail");
     CHECK(instance_pid_alive(child), "child is alive before quit");
 
+    // 2b. the child never registers (it is not a real runner), so the core
+    // must report STARTING: visible row, cancel option, no live Start row
+    n = tray_menu_build(items, 128);
+    CHECK(menu_has(items, n, "starting fake-model.gguf"), "starting row shown");
+    CHECK(menu_has(items, n, "Cancel start"), "cancel available while starting");
+    CHECK(menu_has(items, n, "Default runner: starting"), "start row disabled to starting");
+    CHECK(!menu_has(items, n, "Start default runner"), "no live start row while starting");
+
+    // 2c. kill the child behind the core's back: menu must flip to the
+    // exited warning with a log row and a restart offer
+#ifdef _WIN32
+    {
+        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)child);
+        CHECK(h != NULL, "can open child to simulate a crash");
+        if (h) { TerminateProcess(h, 1); CloseHandle(h); }
+    }
+#else
+    kill((pid_t)child, SIGKILL);
+#endif
+    bool exited_row = false;
+    for (int t = 0; t < 50 && !exited_row; t++) {
+        msleep(100);
+        n = tray_menu_build(items, 128);
+        exited_row = menu_has(items, n, "exited");
+    }
+    CHECK(exited_row, "crash surfaces as the exited warning");
+    CHECK(menu_has(items, n, "View log"), "log row offered after exit");
+    CHECK(menu_has(items, n, "Restart default runner"), "restart offered after exit");
+
+    // 2d. restart spawns a fresh child and clears the warning
+    remove(mp);
+    tray_menu_act(TRAY_ACT_START_MANAGED, 0, NULL);
+    child = 0;
+    for (int t = 0; t < 60 && child == 0; t++) {
+        FILE *m = fopen(mp, "rb");
+        if (m) {
+            char line[512];
+            if (fgets(line, sizeof line, m)) child = atol(line);
+            fclose(m);
+        }
+        msleep(100);
+    }
+    CHECK(child > 0, "restart spawned a fresh child");
+    n = tray_menu_build(items, 128);
+    CHECK(!menu_has(items, n, "exited"), "warning cleared once restarted");
+
     // 3. a foreign record must survive quit; only the managed child stops
     char foreign[700];
     snprintf(foreign, sizeof foreign, "%s/%ld.json", idir, (long)getpid());
@@ -160,6 +207,12 @@ int main(int argc, char **argv) {
         if (r[i].port == 9001) foreign_alive = true;
     instances_list_free(r, nl);
     CHECK(foreign_alive, "foreign instance record untouched by quit");
+
+    // 4. after a user-initiated quit the menu is back to a clean Start —
+    // no lingering exited warning for an instance the user stopped
+    n = tray_menu_build(items, 128);
+    CHECK(menu_has(items, n, "Start default runner"), "start row back after quit");
+    CHECK(!menu_has(items, n, "exited"), "no exited warning after intentional stop");
 
     remove(foreign);
     remove(mp);

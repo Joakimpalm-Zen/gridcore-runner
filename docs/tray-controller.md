@@ -43,11 +43,24 @@ loaded or the call fails.
 - Header row: `gridcore-runner <version>`.
 - One row per live instance: `mode  ·  :port  ·  pid` (`●` marks the
   tray-managed instance). Its submenu lists the model names and a **Stop**
-  item.
+  item. The tray itself is never listed — only things you can manage are.
 - **Start default runner** — spawns `runner --serve -m <last_model> --port
   <port> <last_args>` as a detached child. With no model configured the row
   reads `Start… (no model configured)` and opens the native file picker
   (filtered to `*.gguf`); the choice is saved and the server starts.
+
+The managed instance always shows its lifecycle explicitly — reopen the
+menu to see the current state:
+
+| State | What the menu shows |
+|---|---|
+| starting | `● starting <model>… (loading model)` with a **Cancel start** submenu; the Start row reads `Default runner: starting…`. Large models take several seconds to load. |
+| running | The normal `●` instance row with models and **Stop**; the Start row becomes the label `Default runner: running on :<port>` (no silent-no-op click). |
+| exited on its own | `⚠ default runner exited (failed start or crash)` with a **View log** row and a **Restart default runner** action. The warning clears when you restart, stop, or quit. |
+| stopped by you | Back to the plain **Start default runner** row — an intentional stop is not an error and leaves no warning. |
+
+The managed server's stdout+stderr go to `<config_dir>/managed.log`
+(truncated on each start), so **View log** always has the failure story.
 - **Choose model…** — same picker, any time.
 - **Launch at login** — checkbox, see autostart below.
 - **Quit controller** — stops the tray **and the instance it manages,
@@ -98,7 +111,8 @@ Remove, if present:
 - `~/.gridcore/runner/` (POSIX) or `%APPDATA%\gridcore\runner\` (Windows) —
   contains only `config.json` and the self-healing `instances/` directory.
 
-Nothing else is written anywhere.
+Nothing else is written anywhere (`managed.log` lives inside the same
+`runner/` directory).
 
 ## v1 simplifications (documented, deliberate)
 
