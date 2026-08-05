@@ -1,0 +1,34 @@
+{
+ "schema": "gridcore.runner.bench-evidence.v1",
+ "date": "2026-08-05",
+ "box": "Apple M1 8GB, CPU only (--gpu off), runner afmoe-trinity branch",
+ "note": "afmoe admission gates 4-5: chat smoke passed (finish=stop, '2+2 = 4.'), perf rows below. Q4_K_M fully resident; Q8_0 under memory pressure (6.5GB on 8GB).",
+ "rows": [
+  {
+   "model": "models/Trinity-Nano-Preview-Q8_0.gguf",
+   "arch": "afmoe",
+   "context": 4096,
+   "gpu_layers": 0,
+   "layers": 56,
+   "prompt_tokens": 512,
+   "generated_tokens": 256,
+   "prompt_tok_s": 24.531,
+   "gen_tok_s": 8.942,
+   "prompt_s": 20.872,
+   "gen_s": 28.628
+  },
+  {
+   "model": "models/Trinity-Nano-Preview-Q4_K_M.gguf",
+   "arch": "afmoe",
+   "context": 4096,
+   "gpu_layers": 0,
+   "layers": 56,
+   "prompt_tokens": 512,
+   "generated_tokens": 256,
+   "prompt_tok_s": 26.267,
+   "gen_tok_s": 13.25,
+   "prompt_s": 19.492,
+   "gen_s": 19.321
+  }
+ ]
+}

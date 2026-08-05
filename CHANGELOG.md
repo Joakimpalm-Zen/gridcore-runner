@@ -16,7 +16,13 @@ protocol and CLI may still change between alpha releases.
   blocks. New `afmoe` pre-tokenizer (right-aligned digit-triplet splitting,
   CJK/Asian-script isolation, punctuation-letter contractions). CPU only:
   Metal and CUDA refuse loudly and fall back. Certification record in the
-  README table.
+  README table. Admission gates: tokenizer differential 0/721; layer-0
+  attention path verified vs llama.cpp b10280 to ~2e-4; chat smoke and
+  perf rows green on an 8 GB M1 (Q4_K_M resident: 13.25 tok/s decode
+  CPU-only; Q8_0 under memory pressure: 8.9). Token identity not claimed,
+  with the mechanism measured, not presumed — afmoe's per-branch
+  re-normalization amplifies the engines' by-design quantized-matvec
+  arithmetic difference (docs/afmoe-divergence-triage-2026-08-05.md).
 - The `sampling:` banner at `--temp 0` now says what is actually true —
   greedy argmax, shaping knobs inactive — instead of printing a
   `repeat_penalty` value that does not apply. The penalty was already
