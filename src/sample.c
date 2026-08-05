@@ -521,6 +521,16 @@ const sampler_preset *sampler_resolve(sampler *s, const char *arch,
 
 void sampler_describe(const sampler *s, const sampler_preset *p,
                       char *buf, size_t cap) {
+    // At temp <= 0 every shaping knob is bypassed (greedy argmax; see
+    // sample_pick) — say so, or the banner reads as if repeat_penalty
+    // applies and a reviewer comparing greedy output against another
+    // engine burns time ruling it out. That happened; this line is the fix.
+    if (s->temp <= 0) {
+        snprintf(buf, cap, "%s (temp %.2f — greedy argmax; top_p/top_k/"
+                 "min_p/repeat_penalty inactive)",
+                 p ? p->name : "custom", (double)s->temp);
+        return;
+    }
     snprintf(buf, cap,
              "%s (temp %.2f, top_p %.2f, top_k %d, min_p %.2f, repeat_penalty %.2f)",
              p ? p->name : "custom", (double)s->temp, (double)s->top_p,
