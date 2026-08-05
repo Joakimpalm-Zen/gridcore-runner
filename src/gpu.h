@@ -15,6 +15,13 @@ bool   gpu_device_id(char *id, int id_cap);
 // dedicated GPU memory in bytes; false when there is no discrete GPU
 // (Metal's unified memory is governed by the RAM reservation instead)
 bool   gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
+// The GPU-side fit ceiling, which is NOT the same number as free RAM: on
+// Metal a single resource allocation larger than the device working-set
+// limit (~2/3 of unified memory) fails even when the file would fit in RAM.
+// A scheduler that only reads ram_available_bytes sees capability where
+// there is a capacity cliff. false when the backend has no such limit
+// distinct from what vram_bytes already reports (CUDA), or no GPU.
+bool   gpu_max_working_set(size_t *bytes);
 // does this backend's attention read a q8_0 KV cache? The CPU path always
 // can; a backend that cannot forces the cache back to f16 rather than
 // handing q8_0 blocks to kernels that would read them as fp16.

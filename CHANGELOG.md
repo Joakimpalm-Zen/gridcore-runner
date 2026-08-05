@@ -5,6 +5,17 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- Metal fit ceiling made visible (16 GB-Mac field report): the weight
+  buffer allocation failure now prints requested bytes vs the device
+  working-set limit ("11.5 GB requested, device working-set limit 5.7 GB —
+  model exceeds Metal fit ceiling") instead of a bare "allocation" line,
+  and `--caps` publishes the ceiling as `gpu.max_working_set_bytes` so a
+  scheduler can apply the placement rule before attempting a load.
+  `docs/moe-support.md`'s open item is closed with the measured floor:
+  full `gpt-oss-20b-MXFP4` on Metal needs ≥ 24 GB unified memory; 16 GB
+  machines get the CPU paging path (2.33 tok/s measured) and should run
+  the pruned keep-30 artifact instead.
+
 - **`--tray`: desktop tray / menu-bar controller (macOS + Windows).** A
   code-drawn grid icon lists every live runner instance on the machine
   with its loaded models (swap-mode servers are asked live via

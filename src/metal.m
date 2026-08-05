@@ -197,6 +197,16 @@ bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
     return false;
 }
 
+bool gpu_max_working_set(size_t *bytes) {
+    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+    if (!dev) return false;
+    uint64_t ws = dev.recommendedMaxWorkingSetSize;
+    [dev release];
+    if (ws == 0) return false;
+    if (bytes) *bytes = (size_t)ws;
+    return true;
+}
+
 // UNVERIFIED — written without a macOS machine to run it on. Nobody on this
 // project has executed this function.
 //
@@ -486,8 +496,21 @@ bool gpu_init(model_t *m) {
                                       length:m->gf.map_size
                                      options:MTLResourceStorageModeShared];
         g->weights_copied = true;
-        if (!g->weights)
-            return gpu_init_fail(m, g, lib, "weight buffer allocation");
+        if (!g->weights) {
+            // say what was asked for and what the device allows — the RAM
+            // warning two lines below this in a load gives numbers, and a
+            // bare "allocation failed" gives a scheduler nothing to reason
+            // with (16 GB-Mac field report, 2026-08-05)
+            char why[192];
+            uint64_t ws = dev.recommendedMaxWorkingSetSize;
+            snprintf(why, sizeof why,
+                     "weight buffer allocation: %.1f GB requested, device "
+                     "working-set limit %.1f GB%s",
+                     wlen / 1e9, ws / 1e9,
+                     (uint64_t)wlen > ws ? " — model exceeds Metal fit ceiling"
+                                         : "");
+            return gpu_init_fail(m, g, lib, why);
+        }
     }
 
     int q_dim  = m->n_head * m->head_dim;

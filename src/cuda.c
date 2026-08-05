@@ -447,6 +447,12 @@ bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
     return true;
 }
 
+bool gpu_max_working_set(size_t *bytes) {
+    // CUDA's fit ceiling is device memory, which vram_bytes already reports
+    (void)bytes;
+    return false;
+}
+
 static bool gpu_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:

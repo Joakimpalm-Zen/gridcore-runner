@@ -273,9 +273,17 @@ GPU numbers. CI continues to exercise the harness with fixtures.
 - **gpt-oss architecture — now supported on CPU, CUDA and Metal.** The Metal
   path is smoke-gated by `make test-metal-gptoss-moe`, which exercises sink-aware
   attention, MXFP4 expert tensors, OAI SwiGLU, router bias, per-expert biases
-  and SWA-pattern metadata on a small Mac-runnable fixture. Real
-  `gpt-oss-20b-MXFP4.gguf` Metal validation still needs a Mac with enough
-  unified memory.
+  and SWA-pattern metadata on a small Mac-runnable fixture.
+  **Memory floor for the real model (measured, 2026-08-05):** the 12.1 GB
+  `gpt-oss-20b-MXFP4.gguf` weight wrap exceeds the Metal working-set limit
+  on a 16 GB Mac (~2/3 of unified memory, ~10.7 GB on that class), so Metal
+  init fails and the load falls back to the CPU paging path — 2.33 tok/s
+  decode on an M2 Pro / 16 GB under realistic desktop load, which fails the
+  "configuration worth running" bar. Full-model Metal validation needs
+  **≥ 24 GB unified memory**; 16 GB machines should run the pruned
+  `gpt-oss-20b-keep30` artifact instead (see the 0.1.6/0.1.7 notes). The
+  loader now prints requested-vs-limit bytes when this allocation fails,
+  and `--caps` publishes the ceiling as `gpu.max_working_set_bytes`.
 - **GELU dual-branch MoE** (gemma-4) is implemented on CPU, CUDA and Metal; see
   the `gemma4-moe` section above. `expert_shared_count`-style shared-expert MoE
   (Qwen2-MoE / DeepSeek) remains refused, behind its own validation.

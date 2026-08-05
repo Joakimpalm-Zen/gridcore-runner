@@ -398,6 +398,14 @@ int main(int argc, char **argv) {
             // latter at load.
             printf(",\"moe\":%s", gpu_moe_ok() ? "true" : "false");
             printf(",\"kv_q8\":%s", gpu_kv_q8_ok() ? "true" : "false");
+            // Metal only: a single allocation above this fails even when the
+            // file fits in RAM, so ram_available_bytes alone overstates what
+            // the GPU path can load. Same argument as moe/kv_q8: don't let a
+            // scheduler read capability across a capacity cliff.
+            size_t mws = 0;
+            if (gpu_max_working_set(&mws))
+                printf(",\"max_working_set_bytes\":%llu",
+                       (unsigned long long)mws);
             printf("}");
         } else
             printf("null");
