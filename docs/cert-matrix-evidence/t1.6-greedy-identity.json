@@ -1,0 +1,66 @@
+{
+  "n_pass": 4,
+  "n_total": 6,
+  "results": [
+    {
+      "tag": "a",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "9d45f6aaaee78eab7ff07cc055f1d4420633a22a35b29bb234f3ff23f819a766",
+      "runner_sha256": "9d45f6aaaee78eab7ff07cc055f1d4420633a22a35b29bb234f3ff23f819a766",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "b",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "28736faafa70dc8d97c777e99dc379493dc7fd79d3b77d81c3b2a34020ce2c17",
+      "runner_sha256": "28736faafa70dc8d97c777e99dc379493dc7fd79d3b77d81c3b2a34020ce2c17",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "c",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "b602534fe95f7f30d4a200979c1d0c8549fc56ad8adf966a3804e5541e3fda0c",
+      "runner_sha256": "b602534fe95f7f30d4a200979c1d0c8549fc56ad8adf966a3804e5541e3fda0c",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "d",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runner_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "b-long",
+      "n": 256,
+      "identical": false,
+      "first_divergent_byte": 191,
+      "ref_sha256": "acd5d05aab6c40ca1753fb8aff1cdc7cabc65401eea743f6af36a30f91ed9bae",
+      "runner_sha256": "a94030d8cb0bee1cfeb798de3659e44f900107561ffd2e0857e80e0888c015ad",
+      "ref_tail": "1.\n1.\n1.\n11.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.",
+      "runner_tail": "1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n1.\n"
+    },
+    {
+      "tag": "c-long",
+      "n": 256,
+      "identical": false,
+      "first_divergent_byte": 231,
+      "ref_sha256": "850de03d542c29af59d59f88731df55928614708d23e63b4cf8ec7b1d17092d4",
+      "runner_sha256": "2a79d64e165241e1efca24e91d8a5d569a438126a016a64d9fa447aef4226dcd",
+      "ref_tail": "Apollo 111 landed. Summarize this event. Summar1967, exactly",
+      "runner_tail": "Apollo 11111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}

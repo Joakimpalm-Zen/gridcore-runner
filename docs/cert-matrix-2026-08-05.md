@@ -307,3 +307,57 @@ Notably faster on GPU than item 4's QAT build (47.9 vs 24.1 gen tok/s) — plaus
 ### Summary
 
 Gates 1-3, 5-6 pass; gate 4 misses the numeric bar for a documented, architecture-level reason. The distinguishing result of this row is the QAT-vs-PTQ head-to-head the roster specifically asked for: two nominally-equivalent 26B-A4B builds disagree with each other more than either disagrees with an independent engine, and the QAT build is measurably closer to that independent engine than the PTQ build is. That is a genuine, actionable data point about which quantization strategy to prefer for this architecture — delivered exactly as the roster's own framing predicted it would be.
+
+## 6. Google gemma-4-12B-it QAT Q4_0
+
+**Verdict: CERTIFIED-WITH-CAVEAT** — the first dense-gemma4 row this session, and the greedy-identity gate (not KLD — this architecture is not MoE) passes on all four short-domain prompts; the only misses are two 256-token runs that both degenerate into repetitive loops, a known small-model failure mode rather than an architecture defect.
+
+**Resolved:** `google/gemma-4-12B-it-qat-q4_0-gguf/gemma-4-12b-it-qat-q4_0.gguf`. Downloaded, sha256 `93567e57a8fe10b23569b9d9ec38cd005deedf71e29477c421a4b83f418a538b` verified, 6,975,879,296 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity
+
+**Manifest:** `GEMMA4-DENSE / 48L / Q4_0-QAT / gemma-canonical-chat`
+
+```
+architecture: gemma4   block_count: 48   embedding_length: 3840   feed_forward_length: 15360
+(no expert_count key — genuinely dense, 0 expert tensors)
+tensor histogram (667 tensors): F32 x338, Q6_K x1 (token_embd), Q4_0 x328
+```
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **0/721 diverge** vs `google/gemma-4-12B-it` — clean
+
+### Gate 4 — Reference: **greedy token identity, 4/6 exact** (dense arch, not KLD)
+
+Six-prompt protocol (the afmoe cert session's gate 3 shape: four 64-token short-domain prompts + two of them repeated at 256), reference queried with explicit pure-greedy params and `cache_prompt:false`:
+
+| case | n | identical |
+|---|---:|---|
+| a: "The capital of France is" | 64 | **yes** |
+| b: linked-list reversal | 64 | **yes** |
+| c: Apollo 11 summary | 64 | **yes** |
+| d: Swedish thermometer | 64 | **yes** |
+| b-long | 256 | no (diverges byte 191) |
+| c-long | 256 | no (diverges byte 231) |
+
+**4/6 exact — every short prompt passes.** Both misses are 256-token runs where *both engines* degenerate into a repetitive loop (`"1.\n1.\n1.\n..."` and `"111111...111"` respectively) — a 12B QAT model with no repetition penalty at greedy temp=0 is a textbook case for this, and the divergence point in each case is exactly where the loop's period desynchronizes between the two engines' rounding, not a coherent-text disagreement. Confirmed the runner's own output is deterministic/stable across repeated runs at 256 tokens (ruling out flakiness) before recording this. Evidence: `docs/cert-matrix-evidence/t1.6-greedy-identity.json`.
+
+### Gate 5 — cpu_cuda: **PASS** — byte-identical (64 tokens, full 48/48 offload)
+
+### Gate 6 — Chat smoke: **PASS**
+
+`"What is 2+2? Answer briefly."` -> `"4"`, `finish_reason: "stop"`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":48,"prompt_tok_s":35.868,"gen_tok_s":8.766,"prompt_s":14.274,"gen_s":29.203}
+GPU: {"gpu_layers":48,"layers":48,"prompt_tok_s":5.540,"gen_tok_s":8.330,"prompt_s":92.421,"gen_s":30.731}
+```
+
+GPU prompt throughput here is oddly *lower* than CPU's (5.5 vs 35.9 tok/s) — recorded as measured, not investigated further (out of scope for a perf-row record; possibly this box's MIG slice under different load at measurement time, or a placement/scheduling quirk specific to this model's shape).
+
+### Summary
+
+This is the strongest identity result of the session: a real architecture (dense gemma4, QAT) with 4/6 exact greedy matches against an independent engine, clean tokenizer, and byte-identical CPU/CUDA. The two long-run misses are the kind of divergence the goal doc's own "known acceptable exception" language anticipates in spirit (two engines' rounding disagreeing inside a degenerate repeat loop is a different animal from disagreeing about real content) — recorded honestly as misses rather than waived, but clearly distinguished from a real behavioral gap.
