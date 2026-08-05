@@ -395,3 +395,52 @@ Gates 3 (partially, see above) through 7 do not apply — a refused load ends th
 ### Summary
 
 A specific, well-characterized REFUSED verdict: the file is a legitimate, differently-shaped release (real per-layer FFN width variation, not a corrupt or unusual quant), and the runner's gemma4 loader has a real, narrow gap — no array-typed-KV handling for `feed_forward_length` — that a future engine session could close in one place (`gguf_get_u32`'s array branch, or a per-layer-array reader alongside the existing per-layer-override fields like `l_head_kv`/`l_head_dim` the struct already has for heterogeneous archs). No code was touched to test or work around this, per the STOP rule.
+
+## 8. Google gemma-4-31B-it QAT Q4_0 (flagship dense)
+
+**Verdict: CERTIFIED-WITH-CAVEAT** — the best identity result of the session: **5/6 exact greedy matches**, including both 256-token long runs this time (contrast item 6's dense 12B, which degenerated at 256 tokens on both engines). Only VRAM pressure on this box's 24 GB MIG slice — not correctness — is the real caveat here.
+
+**Resolved:** `google/gemma-4-31B-it-qat-q4_0-gguf/gemma-4-31B_q4_0-it.gguf`. Downloaded, sha256 `179cfb99212709597eae5929112cfca677e1bbf566178b479ae1da0c4772874b` verified, 17,651,001,568 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity
+
+**Manifest:** `GEMMA4-DENSE / 60L / Q4_0-QAT / gemma-canonical-chat`
+
+```
+architecture: gemma4   block_count: 60   embedding_length: 5376   feed_forward_length: 21504 (scalar — unlike item 7)
+tensor histogram (833 tensors): F32 x422, Q6_K x1, Q4_0 x410
+```
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **0/721 diverge** vs `google/gemma-4-31B-it` — clean
+
+### Gate 4 — Reference: **5/6 exact greedy identity**
+
+| case | n | identical |
+|---|---:|---|
+| a: "The capital of France is" | 64 | **yes** |
+| b: linked-list reversal | 64 | **yes** |
+| c: Apollo 11 summary | 64 | **yes** |
+| d: Swedish thermometer | 64 | no (diverges byte 68) |
+| b-long | 256 | **yes** |
+| c-long | 256 | **yes** |
+
+The one miss (prompt d, Swedish) is not degenerate text on either side — both continuations are fluent, on-topic Swedish about thermal expansion, just phrased differently from that point on (`"...kallas **termisk expansi[on]**"` vs `"...**termisk expansion**, vilket innebär..."`), consistent with a genuine near-tie argmax disagreement rather than an architecture bug. Confirmed reproducible/stable on the runner side across repeated runs before recording. Both 256-token runs — the length class that broke item 6's 12B model into a repeat loop — are exact here, for whatever it is worth about scale/stability at this size. Evidence: `docs/cert-matrix-evidence/t1.8-greedy-identity.json`.
+
+### Gate 5 — cpu_cuda: **PASS** — byte-identical (64 tokens, full 60/60 offload)
+
+### Gate 6 — Chat smoke: **PASS** — `"4"`, `finish_reason: "stop"`
+
+### Gate 7 — Perf row: **the real caveat is here, not correctness**
+
+```
+CPU: {"gpu_layers":0,"layers":60,"prompt_tok_s":15.819,"gen_tok_s":4.829,"prompt_s":32.365,"gen_s":53.016}
+GPU: {"gpu_layers":60,"layers":60,"prompt_tok_s":2.096,"gen_tok_s":3.250,"prompt_s":244.227,"gen_s":78.778}
+```
+
+**GPU is slower than CPU on every axis** — prompt throughput drops nearly 8x (15.8 -> 2.1 tok/s). This model's 17.7 GB of weights leaves only ~7.6 GB of this box's 24 GB MIG slice for KV cache and scratch; the load log showed `kv 3.69 GB` against `3.75 GB free` after init — the device is nearly full. This reads as VRAM-pressure-induced slowdown (some combination of reduced batching/parallelism headroom or spillover) specific to this box's small MIG slice, not a correctness defect — cpu_cuda byte-identity above confirms the GPU path computes the *same* answer, just much more slowly under this constraint. Recorded as measured; not investigated further (out of scope for a perf-row record, and doing so would risk turning into engine debugging under the STOP rule).
+
+### Summary
+
+The identity gates are unambiguously the best of the session (5/6, both long runs exact) for what is also the largest dense model tested. The perf row is the interesting anti-correlated result: bigger and more correct here does not mean faster on this specific, VRAM-constrained GPU slice — a genuinely useful data point for anyone sizing which of these artifacts to run on a small GPU versus CPU.

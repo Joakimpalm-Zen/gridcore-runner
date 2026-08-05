@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gemma-4-31B-it-qat-q4_0-google.gguf","arch":"gemma4","context":4096,"gpu_layers":60,"layers":60,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":2.096,"gen_tok_s":3.250,"prompt_s":244.227,"gen_s":78.778}
