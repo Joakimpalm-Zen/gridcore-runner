@@ -217,3 +217,20 @@ for the overlapped pipeline to hold the bar. Next measurement (still no
 engine work): a resident-compute proxy — batch-K CPU forward throughput
 of a 4B-active-class model on the M1 (E4B or a truncated-layer 26B
 slice), overlapped-vs-serial with the probe's I/O pattern.
+
+## Local M1 finding (owner's machine, same day): E-series QAT GGUFs refuse to load
+
+Attempting the (c) compute-proxy measurement surfaced a cert-grade
+result: BOTH independent conversions of Google's official E4B QAT export
+fail identically in the runner —
+`unsloth/gemma-4-E4B-it-qat-GGUF/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` and
+`lmstudio-community/gemma-4-E4B-it-QAT-GGUF/gemma-4-E4B-it-QAT-Q4_0.gguf`
+both die at load with `error: missing tensor blk.24.attn_k.weight`,
+while the certified non-QAT conversion (bartowski Q4_K_M) loads fine.
+The QAT export evidently encodes the E-series shared-KV layer pattern
+differently (omitting K/V weights on shared layers, or declaring the
+share map differently) than the conversions the loader was validated
+against. **Expect roster item 7 (E2B QAT) to REFUSE the same way — that
+is a correct result; record the metadata dump.** Loader-side support is
+owner-machine work, out of scope for the Blackwell session per the STOP
+rules.
