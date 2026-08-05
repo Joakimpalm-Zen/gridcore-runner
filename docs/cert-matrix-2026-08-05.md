@@ -737,3 +737,44 @@ GPU: {"gpu_layers":48,"layers":48,"prompt_tok_s":76.101,"gen_tok_s":34.473,"prom
 ### Summary
 
 A real-world fine-tune (merged, not QAT) shows its own instability under the raw-completion identity protocol — likely the merge process, not the runner — while passing cpu_cuda and, notably, the actual chat-usage smoke test cleanly. The lesson worth keeping for future rows: a raw-completion identity gate and a chat-usage smoke gate can legitimately disagree about the same checkpoint, and both numbers are worth recording rather than only the more convenient one.
+
+## 15. HauhauCS Gemma4-26B-A4B-QAT-Uncensored-Balanced
+
+**Verdict: CERTIFIED-WITH-CAVEAT** — same clean shape as items 4/5 (tokenizer/cpu_cuda/chat all pass; only KLD misses the numeric bar, consistent with the family's documented routing chaos). The gate-1 finding is the interesting one: **despite "QAT" in the name, this file's experts are NOT the uniform QAT Q4_0 of item 4 — they match item 5's mixed post-hoc PTQ signature almost exactly.**
+
+**Resolved:** `HauhauCS/Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-MTP/Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf` (the repo also bundles an MTP drafter file, `mtp-gemma-4-26B-A4B-it.gguf`, used separately for item 17). Downloaded, sha256 `3c13133469e431312fffb8b1d9c85ae42199e6bb5746ea1da84e8ddf2097d73c` verified, 16,796,015,520 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity: **the name says QAT; the tensors say PTQ**
+
+**Manifest:** `GEMMA4-MOE / 30L / 128E / top8 / MIXED-REQUANT(Q8_0/Q4_K/Q5_0, non-uniform per-layer) / custom-tool-chat`
+
+```
+tensor histogram (658 tensors): F32 x392, Q6_K x14, Q4_K x192, Q8_0 x28, Q5_0 x32
+expert-tensor types (150 tensors): F32 x90, Q8_0 x14, Q4_K x30, Q5_0 x16   <- matches item 5's expert histogram almost exactly
+non-uniform expert dtype across layers: confirmed
+```
+
+Compare to item 4 (`google/gemma-4-26B-A4B-it-qat-q4_0-gguf`, the genuine QAT release): experts there are uniformly `Q4_0` (60 tensors, one type, zero variation across layers) — the actual signature of quantization-aware training baked into the checkpoint. This file's expert-tensor type distribution (`F32 x90, Q8_0 x14, Q4_K x30, Q5_0 x16`) is the same shape of mixed, non-uniform, imatrix-looking scheme found in item 5 (Bartowski's independent, ordinary post-training quant of the base model). Plausible reading, not confirmed: "QAT" in this repo's name most likely refers to the *upstream base checkpoint's* training lineage, not to *this specific GGUF's* own quantization method — the conversion pipeline used here appears to be a standard `llama-quantize` Q4_K_M pass, not a preservation of the base's native QAT Q4_0 weights. This is precisely the "record what it ACTUALLY is, not what its name says" case this session's gate 1 exists for, and it is worth flagging distinctly from item 5 only because the filename actively claims otherwise.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **0/721 diverge** vs `google/gemma-4-26B-A4B-it` — clean
+
+### Gate 4 — Reference (KLD): `mean_kld: 0.1545, top1_agreement_pct: 77.25, mean_top8_overlap: 0.816`
+
+Within the family's range for a mixed-requant expert scheme (compare item 5's 65.5%/1.006 for a similarly mixed but more aggressively quantized set, and item 4's 80.5%/0.126 for the genuine uniform-QAT file) — consistent with the already-documented top-8-of-128 routing chaos, not a new finding. Evidence: `docs/cert-matrix-evidence/t2.15-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **PASS** — byte-identical (64 tokens, full 30/30 offload)
+
+### Gate 6 — Chat smoke: **PASS** — `"4"`, `finish_reason: "stop"`
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":30,"prompt_tok_s":8.611,"gen_tok_s":6.451,"prompt_s":59.460,"gen_s":39.685}
+GPU: {"gpu_layers":30,"layers":30,"prompt_tok_s":84.486,"gen_tok_s":50.059,"prompt_s":6.060,"gen_s":5.114}
+```
+
+### Summary
+
+A community "QAT + mutation combo" release that behaves like every other clean gemma4-moe row on correctness (admission, tokenizer, cpu_cuda, chat) and misses only the numeric KLD bar for the family's own well-documented reason. The genuinely new information this row adds is provenance, not behavior: its "QAT" branding does not match its actual tensor-level quantization scheme, which is Bartowski-shaped PTQ rather than item 4's uniform-QAT Q4_0.

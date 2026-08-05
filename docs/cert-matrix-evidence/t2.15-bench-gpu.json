@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gemma-4-26B-qat-uncensored-hauhaucs.gguf","arch":"gemma4","context":4096,"gpu_layers":30,"layers":30,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":84.486,"gen_tok_s":50.059,"prompt_s":6.060,"gen_s":5.114}
