@@ -3,7 +3,46 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
-## Unreleased
+## v0.1.7-alpha — 2026-08-05
+
+### We found a 13× optimization and rejected it
+
+We prototyped an expert-residency cache for MoE models larger than RAM. At
+the extreme it turned 0.05 tok/s into 0.65 tok/s — a 13× speedup, with the
+mechanism working exactly as designed (85%+ hit rates, byte-identical
+output, reproduced on three platforms). We rejected it anyway: 0.65 tok/s
+is not a configuration worth running, and everywhere the model actually
+fits in memory the cache made things *slower*. The full measurements and
+reasoning are in `docs/negative-result-expert-cache.md`.
+
+That distinction is becoming a core principle of how gridcore-runner is
+built: **an optimization doesn't pass because the benchmark got faster. It
+has to preserve the model and produce a configuration worth running.** The
+same gates that enforce this killed two other superficially attractive
+ideas this cycle (deeper expert pruning, sub-4-bit expert requantization —
+the latter produced a model that generated fluent text while agreeing with
+the reference on 22% of tokens; nothing at load time would have noticed).
+
+### CPU SIMD kernels, measured and gated
+
+- **ARM NEON kernels** for the quantized dot/dequant path on Apple Silicon
+  and other aarch64 — added *only* where they measured faster than the
+  compiler's auto-vectorized scalar code, per format: Q6_K 8×, IQ4_NL 5×,
+  IQ4_XS 4×, MXFP4 1.4×, Q5_K and Q4_0 modest wins. Formats where the
+  auto-vectorizer won (F16, BF16, Q8_0, Q4_K) deliberately keep the scalar
+  path, with the measurements noted in the source so nobody "optimizes"
+  them back in.
+- **MXFP4 gets a dedicated dot kernel on every ISA** (NEON, AVX2, scalar).
+  It previously fell through to a generic block-dequant path on *all*
+  platforms — including x86. On a Windows/AVX2 machine this took gpt-oss
+  class decode from 0.21 to 3.4–4.0 tok/s (~16–20×) where the model ≈ fits
+  RAM, and 0.15 → 0.54 tok/s on an 8 GB M1 where it doesn't.
+- New gate `tests/test_quants_simd.c` (in `make test`): every quant format
+  checked against an independent double-precision reference, and q8 KV-row
+  quantization pinned byte-identical to its scalar definition. The gate has
+  passed on macOS/NEON, Windows/AVX2, Linux/AVX2 and Linux/x86-64-v3.
+
+### Fixed
 
 - **gemma-4 E-series (E2B/E4B) produced silently wrong output under partial
   CUDA offload — shipped in `v0.1.5-alpha` and `v0.1.6-alpha`.** Full offload
