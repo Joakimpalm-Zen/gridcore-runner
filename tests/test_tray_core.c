@@ -81,12 +81,17 @@ int main(int argc, char **argv) {
     const char *idir = instances_dir();
     CHECK(idir != NULL, "instances dir resolves under fake HOME");
     snprintf(cfg, sizeof cfg, "%s/../config.json", idir);
+    // raw backslashes are invalid JSON escapes, so the Windows TEMP path
+    // must go into config.json with forward slashes (fopen accepts both)
+    char home_json[512];
+    snprintf(home_json, sizeof home_json, "%s", g_home);
+    for (char *c = home_json; *c; c++) if (*c == '\\') *c = '/';
     FILE *f = fopen(cfg, "wb");
     fprintf(f, "{\"last_model\": \"%s/fake-model.gguf\","
-               " \"last_args\": \"-c 512\", \"port\": 8127}\n", g_home);
+               " \"last_args\": \"-c 512\", \"port\": 8127}\n", home_json);
     fclose(f);
     char mdl[600];
-    snprintf(mdl, sizeof mdl, "%s/fake-model.gguf", g_home);
+    snprintf(mdl, sizeof mdl, "%s/fake-model.gguf", home_json);
     f = fopen(mdl, "wb"); fputs("x", f); fclose(f);
 
     // 1. empty registry: setup rows present, no stop rows
