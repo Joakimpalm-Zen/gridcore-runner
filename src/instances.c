@@ -18,8 +18,12 @@
 #include <process.h>
 #else
 #include <dirent.h>
+#include <limits.h>
 #include <signal.h>
 #include <unistd.h>
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #include <sys/proc.h>
@@ -160,12 +164,17 @@ bool instances_register(const char *mode, int port,
         sb_esc(&g_self.models_json, model_names[i], strlen(model_names[i]));
         sb_lit(&g_self.models_json, "\", \"path\": \"");
         // absolute path: a controller in another cwd must be able to
-        // restart or inspect the file the instance was launched with
-        char abs[1200];
+        // restart or inspect the file the instance was launched with.
+        // realpath's output buffer MUST be PATH_MAX bytes: glibc's
+        // fortified build aborts on a smaller one regardless of how short
+        // the resolved path is (macOS PATH_MAX is 1024 so a short buffer
+        // passes there — every Linux CI job catches it)
 #ifdef _WIN32
+        char abs[_MAX_PATH];
         if (!_fullpath(abs, model_paths[i], sizeof abs))
             snprintf(abs, sizeof abs, "%s", model_paths[i]);
 #else
+        char abs[PATH_MAX];
         if (!realpath(model_paths[i], abs))
             snprintf(abs, sizeof abs, "%s", model_paths[i]);
 #endif
