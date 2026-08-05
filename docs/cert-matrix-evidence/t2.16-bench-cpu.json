@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-36b-brainstorm-davidau.gguf","arch":"gpt-oss","context":4096,"gpu_layers":0,"layers":43,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":33.186,"gen_tok_s":6.462,"prompt_s":15.428,"gen_s":39.619}

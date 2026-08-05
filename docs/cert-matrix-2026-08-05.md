@@ -778,3 +778,58 @@ GPU: {"gpu_layers":30,"layers":30,"prompt_tok_s":84.486,"gen_tok_s":50.059,"prom
 ### Summary
 
 A community "QAT + mutation combo" release that behaves like every other clean gemma4-moe row on correctness (admission, tokenizer, cpu_cuda, chat) and misses only the numeric KLD bar for the family's own well-documented reason. The genuinely new information this row adds is provenance, not behavior: its "QAT" branding does not match its actual tensor-level quantization scheme, which is Bartowski-shaped PTQ rather than item 4's uniform-QAT Q4_0.
+
+## 16. BrainStorm GPT-OSS 36B (DavidAU IQ4_NL)
+
+**Verdict: FAILED** — chat smoke fails with the same runaway/meta-commentary shape as the rest of the gpt-oss family (gate 6). The gate-1 finding is the interesting one: this is a **real** BrainStorm-style layer-duplication expansion, not a rename — `block_count` is genuinely 43 (vs the base gpt-oss-20b's 24), expert count is unchanged at 32/top-4, and because layer duplication requires a dequant-recombine-requant pass, native MXFP4 experts are gone: every expert tensor has been fully requantized to a mixed IQ4_NL/Q5_1 scheme. That mixed-requant side effect is also, per this session's established pattern (items 9 and 15), why this file's KLD numbers are the second-best of the entire gpt-oss family — losing native MXFP4 costs the "authenticity to the original weights" but happens to buy back numerical stability relative to llama.cpp's reference path.
+
+**Resolved:** `DavidAU/OpenAi-GPT-oss-36B-BrainStorm20x-uncensored-gguf/OpenAI-36B-Brains20x-Uncensored-IQ4_NL.gguf`. Downloaded, sha256 `cc08c58b24bbcdeae7dc21fce2f9e7457b61728ac8ed5ab4a7746c2989cd8a6e` verified against the HF API blob hash and the locally computed hash, 21,182,210,272 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity: **real 43-layer expansion, experts requantized off MXFP4**
+
+**Manifest:** `GPT-OSS(BrainStorm-expanded) / 43L(from 24L base) / 32E / top4 / MIXED-REQUANT(IQ4_NL/Q5_1, non-uniform per-layer) / harmony-chat`
+
+```
+gguf version: 3  tensors: 820  kv: 35
+general.architecture: gpt-oss
+general.name: GTP Osss 20b Test1
+gpt-oss.block_count: 43   <- base gpt-oss-20b is 24; confirms real layer duplication, not a relabel
+gpt-oss.expert_count: 32
+gpt-oss.expert_used_count: 4
+
+tensor type histogram (820 tensors): Q8_0 x1, F32 x517, IQ4_NL x254, Q5_1 x48
+expert-tensor types (344 tensors): F32 x215, Q5_1 x5, IQ4_NL x124
+non-expert-tensor types (476 tensors): Q8_0 x1, F32 x302, IQ4_NL x130, Q5_1 x43
+expert layers found: 43, uniform expert dtype across layers: False
+```
+
+`general.name` ("GTP Osss 20b Test1") is a leftover from the base checkpoint and has nothing to do with the actual file — another instance of this session's "record what tensors ACTUALLY are, not what the name says" rule, this time cutting the other way from the family norm: every other gpt-oss row in this matrix preserves native MXFP4 experts under a misleading quant-scheme label; this one is the first gpt-oss row where the experts genuinely were touched, as a structural side effect of layer duplication rather than a deliberate requant choice. Evidence: `docs/cert-matrix-evidence/t2.16-gguf-inspect.json`.
+
+### Gate 2 — Admission: PASS — both runner and llama.cpp b10280 load the 43-layer file without issue
+
+### Gate 3 — Tokenizer: **222/721 diverge** vs `openai/gpt-oss-20b` — identical count to every other gpt-oss row this session (unrelated to the layer expansion; tokenizer is untouched by BrainStorm). Evidence: `docs/cert-matrix-evidence/t2.16-difftok.log`.
+
+### Gate 4 — Reference (KLD): `mean_kld: 0.0770, top1_agreement_pct: 87.5, mean_top8_overlap: 0.866`
+
+Second-best KLD of the entire gpt-oss family this session, behind only item 9's fully-requantized 12-expert prune (88%/0.040) and ahead of every native-MXFP4 row (65.5-84% top1, 0.11-0.14 KLD). Consistent with the pattern established across items 9, 12, and 15: once native MXFP4 experts are gone, cross-engine agreement improves markedly — still short of the 97%/0.05 certification bar, but for a structural reason (residual differences in the requant scheme, not the previously-diagnosed MXFP4 vec_dot_type mismatch). Evidence: `docs/cert-matrix-evidence/t2.16-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **PASS** — byte-identical (64 tokens, "The capital of France is", full 43/43 offload). Only one prompt tested for this item; per item 13's finding that MXFP4-adjacent near-tie sensitivity can be prompt-dependent, this file's PASS should be read as "clean on the prompt tested," not a blanket guarantee — but it is also consistent with gate 1's finding that this file no longer has any native MXFP4 tensors to disagree about. Evidence: `docs/cert-matrix-evidence/t2.16-cpu.out`, `t2.16-gpu.out`.
+
+### Gate 6 — Chat smoke: **FAIL**
+
+```json
+{"content":"\"\n\nWe need to parse the instruction. The user is asking: \"What is 2+2?\" They want a brief answer. The correct answer is 4. The instruction is to answer the math question. There's no context to consider. The response should be a concise answer: \"2+","finish_reason":"length"}
+```
+
+Same shape as the rest of the gpt-oss family: the model reasons about the question in Harmony analysis-channel style instead of answering directly, and runs to the token limit without ever emitting a final answer. No raw `<|channel|>`/`<|message|>` tag leakage into content. Evidence: `docs/cert-matrix-evidence/t2.16-chatresp.json`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":43,"prompt_tok_s":33.186,"gen_tok_s":6.462,"prompt_s":15.428,"gen_s":39.619}
+GPU: {"gpu_layers":43,"layers":43,"prompt_tok_s":15.431,"gen_tok_s":14.553,"prompt_s":33.180,"gen_s":17.591}
+```
+
+### Summary
+
+Confirms the goal doc's own suspicion (item 16 was listed as "if one exists") — a real BrainStorm20x layer-duplication release does exist for gpt-oss-20b, expanding 24 to 43 layers while holding expert count fixed. It fails certification for the same chat-coherence reason as the rest of the gpt-oss family, but it is a genuinely different artifact from the rest of the roster at the tensor level: the only gpt-oss row this session where expert tensors were unavoidably moved off native MXFP4, and correspondingly the row with the second-best cross-engine KLD agreement in the family.
