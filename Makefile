@@ -334,11 +334,17 @@ $(TEST_INSTANCES): $(TEST_INSTANCES_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_INSTANCES_SRC) -o $@ -lm
 
 # links the stub backend on EVERY platform: this gate tests the portable
-# core (menu model, managed spawn/stop, quit semantics), not the GUI
+# core (menu model, managed spawn/stop, quit semantics), not the GUI.
+# ws2_32: the core's /v1/models enrichment uses sockets on Windows
+ifeq ($(OS),Windows_NT)
+TRAY_TEST_LIBS = -lws2_32
+else
+TRAY_TEST_LIBS =
+endif
 TEST_TRAY_CORE_SRC = tests/test_tray_core.c src/tray.c src/tray_stub.c \
                      src/instances.c src/json.c
 $(TEST_TRAY_CORE): $(TEST_TRAY_CORE_SRC) $(HDR)
-	$(CC) $(CFLAGS) -I src $(TEST_TRAY_CORE_SRC) -o $@ -lm
+	$(CC) $(CFLAGS) -I src $(TEST_TRAY_CORE_SRC) -o $@ -lm $(TRAY_TEST_LIBS)
 
 # TC tolerance gate: same shape as the q8-KV gate — teacher-forced logits,
 # top-1 + bounded-deviation criteria, per (type, arch) via the model argument

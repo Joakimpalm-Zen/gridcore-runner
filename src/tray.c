@@ -11,14 +11,24 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <process.h>
 #define getpid _getpid
+typedef SOCKET sock_t;
+#define sock_close closesocket
 #else
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 extern char **environ;
+typedef int sock_t;
+#define INVALID_SOCKET (-1)
+#define sock_close close
 #endif
 
 // ------------------------------------------------------------------ config
@@ -188,6 +198,64 @@ static void self_exe(char *out, size_t cap) {
 #endif
 }
 
+// ---------------------------------------------------- swap-serve enrichment
+
+// A swap-mode server registers with an empty models list (models come and
+// go at runtime), so the menu asks the instance itself: GET /v1/models on
+// loopback with a short timeout, parse the ids. Best-effort — on any
+// failure the menu just shows the placeholder row.
+static int fetch_served_models(int port, char names[][128], int cap) {
+#ifdef _WIN32
+    static bool wsa_up = false;
+    if (!wsa_up) { WSADATA w; wsa_up = WSAStartup(MAKEWORD(2, 2), &w) == 0; }
+    if (!wsa_up) return 0;
+#endif
+    sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET) return 0;
+#ifdef _WIN32
+    DWORD tmo = 500;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tmo, sizeof tmo);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tmo, sizeof tmo);
+#else
+    struct timeval tv = { 0, 500 * 1000 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#endif
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port = htons((unsigned short)port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(s, (struct sockaddr *)&a, sizeof a) != 0) { sock_close(s); return 0; }
+
+    char req[128];
+    int rl = snprintf(req, sizeof req,
+                      "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                      "Connection: close\r\n\r\n", port);
+    if (send(s, req, rl, 0) != rl) { sock_close(s); return 0; }
+
+    char buf[16384];
+    int n = 0, r;
+    while (n < (int)sizeof buf - 1 &&
+           (r = (int)recv(s, buf + n, sizeof buf - 1 - n, 0)) > 0)
+        n += r;
+    sock_close(s);
+    buf[n] = 0;
+
+    char *body = strstr(buf, "\r\n\r\n");
+    if (!body) return 0;
+    jv *v = json_parse(body + 4, strlen(body + 4));
+    if (!v) return 0;
+    int out = 0;
+    jv *data = jv_get(v, "data");
+    if (data && data->type == J_ARR)
+        for (int i = 0; i < data->n && out < cap; i++) {
+            const char *id = jv_str(jv_get(data->items[i], "id"), NULL);
+            if (id) snprintf(names[out++], 128, "%s", id);
+        }
+    jv_free(v);
+    return out;
+}
+
 // ------------------------------------------------------------------- menu
 
 static const char *base_name(const char *p) {
@@ -228,10 +296,18 @@ int tray_menu_build(tray_item *it, int cap) {
             PUT(.kind = TRAY_K_LABEL);
             snprintf(it[n-1].label, sizeof it[n-1].label, "%s", recs[i].model_names[m]);
         }
-        if (recs[i].n_models == 0) {
-            PUT(.kind = TRAY_K_LABEL);
-            snprintf(it[n-1].label, sizeof it[n-1].label,
-                     "(models served on demand — ask :%d/v1/models)", recs[i].port);
+        if (recs[i].n_models == 0 && recs[i].port > 0) {
+            // swap-mode server: registry has no static list, ask the API
+            static char served[16][128];
+            int ns = fetch_served_models(recs[i].port, served, 16);
+            for (int m = 0; m < ns; m++) {
+                PUT(.kind = TRAY_K_LABEL);
+                snprintf(it[n-1].label, sizeof it[n-1].label, "%s", served[m]);
+            }
+            if (ns == 0) {
+                PUT(.kind = TRAY_K_LABEL);
+                snprintf(it[n-1].label, sizeof it[n-1].label, "(no model resident)");
+            }
         }
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_STOP_INSTANCE, .arg = recs[i].pid);
         snprintf(it[n-1].label, sizeof it[n-1].label, "Stop");
