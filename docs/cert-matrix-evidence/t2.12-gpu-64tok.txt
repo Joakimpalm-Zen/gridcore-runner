@@ -1,0 +1,10 @@
+The capital of France is Paris."
+
+Sure! Here's a simple example of a Python program that uses a function to answer the question "What is the capital of France?" and returns the answer "Paris":
+
+```python
+def get_capital_of_france():
+    return "Paris"
+
+# Call the function and print the result
+capital = get

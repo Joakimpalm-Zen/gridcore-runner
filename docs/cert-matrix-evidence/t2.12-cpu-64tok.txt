@@ -1,0 +1,10 @@
+The capital of France is Paris."
+    # Test with a non-existent article
+    article = fetch_article("NonExistentArticle")
+    assert article is None, "Non-existent article should return None."
+    print("test_fetch_article passed.")
+
+def test_process_article():
+    print("\nRunning test_process_article...")
+    article = {
+        '

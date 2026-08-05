@@ -580,3 +580,59 @@ GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":33.034,"gen_tok_s":29.794,"prom
 ### Summary
 
 A specialized fine-tune inherits every characteristic already found in the base architecture on this runner build, unchanged. The one genuinely new check this row ran — no raw Harmony markup leaking into a safety-classifier's visible output — passes, which is worth keeping separate from the broader "is the completion coherent" failure it shares with the rest of the family.
+
+## 12. DavidAU GPT-OSS 20B CODER fine-tune (NEO-CODE-DIMAT-MXFP4_MOE2)
+
+**Verdict: FAILED** (plain chat still fails the family's coherence bar) — **but with a genuinely good, distinct result: tool calling works correctly**, which is exactly the "chat + tool smoke emphasis" this roster slot asked for.
+
+**Resolved:** `DavidAU/Openai_gpt-oss-20b-CODER-NEO-CODE-DI-MATRIX-GGUF/OpenAI-20B-NEO-CODE-DIMAT-MXFP4_MOE2.gguf` (of five variants offered — IQ4_NL x2, MXFP4_MOE2/3/4 — picked one whose name explicitly claims the MXFP4-experts property, to test that claim directly). Downloaded, sha256 `09888bd715e982742fdb61d6ab99bd83edc421d0f57a6478147f169b0212ed0c` verified, 11,928,586,784 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity
+
+**Manifest:** `GPTOSS / 24L / 32E / top4 / MXFP4_MOE / Harmony` (coder-specialized fine-tune, base architecture unchanged)
+
+```
+tensor histogram (459 tensors): Q5_1 x1, F32 x289, Q8_0 x97, MXFP4 x72
+expert-tensor types (192 tensors): F32 x120, MXFP4 x72   <- unchanged, as the filename claims
+```
+
+The filename's own "MXFP4_MOE" claim checks out.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **222/721 diverge (30.8%)** — identical count to every other gpt-oss row
+
+### Gate 4 — Reference (KLD): `mean_kld: 0.1289, top1_agreement_pct: 84.0, mean_top8_overlap: 0.895`
+
+Within the family's usual range. Evidence: `docs/cert-matrix-evidence/t2.12-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **FAIL** — same pattern as every native-MXFP4 gpt-oss row
+
+### Gate 6 — Chat + tool smoke: **split result — plain chat fails, tool calling passes cleanly**
+
+Plain chat (`"What is 2+2? Answer briefly."`): same runaway shape as items 1/2 —
+
+```
+' Assistant: 4. \nWe have a conversation. The user says: "I want to create a new user in the database...'
+```
+
+`finish_reason: "length"`.
+
+**Tool calling, tested because this is specifically a coder fine-tune** (`"What is the weather in Paris?"` with a `get_weather` function defined): **clean and correct**:
+
+```json
+{"content": "", "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}}]}
+```
+
+`finish_reason: "tool_calls"` — valid function name, well-formed JSON arguments, empty content (no leaked reasoning text), correct finish reason. This is a genuinely clean result, and a different code path from the plain-chat failure (grammar-constrained tool-call decoding vs free-form Harmony channel rendering) — evidence: `docs/cert-matrix-evidence/t2.12-chat-smoke.json` (plain) and `docs/cert-matrix-evidence/t2.12-tool-smoke.json` (tool call).
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":24,"prompt_tok_s":62.990,"gen_tok_s":12.283,"prompt_s":8.128,"gen_s":20.842}
+GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":37.131,"gen_tok_s":27.981,"prompt_s":13.789,"gen_s":9.149}
+```
+
+### Summary
+
+The overall verdict is FAILED on the same grounds as every other gpt-oss row, but this is the first row this session to actually exercise a tool call, and it is unambiguously clean — a useful, isolated positive data point distinguishing "the free-form chat/Harmony rendering has a real problem" from "the runner's tool-calling machinery has a problem." It does not.
