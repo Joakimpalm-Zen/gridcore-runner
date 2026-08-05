@@ -3,6 +3,14 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## Unreleased
+
+- The `sampling:` banner at `--temp 0` now says what is actually true —
+  greedy argmax, shaping knobs inactive — instead of printing a
+  `repeat_penalty` value that does not apply. The penalty was already
+  correctly bypassed in greedy mode; the banner misled an external
+  reviewer during the afmoe certification run into ruling it out by hand.
+
 ## v0.1.7-alpha — 2026-08-05
 
 ### We found a 13× optimization and rejected it
