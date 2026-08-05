@@ -6,24 +6,20 @@ the platform C/math/threading/dynamic-loader libraries, loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**In 0.1.6 — `--parallel` on Windows serves real checkpoints correctly, and
-the multi-slot server got a hardening pass.** MinGW's 32-bit `stat()` was
-silently unsharing weights for any file past 2 GB: every slot re-decided its
-own CPU/GPU split under the previous slot's VRAM footprint, and the same
-greedy request could get a different answer depending on which slot took it.
-Files are now keyed by their native 64-bit identity, a guard reports any
-silent split disagreement loudly, and the fix is pinned at real-checkpoint
-scale. Also in: **Apertus on CUDA** with its tokenizer fixed (721-prompt
-mismatches 3 → 0), speculative drafts honoring `--kv q8`, `/v1/embeddings`
-working with the official OpenAI SDK, prefix snapshots that survive a
-restart, a long prefill no longer blocking the other slots, the write-side
-stall reproduced and gated for real, and a corrected published comparison —
-vLLM scores **80/105**, not the 20/100 a misconfigured run reported. Where a
-model is too numerically sensitive for token-identity to mean anything,
-agreement is measured against its own floor: `scripts/sensitivity_floor.py` reports
-what a given model does to a small numeric change, and
-`scripts/token_divergence.py` reports where two engines first disagree and by
-how much.
+**In 0.1.7 — CPU SIMD kernels that had to earn their place, and a 13× 
+optimization we rejected.** MXFP4 (the gpt-oss expert format) gained a
+dedicated dot kernel on every ISA — it previously took a generic path on
+*all* platforms, and fixing that alone was worth ~16–20× on AVX2 where the
+model fits RAM. New ARM NEON kernels were added only where they measured
+faster than the compiler's auto-vectorized code, format by format, gated by
+a new independent-reference test that has passed on four platform/ISA
+combinations. In the same cycle we prototyped an expert-residency cache for
+models larger than RAM: it turned 0.05 tok/s into 0.65 tok/s — 13×,
+mechanism working exactly as designed — and we rejected it, because 0.65
+tok/s is not a configuration worth running and everywhere the model fits
+the cache made things slower. An optimization doesn't pass here because the
+benchmark got faster; it has to preserve the model and produce a
+configuration worth running. Full data: `docs/negative-result-expert-cache.md`.
 
 Earlier, in 0.1.4: the tensor-core prefill GEMM became the default on
 tolerance-gated dense Q4_K models (**+47–77% prefill**, decode unchanged),
@@ -43,7 +39,7 @@ NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
 make                 # produces ./runner (GPU auto-detected at runtime)
-./runner --version   # -> runner 0.1.6-alpha
+./runner --version   # -> runner 0.1.7-alpha
 ```
 
 Then point it at any GGUF model:
@@ -57,7 +53,7 @@ Then point it at any GGUF model:
 ./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
 ```
 
-> **Public alpha (`0.1.6-alpha`).** CI-tested on Linux/macOS/Windows and
+> **Public alpha (`0.1.7-alpha`).** CI-tested on Linux/macOS/Windows and
 > daily-driven by the rest of the Gridcore stack, but it has met few machines
 > other than ours — which is what an alpha is for. Run your GGUF models and
 > [open an issue](../../issues) for anything that crashes, misbehaves, or
