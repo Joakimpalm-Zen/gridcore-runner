@@ -150,3 +150,34 @@ overlap efficiency on 4 P-cores. The async/ring-buffer engineering from
 the proposal is real but subordinate: it matters only if (a) and (b)
 survive. STOP rule unchanged: no engine work until all three numbers are
 in and the composed ceiling still clears 5 tok/s.
+
+## Addendum 2: Google's MoE batch-1 MTP warning, answered with residency math
+
+Google's Gemma-4 MTP guidance (surfaced via owner's web sweep, buried in
+SEO noise) warns the 26B MoE can see ZERO MTP speedup at batch size 1:
+verifying K drafts loads the expert UNION, offsetting draft gains when
+the amortizable dense fraction is small and effective K (acceptance-
+scaled) is low. Mechanism accepted — at effective K=2–3 the raw union
+amortization is only ~1.3–1.5× on expert bytes.
+
+But that analysis is for RAM-resident models with no expert cache. Our
+regime streams misses past a resident standing committee, and the two
+levers COMPOSE (measured, doc trace, misses = union minus top-C-frequent
+residents per layer, M1 2.35 GB/s):
+
+| resident set | cache | eff. K=2 | K=3 | K=4 | K=8 |
+|---|---|---|---|---|---|
+| top-16/layer | 1.5 GB | 6.9 | 7.5 | 7.9 | 9.5 tok/s ceiling |
+| top-32/layer | 3.1 GB | 11.3 | 12.1 | 12.7 | 14.7 tok/s ceiling |
+
+Single-token committee hit rates: 50.6% (top-16), 70.3% (top-32).
+Budget check on 8 GB: dense/attention ~2 GB + committee 1.5 GB + KV/
+scratch ≈ 4 GB — fits with OS headroom; the 3.1 GB cache is the stretch
+config. **Even at effective K=2 — Google's pessimistic regime — the
+composed ceiling is ~7 tok/s, comfortably above the 5 tok/s bar.** The
+kill-order unknowns collapse to: (b) scattered-read efficiency (~7–12
+concurrent 3.2 MB aligned reads per layer — the standalone I/O probe
+answers this) and (c) compute/IO overlap; acceptance (a) merely moves us
+along a curve that clears the bar everywhere. Source-hygiene note: the
+same web sweep attributes "TurboQuant" to an SEO cluster shilling a
+patched llama.cpp fork — consistent with note 2's assessment.
