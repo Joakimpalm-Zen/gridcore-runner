@@ -500,3 +500,37 @@ GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":35.883,"gen_tok_s":31.762,"prom
 ### Summary
 
 The admission test the roster designed this row to run — does the runner's per-layer expert-count machinery handle a real third-party expert prune, not just this project's own — is an unqualified yes. That is genuinely valuable evidence for the pruning infrastructure generally. The overall verdict is still FAILED because gate 6 fails and gate 4 only half-clears, both consistent with characteristics already seen across the gpt-oss family rather than new problems specific to pruning.
+
+## 10. GPT-OSS 120B REAP 58B
+
+**Verdict: REFUSED** — a genuinely new limitation this roster item surfaced: **the runner has no support for GGUF's multi-part/split file format at all.**
+
+**Resolved:** `12bitmisfit/OpenAI_GPT-OSS-120B_Pruned_REAP_58B-GGUF`, Q5_0 shards (the smallest quant this repo offers — no Q4-class option exists here, so this is a ~39 GB class artifact rather than the roster's anticipated ~30 GB; noted as a resolution difference, not a substitution error). Downloaded via `hf download` with `--include`, 9 shards, 39 GB total (`GPT-OSS-120B-Pruned-Q5_0-00001-of-00009.gguf` through `-00009-of-00009.gguf`). Individual shard sha256 not separately re-verified beyond `hf download`'s own transfer integrity checking, given the file count and size; deleted in full after this verdict.
+
+### Gate 1 — Identity (partial — only shard 1's own tensor table is visible to a single-file reader)
+
+```
+general.name: "Reap Seed_42 0.50"
+architecture: gpt-oss   block_count: 36   expert_count: 64   expert_used_count: 4
+(shard 1 alone: 73 tensors, 4 of 36 layers' worth -- the rest live in shards 2-9)
+```
+
+**Manifest (partial):** `GPTOSS / 36L / 64E / top4 / <requant, exact scheme unconfirmed> / Harmony`. REAP ("Router-weighted Expert Activation Pruning") halving gpt-oss-120b's native 128 experts to 64 matches the model name's "0.50" ratio and the roster's own description ("expert-pruned 120B derivative"). A full tensor-type histogram across all 36 layers was not assembled — the inspection tool used this session reads one GGUF file's own header only, and this file's remaining tensors live in 8 sibling shards a single-file reader cannot see. Not pursued further given gate 2's outcome below.
+
+### Gate 2 — Admission: **REFUSED**
+
+```
+error: missing tensor blk.3.post_attention_norm.weight
+error: missing tensor blk.3.ffn_gate_inp.weight
+error: missing MoE expert tensor (neither fused ffn_gate_exps nor split ffn_gate.0) in blk.3
+```
+
+Exit code 1, fails fast (well under a minute), no hang. **The runner does not implement GGUF's split-file convention** (the standard `-00001-of-00009.gguf` naming and accompanying `split.count`/`split.no` metadata that llama.cpp and other tools read to discover and load sibling shards automatically): pointed at shard 1, it reads only that file's own tensor table and reports every tensor belonging to a later layer as simply missing, starting at the first layer (`blk.3`) whose tensors are not in shard 1.
+
+Worth being precise about the *quality* of this refusal, since the goal doc's bar is "a clean refusal with a correct reason": it is clean (no crash, no hang, exits promptly) and technically accurate (`blk.3`'s tensors genuinely are not present in the file passed on the command line) — but it does not correctly *diagnose* the situation as "this is one part of a split model," which a purpose-built check (recognizing the `-NNNNN-of-NNNNN` filename pattern or the `split.count` KV) could report directly and more usefully. Recorded as a real, useful finding either way: any multi-part GGUF — not just this one — will hit the same wall on this runner build.
+
+Gates 3-7 do not apply; a refused load ends the battery.
+
+### Summary
+
+This roster slot ("probably unreachable — prove it with numbers") delivered a different but equally concrete result: the blocker here is a runner-side format gap (no split-GGUF support), not a numbers-based unreachability finding. Multi-part GGUFs are the standard distribution format for anything past roughly the 30-40 GB single-file comfort zone (120B-class models routinely ship this way), so this is a real capability gap worth flagging independent of whether REAP-58B specifically would have passed its other gates.

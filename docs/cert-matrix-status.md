@@ -25,7 +25,7 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 | # | artifact | resolved repo/file | verdict | note |
 |---|---|---|---|---|
 | 9 | GPT-OSS Nano 9B (~12 experts) | `squ11z1/gpt-oss-nano/gpt-oss-9b-q4_k_m.gguf` (sha `794da0a9...`) | **FAILED** | admission PASS on 12-expert (not 32) file — validates runner's per-layer expert-count handling on a real 3rd-party prune; fully requantized off MXFP4 (Q8_0/Q5_0 mixed); cpu_cuda PASSES (no MXFP4 left to disagree about); KLD 88%/0.040 (best KLD of any gpt-oss row, clears the 0.05 bar, misses top-1); chat smoke still fails (same Harmony issue) |
-| 10 | GPT-OSS 120B REAP 58B | pending | pending | |
+| 10 | GPT-OSS 120B REAP 58B | `12bitmisfit/OpenAI_GPT-OSS-120B_Pruned_REAP_58B-GGUF` Q5_0, 9 shards (39GB) | **REFUSED** | runner has NO support for GGUF split/multi-part files at all — reads only shard 1's tensor table, reports later-layer tensors "missing" rather than discovering sibling shards; real capability gap (multi-part is the standard distribution format past ~30-40GB), not specific to REAP |
 | 11 | gpt-oss-safeguard-20b | pending | pending | |
 | 12 | GPT-OSS 20B coder fine-tune | pending | pending | |
 | 13 | abliterated GPT-OSS 20B MXFP4 | pending | pending | |
