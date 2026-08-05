@@ -361,3 +361,37 @@ GPU prompt throughput here is oddly *lower* than CPU's (5.5 vs 35.9 tok/s) — r
 ### Summary
 
 This is the strongest identity result of the session: a real architecture (dense gemma4, QAT) with 4/6 exact greedy matches against an independent engine, clean tokenizer, and byte-identical CPU/CUDA. The two long-run misses are the kind of divergence the goal doc's own "known acceptable exception" language anticipates in spirit (two engines' rounding disagreeing inside a degenerate repeat loop is a different animal from disagreeing about real content) — recorded honestly as misses rather than waived, but clearly distinguished from a real behavioral gap.
+
+## 7. Google gemma-4-E2B-it QAT Q4_0
+
+**Verdict: REFUSED** — clean, specific, correctly-triggered refusal. Per the goal doc, this is a complete result, not a setback.
+
+**Resolved:** `google/gemma-4-E2B-it-qat-q4_0-gguf/gemma-4-E2B_q4_0-it.gguf`. Downloaded, sha256 `fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634` verified, 3,349,516,256 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity
+
+```
+architecture: gemma4   block_count: 35   embedding_length: 1536   context_length: 131072
+gemma4.feed_forward_length: [6144 x15, 12288 x20]   <- an ARRAY of 35 per-layer values, not a scalar
+tensor histogram (541 tensors): F32 x263, F16 x1, Q6_K x2, Q4_0 x275
+(no expert_count key — dense, E-series per-layer-embedding architecture)
+```
+
+The interesting fact this gate surfaces: **this file's FFN width genuinely varies per layer** (15 layers at 6144, 20 at 12288) and Google's own conversion publishes that as a GGUF array-typed KV rather than the scalar `feed_forward_length` every other file in this session has. That is not a malformed file — it is an accurate encoding of a real heterogeneous architecture — but it is a format the runner's loader does not read.
+
+### Gate 2 — Admission: **REFUSED**
+
+```
+gemma4: E-series (per-layer embeddings + shared KV) — verified against llama.cpp at the Q4_K noise floor rather than token-identically
+error: missing model hyperparameters for arch 'gemma4'
+```
+
+The runner correctly *recognizes* this as a gemma4 E-series file (the diagnostic line fires first) but then refuses to load it. Root cause identified by direct inspection (read-only — no code changed, per the STOP rule): `src/model.c:1346-1348` requires `n_ff > 0` after populating hyperparameters from `gguf_get_u32(g, "gemma4.feed_forward_length", ...)`; `src/gguf.c:280-299`'s `gguf_get_u32` has no branch for `GGUF_T_ARR` (array) KVs — every branch tests unsigned/signed/float scalar storage — so it silently returns the caller's default (0) when the key holds an array, which then trips the hyperparameter-completeness check and refuses the load. **This is exactly the "clean refusal with a correct reason" the goal doc asks for**: the runner does not silently misread the array as garbage or crash; it notices the resulting hyperparameter is missing and stops. The specific gap is that this loader path was written assuming `feed_forward_length` is always a scalar, which held for every other file in this session (including the 26B-A4B/12B/31B gemma4 QAT releases, all uniform per-layer) but not for this real, heterogeneous E2B release.
+
+Tokenizer vocab was still checked independently (it does not require the hyperparameter path): **0/721 diverge** vs `google/gemma-4-E2B-it` — clean. `docs/cert-matrix-evidence/t1.7-difftok.log`.
+
+Gates 3 (partially, see above) through 7 do not apply — a refused load ends the battery.
+
+### Summary
+
+A specific, well-characterized REFUSED verdict: the file is a legitimate, differently-shaped release (real per-layer FFN width variation, not a corrupt or unusual quant), and the runner's gemma4 loader has a real, narrow gap — no array-typed-KV handling for `feed_forward_length` — that a future engine session could close in one place (`gguf_get_u32`'s array branch, or a per-layer-array reader alongside the existing per-layer-override fields like `l_head_kv`/`l_head_dim` the struct already has for heterogeneous archs). No code was touched to test or work around this, per the STOP rule.
