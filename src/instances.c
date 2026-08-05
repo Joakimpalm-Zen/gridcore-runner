@@ -20,6 +20,10 @@
 #include <dirent.h>
 #include <signal.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#include <sys/proc.h>
+#endif
 #endif
 
 // ------------------------------------------------------------------ paths
@@ -69,7 +73,33 @@ bool instance_pid_alive(long pid) {
     CloseHandle(h);
     return alive;
 #else
-    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+    if (kill((pid_t)pid, 0) != 0 && errno != EPERM) return false;
+    // a zombie still answers kill(pid, 0) but is dead for every purpose a
+    // reader has: it serves nothing and no signal can stop it further.
+    // Counting it alive turns an unreaped child into a permanent ghost row
+    // that Stop can never clear.
+#ifdef __APPLE__
+    struct kinfo_proc kp;
+    size_t len = sizeof kp;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+    if (sysctl(mib, 4, &kp, &len, NULL, 0) == 0 && len >= sizeof kp &&
+        kp.kp_proc.p_stat == SZOMB)
+        return false;
+#elif defined(__linux__)
+    char sp[64], buf[512];
+    snprintf(sp, sizeof sp, "/proc/%ld/stat", pid);
+    FILE *f = fopen(sp, "rb");
+    if (f) {
+        size_t rn = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        buf[rn] = 0;
+        // state is the field after the parenthesized comm
+        char *rp = strrchr(buf, ')');
+        if (rp && rp[1] == ' ' && (rp[2] == 'Z' || rp[2] == 'X'))
+            return false;
+    }
+#endif
+    return true;
 #endif
 }
 

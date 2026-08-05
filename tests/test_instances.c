@@ -15,6 +15,7 @@
 #define getpid _getpid
 #define setenv_compat(k, v) _putenv_s(k, v)
 #else
+#include <sys/wait.h>
 #include <unistd.h>
 #define setenv_compat(k, v) setenv(k, v, 1)
 #endif
@@ -127,6 +128,32 @@ int main(void) {
         CHECK(f == NULL, "corrupt record swept");
         if (f) fclose(f);
     }
+
+#ifndef _WIN32
+    // 7. a zombie answers kill(pid, 0) but must count as dead: a record
+    // pointing at one would otherwise be an unsweepable ghost row that
+    // Stop can never clear (found live on the M1, 2026-08-05)
+    {
+        pid_t z = fork();
+        if (z == 0) _exit(0);
+        // give it time to die; do NOT reap — the zombie is the fixture
+        for (int t = 0; t < 100 && instance_pid_alive((long)z); t++) {
+            struct timespec ts = { 0, 10 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
+        }
+        CHECK(!instance_pid_alive((long)z), "zombie counts as dead");
+        write_fake(dir, (long)z, "ghost.gguf");
+        r = instances_list(&n);
+        CHECK(n == 0, "zombie record not listed");
+        instances_list_free(r, n);
+        char zp[1300];
+        snprintf(zp, sizeof zp, "%s/%ld.json", dir, (long)z);
+        FILE *f = fopen(zp, "rb");
+        CHECK(f == NULL, "zombie record swept");
+        if (f) fclose(f);
+        waitpid(z, NULL, 0);
+    }
+#endif
 
     if (fails) { fprintf(stderr, "test_instances: %d FAILURES\n", fails); return 1; }
     printf("instances registry tests ok\n");

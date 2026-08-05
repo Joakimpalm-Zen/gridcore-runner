@@ -4,6 +4,7 @@
 #include "json.h"
 #include "runner.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -263,13 +264,28 @@ static void stop_pid(long pid) {
     CloseHandle(h);
 #else
     kill((pid_t)pid, SIGTERM);
+    bool mine = pid == g_managed_pid, reaped = false;
     for (int i = 0; i < 30; i++) {
-        if (!instance_pid_alive(pid)) break;
+        // our own child MUST be reaped here, not just observed dead — a
+        // WNOHANG probe that races the kill leaves a zombie nobody ever
+        // waits on again (found live: permanent ghost row in the menu)
+        if (mine) {
+            pid_t w = waitpid((pid_t)pid, NULL, WNOHANG);
+            if (w == (pid_t)pid || (w == -1 && errno == ECHILD)) {
+                reaped = true;  // dead and reaped (here or by managed_state)
+                break;
+            }
+        }
+        if (!mine && !instance_pid_alive(pid)) break;
         struct timespec ts = { 0, 100 * 1000 * 1000 };
         nanosleep(&ts, NULL);
     }
-    if (instance_pid_alive(pid)) kill((pid_t)pid, SIGKILL);
-    if (pid == g_managed_pid) waitpid((pid_t)pid, NULL, WNOHANG);
+    if (!reaped) {
+        if (instance_pid_alive(pid)) kill((pid_t)pid, SIGKILL);
+        // blocking wait is safe after SIGKILL: death is guaranteed, and it
+        // closes the reap race for good
+        if (mine) waitpid((pid_t)pid, NULL, 0);
+    }
 #endif
     if (pid == g_managed_pid) g_managed_pid = 0;
 }

@@ -57,6 +57,15 @@ recursive `$(MAKE) ... PYTHON=$(PYTHON)` was unquoted and exploded with
   disabled item; parent rows with submenus are now enabled. Headless
   checks could never have caught this: the menu model was correct, the
   platform rendering swallowed the interaction.
+- Owner click-through round 3 (post-merge): Stop left a permanent ghost
+  row. Root cause pair: (a) `instance_pid_alive` counted zombies as alive
+  (`kill(pid,0)` answers for them), so an unreaped child could never be
+  swept and every managed stop burned the full 3 s escalation against a
+  corpse; (b) `stop_pid`'s WNOHANG reap raced the SIGKILL and could lose,
+  orphaning the zombie forever. Fixed: zombie detection in the liveness
+  check (sysctl `SZOMB` on macOS, `/proc` state on Linux; Windows has no
+  zombies) and a proper reap loop with a blocking wait after SIGKILL.
+  Regression-tested with a real forked zombie in test_instances.
 
 ## Human checklist — macOS (owner, at the screen)
 
