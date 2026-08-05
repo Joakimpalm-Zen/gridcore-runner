@@ -3,7 +3,7 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
-## Unreleased
+## v0.1.8-alpha — 2026-08-05
 
 - **New architecture: `afmoe` (Arcee Trinity family — Trinity-Nano-Preview,
   Trinity-Mini).** Plain-transformer sparse MoE with muP-scaled embeddings,
