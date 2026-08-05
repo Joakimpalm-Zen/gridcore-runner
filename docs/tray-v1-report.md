@@ -47,22 +47,31 @@ recursive `$(MAKE) ... PYTHON=$(PYTHON)` was unquoted and exploded with
   were never affected (`cfg_save` escapes via `sb_esc`).
 - NSOpenPanel `allowedFileTypes` deprecation → `allowedContentTypes` +
   UniformTypeIdentifiers framework (Darwin-only link flag).
+- Owner click-through round 1: no feedback between Start and the record
+  appearing (multi-second model load), Start-while-running a silent no-op,
+  tray listed itself, running dot always lit → explicit managed lifecycle
+  (starting / running / exited+log / stopped), tray filtered from rows
+  and dot, managed output captured to `managed.log`.
+- Owner click-through round 2: instance submenu (models + Stop) could not
+  be opened at all on macOS — AppKit refuses to open a submenu on a
+  disabled item; parent rows with submenus are now enabled. Headless
+  checks could never have caught this: the menu model was correct, the
+  platform rendering swallowed the interaction.
 
 ## Human checklist — macOS (owner, at the screen)
 
-The tray is left RUNNING on the M1. Each row UNVERIFIED until you click:
+Owner click-through 2026-08-05 (two rounds of feedback, both fixed on the
+branch — see "Fixed during validation"):
 
-- [ ] Grid icon visible in the menu bar, adapts to light/dark, center cell
-      fills while a server runs.
-- [ ] Menu opens; rows match `GRIDCORE_TRAY_DUMP=1 ./runner --tray`.
-- [ ] Start a server by hand (`./runner --serve -m <model>`); its row +
-      model submenu appear on next menu open; **Stop** kills it.
-- [ ] **Choose model…** opens the picker filtered to .gguf; picking one
-      starts the managed server (● row appears).
-- [ ] **Launch at login** toggles; plist appears/disappears in
-      `~/Library/LaunchAgents/`.
-- [ ] **Quit controller** stops the ● instance, leaves a hand-started one
-      running, icon disappears.
+- [x] Grid icon visible in the menu bar; menu opens and matches the dump.
+- [x] Start default runner: starting → running lifecycle visible; managed
+      ● row appears.
+- [x] Instance submenu opens (model list) and **Stop** works.
+- [x] **Choose model…** picker (used to select Trinity-Nano from Downloads).
+- [ ] **Launch at login** toggle (not yet exercised at the screen; plist
+      lifecycle proven by harness).
+- [ ] **Quit controller** stops the ● instance only (semantics proven by
+      test_tray_core; not yet clicked at the screen).
 
 ## Human checklist — Windows (owner, at the 3070's screen)
 

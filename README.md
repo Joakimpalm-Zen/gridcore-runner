@@ -200,6 +200,17 @@ reasoning between `[thinking]` markers. The server additionally reuses the
 KV cache for the longest shared prompt prefix across requests, so repeated
 system/template prefixes skip prompt evaluation entirely.
 
+**`--tray` puts a controller in the menu bar / notification area** (macOS and
+Windows). The grid icon lists every live runner instance on the machine with
+its loaded models — swap-mode servers are asked live over `GET /v1/models` —
+lets you stop any of them, and starts one pre-configured desktop-managed
+server with explicit lifecycle feedback (starting → running → exited-with-log,
+plus login autostart). Discovery works through per-process registry records
+under `~/.gridcore/runner/` (`%APPDATA%\gridcore\runner\` on Windows) that
+every run-mode invocation writes best-effort and readers self-heal, so the
+CLI and serve paths are untouched when the tray is not running. Details,
+config format and uninstall notes: [docs/tray-controller.md](docs/tray-controller.md).
+
 ## GPU
 
 Two backends implement the same small interface (`src/gpu_none.c` documents

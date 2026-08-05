@@ -3,7 +3,7 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
-## Unreleased (branch `tray-controller`)
+## Unreleased
 
 - **`--tray`: desktop tray / menu-bar controller (macOS + Windows).** A
   code-drawn grid icon lists every live runner instance on the machine
