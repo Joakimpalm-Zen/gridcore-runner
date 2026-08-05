@@ -11,7 +11,7 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 
 | # | artifact | resolved repo/file | verdict | note |
 |---|---|---|---|---|
-| 1 | ggml-org gpt-oss-20b MXFP4 | pending | pending | |
+| 1 | ggml-org gpt-oss-20b MXFP4 | `ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf` (sha `27cd6c43...`) | **FAILED** | tokenizer 222/721 diverge, cpu_cuda not byte-identical on this GPU, chat smoke runs away non-coherent; KLD (raw-completions, chat endpoint unusable for gpt-oss cross-engine) 83% top1/0.128 KLD misses 97%/0.05 bar but matches an already-diagnosed MXFP4 vec_dot_type gap |
 | 2 | Bartowski gpt-oss-20b Q6_K_L | pending | pending | |
 | 3 | Unsloth gpt-oss-20b Q4_K_M-class | pending | pending | |
 | 4 | Gemma-4-26B-A4B-it QAT Q4_0 | pending | pending | |

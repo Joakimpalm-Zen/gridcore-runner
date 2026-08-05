@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-20b-MXFP4-ggml-org.gguf","arch":"gpt-oss","context":4096,"gpu_layers":0,"layers":24,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":62.842,"gen_tok_s":12.329,"prompt_s":8.147,"gen_s":20.765}
