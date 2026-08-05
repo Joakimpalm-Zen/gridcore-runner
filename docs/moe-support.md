@@ -281,7 +281,8 @@ GPU numbers. CI continues to exercise the harness with fixtures.
   decode on an M2 Pro / 16 GB under realistic desktop load, which fails the
   "configuration worth running" bar. Full-model Metal validation needs
   **≥ 24 GB unified memory**; 16 GB machines should run the pruned
-  `gpt-oss-20b-keep30` artifact instead (see the 0.1.6/0.1.7 notes). The
+  [`gpt-oss-20b-keep30`](https://huggingface.co/Joakimpalm-Zen/gpt-oss-20b-keep30-MXFP4-GGUF)
+  artifact instead (see the 0.1.6/0.1.7 notes). The
   loader now prints requested-vs-limit bytes when this allocation fails,
   and `--caps` publishes the ceiling as `gpu.max_working_set_bytes`.
 - **GELU dual-branch MoE** (gemma-4) is implemented on CPU, CUDA and Metal; see
