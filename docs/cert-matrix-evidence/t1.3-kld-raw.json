@@ -1,0 +1,7 @@
+{
+  "positions_scored": 400,
+  "positions_failed": 0,
+  "mean_kld": 0.1373951692228762,
+  "top1_agreement_pct": 78.25,
+  "mean_top8_overlap": 0.8740625
+}

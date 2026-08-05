@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-20b-Q4_K_M-unsloth.gguf","arch":"gpt-oss","context":4096,"gpu_layers":24,"layers":24,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":33.061,"gen_tok_s":28.644,"prompt_s":15.487,"gen_s":8.937}

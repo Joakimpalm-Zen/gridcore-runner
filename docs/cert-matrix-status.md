@@ -13,7 +13,7 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 |---|---|---|---|---|
 | 1 | ggml-org gpt-oss-20b MXFP4 | `ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf` (sha `27cd6c43...`) | **FAILED** | tokenizer 222/721 diverge, cpu_cuda not byte-identical on this GPU, chat smoke runs away non-coherent; KLD (raw-completions, chat endpoint unusable for gpt-oss cross-engine) 83% top1/0.128 KLD misses 97%/0.05 bar but matches an already-diagnosed MXFP4 vec_dot_type gap |
 | 2 | Bartowski gpt-oss-20b Q6_K_L | `bartowski/openai_gpt-oss-20b-GGUF/openai_gpt-oss-20b-Q6_K_L.gguf` (sha `e729b05f...`) | **FAILED** | mixed-tensor trap confirmed: experts stay MXFP4_MOE (72/72 unchanged), only 24 non-expert tensors move Q8_0->Q6_K; tokenizer/cpu_cuda/chat-smoke fail identically to item 1 (same root causes); KLD 84%/0.116, consistent with item 1 |
-| 3 | Unsloth gpt-oss-20b Q4_K_M-class | pending | pending | |
+| 3 | Unsloth gpt-oss-20b Q4_K_M-class | `unsloth/gpt-oss-20b-GGUF/gpt-oss-20b-Q4_K_M.gguf` (sha `c2753664...`) | **FAILED** | mixed-tensor trap confirmed again (experts untouched MXFP4); tokenizer/cpu_cuda fail same as items 1/2; chat smoke fails DIFFERENTLY — stops cleanly (Unsloth patched the chat template) but still leaks analysis-channel meta-commentary instead of a direct answer; KLD 78%/0.137 |
 | 4 | Gemma-4-26B-A4B-it QAT Q4_0 | pending | pending | |
 | 5 | Bartowski gemma-4-26B-A4B-it Q4_K_M | pending | pending | |
 | 6 | gemma-4-12B-it QAT Q4_0 | pending | pending | |

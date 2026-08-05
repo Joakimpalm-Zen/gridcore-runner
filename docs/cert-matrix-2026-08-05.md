@@ -149,3 +149,57 @@ Within noise of item 1's numbers, as expected for a file differing in only 24 no
 ### Summary
 
 The interesting result here is gate 1, exactly as the goal doc anticipated: Bartowski's "Q6_K_L" name is honest about *quantizing something*, but the experts — the overwhelming majority of the file's parameters and the reason MXFP4 exists at all — are untouched. Gates 3/5/6 reproduce item 1's failures with the same root causes (not re-diagnosed from scratch), which is itself informative: these are properties of the *architecture implementation on this runner build*, not properties of any one file.
+
+## 3. Unsloth gpt-oss-20b Q4_K_M
+
+**Verdict: FAILED** — same three gates fail as items 1/2, but gate 6 (chat smoke) fails *differently* here: it terminates cleanly instead of running away, which is a real, distinct partial improvement worth recording precisely rather than lumping in as "same failure."
+
+**Resolved:** `unsloth/gpt-oss-20b-GGUF/gpt-oss-20b-Q4_K_M.gguf`. Downloaded, sha256 `c27536640e410032865dc68781d80a08b98f8db5e93575919af8ccc0568aeb4f` verified against the HF LFS blob, 11,624,759,488 bytes. Deleted after this verdict.
+
+### Gate 1 — Identity
+
+**Manifest:** `GPTOSS / 24L / 32E / top4 / MXFP4_MOE / Harmony`
+
+```
+tensor histogram (459 tensors): Q8_0 x13, F32 x289, Q5_0 x61, Q4_K x24, MXFP4 x72
+expert-tensor types (192 tensors): F32 x120, MXFP4 x72   <- experts UNCHANGED, same as items 1/2
+non-expert-tensor types: Q8_0 x13, F32 x169, Q5_0 x61, Q4_K x24
+token_embd.weight: Q5_0 (items 1/2 had this at Q8_0)
+```
+
+Third confirmation of the mixed-tensor pattern: "Q4_K_M" names a granular per-tensor-role scheme (Unsloth's own "Dynamic" quant strategy — a genuine 3-way split across Q8_0/Q5_0/Q4_K for non-expert tensors, not a uniform Q4_K_M), while the 72 expert tensors are, again, untouched MXFP4. Notably the GGUF's `tokenizer.chat_template` KV begins with a literal comment: `"{# Chat template fixes by Unsloth #}"` — Unsloth is aware of and has patched gpt-oss's chat template, which matters for gate 6 below.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **222/721 diverge (30.8%)**, identical to items 1/2
+
+Confirms (third file, third source) this is a runner-side characteristic of the gpt-oss vocab, not introduced by any specific conversion. `docs/cert-matrix-evidence/t1.3-difftok.log`.
+
+### Gate 4 — Reference (KLD, raw-completions protocol)
+
+400 positions: `mean_kld: 0.1374, top1_agreement_pct: 78.25, mean_top8_overlap: 0.874`. Slightly lower top-1 than items 1/2 (83-84%), consistent with this file's more aggressive non-expert quantization (Q4_K/Q5_0 vs mostly-Q8_0) compounding the already-diagnosed MXFP4 activation-quantization gap. Still the same underlying cause, not a new one. Evidence: `docs/cert-matrix-evidence/t1.3-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **FAIL**, same pattern as items 1/2
+
+Diverges at 64 tokens, same GPU-architecture-dependent characteristic.
+
+### Gate 6 — Chat smoke: **FAIL, but a genuinely different failure mode**
+
+`"What is 2+2? Answer briefly."`:
+
+```
+'"\n\nWe need to produce a short answer: 4. But we must follow the style guidelines: no mention of policies, no mention of being an AI, no mention of the policy. Just answer. So answer: 4.'
+```
+
+`finish_reason: "stop"` — **this is the first gpt-oss file this session where the completion terminates on its own** rather than running to `max_tokens`/`"length"` (items 1 and 2 both ran away to 1024 tokens). Unsloth's chat-template fix (see gate 1) plausibly explains the difference: stopping is a real, measurable improvement. But the content is still not a coherent, direct answer — the visible text is entirely reasoning/meta-commentary about how to format a response ("we must follow the style guidelines... no mention of policies... Just answer.") with the actual answer buried at the very end, and it opens with a stray, dangling `"` character. Still fails the gate's "coherent answer" bar, but the specific way it fails is materially different from items 1/2 and worth an engineer's attention as a smaller, more tractable gap. `docs/cert-matrix-evidence/t1.3-chat-smoke.json`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":24,"prompt_tok_s":60.462,"gen_tok_s":12.346,"prompt_s":8.468,"gen_s":20.735}
+GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":33.061,"gen_tok_s":28.644,"prompt_s":15.487,"gen_s":8.937}
+```
+
+### Summary
+
+Three-for-three on the mixed-tensor-trap gate 1 confirmation across independent conversion sources (ggml-org, Bartowski, Unsloth) — the finding generalizes: nobody who converts gpt-oss touches the expert tensors, because MXFP4 is gpt-oss's native/required format and there is no reason to requantize it. Gate 6 is the one genuinely new data point this file adds: Unsloth's documented chat-template patch changes *how* the failure manifests (clean stop vs runaway) without fixing the underlying issue (analysis-channel content leaking into the visible answer) — useful signal for whoever eventually debugs the runner's Harmony handling.
