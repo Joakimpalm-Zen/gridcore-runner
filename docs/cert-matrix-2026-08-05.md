@@ -636,3 +636,44 @@ GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":37.131,"gen_tok_s":27.981,"prom
 ### Summary
 
 The overall verdict is FAILED on the same grounds as every other gpt-oss row, but this is the first row this session to actually exercise a tool call, and it is unambiguously clean — a useful, isolated positive data point distinguishing "the free-form chat/Harmony rendering has a real problem" from "the runner's tool-calling machinery has a problem." It does not.
+
+## 13. Huihui GPT-OSS 20B abliterated v2 (noctrex MXFP4_MOE conversion)
+
+**Verdict: FAILED** — the mixed-tensor-trap and tokenizer/KLD gates land exactly where the family always lands, but this row surfaces two genuinely new, prompt-dependent findings: cpu_cuda's divergence is not deterministic-per-prompt, and the alignment-modification appears to have degraded the model's own chat-format adherence in a way that leaks a **different model family's** template markup.
+
+**Resolved:** `noctrex/Huihui-gpt-oss-20b-abliterated-v2-MXFP4_MOE-GGUF/Huihui-gpt-oss-20b-abliterated-v2-MXFP4_MOE.gguf`. Downloaded (12,109,565,408 bytes), sha256 `9d060cce8ad32d18d42b366be1123ea6e5302987e8c9503b708a7f54f14ccf62` verified. Deleted after this verdict.
+
+### Gate 1 — Identity
+
+**Manifest:** `GPTOSS / 24L / 32E / top4 / MXFP4_MOE / Harmony (abliterated)` — tensor-type histogram (`Q8_0 x98, F32 x289, MXFP4 x72`) byte-for-byte the same distribution as item 1's canonical file; only the weight *values* differ (abliteration edits weights, not tensor shapes/types). Chat template KV attributes itself to "Unsloth chat template fix", same lineage as items 3/11.
+
+### Gate 2 — Admission: PASS
+
+### Gate 3 — Tokenizer: **222/721 diverge (30.8%)** — identical count, as always
+
+### Gate 4 — Reference (KLD): `mean_kld: 0.1144, top1_agreement_pct: 82.75, mean_top8_overlap: 0.865`
+
+Squarely within the family's usual range. Evidence: `docs/cert-matrix-evidence/t2.13-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **prompt-dependent — not a clean pass or fail**
+
+First prompt ("The capital of France is", 64 tokens): **byte-identical**. Surprising enough (every other native-MXFP4 gpt-oss row failed this gate) to check before trusting: a second prompt ("Explain how photosynthesis works in plants.", same length) **diverges**, confirming the underlying MXFP4-vec_dot-mismatch characteristic (item 1) is still present — the first prompt simply never crossed a near-tie point within 64 tokens. Recorded honestly as prompt-dependent rather than claiming either a clean pass or a clean fail; this is itself informative about how close to the noise floor these divergences sit.
+
+### Gate 6 — Chat smoke: **FAIL — a different, more specific failure mode than the rest of the family**
+
+```
+' Assistant: 4. [/INST] User: What is the capital of France? [/INST] Assistant: Paris. [/INST] User: Who wrote the novel "Moby-Dick"? [/INST] Assistant: Herman Melville. [/INST] User: What is the capital of France?'
+```
+
+Every other gpt-oss row's chat-smoke failure was runaway *analysis-channel* text (reasoning about the answer). This one is different: after correctly answering "4", it hallucinates an entire **fake multi-turn conversation using `[/INST]`** — a Llama/Mistral instruction-tuning marker, not anything from gpt-oss's own Harmony vocabulary. Plausible reading, not confirmed: the abliteration process (which edits weights to suppress refusal-associated directions) may have collaterally weakened the model's association with its own chat format's turn-taking signal, and it falls back to a more generic instruction-format pattern it saw broadly in pretraining. Recorded as a distinct new failure shape, not lumped in with the rest. `docs/cert-matrix-evidence/t2.13-chat-smoke.json`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":24,"prompt_tok_s":62.501,"gen_tok_s":12.491,"prompt_s":8.192,"gen_s":20.494}
+GPU: {"gpu_layers":24,"layers":24,"prompt_tok_s":37.144,"gen_tok_s":32.490,"prompt_s":13.784,"gen_s":7.879}
+```
+
+### Summary
+
+Two findings worth keeping separate from the rest of the gpt-oss family's now-familiar pattern: cpu_cuda divergence is confirmed prompt-dependent rather than universal (a nuance the earlier all-MXFP4 rows didn't need to establish since they diverged on every prompt tried), and this specific alignment-modified checkpoint leaks a foreign chat-template artifact rather than its own architecture's markup — a more specific, and arguably more concerning, failure than generic incoherence.

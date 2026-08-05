@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-20b-abliterated-huihui.gguf","arch":"gpt-oss","context":4096,"gpu_layers":0,"layers":24,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":62.501,"gen_tok_s":12.491,"prompt_s":8.192,"gen_s":20.494}
