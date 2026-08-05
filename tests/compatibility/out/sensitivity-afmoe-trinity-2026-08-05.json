@@ -1,0 +1,11 @@
+{
+  "schema_version": "gridcore.runner.sensitivity-floor.v1",
+  "model": "/home/lab/workspace/models/trinity-nano/Trinity-Nano-Preview-Q8_0.gguf",
+  "mode": "runner f16-KV vs runner q8-KV",
+  "tokens_per_prompt": 16,
+  "prompts": 16,
+  "identical": 11,
+  "mean_tokens_before_divergence": 12.56,
+  "max_logprob_delta": 0.5833,
+  "mean_logprob_delta": 0.02428
+}

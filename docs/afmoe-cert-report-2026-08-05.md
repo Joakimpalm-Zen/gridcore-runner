@@ -1,5 +1,14 @@
 # afmoe (Trinity-Nano) certification report — 2026-08-05
 
+> **Superseded in part (2026-08-05, later):** the sensitivity-floor run in
+> `docs/afmoe-sensitivity-floor-2026-08-05.md` measured Trinity's own numerical
+> floor and found the cross-engine gap **exceeds** it (6/16 prompts and
+> 1.8668 nats, vs a 5/16 and 0.5833-nat floor), with 3 of 6 divergences not
+> near-ties. The FAIL verdict below stands; the "looks like numerical
+> tie-breaking, not structurally wrong" *explanation* below was inferred from
+> only two hand-inspected points and does not survive the wider sample. Read
+> the addendum for the corrected reading.
+
 ## Summary
 
 **afmoe is NOT certified. The greedy-identity gate (gate 3) failed: 1 of 6
