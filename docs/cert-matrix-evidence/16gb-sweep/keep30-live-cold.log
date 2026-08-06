@@ -1,0 +1,8 @@
+rope: YaRN scaling x32.00 (model metadata)
+loaded /home/lab/workspace/Gridcore/cert-matrix-models/keep30-live.gguf | gpt-oss | 24 layers | ctx 4096 | 64 threads | 0.05s
+sampling: gpt-oss (temp 0.00 — greedy argmax; top_p/top_k/min_p/repeat_penalty inactive)
+Write a long essay about the history of computing. The essay should be a long essay about the "long" (the "long" is a "long" in the essay)."
+
+We need to produce a long essay about the history of computing. The essay should be a long essay about the "long" (the "long" is a "long" in the
+prompt: 10 tok, 30.16 tok/s | gen: 64 tok, 13.32 tok/s
+

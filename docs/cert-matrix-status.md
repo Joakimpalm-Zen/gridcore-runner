@@ -58,9 +58,17 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 
 ## 16 GB envelope sweep
 
-Table filled in after Tiers 1-2. See `docs/cert-matrix-2026-08-05.md` for the
-prune-lever numbers and the ballast-capped live verification.
+**Recommendation: no candidate beats keep-30** — fastest under a real 16 GiB
+ballast-capped test (13.2-13.3 tok/s) and the only pruning ratio (2 of 32
+experts) that clears the 97%/0.05 quality bar. Full numbers, ballast
+methodology, and the QAT-vs-PTQ pruning-tolerance experiment in
+`docs/cert-matrix-2026-08-05.md`.
 
-| candidate | fits? | lever | top-1 vs parent | mean KLD | tok/s (cap) | verdict |
+| candidate | fits? | lever | top-1 vs parent | mean KLD | tok/s cold/warm (16GiB cap) | verdict |
 |---|---|---|---|---|---|---|
-| pending | | | | | | |
+| gpt-oss-20b keep-30 (current holder) | fits (11.5GB) | 32→30 experts, native MXFP4 | ≥97% (prior session) | ≤0.05 (prior session) | **13.32 / 13.18** | holds |
+| Gemma 4 26B-A4B QAT Q4_0 (item 4), unpruned | fits with levers (`--kv q8`, 14.41GB) | none needed to fit | n/a (not pruned) | n/a | 7.08 / 7.32 | fits, usable, doesn't beat keep-30 |
+| Gemma 4 26B-A4B QAT Q4_0, keep-96/64/48 (further pruned) | n/a (didn't need pruning) | 128→96/64/48 experts | 67.75% / 50.25% / 45.25% | 0.377 / 0.719 / 0.896 | not live-tested (failed KLD gate) | **FAIL all 3 points** — refutes "QAT tolerates pruning better" |
+| GPT-OSS Nano 9B (item 9), unpruned | fits trivially (6.36GB) | none | n/a (not pruned) | n/a | 12.23 / 12.11 | fits, usable, doesn't beat keep-30 |
+| GPT-OSS Nano 9B, keep-10/8/6 (further pruned) | n/a (didn't need pruning) | 12→10/8/6 experts | 79.5% / 72.0% / 59.25% | 0.099 / 0.180 / 0.344 | not live-tested (failed KLD gate) | **FAIL all 3 points** — already-pruned base has no headroom left |
+| GPT-OSS 120B REAP 58B (item 10) | does not fit | none rescues it (39GB min quant, 2.4x budget) | n/a | n/a | not tested | **does not fit**, arithmetic only |

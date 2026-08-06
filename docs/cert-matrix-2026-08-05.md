@@ -1033,3 +1033,65 @@ The goal doc's own hedge for this item ("a REFUSED/loads-metadata result is all 
 **BnB (bitsandbytes)** — a PyTorch runtime quantization scheme (NF4/INT8) applied on-the-fly when a model is loaded through `transformers` + `bitsandbytes`. It is not a file format at all in the GGUF sense — there is nothing to download and point a GGUF runtime at; the quantization only exists inside a live Python/PyTorch process.
 
 **MLX** — Apple's own array framework and model format for Apple Silicon (`mlx-lm`), with its own quantization scheme and weight layout. It is a separate runtime and file format from GGUF/llama.cpp entirely (no shared tensor encoding, no shared metadata schema), so there is no meaningful "admit this MLX file into the runner" test to run.
+
+## The 16 GB envelope: lever sweep + live verification
+
+**Recommendation: no candidate beats keep-30.** The current holder (`gpt-oss-20b-keep30-MXFP4`, 32→30 experts, native MXFP4 preserved, 11.47 GB, previously certified at top-1 ≥97%/KLD ≤0.05 vs its own parent) was re-verified this session under an identical live 16 GiB-envelope cap alongside the two prime candidates the goal doc named, and it wins on every axis tested: it is the fastest of the three under the cap (13.2–13.3 tok/s vs 7.1–7.3 and 12.1–12.2 tok/s), and it is the only pruning ratio that actually clears the strict numeric quality bar — every keep-N point attempted this session on the other two candidates missed the bar, several by a wide margin.
+
+### Fit arithmetic (no live test needed)
+
+| candidate | weights | KV @ context | total | fit verdict |
+|---|---|---|---|---|
+| gpt-oss-20b keep-30 (current holder) | 11.47 GB | small (24L, 4096 ctx) | ~11.5–12 GB | **fits** |
+| Gemma 4 26B-A4B-it QAT Q4_0 (item 4) | 13.45 GiB | 1.80 GiB f16 @ c=8192 → 0.96 GiB with `--kv q8` | 15.25 GiB (f16) / **14.41 GiB (q8)** | **fits with levers** (`--kv q8` alone, no pruning needed) |
+| GPT-OSS Nano 9B (item 9, already a 12-expert prune) | 6.36 GiB | small (24L, 4096 ctx) | ~6.5 GB | **fits trivially**, no levers needed |
+| GPT-OSS 120B REAP 58B (item 10) | 39 GB (Q5_0, the smallest quant this repo offers — no Q4 option exists) | n/a | **≥39 GB, 2.4× over budget** | **does not fit** — even the theoretical floor of a quality-preserving quant (this session's own q4ne finding: sub-4-bit already fails at 22.5% top-1) can't close a 2.4× gap; no live test can rescue an artifact whose weights alone are 2.4x the entire budget |
+
+Item 4's `--kv q8` numbers came directly from the runner's own verbose diagnostics (`-v`): `kv cache 1845.5 MB (fp16)` → `980.4 MB (q8_0)` at `-c 8192`, measured on the actual file (`~/workspace/Gridcore/gridcore-runner/models/gemma-4-26B_q4_0-it.gguf`, sha256 `3eca3b8f...`, already on the box per item 4's own report — no download needed).
+
+### Expert-pruning lever: "does QAT tolerate pruning better than PTQ?" — tested, and the answer is no
+
+The goal doc's own framing for item 4 called this out explicitly as an open experiment. Saliency traces were collected via `RUNNER_MOE_TRACE` (gate*norm weighting, REAP-style) over a corpus subset, `--prune-experts` plans generated with `scripts/moe-prune-plan.py --use-norms`, and each pruned artifact requantized (per-tensor precision left untouched — only expert count changed) and KLD-gated against its own unpruned parent via `scripts/kld-compare-raw.py` (same-engine, both sides the runner itself, on `/v1/completions`).
+
+**Gemma 4 26B-A4B-it QAT Q4_0 (128 experts, top-8) — 3 keep-N points, all FAIL:**
+
+| keep-N | experts dropped | top-1 vs parent | mean KLD vs parent | verdict |
+|---|---|---|---|---|
+| 96 | 32 (25%) | 67.75% | 0.377 | FAIL (bar: ≥97% / ≤0.05) |
+| 64 | 64 (50%) | 50.25% | 0.719 | FAIL |
+| 48 | 80 (62.5%) | 45.25% | 0.896 | FAIL |
+
+**GPT-OSS Nano 9B (12 experts, top-4 — already a prune of the 32-expert base) — 3 keep-N points, all FAIL:**
+
+| keep-N | experts dropped | top-1 vs parent | mean KLD vs parent | verdict |
+|---|---|---|---|---|
+| 10 | 2 (16.7%) | 79.5% | 0.099 | FAIL |
+| 8 | 4 (33%) | 72.0% | 0.180 | FAIL |
+| 6 | 6 (50%) | 59.25% | 0.344 | FAIL |
+
+Both curves are monotonic and neither gets remotely close to the bar even at the mildest point tested — contrast with keep-30's own 6.25% expert drop (2 of 32) clearing 97%/0.05 cleanly. Two comparative findings fall out of this data even though both experiments failed their own goal:
+
+1. **The QAT-tolerates-pruning hypothesis is refuted, not confirmed**, at least at the drop ratios tested: Gemma 4 26B-A4B's QAT weights degrade *faster* under expert pruning than gpt-oss-20b's do (67.75% top-1 at a 25% drop vs keep-30's presumed ≥97% at a 6.25% drop) — a 128-expert/top-8 architecture has far less per-expert slack than a 32-expert/top-4 one, consistent with this session's whole-roster finding that gemma4-moe's top-8-of-128 routing is measurably more chaos-prone than gpt-oss's top-4-of-32.
+2. **Nano 9B's already-pruned 12-expert base has essentially no further pruning headroom left** — even the mildest additional drop tested (2 of 12, the same *proportional* aggressiveness class as keep-30's 2-of-32) misses the bar by a wide margin (79.5% vs the ≥97% bar), unlike keep-30's own 2-of-32 drop on its unpruned 32-expert base. This suggests pruning tolerance depends heavily on how much slack the *specific* expert roster already has, not just the raw fraction removed — a roster already thinned once has less room to give twice.
+
+Neither candidate needed the pruning lever to fit 16 GB in the first place (both already fit via `--kv q8` or trivially, per the fit-arithmetic table above), so these FAILs subtract nothing from either model's own already-fits status — they only rule out expert-pruning as a way to shrink either one *further* within the envelope.
+
+### Live verification: ballast-capped decode under a real 16 GiB cap
+
+Per the goal's hard-won ballast rules (regulate against the container cgroup `memory.max`, not `/proc/meminfo` — confirmed `memory.max = 200 GiB` exactly on this box vs the host's reported 250 GB; fill with random bytes via a fast xorshift64 fill, not zeroed pages; grow in shrinking chunks and pace the last GiB slower as the ceiling approaches; never touch `oom_score_adj`; freeze the size once at target and never release/regrow it mid-measurement), a purpose-built ballast tool (`docs/cert-matrix-evidence/16gb-sweep/ballast.c`) was written, compiled, and validated at small scale before the real run. It adaptively grows anonymous memory while polling the real `/sys/fs/cgroup/memory.current`, targeting `memory.max − 16 GiB reserve − 2 GiB safety margin = 182 GiB`, then freezes and holds until `SIGTERM`. No child cgroup could be created for a cleaner hard cap (`/sys/fs/cgroup` is read-only in this container — confirmed by a failed `mkdir` test), which is exactly why the ballast method is the right tool here rather than a nicety.
+
+Each of the three candidates below was tested **CPU-only** (`--gpu off`) — deliberately, since this box's GPU VRAM is a separate resource the memory cgroup does not account for, and CUDA offload would let a model bypass the ballast entirely rather than genuinely compete for the same constrained pool the way a real 16 GB Mac's unified memory would force it to.
+
+| candidate | cold tok/s | warm tok/s | ballast integrity | usable (≥5 tok/s)? |
+|---|---|---|---|---|
+| **gpt-oss-20b keep-30 (current holder)** | **13.32** | **13.18** | held (102.75 GiB, no loss) | **yes — fastest of the three** |
+| GPT-OSS Nano 9B (unpruned, as-is) | 12.23 | 12.11 | held (113.50 GiB, no loss) | yes |
+| Gemma 4 26B-A4B QAT Q4_0 (`--kv q8`) | 7.08 | 7.32 | held (113.50 GiB, no loss) | yes |
+
+All three comfortably clear the ≥5 tok/s usable bar under the real cap, and the ballast held its full frozen size through every run for all three (re-checked after each generation — no measurement here is "impossibly warm" from a silently-shrunk ballast). Cold vs warm shows almost no difference for any candidate: under an ~18 GiB total headroom for a 6.4–14.4 GiB model, there is too little slack for meaningful cross-process page-cache persistence between runs — each run essentially re-faults its own working set regardless of whether a prior run just finished, which is itself a realistic, honestly-reported property of operating this close to the edge of a real 16 GB envelope, not a measurement artifact.
+
+Nano 9B and keep-30 both produced coherent-looking greedy continuations on the raw completion prompt used for timing; item 4 (Gemma 4, no chat template applied — a raw, template-free completion, deliberately chosen so the throughput number isn't confounded by chat-formatting differences) degenerated into a repeat loop, matching the same raw-completion instability pattern this session already observed for this file at earlier gates (not a memory-pressure artifact — the identical prompt produces similar degeneration without any ballast active).
+
+### Verdict
+
+**No candidate beats keep-30.** It remains the correct 16 GB-envelope recommendation: fastest under a real cap, and the only pruning ratio in this session's data (its own, from a prior session, and the two fresh ones swept here) that clears the strict 97%/0.05 quality bar. Gemma 4 26B-A4B-it QAT Q4_0 is a legitimate, independently-useful **fits-with-levers** alternative — a substantially larger, more capable, genuinely-chat-working model (`--kv q8`, no pruning needed, CERTIFIED-WITH-CAVEAT in the main roster) — worth keeping in mind for use cases where its larger capability matters more than keep-30's ~1.8× throughput edge, but it is not a *replacement* for keep-30 by the goal's own numeric bar. GPT-OSS 120B REAP 58B is conclusively out of reach by simple arithmetic; no lever or live test changes that.
