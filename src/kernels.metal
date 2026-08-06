@@ -5,14 +5,24 @@ using namespace metal;
 
 // ---------------------------------------------------------------- rmsnorm
 
-kernel void k_rmsnorm(device const float *x   [[buffer(0)]],
-                      device float       *y   [[buffer(1)]],
-                      device const float *w   [[buffer(2)]],
-                      constant int       &n   [[buffer(3)]],
-                      constant float     &eps [[buffer(4)]],
-                      uint tid [[thread_position_in_threadgroup]],
-                      uint tpg [[threads_per_threadgroup]]) {
+// One threadgroup per column: a prompt batch normalizes every token in one
+// dispatch instead of n. Strides are explicit because x and y scratch can be
+// strided differently (n_embd vs xdim).
+struct norm_args { int n, x_stride, y_stride; float eps; };
+
+kernel void k_rmsnorm(device const float *x_all [[buffer(0)]],
+                      device float       *y_all [[buffer(1)]],
+                      device const float *w     [[buffer(2)]],
+                      constant norm_args &a     [[buffer(3)]],
+                      uint3 tid3 [[thread_position_in_threadgroup]],
+                      uint3 tpg3 [[threads_per_threadgroup]],
+                      uint3 tgpig [[threadgroup_position_in_grid]]) {
     threadgroup float red[256];
+    uint tid = tid3.x, tpg = tpg3.x;
+    int n = a.n;
+    float eps = a.eps;
+    device const float *x = x_all + (ulong)tgpig.x * a.x_stride;
+    device float       *y = y_all + (ulong)tgpig.x * a.y_stride;
     float s = 0;
     for (int i = tid; i < n; i += tpg) s += x[i] * x[i];
     red[tid] = s;
@@ -74,28 +84,57 @@ kernel void k_head_rmsnorm(device const float *src [[buffer(0)]],
 
 // ---------------------------------------------------------------- matvec
 // One simdgroup (32 lanes) per output row; lanes stride over blocks.
+//
+// n_col > 1 turns this into a matmul: the simdgroup walks its weight row once
+// per column, so for a prompt batch the row is fetched from device memory on
+// the first column and served from cache for the rest — prefill stops paying
+// the whole weight matrix per token. The arithmetic per output element is
+// character-for-character what n_col == 1 does (same lane striding, same
+// simd_sum), so batched prefill stays bit-identical to per-token submits,
+// which is what the CPU==GPU gate requires.
+//
+// col_tile trades the two off: one threadgroup per row over ALL columns gets
+// maximum cache reuse but serializes the batch and starves the GPU of
+// threadgroups; col_tile columns per threadgroup keeps grid.y parallelism
+// while still amortizing each weight fetch col_tile ways.
+//
+// x and y strides are explicit because they are NOT always n_in/n_out: the
+// xb scratch is strided by xdim = max(q_dim, n_embd).
 
 struct mv_args {
     int   n_in;
     int   n_out;
     ulong w_off;      // tensor byte offset inside the weight buffer
     int   has_bias;
+    int   n_col;      // columns (prompt tokens) processed by this dispatch
+    int   x_stride;   // elements between consecutive columns of x
+    int   y_stride;   // elements between consecutive columns of y
+    int   col_tile;   // columns per threadgroup (grid.y tiles the rest)
 };
 
+// The loop bound is uniform across the simdgroup, so every lane reaches each
+// simd_sum in MV_TAIL the same number of times — a divergent simd_sum would
+// be undefined.
 #define MV_HEAD \
     uint row = tgpig.x * (ntg.x / 32) + sgitg; \
-    if (row >= (uint)a.n_out) return;
+    if (row >= (uint)a.n_out) return; \
+    int col_lo = (int)tgpig.y * a.col_tile; \
+    int col_hi = min(col_lo + a.col_tile, a.n_col); \
+    for (int col = col_lo; col < col_hi; col++) { \
+    device const float *x = x_all + (ulong)col * a.x_stride; \
+    device float       *y = y_all + (ulong)col * a.y_stride;
 
 #define MV_TAIL \
     s = simd_sum(s); \
-    if (tiisg == 0) y[row] = a.has_bias ? s + bias[row] : s;
+    if (tiisg == 0) y[row] = a.has_bias ? s + bias[row] : s; \
+    }
 
 #define MV_PARAMS \
-    device const uchar *wb   [[buffer(0)]], \
-    device const float *x    [[buffer(1)]], \
-    device float       *y    [[buffer(2)]], \
-    constant mv_args   &a    [[buffer(3)]], \
-    device const float *bias [[buffer(4)]], \
+    device const uchar *wb    [[buffer(0)]], \
+    device const float *x_all [[buffer(1)]], \
+    device float       *y_all [[buffer(2)]], \
+    constant mv_args   &a     [[buffer(3)]], \
+    device const float *bias  [[buffer(4)]], \
     uint  sgitg [[simdgroup_index_in_threadgroup]], \
     uint  tiisg [[thread_index_in_simdgroup]], \
     uint3 tgpig [[threadgroup_position_in_grid]], \
@@ -353,19 +392,23 @@ kernel void k_mv_mxfp4(MV_PARAMS) {
 
 // ---------------------------------------------------------------- rope
 
+// pos is the FIRST column's position; column c rotates at pos + c, so a whole
+// prompt batch ropes in one dispatch (grid.z selects the column).
 struct rope_args {
     int   head_dim, n_heads, half_dim, pos, neox;
     float mscale;
+    int   stride;     // elements between consecutive columns
 };
 
-kernel void k_rope(device float       *v  [[buffer(0)]],
-                   device const float *fr [[buffer(1)]],
-                   constant rope_args &a  [[buffer(2)]],
-                   uint2 gid [[thread_position_in_grid]]) {
-    int j = gid.x, h = gid.y;
+kernel void k_rope(device float       *v_all [[buffer(0)]],
+                   device const float *fr    [[buffer(1)]],
+                   constant rope_args &a     [[buffer(2)]],
+                   uint3 gid [[thread_position_in_grid]]) {
+    int j = gid.x, h = gid.y, col = gid.z;
     if (j >= a.half_dim || h >= a.n_heads) return;
-    float ang = a.pos * fr[j];
+    float ang = (a.pos + col) * fr[j];
     float c = cos(ang) * a.mscale, s = sin(ang) * a.mscale;
+    device float *v = v_all + (ulong)col * a.stride;
     device float *p = v + h * a.head_dim;
     int i0 = a.neox ? j : 2 * j;
     int i1 = a.neox ? j + a.half_dim : i0 + 1;
@@ -438,24 +481,32 @@ static inline float2 kv_pair(device const uchar *row, int i2, int q8) {
     return float2((float)h[0], (float)h[1]);
 }
 
-kernel void k_store_kv(device const float *k  [[buffer(0)]],
-                       device const float *v  [[buffer(1)]],
+// off is the FIRST column's byte offset; column c lands row_b bytes further on,
+// so a prompt batch stores every token's K/V in one dispatch (grid.y = column).
+struct store_args { int kv_dim, q8, stride; ulong off, row_b; };
+
+kernel void k_store_kv(device const float *k_all [[buffer(0)]],
+                       device const float *v_all [[buffer(1)]],
                        device uchar       *kc [[buffer(2)]],
                        device uchar       *vc [[buffer(3)]],
-                       constant int       &kv_dim [[buffer(4)]],
-                       constant ulong     &off    [[buffer(5)]],
-                       constant int       &q8     [[buffer(6)]],
-                       uint i [[thread_position_in_grid]]) {
-    int n = q8 ? kv_dim / 32 : kv_dim;
+                       constant store_args &a [[buffer(4)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    int n = a.q8 ? a.kv_dim / 32 : a.kv_dim;
+    uint i = gid.x, col = gid.y;
     if ((int)i < n) {
-        kv_store_row(kc + off, k, q8, i);
-        kv_store_row(vc + off, v, q8, i);
+        ulong off = a.off + (ulong)col * a.row_b;
+        kv_store_row(kc + off, k_all + (ulong)col * a.stride, a.q8, i);
+        kv_store_row(vc + off, v_all + (ulong)col * a.stride, a.q8, i);
     }
 }
 
 // ---------------------------------------------------------------- attention
 // One threadgroup per head: scores -> softmax -> weighted value sum.
 
+// pos is the FIRST column's position; column c attends over [.., pos + c], so
+// a prompt batch runs every token's attention in one dispatch (grid.y = col).
+// Each column keeps its own score row and output slice, so the arithmetic per
+// (head, position) is exactly what a per-token dispatch computed.
 struct attn_args {
     int   head_dim, n_head, n_head_kv, n_ctx, pos;
     ulong l_off;      // this layer's byte offset into the kv cache
@@ -463,37 +514,44 @@ struct attn_args {
     int   q8;
     int   window;     // sliding-window size for this layer (0 = full)
     int   has_sinks;  // gpt-oss: per-head sink joins softmax denominator only
+    int   q_stride, att_stride, out_stride;
 };
 
-kernel void k_attn(device const float *q   [[buffer(0)]],
-                   device const uchar *kc  [[buffer(1)]],
-                   device const uchar *vc  [[buffer(2)]],
-                   device float       *att [[buffer(3)]],
-                   device float       *out [[buffer(4)]],
+kernel void k_attn(device const float *q_all   [[buffer(0)]],
+                   device const uchar *kc      [[buffer(1)]],
+                   device const uchar *vc      [[buffer(2)]],
+                   device float       *att_all [[buffer(3)]],
+                   device float       *out_all [[buffer(4)]],
                    constant attn_args &a   [[buffer(5)]],
                    device const float *sinks [[buffer(6)]],
-                   uint h   [[threadgroup_position_in_grid]],
-                   uint tid [[thread_position_in_threadgroup]],
-                   uint tpg [[threads_per_threadgroup]]) {
+                   uint3 tgpig [[threadgroup_position_in_grid]],
+                   uint3 tid3 [[thread_position_in_threadgroup]],
+                   uint3 tpg3 [[threads_per_threadgroup]]) {
     threadgroup float red[256];
+    uint tid = tid3.x, tpg = tpg3.x;
+    uint h = tgpig.x, col = tgpig.y;
     int hd = a.head_dim;
     int kvh = h / (a.n_head / a.n_head_kv);
     int kv_dim = a.n_head_kv * hd;
     ulong row_b = kv_row_bytes(kv_dim, a.q8);
     ulong base = a.l_off + kv_head_off(kvh, hd, a.q8);
+    int pos = a.pos + (int)col;
+    device const float *q = q_all + (ulong)col * a.q_stride;
+    device float *att = att_all + (ulong)col * a.att_stride;
+    device float *out = out_all + (ulong)col * a.out_stride;
     device const float *qh = q + h * hd;
     device float *ah = att + (ulong)h * a.n_ctx;
     int t0 = 0;
-    if (a.window > 0 && a.pos - a.window + 1 > 0) t0 = a.pos - a.window + 1;
+    if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1;
 
-    for (int t = t0 + tid; t <= a.pos; t += tpg) {
+    for (int t = t0 + tid; t <= pos; t += tpg) {
         ah[t] = kv_dot(kc + base + (ulong)t * row_b, qh, hd, a.q8) * a.scale;
     }
     threadgroup_barrier(mem_flags::mem_device);
 
     // max
     float mx = -1e30f;
-    for (int t = t0 + tid; t <= a.pos; t += tpg) mx = max(mx, ah[t]);
+    for (int t = t0 + tid; t <= pos; t += tpg) mx = max(mx, ah[t]);
     if (a.has_sinks && tid == 0) mx = max(mx, sinks[h]);
     red[tid] = mx;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -505,7 +563,7 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // exp + sum
     float sum = 0;
-    for (int t = t0 + tid; t <= a.pos; t += tpg) {
+    for (int t = t0 + tid; t <= pos; t += tpg) {
         float e = exp(ah[t] - mx);
         ah[t] = e;
         sum += e;
@@ -522,7 +580,7 @@ kernel void k_attn(device const float *q   [[buffer(0)]],
 
     for (int i = tid; i < hd; i += tpg) {
         float o = 0;
-        for (int t = t0; t <= a.pos; t++)
+        for (int t = t0; t <= pos; t++)
             o += ah[t] * kv_pair(vc + base + (ulong)t * row_b, i / 2, a.q8)[i & 1];
         out[h * hd + i] = o / sum;
     }

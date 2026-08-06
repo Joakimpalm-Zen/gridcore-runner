@@ -39,9 +39,14 @@ typedef struct {
     int batch_cap;                              // scratch rows allocated
 } gpu_t;
 
-typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; } mv_args;
-typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; } rope_args;
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8, window, has_sinks; } attn_args;
+// mirrors struct mv_args in kernels.metal — keep the field order in step
+typedef struct { int n_in, n_out; uint64_t w_off; int has_bias;
+                 int n_col, x_stride, y_stride, col_tile; } mv_args;
+typedef struct { int n, x_stride, y_stride; float eps; } norm_args;
+typedef struct { int kv_dim, q8, stride; uint64_t off, row_b; } store_args;
+typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; int stride; } rope_args;
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8, window, has_sinks;
+                 int q_stride, att_stride, out_stride; } attn_args;
 typedef struct { int n_in, n_out; uint64_t w_off, estride; int xs, ys, has_bias, bias_stride; } moe_args;
 
 static void gpu_release_state(gpu_t *g, int n_layer) {
@@ -692,27 +697,54 @@ unsupported:
 
 // ---------------------------------------------------------------- encoding
 
-static void enc_rmsnorm(gpu_t *g, id<MTLComputeCommandEncoder> e,
-                        id<MTLBuffer> x, NSUInteger x_off,
-                        id<MTLBuffer> y, NSUInteger y_off, id<MTLBuffer> w,
-                        int n, float eps) {
+static void enc_rmsnorm_n(gpu_t *g, id<MTLComputeCommandEncoder> e,
+                          id<MTLBuffer> x, NSUInteger x_off,
+                          id<MTLBuffer> y, NSUInteger y_off, id<MTLBuffer> w,
+                          int n, float eps,
+                          int n_col, int x_stride, int y_stride) {
+    norm_args a = { n, x_stride, y_stride, eps };
     [e setComputePipelineState:g->p_rmsnorm];
     [e setBuffer:x offset:x_off atIndex:0];
     [e setBuffer:y offset:y_off atIndex:1];
     [e setBuffer:w offset:0 atIndex:2];
-    [e setBytes:&n length:4 atIndex:3];
-    [e setBytes:&eps length:4 atIndex:4];
-    [e dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+    [e setBytes:&a length:sizeof(a) atIndex:3];
+    [e dispatchThreadgroups:MTLSizeMake(n_col, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
-static void enc_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                   gguf_tensor *w, id<MTLBuffer> x, NSUInteger x_off,
-                   id<MTLBuffer> y, NSUInteger y_off,
-                   int n_in, int n_out, id<MTLBuffer> bias) {
+static void enc_rmsnorm(gpu_t *g, id<MTLComputeCommandEncoder> e,
+                        id<MTLBuffer> x, NSUInteger x_off,
+                        id<MTLBuffer> y, NSUInteger y_off, id<MTLBuffer> w,
+                        int n, float eps) {
+    enc_rmsnorm_n(g, e, x, x_off, y, y_off, w, n, eps, 1, n, n);
+}
+
+// n_col columns in one dispatch (see the MV macros in kernels.metal): the
+// weight row is walked once per column and stays in cache after the first, so
+// a prompt batch stops re-streaming the whole weight matrix per token. Output
+// is bit-identical to n_col separate enc_mv calls.
+// Columns per threadgroup in the batched matmul. Tunable so the tradeoff can
+// be re-measured on other Apple GPUs without a rebuild.
+static int metal_col_tile(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *s = getenv("RUNNER_METAL_COL_TILE");
+        v = s && *s ? atoi(s) : 8;
+        if (v < 1) v = 1;
+    }
+    return v;
+}
+
+static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                     gguf_tensor *w, id<MTLBuffer> x, NSUInteger x_off,
+                     id<MTLBuffer> y, NSUInteger y_off,
+                     int n_in, int n_out, id<MTLBuffer> bias,
+                     int n_col, int x_stride, int y_stride) {
+    int col_tile = metal_col_tile();
+    if (col_tile > n_col) col_tile = n_col;
     mv_args a = { n_in, n_out,
                   (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
-                  bias != nil };
+                  bias != nil, n_col, x_stride, y_stride, col_tile };
     [e setComputePipelineState:g->p_mv[w->type]];
     [e setBuffer:g->weights offset:0 atIndex:0];
     [e setBuffer:x offset:x_off atIndex:1];
@@ -720,8 +752,17 @@ static void enc_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     [e setBytes:&a length:sizeof(a) atIndex:3];
     [e setBuffer:bias ? bias : g->dummy offset:0 atIndex:4];
     // 128 threads = 4 simdgroups = 4 rows per threadgroup
-    [e dispatchThreadgroups:MTLSizeMake((n_out + 3) / 4, 1, 1)
+    [e dispatchThreadgroups:MTLSizeMake((n_out + 3) / 4,
+                                        (n_col + col_tile - 1) / col_tile, 1)
       threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+}
+
+static void enc_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                   gguf_tensor *w, id<MTLBuffer> x, NSUInteger x_off,
+                   id<MTLBuffer> y, NSUInteger y_off,
+                   int n_in, int n_out, id<MTLBuffer> bias) {
+    enc_mv_n(g, e, m, w, x, x_off, y, y_off, n_in, n_out, bias,
+             1, n_in, n_out);
 }
 
 static void enc_qknorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
@@ -754,21 +795,27 @@ static void enc_headnorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 }
 
-static void enc_rope(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                     id<MTLBuffer> v, NSUInteger v_off, int n_heads, int pos,
-                     int layer) {
+static void enc_rope_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                       id<MTLBuffer> v, NSUInteger v_off, int n_heads, int pos,
+                       int layer, int n_col, int stride) {
     bool local = model_is_swa(m, layer);
     int hd = model_head_dim(m, layer);
     int rope_dim = model_rope_dim(m, layer);
     rope_args a = { hd, n_heads, rope_dim / 2, pos,
-                    m->rope_neox, model_rope_mscale(m, layer) };
+                    m->rope_neox, model_rope_mscale(m, layer), stride };
     [e setComputePipelineState:g->p_rope];
     [e setBuffer:v offset:v_off atIndex:0];
     [e setBuffer:(local && g->inv_freq_local) ? g->inv_freq_local : g->inv_freq
           offset:0 atIndex:1];
     [e setBytes:&a length:sizeof(a) atIndex:2];
-    [e dispatchThreads:MTLSizeMake(a.half_dim, n_heads, 1)
+    [e dispatchThreads:MTLSizeMake(a.half_dim, n_heads, n_col)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+}
+
+static void enc_rope(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                     id<MTLBuffer> v, NSUInteger v_off, int n_heads, int pos,
+                     int layer) {
+    enc_rope_n(g, e, m, v, v_off, n_heads, pos, layer, 1, 0);
 }
 
 static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
@@ -1063,77 +1110,91 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         int q_dim_l = model_q_dim(m, l);
         int kv_dim_l = model_kv_dim(m, l);
         int window = model_is_swa(m, l) ? m->swa_window : 0;
+        // Weight-heavy projections run ONCE for the whole batch: the simdgroup
+        // walks its weight row per column, so the row is fetched from device
+        // memory on the first token and cached for the rest. Per-token submits
+        // instead re-streamed every weight matrix n times, which is why Metal
+        // prefill used to run at decode speed. Bit-identical either way.
+        enc_rmsnorm_n(g, e, g->x, 0, g->xb, 0, g->attn_norm[l],
+                      n_embd, m->rms_eps, n, n_embd, xdim);
+        enc_mv_n(g, e, m, ly->wq, g->xb, 0, g->q,  0,
+                 n_embd, q_dim_l,  g->bq[l], n, xdim, q_dim);
+        enc_mv_n(g, e, m, ly->wk, g->xb, 0, g->kt, 0,
+                 n_embd, kv_dim_l, g->bk[l], n, xdim, kv_dim);
+        enc_mv_n(g, e, m, ly->wv, g->xb, 0, g->vt, 0,
+                 n_embd, kv_dim_l, g->bv[l], n, xdim, kv_dim);
+
         for (int b = 0; b < n; b++) {
-            int p = pos + b;
-            NSUInteger xo = foff((size_t)b * n_embd);
-            NSUInteger xbo = foff((size_t)b * xdim);
-            NSUInteger xb2o = foff((size_t)b * xdim);
             NSUInteger qo = foff((size_t)b * q_dim);
             NSUInteger kto = foff((size_t)b * kv_dim);
-            NSUInteger vto = foff((size_t)b * kv_dim);
-            NSUInteger hbo = foff((size_t)b * m->n_ff);
-            NSUInteger hb2o = foff((size_t)b * m->n_ff);
-            NSUInteger atto = foff((size_t)b * (size_t)m->n_head * m->n_ctx);
-            NSUInteger logo = foff((size_t)b * m->n_vocab);
+            if (g->qn[l]) enc_qknorm(g, e, m, g->q,  qo,  g->qn[l], m->n_head, hd);
+            if (g->kn[l]) enc_qknorm(g, e, m, g->kt, kto, g->kn[l], n_kv, hd);
+        }
+        {
             size_t row_b = model_kv_row_bytes(m, l);
-            uint64_t kv_off = model_kv_byte_off(m, l) + (uint64_t)p * row_b;
             int q8 = m->kv_q8;
             int kv_units = q8 ? kv_dim_l / 32 : kv_dim_l;
 
-            enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->attn_norm[l],
-                        n_embd, m->rms_eps);
-            enc_mv(g, e, m, ly->wq, g->xb, xbo, g->q,  qo,
-                   n_embd, q_dim_l,  g->bq[l]);
-            enc_mv(g, e, m, ly->wk, g->xb, xbo, g->kt, kto,
-                   n_embd, kv_dim_l, g->bk[l]);
-            enc_mv(g, e, m, ly->wv, g->xb, xbo, g->vt, vto,
-                   n_embd, kv_dim_l, g->bv[l]);
-            if (g->qn[l]) enc_qknorm(g, e, m, g->q,  qo,  g->qn[l], m->n_head, hd);
-            if (g->kn[l]) enc_qknorm(g, e, m, g->kt, kto, g->kn[l], n_kv, hd);
-            enc_rope(g, e, m, g->q,  qo,  m->n_head, p, l);
-            enc_rope(g, e, m, g->kt, kto, n_kv,      p, l);
+            // rope/store/attention each take the batch in one dispatch: the
+            // kernels derive their column's position from pos + col, so every
+            // token still rotates at, writes to, and attends over exactly the
+            // range a per-token submit gave it.
+            enc_rope_n(g, e, m, g->q,  0, m->n_head, pos, l, n, q_dim);
+            enc_rope_n(g, e, m, g->kt, 0, n_kv,      pos, l, n, kv_dim);
 
+            store_args sa = { kv_dim_l, q8, kv_dim,
+                              model_kv_byte_off(m, l) + (uint64_t)pos * row_b,
+                              (uint64_t)row_b };
             [e setComputePipelineState:g->p_store];
-            [e setBuffer:g->kt offset:kto atIndex:0];
-            [e setBuffer:g->vt offset:vto atIndex:1];
+            [e setBuffer:g->kt offset:0 atIndex:0];
+            [e setBuffer:g->vt offset:0 atIndex:1];
             [e setBuffer:g->kc offset:0 atIndex:2];
             [e setBuffer:g->vc offset:0 atIndex:3];
-            [e setBytes:&kv_dim_l length:4 atIndex:4];
-            [e setBytes:&kv_off length:8 atIndex:5];
-            [e setBytes:&q8 length:4 atIndex:6];
-            [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
+            [e setBytes:&sa length:sizeof(sa) atIndex:4];
+            [e dispatchThreads:MTLSizeMake(kv_units, n, 1)
               threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
-            attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, p,
+            attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
                              (uint64_t)model_kv_byte_off(m, l),
                              model_attn_scale(m, l), q8, window,
-                             g->sinks[l] != nil };
+                             g->sinks[l] != nil,
+                             q_dim, m->n_head * m->n_ctx, xdim };
             [e setComputePipelineState:g->p_attn];
-            [e setBuffer:g->q   offset:qo atIndex:0];
+            [e setBuffer:g->q   offset:0 atIndex:0];
             [e setBuffer:g->kc  offset:0 atIndex:1];
             [e setBuffer:g->vc  offset:0 atIndex:2];
-            [e setBuffer:g->att offset:atto atIndex:3];
-            [e setBuffer:g->xb2 offset:xb2o atIndex:4];
+            [e setBuffer:g->att offset:0 atIndex:3];
+            [e setBuffer:g->xb2 offset:0 atIndex:4];
             [e setBytes:&aa length:sizeof(aa) atIndex:5];
             [e setBuffer:g->sinks[l] ? g->sinks[l] : g->dummy offset:0 atIndex:6];
-            [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
+            [e dispatchThreadgroups:MTLSizeMake(m->n_head, n, 1)
               threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        }
 
-            enc_mv(g, e, m, ly->wo, g->xb2, xb2o, g->xb, xbo,
-                   q_dim_l, n_embd, g->bo[l]);
+        enc_mv_n(g, e, m, ly->wo, g->xb2, 0, g->xb, 0,
+                 q_dim_l, n_embd, g->bo[l], n, xdim, xdim);
+        for (int b = 0; b < n; b++)
+            enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
+                     g->xb, foff((size_t)b * xdim), n_embd);
+        enc_rmsnorm_n(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l],
+                      n_embd, m->rms_eps, n, n_embd, xdim);
+        enc_mv_n(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0,
+                 n_embd, m->n_ff, nil, n, xdim, m->n_ff);
+        enc_mv_n(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0,
+                 n_embd, m->n_ff, nil, n, xdim, m->n_ff);
+        // hb/hb2 are contiguous across the batch (stride == n_ff), so the
+        // activation is one dispatch over the whole batch rather than n
+        enc_elem(g, e, g->p_silu, g->hb, 0, g->hb2, 0, n * m->n_ff);
+        enc_mv_n(g, e, m, ly->w_down, g->hb, 0, g->xb, 0,
+                 m->n_ff, n_embd, nil, n, m->n_ff, xdim);
+        for (int b = 0; b < n; b++) {
+            NSUInteger xo = foff((size_t)b * n_embd), xbo = foff((size_t)b * xdim);
+            NSUInteger logo = foff((size_t)b * m->n_vocab);
             enc_elem(g, e, g->p_add, g->x, xo, g->xb, xbo, n_embd);
-
-            enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->ffn_norm[l],
-                        n_embd, m->rms_eps);
-            enc_mv(g, e, m, ly->w_gate, g->xb, xbo, g->hb,  hbo,
-                   n_embd, m->n_ff, nil);
-            enc_mv(g, e, m, ly->w_up,   g->xb, xbo, g->hb2, hb2o,
-                   n_embd, m->n_ff, nil);
-            enc_elem(g, e, g->p_silu, g->hb, hbo, g->hb2, hb2o, m->n_ff);
-            enc_mv(g, e, m, ly->w_down, g->hb, hbo, g->xb, xbo,
-                   m->n_ff, n_embd, nil);
-            enc_elem(g, e, g->p_add, g->x, xo, g->xb, xbo, n_embd);
-            if (l == m->n_layer - 1) {
+            // Only the last position's logits are ever read (see the return
+            // below), and the vocab matmul is the widest in the model — doing
+            // it for every prompt token was pure waste.
+            if (l == m->n_layer - 1 && b == n - 1) {
                 enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->out_norm,
                             n_embd, m->rms_eps);
                 enc_mv(g, e, m, m->output, g->xb, xbo, g->logits, logo,
@@ -1232,21 +1293,20 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         NANCK(g->kt, kv_dim_l, "k-post-rope");
         NANCK(g->vt, kv_dim_l, "v");
 
+        store_args sa = { kv_dim_l, q8, 0, kv_off, 0 };
         [e setComputePipelineState:g->p_store];
         [e setBuffer:g->kt offset:0 atIndex:0];
         [e setBuffer:g->vt offset:0 atIndex:1];
         [e setBuffer:g->kc offset:0 atIndex:2];
         [e setBuffer:g->vc offset:0 atIndex:3];
-        [e setBytes:&kv_dim_l length:4 atIndex:4];
-        [e setBytes:&kv_off length:8 atIndex:5];
-        [e setBytes:&q8 length:4 atIndex:6];
+        [e setBytes:&sa length:sizeof(sa) atIndex:4];
         [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 
         attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
                          (uint64_t)model_kv_byte_off(m, l),
                          model_attn_scale(m, l), q8, window,
-                         g->sinks[l] != nil };
+                         g->sinks[l] != nil, 0, 0, 0 };
         [e setComputePipelineState:g->p_attn];
         [e setBuffer:g->q   offset:0 atIndex:0];
         [e setBuffer:g->kc  offset:0 atIndex:1];
