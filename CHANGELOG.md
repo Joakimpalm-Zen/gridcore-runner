@@ -3,7 +3,7 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
-## Unreleased
+## v0.1.11-alpha — 2026-08-06
 
 - **MoE expert prefetch: routed experts are handed to the OS as whole blocks.**
   On a model larger than RAM the engine's cost is not bandwidth and not
@@ -33,9 +33,19 @@ protocol and CLI may still change between alpha releases.
   router ran, so it engages on gemma-4's dual-branch MoE and gpt-oss's generic
   path alike — unlike the rejected `--expert-cache` tier, which hooked one
   specific FFN path and therefore never engaged on gemma-4 at all
-  (`docs/negative-result-expert-cache.md`). Enabled automatically when weights
-  exceed available RAM and `--mlock` is not in force, since it is pointless
-  when the pages are already resident; `RUNNER_MOE_PREFETCH=0`/`1` overrides.
+  (`docs/negative-result-expert-cache.md`).
+
+  **It is OFF by default, and the table above is why it does not get to be
+  on.** Every number in it is Apple Silicon, far oversubscribed, on slow
+  storage. Re-measured on Linux with XFS at 425 MB/s and 2.24x
+  oversubscription, against a RAM cap verified to hold, the feature is
+  **neutral to slightly negative** — 0.22 tok/s off versus 0.21 on, with
+  marginally *more* major faults enabled. That is coherent (fewer faults to
+  save when faults are cheap), but it means the win is a property of one
+  machine class rather than of the technique, and one machine class is not
+  grounds for a default. `RUNNER_MOE_PREFETCH=1` opts in, `=0` forces off.
+  It gets the default back when a second machine class agrees, with the
+  number attached.
 
 
 - **Metal prefill is batched: 3.0x on the prompt path, and the Gemma

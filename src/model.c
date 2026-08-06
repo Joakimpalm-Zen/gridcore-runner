@@ -808,15 +808,31 @@ double model_resident_fraction(const model_t *m) {
 // minute. Reported from a 16 GB Mac where a 1.2k-token prompt returned nothing
 // in 300 s at 0% CPU. Advisory only -- the load continues either way, since
 // the estimate can be wrong and a model that fits today may not fit at noon.
-// Same test decides expert prefetch: handing routed experts to the OS as whole
-// blocks is a pure win when the model cannot stay resident, and pointless
-// syscalls when it can (the pages are already there). RUNNER_MOE_PREFETCH
-// forces it either way for measurement.
+// Expert prefetch hands routed experts to the OS as whole blocks instead of
+// letting them arrive as ~16 KB fault-by-fault reads. It is OFF by default,
+// including in the bigger-than-RAM case it was written for, because the
+// evidence does not yet support turning it on.
+//
+// It defaulted to on until 2026-08-06. The evidence for that default is real
+// but narrow: interleaved A/B on an 8 GB M1 at ~4x available RAM measured
+// decode 1.37 -> 1.96 tok/s (1.43x) on gemma-4-26B and 0.61 -> 1.04 (1.70x)
+// on gpt-oss-20b. Both are Apple Silicon, both far oversubscribed, both on
+// slow storage. On a Linux box with XFS at 425 MB/s and 2.24x oversubscription
+// the same feature measured 0.22 tok/s off vs 0.21 on, with marginally MORE
+// major faults enabled — no benefit at all. Fewer faults to save when the
+// faults are cheap, which is a coherent story, but it means "pure win when the
+// model cannot stay resident" was over-generalised from one machine class.
+//
+// One machine class showing a win is not grounds for a default. Off until a
+// second one agrees, and then it can have the default back with a number
+// attached.
+//
+// RUNNER_MOE_PREFETCH=1 opts in, =0 forces off.
 static bool moe_prefetch_default(const model_t *m) {
     const char *e = getenv("RUNNER_MOE_PREFETCH");
     if (e && *e) return strcmp(e, "0") && strcmp(e, "off");
-    uint64_t need = m->gf.map_size, have = plat_ram_available_bytes();
-    return need && have && need > have;
+    (void)m;
+    return false;
 }
 
 static void warn_if_it_will_not_stay_resident(const model_t *m, bool locked) {

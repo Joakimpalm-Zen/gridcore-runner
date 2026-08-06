@@ -6,7 +6,27 @@ the platform C/math/threading/dynamic-loader libraries, loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**In 0.1.10 — the Gemma families stop falling back to CPU on Apple Silicon.**
+**In 0.1.11 — Metal prefill goes from 119 to 768 tok/s, a 6.4x on the prompt
+path.** Prefill ran at decode speed because the prompt batch encoded per-token
+chains: every weight matrix was re-streamed once per token. Batching the
+dispatches gave 3.0x, and a `simdgroup_matrix` tiled GEMM behind the same
+tolerance gate the CUDA path uses took it the rest of the way — past the
+272 tok/s CPU path on the same box. MoE and the E-series joined it, so real
+**E2B** now runs on Metal rather than falling back. The tolerance gate paid for
+itself again: it caught a Q6_K nibble-indexing bug at 14 of 64 positions that
+greedy output and nine byte-identity smoke tests had all passed clean. And
+because a mismatched attribute type once made the shader library fail to
+compile *silently* — leaving Metal to fall back to CPU while `--caps` still
+advertised it — the library is now compiled at build time by a test that fails
+if any of its 40 kernels is missing.
+
+Also here, and off by default: **MoE expert prefetch**. It measures 1.43–1.70x
+decode on Apple Silicon at ~4x oversubscription, and nothing at all on a Linux
+box with fast NVMe. One machine class is not grounds for a default, so it is
+opt-in via `RUNNER_MOE_PREFETCH=1` until a second one agrees.
+
+Earlier, in 0.1.10 — the Gemma families stopped falling back to CPU on Apple
+Silicon.
 Metal refused every heterogeneous-attention Gemma-4 and every GELU model,
 guarding plumbing the per-token path had implemented all along. Retiring
 that refusal exposed a defect worth the whole exercise: Metal compiles
@@ -51,7 +71,7 @@ NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
 make                 # produces ./runner (GPU auto-detected at runtime)
-./runner --version   # -> runner 0.1.10-alpha
+./runner --version   # -> runner 0.1.11-alpha
 ```
 
 Then point it at any GGUF model:
@@ -65,7 +85,7 @@ Then point it at any GGUF model:
 ./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
 ```
 
-> **Public alpha (`0.1.10-alpha`).** CI-tested on Linux/macOS/Windows and
+> **Public alpha (`0.1.11-alpha`).** CI-tested on Linux/macOS/Windows and
 > daily-driven by the rest of the Gridcore stack, but it has met few machines
 > other than ours — which is what an alpha is for. Run your GGUF models and
 > [open an issue](../../issues) for anything that crashes, misbehaves, or
