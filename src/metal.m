@@ -209,10 +209,30 @@ static bool metal_ensure_batch(model_t *m, int n) {
     return true;
 }
 
+// A device that exists is not a backend that works: if the shader library does
+// not compile, gpu_init falls back and every run is CPU-speed. --caps exists so
+// a scheduler can place work BEFORE dispatching, so reporting a usable Metal
+// backend in that state would be a lie that costs a whole run. Compiling the
+// library here is the same work gpu_init does moments later and only happens
+// on the --caps path. tests/test_metal_shaders.m is the build-time gate.
 bool gpu_available(char *name, int cap) {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
     if (!dev) return false;
+    NSError *err = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:
+                              [NSString stringWithUTF8String:k_metal_src]
+                                           options:nil
+                                             error:&err];
+    if (!lib) {
+        fprintf(stderr, "gpu: Metal device present but its shader library does "
+                "not compile — reporting no GPU backend (every run would be "
+                "CPU-speed): %s\n",
+                err ? err.localizedDescription.UTF8String : "(no diagnostic)");
+        [dev release];
+        return false;
+    }
     if (name) snprintf(name, cap, "%s", dev.name.UTF8String);
+    [lib release];
     [dev release];
     return true;
 }

@@ -25,6 +25,20 @@ protocol and CLI may still change between alpha releases.
   tok/s (3.0x)**, and Metal now beats the CPU path (273 tok/s) instead of
   losing to it by 2.3x. Decode is unchanged (~68 tok/s) — n=1 has nothing
   to batch.
+- **A Metal shader-compile failure can no longer pass unnoticed.** It was the
+  quietest failure in the backend: `gpu_init` printed a line, returned false,
+  and the model ran correctly on the CPU — so a hand-run "CPU vs GPU" check
+  compared the CPU path with itself and passed. That happened during this
+  release's prefill work, and briefly made a fallback look like a speedup.
+  Two guards: `make test` now runs a shader gate on macOS
+  (`tests/test_metal_shaders.m`) that compiles the embedded library and looks
+  up every kernel `mk_pipeline()` asks for — verified to fail on both a broken
+  kernel and a renamed one; and `--caps` no longer reports a Metal backend
+  when the library will not compile, because `--caps` exists to let a
+  scheduler place work before dispatching and a device that cannot run is not
+  a backend. A missing *function* was quieter still: `mk_pipeline` returns nil
+  and the tiled-GEMM path silently degrades to the matvec path — a large
+  performance regression with no wrong answer for a correctness gate to catch.
 - **MoE and E-series join the Metal batched path; one encoder now, not two.**
   MoE layers were excluded because `enc_gemma_moe_ffn` read the residual at a
   fixed offset 0; both MoE encoders now take an explicit token offset, so

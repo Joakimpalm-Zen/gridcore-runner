@@ -113,6 +113,7 @@ TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
 TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
 TEST_PARSE = $(TEST_BATCH:test-batch%=test-parse%)
 TEST_METAL_OWNERSHIP = $(TEST_BATCH:test-batch%=test-metal-ownership%)
+TEST_METAL_SHADERS = $(TEST_BATCH:test-batch%=test-metal-shaders%)
 TEST_MODEL_LOAD_FAILURE = $(TEST_BATCH:test-batch%=test-model-load-failure%)
 TEST_THREAD_DEFAULT = $(TEST_BATCH:test-batch%=test-thread-default%)
 
@@ -455,9 +456,23 @@ test-moe: runner
 test-prune-experts: runner
 	$(PYTHON) -m pytest -q tests/test_prune_experts.py
 
+$(TEST_METAL_SHADERS): tests/test_metal_shaders.m src/kernels_metal.h
+	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
+	    tests/test_metal_shaders.m -o $@ -framework Metal -framework Foundation
+
 $(TEST_METAL_OWNERSHIP): tests/test_metal_ownership.m src/metal.m $(HDR)
 	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
 	    tests/test_metal_ownership.m -o $@ $(LDFLAGS)
+
+# Runs inside `make test` on macOS: a shader that does not compile makes every
+# run fall back to the CPU silently, which no correctness gate can see.
+test-metal-shader-gate:
+ifeq ($(shell uname -s),Darwin)
+	@$(MAKE) --no-print-directory $(TEST_METAL_SHADERS) >/dev/null
+	@./$(TEST_METAL_SHADERS)
+else
+	@echo "metal shader gate skipped: macOS-only backend"
+endif
 
 test-metal-fallback: runner test.gguf
 ifeq ($(shell uname -s),Darwin)
@@ -702,6 +717,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_PARSE)
 	./$(TEST_THREAD_DEFAULT)
 	./$(TEST_MODEL_LOAD_FAILURE)
+	$(MAKE) --no-print-directory test-metal-shader-gate
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		set -e; \
@@ -849,4 +865,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: clean debug ptx test test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
