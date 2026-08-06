@@ -75,6 +75,24 @@ Then point it at any GGUF model:
 
 ## Why runner
 
+Three things, before anything else:
+
+1. **We publish what didn't work.** Sub-4-bit quantization, expert pruning at
+   four separate depths, an expert cache that was a real 13x and got cut
+   anyway ([why](docs/negative-result-expert-cache.md)). Measured cheaply,
+   then written down.
+2. **CPU and GPU agree.** Switch backends and you get the same tokens, or a
+   stated bound on how far they drift. Moving to a GPU is not a quality gamble.
+3. **The certified list is hashed.** Point at a model, check the SHA-256, know
+   it ran — per check, per architecture. Where a check wasn't run it says so,
+   instead of leaving a blank you'd read as "fine."
+
+Together they make the numbers load-bearing: the exact file a claim ran on, a
+gate saying the GPU didn't quietly change the answer, and the list of things
+that didn't work. The third is what makes the first two believable.
+
+The rest of this section is the evidence.
+
 **Gates decide what gets claimed.** GPU output is verified *token-identical* to
 CPU on the scalar path. Where that is impossible — the prefill GEMM sums in a
 different order and cannot be bit-identical — the claim drops to a measured
