@@ -25,6 +25,28 @@ protocol and CLI may still change between alpha releases.
   tok/s (3.0x)**, and Metal now beats the CPU path (273 tok/s) instead of
   losing to it by 2.3x. Decode is unchanged (~68 tok/s) — n=1 has nothing
   to batch.
+- **Tiled prefill GEMM on Metal, behind the tolerance gate: 768 tok/s.**
+  The matvec kernels give one output element per simdgroup — 32 lanes each
+  doing one FMA, then a log-depth reduction — so almost none of the work is
+  reuse. `k_mm_*` computes an output TILE per threadgroup with Apple's
+  simdgroup matrix units (32 rows x 16 columns, k-step 32, weights loaded
+  transposed straight out of threadgroup memory). Implemented for F32, F16,
+  Q8_0, Q4_0, Q4_K, Q6_K and MXFP4; anything else keeps the matvec path.
+  It is deliberately NOT bit-identical and cannot be — the weight is
+  dequantized before the multiply, and the sum is reassociated into 8-element
+  matrix steps — so, exactly like the CUDA tensor-core prefill, it answers to
+  `tests/test_tc_tol.c` rather than to an identity claim it cannot honour.
+  `gpu_tc_force()` drives it from the gate; `RUNNER_METAL_MM=0` pins the
+  matvec path, and the Metal identity smokes now pin it (as the CUDA
+  harnesses pin `RUNNER_CUDA_TC=0`), so each gate tests the path it claims.
+  Measured, SmolLM2-135M Q8_0, 601-token prompt on an M1: **prefill 360 ->
+  768 tok/s** on top of the batching below — **6.4x over the 119 tok/s this
+  release started from**, and 2.8x the CPU path. Gate results on real
+  weights: Q8_0 mean|dlogit| 0.00003 of logit range and 0/64 top-1 flips;
+  gemma-3-4b Q4_K_M 0.00001 of range and 0/64 flips (limits 0.005 and 5%).
+  The gate earned its keep immediately — it caught a genuine Q6_K nibble/byte
+  indexing bug (14/64 flips with decisive margins) that greedy output and
+  every identity smoke had missed.
 - **The two Metal forward paths were merged.** The prompt-batch encoder
   duplicated the layer loop and silently lacked features, which an
   eligibility check papered over — so every Gemma model took per-token

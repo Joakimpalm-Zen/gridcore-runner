@@ -1,6 +1,7 @@
 // Metal compute kernels: the full single-token forward pass.
 // Mirrors the CPU implementations in quants.c/model.c bit-layout for bit-layout.
 #include <metal_stdlib>
+#include <metal_simdgroup_matrix>
 using namespace metal;
 
 // ---------------------------------------------------------------- rmsnorm
@@ -388,6 +389,200 @@ kernel void k_mv_mxfp4(MV_PARAMS) {
         s += d * t;
     }
     MV_TAIL;
+}
+
+
+// ------------------------------------------------------- tiled prefill GEMM
+// The matvec kernels above give one output element per simdgroup: 32 lanes
+// each do one FMA and then a log-depth reduction, so almost none of the work
+// is reuse. This computes an output TILE per threadgroup with Apple's
+// simdgroup matrix units instead, which is where prompt processing has its
+// real headroom.
+//
+// It is deliberately NOT bit-identical to the matvec path and cannot be: the
+// weight is dequantized before the multiply (d*q)*x rather than d*(q*x), and
+// the sum is reassociated into 8-element matrix steps. That is the same trade
+// the CUDA tensor-core prefill makes, so it answers to the same kind of gate —
+// tests/test_tc_tol.c, driven through gpu_tc_force() — rather than to an
+// identity claim it cannot honour.
+//
+// Orientation: out[c][r] = sum_k W[r][k] * X[c][k], i.e. out = X * W^T. That
+// makes the result tile row-major in the COLUMN index, which is exactly how y
+// is laid out (column c at offset c*y_stride), so the store is contiguous.
+// W is loaded transposed straight out of threadgroup memory.
+
+#define MM_TM 32    // output rows per threadgroup
+#define MM_TN 16    // output columns (prompt tokens) per threadgroup
+#define MM_TK 32    // k-step: one q8_0/q4_0/mxfp4 block, and a q4_K sub-block
+
+struct mm_args {
+    int   n_in, n_out, n_col;
+    ulong w_off;
+    int   has_bias, x_stride, y_stride;
+};
+
+#define MM_PARAMS \
+    device const uchar *wb   [[buffer(0)]], \
+    device const float *x    [[buffer(1)]], \
+    device float       *y    [[buffer(2)]], \
+    constant mm_args   &a    [[buffer(3)]], \
+    device const float *bias [[buffer(4)]], \
+    uint3 tgpig [[threadgroup_position_in_grid]], \
+    uint3 tpitg [[thread_position_in_threadgroup]], \
+    uint  sgitg [[simdgroup_index_in_threadgroup]]
+
+// Shared prologue/epilogue; DEQ_CHUNK fills tg_w[r][0..MM_TK) for this
+// thread's row/sub-range from the type's own block layout.
+#define MM_BODY(...) \
+    threadgroup float tg_w[MM_TM * MM_TK]; \
+    threadgroup float tg_x[MM_TN * MM_TK]; \
+    threadgroup float tg_c[MM_TN * MM_TM]; \
+    const int row0 = (int)tgpig.x * MM_TM; \
+    const int col0 = (int)tgpig.y * MM_TN; \
+    const int tid  = (int)tpitg.x; \
+    simdgroup_float8x8 acc0 = simdgroup_float8x8(0.0f); \
+    simdgroup_float8x8 acc1 = simdgroup_float8x8(0.0f); \
+    for (int k0 = 0; k0 < a.n_in; k0 += MM_TK) { \
+        /* 128 threads x 8 values = the 32x32 weight tile */ \
+        { \
+            int r = tid >> 2, sub = (tid & 3) * 8; \
+            int row = row0 + r; \
+            threadgroup float *dst = tg_w + r * MM_TK + sub; \
+            if (row < a.n_out) { __VA_ARGS__; } \
+            else { for (int j = 0; j < 8; j++) dst[j] = 0.0f; } \
+        } \
+        /* 128 threads x 4 values = the 16x32 activation tile */ \
+        for (int i = tid * 4; i < MM_TN * MM_TK; i += 128 * 4) { \
+            for (int j = 0; j < 4; j++) { \
+                int idx = i + j, cc = idx / MM_TK, kk = idx % MM_TK; \
+                tg_x[idx] = (col0 + cc < a.n_col) \
+                    ? x[(ulong)(col0 + cc) * a.x_stride + k0 + kk] : 0.0f; \
+            } \
+        } \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        for (int kk = 0; kk < MM_TK / 8; kk++) { \
+            simdgroup_float8x8 A0, A1, B; \
+            simdgroup_load(A0, tg_x + kk * 8, MM_TK); \
+            simdgroup_load(A1, tg_x + 8 * MM_TK + kk * 8, MM_TK); \
+            simdgroup_load(B, tg_w + (int)sgitg * 8 * MM_TK + kk * 8, MM_TK, \
+                           ulong2(0, 0), true); \
+            simdgroup_multiply_accumulate(acc0, A0, B, acc0); \
+            simdgroup_multiply_accumulate(acc1, A1, B, acc1); \
+        } \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+    } \
+    simdgroup_store(acc0, tg_c + (int)sgitg * 8, MM_TM); \
+    simdgroup_store(acc1, tg_c + 8 * MM_TM + (int)sgitg * 8, MM_TM); \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    for (int idx = tid; idx < MM_TN * MM_TM; idx += 128) { \
+        int cc = idx / MM_TM, rr = idx % MM_TM; \
+        if (col0 + cc < a.n_col && row0 + rr < a.n_out) \
+            y[(ulong)(col0 + cc) * a.y_stride + row0 + rr] = \
+                a.has_bias ? tg_c[idx] + bias[row0 + rr] : tg_c[idx]; \
+    }
+
+kernel void k_mm_f32(MM_PARAMS) {
+    MM_BODY({
+        device const float *rw = (device const float *)(wb + a.w_off)
+                               + (ulong)row * a.n_in + k0 + sub;
+        for (int j = 0; j < 8; j++) dst[j] = rw[j];
+    })
+}
+
+kernel void k_mm_f16(MM_PARAMS) {
+    MM_BODY({
+        device const half *rw = (device const half *)(wb + a.w_off)
+                              + (ulong)row * a.n_in + k0 + sub;
+        for (int j = 0; j < 8; j++) dst[j] = (float)rw[j];
+    })
+}
+
+kernel void k_mm_q8_0(MM_PARAMS) {
+    MM_BODY({
+        int nb = a.n_in / 32;
+        device const uchar *blk = wb + a.w_off + ((ulong)row * nb + k0 / 32) * 34;
+        float d = (float)*(device const half *)blk;
+        device const char *q = (device const char *)(blk + 2) + sub;
+        for (int j = 0; j < 8; j++) dst[j] = d * (float)q[j];
+    })
+}
+
+kernel void k_mm_q4_0(MM_PARAMS) {
+    MM_BODY({
+        int nb = a.n_in / 32;
+        device const uchar *blk = wb + a.w_off + ((ulong)row * nb + k0 / 32) * 18;
+        float d = (float)*(device const half *)blk;
+        device const uchar *q = blk + 2;
+        /* low nibbles hold lanes 0-15, high nibbles lanes 16-31 */
+        for (int j = 0; j < 8; j++) {
+            int lane = sub + j;
+            int v = lane < 16 ? (int)(q[lane] & 0xF) : (int)(q[lane - 16] >> 4);
+            dst[j] = d * (float)(v - 8);
+        }
+    })
+}
+
+kernel void k_mm_q4_K(MM_PARAMS) {
+    MM_BODY({
+        int nsb = a.n_in / 256;
+        int sb  = k0 / 256;              /* superblock */
+        int j32 = (k0 % 256) / 32;       /* which 32-lane sub-block */
+        device const uchar *blk = wb + a.w_off + ((ulong)row * nsb + sb) * 144;
+        float dall = (float)*(device const half *)blk;
+        float dmin = (float)*(device const half *)(blk + 2);
+        device const uchar *sc = blk + 4;
+        uchar s1, m1;
+        get_scale_min_k4(j32, sc, &s1, &m1);
+        float d = dall * s1, mm = dmin * m1;
+        device const uchar *q = blk + 16 + (j32 / 2) * 32;
+        bool hi = (j32 & 1) != 0;
+        for (int j = 0; j < 8; j++) {
+            int lane = sub + j;
+            int v = hi ? (int)(q[lane] >> 4) : (int)(q[lane] & 0xF);
+            dst[j] = d * (float)v - mm;
+        }
+    })
+}
+
+kernel void k_mm_q6_K(MM_PARAMS) {
+    MM_BODY({
+        int nsb = a.n_in / 256;
+        int sb  = k0 / 256;
+        int off = k0 % 256;              /* 0,32,...,224 */
+        device const uchar *blk = wb + a.w_off + ((ulong)row * nsb + sb) * 210;
+        float dall = (float)*(device const half *)(blk + 208);
+        device const char *scs = (device const char *)(blk + 192);
+        /* q6_K packs 128 lanes per half: ql[0..63] low nibbles + qh 2 bits */
+        int half_i = off / 128, within = off % 128;
+        device const uchar *ql = blk + half_i * 64;
+        device const uchar *qh = blk + 128 + half_i * 32;
+        device const char  *sc = scs + half_i * 8;
+        for (int j = 0; j < 8; j++) {
+            int lane = within + sub + j;      /* 0..127 within this half */
+            int l = lane % 32, grp = lane / 32;
+            /* groups 0,1 take low nibbles and 2,3 high; the byte index cycles
+               l, l+32, l, l+32 — matching the reference's four q1..q4 lanes */
+            int qb = (int)ql[l + (grp & 1) * 32];
+            int qlv = (grp >= 2) ? (qb >> 4) : (qb & 0xF);
+            int qhv = ((int)(qh[l] >> (grp * 2)) & 3) << 4;
+            int is = (l / 16) & 1;
+            dst[j] = dall * (float)sc[grp * 2 + is] * (float)((qlv | qhv) - 32);
+        }
+    })
+}
+
+kernel void k_mm_mxfp4(MM_PARAMS) {
+    MM_BODY({
+        int nb = a.n_in / 32;
+        device const uchar *blk = wb + a.w_off + ((ulong)row * nb + k0 / 32) * 17;
+        float d = ldexp(1.0f, (int)blk[0] - 127);
+        device const uchar *q = blk + 1;
+        for (int j = 0; j < 8; j++) {
+            int lane = sub + j;
+            uchar nib = lane < 16 ? (q[lane] & 0xF) : (q[lane - 16] >> 4);
+            dst[j] = d * kv_mxfp4[nib];
+        }
+    })
 }
 
 // ---------------------------------------------------------------- rope

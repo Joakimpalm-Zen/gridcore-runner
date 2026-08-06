@@ -20,6 +20,7 @@ typedef struct {
     id<MTLComputePipelineState> p_silu, p_gelu, p_add, p_scale, p_head_transform;
     id<MTLComputePipelineState> p_moe_route, p_moe_actmul, p_moe_sum;
     id<MTLComputePipelineState> p_mv[METAL_TYPE_SLOTS];       // indexed by ggml type
+    id<MTLComputePipelineState> p_mm[METAL_TYPE_SLOTS];       // tiled prefill GEMM
     id<MTLComputePipelineState> p_moe_mv[METAL_TYPE_SLOTS];   // indexed by ggml type
     id<MTLBuffer> weights;                      // wraps the model mmap (zero copy)
     bool          weights_copied;
@@ -42,6 +43,8 @@ typedef struct {
 // mirrors struct mv_args in kernels.metal — keep the field order in step
 typedef struct { int n_in, n_out; uint64_t w_off; int has_bias;
                  int n_col, x_stride, y_stride, col_tile; } mv_args;
+typedef struct { int n_in, n_out, n_col; uint64_t w_off;
+                 int has_bias, x_stride, y_stride; } mm_args;
 typedef struct { int n, x_stride, y_stride; float eps; } norm_args;
 typedef struct { int kv_dim, q8, stride; uint64_t off, row_b; } store_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; int stride; } rope_args;
@@ -87,6 +90,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
                              g->dummy, g->suppress };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mv[i] release];
+    for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mm[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_moe_mv[i] release];
     [g->p_rmsnorm release]; [g->p_qknorm release]; [g->p_headnorm release];
     [g->p_rope release]; [g->p_store release]; [g->p_attn release];
@@ -355,8 +359,29 @@ static float *gpu_forward(model_t *m, int token, int pos);
 static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                                        int n, int pos);
 
-// No tensor-core GEMM path on Metal; the TC tolerance gate self-skips.
-void gpu_tc_force(int on) { (void)on; }
+// Tiled prefill GEMM (k_mm_*): simdgroup matrix units instead of one output
+// element per simdgroup. Not bit-identical to the matvec path by construction
+// — the weight is dequantized before the multiply and the sum is reassociated
+// into 8-element matrix steps — so it answers to tests/test_tc_tol.c, the same
+// tolerance gate the CUDA tensor-core prefill answers to, through this hook.
+// -1 restores the env default (RUNNER_METAL_MM), 0 pins the matvec path on,
+// 1 forces the tiled path wherever a kernel exists for the weight type.
+enum { MM_ENV_UNSET = -2 };
+static int g_mm_state = MM_ENV_UNSET;
+
+void gpu_tc_force(int on) {
+    g_mm_state = on < 0 ? MM_ENV_UNSET : (on != 0);
+}
+
+static bool metal_mm_on(void) {
+    if (g_mm_state == MM_ENV_UNSET) {
+        const char *e = getenv("RUNNER_METAL_MM");
+        if (!e || !*e) g_mm_state = -1;                  // promoted default
+        else g_mm_state = strcmp(e, "0") && strcmp(e, "off");
+    }
+    if (g_mm_state >= 0) return g_mm_state != 0;
+    return true;   // promoted: every type with a k_mm_* kernel, prefill only
+}
 void gpu_moe_eager_force(int on) { (void)on; }
 
 bool gpu_moe_ok(void) {
@@ -450,6 +475,13 @@ bool gpu_init(model_t *m) {
     g->p_moe_route    = mk_pipeline(dev, lib, @"k_moe_route");
     g->p_moe_actmul   = mk_pipeline(dev, lib, @"k_moe_actmul");
     g->p_moe_sum      = mk_pipeline(dev, lib, @"k_moe_sum");
+    g->p_mm[T_F32]   = mk_pipeline(dev, lib, @"k_mm_f32");
+    g->p_mm[T_F16]   = mk_pipeline(dev, lib, @"k_mm_f16");
+    g->p_mm[T_Q8_0]  = mk_pipeline(dev, lib, @"k_mm_q8_0");
+    g->p_mm[T_Q4_0]  = mk_pipeline(dev, lib, @"k_mm_q4_0");
+    g->p_mm[T_Q4_K]  = mk_pipeline(dev, lib, @"k_mm_q4_K");
+    g->p_mm[T_Q6_K]  = mk_pipeline(dev, lib, @"k_mm_q6_K");
+    g->p_mm[T_MXFP4] = mk_pipeline(dev, lib, @"k_mm_mxfp4");
     g->p_mv[T_F32]    = mk_pipeline(dev, lib, @"k_mv_f32");
     g->p_mv[T_F16]    = mk_pipeline(dev, lib, @"k_mv_f16");
     g->p_mv[T_Q8_0]   = mk_pipeline(dev, lib, @"k_mv_q8_0");
@@ -740,6 +772,26 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
                      id<MTLBuffer> y, NSUInteger y_off,
                      int n_in, int n_out, id<MTLBuffer> bias,
                      int n_col, int x_stride, int y_stride) {
+    // Tiled GEMM when this is a real batch and a kernel exists for the weight
+    // type. n_in must be a whole number of k-steps (every real model's is) and
+    // K-quant kernels index a 256-superblock, so require that too.
+    if (n_col > 1 && metal_mm_on() && g->p_mm[w->type] &&
+        n_in % 32 == 0 &&
+        !((w->type == T_Q4_K || w->type == T_Q6_K) && n_in % 256 != 0)) {
+        mm_args ma = { n_in, n_out, n_col,
+                       (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
+                       bias != nil, x_stride, y_stride };
+        [e setComputePipelineState:g->p_mm[w->type]];
+        [e setBuffer:g->weights offset:0 atIndex:0];
+        [e setBuffer:x offset:x_off atIndex:1];
+        [e setBuffer:y offset:y_off atIndex:2];
+        [e setBytes:&ma length:sizeof(ma) atIndex:3];
+        [e setBuffer:bias ? bias : g->dummy offset:0 atIndex:4];
+        [e dispatchThreadgroups:MTLSizeMake((n_out + 31) / 32,
+                                            (n_col + 15) / 16, 1)
+          threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        return;
+    }
     int col_tile = metal_col_tile();
     if (col_tile > n_col) col_tile = n_col;
     mv_args a = { n_in, n_out,
