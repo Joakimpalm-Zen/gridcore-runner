@@ -3,7 +3,30 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
-## Unreleased
+## v0.1.9-alpha — 2026-08-06
+
+The desktop release, plus a certification survey that sharpened the
+recommendations: the tray controller lands on macOS and Windows, gemma-4
+E2B loads (the last locally-blocked Gemma-4 variant), a 19-model
+derivative-certification campaign is folded into the docs, and the README
+now carries **standing model recommendations per machine RAM**, each backed
+by a measured run.
+
+- **Certified-models README restructured**: one merged table (EU roster
+  folded in), plus the new *Recommended models by machine RAM* section —
+  8 GB Apple Silicon: Trinity-Nano (13.25 tok/s, resident); 16 GB:
+  keep-30 (13.2–13.3 tok/s capped) or gemma-4-26B QAT `--kv q8`
+  (7.1–7.3 tok/s capped, live validation pending); 24 GB GPU:
+  Qwen3-30B-A3B (~72 tok/s). Models larger than RAM are recommended in
+  no configuration — the streaming/paging regimes were measured and
+  rejected (see `docs/negative-result-expert-cache.md`).
+- **Cert-matrix campaign docs** (`docs/cert-matrix-status.md`,
+  `docs/cert-matrix-2026-08-05.md` + evidence): 19 GPT-OSS × Gemma-4
+  derivatives certified/failed/refused against the gates; only the
+  Gemma-4 family certifies. Two capability gaps documented with root
+  causes: no split/multi-part GGUF support, and the E2B loader gap fixed
+  below. The compatibility manifest gained the missing `afmoe` pin and
+  the README table the missing `apertus` row.
 
 - **gemma-4 E2B loads: per-layer FFN widths.** E2B publishes real
   per-layer width variation (6144/12288) as an ARRAY-typed

@@ -6,24 +6,26 @@ the platform C/math/threading/dynamic-loader libraries, loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**In 0.1.8 — a new architecture, certified through an honest failure.**
-Runner now runs the Arcee Trinity MoE family (`afmoe`): Trinity-Nano decodes
-at **13.25 tok/s, CPU-only, fully resident on an 8 GB Apple Silicon Mac** —
-a December-2025 US open-weights MoE at usable speed on the smallest Mac sold.
-The certification is the story: greedy token-identity against llama.cpp
-*failed* (1/6 prompts), and instead of shipping anyway or quietly relaxing
-the bar, the failure was traced to a measured mechanism — afmoe re-normalizes
-every branch before the residual add, amplifying the engines' by-design
-quantized-matvec arithmetic difference from ~1e-3 absolute to full
-normalized scale, at every one of 56 layers. The implementation itself is
-verified faithful (layer-0 attention path matches llama.cpp to ~2e-4;
-tokenizer differential 0/721). So the certified table now carries the first
-row whose caveat cites a measured cause with a falsifiable retirement test:
-when the planned integer-dot work aligns the engines' arithmetic, token
-identity should appear. Details: `docs/afmoe-divergence-triage-2026-08-05.md`.
-The table also gains an Artificial Analysis intelligence column, sorted.
+**In 0.1.9 — the desktop release, and recommendations you can hold us to.**
+A tray / menu-bar controller lands on macOS and Windows (`--tray`): every
+live runner instance on the machine, listed, stoppable, plus a one-click
+managed server and login autostart. gemma-4 **E2B** loads — the last
+locally-blocked Gemma-4 variant, refused until now because its ARRAY-typed
+per-layer FFN widths read as 0 — and a 19-model certification campaign
+across the GPT-OSS and Gemma-4 derivative ecosystems is folded into the
+docs (`docs/cert-matrix-status.md`: only the Gemma-4 family certifies). Out
+of all of it comes the new **[Recommended models by machine
+RAM](#recommended-models-by-machine-ram)** section: a standing, measured
+recommendation per machine class — and a standing refusal to recommend any
+model larger than the machine's RAM, because we measured those regimes and
+rejected them rather than estimating.
 
-Earlier, in 0.1.4: the tensor-core prefill GEMM became the default on
+Earlier, in 0.1.8: the Arcee Trinity MoE family (`afmoe`) — Trinity-Nano at
+**13.25 tok/s, CPU-only, fully resident on an 8 GB Apple Silicon Mac** —
+certified through an honest failure: greedy token-identity vs llama.cpp
+failed 1/6, the mechanism was measured rather than shipped around, and the
+caveat carries a falsifiable retirement test
+(`docs/afmoe-divergence-triage-2026-08-05.md`). In 0.1.4: the tensor-core prefill GEMM became the default on
 tolerance-gated dense Q4_K models (**+47–77% prefill**, decode unchanged),
 dense decode reached **73–79% of llama.cpp** on the reference box with the
 head-to-head numbers published, losing rows included
@@ -41,7 +43,7 @@ NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
 make                 # produces ./runner (GPU auto-detected at runtime)
-./runner --version   # -> runner 0.1.8-alpha
+./runner --version   # -> runner 0.1.9-alpha
 ```
 
 Then point it at any GGUF model:
@@ -55,7 +57,7 @@ Then point it at any GGUF model:
 ./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
 ```
 
-> **Public alpha (`0.1.8-alpha`).** CI-tested on Linux/macOS/Windows and
+> **Public alpha (`0.1.9-alpha`).** CI-tested on Linux/macOS/Windows and
 > daily-driven by the rest of the Gridcore stack, but it has met few machines
 > other than ours — which is what an alpha is for. Run your GGUF models and
 > [open an issue](../../issues) for anything that crashes, misbehaves, or
@@ -784,94 +786,74 @@ whose guarantee is the tolerance gate — 0/64 teacher-forced top-1 flips and
 to date its greedy output has matched the scalar path exactly, but that is
 measured behavior, not a by-construction identity.
 
-## Certified architectures
+## Certified models
 
-Runner runs a formal **compatibility program**, not just "it loaded." An
-architecture is *certified* only when it passes a versioned matrix of
-independent checks against a **real, SHA-256-pinned GGUF** — one per claimed
-architecture (`tests/compatibility/models.json`, run by
-`scripts/compat_matrix.py`; full write-up in `docs/compatibility-program.md`).
-
-**What "certified" entails** — each of these is recorded independently, and a
-report only marks the checks that actually ran:
+Runner runs a formal **compatibility program**, not just "it loaded": every
+claimed architecture is certified against a real, SHA-256-pinned GGUF
+(`tests/compatibility/models.json`, run by `scripts/compat_matrix.py`; full
+write-up in [docs/compatibility-program.md](docs/compatibility-program.md)).
+Certification is **per architecture, not per model or brand**, each check is
+recorded independently (`pass` / `fail` / `not_executed`), and unknown
+architectures are **refused**, not run through llama-style math — a clear
+refusal beats plausible, silently-wrong output.
 
 | Check | What it proves |
 |---|---|
 | **load** | the pinned file's SHA matches and the model loads (a filename is never taken as evidence) |
 | **tokenizer** | runner's tokenizer matches the model's own HuggingFace reference over the committed 721-string corpus |
-| **greedy_reference** | temperature-0 generation is compared token-for-token against a pinned **llama.cpp** revision via the shared `/v1/completions` API |
-| **cpu_cuda** | GPU and CPU produce identical greedy output (scalar path — the harnesses pin `RUNNER_CUDA_TC=0`; the promoted TC default is gated by `test_tc_tol`, not by this check) |
+| **greedy_reference** | temperature-0 generation is compared token-for-token against a pinned **llama.cpp** revision |
+| **cpu_cuda** | GPU and CPU produce identical greedy output (scalar path) |
 | **chat** | the model answers through the real `/v1/chat/completions` surface |
 | **tool** | a tool/function call round-trips as a well-formed `tool_calls` payload |
-| **long_context** | a needle placed mid-document is retrieved at length |
+| **long_context** | a needle placed mid-document is retrieved at length (not executed for the European roster) |
 
-Certification is **per architecture, not per model or brand** — a family is only
-certifiable if runner *implements its architecture* (see the by-design
-exclusions below); tensor-name compatibility is never treated as proof of
-mathematical compatibility.
+Where a row says a check is *not claimed*, that is a measured decision, not a
+gap: some models are numerically too sensitive for exact-text gating against a
+second engine, and the honest gate is their own measured sensitivity floor
+(`scripts/sensitivity_floor.py`; details per model in the manifest notes and
+the linked docs).
 
-**Currently represented in the pinned architecture matrix.** Certification is
-check-specific: consult the manifest and dated reports for `pass`, `fail`, and
-`not_executed`; inclusion here does not mean every check passed. In particular,
-Ornith's older pinned report predates CUDA support; its `cpu_cuda` check was
-regenerated on 2026-08-03 with 5/5 prompts identical over 128 tokens and a
-verified 32/32-layer GPU split.
-
-| Architecture | Family | Pinned model | AA intelligence† |
+| Architecture | Pinned model | Notes | AA† |
 |---|---|---|---|
-| `gemma4-moe` | Gemma 4 MoE | gemma-4-26B-A4B-it (dual-branch dense+routed GELU MoE; CPU + CUDA, Metal synthetic-smoke gated; CUDA GPU/CPU-identical; too numerically chaotic to gate on token identity — see the architecture note above) | 20.1 |
-| `gpt-oss` | OpenAI gpt-oss | gpt-oss-20b-MXFP4 (per-head attention sinks, clamped alpha-sigmoid GLU, router + per-expert biases, MXFP4 experts; CPU + CUDA, Metal synthetic-smoke gated. CUDA GPU/CPU byte-identical; agreement with llama.cpp is at this model's own sensitivity floor rather than token identity, so `greedy_reference` is not claimed — see the note above the table) | 14.9 |
-| `gemma4` | Gemma 4 (dense) | gemma-4-12B-it | 13.2 |
-| `gemma4` E-series | Gemma 4 E2B/E4B | gemma-4-E4B-it (per-layer embeddings + shared-KV layers; CPU + CUDA, GPU/CPU byte-identical) | 8.9 |
-| `qwen3moe` | Qwen 3 MoE / Mixtral-style | Qwen3-30B-A3B (greedy-identical to llama.cpp; 128 experts / 8 active) | 6.8 |
-| `qwen3` | Qwen 3 | Qwen3-4B (`cpu_cuda` recheck: 4/5 at 128 tokens, recorded failure) | 6.8 |
-| `llama` | Llama 3 / Mistral | Llama-3.2-3B, Mistral-7B-v0.3 | 4.2 / 2.1 |
-| `gemma3` | Gemma 3 | gemma-3-4b-it | 1.1 |
-| `qwen2` | Qwen 2.5 | Qwen2.5-32B-Instruct | — |
-| `qwen35` | Qwen 3.5 / Ornith | Ornith-1.0-9B (CPU + CUDA; 5/5 at 128 tokens) | — |
-| `phi3` | Phi 3 | Phi-3.5-mini-instruct | — |
-| `apertus` | Apertus (Swiss AI) | Apertus-8B-Instruct-2509 (ungated xIELU FFN; CPU + CUDA full-graph — 32/32 layers plus output weight on an 8 GB RTX 3070, 5/5 CPU/CUDA-identical prompts at 128 tokens; tokenizer exact 0/721 since the 2026-08-03 `tekken` combining-mark fix; `greedy_reference` deliberately undeclared because the cross-engine delta sits below the model's own measured sensitivity floor — see `scripts/sensitivity_floor.py` and `tests/compatibility/out/sensitivity-apertus-2026-08-03.json`) | — |
-| `afmoe` | Arcee Trinity MoE | Trinity-Nano-Preview-Q8_0 (muP scaling, output-gated attention, sigmoid routing with selection-only bias, shared expert, leading dense blocks, 3:1 SWA/NoPE interleave; **CPU only** — Metal/CUDA refuse loudly and fall back. Tokenizer differential 0/721 vs the HF reference; layer-0 attention path verified against llama.cpp b10280 to ~2e-4. `greedy_reference` NOT claimed, with the mechanism measured rather than presumed: afmoe re-normalizes every branch before the residual add, which amplifies the engines' by-design quantized-matvec arithmetic difference (f32-dequant dots here, integer-quantized-activation dots in llama.cpp) from ~1e-3 absolute to full normalized scale per layer — see `docs/afmoe-divergence-triage-2026-08-05.md`. Cross-engine agreement evidenced instead by 5/6 domains byte-identical at 64 greedy tokens with divergences confined to sub-0.41-nat near-ties, and by the sensitivity-floor study. Expected to reach token identity when the planned integer-dot (VNNI) work aligns the engines' arithmetic) | — |
+| `gemma4-moe` | gemma-4-26B-A4B-it | dual-branch dense+routed GELU MoE; CPU + CUDA, GPU/CPU-identical; token identity vs llama.cpp not claimable for this model on any engine pair ([docs/moe-support.md](docs/moe-support.md)) | 20.1 |
+| `gpt-oss` | gpt-oss-20b-MXFP4 | attention sinks, MXFP4 experts; CUDA GPU/CPU byte-identical; llama.cpp agreement sits at the model's own sensitivity floor, so `greedy_reference` is not claimed | 14.9 |
+| `gemma4` | gemma-4-12B-it | token-identical to llama.cpp; all checks pass | 13.2 |
+| `gemma4` E-series | gemma-4-E4B-it | per-layer embeddings + shared-KV layers; CPU + CUDA byte-identical. E2B variants load since 2026-08-06 (per-layer FFN widths, CPU) | 8.9 |
+| `qwen3moe` | Qwen3-30B-A3B | greedy-identical to llama.cpp; 128 experts / 8 active | 6.8 |
+| `qwen3` | Qwen3-4B | `cpu_cuda` recheck 4/5 at 128 tokens — recorded failure | 6.8 |
+| `llama` | Llama-3.2-3B, Mistral-7B-v0.3 | the reference path; `mistral`, `smollm` and `stablelm` ride it | 4.2 / 2.1 |
+| `gemma3` | gemma-3-4b-it | QAT and regular | 1.1 |
+| `qwen2` | Qwen2.5-32B-Instruct | | — |
+| `qwen35` | Ornith-1.0-9B | hybrid Gated DeltaNet; CPU + CUDA 5/5 at 128 tokens | — |
+| `phi3` | Phi-3.5-mini-instruct | fused QKV, LongRoPE | — |
+| `apertus` | Apertus-8B-Instruct-2509 | xIELU FFN; CPU + CUDA full-graph identical; cross-engine delta below the model's own sensitivity floor | — |
+| `afmoe` | Trinity-Nano-Preview-Q8_0 | **CPU only** (CUDA/Metal refuse loudly); tokenizer 0/721; `greedy_reference` not claimed with the mechanism measured, not presumed ([docs/afmoe-divergence-triage-2026-08-05.md](docs/afmoe-divergence-triage-2026-08-05.md)) | — |
+| `llama` (EU roster) | EuroLLM-9B · Lucie-7B · Mistral-Nemo-12B · Teuken-7B · salamandra-7b · TildeOpen-30b | added 2026-07-29 per [docs/model-scope.md](docs/model-scope.md); each SHA-pinned with a recorded evidence run — load, 128-token `cpu_cuda`, chat, tool all pass (TildeOpen is a base model: chat/tool not claimed). Known roster caveats live in the manifest notes, incl. Lucie's tokenizer defect being in the GGUF itself | — |
 
-† Artificial Analysis Intelligence Index (artificialanalysis.ai), fetched 2026-08-05, shown as context for model quality — it is NOT part of the certification evidence. Where AA lists reasoning and non-reasoning variants the non-reasoning score is shown (runner certifications are plain greedy completions); gpt-oss-20b is listed by AA only in reasoning-effort variants, shown: (high). `llama` shows its two pinned models (Llama-3.2-3B / Mistral-7B). “—” = model not in AA's catalog (Qwen2.5-32B, Ornith, Phi-3.5-mini, Apertus-8B and Trinity-Nano-Preview are unlisted; scores for different family members are not substituted).
-
-`mistral`, `smollm` and `stablelm` ride the certified `llama` path. Unknown
-architectures are **refused**, not run through llama-style math — a clear
-refusal beats plausible, silently-wrong output.
-
-**European roster (added 2026-07-29, per the [model-scope
-focus](docs/model-scope.md)).** Five European families ride the certified
-`llama` path and are individually SHA-pinned in the manifest with a recorded
-evidence run (`tests/compatibility/out/eu-roster-*-2026-07-29.json`): each
-passed `load`, `cpu_cuda` (128-token greedy byte-identical, scalar path),
-`chat` and `tool`, plus the 8-token `greedy_reference` sweep against pinned
-llama.cpp b10076 (same divergence class as the long-certified models):
-
-| Model | Origin | Notes |
-|---|---|---|
-| EuroLLM-9B-Instruct | EU consortium | tokenizer check blocked (gated reference repo) |
-| Lucie-7B-Instruct | France (OpenLLM-France) | **tokenizer check FAILS** (259/721) — root-caused to the GGUF, not the engine: the conversion exports Lucie's BPE tokenizer as SentencePiece with every merge rank flattened to −1000, so no engine can reproduce the reference tokenization from the file (Runner is token-identical to llama.cpp b10076 on it; the vendor's own GGUF has the same defect) |
-| Mistral-Nemo-12B | France (Mistral) | tokenizer 3/721 edge divergences; vendor sampling preset (temp 0.3) |
-| Teuken-7B-instruct | Germany (OpenGPT-X) | chat template emits artifacts; tool calls clean |
-| salamandra-7b-instruct | Spain (BSC) | cleanest sweep: 5/5 greedy_reference exact |
-| TildeOpen-30b | Latvia (Tilde) | full 19.4 GB GPU offload — the largest European model in the fleet; cpu_cuda byte-identical and greedy_reference 4/5 after its evidence run found and fixed a real engine defect (fast-math expf UB in the CPU silu path, which TildeOpen's extreme last-layer gates were first to trip); base model, so chat/tool not claimed |
-
-`long_context` was not executed for this roster and is recorded as such. The
-roster's cpu_cuda evidence was re-verified with a true `--gpu off` CPU side
-after a method correction (`--gpu-layers 0` used to be the auto-fit sentinel
-and silently ran full GPU — fixed: an explicit 0 now means no GPU); all five
-EU models are byte-identical CPU vs GPU over 128 greedy tokens.
+† Artificial Analysis Intelligence Index (artificialanalysis.ai), fetched
+2026-08-05 — context for model quality, NOT part of the certification
+evidence. Non-reasoning scores where AA lists variants (gpt-oss shown at
+reasoning-high, the only form AA lists); "—" = model not in AA's catalog.
 
 New model-support work focuses on **European and US model families**
 ([docs/model-scope.md](docs/model-scope.md)); everything already certified
 stays certified and maintained.
 
-Sparse MoE covers Mixtral/Qwen3-style top-k SiLU experts (CPU + CUDA; fused and
-legacy-split layouts) **and** gemma-4's GELU dual-branch MoE — a dense shared
-GELU FFN plus routed fused-`gate_up` experts with per-expert down scales and
-the pre/post sandwich norms (CPU + CUDA; GPU/CPU-identical on the recorded
-model, but deliberately not claimed token-identical to llama.cpp because its
-numeric sensitivity makes exact-text gating unsound; see docs/moe-support.md).
+### Recommended models by machine RAM
+
+Standing recommendations as of **2026-08-06**, each backed by a measured run
+on real hardware (or a RAM-capped equivalent) — not extrapolation:
+
+| Machine | Run this | Measured |
+|---|---|---|
+| **8 GB Apple Silicon** | **Trinity-Nano-Preview Q4_K_M** (arcee-ai) | 13.25 tok/s decode, CPU, fully resident — the standing 8 GB recommendation |
+| **16 GB Apple Silicon** | [**gpt-oss-20b-keep30-MXFP4**](https://huggingface.co/Joakimpalm-Zen/gpt-oss-20b-keep30-MXFP4-GGUF) (11.5 GB) | 13.2–13.3 tok/s under a real 16 GiB cap; Metal fit after `sudo sysctl iogpu.wired_limit_mb=13312` |
+| **16 GB Apple Silicon** (larger model) | gemma-4-26B-A4B-it QAT Q4_0 with `--kv q8` (14.4 GB) | 7.1–7.3 tok/s under a real 16 GiB cap; live 16 GB-Mac validation pending |
+| **24 GB GPU** | Qwen3-30B-A3B | ~72 tok/s on an RTX PRO 6000 24 GB MIG slice |
+
+Models *larger* than a machine's RAM are not recommended in any
+configuration: the paging/streaming regimes were measured exhaustively and
+rejected ([docs/negative-result-expert-cache.md](docs/negative-result-expert-cache.md)).
 
 Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
 `expert_shared_count`-style shared-expert MoE / MLA (Qwen2-MoE, DeepSeek/Kimi),
