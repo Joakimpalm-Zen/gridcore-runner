@@ -20,8 +20,29 @@ protocol and CLI may still change between alpha releases.
   per-token path instead of a silently-wrong batch. Pinned by two new
   heterogeneous fixtures (dense + dual-branch MoE, both with V-less full
   layers) under `make test-metal-gemma4-hetero`, byte-identical CPU vs
-  Metal. Real-model validation and the 26B partial-offload story follow
-  in the next release notes.
+  Metal.
+
+- **Metal GELU produced NaN on real Gemma weights — fixed.** Enabling the
+  path above exposed it immediately: gemma-3-4b-it emitted nothing but
+  token 0, with NaN logits, from layer 0. Metal compiles kernels with fast
+  math, where `tanh()` is evaluated through `exp(2a)`; the GELU tanh
+  argument grows as x^3, overflows to `inf`, and `inf/inf` is NaN. libm's
+  `tanhf` on the CPU oracle saturates instead, and CUDA is unaffected
+  (nvcc is not built with `-use_fast_math`), which is why the arch was
+  certified on CUDA with the defect latent on Metal. The kernel now clamps
+  the tanh argument to a magnitude where the result is already exactly
+  ±1.0f in fp32, so the guard cannot change any representable value — the
+  same hazard and the same remedy as the `g < -80` early-out in the CPU
+  silu path. Pinned by `make test-metal-gelu-overflow` (a fixture whose
+  gate weights reach the overflow; verified to fail without the fix), and
+  validated on real weights: **gemma-3-4b-it Q4_K_M is byte-identical CPU
+  vs Metal over 32 greedy tokens** on an M1.
+
+- `RUNNER_METAL_NAN_TRACE=1`: submit after each Metal layer and report the
+  first buffer carrying NaN/Inf. The GPU path had no equivalent of
+  `RUNNER_DEBUG_ACT`, so a backend silently producing NaN logits could
+  only be bisected by guesswork; this found the defect above in three
+  runs. Off by default, one env read per forward.
 
 ## v0.1.9-alpha — 2026-08-06
 

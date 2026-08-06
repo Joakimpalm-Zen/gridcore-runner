@@ -29,6 +29,7 @@ ESERIES_SHARED_KV = 0
 ESERIES_PLE = 0
 FFN_WIDTHS = None  # per-layer FFN widths -> ARRAY-typed feed_forward_length
 G4HETERO = False   # gemma4 heterogeneous attention geometry (26B/12B shape)
+ACT_OVERFLOW = 0   # scale on ffn_gate weights, to drive the activation extreme
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -74,6 +75,14 @@ while i < len(args):
         shared, ple = args[i].split(",")
         ESERIES_SHARED_KV, ESERIES_PLE = int(shared), int(ple)
         ARCH = "gemma4"
+    elif a == "--act-overflow":
+        # Scale ffn_gate so the gated activation's input is large. The GELU
+        # tanh argument grows as x^3, and a fast-math tanh evaluated through
+        # exp(2a) overflows to inf (then inf/inf = NaN) well before fp32 runs
+        # out of range — a real gemma-3-4b hit exactly this on Metal and
+        # emitted only token 0. Real models reach these magnitudes; the
+        # default fixture weights (±0.04) never do.
+        ACT_OVERFLOW = 400.0
     elif a == "--gemma4-hetero":
         # the real gemma-4 26B/12B attention shape, scaled down: sliding
         # layers (i%3 != 2) rotate fewer dims on smaller heads with fewer KV
@@ -165,8 +174,8 @@ def rnd():
     return (_state / 0x7FFFFFFF - 0.5) * 0.08
 
 
-def tensor_data(n):
-    return struct.pack(f"<{n}f", *(rnd() for _ in range(n)))
+def tensor_data(n, scale=1.0):
+    return struct.pack(f"<{n}f", *(rnd() * scale for _ in range(n)))
 
 
 def ones(n):
@@ -199,7 +208,8 @@ for i in range(N_LAYER + MTP_LAYERS):
         (f"blk.{i}.attn_output.weight", [q_dim, N_EMBD], tensor_data(q_dim * N_EMBD)),
         (f"blk.{i}.ffn_norm.weight", [N_EMBD], ones(N_EMBD)),
         *([] if APERTUS else
-          [(f"blk.{i}.ffn_gate.weight", [N_EMBD, N_FF_I], tensor_data(N_EMBD * N_FF_I))]),
+          [(f"blk.{i}.ffn_gate.weight", [N_EMBD, N_FF_I],
+            tensor_data(N_EMBD * N_FF_I, ACT_OVERFLOW or 1.0))]),
         (f"blk.{i}.ffn_up.weight", [N_EMBD, N_FF_I], tensor_data(N_EMBD * N_FF_I)),
         (f"blk.{i}.ffn_down.weight", [N_FF_I, N_EMBD], tensor_data(N_FF_I * N_EMBD)),
     ]

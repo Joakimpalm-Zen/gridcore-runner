@@ -546,7 +546,16 @@ kernel void k_gelu_mul(device float       *g [[buffer(0)]],
                        uint i [[thread_position_in_grid]]) {
     if ((int)i < n) {
         float x = g[i];
-        float t = tanh(0.7978845608f * (x + 0.044715f * x * x * x));
+        // Metal compiles with fast math, where tanh() is evaluated through
+        // exp(2a): for large |a| that overflows to inf and inf/inf yields NaN,
+        // while the CPU oracle's libm tanhf saturates. Gemma-class models
+        // reach it — gemma-3-4b's layer-0 gate produced NaN logits here, and
+        // the model emitted only token 0. Clamping to a magnitude where tanh
+        // is already exactly +/-1.0f in fp32 cannot change any representable
+        // result, so this guard is invisible to the identity gates. Same
+        // hazard, same fix as the `g < -80` early-out in the CPU silu path.
+        float a = 0.7978845608f * (x + 0.044715f * x * x * x);
+        float t = tanh(clamp(a, -16.0f, 16.0f));
         g[i] = 0.5f * x * (1.0f + t) * u[i];
     }
 }

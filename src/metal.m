@@ -1154,9 +1154,33 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
     return (float *)g->logits.contents + (size_t)(n - 1) * m->n_vocab;
 }
 
+// RUNNER_METAL_NAN_TRACE=1: submit after every layer and report the first one
+// whose residual carries a NaN/Inf. The GPU path has no equivalent of
+// RUNNER_DEBUG_ACT — without this, a backend that silently produces NaN logits
+// can only be bisected by guesswork. Costs one command buffer per layer, so it
+// is opt-in and read once.
+static bool metal_nan_trace(void) {
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("RUNNER_METAL_NAN_TRACE"); on = v && *v && strcmp(v, "0"); }
+    return on > 0;
+}
+
+static bool metal_scan_bad(const float *p, int n, const char *what, int layer) {
+    for (int i = 0; i < n; i++) {
+        uint32_t u; memcpy(&u, &p[i], 4);
+        if ((u & 0x7f800000u) == 0x7f800000u) {   // NaN or Inf, -ffast-math safe
+            fprintf(stderr, "metal-nan: L%d %s[%d] = %s\n", layer, what, i,
+                    (u & 0x7fffffu) ? "NaN" : "Inf");
+            return true;
+        }
+    }
+    return false;
+}
+
 static float *gpu_forward(model_t *m, int token, int pos) {
     gpu_t *g = m->gpu;
     int n_embd = m->n_embd;
+    bool nantrace = metal_nan_trace();
 
     // token embedding on CPU (one row), straight into the shared buffer
     size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
@@ -1170,6 +1194,15 @@ static float *gpu_forward(model_t *m, int token, int pos) {
 
     id<MTLCommandBuffer> cb = [g->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+
+    // checkpoint the named buffer under RUNNER_METAL_NAN_TRACE (see above)
+    #define NANCK(BUF, N, WHAT) do { if (nantrace) {                    \
+        [e endEncoding]; [cb commit]; [cb waitUntilCompleted];          \
+        if (metal_scan_bad((const float *)(BUF).contents, (N), (WHAT), l)) \
+            return NULL;                                                \
+        cb = [g->queue commandBuffer];                                  \
+        e = [cb computeCommandEncoder];                                 \
+    } } while (0)
 
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
@@ -1194,6 +1227,10 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         if (g->kn[l]) enc_qknorm(g, e, m, g->kt, 0, g->kn[l], n_kv, hd);
         enc_rope(g, e, m, g->q,  0, m->n_head, pos, l);
         enc_rope(g, e, m, g->kt, 0, n_kv,      pos, l);
+        NANCK(g->xb, n_embd, "attn-norm");
+        NANCK(g->q, q_dim_l, "q-post-rope");
+        NANCK(g->kt, kv_dim_l, "k-post-rope");
+        NANCK(g->vt, kv_dim_l, "v");
 
         [e setComputePipelineState:g->p_store];
         [e setBuffer:g->kt offset:0 atIndex:0];
@@ -1221,7 +1258,9 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 
+        NANCK(g->xb2, q_dim_l, "attn-out");
         enc_mv(g, e, m, ly->wo, g->xb2, 0, g->xb, 0, q_dim_l, n_embd, g->bo[l]);
+        NANCK(g->xb, n_embd, "wo-out");
         if (g->pan[l])
             enc_rmsnorm(g, e, g->xb, 0, g->xb, 0, g->pan[l], n_embd, m->rms_eps);
         enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
@@ -1233,11 +1272,16 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         if (ly->is_moe) {
             enc_moe_ffn(g, e, m, ly, 0);
         } else {
+            NANCK(g->xb, n_embd, "ffn-norm");
             enc_mv(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0, n_embd, m->n_ff, nil);
+            NANCK(g->hb, m->n_ff, "ffn-gate");
             enc_mv(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0, n_embd, m->n_ff, nil);
+            NANCK(g->hb2, m->n_ff, "ffn-up");
             enc_elem(g, e, m->ffn_act == ACT_GELU ? g->p_gelu : g->p_silu,
                      g->hb, 0, g->hb2, 0, m->n_ff);
+            NANCK(g->hb, m->n_ff, "ffn-act");
             enc_mv(g, e, m, ly->w_down, g->hb, 0, g->xb, 0, m->n_ff, n_embd, nil);
+            NANCK(g->xb, n_embd, "ffn-down");
         }
         }
         if (g->pfn[l])
@@ -1245,7 +1289,17 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
             enc_scale(g, e, g->x, 0, n_embd, ly->out_scale);
+        if (nantrace) {
+            [e endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (metal_scan_bad((const float *)g->x.contents, n_embd, "resid", l))
+                return NULL;
+            cb = [g->queue commandBuffer];
+            e = [cb computeCommandEncoder];
+        }
     }
+    #undef NANCK
 
     enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->out_norm, n_embd, m->rms_eps);
     enc_mv(g, e, m, m->output, g->xb, 0, g->logits, 0, n_embd, m->n_vocab, nil);
