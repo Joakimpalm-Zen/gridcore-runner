@@ -906,3 +906,68 @@ No speedup and no meaningful slowdown — consistent with gate (a): the drafter 
 ### Summary
 
 The goal doc frames a speedup-with-losslessness-proof as a "README-grade result" — this item doesn't produce that, because the one MTP drafter this session could resolve for the Gemma 4 26B-A4B family uses an architecture (`gemma4-assistant`, real NextN/MTP layer semantics) the runner's `--draft` path doesn't yet support. What it does produce is a clean capability-gap finding plus a genuinely reassuring robustness result: an unsupported drafter is refused loudly and specifically (not silently misused), and the fallback to ordinary generation is provably byte-identical to never having passed `--draft` at all. This is the same "record what's actually true and move on" discipline as the rest of the roster — REFUSED, with precise evidence, is the deliverable.
+
+## Tier 4 — big iron
+
+## 18. gpt-oss-120b MXFP4 (canonical, ~59GB)
+
+**Verdict: FAILED** — same two failure modes as every native-MXFP4 gpt-oss row this session (gate 5 cpu_cuda, gate 6 chat smoke), at the largest scale tested. The scale-up itself is the interesting finding: with 128 experts instead of 20b's 32, this is the **worst cross-engine KLD agreement of the entire gpt-oss family** (64.5% top-1, 0.254 mean KLD — the next-worst row this session was 65.5%), consistent with the already-diagnosed near-tie top-k routing sensitivity simply having more ways to flip when there are four times as many experts to choose the top-4 from.
+
+**Resolved:** `ggml-org/gpt-oss-120b-GGUF/gpt-oss-120b-MXFP4.gguf`. Downloaded, sha256 `582bd40f6886200101f4c4ed9f25f3fe80cc14c86e9e2b37746cd8904a0c622d` verified against the HF API blob hash and the locally computed hash, 63,387,346,208 bytes (~59GiB). This is the goal doc's explicit disk exception (item 18, "allowed to be the only artifact on disk"); deleted immediately after this verdict per standard disk discipline.
+
+### Gate 1 — Identity: canonical native-MXFP4 scale-up of the 20b family
+
+```
+gguf version: 3  tensors: 687  kv: 36
+general.architecture: gpt-oss
+general.name: gpt-oss-120b
+gpt-oss.block_count: 36        <- vs 20b's 24
+gpt-oss.expert_count: 128      <- vs 20b's 32
+gpt-oss.expert_used_count: 4   <- same top-k as 20b
+
+tensor type histogram (687 tensors): Q8_0 x146, F32 x433, MXFP4 x108
+expert-tensor types (288 tensors): F32 x180, MXFP4 x108
+expert layers found: 36, uniform expert dtype across layers: True
+```
+
+Uniform-MXFP4 experts across all 36 layers — the same QAT-native signature seen on every canonical gpt-oss release this session, just at 4x the expert count. Evidence: `docs/cert-matrix-evidence/t4.18-gguf-inspect.json`.
+
+### Gate 2 — Admission: PASS (both engines, both needed partial/patient loading)
+
+Runner auto-fit chose partial GPU offload: `gpu-split: budget=25.13GB fixed=1.17GB G=13/36 full=0 used=23.66GB` — 13 of 36 layers on the 24GB MIG slice, the rest on CPU, exactly the "GPU offload what fits + CPU rest" behavior the goal doc asks for. llama.cpp b10280 (`-ngl 999`) also loaded successfully (~18 minutes wall-clock for the 59GB read+init) and produced coherent completions. One operational note for future big-iron runs on this box: a killed runner leaves a stale entry in its `/tmp/gridcore-vram-GPU-*.reg` lease file if the process becomes a zombie before being reaped, which then blocks a subsequent run with a false "VRAM already held" error until the stale `.reg` file is removed — not a correctness issue, just a lock-hygiene wrinkle worth knowing about when re-running big models back-to-back.
+
+### Gate 3 — Tokenizer: **222/721 diverge** vs `openai/gpt-oss-120b` — identical count and identical divergent strings to every other gpt-oss row this session (confirms the divergence is a tokenizer-implementation property, entirely independent of model size). Evidence: `docs/cert-matrix-evidence/t4.18-difftok.log`.
+
+### Gate 4 — Reference (KLD): `mean_kld: 0.2538, top1_agreement_pct: 64.5, mean_top8_overlap: 0.773`
+
+Worst of the entire gpt-oss family this session (previous worst was item 11's 73.75%/0.136). The 128-expert/top-4 routing here has four times as many near-tie candidates per layer as the 20b family's 32-expert/top-4, and this session's running diagnosis (MXFP4 `vec_dot_type` precision differences flip near-tie routing decisions between engines) predicts exactly this direction of effect: more experts to route among compounds the flip rate. Evidence: `docs/cert-matrix-evidence/t4.18-kld-raw.json`.
+
+### Gate 5 — cpu_cuda: **FAIL**
+
+```
+CPU: "The capital of France is Paris.\n\nGreat! If you have any more questions or need further assistance, feel free to ask!..."
+GPU: "The capital of France is Paris.\n\nGreat! Here's a possible prompt for a short story based on the given input:..."
+```
+
+Diverges immediately after the shared prefix "The capital of France is Paris.\n\nGreat! " — same MXFP4-vec_dot-mismatch signature as every other native-MXFP4 gpt-oss row, unsurprising given gate 4's finding that this file has the family's worst near-tie sensitivity. Evidence: `docs/cert-matrix-evidence/t4.18-cpu.out`, `t4.18-gpu.out`.
+
+### Gate 6 — Chat smoke: **FAIL**
+
+```json
+{"content":" The answer is 4.\"\n\nNow we need to produce the answer: \"The answer is 4.\"\n\nThus the answer is \"The answer is 4.\"\n\nThus the answer: The answer is 4.\n\nThus the answer: The answer is 4.\n\nThus the answer: The answer is ","finish_reason":"length"}
+```
+
+A different failure shape than most of the family (a degenerate repeat-loop rather than Harmony-analysis-channel meta-commentary), but the same underlying result: no clean single answer, runs to the token limit. No raw `<|channel|>`/`<|message|>` tag leakage into content. Evidence: `docs/cert-matrix-evidence/t4.18-chatresp.json`.
+
+### Gate 7 — Perf row
+
+```
+CPU: {"gpu_layers":0,"layers":36,"prompt_tok_s":32.993,"gen_tok_s":8.549,"prompt_s":15.518,"gen_s":29.943}
+GPU: {"gpu_layers":13,"layers":36,"prompt_tok_s":29.162,"gen_tok_s":10.898,"prompt_s":17.557,"gen_s":23.491}
+```
+
+Only a modest GPU uplift (10.9 vs 8.5 gen tok/s) — expected, since just 13 of 36 layers fit the 24GB MIG slice and the bulk of the MoE compute still runs on CPU.
+
+### Summary
+
+The largest model in the roster confirms the session's central gpt-oss finding at scale rather than overturning it: the runner correctly identifies, admits, and partially-GPU-offloads a canonical ~59GB native-MXFP4 checkpoint (validating both the disk-exception workflow and the auto-fit partial-offload logic), but fails the same two correctness gates every native-MXFP4 gpt-oss row has failed. The new information is quantitative, not qualitative — going from 32 to 128 experts measurably worsens cross-engine numerical agreement, which is exactly what the standing MXFP4 near-tie-routing diagnosis predicts.

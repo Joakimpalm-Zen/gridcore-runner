@@ -1,0 +1,23 @@
+file: /home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-120b-mxfp4.gguf
+gguf version: 3  tensors: 687  kv: 36
+general.architecture: gpt-oss
+general.name: gpt-oss-120b
+  gpt-oss.block_count: 36
+  gpt-oss.expert_count: 128
+  gpt-oss.expert_used_count: 4
+  gpt-oss.embedding_length: 2880
+  gpt-oss.feed_forward_length: 2880
+  gpt-oss.expert_feed_forward_length: 2880
+  gpt-oss.context_length: 131072
+  gpt-oss.rope.scaling.type: yarn
+  tokenizer.ggml.model: gpt2
+  tokenizer.chat_template: {#-
+  In addition to the normal inputs of `messages` and `tools`, this template ...(16714 chars)
+
+tensor type histogram (all 687 tensors): {'Q8_0': 146, 'F32': 433, 'MXFP4': 108}
+expert-tensor types (288 tensors): {'F32': 180, 'MXFP4': 108}
+non-expert-tensor types (399 tensors): {'Q8_0': 146, 'F32': 253}
+expert layers found: 36, uniform expert dtype across layers: True
+  output.weight: Q8_0 ne=[2880, 201088]
+  output_norm.weight: F32 ne=[2880]
+  token_embd.weight: Q8_0 ne=[2880, 201088]

@@ -43,7 +43,7 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 
 | # | artifact | resolved repo/file | verdict | note |
 |---|---|---|---|---|
-| 18 | gpt-oss-120b MXFP4 | pending | pending | |
+| 18 | gpt-oss-120b MXFP4 | `ggml-org/gpt-oss-120b-GGUF/gpt-oss-120b-MXFP4.gguf` (sha `582bd40f...`) | **FAILED** | canonical scale-up (36L/128E/top4, uniform MXFP4, same QAT signature as 20b family); disk-exception download (~59GB) worked cleanly, runner auto-fit 13/36 layers to GPU; cpu_cuda and chat smoke fail same as family; tokenizer 222/721 identical to family; **KLD 64.5%/0.254 is the WORST of the entire gpt-oss family — 128 experts vs 20b's 32 compounds the already-diagnosed near-tie routing sensitivity** |
 | 19 | gpt-oss-safeguard-120b | pending | pending | |
 | 20 | 220A20B expanded-expert FrankenMoE | pending | pending | |
 
