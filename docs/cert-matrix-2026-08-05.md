@@ -1013,3 +1013,13 @@ Gates 3-7 do not apply; a refused load ends the battery.
 ### Summary
 
 A second, independent confirmation of item 10's finding rather than a new one: gpt-oss-safeguard-120b is universally distributed as a 2-part split GGUF (true of every uploader checked), and the runner's lack of split-file support blocks it identically regardless of which specific checkpoint or uploader produced the split. Declining to download the untested second shard was itself a disk-discipline call — the root cause was already proven at the code level in item 10 (`gguf_get_u32`-adjacent tensor-table reading only ever looks at the file passed on the command line), so no amount of additional shard data changes this item's verdict.
+
+## 20. 220A20B expanded-expert FrankenMoE
+
+**Verdict: NOT FOUND** — no GGUF conversion of this checkpoint exists anywhere on Hugging Face.
+
+**Resolved (source only, no GGUF):** `LLMWildling/gpt-oss-220a20b` — a real model (safetensors, `gpt_oss` architecture, `num_experts_per_tok: 20`, native MXFP4, based on `openai/gpt-oss-120b`), distributed only as 15 `model-NNNNN.safetensors` shards plus the standard HF config files. No `-GGUF` sibling repo exists for it under any of the usual quantizer accounts (`bartowski`, `unsloth`, `mradermacher`, `ggml-org`), and a search across the uploader's entire catalog (`LLMWildling`, a prolific publisher of expert-expanded gpt-oss and gemma4 "Franken" variants — `gpt-oss-140b-ren-2`, `-160b-kiwi`, `-180b-goomba`, `-200b-goblin`, and this `220a20b`, plus dozens of gemma4-coder expansions) turned up zero GGUF repos for any of them: the author ships only `safetensors` and `NVFP4` formats. Since the runner and the llama.cpp reference both require GGUF, there is nothing loadable to admit, and no plausible alternate repo/filename to try.
+
+### Summary
+
+The goal doc's own hedge for this item ("a REFUSED/loads-metadata result is all we want") anticipated a GGUF existing that might fail to load; the real situation is one step earlier — nobody has converted this specific expert-expansion checkpoint (or any of its siblings from the same author) to GGUF at all. Per the goal's own naming-reality-check principle, NOT FOUND is the accurate verdict rather than forcing a substitution onto a differently-named model that wouldn't actually be this roster item.

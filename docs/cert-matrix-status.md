@@ -45,7 +45,7 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 |---|---|---|---|---|
 | 18 | gpt-oss-120b MXFP4 | `ggml-org/gpt-oss-120b-GGUF/gpt-oss-120b-MXFP4.gguf` (sha `582bd40f...`) | **FAILED** | canonical scale-up (36L/128E/top4, uniform MXFP4, same QAT signature as 20b family); disk-exception download (~59GB) worked cleanly, runner auto-fit 13/36 layers to GPU; cpu_cuda and chat smoke fail same as family; tokenizer 222/721 identical to family; **KLD 64.5%/0.254 is the WORST of the entire gpt-oss family — 128 experts vs 20b's 32 compounds the already-diagnosed near-tie routing sensitivity** |
 | 19 | gpt-oss-safeguard-120b | `lmstudio-community/gpt-oss-safeguard-120b-GGUF` MXFP4, shard 1/2 only (sha `c53a801f...`); shard 2 deliberately not downloaded | **REFUSED** | every uploader's conversion is a 2-part split; identical failure to item 10 ("missing tensor blk.22...") confirms the runner's split-GGUF gap is universal, not checkpoint-specific; same 36L/128E/top4 uniform-MXFP4 shape as item 18, confirming a genuine same-arch safety fine-tune |
-| 20 | 220A20B expanded-expert FrankenMoE | pending | pending | |
+| 20 | 220A20B expanded-expert FrankenMoE | `LLMWildling/gpt-oss-220a20b` (safetensors only, no GGUF) | **NOT FOUND** | no GGUF conversion exists anywhere on HF for this checkpoint or any sibling in the same author's prolific gpt-oss/gemma4 expert-expansion catalog (checked bartowski/unsloth/mradermacher/ggml-org and the author's full repo list) — author publishes safetensors/NVFP4 only |
 
 ## Note-only (no download)
 
