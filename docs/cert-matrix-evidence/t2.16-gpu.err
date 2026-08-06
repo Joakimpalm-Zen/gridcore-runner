@@ -1,0 +1,8 @@
+rope: YaRN scaling x32.00 (model metadata)
+gpu-split: budget=25.13GB fixed=0.88GB G=43/43 full=1 used=21.42GB
+gpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (21.2 GB weights in VRAM)
+gpu: VRAM 3.51 GB free of 25.37 GB after init (kv 0.36 GB + scratch 0.02 GB this instance)
+loaded /home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-36b-brainstorm-davidau.gguf | gpt-oss | 43 layers | ctx 4096 | 64 threads | 2.36s
+sampling: gpt-oss (temp 0.00 — greedy argmax; top_p/top_k/min_p/repeat_penalty inactive)
+
+prompt: 5 tok, 9.94 tok/s | gen: 64 tok, 15.23 tok/s

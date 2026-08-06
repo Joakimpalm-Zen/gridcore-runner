@@ -1,0 +1,9 @@
+rope: YaRN scaling x32.00 (model metadata)
+loaded /home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-36b-brainstorm-davidau.gguf | gpt-oss | 43 layers | ctx 4096 | 1 threads | 0.07s
+sampling: gpt-oss (temp 1.00, top_p 1.00, top_k 0, min_p 0.00, repeat_penalty 1.00)
+server listening on http://127.0.0.1:8302 — 1 slot x 64 threads
+  POST /v1/chat/completions | POST /v1/responses | POST /v1/completions
+  GET /v1/models | GET /v1/capabilities | GET /health
+  note: this is a sparse-MoE model and its experts are running on the CPU — expect a fraction of dense throughput
+[slot 0] chatcmpl-0: start, 16 prompt (0 cached)
+[slot 0] chatcmpl-0: 16 prompt (0 cached) + 60 gen tok (6.7 tok/s) [23772 page-ins — weights not resident]

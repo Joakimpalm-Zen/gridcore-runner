@@ -1,0 +1,8 @@
+rope: YaRN scaling x32.00 (model metadata)
+loaded /home/lab/workspace/Gridcore/cert-matrix-models/nano9b-live.gguf | gpt-oss | 24 layers | ctx 4096 | 64 threads | 0.04s
+sampling: gpt-oss (temp 0.00 — greedy argmax; top_p/top_k/min_p/repeat_penalty inactive)
+Write a long essay about the history of computing. The essay will be a 2.5k word essay.
+
+The history of computing is a fascinating story that spans from the earliest days of the invention of the abacus to the present age of the internet. The computing history is a story of the evolution of the technology that has been used to solve problems and to
+prompt: 10 tok, 40.92 tok/s | gen: 64 tok, 12.11 tok/s
+

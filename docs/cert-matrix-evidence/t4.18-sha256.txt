@@ -1,0 +1,1 @@
+582bd40f6886200101f4c4ed9f25f3fe80cc14c86e9e2b37746cd8904a0c622d  /home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-120b-mxfp4.gguf

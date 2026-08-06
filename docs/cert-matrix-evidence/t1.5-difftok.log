@@ -1,0 +1,6 @@
+Makefile:267: warning: overriding recipe for target 'test-split-guard'
+Makefile:260: warning: ignoring old recipe for target 'test-split-guard'
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+0/721 strings differ (0 of them begin with whitespace)
+OK

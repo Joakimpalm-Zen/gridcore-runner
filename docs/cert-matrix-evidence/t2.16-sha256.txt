@@ -1,0 +1,1 @@
+cc08c58b24bbcdeae7dc21fce2f9e7457b61728ac8ed5ab4a7746c2989cd8a6e  /home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-36b-brainstorm-davidau.gguf

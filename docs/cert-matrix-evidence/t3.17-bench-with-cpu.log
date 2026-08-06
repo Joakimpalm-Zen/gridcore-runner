@@ -1,0 +1,6 @@
+gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files
+rope: using model frequency factors (rope_freqs.weight)
+loaded /home/lab/workspace/Gridcore/cert-matrix-models/t3.17-main.gguf | gemma4 | 30 layers | ctx 4096 | 64 threads | 0.04s
+sampling: gemma3 (temp 1.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)
+error: unsupported architecture 'gemma4-assistant' — refusing to run it through llama-style math (set RUNNER_ALLOW_UNKNOWN_ARCH=1 to try anyway, EXPERIMENTAL: output may be silently wrong)
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/t3.17-main.gguf","arch":"gemma4","context":4096,"gpu_layers":0,"layers":30,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":9.533,"gen_tok_s":7.127,"prompt_s":53.711,"gen_s":35.921}

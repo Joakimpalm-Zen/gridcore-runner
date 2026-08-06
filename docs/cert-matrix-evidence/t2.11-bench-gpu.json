@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-safeguard-20b-unsloth.gguf","arch":"gpt-oss","context":4096,"gpu_layers":24,"layers":24,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":33.034,"gen_tok_s":29.794,"prompt_s":15.499,"gen_s":8.592}

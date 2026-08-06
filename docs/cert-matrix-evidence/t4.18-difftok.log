@@ -1,0 +1,56 @@
+Makefile:267: warning: overriding recipe for target 'test-split-guard'
+Makefile:260: warning: ignoring old recipe for target 'test-split-guard'
+FAIL: expected 0
+--- line 18: "pre-tokenizer"
+    runner: [2235, 12, 10346, 4492]
+            ['pre', '-', 'token', 'izer']
+    ref   : [2235, 73397, 4492]
+            ['pre', '-token', 'izer']
+--- line 19: "byte-level BPE"
+    runner: [7216, 12, 6164, 418, 3111]
+            ['byte', '-', 'level', ' B', 'PE']
+    ref   : [7216, 19231, 418, 3111]
+            ['byte', '-level', ' B', 'PE']
+--- line 85: "\r\nhello"
+    runner: [201, 198, 24912]
+            ['\r', '\n', 'hello']
+    ref   : [370, 24912]
+            ['\r\n', 'hello']
+--- line 92: "\r\nHello world"
+    runner: [201, 198, 13225, 2375]
+            ['\r', '\n', 'Hello', ' world']
+    ref   : [370, 13225, 2375]
+            ['\r\n', 'Hello', ' world']
+--- line 99: "\r\n1"
+    runner: [201, 198, 16]
+            ['\r', '\n', '1']
+    ref   : [370, 16]
+            ['\r\n', '1']
+--- line 106: "\r\n!"
+    runner: [201, 198, 0]
+            ['\r', '\n', '!']
+    ref   : [370, 0]
+            ['\r\n', '!']
+--- line 111: "\tthe"
+    runner: [197, 3086]
+            ['\t', 'the']
+    ref   : [62103]
+            ['\tthe']
+--- line 113: "\r\nthe"
+    runner: [201, 198, 3086]
+            ['\r', '\n', 'the']
+    ref   : [370, 3086]
+            ['\r\n', 'the']
+--- line 136: "!\n"
+    runner: [0, 198]
+            ['!', '\n']
+    ref   : [4175]
+            ['!\n']
+--- line 137: "!\n\n"
+    runner: [0, 279]
+            ['!', '\n\n']
+    ref   : [1703]
+            ['!\n\n']
+... and 212 more
+
+222/721 strings differ (10 of them begin with whitespace)

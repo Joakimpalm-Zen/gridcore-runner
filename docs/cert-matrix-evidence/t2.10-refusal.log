@@ -1,0 +1,3 @@
+error: missing tensor blk.3.post_attention_norm.weight
+error: missing tensor blk.3.ffn_gate_inp.weight
+error: missing MoE expert tensor (neither fused ffn_gate_exps nor split ffn_gate.0) in blk.3

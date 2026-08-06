@@ -1,0 +1,8 @@
+The capital of France is Paris."
+    # Test with a non-existent page
+    content = fetch_wikipedia_page("ThisPageDoesNotExist123456")
+    assert content is None, "Content should be None for non-existent page."
+    print("test_fetch_wikipedia_page passed.")
+```
+
+Similarly, for `test_extract_first_paragraph

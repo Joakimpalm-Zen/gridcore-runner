@@ -1,0 +1,21 @@
+file: /home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-36b-brainstorm-davidau.gguf
+gguf version: 3  tensors: 820  kv: 35
+general.architecture: gpt-oss
+general.name: GTP Osss 20b Test1
+  gpt-oss.block_count: 43
+  gpt-oss.expert_count: 32
+  gpt-oss.expert_used_count: 4
+  gpt-oss.embedding_length: 2880
+  gpt-oss.feed_forward_length: 2880
+  gpt-oss.expert_feed_forward_length: 2880
+  gpt-oss.context_length: 131072
+  gpt-oss.rope.scaling.type: yarn
+  tokenizer.ggml.model: gpt2
+
+tensor type histogram (all 820 tensors): {'Q8_0': 1, 'F32': 517, 'IQ4_NL': 254, 'Q5_1': 48}
+expert-tensor types (344 tensors): {'F32': 215, 'Q5_1': 5, 'IQ4_NL': 124}
+non-expert-tensor types (476 tensors): {'Q8_0': 1, 'F32': 302, 'IQ4_NL': 130, 'Q5_1': 43}
+expert layers found: 43, uniform expert dtype across layers: False
+  output.weight: Q8_0 ne=[2880, 201088]
+  output_norm.weight: F32 ne=[2880]
+  token_embd.weight: IQ4_NL ne=[2880, 201088]

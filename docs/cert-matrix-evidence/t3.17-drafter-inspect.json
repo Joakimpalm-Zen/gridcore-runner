@@ -1,0 +1,17 @@
+file: /home/lab/workspace/Gridcore/cert-matrix-models/t3.17-drafter.gguf
+gguf version: 3  tensors: 49  kv: 44
+general.architecture: gemma4-assistant
+general.name: 26B A4B Assistant
+  gemma4-assistant.block_count: 4
+  gemma4-assistant.embedding_length: 1024
+  gemma4-assistant.feed_forward_length: 8192
+  gemma4-assistant.context_length: 131072
+  tokenizer.ggml.model: gemma4
+  tokenizer.chat_template: {%- macro format_parameters(properties, required, filter_keys=false) -%}
+    {%-...(17336 chars)
+
+tensor type histogram (all 49 tensors): {'F32': 26, 'Q4_0': 23}
+expert-tensor types (0 tensors): (none -- dense model)
+non-expert-tensor types (49 tensors): {'F32': 26, 'Q4_0': 23}
+  token_embd.weight: Q4_0 ne=[1024, 262144]
+  output_norm.weight: F32 ne=[1024]

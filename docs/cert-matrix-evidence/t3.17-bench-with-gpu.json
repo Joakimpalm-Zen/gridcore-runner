@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/t3.17-main.gguf","arch":"gemma4","context":4096,"gpu_layers":30,"layers":30,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":84.433,"gen_tok_s":49.448,"prompt_s":6.064,"gen_s":5.177}

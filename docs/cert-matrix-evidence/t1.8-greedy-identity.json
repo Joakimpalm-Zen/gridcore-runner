@@ -1,0 +1,66 @@
+{
+  "n_pass": 5,
+  "n_total": 6,
+  "results": [
+    {
+      "tag": "a",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "f0512065dede51e39788666b487f3010c3b057fcded01d7a7de50766e6eefcc0",
+      "runner_sha256": "f0512065dede51e39788666b487f3010c3b057fcded01d7a7de50766e6eefcc0",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "b",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "582bf5084ba686bfa95dc641ed04349a400cfde81cd39c1bde21ad215fbbf781",
+      "runner_sha256": "582bf5084ba686bfa95dc641ed04349a400cfde81cd39c1bde21ad215fbbf781",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "c",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "2e15e1aff679b3f604cbd047158bfcb201b4a7f8c632adc416af28111dfa2a9f",
+      "runner_sha256": "2e15e1aff679b3f604cbd047158bfcb201b4a7f8c632adc416af28111dfa2a9f",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "d",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 68,
+      "ref_sha256": "19a18cebfedac30e57e621347641eeb69bc7f97d90e4ce9b3a810c9aad825b4d",
+      "runner_sha256": "104bdee5fed9a1d0525710c4c3c4f3d61df44879be8da48af60c3100e2545128",
+      "ref_tail": "rar genom en fysikalisk princip som kallas **termisk expansi",
+      "runner_tail": "rar genom **termisk expansion**, vilket innebär att vätskan "
+    },
+    {
+      "tag": "b-long",
+      "n": 256,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "8b435944bebedc31929a6dbb697de74b7d014f073417a2dbaf5487f55f14dfbe",
+      "runner_sha256": "8b435944bebedc31929a6dbb697de74b7d014f073417a2dbaf5487f55f14dfbe",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "c-long",
+      "n": 256,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "2e15e1aff679b3f604cbd047158bfcb201b4a7f8c632adc416af28111dfa2a9f",
+      "runner_sha256": "2e15e1aff679b3f604cbd047158bfcb201b4a7f8c632adc416af28111dfa2a9f",
+      "ref_tail": "",
+      "runner_tail": ""
+    }
+  ]
+}

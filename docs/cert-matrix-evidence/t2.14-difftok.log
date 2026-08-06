@@ -1,0 +1,5 @@
+Makefile:267: warning: overriding recipe for target 'test-split-guard'
+Makefile:260: warning: ignoring old recipe for target 'test-split-guard'
+
+0/721 strings differ (0 of them begin with whitespace)
+OK

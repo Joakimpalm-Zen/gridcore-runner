@@ -1,0 +1,7 @@
+gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files
+rope: using model frequency factors (rope_freqs.weight)
+loaded /home/lab/workspace/Gridcore/gridcore-runner/models/gemma-4-26B_q4_0-it.gguf | gemma4 | 30 layers | ctx 8192 | 64 threads | 0.05s
+sampling: gemma3 (temp 0.00 — greedy argmax; top_p/top_k/min_p/repeat_penalty inactive)
+Write a long essay about the history of computing.-by-thought-process-thought-process-thought-process-thought-process-thought-process-thought-process-thought-process-thought-thought-process-thought-process-thought-process-thought-process-thought-process-thought-process-thought-process-thought-process
+prompt: 11 tok, 8.48 tok/s | gen: 64 tok, 7.32 tok/s
+

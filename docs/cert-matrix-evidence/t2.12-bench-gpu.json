@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-20b-coder-davidau.gguf","arch":"gpt-oss","context":4096,"gpu_layers":24,"layers":24,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":37.131,"gen_tok_s":27.981,"prompt_s":13.789,"gen_s":9.149}

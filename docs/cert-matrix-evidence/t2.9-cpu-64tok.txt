@@ -1,0 +1,11 @@
+The capital of France is Paris."
+
+We need to parse the sentence: "The capital of France is Paris."
+
+We need to parse the sentence: "The capital of France is Paris."
+
+We need to parse the sentence: "The capital of France is Paris."
+
+We need to parse the sentence: "The capital of France is Paris."
+
+We

@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gemma-4-12B-coder-yuxinlu1.gguf","arch":"gemma4","context":4096,"gpu_layers":48,"layers":48,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":76.101,"gen_tok_s":34.473,"prompt_s":6.728,"gen_s":7.426}

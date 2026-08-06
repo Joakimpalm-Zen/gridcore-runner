@@ -1,0 +1,107 @@
+Makefile:267: warning: overriding recipe for target 'test-split-guard'
+Makefile:260: warning: ignoring old recipe for target 'test-split-guard'
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+FAIL: expected 0
+--- line 18: "pre-tokenizer"
+    runner: [2235, 12, 10346, 4492]
+            ['pre', '-', 'token', 'izer']
+    ref   : [2235, 73397, 4492]
+            ['pre', '-token', 'izer']
+--- line 19: "byte-level BPE"
+    runner: [7216, 12, 6164, 418, 3111]
+            ['byte', '-', 'level', ' B', 'PE']
+    ref   : [7216, 19231, 418, 3111]
+            ['byte', '-level', ' B', 'PE']
+--- line 85: "\r\nhello"
+    runner: [201, 198, 24912]
+            ['\r', '\n', 'hello']
+    ref   : [370, 24912]
+            ['\r\n', 'hello']
+--- line 92: "\r\nHello world"
+    runner: [201, 198, 13225, 2375]
+            ['\r', '\n', 'Hello', ' world']
+    ref   : [370, 13225, 2375]
+            ['\r\n', 'Hello', ' world']
+--- line 99: "\r\n1"
+    runner: [201, 198, 16]
+            ['\r', '\n', '1']
+    ref   : [370, 16]
+            ['\r\n', '1']
+--- line 106: "\r\n!"
+    runner: [201, 198, 0]
+            ['\r', '\n', '!']
+    ref   : [370, 0]
+            ['\r\n', '!']
+--- line 111: "\tthe"
+    runner: [197, 3086]
+            ['\t', 'the']
+    ref   : [62103]
+            ['\tthe']
+--- line 113: "\r\nthe"
+    runner: [201, 198, 3086]
+            ['\r', '\n', 'the']
+    ref   : [370, 3086]
+            ['\r\n', 'the']
+--- line 136: "!\n"
+    runner: [0, 198]
+            ['!', '\n']
+    ref   : [4175]
+            ['!\n']
+--- line 137: "!\n\n"
+    runner: [0, 279]
+            ['!', '\n\n']
+    ref   : [1703]
+            ['!\n\n']
+--- line 163: "1234"
+    runner: [899, 3020]
+            ['12', '34']
+    ref   : [7633, 19]
+            ['123', '4']
+--- line 166: "1234567"
+    runner: [7633, 2548, 5462]
+            ['123', '45', '67']
+    ref   : [7633, 19354, 22]
+            ['123', '456', '7']
+--- line 169: "1234567890"
+    runner: [7633, 19354, 4388, 2744]
+            ['123', '456', '78', '90']
+    ref   : [7633, 19354, 29338, 15]
+            ['123', '456', '789', '0']
+--- line 172: "0000"
+    runner: [504, 504]
+            ['00', '00']
+    ref   : [1302, 15]
+            ['000', '0']
+--- line 173: "3.14159"
+    runner: [18, 13, 1265, 19218]
+            ['3', '.', '14', '159']
+    ref   : [18, 13, 16926, 4621]
+            ['3', '.', '141', '59']
+--- line 181: "0b1010"
+    runner: [15, 65, 702, 702]
+            ['0', 'b', '10', '10']
+    ref   : [15, 65, 7959, 15]
+            ['0', 'b', '101', '0']
+--- line 207: "it's"
+    runner: [278, 885]
+            ['it', "'s"]
+    ref   : [64190]
+            ["it's"]
+--- line 208: "It's"
+    runner: [3206, 885]
+            ['It', "'s"]
+    ref   : [15834]
+            ["It's"]
+--- line 221: "it'S"
+    runner: [278, 6, 50]
+            ['it', "'", 'S']
+    ref   : [278, 31233]
+            ['it', "'S"]
+--- line 222: "It'S"
+    runner: [3206, 6, 50]
+            ['It', "'", 'S']
+    ref   : [3206, 31233]
+            ['It', "'S"]
+... and 202 more
+
+222/721 strings differ (10 of them begin with whitespace)

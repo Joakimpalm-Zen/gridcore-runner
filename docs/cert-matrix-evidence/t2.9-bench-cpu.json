@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/Gridcore/cert-matrix-models/gpt-oss-nano-9b-q4_k_m-squ11z1.gguf","arch":"gpt-oss","context":4096,"gpu_layers":0,"layers":24,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":68.784,"gen_tok_s":9.941,"prompt_s":7.444,"gen_s":25.752}
