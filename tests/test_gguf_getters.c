@@ -83,6 +83,52 @@ static void test_getter_validation(void) {
     printf("ok: typed getters validate type/sign/range/finiteness\n");
 }
 
+static void test_u32_idx_getter(void) {
+    // gemma-4 E2B publishes feed_forward_length as a per-layer ARRAY
+    // (6144/12288 alternating); every other export publishes one scalar.
+    // The per-index getter must serve both, with the scalar answering every
+    // index, and must not let a wrong-typed or short array become geometry.
+    buf kv = {0};
+    uint64_t n = 0;
+    bkey(&kv, "ff_scalar", GGUF_T_U32); bu32(&kv, 7);                    n++;
+    bkey(&kv, "ff_arr", GGUF_T_ARR);
+    bu32(&kv, GGUF_T_U32); bu64(&kv, 3);
+    bu32(&kv, 6144); bu32(&kv, 12288); bu32(&kv, 6144);                  n++;
+    bkey(&kv, "ff_i32_arr", GGUF_T_ARR);
+    bu32(&kv, GGUF_T_I32); bu64(&kv, 2);
+    bi32(&kv, 512); bi32(&kv, -4);                                       n++;
+    bkey(&kv, "ff_f32_arr", GGUF_T_ARR);
+    bu32(&kv, GGUF_T_F32); bu64(&kv, 2);
+    bf32(&kv, 1.0f); bf32(&kv, 2.0f);                                    n++;
+
+    const char *path = "getters-idx.gguf";
+    write_gguf(path, &kv, n, NULL, 0);
+    free(kv.b);
+
+    gguf_file g;
+    assert(gguf_open(&g, path));
+
+    // a scalar answers every index (uniform width models)
+    assert(gguf_get_u32_idx(&g, "ff_scalar", 0, 99) == 7);
+    assert(gguf_get_u32_idx(&g, "ff_scalar", 34, 99) == 7);
+    // an array answers per index
+    assert(gguf_get_u32_idx(&g, "ff_arr", 0, 99) == 6144);
+    assert(gguf_get_u32_idx(&g, "ff_arr", 1, 99) == 12288);
+    assert(gguf_get_u32_idx(&g, "ff_arr", 2, 99) == 6144);
+    // out of range is the default, never a read past the array
+    assert(gguf_get_u32_idx(&g, "ff_arr", 3, 99) == 99);
+    // signed elements validate like the scalar getter: negatives fall back
+    assert(gguf_get_u32_idx(&g, "ff_i32_arr", 0, 99) == 512);
+    assert(gguf_get_u32_idx(&g, "ff_i32_arr", 1, 99) == 99);
+    // float arrays are not integer geometry
+    assert(gguf_get_u32_idx(&g, "ff_f32_arr", 0, 99) == 99);
+    assert(gguf_get_u32_idx(&g, "absent", 0, 99) == 99);
+
+    gguf_close(&g);
+    remove(path);
+    printf("ok: per-index u32 getter serves scalar and array forms\n");
+}
+
 static void write_tensor_info(buf *ti, const char *name) {
     bstr(ti, name);
     bu32(ti, 1);            // n_dims
@@ -119,6 +165,7 @@ static void test_duplicate_tensor_names_rejected(void) {
 
 int main(void) {
     test_getter_validation();
+    test_u32_idx_getter();
     test_duplicate_keys_rejected();
     test_duplicate_tensor_names_rejected();
     printf("all gguf getter tests passed\n");

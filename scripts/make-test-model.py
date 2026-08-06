@@ -27,6 +27,7 @@ SWA_WINDOW = 0
 SWA_PATTERN = 0
 ESERIES_SHARED_KV = 0
 ESERIES_PLE = 0
+FFN_WIDTHS = None  # per-layer FFN widths -> ARRAY-typed feed_forward_length
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -72,6 +73,12 @@ while i < len(args):
         shared, ple = args[i].split(",")
         ESERIES_SHARED_KV, ESERIES_PLE = int(shared), int(ple)
         ARCH = "gemma4"
+    elif a == "--ffn-widths":
+        # "W0,W1,..." one width per layer — emitted as an ARRAY-typed
+        # feed_forward_length, the gemma-4 E2B export shape (real per-layer
+        # variation 6144/12288); tensor shapes follow the per-layer widths
+        i += 1
+        FFN_WIDTHS = [int(w) for w in args[i].split(",")]
     elif a == "--mtp-layers":
         # emit N extra blocks and declare them as training-only MTP predictor
         # heads; the runner must exclude them and decode exactly as without
@@ -125,6 +132,11 @@ def kv_arr_i32(k, items):
             struct.pack(f"<{len(items)}i", *items))
 
 
+def kv_arr_u32(k, items):
+    return (s(k) + struct.pack("<IIQ", GGUF_ARR, GGUF_U32, len(items)) +
+            struct.pack(f"<{len(items)}I", *items))
+
+
 # deterministic pseudo-random floats (no numpy dependency)
 _state = 0x12345678
 
@@ -148,8 +160,13 @@ tensors = [("token_embd.weight", [N_EMBD, N_VOCAB], tensor_data(N_EMBD * N_VOCAB
 # MTP predictor heads are counted inside block_count by the exports that carry
 # them, exactly like the Qwen3.5 NextN blocks; the runner must strip them back
 # off and decode as if they were never there.
+if FFN_WIDTHS is not None and len(FFN_WIDTHS) != N_LAYER + MTP_LAYERS:
+    sys.exit(f"--ffn-widths needs {N_LAYER + MTP_LAYERS} entries, "
+             f"got {len(FFN_WIDTHS)}")
+
 for i in range(N_LAYER + MTP_LAYERS):
     kv_dim = N_KV * (N_EMBD // N_HEAD)
+    N_FF_I = FFN_WIDTHS[i] if FFN_WIDTHS else N_FF
     tensors += [
         (f"blk.{i}.attn_norm.weight", [N_EMBD], ones(N_EMBD)),
         (f"blk.{i}.attn_q.weight", [N_EMBD, N_EMBD], tensor_data(N_EMBD * N_EMBD)),
@@ -158,9 +175,9 @@ for i in range(N_LAYER + MTP_LAYERS):
         (f"blk.{i}.attn_output.weight", [N_EMBD, N_EMBD], tensor_data(N_EMBD * N_EMBD)),
         (f"blk.{i}.ffn_norm.weight", [N_EMBD], ones(N_EMBD)),
         *([] if APERTUS else
-          [(f"blk.{i}.ffn_gate.weight", [N_EMBD, N_FF], tensor_data(N_EMBD * N_FF))]),
-        (f"blk.{i}.ffn_up.weight", [N_EMBD, N_FF], tensor_data(N_EMBD * N_FF)),
-        (f"blk.{i}.ffn_down.weight", [N_FF, N_EMBD], tensor_data(N_FF * N_EMBD)),
+          [(f"blk.{i}.ffn_gate.weight", [N_EMBD, N_FF_I], tensor_data(N_EMBD * N_FF_I))]),
+        (f"blk.{i}.ffn_up.weight", [N_EMBD, N_FF_I], tensor_data(N_EMBD * N_FF_I)),
+        (f"blk.{i}.ffn_down.weight", [N_FF_I, N_EMBD], tensor_data(N_FF_I * N_EMBD)),
     ]
     if ESERIES_SHARED_KV or ESERIES_PLE:
         head_dim = N_EMBD // N_HEAD
@@ -195,7 +212,8 @@ meta_kvs = [
     kv_u32(f"{ARCH}.block_count", N_LAYER + MTP_LAYERS),
     kv_u32(f"{ARCH}.context_length", 256),
     kv_u32(f"{ARCH}.embedding_length", N_EMBD),
-    kv_u32(f"{ARCH}.feed_forward_length", N_FF),
+    (kv_arr_u32(f"{ARCH}.feed_forward_length", FFN_WIDTHS) if FFN_WIDTHS
+     else kv_u32(f"{ARCH}.feed_forward_length", N_FF)),
     kv_u32(f"{ARCH}.attention.head_count", N_HEAD),
     kv_u32(f"{ARCH}.attention.head_count_kv", N_KV),
     kv_f32(f"{ARCH}.attention.layer_norm_rms_epsilon", 1e-5),

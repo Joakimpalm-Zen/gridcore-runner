@@ -1407,6 +1407,14 @@ bool gpu_init(model_t *m) {
         // stays on the host.
         goto unsupported;
     }
+    if (m->ffn_var) {
+        // gemma-4 E2B: per-layer FFN widths differ, and the device FFN path
+        // sizes off one global width — computing with it would be silently
+        // wrong on every narrow layer.
+        fprintf(stderr, "gpu: per-layer FFN widths have no device path — "
+                "running on CPU\n");
+        goto unsupported;
+    }
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];

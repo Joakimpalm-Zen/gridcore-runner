@@ -365,6 +365,10 @@ bool gpu_init(model_t *m) {
         fprintf(stderr, "gpu: qwen35 hybrid path is not on the metal backend yet — using CPU\n");
         return false;
     }
+    if (m->ffn_var) {
+        fprintf(stderr, "gpu: per-layer FFN widths are not on the metal backend yet — using CPU\n");
+        return false;
+    }
     if (!metal_moe_supported(m))
         return false;
     if (m->ffn_act != ACT_SILU && !(m->n_expert > 0 && m->gptoss &&

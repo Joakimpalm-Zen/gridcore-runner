@@ -53,6 +53,12 @@ typedef struct {
     gguf_tensor *attn_norm, *wq, *wk, *wv, *wo;
     float       *bq, *bk, *bv, *bo;      // optional biases (f32, converted)
     gguf_tensor *ffn_norm, *w_gate, *w_up, *w_down;
+    int          n_ff;          // THIS layer's dense-FFN width. gemma-4 E2B
+                                 // publishes real per-layer variation
+                                 // (6144/12288) via an ARRAY-typed
+                                 // feed_forward_length; everywhere else this
+                                 // equals model_t.n_ff, which holds the MAX
+                                 // (scratch buffers size off the max)
     // sparse-MoE FFN (Mixtral / Qwen3-MoE): a router picks expert_used of
     // expert_count experts, each a SwiGLU FFN, weighted-summed. When is_moe is
     // set these replace w_gate/w_up/w_down for this layer.
@@ -219,6 +225,8 @@ typedef struct {
     bool      v_rmsnorm;     // weightless per-head RMS norm on V (gemma4)
     bool      qwen35;
     bool      moe_gemma;     // gemma-4 dual-branch MoE (CPU-only; no GPU dual-branch kernel yet)
+    bool      ffn_var;       // per-layer FFN widths differ (gemma-4 E2B):
+                             // CPU sizes per layer; device backends refuse
     int       full_attn_interval;
     int       ssm_conv_kernel, ssm_inner, ssm_state, ssm_v_heads, ssm_groups;
     float     logit_softcap; // final logits = c*tanh(x/c) when > 0

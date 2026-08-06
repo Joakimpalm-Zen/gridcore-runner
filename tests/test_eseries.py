@@ -165,3 +165,52 @@ def test_partial_offload_matches_cpu_across_the_shared_kv_boundary(
     assert "falling back to CPU" not in err, err
     assert "not resident on the device" not in err, err
     assert gpu.stdout == cpu.stdout
+
+
+# --- per-layer FFN widths (the E2B export shape) -----------------------------
+#
+# gemma-4 E2B publishes REAL per-layer FFN width variation (6144/12288) as an
+# ARRAY-typed feed_forward_length. A loader that only reads the scalar form
+# silently sees 0 and refuses the whole model, so every E2B conversion (QAT or
+# not) was REFUSED — cert-matrix roster item 7. The fixture alternates two
+# widths on the same 6-layer E-series skeleton.
+
+E2B_WIDTHS = "96,96,192,96,96,192"
+
+
+def _make_varff(path):
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--eseries", "3,16", "--ffn-widths", E2B_WIDTHS, str(path)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    return path
+
+
+def test_array_ffn_widths_load_and_decode(runner_bin, tmp_path):
+    model = _make_varff(tmp_path / "varff.gguf")
+    proc = _run(runner_bin, model)
+    err = proc.stderr.decode(errors="replace")
+    assert proc.returncode == 0, err
+    assert "missing model hyperparameters" not in err
+    assert b"tok/s" in proc.stdout + proc.stderr
+
+
+def test_array_ffn_widths_greedy_is_deterministic(runner_bin, tmp_path):
+    model = _make_varff(tmp_path / "det-varff.gguf")
+    outs = {_run(runner_bin, model, "--temp", "0", tokens=8).stdout
+            for _ in range(3)}
+    assert len(outs) == 1
+
+
+def test_array_ffn_widths_refuse_gpu_offload_loudly(runner_bin, tmp_path):
+    """Heterogeneous FFN widths are CPU-only until the device paths size
+    per layer; the backends must refuse and fall back with a reason, not
+    compute with one global width."""
+    model = _make_varff(tmp_path / "gpu-varff.gguf")
+    proc = _run(runner_bin, model, "--gpu", "auto", tokens=4)
+    err = proc.stderr.decode(errors="replace")
+    assert proc.returncode == 0, err
+    if "CUDA backend" in err or "Metal" in err:
+        # a backend engaged anyway: it must have produced no silent garbage —
+        # the refusal path is required instead
+        assert "per-layer FFN" in err, err

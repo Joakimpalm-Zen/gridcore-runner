@@ -5,6 +5,18 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **gemma-4 E2B loads: per-layer FFN widths.** E2B publishes real
+  per-layer width variation (6144/12288) as an ARRAY-typed
+  `feed_forward_length`, which the u32 getter silently read as 0 —
+  refusing every E2B conversion, QAT or not (cert-matrix roster item 7).
+  A new per-index getter (`gguf_get_u32_idx`) serves scalar and array
+  forms, each layer carries its own dense-FFN width through the CPU
+  forward path, and `--ffn-widths` on the fixture generator pins it in
+  `tests/test_eseries.py`. Heterogeneous widths are CPU-only for now:
+  CUDA and Metal refuse loudly and fall back rather than compute with one
+  global width (verified byte-identical output either way on the real
+  E2B-it Q4_K_M: loads, decodes coherently at 10.7 tok/s on an M1).
+
 - Metal fit ceiling made visible (16 GB-Mac field report): the weight
   buffer allocation failure now prints requested bytes vs the device
   working-set limit ("11.5 GB requested, device working-set limit 5.7 GB —

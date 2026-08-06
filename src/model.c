@@ -915,7 +915,25 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     m->n_embd      = (int)gguf_get_u32(g, AK("embedding_length"), 0);
     m->n_head      = (int)gguf_get_u32(g, AK("attention.head_count"), 0);
     m->n_head_kv   = (int)gguf_get_u32(g, AK("attention.head_count_kv"), m->n_head);
+    // feed_forward_length is a scalar in almost every export, but gemma-4 E2B
+    // publishes real per-layer width variation (6144/12288) as an ARRAY-typed
+    // value. m->n_ff carries the MAX (scratch buffers size off it); the
+    // per-layer widths land on each layer_t at bind time via the same
+    // per-index getter, and heterogeneous widths mark ffn_var so the device
+    // backends can refuse rather than compute with one global width.
     m->n_ff        = (int)gguf_get_u32(g, AK("feed_forward_length"), 0);
+    m->ffn_var     = false;
+    if (m->n_ff == 0 && m->n_layer > 0) {
+        uint32_t mx = 0, mn = UINT32_MAX;
+        for (int i = 0; i < m->n_layer; i++) {
+            uint32_t w = gguf_get_u32_idx(g, AK("feed_forward_length"),
+                                          (uint64_t)i, 0);
+            if (w == 0) { mx = 0; break; }   // absent or malformed entry
+            if (w > mx) mx = w;
+            if (w < mn) mn = w;
+        }
+        if (mx > 0) { m->n_ff = (int)mx; m->ffn_var = mn != mx; }
+    }
     m->n_ctx_train = (int)gguf_get_u32(g, AK("context_length"), 2048);
     m->head_dim    = (int)gguf_get_u32(g, AK("attention.key_length"),
                                        m->n_head ? m->n_embd / m->n_head : 0);
@@ -1441,6 +1459,15 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     }
     for (int i = 0; i < m->n_layer; i++) {
         layer_t *l = &m->layers[i];
+        // per-layer FFN width: the ARRAY form answers per index, the scalar
+        // form (every other export) answers every index with m->n_ff
+        l->n_ff = (int)gguf_get_u32_idx(g, AK("feed_forward_length"),
+                                        (uint64_t)i, (uint32_t)m->n_ff);
+        if (l->n_ff <= 0 || l->n_ff > m->n_ff) {
+            fprintf(stderr, "error: layer %d FFN width %d outside (0, %d]\n",
+                    i, l->n_ff, m->n_ff);
+            return false;
+        }
         gguf_tensor *an = need_tensor(g, "blk.%d.attn_norm.weight", i, &ok);
         // gpt-oss shares qwen35's shape here: post_attention_norm IS the FFN
         // input norm and there is no ffn_norm tensor at all.
@@ -1489,7 +1516,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             // and the gate/up half must be n_ff wide.
             if ((int64_t)qkv->ne[0] != m->n_embd || (int64_t)gu->ne[0] != m->n_embd ||
                 (int64_t)qkv->ne[1] != q_rows + 2 * kv_rows ||
-                (int64_t)gu->ne[1] != 2 * (int64_t)m->n_ff) {
+                (int64_t)gu->ne[1] != 2 * (int64_t)l->n_ff) {
                 fprintf(stderr, "error: unexpected fused tensor shape in blk.%d\n", i);
                 return false;
             }
@@ -1624,12 +1651,12 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                     !check_shape(l->wv, m->n_embd, kd, "attn_v", i))
                     return false;
                 if (!l->is_moe &&
-                    (!check_shape(l->w_gate, m->n_embd, m->n_ff, "ffn_gate", i) ||
-                     !check_shape(l->w_up,   m->n_embd, m->n_ff, "ffn_up",   i)))
+                    (!check_shape(l->w_gate, m->n_embd, l->n_ff, "ffn_gate", i) ||
+                     !check_shape(l->w_up,   m->n_embd, l->n_ff, "ffn_up",   i)))
                     return false;
             }
             if (!l->is_moe &&
-                !check_shape(l->w_down, m->n_ff, m->n_embd, "ffn_down", i))
+                !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
                 return false;
             if (l->is_moe) {
                 // The MoE forward path slices each expert from the fused 3D
@@ -3029,7 +3056,7 @@ static void gemma_route(model_t *m, const layer_t *ly, const float *h,
 // is n==1. Verified token-identical to llama.cpp gemma4.cpp.
 static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
     int n_embd = m->n_embd, ne = ly->n_expert, used = m->n_expert_used;
-    int nff = m->n_ff_exp, dff = m->n_ff;           // dff = dense shared-FFN size
+    int nff = m->n_ff_exp, dff = ly->n_ff;          // dff = dense shared-FFN size
     bool probe = moe_probe_file() != NULL;
     bool trace = moe_trace_file() != NULL;
     int layer_idx = (int)(ly - m->layers);
@@ -3418,22 +3445,25 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             moe_ffn(m, ly, n, xdim);   // reads normed m->xb, writes FFN out to m->xb
             shexp_add(m, ly, m->shexp_in, n, xdim);
         } else {
+        {
+        int nff = ly->n_ff;   // per-layer width (gemma-4 E2B varies it)
         if (!ly->w_gate) {
             // ungated MLP (Apertus): up -> xielu -> down, no gate branch
             int l_i = (int)(ly - m->layers);
-            matvec_b(m->tp, m->hb, m->n_ff, ly->w_up, m->xb, xdim, n_embd, m->n_ff, NULL, n);
+            matvec_b(m->tp, m->hb, nff, ly->w_up, m->xb, xdim, n_embd, nff, NULL, n);
             float an = m->xielu_an[l_i], ap = m->xielu_ap[l_i];
             float bb = m->xielu_b[l_i],  ep = m->xielu_eps[l_i];
-            for (size_t i = 0; i < (size_t)n * m->n_ff; i++)
+            for (size_t i = 0; i < (size_t)n * nff; i++)
                 m->hb[i] = xielu(m->hb[i], an, ap, bb, ep);
         } else {
-        matvec_b(m->tp, m->hb,  m->n_ff, ly->w_gate, m->xb, xdim, n_embd, m->n_ff, NULL, n);
-        matvec_b(m->tp, m->hb2, m->n_ff, ly->w_up,   m->xb, xdim, n_embd, m->n_ff, NULL, n);
-        for (size_t i = 0; i < (size_t)n * m->n_ff; i++)
+        matvec_b(m->tp, m->hb,  nff, ly->w_gate, m->xb, xdim, n_embd, nff, NULL, n);
+        matvec_b(m->tp, m->hb2, nff, ly->w_up,   m->xb, xdim, n_embd, nff, NULL, n);
+        for (size_t i = 0; i < (size_t)n * nff; i++)
             m->hb[i] = gated_act(m->ffn_act, m->hb[i], m->hb2[i]);
         }
-        if (dbg) dbg_stat("ffn-act", l, m->hb + (size_t)(n - 1) * m->n_ff, m->n_ff);
-        matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, m->n_ff, m->n_ff, n_embd, NULL, n);
+        if (dbg) dbg_stat("ffn-act", l, m->hb + (size_t)(n - 1) * nff, nff);
+        matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, nff, nff, n_embd, NULL, n);
+        }
         }
         ffn_done:
         if (dbg) dbg_stat("ffn-down", l, m->xb + (size_t)(n - 1) * xdim, n_embd);

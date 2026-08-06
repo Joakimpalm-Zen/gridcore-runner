@@ -301,6 +301,39 @@ uint32_t gguf_get_u32(gguf_file *g, const char *key, uint32_t dflt) {
     return dflt;   // ARR, STR, BOOL are not a u32
 }
 
+// Per-index variant for metadata some exports publish per layer as an
+// ARRAY-typed value where others write one scalar (gemma-4 E2B's
+// feed_forward_length is the motivating case: real 6144/12288 per-layer
+// variation). A scalar answers every index; an integer-typed array answers
+// in-range indexes with the same sign/range validation as the scalar getter;
+// float/bool/string arrays, out-of-range indexes and negatives are the
+// caller's default — never a read past the array or garbage geometry.
+uint32_t gguf_get_u32_idx(gguf_file *g, const char *key, uint64_t idx,
+                          uint32_t dflt) {
+    gguf_kv *kv = gguf_get(g, key);
+    if (!kv) return dflt;
+    if (kv->type != GGUF_T_ARR) return gguf_get_u32(g, key, dflt);
+    if (idx >= kv->arr_n || !kv->arr_raw) return dflt;
+    const unsigned char *p = kv->arr_raw;
+    switch (kv->arr_type) {
+    case GGUF_T_U8:  return p[idx];
+    case GGUF_T_I8:  { int8_t v = (int8_t)p[idx];
+                       return v >= 0 ? (uint32_t)v : dflt; }
+    case GGUF_T_U16: { uint16_t v; memcpy(&v, p + idx * 2, 2); return v; }
+    case GGUF_T_I16: { int16_t v; memcpy(&v, p + idx * 2, 2);
+                       return v >= 0 ? (uint32_t)v : dflt; }
+    case GGUF_T_U32: { uint32_t v; memcpy(&v, p + idx * 4, 4); return v; }
+    case GGUF_T_I32: { int32_t v; memcpy(&v, p + idx * 4, 4);
+                       return v >= 0 ? (uint32_t)v : dflt; }
+    case GGUF_T_U64: { uint64_t v; memcpy(&v, p + idx * 8, 8);
+                       return v <= UINT32_MAX ? (uint32_t)v : dflt; }
+    case GGUF_T_I64: { int64_t v; memcpy(&v, p + idx * 8, 8);
+                       return (v >= 0 && v <= (int64_t)UINT32_MAX)
+                                ? (uint32_t)v : dflt; }
+    default: return dflt;   // F32/F64/BOOL/STR arrays are not integer geometry
+    }
+}
+
 float gguf_get_f32(gguf_file *g, const char *key, float dflt) {
     gguf_kv *kv = gguf_get(g, key);
     if (!kv) return dflt;
