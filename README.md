@@ -75,19 +75,6 @@ Then point it at any GGUF model:
 
 ## Why runner
 
-**Start here: this project publishes what didn't work.** In 0.1.7 an
-expert-residency cache turned 0.05 tok/s into 0.65 on a model far larger than
-RAM — a real 13x — and it was **rejected**. 0.65 tok/s is still unusable, and
-the tier taxed every configuration that already worked. The measurements that
-killed it ship in the repo:
-[docs/negative-result-expert-cache.md](docs/negative-result-expert-cache.md).
-Sub-4-bit quantization for gpt-oss, expert pruning at four separate depths, and
-a bigger-than-RAM streaming target all died the same way — measured cheaply,
-then written down.
-
-That habit is what the rest of this page rests on. Everything below is a number
-someone tried to disprove first.
-
 **Gates decide what gets claimed.** GPU output is verified *token-identical* to
 CPU on the scalar path. Where that is impossible — the prefill GEMM sums in a
 different order and cannot be bit-identical — the claim drops to a measured
