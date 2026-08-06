@@ -147,8 +147,14 @@ static void release_buf(id<MTLBuffer> b) {
 static bool metal_ensure_batch(model_t *m, int n) {
     gpu_t *g = (gpu_t *)m->gpu;
     if (!g || n <= g->batch_cap) return true;
+    // eligibility keeps heterogeneous models off this path, but size off the
+    // per-layer maxima anyway so the two sizing sites cannot drift apart
     int q_dim  = m->n_head * m->head_dim;
     int kv_dim = m->n_head_kv * m->head_dim;
+    for (int l = 0; l < m->n_layer; l++) {
+        if (model_q_dim(m, l)  > q_dim)  q_dim  = model_q_dim(m, l);
+        if (model_kv_dim(m, l) > kv_dim) kv_dim = model_kv_dim(m, l);
+    }
     int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
     size_t nb = (size_t)n;
 
@@ -371,9 +377,8 @@ bool gpu_init(model_t *m) {
     }
     if (!metal_moe_supported(m))
         return false;
-    if (m->ffn_act != ACT_SILU && !(m->n_expert > 0 && m->gptoss &&
-                                    m->ffn_act == ACT_SWIGLU_OAI) &&
-        !(m->moe_gemma && m->ffn_act == ACT_GELU)) {
+    if (m->ffn_act != ACT_SILU && m->ffn_act != ACT_GELU &&
+        !(m->n_expert > 0 && m->gptoss && m->ffn_act == ACT_SWIGLU_OAI)) {
         fprintf(stderr, "gpu: '%s' FFN activation is not on the metal backend yet — using CPU\n",
                 m->arch);
         return false;
@@ -389,12 +394,6 @@ bool gpu_init(model_t *m) {
         layer_t *ly = &m->layers[l];
         if (ly->ple_gate || (!ly->wv && !m->v_rmsnorm)) {
             fprintf(stderr, "gpu: '%s' layer layout is not on the metal backend yet — using CPU\n",
-                    m->arch);
-            return false;
-        }
-        if ((model_head_dim(m, l) != m->head_dim) ||
-            (model_n_head_kv(m, l) != m->n_head_kv)) {
-            fprintf(stderr, "gpu: '%s' heterogeneous attention geometry is not on the metal backend yet — using CPU\n",
                     m->arch);
             return false;
         }
@@ -517,8 +516,14 @@ bool gpu_init(model_t *m) {
         }
     }
 
+    // scratch sizes off the per-layer MAXIMA: gemma4 varies q/kv widths per
+    // layer, and a global-scalar size would overrun on the widest layer
     int q_dim  = m->n_head * m->head_dim;
     int kv_dim = m->n_head_kv * m->head_dim;
+    for (int l = 0; l < m->n_layer; l++) {
+        if (model_q_dim(m, l)  > q_dim)  q_dim  = model_q_dim(m, l);
+        if (model_kv_dim(m, l) > kv_dim) kv_dim = model_kv_dim(m, l);
+    }
     int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
     size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
 
@@ -919,9 +924,31 @@ void gpu_free(model_t *m) {
     gpu_release_state(g, m->n_layer);
 }
 
+// The native prompt-batch encoder implements exactly the plain llama shape.
+// Every feature beyond it — MoE, GELU dense FFN, embedding scale, weightless
+// V norm / V-less layers, sandwich norms, per-layer output scale, logit
+// softcap or suppressed tokens, heterogeneous per-layer geometry — is
+// implemented only by the per-token path, so a model carrying any of them
+// must take that path or the batch would be silently wrong (the gemma3/4
+// families hit several of these at once).
+static bool metal_native_batch_eligible(const model_t *m) {
+    if (m->n_expert > 0 || m->ffn_act != ACT_SILU) return false;
+    if (m->embd_scale != 1.0f || m->v_rmsnorm) return false;
+    if (m->logit_softcap > 0.0f || m->n_suppress > 0) return false;
+    for (int l = 0; l < m->n_layer; l++) {
+        const layer_t *ly = &m->layers[l];
+        if (model_head_dim(m, l) != m->head_dim ||
+            model_n_head_kv(m, l) != m->n_head_kv) return false;
+        if (!ly->wv) return false;
+        if (ly->post_attn_norm_w || ly->post_ffn_norm_w) return false;
+        if (ly->out_scale != 1.0f && ly->out_scale != 0.0f) return false;
+    }
+    return true;
+}
+
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                        bool want_logits, float **logits) {
-    if (m->n_expert == 0 && n > 1 && metal_batch_enabled()) {
+    if (metal_native_batch_eligible(m) && n > 1 && metal_batch_enabled()) {
         if (metal_ensure_batch(m, n)) {
             float *lg = gpu_forward_native_batch(m, tokens, n, pos);
             if (!lg) return false;
@@ -1208,7 +1235,8 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         } else {
             enc_mv(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0, n_embd, m->n_ff, nil);
             enc_mv(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0, n_embd, m->n_ff, nil);
-            enc_elem(g, e, g->p_silu, g->hb, 0, g->hb2, 0, m->n_ff);
+            enc_elem(g, e, m->ffn_act == ACT_GELU ? g->p_gelu : g->p_silu,
+                     g->hb, 0, g->hb2, 0, m->n_ff);
             enc_mv(g, e, m, ly->w_down, g->hb, 0, g->xb, 0, m->n_ff, n_embd, nil);
         }
         }

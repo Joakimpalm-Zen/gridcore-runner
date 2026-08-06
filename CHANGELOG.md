@@ -3,6 +3,26 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## Unreleased
+
+- **gemma-4 runs on Metal.** The heterogeneous-attention refusal is
+  retired: the per-token Metal path already carried per-layer
+  head_dim/KV-head/rope geometry, V-less layers (V from the raw K
+  projection), the weightless V head-norm, sandwich norms, per-layer
+  output scale and the logit softcap — it was gated off, never exercised.
+  Now: scratch buffers size off the per-layer maxima, the dense-FFN
+  activation selects GELU when the arch calls for it (unlocks dense
+  gemma3/gemma4 class models past the activation gate), and the native
+  prompt-batch fast path gained an explicit eligibility check naming the
+  features it implements — models carrying anything beyond the plain
+  llama shape (MoE, GELU, embedding scale, V norms, sandwich norms,
+  out-scales, softcap/suppress, heterogeneous geometry) take the
+  per-token path instead of a silently-wrong batch. Pinned by two new
+  heterogeneous fixtures (dense + dual-branch MoE, both with V-less full
+  layers) under `make test-metal-gemma4-hetero`, byte-identical CPU vs
+  Metal. Real-model validation and the 26B partial-offload story follow
+  in the next release notes.
+
 ## v0.1.9-alpha — 2026-08-06
 
 The desktop release, plus a certification survey that sharpened the

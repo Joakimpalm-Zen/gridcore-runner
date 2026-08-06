@@ -28,6 +28,7 @@ SWA_PATTERN = 0
 ESERIES_SHARED_KV = 0
 ESERIES_PLE = 0
 FFN_WIDTHS = None  # per-layer FFN widths -> ARRAY-typed feed_forward_length
+G4HETERO = False   # gemma4 heterogeneous attention geometry (26B/12B shape)
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -73,6 +74,15 @@ while i < len(args):
         shared, ple = args[i].split(",")
         ESERIES_SHARED_KV, ESERIES_PLE = int(shared), int(ple)
         ARCH = "gemma4"
+    elif a == "--gemma4-hetero":
+        # the real gemma-4 26B/12B attention shape, scaled down: sliding
+        # layers (i%3 != 2) rotate fewer dims on smaller heads with fewer KV
+        # heads; full layers are V-LESS (no attn_v tensor — V is the raw K
+        # projection under the weightless per-head V RMS norm). Exercises
+        # per-layer head_dim/head_count_kv/rope_dim + V-less + sandwich
+        # norms + per-layer output scale + logit softcap.
+        G4HETERO = True
+        ARCH = "gemma4"
     elif a == "--ffn-widths":
         # "W0,W1,..." one width per layer — emitted as an ARRAY-typed
         # feed_forward_length, the gemma-4 E2B export shape (real per-layer
@@ -89,9 +99,17 @@ while i < len(args):
     i += 1
 
 N_EMBD, N_HEAD, N_KV, N_FF, N_LAYER = 64, 4, 2, 128, 2
-if ESERIES_SHARED_KV or ESERIES_PLE:
-    # enough layers for a sliding/full pattern with a shared-KV tail
+if ESERIES_SHARED_KV or ESERIES_PLE or G4HETERO:
+    # enough layers for a sliding/full pattern (with a shared-KV tail for
+    # the E-series variants)
     N_LAYER = 6
+
+# gemma4-hetero per-layer geometry: full-attention layers (i%3 == 2) use
+# head_dim 32 / 2 KV heads / no V tensor; sliding layers head_dim 16 /
+# 1 KV head / V present. Q width therefore varies 128 vs 64.
+def g4_swa(i):  return (i % 3) != 2
+def g4_hd(i):   return 16 if g4_swa(i) else 32
+def g4_kv(i):   return 1 if g4_swa(i) else 2
 VOCAB = ["<unk>", "<s>", "</s>"] + [f"<0x{i:02X}>" for i in range(256)]
 TTYPE = [2, 3, 3] + [6] * 256  # unknown, control, control, bytes
 N_VOCAB = len(VOCAB)
@@ -165,28 +183,35 @@ if FFN_WIDTHS is not None and len(FFN_WIDTHS) != N_LAYER + MTP_LAYERS:
              f"got {len(FFN_WIDTHS)}")
 
 for i in range(N_LAYER + MTP_LAYERS):
-    kv_dim = N_KV * (N_EMBD // N_HEAD)
+    if G4HETERO:
+        q_dim  = N_HEAD * g4_hd(i)
+        kv_dim = g4_kv(i) * g4_hd(i)
+    else:
+        q_dim  = N_EMBD
+        kv_dim = N_KV * (N_EMBD // N_HEAD)
     N_FF_I = FFN_WIDTHS[i] if FFN_WIDTHS else N_FF
     tensors += [
         (f"blk.{i}.attn_norm.weight", [N_EMBD], ones(N_EMBD)),
-        (f"blk.{i}.attn_q.weight", [N_EMBD, N_EMBD], tensor_data(N_EMBD * N_EMBD)),
+        (f"blk.{i}.attn_q.weight", [N_EMBD, q_dim], tensor_data(N_EMBD * q_dim)),
         (f"blk.{i}.attn_k.weight", [N_EMBD, kv_dim], tensor_data(N_EMBD * kv_dim)),
-        (f"blk.{i}.attn_v.weight", [N_EMBD, kv_dim], tensor_data(N_EMBD * kv_dim)),
-        (f"blk.{i}.attn_output.weight", [N_EMBD, N_EMBD], tensor_data(N_EMBD * N_EMBD)),
+        *([] if (G4HETERO and not g4_swa(i)) else
+          [(f"blk.{i}.attn_v.weight", [N_EMBD, kv_dim], tensor_data(N_EMBD * kv_dim))]),
+        (f"blk.{i}.attn_output.weight", [q_dim, N_EMBD], tensor_data(q_dim * N_EMBD)),
         (f"blk.{i}.ffn_norm.weight", [N_EMBD], ones(N_EMBD)),
         *([] if APERTUS else
           [(f"blk.{i}.ffn_gate.weight", [N_EMBD, N_FF_I], tensor_data(N_EMBD * N_FF_I))]),
         (f"blk.{i}.ffn_up.weight", [N_EMBD, N_FF_I], tensor_data(N_EMBD * N_FF_I)),
         (f"blk.{i}.ffn_down.weight", [N_FF_I, N_EMBD], tensor_data(N_FF_I * N_EMBD)),
     ]
-    if ESERIES_SHARED_KV or ESERIES_PLE:
-        head_dim = N_EMBD // N_HEAD
+    if ESERIES_SHARED_KV or ESERIES_PLE or G4HETERO:
+        head_dim = g4_hd(i) if G4HETERO else N_EMBD // N_HEAD
         tensors += [
             (f"blk.{i}.attn_q_norm.weight", [head_dim], ones(head_dim)),
             (f"blk.{i}.attn_k_norm.weight", [head_dim], ones(head_dim)),
             (f"blk.{i}.post_attention_norm.weight", [N_EMBD], ones(N_EMBD)),
             (f"blk.{i}.post_ffw_norm.weight", [N_EMBD], ones(N_EMBD)),
-            (f"blk.{i}.layer_output_scale.weight", [1], ones(1)),
+            (f"blk.{i}.layer_output_scale.weight", [1],
+             struct.pack("<f", 0.91 + 0.02 * i) if G4HETERO else ones(1)),
         ]
     if ESERIES_PLE:
         tensors += [
@@ -215,7 +240,8 @@ meta_kvs = [
     (kv_arr_u32(f"{ARCH}.feed_forward_length", FFN_WIDTHS) if FFN_WIDTHS
      else kv_u32(f"{ARCH}.feed_forward_length", N_FF)),
     kv_u32(f"{ARCH}.attention.head_count", N_HEAD),
-    kv_u32(f"{ARCH}.attention.head_count_kv", N_KV),
+    # G4HETERO publishes head_count_kv as a per-layer ARRAY below instead
+    *([] if G4HETERO else [kv_u32(f"{ARCH}.attention.head_count_kv", N_KV)]),
     kv_f32(f"{ARCH}.attention.layer_norm_rms_epsilon", 1e-5),
     kv_f32(f"{ARCH}.rope.freq_base", 10000.0),
     kv_str("tokenizer.ggml.model", "llama"),
@@ -238,12 +264,25 @@ if ESERIES_SHARED_KV or ESERIES_PLE:
         kv_u32(f"{ARCH}.rope.dimension_count", N_EMBD // N_HEAD),
         kv_f32(f"{ARCH}.final_logit_softcapping", 30.0),
     ]
-    if ESERIES_SHARED_KV:
-        meta_kvs.append(
-            kv_u32(f"{ARCH}.attention.shared_kv_layers", ESERIES_SHARED_KV))
-    if ESERIES_PLE:
-        meta_kvs.append(
-            kv_u32(f"{ARCH}.embedding_length_per_layer_input", ESERIES_PLE))
+if G4HETERO:
+    pattern = [g4_swa(i) for i in range(N_LAYER)]
+    meta_kvs += [
+        kv_u32(f"{ARCH}.attention.key_length", 32),
+        kv_u32(f"{ARCH}.attention.key_length_swa", 16),
+        kv_arr_u32(f"{ARCH}.attention.head_count_kv",
+                   [g4_kv(i) for i in range(N_LAYER)]),
+        kv_u32(f"{ARCH}.attention.sliding_window", 32),
+        kv_arr_bool(f"{ARCH}.attention.sliding_window_pattern", pattern),
+        kv_u32(f"{ARCH}.rope.dimension_count", 32),
+        kv_u32(f"{ARCH}.rope.dimension_count_swa", 16),
+        kv_f32(f"{ARCH}.final_logit_softcapping", 30.0),
+    ]
+if ESERIES_SHARED_KV:
+    meta_kvs.append(
+        kv_u32(f"{ARCH}.attention.shared_kv_layers", ESERIES_SHARED_KV))
+if ESERIES_PLE:
+    meta_kvs.append(
+        kv_u32(f"{ARCH}.embedding_length_per_layer_input", ESERIES_PLE))
 if APERTUS:
     _id = APERTUS == "IDENT"
     meta_kvs += [

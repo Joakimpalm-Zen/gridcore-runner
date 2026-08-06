@@ -43,6 +43,8 @@ def kb(k, v): return s(k) + struct.pack("<IB", BOOL, bool(v))
 def kas(k, xs): return s(k) + struct.pack("<IIQ", ARR, STR, len(xs)) + b"".join(s(x) for x in xs)
 def kaf(k, xs): return s(k) + struct.pack("<IIQ", ARR, F32, len(xs)) + struct.pack(f"<{len(xs)}f", *xs)
 def kai(k, xs): return s(k) + struct.pack("<IIQ", ARR, I32, len(xs)) + struct.pack(f"<{len(xs)}i", *xs)
+def kau(k, xs): return s(k) + struct.pack("<IIQ", ARR, U32, len(xs)) + struct.pack(f"<{len(xs)}I", *xs)
+def kab(k, xs): return s(k) + struct.pack("<IIQ", ARR, BOOL, len(xs)) + bytes(1 if x else 0 for x in xs)
 
 
 _seed = 0x50E
@@ -469,3 +471,69 @@ write(f"{OUT}.gemma4-moe.gguf", gemma4,
                            ku("gemma4.attention.key_length", E // HEADS),
                            ku("gemma4.rope.dimension_count", E // HEADS),
                            kf("gemma4.final_logit_softcapping", 30.0)]))
+
+# gemma4 dual-branch MoE with the real 26B's HETEROGENEOUS attention: sliding
+# layers (i%3 != 2) on smaller heads with fewer KV heads, full layers V-LESS
+# (no attn_v — V is the raw K projection under the weightless V head norm).
+# Same MoE FFN block as the uniform fixture; only attention geometry differs.
+_HL = 3                                        # [S, S, F]
+def _h_swa(i): return (i % 3) != 2
+def _h_hd(i):  return 8 if _h_swa(i) else 16
+def _h_kv(i):  return 1 if _h_swa(i) else 2
+g4h = [
+    ("token_embd.weight", [E, len(VOCAB)], pack(flist(E * len(VOCAB)))),
+    ("output_norm.weight", [E], ones(E)),
+]
+for _i in range(_HL):
+    _qd, _kd = HEADS * _h_hd(_i), _h_kv(_i) * _h_hd(_i)
+    g4h += [
+        (f"blk.{_i}.attn_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.attn_q.weight", [E, _qd], pack(flist(E * _qd))),
+        (f"blk.{_i}.attn_k.weight", [E, _kd], pack(flist(E * _kd))),
+        *([(f"blk.{_i}.attn_v.weight", [E, _kd], pack(flist(E * _kd)))]
+          if _h_swa(_i) else []),
+        (f"blk.{_i}.attn_output.weight", [_qd, E], pack(flist(_qd * E))),
+        (f"blk.{_i}.attn_q_norm.weight", [_h_hd(_i)], ones(_h_hd(_i))),
+        (f"blk.{_i}.attn_k_norm.weight", [_h_hd(_i)], ones(_h_hd(_i))),
+        (f"blk.{_i}.post_attention_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.ffn_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.post_ffw_norm.weight", [E], ones(E)),
+        (f"blk.{_i}.ffn_gate.weight", [E, FF], pack([v * 2 for v in flist(E * FF)])),
+        (f"blk.{_i}.ffn_up.weight", [E, FF], pack([v * 2 for v in flist(E * FF)])),
+        (f"blk.{_i}.ffn_down.weight", [FF, E], pack([v * 2 for v in flist(FF * E)])),
+        (f"blk.{_i}.ffn_gate_inp.weight", [E, 2], pack(flist(E * 2))),
+        (f"blk.{_i}.ffn_gate_inp.scale", [E],
+         pack([0.9 + 0.01 * ((j + _i) % 5) for j in range(E)])),
+        (f"blk.{_i}.ffn_gate_up_exps.weight", [E, 2 * FF, 2],
+         pack([v * 2 for v in flist(E * 2 * FF * 2)])),
+        (f"blk.{_i}.ffn_down_exps.weight", [FF, E, 2],
+         pack([v * 2 for v in flist(FF * E * 2)])),
+        (f"blk.{_i}.ffn_down_exps.scale", [2], pack([0.85, 1.15])),
+        (f"blk.{_i}.post_ffw_norm_1.weight", [E], ones(E)),
+        (f"blk.{_i}.pre_ffw_norm_2.weight", [E], ones(E)),
+        (f"blk.{_i}.post_ffw_norm_2.weight", [E], ones(E)),
+        (f"blk.{_i}.layer_output_scale.weight", [1], pack([0.92 + 0.03 * _i])),
+    ]
+_g4h_meta = [
+    ks("general.architecture", "gemma4"),
+    ku("gemma4.block_count", _HL), ku("gemma4.context_length", 256),
+    ku("gemma4.embedding_length", E), ku("gemma4.feed_forward_length", FF),
+    ku("gemma4.attention.head_count", HEADS),
+    kau("gemma4.attention.head_count_kv", [_h_kv(i) for i in range(_HL)]),
+    kf("gemma4.attention.layer_norm_rms_epsilon", 1e-5),
+    kf("gemma4.rope.freq_base", 10000.0),
+    ku("gemma4.expert_count", 2), ku("gemma4.expert_used_count", 2),
+    ku("gemma4.expert_feed_forward_length", FF),
+    ku("gemma4.attention.key_length", 16),
+    ku("gemma4.attention.key_length_swa", 8),
+    ku("gemma4.attention.sliding_window", 16),
+    kab("gemma4.attention.sliding_window_pattern", [_h_swa(i) for i in range(_HL)]),
+    ku("gemma4.rope.dimension_count", 16),
+    ku("gemma4.rope.dimension_count_swa", 8),
+    kf("gemma4.final_logit_softcapping", 30.0),
+    ks("tokenizer.ggml.model", "llama"), kas("tokenizer.ggml.tokens", VOCAB),
+    kaf("tokenizer.ggml.scores", [0.0] * len(VOCAB)),
+    kai("tokenizer.ggml.token_type", TTYPE), ku("tokenizer.ggml.bos_token_id", 1),
+    ku("tokenizer.ggml.eos_token_id", 2), kb("tokenizer.ggml.add_bos_token", True),
+]
+write(f"{OUT}.gemma4-moe-hetero.gguf", g4h, _g4h_meta)

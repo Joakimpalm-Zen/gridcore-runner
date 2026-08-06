@@ -570,6 +570,28 @@ else
 	@echo "metal gemma4 MoE smoke skipped: macOS-only backend"
 endif
 
+test-metal-gemma4-hetero: runner
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		$(PYTHON) scripts/make-test-model.py --gemma4-hetero test-g4h.gguf; \
+		./$(RUNNER_EXE) -m test-g4h.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-g4h-dense-cpu.out 2>/dev/null; \
+		./$(RUNNER_EXE) -m test-g4h.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-g4h-dense-gpu.out 2> metal-g4h-dense-gpu.err; \
+		cmp -s metal-g4h-dense-cpu.out metal-g4h-dense-gpu.out; \
+		grep -q "Metal backend" metal-g4h-dense-gpu.err; \
+		$(PYTHON) scripts/make-test-moe.py test-moe-fixture; \
+		./$(RUNNER_EXE) -m test-moe-fixture.gemma4-moe-hetero.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-g4h-moe-cpu.out 2>/dev/null; \
+		./$(RUNNER_EXE) -m test-moe-fixture.gemma4-moe-hetero.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-g4h-moe-gpu.out 2> metal-g4h-moe-gpu.err; \
+		cmp -s metal-g4h-moe-cpu.out metal-g4h-moe-gpu.out; \
+		grep -q "Metal backend" metal-g4h-moe-gpu.err; \
+		echo "metal gemma4 heterogeneous ok"; \
+	else \
+		echo "metal gemma4 hetero smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal gemma4 hetero smoke skipped: macOS-only backend"
+endif
+
 test-metal-swa: runner
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
@@ -790,4 +812,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: clean debug ptx test test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
