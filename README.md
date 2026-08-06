@@ -6,19 +6,27 @@ the platform C/math/threading/dynamic-loader libraries, loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**In 0.1.9 — the desktop release, and recommendations you can hold us to.**
-A tray / menu-bar controller lands on macOS and Windows (`--tray`): every
-live runner instance on the machine, listed, stoppable, plus a one-click
-managed server and login autostart. gemma-4 **E2B** loads — the last
-locally-blocked Gemma-4 variant, refused until now because its ARRAY-typed
-per-layer FFN widths read as 0 — and a 19-model certification campaign
-across the GPT-OSS and Gemma-4 derivative ecosystems is folded into the
-docs (`docs/cert-matrix-status.md`: only the Gemma-4 family certifies). Out
-of all of it comes the new **[Recommended models by machine
-RAM](#recommended-models-by-machine-ram)** section: a standing, measured
-recommendation per machine class — and a standing refusal to recommend any
-model larger than the machine's RAM, because we measured those regimes and
-rejected them rather than estimating.
+**In 0.1.10 — the Gemma families stop falling back to CPU on Apple Silicon.**
+Metal refused every heterogeneous-attention Gemma-4 and every GELU model,
+guarding plumbing the per-token path had implemented all along. Retiring
+that refusal exposed a defect worth the whole exercise: Metal compiles
+kernels with fast math, where `tanh()` runs through `exp(2a)` — GELU's
+argument grows as x³, overflows to `inf`, and `inf/inf` is NaN. Real
+gemma-3-4b weights hit it on layer 0 and the model emitted nothing but
+token 0. CUDA never showed it (nvcc isn't built with `-use_fast_math`), so
+the architecture certified cleanly while the Metal path was quietly broken.
+Fixed, pinned by a fixture that fails without it, and validated on real
+weights: **gemma-3-4b-it Q4_K_M is byte-identical CPU vs Metal**. New
+`RUNNER_METAL_NAN_TRACE=1` is the GPU-side counterpart to
+`RUNNER_DEBUG_ACT` that found it.
+
+Earlier, in 0.1.9 — the desktop release: a tray / menu-bar controller on
+macOS and Windows (`--tray`), gemma-4 **E2B** loading (ARRAY-typed
+per-layer FFN widths), a 19-model derivative certification campaign
+(`docs/cert-matrix-status.md`), and the **[Recommended models by machine
+RAM](#recommended-models-by-machine-ram)** section — measured
+recommendations per machine class, and a standing refusal to recommend any
+model larger than the machine's RAM.
 
 Earlier, in 0.1.8: the Arcee Trinity MoE family (`afmoe`) — Trinity-Nano at
 **13.25 tok/s, CPU-only, fully resident on an 8 GB Apple Silicon Mac** —
@@ -43,7 +51,7 @@ NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
 make                 # produces ./runner (GPU auto-detected at runtime)
-./runner --version   # -> runner 0.1.9-alpha
+./runner --version   # -> runner 0.1.10-alpha
 ```
 
 Then point it at any GGUF model:
@@ -57,7 +65,7 @@ Then point it at any GGUF model:
 ./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
 ```
 
-> **Public alpha (`0.1.9-alpha`).** CI-tested on Linux/macOS/Windows and
+> **Public alpha (`0.1.10-alpha`).** CI-tested on Linux/macOS/Windows and
 > daily-driven by the rest of the Gridcore stack, but it has met few machines
 > other than ours — which is what an alpha is for. Run your GGUF models and
 > [open an issue](../../issues) for anything that crashes, misbehaves, or
@@ -817,12 +825,12 @@ the linked docs).
 |---|---|---|---|
 | `gemma4-moe` | gemma-4-26B-A4B-it | dual-branch dense+routed GELU MoE; CPU + CUDA, GPU/CPU-identical; token identity vs llama.cpp not claimable for this model on any engine pair ([docs/moe-support.md](docs/moe-support.md)) | 20.1 |
 | `gpt-oss` | gpt-oss-20b-MXFP4 | attention sinks, MXFP4 experts; CUDA GPU/CPU byte-identical; llama.cpp agreement sits at the model's own sensitivity floor, so `greedy_reference` is not claimed | 14.9 |
-| `gemma4` | gemma-4-12B-it | token-identical to llama.cpp; all checks pass | 13.2 |
+| `gemma4` | gemma-4-12B-it | token-identical to llama.cpp; all checks pass. CPU + CUDA + **Metal** (0.1.10) | 13.2 |
 | `gemma4` E-series | gemma-4-E4B-it | per-layer embeddings + shared-KV layers; CPU + CUDA byte-identical. E2B variants load since 2026-08-06 (per-layer FFN widths, CPU) | 8.9 |
 | `qwen3moe` | Qwen3-30B-A3B | greedy-identical to llama.cpp; 128 experts / 8 active | 6.8 |
 | `qwen3` | Qwen3-4B | `cpu_cuda` recheck 4/5 at 128 tokens — recorded failure | 6.8 |
 | `llama` | Llama-3.2-3B, Mistral-7B-v0.3 | the reference path; `mistral`, `smollm` and `stablelm` ride it | 4.2 / 2.1 |
-| `gemma3` | gemma-3-4b-it | QAT and regular | 1.1 |
+| `gemma3` | gemma-3-4b-it | QAT and regular; CPU + CUDA + **Metal** (0.1.10, byte-identical CPU vs Metal on the pinned file) | 1.1 |
 | `qwen2` | Qwen2.5-32B-Instruct | | — |
 | `qwen35` | Ornith-1.0-9B | hybrid Gated DeltaNet; CPU + CUDA 5/5 at 128 tokens | — |
 | `phi3` | Phi-3.5-mini-instruct | fused QKV, LongRoPE | — |
@@ -848,7 +856,8 @@ on real hardware (or a RAM-capped equivalent) — not extrapolation:
 |---|---|---|
 | **8 GB Apple Silicon** | **Trinity-Nano-Preview Q4_K_M** (arcee-ai) | 13.25 tok/s decode, CPU, fully resident — the standing 8 GB recommendation |
 | **16 GB Apple Silicon** | [**gpt-oss-20b-keep30-MXFP4**](https://huggingface.co/Joakimpalm-Zen/gpt-oss-20b-keep30-MXFP4-GGUF) (11.5 GB) | 13.2–13.3 tok/s under a real 16 GiB cap; Metal fit after `sudo sysctl iogpu.wired_limit_mb=13312` |
-| **16 GB Apple Silicon** (larger model) | gemma-4-26B-A4B-it QAT Q4_0 with `--kv q8`, served via the chat endpoints (14.4 GB) | validated 2026-08-06 on a corporate-loaded M2 Pro 16 GB: 8.1–8.2 tok/s decode, chat + JSON-schema output correct at 5.5–5.9 tok/s, greedy-deterministic. CPU only (gemma4 has no Metal path). Serve it — raw one-shot `-p` completions on this model can land on its documented near-tie degeneracy on any ISA |
+| **16 GB Apple Silicon** (larger model) | gemma-4-26B-A4B-it QAT Q4_0 with `--kv q8`, served via the chat endpoints (14.4 GB) | validated 2026-08-06 on a corporate-loaded M2 Pro 16 GB: 8.1–8.2 tok/s decode, chat + JSON-schema output correct at 5.5–5.9 tok/s, greedy-deterministic. **CPU in practice**: gemma-4 runs on Metal since 0.1.10, but Metal is all-or-nothing (no partial offload) and 14.4 GB of weights exceeds the ~11.8 GiB Metal working-set ceiling on a 16 GB Mac, so it falls back with a numeric reason. Serve it — raw one-shot `-p` completions on this model can land on its documented near-tie degeneracy on any ISA |
+| **Gemma on Metal** (any Mac) | any Gemma-3 / dense Gemma-4 whose weights fit the device working set (`--caps` → `gpu.max_working_set_bytes`) | byte-identical CPU vs Metal since 0.1.10. Note Metal is **all-or-nothing**: a model above the ceiling falls back to CPU entirely rather than offloading part of it |
 | **24 GB GPU** | Qwen3-30B-A3B | ~72 tok/s on an RTX PRO 6000 24 GB MIG slice |
 
 Models *larger* than a machine's RAM are not recommended in any

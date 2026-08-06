@@ -3,7 +3,11 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
-## Unreleased
+## v0.1.10-alpha — 2026-08-06
+
+The Metal release: the Gemma families stop falling back to CPU on Apple
+Silicon, and a latent fast-math defect that would have produced NaN on real
+Gemma weights is fixed and pinned before anyone could hit it.
 
 - **gemma-4 runs on Metal.** The heterogeneous-attention refusal is
   retired: the per-token Metal path already carried per-layer
