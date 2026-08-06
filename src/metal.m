@@ -1028,10 +1028,7 @@ void gpu_free(model_t *m) {
 // per-layer embeddings have no batched prepass. Both take per-token submits,
 // which is correct, just not yet fast.
 static bool metal_native_batch_eligible(const model_t *m) {
-    if (m->n_expert > 0) return false;
-    for (int l = 0; l < m->n_layer; l++)
-        if (m->layers[l].ple_gate || m->layers[l].is_moe ||
-            m->layers[l].moe_gemma) return false;
+    (void)m;
     return true;
 }
 
@@ -1089,9 +1086,14 @@ static void enc_moe_ffn(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     enc_moe_sum(g, e, g->xb, xbo, n_embd, used, n_embd, nil);
 }
 
+// xo/xbo select this token's slice of the residual (g->x) and of g->xb. The
+// remaining scratch (xb2, q, moe_*) is used at offset 0 by every token: the
+// compute encoder is serial, so a token's MoE completes before the next one's
+// begins, and by the time the FFN runs the attention has already drained xb2
+// and q for the whole batch.
 static void enc_gemma_moe_ffn(gpu_t *g, id<MTLComputeCommandEncoder> e,
                               model_t *m, layer_t *ly, int l,
-                              NSUInteger xbo) {
+                              NSUInteger xo, NSUInteger xbo) {
     int n_embd = m->n_embd;
     int ne = m->n_expert;
     int used = m->n_expert_used;
@@ -1103,7 +1105,7 @@ static void enc_gemma_moe_ffn(gpu_t *g, id<MTLComputeCommandEncoder> e,
                        ggml_row_size(ly->ffn_down_exps->type, nff);
 
     // Dense shared branch: norm(x) -> GELU gate/up -> down -> post_norm_1.
-    enc_rmsnorm(g, e, g->x, 0, g->xb2, 0, g->ffn_norm[l], n_embd, m->rms_eps);
+    enc_rmsnorm(g, e, g->x, xo, g->xb2, 0, g->ffn_norm[l], n_embd, m->rms_eps);
     enc_mv(g, e, m, ly->w_gate, g->xb2, 0, g->hb, 0, n_embd, dff, nil);
     enc_mv(g, e, m, ly->w_up, g->xb2, 0, g->hb2, 0, n_embd, dff, nil);
     enc_elem(g, e, g->p_gelu, g->hb, 0, g->hb2, 0, dff);
@@ -1112,8 +1114,8 @@ static void enc_gemma_moe_ffn(gpu_t *g, id<MTLComputeCommandEncoder> e,
 
     // Routed branch: pre_norm_2 feeds experts; a separate weightless norm with
     // the folded 1/sqrt(n_embd)*gate_inp_scale vector feeds the router.
-    enc_rmsnorm(g, e, g->x, 0, g->xb2, 0, g->gprn2[l], n_embd, m->rms_eps);
-    enc_rmsnorm(g, e, g->x, 0, g->q, 0, g->ggis[l], n_embd, m->rms_eps);
+    enc_rmsnorm(g, e, g->x, xo, g->xb2, 0, g->gprn2[l], n_embd, m->rms_eps);
+    enc_rmsnorm(g, e, g->x, xo, g->q, 0, g->ggis[l], n_embd, m->rms_eps);
     enc_mv(g, e, m, ly->ffn_gate_inp, g->q, 0, g->moe_logits, 0, n_embd, ne, nil);
     enc_moe_route(g, e, ne, used);
     enc_moe_mv(g, e, m, ly->ffn_gate_up_exps, gustride, g->xb2, 0,
@@ -1232,7 +1234,23 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
                      g->xb, foff((size_t)b * xdim), n_embd);
 
-        {
+        if (ly->moe_gemma || ly->is_moe) {
+            // The MoE FFN itself stays per-token — routing picks different
+            // experts for each token, so there is no shared weight tile to
+            // amortize. Everything around it (attention, projections, norms)
+            // already ran once for the whole batch.
+            for (int b = 0; b < n; b++) {
+                NSUInteger xo = foff((size_t)b * n_embd);
+                NSUInteger xbo = foff((size_t)b * xdim);
+                if (ly->moe_gemma) {
+                    enc_gemma_moe_ffn(g, e, m, ly, l, xo, xbo);
+                } else {
+                    enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->ffn_norm[l],
+                                n_embd, m->rms_eps);
+                    enc_moe_ffn(g, e, m, ly, xbo);
+                }
+            }
+        } else {
             enc_rmsnorm_n(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l],
                           n_embd, m->rms_eps, n, n_embd, xdim);
             enc_mv_n(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0,
@@ -1390,7 +1408,7 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
 
         if (ly->moe_gemma) {
-            enc_gemma_moe_ffn(g, e, m, ly, l, 0);
+            enc_gemma_moe_ffn(g, e, m, ly, l, 0, 0);
         } else {
         enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l], n_embd, m->rms_eps);
         if (ly->is_moe) {
