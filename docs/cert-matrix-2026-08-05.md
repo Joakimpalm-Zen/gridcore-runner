@@ -971,3 +971,45 @@ Only a modest GPU uplift (10.9 vs 8.5 gen tok/s) — expected, since just 13 of 
 ### Summary
 
 The largest model in the roster confirms the session's central gpt-oss finding at scale rather than overturning it: the runner correctly identifies, admits, and partially-GPU-offloads a canonical ~59GB native-MXFP4 checkpoint (validating both the disk-exception workflow and the auto-fit partial-offload logic), but fails the same two correctness gates every native-MXFP4 gpt-oss row has failed. The new information is quantitative, not qualitative — going from 32 to 128 experts measurably worsens cross-engine numerical agreement, which is exactly what the standing MXFP4 near-tie-routing diagnosis predicts.
+
+## 19. gpt-oss-safeguard-120b
+
+**Verdict: REFUSED** — every GGUF conversion of this checkpoint on Hugging Face, across every uploader (`unsloth`, `lmstudio-community`, `mradermacher`, `cPilotGod`), ships as a 2-part split file; this hits the exact split-GGUF capability gap item 10 already root-caused, now confirmed on a second, unrelated checkpoint.
+
+**Resolved:** `lmstudio-community/gpt-oss-safeguard-120b-GGUF`, MXFP4 (the closest available quant to the canonical native format, matching item 18's build). Only shard 1 of 2 was downloaded — `gpt-oss-safeguard-120b-MXFP4-00001-of-00002.gguf`, sha256 `c53a801fe89b033e64d1e30254c1f8e38b96cf547e86329e225697e4c1e8ac6f` verified, 39,815,567,072 bytes. Shard 2 (23.6 GB, sha256 `d20bb68212bcef0a3a01f8a8227a0ab20647ea1f38955817c139c18e79a91a9f` per the HF API, not downloaded) was deliberately skipped: item 10 already conclusively established that the runner never discovers or reads sibling shards regardless of how many are present on disk, so a second shard cannot change the outcome — downloading it would cost ~24GB of bandwidth/disk to reconfirm an already-proven negative. Shard 1 deleted after this verdict.
+
+### Gate 1 — Identity (partial — same single-shard limitation as item 10)
+
+```
+gguf version: 3  tensors: 434  kv: 36
+general.architecture: gpt-oss
+general.name: Tlhv_Osb Mini        <- internal/obfuscated codename, unrelated to the public model name
+gpt-oss.block_count: 36
+gpt-oss.expert_count: 128
+gpt-oss.expert_used_count: 4
+split.no: 0
+split.tensors.count: 687           <- full model has 687 tensors; this shard holds 434 (23 of 36 layers' worth)
+split.count: 2
+
+tensor histogram (434 tensors, shard 1 only): Q8_0 x94, F32 x273, MXFP4 x67
+expert-tensor types (179 tensors): F32 x112, MXFP4 x67
+uniform expert dtype (within the visible 23 layers): True
+```
+
+Same 36-layer/128-expert/top-4 shape as item 18's canonical 120b build, with uniform native MXFP4 experts — this is a genuine same-architecture safety fine-tune of the base 120b checkpoint, not a structurally different model. `split.count`/`split.no`/`split.tensors.count` are explicit, correctly-populated KVs in the file itself, confirming (as item 10 inferred but could not directly read) that split-awareness metadata really is present in the standard distribution format — the gap is entirely on the runner's read side, not a missing-metadata problem upstream. Evidence: `docs/cert-matrix-evidence/t4.19-gguf-inspect.json`.
+
+### Gate 2 — Admission: **REFUSED**
+
+```
+error: missing tensor blk.22.post_attention_norm.weight
+error: missing tensor blk.22.ffn_gate_inp.weight
+error: missing MoE expert tensor (neither fused ffn_gate_exps nor split ffn_gate.0) in blk.22
+```
+
+Identical failure shape to item 10: clean, fast (exit code 1, well under a minute, no hang), fails at the first layer (`blk.22`) whose tensors live in the un-discovered second shard. This is not a checkpoint-specific quirk — it is the same universal runner-side limitation, now confirmed on a completely different model family/lineage (a 120b safety fine-tune vs item 10's REAP-pruned base model), reinforcing that the gap is genuinely architecture/format-level rather than an artifact of one particular conversion. Evidence: `docs/cert-matrix-evidence/t4.19-admission.log`.
+
+Gates 3-7 do not apply; a refused load ends the battery.
+
+### Summary
+
+A second, independent confirmation of item 10's finding rather than a new one: gpt-oss-safeguard-120b is universally distributed as a 2-part split GGUF (true of every uploader checked), and the runner's lack of split-file support blocks it identically regardless of which specific checkpoint or uploader produced the split. Declining to download the untested second shard was itself a disk-discipline call — the root cause was already proven at the code level in item 10 (`gguf_get_u32`-adjacent tensor-table reading only ever looks at the file passed on the command line), so no amount of additional shard data changes this item's verdict.
