@@ -202,15 +202,20 @@ def test_array_ffn_widths_greedy_is_deterministic(runner_bin, tmp_path):
     assert len(outs) == 1
 
 
-def test_array_ffn_widths_refuse_gpu_offload_loudly(runner_bin, tmp_path):
-    """Heterogeneous FFN widths are CPU-only until the device paths size
-    per layer; the backends must refuse and fall back with a reason, not
-    compute with one global width."""
+def test_array_ffn_widths_on_gpu_are_identical_or_refused_loudly(runner_bin, tmp_path):
+    """Per-layer FFN widths landed on Metal (0.1.11); CUDA still has no device
+    path for them. Either is fine — computing with one global width is not.
+
+    So: if a backend engaged, its output must match the CPU byte for byte; if
+    it declined, it must say so rather than fall back silently.
+    """
     model = _make_varff(tmp_path / "gpu-varff.gguf")
-    proc = _run(runner_bin, model, "--gpu", "auto", tokens=4)
-    err = proc.stderr.decode(errors="replace")
-    assert proc.returncode == 0, err
-    if "CUDA backend" in err or "Metal" in err:
-        # a backend engaged anyway: it must have produced no silent garbage —
-        # the refusal path is required instead
-        assert "per-layer FFN" in err, err
+    cpu = _run(runner_bin, model, "--gpu", "off", tokens=8)
+    gpu = _run(runner_bin, model, "--gpu", "auto", tokens=8,
+               env={"RUNNER_METAL_MM": "0"})
+    err = gpu.stderr.decode(errors="replace")
+    engaged = "Metal backend" in err or "CUDA backend" in err
+    if engaged:
+        assert gpu.stdout == cpu.stdout, err
+    else:
+        assert "using CPU" in err or "no device path" in err, err

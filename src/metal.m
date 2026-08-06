@@ -117,10 +117,6 @@ static bool metal_env_on(const char *name) {
     return v && *v && strcmp(v, "0");
 }
 
-static bool metal_batch_enabled(void) {
-    const char *v = getenv("RUNNER_METAL_BATCH");
-    return !(v && *v && !strcmp(v, "0"));
-}
 
 static bool gpu_init_fail(model_t *m, gpu_t *g, id<MTLLibrary> lib,
                           const char *why) {
@@ -370,7 +366,6 @@ static id<MTLBuffer> f32_buf_ones(id<MTLDevice> dev, const float *src, size_t n)
     return b;
 }
 
-static float *gpu_forward(model_t *m, int token, int pos);
 
 static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                                        int n, int pos);
@@ -415,10 +410,6 @@ bool gpu_init(model_t *m) {
     }
     if (m->qwen35) {
         fprintf(stderr, "gpu: qwen35 hybrid path is not on the metal backend yet — using CPU\n");
-        return false;
-    }
-    if (m->ffn_var) {
-        fprintf(stderr, "gpu: per-layer FFN widths are not on the metal backend yet — using CPU\n");
         return false;
     }
     if (!metal_moe_supported(m))
@@ -889,11 +880,6 @@ static void enc_rope_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 }
 
-static void enc_rope(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                     id<MTLBuffer> v, NSUInteger v_off, int n_heads, int pos,
-                     int layer) {
-    enc_rope_n(g, e, m, v, v_off, n_heads, pos, layer, 1, 0);
-}
 
 static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
                      id<MTLComputePipelineState> p,
@@ -1042,38 +1028,22 @@ void gpu_free(model_t *m) {
 // implemented only by the per-token path, so a model carrying any of them
 // must take that path or the batch would be silently wrong (the gemma3/4
 // families hit several of these at once).
-// The prompt-batch encoder now implements what the per-token encoder does for
-// DENSE layers — embedding scale, weightless V norm and V-less layers,
-// sandwich norms, per-layer output scale, GELU, heterogeneous per-layer
-// geometry — so the Gemma families no longer fall back to per-token submits.
-//
-// Two shapes still do, and both are real work rather than oversights: the MoE
-// encoders address their scratch (and the attention residual) at a fixed
-// offset 0, so they cannot yet be aimed at token b of a batch; and E-series
-// per-layer embeddings have no batched prepass. Both take per-token submits,
-// which is correct, just not yet fast.
-static bool metal_native_batch_eligible(const model_t *m) {
-    (void)m;
-    return true;
-}
 
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                        bool want_logits, float **logits) {
-    if (metal_native_batch_eligible(m) && n > 1 && metal_batch_enabled()) {
-        if (metal_ensure_batch(m, n)) {
-            float *lg = gpu_forward_native_batch(m, tokens, n, pos);
-            if (!lg) return false;
-            if (logits) *logits = want_logits ? lg : NULL;
-            return true;
-        }
-        fprintf(stderr, "gpu: Metal prompt batch scratch allocation failed — "
-                "using per-token submits\n");
+    // One encoder for every n, decode included. There used to be a second,
+    // per-token encoder here; keeping two implementations of the same layer
+    // loop cost three defects (features silently missing behind an
+    // eligibility check, a double-applied logit softcap, and wrong output on
+    // real gemma-4 E2B weights) before it was removed. A scratch allocation
+    // failure now falls back to the CPU loudly instead of to a second path.
+    if (!metal_ensure_batch(m, n)) {
+        fprintf(stderr, "gpu: Metal batch scratch allocation failed — "
+                "releasing the backend, continuing on CPU\n");
+        return false;
     }
-    float *lg = NULL;
-    for (int b = 0; b < n; b++) {
-        lg = gpu_forward(m, tokens[b], pos + b);
-        if (!lg) return false;
-    }
+    float *lg = gpu_forward_native_batch(m, tokens, n, pos);
+    if (!lg) return false;
     if (logits) *logits = want_logits ? lg : NULL;
     return true;
 }
@@ -1181,6 +1151,29 @@ static void enc_ple(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
                  g->xb, foff((size_t)b * xdim), n_embd);
 }
 
+// RUNNER_METAL_NAN_TRACE=1: submit after every layer and report the first one
+// whose residual carries a NaN/Inf. The GPU path has no equivalent of
+// RUNNER_DEBUG_ACT — without this, a backend that silently produces NaN logits
+// can only be bisected by guesswork. Costs one command buffer per layer, so it
+// is opt-in and read once.
+static bool metal_nan_trace(void) {
+    static int on = -1;
+    if (on < 0) { const char *v = getenv("RUNNER_METAL_NAN_TRACE"); on = v && *v && strcmp(v, "0"); }
+    return on > 0;
+}
+
+static bool metal_scan_bad(const float *p, int n, const char *what, int layer) {
+    for (int i = 0; i < n; i++) {
+        uint32_t u; memcpy(&u, &p[i], 4);
+        if ((u & 0x7f800000u) == 0x7f800000u) {   // NaN or Inf, -ffast-math safe
+            fprintf(stderr, "metal-nan: L%d %s[%d] = %s\n", layer, what, i,
+                    (u & 0x7fffffu) ? "NaN" : "Inf");
+            return true;
+        }
+    }
+    return false;
+}
+
 static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                                        int n, int pos) {
     gpu_t *g = m->gpu;
@@ -1210,6 +1203,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                sizeof(float) * (size_t)n * m->n_layer * m->n_embd_ple);
     }
 
+    bool nantrace = metal_nan_trace();
     id<MTLCommandBuffer> cb = [g->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
 
@@ -1324,18 +1318,21 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                 }
             }
         } else {
+            // gemma-4 E2B varies the FFN width per layer; hb/hb2 are sized
+            // for the max, so pack the batch at THIS layer's width.
+            int nff_l = ly->n_ff;
             enc_rmsnorm_n(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l],
                           n_embd, m->rms_eps, n, n_embd, xdim);
             enc_mv_n(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0,
-                     n_embd, m->n_ff, nil, n, xdim, m->n_ff);
+                     n_embd, nff_l, nil, n, xdim, nff_l);
             enc_mv_n(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0,
-                     n_embd, m->n_ff, nil, n, xdim, m->n_ff);
-            // hb/hb2 are contiguous across the batch (stride == n_ff), so the
-            // activation is one dispatch over the whole batch rather than n
+                     n_embd, nff_l, nil, n, xdim, nff_l);
+            // hb/hb2 are contiguous across the batch, so the activation is one
+            // dispatch over the whole batch rather than n
             enc_elem(g, e, m->ffn_act == ACT_GELU ? g->p_gelu : g->p_silu,
-                     g->hb, 0, g->hb2, 0, n * m->n_ff);
+                     g->hb, 0, g->hb2, 0, n * nff_l);
             enc_mv_n(g, e, m, ly->w_down, g->hb, 0, g->xb, 0,
-                     m->n_ff, n_embd, nil, n, m->n_ff, xdim);
+                     nff_l, n_embd, nil, n, nff_l, xdim);
         }
         if (g->pfn[l])
             enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pfn[l],
@@ -1350,6 +1347,16 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             for (int b = 0; b < n; b++)
                 enc_scale(g, e, g->x, foff((size_t)b * n_embd), n_embd,
                           ly->out_scale);
+        if (nantrace) {
+            [e endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (metal_scan_bad((const float *)g->x.contents,
+                               n * n_embd, "resid", l))
+                return NULL;
+            cb = [g->queue commandBuffer];
+            e = [cb computeCommandEncoder];
+        }
         // Only the last position's logits are ever read (see the return
         // below), and the vocab matmul is the widest in the model — doing it
         // for every prompt token was pure waste.
@@ -1376,182 +1383,4 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
     return (float *)g->logits.contents + (size_t)(n - 1) * m->n_vocab;
 }
 
-// RUNNER_METAL_NAN_TRACE=1: submit after every layer and report the first one
-// whose residual carries a NaN/Inf. The GPU path has no equivalent of
-// RUNNER_DEBUG_ACT — without this, a backend that silently produces NaN logits
-// can only be bisected by guesswork. Costs one command buffer per layer, so it
-// is opt-in and read once.
-static bool metal_nan_trace(void) {
-    static int on = -1;
-    if (on < 0) { const char *v = getenv("RUNNER_METAL_NAN_TRACE"); on = v && *v && strcmp(v, "0"); }
-    return on > 0;
-}
 
-static bool metal_scan_bad(const float *p, int n, const char *what, int layer) {
-    for (int i = 0; i < n; i++) {
-        uint32_t u; memcpy(&u, &p[i], 4);
-        if ((u & 0x7f800000u) == 0x7f800000u) {   // NaN or Inf, -ffast-math safe
-            fprintf(stderr, "metal-nan: L%d %s[%d] = %s\n", layer, what, i,
-                    (u & 0x7fffffu) ? "NaN" : "Inf");
-            return true;
-        }
-    }
-    return false;
-}
-
-static float *gpu_forward(model_t *m, int token, int pos) {
-    gpu_t *g = m->gpu;
-    int n_embd = m->n_embd;
-    bool nantrace = metal_nan_trace();
-
-    // token embedding on CPU (one row), straight into the shared buffer
-    size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
-    dequant_row(m->tok_embd->type,
-                (uint8_t *)m->tok_embd->data + (size_t)token * ers,
-                (float *)g->x.contents, n_embd);
-    if (m->embd_scale != 1.0f) {
-        float *xp = (float *)g->x.contents;
-        for (int i = 0; i < n_embd; i++) xp[i] *= m->embd_scale;
-    }
-    if (m->n_embd_ple > 0 && m->ple && g->ple) {
-        int32_t one = token;
-        model_ple_prepass(m, &one, 1, (const float *)g->x.contents,
-                          m->ple, m->ple_tmp);
-        memcpy(g->ple.contents, m->ple,
-               sizeof(float) * (size_t)m->n_layer * m->n_embd_ple);
-    }
-
-    id<MTLCommandBuffer> cb = [g->queue commandBuffer];
-    id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-
-    // checkpoint the named buffer under RUNNER_METAL_NAN_TRACE (see above)
-    #define NANCK(BUF, N, WHAT) do { if (nantrace) {                    \
-        [e endEncoding]; [cb commit]; [cb waitUntilCompleted];          \
-        if (metal_scan_bad((const float *)(BUF).contents, (N), (WHAT), l)) \
-            return NULL;                                                \
-        cb = [g->queue commandBuffer];                                  \
-        e = [cb computeCommandEncoder];                                 \
-    } } while (0)
-
-    for (int l = 0; l < m->n_layer; l++) {
-        layer_t *ly = &m->layers[l];
-        int hd = model_head_dim(m, l);
-        int n_kv = model_n_head_kv(m, l);
-        int q_dim_l = model_q_dim(m, l);
-        int kv_dim_l = model_kv_dim(m, l);
-        int window = model_is_swa(m, l) ? m->swa_window : 0;
-        size_t row_b = model_kv_row_bytes(m, l);
-        uint64_t kv_off = model_kv_byte_off(m, l) + (uint64_t)pos * row_b;
-        int q8 = m->kv_q8;
-        int kv_units = q8 ? kv_dim_l / 32 : kv_dim_l;
-
-        enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->attn_norm[l], n_embd, m->rms_eps);
-        enc_mv(g, e, m, ly->wq, g->xb, 0, g->q,  0, n_embd, q_dim_l,  g->bq[l]);
-        // shared-KV layers (gemma-4 E-series) own no cache rows: project Q
-        // only and attend over the layer model_kv_byte_off() aliases to.
-        bool owns_kv = model_kv_owner(m, l) == l;
-        if (owns_kv) {
-            enc_mv(g, e, m, ly->wk, g->xb, 0, g->kt, 0, n_embd, kv_dim_l, g->bk[l]);
-            if (ly->wv)
-                enc_mv(g, e, m, ly->wv, g->xb, 0, g->vt, 0, n_embd, kv_dim_l, g->bv[l]);
-        }
-        if (g->qn[l]) enc_qknorm(g, e, m, g->q,  0, g->qn[l], m->n_head, hd);
-        if (owns_kv) {
-            if (m->v_rmsnorm)
-                enc_headnorm(g, e, m, ly->wv ? g->vt : g->kt, 0, g->vt, 0, nil, n_kv, hd);
-            if (g->kn[l]) enc_qknorm(g, e, m, g->kt, 0, g->kn[l], n_kv, hd);
-        }
-        enc_rope(g, e, m, g->q,  0, m->n_head, pos, l);
-        if (owns_kv) enc_rope(g, e, m, g->kt, 0, n_kv, pos, l);
-        NANCK(g->xb, n_embd, "attn-norm");
-        NANCK(g->q, q_dim_l, "q-post-rope");
-        NANCK(g->kt, kv_dim_l, "k-post-rope");
-        NANCK(g->vt, kv_dim_l, "v");
-
-        if (owns_kv) {
-            store_args sa = { kv_dim_l, q8, 0, kv_off, 0 };
-            [e setComputePipelineState:g->p_store];
-            [e setBuffer:g->kt offset:0 atIndex:0];
-            [e setBuffer:g->vt offset:0 atIndex:1];
-            [e setBuffer:g->kc offset:0 atIndex:2];
-            [e setBuffer:g->vc offset:0 atIndex:3];
-            [e setBytes:&sa length:sizeof(sa) atIndex:4];
-            [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
-              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-        }
-
-        attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
-                         (uint64_t)model_kv_byte_off(m, l),
-                         model_attn_scale(m, l), q8, window,
-                         g->sinks[l] != nil, 0, 0, 0 };
-        [e setComputePipelineState:g->p_attn];
-        [e setBuffer:g->q   offset:0 atIndex:0];
-        [e setBuffer:g->kc  offset:0 atIndex:1];
-        [e setBuffer:g->vc  offset:0 atIndex:2];
-        [e setBuffer:g->att offset:0 atIndex:3];
-        [e setBuffer:g->xb2 offset:0 atIndex:4];
-        [e setBytes:&aa length:sizeof(aa) atIndex:5];
-        [e setBuffer:g->sinks[l] ? g->sinks[l] : g->dummy offset:0 atIndex:6];
-        [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
-          threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-
-        NANCK(g->xb2, q_dim_l, "attn-out");
-        enc_mv(g, e, m, ly->wo, g->xb2, 0, g->xb, 0, q_dim_l, n_embd, g->bo[l]);
-        NANCK(g->xb, n_embd, "wo-out");
-        if (g->pan[l])
-            enc_rmsnorm(g, e, g->xb, 0, g->xb, 0, g->pan[l], n_embd, m->rms_eps);
-        enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
-
-        if (ly->moe_gemma) {
-            enc_gemma_moe_ffn(g, e, m, ly, l, 0, 0);
-        } else {
-        enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l], n_embd, m->rms_eps);
-        if (ly->is_moe) {
-            enc_moe_ffn(g, e, m, ly, 0);
-        } else {
-            NANCK(g->xb, n_embd, "ffn-norm");
-            enc_mv(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0, n_embd, m->n_ff, nil);
-            NANCK(g->hb, m->n_ff, "ffn-gate");
-            enc_mv(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0, n_embd, m->n_ff, nil);
-            NANCK(g->hb2, m->n_ff, "ffn-up");
-            enc_elem(g, e, m->ffn_act == ACT_GELU ? g->p_gelu : g->p_silu,
-                     g->hb, 0, g->hb2, 0, m->n_ff);
-            NANCK(g->hb, m->n_ff, "ffn-act");
-            enc_mv(g, e, m, ly->w_down, g->hb, 0, g->xb, 0, m->n_ff, n_embd, nil);
-            NANCK(g->xb, n_embd, "ffn-down");
-        }
-        }
-        if (g->pfn[l])
-            enc_rmsnorm(g, e, g->xb, 0, g->xb, 0, g->pfn[l], n_embd, m->rms_eps);
-        enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
-        if (ly->ple_gate) enc_ple(g, e, m, ly, l, 1, n_embd);
-        if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
-            enc_scale(g, e, g->x, 0, n_embd, ly->out_scale);
-        if (nantrace) {
-            [e endEncoding];
-            [cb commit];
-            [cb waitUntilCompleted];
-            if (metal_scan_bad((const float *)g->x.contents, n_embd, "resid", l))
-                return NULL;
-            cb = [g->queue commandBuffer];
-            e = [cb computeCommandEncoder];
-        }
-    }
-    #undef NANCK
-
-    enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->out_norm, n_embd, m->rms_eps);
-    enc_mv(g, e, m, m->output, g->xb, 0, g->logits, 0, n_embd, m->n_vocab, nil);
-    // No head transform here: model_forward_batch applies softcap/suppress on
-    // the host for BOTH the batched and solo paths (see its comment), so doing
-    // it here too applied softcap twice. Monotonic, so greedy argmax never saw
-    // it — but it distorted logprobs and any temperature/top-p sampling.
-
-    [e endEncoding];
-    [cb commit];
-    [cb waitUntilCompleted];
-    if (metal_command_failed(cb)) {
-        fprintf(stderr, "gpu: command buffer failed — falling back to CPU\n");
-        return NULL;
-    }
-    return (float *)g->logits.contents;
-}

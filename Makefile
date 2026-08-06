@@ -487,10 +487,11 @@ ifeq ($(shell uname -s),Darwin)
 	@set -e; \
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		prompt="alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"; \
-		env RUNNER_METAL_BATCH=0 RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test.gguf -p "$$prompt" -n 8 -b 8 --temp 0 --gpu auto > metal-prefill-loop.out 2>/dev/null; \
+		./$(RUNNER_EXE) -m test.gguf -p "$$prompt" -n 8 -b 8 --temp 0 --gpu off > metal-prefill-cpu.out 2>/dev/null; \
 		env RUNNER_METAL_STATS=1 RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test.gguf -p "$$prompt" -n 8 -b 8 --temp 0 --gpu auto > metal-prefill-native.out 2> metal-prefill-native.err; \
-		cmp -s metal-prefill-loop.out metal-prefill-native.out; \
+		cmp -s metal-prefill-cpu.out metal-prefill-native.out; \
 		grep -q "metal: native prompt batch" metal-prefill-native.err; \
+		grep -q "Metal backend" metal-prefill-native.err; \
 		echo "metal prompt batch ok"; \
 	else \
 		echo "metal prompt batch smoke skipped: no Metal device reported by --caps"; \

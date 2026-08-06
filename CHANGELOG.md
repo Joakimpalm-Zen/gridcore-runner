@@ -25,6 +25,40 @@ protocol and CLI may still change between alpha releases.
   tok/s (3.0x)**, and Metal now beats the CPU path (273 tok/s) instead of
   losing to it by 2.3x. Decode is unchanged (~68 tok/s) — n=1 has nothing
   to batch.
+- **MoE and E-series join the Metal batched path; one encoder now, not two.**
+  MoE layers were excluded because `enc_gemma_moe_ffn` read the residual at a
+  fixed offset 0; both MoE encoders now take an explicit token offset, so
+  attention, the projections and the norms run once for the batch while the
+  MoE FFN stays per-token (routing picks different experts per token — there
+  is no shared weight tile to amortize).
+  **gemma-4 E-series runs on Metal at all for the first time** (a standing
+  field report: "E-series gets no Metal path"). `gpu_init` used to refuse it
+  outright. Implemented: the per-layer-embedding branch, and per-layer FFN
+  widths — which together unblock E2B *and* E4B. Real gemma-4 E2B Q4_K_M is
+  byte-identical CPU vs Metal, and prefills at 40.3 tok/s against the CPU
+  path's 19.6.
+  Building the PLE table needed care: `model_forward_batch` deliberately skips
+  its own prepass under full offload because CUDA stages the table on-device,
+  so Metal was reading a stale one; it now builds the table from the scaled
+  embeddings it just wrote.
+- **Fixed: shared-KV layers were silently wrong on Metal.** A gemma-4 E-series
+  layer past `kv_from_start` owns no cache rows — it projects Q only and
+  attends over the layer `model_kv_byte_off()` aliases to, exactly as the CUDA
+  backend does. Metal projected K/V anyway and stored them, overwriting the
+  source layer's rows. Real E-series models never reached it because the
+  per-layer-embedding refusal turned them away first, so this had no symptom
+  until that refusal was lifted — but a shared-KV-only model would have
+  produced wrong output with no gate to catch it. Pinned by the new
+  `make test-metal-eseries` (PLE only, shared-KV only, and both).
+- **The per-token Metal encoder is gone.** Keeping a second implementation of
+  the same layer loop cost three defects — features silently missing behind an
+  eligibility check, a double-applied logit softcap, and wrong output on real
+  gemma-4 E2B weights — each invisible to the gates until something else
+  exposed it. One encoder now serves every batch size including decode; a
+  scratch-allocation failure falls back to the CPU loudly instead of to a
+  second, drift-prone path. `tests/test_eseries.py` goes from 9 passed /
+  8 skipped to 17 passed: its GPU tests had been skipping because the backend
+  refused the models.
 - **Tiled prefill GEMM on Metal, behind the tolerance gate: 768 tok/s.**
   The matvec kernels give one output element per simdgroup — 32 lanes each
   doing one FMA, then a log-depth reduction — so almost none of the work is
