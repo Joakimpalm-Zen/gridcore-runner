@@ -51,10 +51,10 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 
 | format | why out of scope |
 |---|---|
-| NVFP4 | pending |
-| FP8 | pending |
-| BnB | pending |
-| MLX | pending |
+| NVFP4 | NVIDIA block-scaled 4-bit float for Blackwell tensor cores (TensorRT-LLM/vLLM); no GGUF tensor type, no CPU reference kernel, no conversion path |
+| FP8 | 8-bit float (E4M3/E5M2), native H100/Blackwell serving format; lives in safetensors/HF checkpoints, not representable as a GGUF tensor type |
+| BnB | bitsandbytes NF4/INT8 is a PyTorch runtime quantization applied on load via `transformers`, not a file format — nothing to point a GGUF runtime at |
+| MLX | Apple's own array framework/format for `mlx-lm` on Apple Silicon; entirely separate runtime and encoding from GGUF/llama.cpp, no shared schema to test admission against |
 
 ## 16 GB envelope sweep
 

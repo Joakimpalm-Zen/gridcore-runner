@@ -1023,3 +1023,13 @@ A second, independent confirmation of item 10's finding rather than a new one: g
 ### Summary
 
 The goal doc's own hedge for this item ("a REFUSED/loads-metadata result is all we want") anticipated a GGUF existing that might fail to load; the real situation is one step earlier — nobody has converted this specific expert-expansion checkpoint (or any of its siblings from the same author) to GGUF at all. Per the goal's own naming-reality-check principle, NOT FOUND is the accurate verdict rather than forcing a substitution onto a differently-named model that wouldn't actually be this roster item.
+
+## Note-only formats (no download)
+
+**NVFP4** — NVIDIA's block-scaled 4-bit float format for Blackwell-generation tensor cores, native to TensorRT-LLM and vLLM's NVFP4 path. It is a GPU-kernel-specific packed representation, not a GGUF tensor type, and has no CPU reference implementation to fall back on. Out of scope for a llama.cpp-family GGUF runtime: there is no conversion path into GGUF's tensor encoding and no kernel in this runner (or in the b10280 reference) that understands it.
+
+**FP8** — 8-bit floating point (E4M3/E5M2), a training- and serving-time format with native hardware support on H100/Blackwell-class GPUs (vLLM, TensorRT-LLM, native `transformers` FP8 paths). GGUF has no FP8 tensor type; the format lives entirely in the safetensors/HF-checkpoint world one layer upstream of anything a GGUF runtime reads.
+
+**BnB (bitsandbytes)** — a PyTorch runtime quantization scheme (NF4/INT8) applied on-the-fly when a model is loaded through `transformers` + `bitsandbytes`. It is not a file format at all in the GGUF sense — there is nothing to download and point a GGUF runtime at; the quantization only exists inside a live Python/PyTorch process.
+
+**MLX** — Apple's own array framework and model format for Apple Silicon (`mlx-lm`), with its own quantization scheme and weight layout. It is a separate runtime and file format from GGUF/llama.cpp entirely (no shared tensor encoding, no shared metadata schema), so there is no meaningful "admit this MLX file into the runner" test to run.
