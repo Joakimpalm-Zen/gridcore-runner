@@ -234,3 +234,52 @@ against. **Expect roster item 7 (E2B QAT) to REFUSE the same way — that
 is a correct result; record the metadata dump.** Loader-side support is
 owner-machine work, out of scope for the Blackwell session per the STOP
 rules.
+
+## Addendum 4 (2026-08-06, M1): unknown (c) has a first number, and the residency budget does not fit this machine
+
+Two measurements on the owner's 8 GB M1, no engine work, using shipped
+code and models already on the shelf.
+
+**1. Compute proxy for unknown (c): 5.77 tok/s.** `e4b-q4km` (Gemma-4
+E4B-it Q4_K_M, 5.4 GB, the 4B-active-class proxy addendum 3 asked for),
+`--gpu off --temp 0`, 48 greedy tokens, 4 threads: **5.77 tok/s decode**
+(48-token run; a 4-token run gave 5.44). This is single-token decode with
+no batch-K verify work and no draft model, and it was measured *while
+paging* (see 2), so treat it as a floor rather than a ceiling.
+
+Read against the ≥5 tok/s bar it is uncomfortably tight. The composed
+pipeline has to carry, on the same four P-cores: the target's per-token
+compute, the batch-K verify positions (wider matmuls amortize better than
+K separate decodes, so this is sublinear in K but not free), and the
+draft model's own forwards. Starting from ~15% headroom over the bar at
+K=1, unknown (c) is now the item most likely to kill the target, exactly
+as addendum 3 predicted.
+
+**2. The residency budget does not fit the machine as it stands.**
+Addendum 2's budget check assumed "dense/attention ~2 GB + committee
+1.5 GB + KV/scratch ≈ 4 GB — fits with OS headroom" on 8 GB. The runner's
+own admission line on this machine reports **only 2.9 GB of RAM
+available** with a normal desktop session running (browser, terminal,
+editor). The 4 GB plan does not fit; the 3.1 GB top-32 "stretch config"
+is not reachable at all. Either the target is restated for a quiesced
+machine (and measured that way, honestly labelled), or the committee
+shrinks below top-16 and the composed ceilings must be recomputed at the
+lower hit rates. This also re-explains three overnight runs dying under
+memory pressure: it was never headroom the machine had.
+
+**3. Kill-order item (a) is not blocked on MTP after all.** `--draft`
+does not require an MTP head or a matching architecture — `spec_draft_load`
+(`src/engine.c:677`) accepts *any* loadable model whose vocab is within
+512 of the target's, and refuses only a fully GPU-offloaded target. Every
+Gemma-4 checked shares vocab **262144** (E2B, E4B, and the E4B MTP
+drafter all report `token_embd.weight ne=[*, 262144]`), so a small
+Gemma-4 can draft for gemma-4-26B-A4B today with shipped code. The
+economics differ from MTP and need their own accounting — a separate
+drafter pays a full forward per draft token instead of riding the target's
+own forward — so addendum 2's tables do not transfer unchanged. But the
+acceptance-rate measurement no longer waits on `gemma4-assistant` support;
+it waits only on re-downloading the 26B target (14.4 GB; 42 GB free).
+
+E2B would have been the natural drafter and is blocked by the loader gap
+in roster item 7 — see the scope correction in `cert-matrix-status.md`:
+that gap affects every E2B conversion, not just the QAT export.
