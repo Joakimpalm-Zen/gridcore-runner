@@ -23,6 +23,9 @@ static inline bool checked_u64_mul(uint64_t a, uint64_t b, uint64_t *out) {
 // map a regular file read-only; returns NULL on failure (missing, empty,
 // directory, ...). The mapping outlives any internal handles.
 void  *plat_mmap_ro(const char *path, size_t *size);
+// Ask the OS to fault a whole range in as one unit. Advisory: it can never
+// change what a later read returns, only how many faults that read costs.
+void   plat_willneed(const void *addr, size_t len);
 void   plat_munmap(void *p, size_t size);
 
 int         plat_cpu_count(void);

@@ -225,6 +225,8 @@ typedef struct {
     bool      v_rmsnorm;     // weightless per-head RMS norm on V (gemma4)
     bool      qwen35;
     bool      moe_gemma;     // gemma-4 dual-branch MoE (CPU-only; no GPU dual-branch kernel yet)
+    bool      moe_prefetch;  // hand routed experts to the OS as whole blocks
+                             // (only pays when weights exceed RAM)
     bool      ffn_var;       // per-layer FFN widths differ (gemma-4 E2B):
                              // CPU sizes per layer; device backends refuse
     int       full_attn_interval;
@@ -536,6 +538,10 @@ float *model_forward(model_t *m, int token, int pos);
 bool   model_moe_ffn_cpu(model_t *m, int layer, int n);
 // byte cost of one layer's expert half (router + experts + gemma shared branch)
 uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert);
+// Advisory prefetch of the experts a router just selected. Fed by whichever
+// router ran, so it is architecture-agnostic; cannot change output.
+void     model_moe_prefetch(const model_t *m, const layer_t *ly,
+                            const int *sel, int used);
 // fill m->moe_host for a requested host-expert layer count (see model.c)
 void   model_moe_place_host(model_t *m, int host_layers);
 // speculative verify: forward a small batch keeping hidden states, then pull

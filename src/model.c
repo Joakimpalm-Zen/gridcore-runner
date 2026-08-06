@@ -360,6 +360,66 @@ static uint64_t vram_free_now(void *ud) {
 // either layout, and gemma-4's coupled dense shared branch. Shared by the VRAM
 // estimate and the CUDA fit so the two cannot disagree about what an expert
 // bank costs.
+// Expert-granular prefetch.
+//
+// On a model larger than RAM the engine's cost is not bandwidth and not
+// arithmetic — it is the NUMBER of I/O operations. Reaching an expert through
+// the mmap costs ~200 synchronous 16 KB faults; measured on gemma-4-26B on an
+// 8 GB M1 that is ~17,000 faults per token at ~45-60 us each, which is the
+// whole token budget (thread scaling 1.32x for 4x threads, and warming the
+// page cache halved the faults without moving throughput at all).
+//
+// The router has just named the 8 experts this layer will read. Handing those
+// byte ranges to the OS as whole blocks turns ~200 faults per expert into one
+// readahead. A standalone probe replaying real routing traces against the real
+// GGUF measured the difference as 0.70 s/token of fault stall against
+// 0.20-0.25 s/token of expert-granular reads.
+//
+// This is deliberately NOT a cache: no residency set, no eviction, no hit-rate
+// policy. The same probe showed caching contributes little and does not
+// generalize across workloads (13.7% cross-workload hit rate at top-8), while
+// granularity alone captures most of the win. It also keeps the feature
+// architecture-agnostic: the ONLY thing it takes from the model is the list of
+// expert ids a router just produced, which every MoE arch has. The rejected
+// expert-cache tier hooked one specific FFN path and therefore never engaged on
+// gemma-4 at all (docs/negative-result-expert-cache.md); this hook is fed by
+// whichever router ran.
+//
+// Advisory throughout: it cannot change a single output bit, only how long the
+// read that follows takes.
+static bool moe_prefetch_enabled(const model_t *m) {
+    if (!m->moe_prefetch) return false;
+    if (m->gpu && m->gpu_layers >= m->n_layer) return false;  // weights on device
+    return true;
+}
+
+void model_moe_prefetch(const model_t *m, const layer_t *ly,
+                        const int *sel, int used) {
+    if (!moe_prefetch_enabled(m) || !ly->is_moe) return;
+    int ne = ly->n_expert;
+    for (int i = 0; i < used; i++) {
+        int e = sel[i];
+        if (e < 0 || e >= ne) continue;
+        if (ly->moe_split) {           // legacy: one tensor per expert
+            if (ly->moe_g[e]) plat_willneed(ly->moe_g[e]->data, ly->moe_g[e]->nbytes);
+            if (ly->moe_u[e]) plat_willneed(ly->moe_u[e]->data, ly->moe_u[e]->nbytes);
+            if (ly->moe_d[e]) plat_willneed(ly->moe_d[e]->data, ly->moe_d[e]->nbytes);
+            continue;
+        }
+        // fused 3D {.., .., n_expert}: expert e is one contiguous stride in
+        gguf_tensor *fused[3] = { ly->ffn_gate_up_exps ? ly->ffn_gate_up_exps
+                                                       : ly->ffn_gate_exps,
+                                  ly->ffn_gate_up_exps ? NULL : ly->ffn_up_exps,
+                                  ly->ffn_down_exps };
+        for (int t = 0; t < 3; t++) {
+            gguf_tensor *w = fused[t];
+            if (!w || ne <= 0) continue;
+            size_t stride = (size_t)(w->nbytes / (uint64_t)ne);
+            plat_willneed((const uint8_t *)w->data + stride * (size_t)e, stride);
+        }
+    }
+}
+
 uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert) {
     uint64_t wb = 0;
     if (!ly->is_moe) return 0;
@@ -748,6 +808,17 @@ double model_resident_fraction(const model_t *m) {
 // minute. Reported from a 16 GB Mac where a 1.2k-token prompt returned nothing
 // in 300 s at 0% CPU. Advisory only -- the load continues either way, since
 // the estimate can be wrong and a model that fits today may not fit at noon.
+// Same test decides expert prefetch: handing routed experts to the OS as whole
+// blocks is a pure win when the model cannot stay resident, and pointless
+// syscalls when it can (the pages are already there). RUNNER_MOE_PREFETCH
+// forces it either way for measurement.
+static bool moe_prefetch_default(const model_t *m) {
+    const char *e = getenv("RUNNER_MOE_PREFETCH");
+    if (e && *e) return strcmp(e, "0") && strcmp(e, "off");
+    uint64_t need = m->gf.map_size, have = plat_ram_available_bytes();
+    return need && have && need > have;
+}
+
 static void warn_if_it_will_not_stay_resident(const model_t *m, bool locked) {
     uint64_t need = m->gf.map_size;
     uint64_t have = plat_ram_available_bytes();
@@ -784,6 +855,10 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         }
     }
     warn_if_it_will_not_stay_resident(m, locked);
+    m->moe_prefetch = m->n_expert > 0 && !locked && moe_prefetch_default(m);
+    if (m->moe_prefetch)
+        fprintf(stderr, "moe: prefetching routed experts as whole blocks "
+                "(weights exceed RAM; RUNNER_MOE_PREFETCH=0 disables)\n");
     return true;
 }
 
@@ -2841,6 +2916,7 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
     float selw[256];
     float norms[256];
     moe_route(m, ly, xin, n_embd, ne, used, sel, selw, true);
+    model_moe_prefetch(m, ly, sel, used);
     // RUNNER_MOE_PROBE: same lookback replay as gemma_route's caller — see
     // gemma_moe_ffn's comment. xin gets overwritten in place by this
     // function's last line, so the push below must happen before that, and
@@ -2929,6 +3005,23 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
         for (int i = 0; i < n_embd; i++) out[i] = 0.0f;
     }
     if (probe) moe_probe_push(m, m->xb, n, n_embd, xdim);
+    // Prefill knows the WHOLE batch's routing before any expert runs, so this
+    // is the one place the prefetch gets real lead time: hand the union of
+    // selected experts to the OS up front and the reads overlap the compute
+    // that follows. Decode has no such luxury — routing there is inherently
+    // just-in-time.
+    if (m->moe_prefetch) {
+        int un[256], nun = 0;
+        for (int b = 0; b < n; b++) {
+            const int *sel = m->moe_sel + (size_t)b * used;
+            for (int t = 0; t < used; t++) {
+                int e = sel[t], seen = 0;
+                for (int k = 0; k < nun; k++) if (un[k] == e) { seen = 1; break; }
+                if (!seen && nun < (int)(sizeof(un) / sizeof(*un))) un[nun++] = e;
+            }
+        }
+        model_moe_prefetch(m, ly, un, nun);
+    }
     for (int e = 0; e < ne; e++) {
         int cnt = 0;
         for (int b = 0; b < n; b++) {
@@ -3076,6 +3169,7 @@ static void gemma_moe_ffn(model_t *m, const layer_t *ly, int n, int xdim) {
         rmsnorm(xn2, attn, ly->ffn_pre_norm2_w, n_embd, m->rms_eps);
         int sel[256]; float selw[256], norms[256];
         gemma_route(m, ly, attn, n_embd, ne, used, sel, selw, b == n - 1);
+        model_moe_prefetch(m, ly, sel, used);
         // RUNNER_MOE_PROBE: replay THIS layer's router against the 1/2/3
         // layers-back hidden state instead of attn, and record whether that
         // earlier-and-cheaper prediction covers what attn's router actually

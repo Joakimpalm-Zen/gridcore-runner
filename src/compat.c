@@ -27,6 +27,11 @@ void *plat_mmap_ro(const char *path, size_t *size) {
     return p;
 }
 
+// Windows: PrefetchVirtualMemory is the equivalent, but it lives behind a
+// runtime lookup on older SDKs and this path has no bigger-than-RAM story to
+// serve yet. A no-op is correct — the advice can only ever affect speed.
+void plat_willneed(const void *addr, size_t len) { (void)addr; (void)len; }
+
 void plat_munmap(void *p, size_t size) {
     (void)size;
     if (p) UnmapViewOfFile(p);
@@ -293,6 +298,17 @@ void *plat_mmap_ro(const char *path, size_t *size) {
     if (p == MAP_FAILED) return NULL;
     *size = (size_t)st.st_size;
     return p;
+}
+
+// madvise(MADV_WILLNEED) turns "fault this in 16 KB at a time, synchronously"
+// into one readahead over the whole range. That is the entire point on a model
+// larger than RAM: a 3.35 MB expert costs ~200 faults through the fault path
+// and one request through this one. Advisory and best-effort by definition —
+// if the kernel ignores it the weights still read correctly, just slower, so
+// no output can depend on whether it worked.
+void plat_willneed(const void *addr, size_t len) {
+    if (!addr || !len) return;
+    (void)madvise((void *)(uintptr_t)addr, len, MADV_WILLNEED);
 }
 
 void plat_munmap(void *p, size_t size) {

@@ -5,6 +5,39 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **MoE expert prefetch: routed experts are handed to the OS as whole blocks.**
+  On a model larger than RAM the engine's cost is not bandwidth and not
+  arithmetic — it is the NUMBER of I/O operations. Reaching an expert through
+  the mmap costs ~200 synchronous 16 KB faults; measured on gemma-4-26B on an
+  8 GB M1 that is **~17,000 faults per token at ~45–60 µs each**, which is the
+  entire token budget (4x the threads bought 1.32x, and warming the page cache
+  halved the faults without moving throughput at all). The router has just
+  named the experts this layer will read, so those byte ranges now go to the
+  OS as whole blocks. Measured, CPU, weights ~4x available RAM:
+
+  | model | prefill | decode |
+  |---|---|---|
+  | gemma-4-26B-A4B QAT Q4_0 | 2.61 → **4.33** tok/s (1.66x) | 1.37 → **1.96** tok/s (1.43x) |
+  | gpt-oss-20b keep-30 MXFP4 | 0.42 → **0.80** tok/s (1.90x) | 0.61 → **1.04** tok/s (1.70x) |
+
+  **It cannot change output.** The advice is purely about how many faults a
+  read costs, never what it returns — verified byte-identical on every MoE
+  fixture with it forced on and off.
+  **It is not a cache**, deliberately: no residency set, no eviction, no
+  hit-rate policy. A standalone probe replaying real routing traces against the
+  real GGUF measured cross-workload committee hit rates at 13.7% (top-8) and
+  24.8% (top-16) — caching contributes little and does not generalize, while
+  granularity alone captures the win.
+  **It is architecture-agnostic.** The only thing it takes from the model is
+  the list of expert ids a router just produced. It is fed by *whichever*
+  router ran, so it engages on gemma-4's dual-branch MoE and gpt-oss's generic
+  path alike — unlike the rejected `--expert-cache` tier, which hooked one
+  specific FFN path and therefore never engaged on gemma-4 at all
+  (`docs/negative-result-expert-cache.md`). Enabled automatically when weights
+  exceed available RAM and `--mlock` is not in force, since it is pointless
+  when the pages are already resident; `RUNNER_MOE_PREFETCH=0`/`1` overrides.
+
+
 - **Metal prefill is batched: 3.0x on the prompt path, and the Gemma
   families get it too.** Issue #6 — prefill ran at decode speed because
   the prompt batch encoded per-token chains: every weight matrix was
