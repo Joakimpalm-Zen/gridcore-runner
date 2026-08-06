@@ -105,13 +105,20 @@ tokenizer failing 259 of 721 strings because the *conversion* flattened its
 merge ranks. Being in the table does not mean everything passed.
 
 **Tool calls that still parse when the budget runs out.** Constrained decoding
-is not novel; where it sits is. runner's validator drives sampling on the path
-a tool call actually takes, so properties emit in declared order, unknown keys
-are impossible, and **a call truncated mid-emission still parses**. On the
-[agent-torture suite](docs/agent-torture.md) — same model, same box, each
-runtime a `--runtime` target — **12/12 valid tool calls against 5/12 for
-llama.cpp and Ollama**, and the entire gap is deep nesting and truncation.
-Bring your nastiest schema; the suite exists to be contested.
+is not novel — llama.cpp compiles JSON Schema to a GBNF grammar behind
+`response_format`, Ollama takes a schema in `format`. The difference is *where
+it sits*: runner's validator drives the sampler itself, on the path a tool call
+actually takes. Properties emit in declared order, unknown keys are impossible,
+and **a call truncated mid-emission still parses** — you get the fields it got
+to, not a syntax error.
+
+On the [agent-torture suite](docs/agent-torture.md) — same model, same box,
+each runtime a `--runtime` target — that is **12/12 valid tool calls against
+5/12 for llama.cpp and Ollama**, and the entire gap is the hard cases: deep
+nesting and truncation. The gap widens as the model weakens: on one small
+enough that llama.cpp's template path lands **no** parseable call at all
+(3/12), runner still returns 12/12. Bring your nastiest schema; the suite
+exists to be contested.
 
 **No `--host` flag to get wrong.** runner binds `127.0.0.1` with no override —
 no flag, no environment variable, no config key. llama-server and Ollama
