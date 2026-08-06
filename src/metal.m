@@ -841,23 +841,10 @@ static void enc_scale(gpu_t *g, id<MTLComputeCommandEncoder> e,
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
-static void enc_head_transform(gpu_t *g, id<MTLComputeCommandEncoder> e,
-                               model_t *m, id<MTLBuffer> logits,
-                               NSUInteger logits_off) {
-    if (m->logit_softcap <= 0.0f && m->n_suppress == 0) return;
-    int nv = m->n_vocab, ns = m->n_suppress;
-    float cap = m->logit_softcap;
-    int n = nv > ns ? nv : ns;
-    [e setComputePipelineState:g->p_head_transform];
-    [e setBuffer:logits offset:logits_off atIndex:0];
-    [e setBuffer:g->suppress ? g->suppress : g->dummy offset:0 atIndex:1];
-    [e setBytes:&nv length:4 atIndex:2];
-    [e setBytes:&cap length:4 atIndex:3];
-    [e setBytes:&ns length:4 atIndex:4];
-    [e dispatchThreads:MTLSizeMake(n, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-}
-
+// Head transforms (logit softcap / suppressed tokens) deliberately do NOT
+// live on the backend: model_forward_batch applies them on the host for both
+// the batched and the solo path, so the two cannot drift apart. A Metal-side
+// copy existed here and double-applied the softcap.
 static void enc_moe_route(gpu_t *g, id<MTLComputeCommandEncoder> e,
                           int ne, int used) {
     int tokens = 1, ls = ne;
@@ -978,18 +965,21 @@ void gpu_free(model_t *m) {
 // implemented only by the per-token path, so a model carrying any of them
 // must take that path or the batch would be silently wrong (the gemma3/4
 // families hit several of these at once).
+// The prompt-batch encoder now implements what the per-token encoder does for
+// DENSE layers — embedding scale, weightless V norm and V-less layers,
+// sandwich norms, per-layer output scale, GELU, heterogeneous per-layer
+// geometry — so the Gemma families no longer fall back to per-token submits.
+//
+// Two shapes still do, and both are real work rather than oversights: the MoE
+// encoders address their scratch (and the attention residual) at a fixed
+// offset 0, so they cannot yet be aimed at token b of a batch; and E-series
+// per-layer embeddings have no batched prepass. Both take per-token submits,
+// which is correct, just not yet fast.
 static bool metal_native_batch_eligible(const model_t *m) {
-    if (m->n_expert > 0 || m->ffn_act != ACT_SILU) return false;
-    if (m->embd_scale != 1.0f || m->v_rmsnorm) return false;
-    if (m->logit_softcap > 0.0f || m->n_suppress > 0) return false;
-    for (int l = 0; l < m->n_layer; l++) {
-        const layer_t *ly = &m->layers[l];
-        if (model_head_dim(m, l) != m->head_dim ||
-            model_n_head_kv(m, l) != m->n_head_kv) return false;
-        if (!ly->wv) return false;
-        if (ly->post_attn_norm_w || ly->post_ffn_norm_w) return false;
-        if (ly->out_scale != 1.0f && ly->out_scale != 0.0f) return false;
-    }
+    if (m->n_expert > 0) return false;
+    for (int l = 0; l < m->n_layer; l++)
+        if (m->layers[l].ple_gate || m->layers[l].is_moe ||
+            m->layers[l].moe_gemma) return false;
     return true;
 }
 
@@ -1095,9 +1085,12 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
 
     size_t ers = ggml_row_size(m->tok_embd->type, n_embd);
     for (int b = 0; b < n; b++) {
+        float *xp = (float *)g->x.contents + (size_t)b * n_embd;
         dequant_row(m->tok_embd->type,
                     (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
-                    (float *)g->x.contents + (size_t)b * n_embd, n_embd);
+                    xp, n_embd);
+        if (m->embd_scale != 1.0f)
+            for (int i = 0; i < n_embd; i++) xp[i] *= m->embd_scale;
     }
 
     id<MTLCommandBuffer> cb = [g->queue commandBuffer];
@@ -1121,13 +1114,20 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                  n_embd, q_dim_l,  g->bq[l], n, xdim, q_dim);
         enc_mv_n(g, e, m, ly->wk, g->xb, 0, g->kt, 0,
                  n_embd, kv_dim_l, g->bk[l], n, xdim, kv_dim);
-        enc_mv_n(g, e, m, ly->wv, g->xb, 0, g->vt, 0,
-                 n_embd, kv_dim_l, g->bv[l], n, xdim, kv_dim);
+        // gemma-4 global layers publish no V projection: V is the raw K
+        // projection, taken before K is normed/roped (as on the CPU path).
+        if (ly->wv)
+            enc_mv_n(g, e, m, ly->wv, g->xb, 0, g->vt, 0,
+                     n_embd, kv_dim_l, g->bv[l], n, xdim, kv_dim);
 
         for (int b = 0; b < n; b++) {
             NSUInteger qo = foff((size_t)b * q_dim);
             NSUInteger kto = foff((size_t)b * kv_dim);
+            NSUInteger vto = foff((size_t)b * kv_dim);
             if (g->qn[l]) enc_qknorm(g, e, m, g->q,  qo,  g->qn[l], m->n_head, hd);
+            if (m->v_rmsnorm)
+                enc_headnorm(g, e, m, ly->wv ? g->vt : g->kt, ly->wv ? vto : kto,
+                             g->vt, vto, nil, n_kv, hd);
             if (g->kn[l]) enc_qknorm(g, e, m, g->kt, kto, g->kn[l], n_kv, hd);
         }
         {
@@ -1173,24 +1173,36 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
 
         enc_mv_n(g, e, m, ly->wo, g->xb2, 0, g->xb, 0,
                  q_dim_l, n_embd, g->bo[l], n, xdim, xdim);
+        if (g->pan[l])
+            enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pan[l],
+                          n_embd, m->rms_eps, n, xdim, xdim);
         for (int b = 0; b < n; b++)
             enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
                      g->xb, foff((size_t)b * xdim), n_embd);
-        enc_rmsnorm_n(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l],
-                      n_embd, m->rms_eps, n, n_embd, xdim);
-        enc_mv_n(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0,
-                 n_embd, m->n_ff, nil, n, xdim, m->n_ff);
-        enc_mv_n(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0,
-                 n_embd, m->n_ff, nil, n, xdim, m->n_ff);
-        // hb/hb2 are contiguous across the batch (stride == n_ff), so the
-        // activation is one dispatch over the whole batch rather than n
-        enc_elem(g, e, g->p_silu, g->hb, 0, g->hb2, 0, n * m->n_ff);
-        enc_mv_n(g, e, m, ly->w_down, g->hb, 0, g->xb, 0,
-                 m->n_ff, n_embd, nil, n, m->n_ff, xdim);
+
+        {
+            enc_rmsnorm_n(g, e, g->x, 0, g->xb, 0, g->ffn_norm[l],
+                          n_embd, m->rms_eps, n, n_embd, xdim);
+            enc_mv_n(g, e, m, ly->w_gate, g->xb, 0, g->hb,  0,
+                     n_embd, m->n_ff, nil, n, xdim, m->n_ff);
+            enc_mv_n(g, e, m, ly->w_up,   g->xb, 0, g->hb2, 0,
+                     n_embd, m->n_ff, nil, n, xdim, m->n_ff);
+            // hb/hb2 are contiguous across the batch (stride == n_ff), so the
+            // activation is one dispatch over the whole batch rather than n
+            enc_elem(g, e, m->ffn_act == ACT_GELU ? g->p_gelu : g->p_silu,
+                     g->hb, 0, g->hb2, 0, n * m->n_ff);
+            enc_mv_n(g, e, m, ly->w_down, g->hb, 0, g->xb, 0,
+                     m->n_ff, n_embd, nil, n, m->n_ff, xdim);
+        }
+        if (g->pfn[l])
+            enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pfn[l],
+                          n_embd, m->rms_eps, n, xdim, xdim);
         for (int b = 0; b < n; b++) {
             NSUInteger xo = foff((size_t)b * n_embd), xbo = foff((size_t)b * xdim);
             NSUInteger logo = foff((size_t)b * m->n_vocab);
             enc_elem(g, e, g->p_add, g->x, xo, g->xb, xbo, n_embd);
+            if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
+                enc_scale(g, e, g->x, xo, n_embd, ly->out_scale);
             // Only the last position's logits are ever read (see the return
             // below), and the vocab matmul is the widest in the model — doing
             // it for every prompt token was pure waste.
@@ -1363,7 +1375,10 @@ static float *gpu_forward(model_t *m, int token, int pos) {
 
     enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->out_norm, n_embd, m->rms_eps);
     enc_mv(g, e, m, m->output, g->xb, 0, g->logits, 0, n_embd, m->n_vocab, nil);
-    enc_head_transform(g, e, m, g->logits, 0);
+    // No head transform here: model_forward_batch applies softcap/suppress on
+    // the host for BOTH the batched and solo paths (see its comment), so doing
+    // it here too applied softcap twice. Monotonic, so greedy argmax never saw
+    // it — but it distorted logprobs and any temperature/top-p sampling.
 
     [e endEncoding];
     [cb commit];

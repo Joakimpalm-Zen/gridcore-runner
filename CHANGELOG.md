@@ -3,6 +3,46 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## Unreleased
+
+- **Metal prefill is batched: 3.0x on the prompt path, and the Gemma
+  families get it too.** Issue #6 — prefill ran at decode speed because
+  the prompt batch encoded per-token chains: every weight matrix was
+  re-streamed once per token, and each token cost ~10 tiny dispatches per
+  layer. The batch now issues one dispatch per layer for each of rmsnorm,
+  the Q/K/V/O and FFN matmuls, rope, KV store and attention. Kernels gained
+  an explicit column dimension with strides passed in (the scratch is not
+  uniformly strided — `xb` is strided by `xdim = max(q_dim, n_embd)`), plus
+  a tunable `col_tile` (`RUNNER_METAL_COL_TILE`, default 8): one threadgroup
+  per row across ALL columns maximizes cache reuse but serializes the batch
+  and starves the GPU of threadgroups, so columns are tiled to keep
+  parallelism while still amortizing each weight fetch. Per-element
+  arithmetic and the `simd_sum` order are unchanged, so a batched prefill is
+  bit-identical to per-token submits. Logits are no longer computed for
+  every prompt position when only the last is read.
+  Measured on an M1, SmolLM2-135M Q8_0, 601-token prompt, interleaved A/B
+  against a binary built from the previous commit: **prefill 119 -> 358
+  tok/s (3.0x)**, and Metal now beats the CPU path (273 tok/s) instead of
+  losing to it by 2.3x. Decode is unchanged (~68 tok/s) — n=1 has nothing
+  to batch.
+- **The two Metal forward paths were merged.** The prompt-batch encoder
+  duplicated the layer loop and silently lacked features, which an
+  eligibility check papered over — so every Gemma model took per-token
+  submits and got none of the above. It now implements embedding scale,
+  the weightless V norm and V-less layers, sandwich norms, per-layer output
+  scale, GELU and heterogeneous per-layer geometry. Real gemma-3-4b-it
+  Q4_K_M: byte-identical CPU vs Metal, prefill 5.3 -> 7.2 tok/s on a
+  paging-bound M1. Still on per-token submits, honestly: MoE layers (their
+  encoders address scratch at a fixed offset 0) and E-series per-layer
+  embeddings (no batched prepass).
+- **Fixed: Metal applied logit softcap twice.** `model_forward_batch`
+  applies head transforms on the host for both the batched and solo paths —
+  by design, so they cannot drift — and the Metal encoder applied them
+  again. Softcap is monotonic, so greedy argmax never saw it and no
+  identity gate could fail; it distorted logprobs and any temperature/top-p
+  sampling on softcapped models (the Gemma families). The backend-side copy
+  is removed.
+
 ## v0.1.10-alpha — 2026-08-06
 
 The Metal release: the Gemma families stop falling back to CPU on Apple
