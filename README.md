@@ -848,7 +848,7 @@ on real hardware (or a RAM-capped equivalent) — not extrapolation:
 |---|---|---|
 | **8 GB Apple Silicon** | **Trinity-Nano-Preview Q4_K_M** (arcee-ai) | 13.25 tok/s decode, CPU, fully resident — the standing 8 GB recommendation |
 | **16 GB Apple Silicon** | [**gpt-oss-20b-keep30-MXFP4**](https://huggingface.co/Joakimpalm-Zen/gpt-oss-20b-keep30-MXFP4-GGUF) (11.5 GB) | 13.2–13.3 tok/s under a real 16 GiB cap; Metal fit after `sudo sysctl iogpu.wired_limit_mb=13312` |
-| **16 GB Apple Silicon** (larger model) | gemma-4-26B-A4B-it QAT Q4_0 with `--kv q8` (14.4 GB) | 7.1–7.3 tok/s under a real 16 GiB cap; live 16 GB-Mac validation pending |
+| **16 GB Apple Silicon** (larger model) | gemma-4-26B-A4B-it QAT Q4_0 with `--kv q8`, served via the chat endpoints (14.4 GB) | validated 2026-08-06 on a corporate-loaded M2 Pro 16 GB: 8.1–8.2 tok/s decode, chat + JSON-schema output correct at 5.5–5.9 tok/s, greedy-deterministic. CPU only (gemma4 has no Metal path). Serve it — raw one-shot `-p` completions on this model can land on its documented near-tie degeneracy on any ISA |
 | **24 GB GPU** | Qwen3-30B-A3B | ~72 tok/s on an RTX PRO 6000 24 GB MIG slice |
 
 Models *larger* than a machine's RAM are not recommended in any
