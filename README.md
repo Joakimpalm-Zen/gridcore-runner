@@ -250,6 +250,14 @@ covered by a teacher-forced tolerance gate (0/64 top-1 flips on every
 promoted row; the `test-tc-tol` gate in `make test`) instead of byte identity. Set
 `RUNNER_CUDA_TC=0` to pin the byte-identical scalar path everywhere.
 
+The same applies on **Metal since 0.1.11**: prompt processing runs a tiled
+GEMM on Apple's simdgroup matrix units, which reassociates the sum and so
+answers to the same `test-tc-tol` gate rather than to byte identity
+(measured 0/64 top-1 flips on both a Q8_0 and a Q4_K_M model, mean logit
+deviation ~1e-5 of range). `RUNNER_METAL_MM=0` pins the byte-identical
+matvec path; the Metal identity smokes pin it too, so each gate tests the
+path it actually claims.
+
 **Metal (Apple Silicon):** model weights are wrapped **zero-copy** from the
 mmap (no extra RAM), the KV cache lives in unified memory shared with the
 CPU, and each generated token is a single GPU command buffer. On
