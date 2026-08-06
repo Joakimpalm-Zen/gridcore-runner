@@ -389,6 +389,24 @@
     "tool",
     "long_context"
    ]
+  },
+  {
+   "id": "trinity-nano-preview-q8_0",
+   "architecture": "afmoe",
+   "family": "Arcee Trinity MoE",
+   "file": "models/Trinity-Nano-Preview-Q8_0.gguf",
+   "sha256": "5fcc2428c325e8b2035d280ff28c4c659ea240ce317a9536f230acfc352b79d1",
+   "tokenizer_reference": "arcee-ai/Trinity-Nano-Preview",
+   "reference": {
+    "implementation": "llama.cpp",
+    "revision": "b10280"
+   },
+   "checks": [
+    "load",
+    "tokenizer",
+    "chat"
+   ],
+   "notes": "Source: arcee-ai/Trinity-Nano-Preview-GGUF (Q4_K_M sha256 211127328238031b7aead5c71f488023710300da587703160e42fb981c8c335a also on record). CPU only: CUDA and Metal refuse loudly and fall back, so cpu_cuda is not declared. greedy_reference deliberately not declared: 1/6 byte-identical vs llama.cpp b10280, with the mechanism measured rather than presumed (afmoe re-normalizes every branch before the residual add, amplifying the engines' by-design quantized-matvec arithmetic difference; layer-0 verified to ~2e-4) - see docs/afmoe-divergence-triage-2026-08-05.md and docs/afmoe-sensitivity-floor-2026-08-05.md. Chat smoke and perf gates green on the M1 (13.25 tok/s decode, Q4_K_M resident, CPU). Evidence: out/divergence-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-reference-2026-08-05.json, out/bench-afmoe-m1-2026-08-05.json"
   }
  ]
 }
