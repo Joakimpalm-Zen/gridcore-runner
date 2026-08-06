@@ -28,6 +28,8 @@ typedef struct {
     id<MTLBuffer> x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
     id<MTLBuffer> moe_logits, moe_sel, moe_selw, moe_hb, moe_hb2, moe_eout;
     id<MTLBuffer> inv_freq, inv_freq_local, out_norm, dummy;
+    id<MTLBuffer> *ppn;                 // gemma4 E-series per-layer post_norm
+    id<MTLBuffer> ple, ple_tmp;         // [n][n_layer][P] slices, [n][P] gate
     id<MTLBuffer> *attn_norm, *ffn_norm;        // per layer
     id<MTLBuffer> *bq, *bk, *bv, *bo;           // per layer, may be nil
     id<MTLBuffer> *qn, *kn;                     // qwen3 per-head q/k norms
@@ -69,6 +71,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
         if (g->ueb) [g->ueb[l] release];
         if (g->deb) [g->deb[l] release];
         if (g->pan) [g->pan[l] release];
+        if (g->ppn) [g->ppn[l] release];
         if (g->pfn) [g->pfn[l] release];
         if (g->gpn1) [g->gpn1[l] release];
         if (g->gprn2) [g->gprn2[l] release];
@@ -87,7 +90,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
                              g->logits, g->moe_logits, g->moe_sel, g->moe_selw,
                              g->moe_hb, g->moe_hb2, g->moe_eout,
                              g->inv_freq, g->inv_freq_local, g->out_norm,
-                             g->dummy, g->suppress };
+                             g->dummy, g->suppress, g->ple, g->ple_tmp };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mv[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mm[i] release];
@@ -178,13 +181,21 @@ static bool metal_ensure_batch(model_t *m, int n) {
     id<MTLBuffer> att    = new_f32_scratch(g->dev, nb * (size_t)m->n_head *
                                                    (size_t)m->n_ctx);
     id<MTLBuffer> logits = new_f32_scratch(g->dev, nb * (size_t)m->n_vocab);
+    int P = m->n_embd_ple;
+    id<MTLBuffer> ple = nil, ple_tmp = nil;
+    if (P > 0) {
+        ple     = new_f32_scratch(g->dev, nb * (size_t)m->n_layer * P);
+        ple_tmp = new_f32_scratch(g->dev, nb * (size_t)P);
+    }
     if (!metal_buffer_ok(x) || !metal_buffer_ok(xb) || !metal_buffer_ok(xb2) ||
         !metal_buffer_ok(q) || !metal_buffer_ok(kt) || !metal_buffer_ok(vt) ||
         !metal_buffer_ok(hb) || !metal_buffer_ok(hb2) || !metal_buffer_ok(att) ||
-        !metal_buffer_ok(logits)) {
+        !metal_buffer_ok(logits) ||
+        (P > 0 && (!metal_buffer_ok(ple) || !metal_buffer_ok(ple_tmp)))) {
         release_buf(x); release_buf(xb); release_buf(xb2); release_buf(q);
         release_buf(kt); release_buf(vt); release_buf(hb); release_buf(hb2);
         release_buf(att); release_buf(logits);
+        release_buf(ple); release_buf(ple_tmp);
         return false;
     }
 
@@ -194,6 +205,10 @@ static bool metal_ensure_batch(model_t *m, int n) {
     release_buf(g->logits);
     g->x = x; g->xb = xb; g->xb2 = xb2; g->q = q; g->kt = kt; g->vt = vt;
     g->hb = hb; g->hb2 = hb2; g->att = att; g->logits = logits;
+    if (P > 0) {
+        release_buf(g->ple); release_buf(g->ple_tmp);
+        g->ple = ple; g->ple_tmp = ple_tmp;
+    }
     g->batch_cap = n;
     return true;
 }
@@ -356,6 +371,7 @@ static id<MTLBuffer> f32_buf_ones(id<MTLDevice> dev, const float *src, size_t n)
 }
 
 static float *gpu_forward(model_t *m, int token, int pos);
+
 static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                                        int n, int pos);
 
@@ -422,7 +438,7 @@ bool gpu_init(model_t *m) {
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
-        if (ly->ple_gate || (!ly->wv && !m->v_rmsnorm)) {
+        if (!ly->wv && !m->v_rmsnorm) {
             fprintf(stderr, "gpu: '%s' layer layout is not on the metal backend yet — using CPU\n",
                     m->arch);
             return false;
@@ -580,6 +596,12 @@ bool gpu_init(model_t *m) {
     g->q      = NEWBUF(sizeof(float) * q_dim);
     g->kt     = NEWBUF(sizeof(float) * kv_dim);
     g->vt     = NEWBUF(sizeof(float) * kv_dim);
+    if (m->n_embd_ple > 0) {
+        g->ple     = NEWBUF(sizeof(float) * (size_t)m->n_layer * m->n_embd_ple);
+        g->ple_tmp = NEWBUF(sizeof(float) * (size_t)m->n_embd_ple);
+        if (!metal_buffer_ok(g->ple) || !metal_buffer_ok(g->ple_tmp))
+            return gpu_init_fail(m, g, lib, "PLE scratch allocation");
+    }
     g->hb     = NEWBUF(sizeof(float) * m->n_ff);
     g->hb2    = NEWBUF(sizeof(float) * m->n_ff);
     g->att    = NEWBUF(sizeof(float) * (size_t)m->n_head * m->n_ctx);
@@ -636,6 +658,7 @@ bool gpu_init(model_t *m) {
     g->geb = calloc(m->n_layer, sizeof(id));
     g->ueb = calloc(m->n_layer, sizeof(id));
     g->deb = calloc(m->n_layer, sizeof(id));
+    g->ppn = calloc(m->n_layer, sizeof(id));
     g->pan = calloc(m->n_layer, sizeof(id));
     g->pfn = calloc(m->n_layer, sizeof(id));
     g->gpn1 = calloc(m->n_layer, sizeof(id));
@@ -644,6 +667,7 @@ bool gpu_init(model_t *m) {
     g->ggis = calloc(m->n_layer, sizeof(id));
     g->gdsc = calloc(m->n_layer, sizeof(id));
     if (!g->attn_norm || !g->ffn_norm || !g->bq || !g->bk || !g->bv ||
+        !g->ppn ||
         !g->bo || !g->qn || !g->kn || !g->sinks || !g->gib || !g->geb ||
         !g->ueb || !g->deb || !g->pan || !g->pfn || !g->gpn1 ||
         !g->gprn2 || !g->gpn2 || !g->ggis || !g->gdsc)
@@ -662,6 +686,7 @@ bool gpu_init(model_t *m) {
         g->kn[l] = f32_buf(dev, ly->knorm_w, l_hd);
         g->sinks[l] = f32_buf(dev, ly->attn_sinks, m->n_head);
         g->pan[l] = f32_buf(dev, ly->post_attn_norm_w, m->n_embd);
+        g->ppn[l] = f32_buf(dev, ly->ple_post_norm, m->n_embd);
         g->pfn[l] = f32_buf(dev, ly->post_ffn_norm_w, m->n_embd);
         g->gib[l] = f32_buf(dev, ly->ffn_gate_inp_b, m->n_expert);
         g->geb[l] = f32_buf(dev, ly->ffn_gate_exps_b,
@@ -1129,6 +1154,33 @@ static void enc_gemma_moe_ffn(gpu_t *g, id<MTLComputeCommandEncoder> e,
     enc_elem(g, e, g->p_add, g->xb, xbo, g->q, 0, n_embd);
 }
 
+// gemma-4 E-series per-layer embeddings, mirroring the CPU tail in model.c:
+// gate(x) -> GELU-gated against this layer's slice of the per-layer embedding
+// table -> project back to n_embd -> own RMS norm -> into the residual. Runs
+// on the post-FFN residual and BEFORE the layer output scale.
+//
+// m->ple is filled on the host by model_ple_prepass before the backend is
+// called, so the slice is copied into a shared buffer once per forward rather
+// than recomputed here.
+static void enc_ple(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                    layer_t *ly, int l, int n, int xdim) {
+    int P = m->n_embd_ple, n_embd = m->n_embd;
+    enc_mv_n(g, e, m, ly->ple_gate, g->x, 0, g->ple_tmp, 0,
+             n_embd, P, nil, n, n_embd, P);
+    // gate *= gelu-gated slice: p_gelu computes g[i] = gelu(g[i]) * u[i],
+    // which is exactly gated_act(ACT_GELU, gate, slice)
+    for (int b = 0; b < n; b++)
+        enc_elem(g, e, g->p_gelu, g->ple_tmp, foff((size_t)b * P),
+                 g->ple, foff(((size_t)b * m->n_layer + l) * P), P);
+    enc_mv_n(g, e, m, ly->ple_proj, g->ple_tmp, 0, g->xb, 0,
+             P, n_embd, nil, n, P, xdim);
+    enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->ppn[l],
+                  n_embd, m->rms_eps, n, xdim, xdim);
+    for (int b = 0; b < n; b++)
+        enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
+                 g->xb, foff((size_t)b * xdim), n_embd);
+}
+
 static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                                        int n, int pos) {
     gpu_t *g = m->gpu;
@@ -1145,6 +1197,17 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                     xp, n_embd);
         if (m->embd_scale != 1.0f)
             for (int i = 0; i < n_embd; i++) xp[i] *= m->embd_scale;
+    }
+    // E-series per-layer embedding table. model_forward_batch deliberately
+    // skips its own prepass under full offload (CUDA stages the table on the
+    // device), so Metal builds it here from the scaled embeddings it just
+    // wrote, then hands it over — shared storage, so a copy into unified
+    // memory rather than a transfer.
+    if (m->n_embd_ple > 0 && m->ple && g->ple) {
+        model_ple_prepass(m, tokens, n, (const float *)g->x.contents,
+                          m->ple, m->ple_tmp);
+        memcpy(g->ple.contents, m->ple,
+               sizeof(float) * (size_t)n * m->n_layer * m->n_embd_ple);
     }
 
     id<MTLCommandBuffer> cb = [g->queue commandBuffer];
@@ -1166,19 +1229,27 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                       n_embd, m->rms_eps, n, n_embd, xdim);
         enc_mv_n(g, e, m, ly->wq, g->xb, 0, g->q,  0,
                  n_embd, q_dim_l,  g->bq[l], n, xdim, q_dim);
-        enc_mv_n(g, e, m, ly->wk, g->xb, 0, g->kt, 0,
-                 n_embd, kv_dim_l, g->bk[l], n, xdim, kv_dim);
-        // gemma-4 global layers publish no V projection: V is the raw K
-        // projection, taken before K is normed/roped (as on the CPU path).
-        if (ly->wv)
-            enc_mv_n(g, e, m, ly->wv, g->xb, 0, g->vt, 0,
-                     n_embd, kv_dim_l, g->bv[l], n, xdim, kv_dim);
+        // gemma-4 E-series shared-KV layers project Q as usual but compute no
+        // K/V of their own: they attend over the cache an earlier layer filled,
+        // which model_kv_byte_off() below already aliases to. Projecting and
+        // storing here would overwrite that source layer's rows.
+        bool owns_kv = model_kv_owner(m, l) == l;
+        if (owns_kv) {
+            enc_mv_n(g, e, m, ly->wk, g->xb, 0, g->kt, 0,
+                     n_embd, kv_dim_l, g->bk[l], n, xdim, kv_dim);
+            // gemma-4 global layers publish no V projection: V is the raw K
+            // projection, taken before K is normed/roped (as on the CPU path).
+            if (ly->wv)
+                enc_mv_n(g, e, m, ly->wv, g->xb, 0, g->vt, 0,
+                         n_embd, kv_dim_l, g->bv[l], n, xdim, kv_dim);
+        }
 
         for (int b = 0; b < n; b++) {
             NSUInteger qo = foff((size_t)b * q_dim);
             NSUInteger kto = foff((size_t)b * kv_dim);
             NSUInteger vto = foff((size_t)b * kv_dim);
             if (g->qn[l]) enc_qknorm(g, e, m, g->q,  qo,  g->qn[l], m->n_head, hd);
+            if (!owns_kv) continue;
             if (m->v_rmsnorm)
                 enc_headnorm(g, e, m, ly->wv ? g->vt : g->kt, ly->wv ? vto : kto,
                              g->vt, vto, nil, n_kv, hd);
@@ -1194,19 +1265,21 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             // token still rotates at, writes to, and attends over exactly the
             // range a per-token submit gave it.
             enc_rope_n(g, e, m, g->q,  0, m->n_head, pos, l, n, q_dim);
-            enc_rope_n(g, e, m, g->kt, 0, n_kv,      pos, l, n, kv_dim);
+            if (owns_kv) {
+                enc_rope_n(g, e, m, g->kt, 0, n_kv, pos, l, n, kv_dim);
 
-            store_args sa = { kv_dim_l, q8, kv_dim,
-                              model_kv_byte_off(m, l) + (uint64_t)pos * row_b,
-                              (uint64_t)row_b };
-            [e setComputePipelineState:g->p_store];
-            [e setBuffer:g->kt offset:0 atIndex:0];
-            [e setBuffer:g->vt offset:0 atIndex:1];
-            [e setBuffer:g->kc offset:0 atIndex:2];
-            [e setBuffer:g->vc offset:0 atIndex:3];
-            [e setBytes:&sa length:sizeof(sa) atIndex:4];
-            [e dispatchThreads:MTLSizeMake(kv_units, n, 1)
-              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+                store_args sa = { kv_dim_l, q8, kv_dim,
+                                  model_kv_byte_off(m, l) + (uint64_t)pos * row_b,
+                                  (uint64_t)row_b };
+                [e setComputePipelineState:g->p_store];
+                [e setBuffer:g->kt offset:0 atIndex:0];
+                [e setBuffer:g->vt offset:0 atIndex:1];
+                [e setBuffer:g->kc offset:0 atIndex:2];
+                [e setBuffer:g->vc offset:0 atIndex:3];
+                [e setBytes:&sa length:sizeof(sa) atIndex:4];
+                [e dispatchThreads:MTLSizeMake(kv_units, n, 1)
+                  threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            }
 
             attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
                              (uint64_t)model_kv_byte_off(m, l),
@@ -1267,21 +1340,27 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         if (g->pfn[l])
             enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pfn[l],
                           n_embd, m->rms_eps, n, xdim, xdim);
-        for (int b = 0; b < n; b++) {
-            NSUInteger xo = foff((size_t)b * n_embd), xbo = foff((size_t)b * xdim);
-            NSUInteger logo = foff((size_t)b * m->n_vocab);
-            enc_elem(g, e, g->p_add, g->x, xo, g->xb, xbo, n_embd);
-            if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
-                enc_scale(g, e, g->x, xo, n_embd, ly->out_scale);
-            // Only the last position's logits are ever read (see the return
-            // below), and the vocab matmul is the widest in the model — doing
-            // it for every prompt token was pure waste.
-            if (l == m->n_layer - 1 && b == n - 1) {
-                enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->out_norm,
-                            n_embd, m->rms_eps);
-                enc_mv(g, e, m, m->output, g->xb, xbo, g->logits, logo,
-                       n_embd, m->n_vocab, nil);
-            }
+        for (int b = 0; b < n; b++)
+            enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
+                     g->xb, foff((size_t)b * xdim), n_embd);
+        // Order matters: the E-series branch reads the post-FFN residual of
+        // EVERY token, so it has to run before any token's output scale.
+        if (ly->ple_gate) enc_ple(g, e, m, ly, l, n, xdim);
+        if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
+            for (int b = 0; b < n; b++)
+                enc_scale(g, e, g->x, foff((size_t)b * n_embd), n_embd,
+                          ly->out_scale);
+        // Only the last position's logits are ever read (see the return
+        // below), and the vocab matmul is the widest in the model — doing it
+        // for every prompt token was pure waste.
+        if (l == m->n_layer - 1) {
+            NSUInteger xo = foff((size_t)(n - 1) * n_embd);
+            NSUInteger xbo = foff((size_t)(n - 1) * xdim);
+            enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->out_norm,
+                        n_embd, m->rms_eps);
+            enc_mv(g, e, m, m->output, g->xb, xbo, g->logits,
+                   foff((size_t)(n - 1) * m->n_vocab),
+                   n_embd, m->n_vocab, nil);
         }
     }
 
@@ -1334,6 +1413,13 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         float *xp = (float *)g->x.contents;
         for (int i = 0; i < n_embd; i++) xp[i] *= m->embd_scale;
     }
+    if (m->n_embd_ple > 0 && m->ple && g->ple) {
+        int32_t one = token;
+        model_ple_prepass(m, &one, 1, (const float *)g->x.contents,
+                          m->ple, m->ple_tmp);
+        memcpy(g->ple.contents, m->ple,
+               sizeof(float) * (size_t)m->n_layer * m->n_embd_ple);
+    }
 
     id<MTLCommandBuffer> cb = [g->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
@@ -1361,29 +1447,38 @@ static float *gpu_forward(model_t *m, int token, int pos) {
 
         enc_rmsnorm(g, e, g->x, 0, g->xb, 0, g->attn_norm[l], n_embd, m->rms_eps);
         enc_mv(g, e, m, ly->wq, g->xb, 0, g->q,  0, n_embd, q_dim_l,  g->bq[l]);
-        enc_mv(g, e, m, ly->wk, g->xb, 0, g->kt, 0, n_embd, kv_dim_l, g->bk[l]);
-        if (ly->wv)
-            enc_mv(g, e, m, ly->wv, g->xb, 0, g->vt, 0, n_embd, kv_dim_l, g->bv[l]);
+        // shared-KV layers (gemma-4 E-series) own no cache rows: project Q
+        // only and attend over the layer model_kv_byte_off() aliases to.
+        bool owns_kv = model_kv_owner(m, l) == l;
+        if (owns_kv) {
+            enc_mv(g, e, m, ly->wk, g->xb, 0, g->kt, 0, n_embd, kv_dim_l, g->bk[l]);
+            if (ly->wv)
+                enc_mv(g, e, m, ly->wv, g->xb, 0, g->vt, 0, n_embd, kv_dim_l, g->bv[l]);
+        }
         if (g->qn[l]) enc_qknorm(g, e, m, g->q,  0, g->qn[l], m->n_head, hd);
-        if (m->v_rmsnorm)
-            enc_headnorm(g, e, m, ly->wv ? g->vt : g->kt, 0, g->vt, 0, nil, n_kv, hd);
-        if (g->kn[l]) enc_qknorm(g, e, m, g->kt, 0, g->kn[l], n_kv, hd);
+        if (owns_kv) {
+            if (m->v_rmsnorm)
+                enc_headnorm(g, e, m, ly->wv ? g->vt : g->kt, 0, g->vt, 0, nil, n_kv, hd);
+            if (g->kn[l]) enc_qknorm(g, e, m, g->kt, 0, g->kn[l], n_kv, hd);
+        }
         enc_rope(g, e, m, g->q,  0, m->n_head, pos, l);
-        enc_rope(g, e, m, g->kt, 0, n_kv,      pos, l);
+        if (owns_kv) enc_rope(g, e, m, g->kt, 0, n_kv, pos, l);
         NANCK(g->xb, n_embd, "attn-norm");
         NANCK(g->q, q_dim_l, "q-post-rope");
         NANCK(g->kt, kv_dim_l, "k-post-rope");
         NANCK(g->vt, kv_dim_l, "v");
 
-        store_args sa = { kv_dim_l, q8, 0, kv_off, 0 };
-        [e setComputePipelineState:g->p_store];
-        [e setBuffer:g->kt offset:0 atIndex:0];
-        [e setBuffer:g->vt offset:0 atIndex:1];
-        [e setBuffer:g->kc offset:0 atIndex:2];
-        [e setBuffer:g->vc offset:0 atIndex:3];
-        [e setBytes:&sa length:sizeof(sa) atIndex:4];
-        [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
-          threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        if (owns_kv) {
+            store_args sa = { kv_dim_l, q8, 0, kv_off, 0 };
+            [e setComputePipelineState:g->p_store];
+            [e setBuffer:g->kt offset:0 atIndex:0];
+            [e setBuffer:g->vt offset:0 atIndex:1];
+            [e setBuffer:g->kc offset:0 atIndex:2];
+            [e setBuffer:g->vc offset:0 atIndex:3];
+            [e setBytes:&sa length:sizeof(sa) atIndex:4];
+            [e dispatchThreads:MTLSizeMake(kv_units, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        }
 
         attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
                          (uint64_t)model_kv_byte_off(m, l),
@@ -1429,6 +1524,7 @@ static float *gpu_forward(model_t *m, int token, int pos) {
         if (g->pfn[l])
             enc_rmsnorm(g, e, g->xb, 0, g->xb, 0, g->pfn[l], n_embd, m->rms_eps);
         enc_elem(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd);
+        if (ly->ple_gate) enc_ple(g, e, m, ly, l, 1, n_embd);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
             enc_scale(g, e, g->x, 0, n_embd, ly->out_scale);
         if (nantrace) {

@@ -18,6 +18,12 @@ void dequant_row(int type, const void *src, float *dst, int n) {
     abort();
 }
 
+void model_ple_prepass(model_t *m, const int32_t *tokens, int n,
+                       const float *x, float *out, float *scratch) {
+    (void)m; (void)tokens; (void)n; (void)x; (void)out; (void)scratch;
+    abort();
+}
+
 int main(void) {
     model_t m = {0};
     gpu_t *g = calloc(1, sizeof(*g));

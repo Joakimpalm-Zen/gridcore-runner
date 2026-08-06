@@ -609,6 +609,25 @@ else
 	@echo "metal GELU overflow smoke skipped: macOS-only backend"
 endif
 
+test-metal-eseries: runner
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		for cfg in 0,16 3,0 3,16; do \
+		  $(PYTHON) scripts/make-test-model.py --eseries $$cfg test-es.gguf; \
+		  ./$(RUNNER_EXE) -m test-es.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-es-cpu.out 2>/dev/null; \
+		  env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-es.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-es-gpu.out 2> metal-es-gpu.err; \
+		  cmp -s metal-es-cpu.out metal-es-gpu.out || { echo "eseries $$cfg differs"; exit 1; }; \
+		  grep -q "Metal backend" metal-es-gpu.err || { echo "eseries $$cfg: Metal never engaged"; exit 1; }; \
+		done; \
+		echo "metal E-series ok"; \
+	else \
+		echo "metal E-series smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal E-series smoke skipped: macOS-only backend"
+endif
+
 test-metal-swa: runner
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
@@ -829,4 +848,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: clean debug ptx test test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
