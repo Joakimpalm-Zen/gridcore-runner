@@ -939,10 +939,42 @@ static bool json_ok(void *ud, int id) {
     return constraint_token_ok(ud, id, false);
 }
 
+// RUNNER_SCHEMA_TRACE=1: one line per accepted token showing what the
+// constraint layer did with it -- phase, visible offset, validator depth and
+// done flag, and the decoded bytes. Added 2026-08-07 after two hypotheses
+// about a "generation stops with no payload" defect were both wrong from
+// reading the code alone; the first trace run answered it in one line.
+static void schema_trace(const engine *e, bool schema, const char *bytes,
+                         int n, int visible, bool fed_ok) {
+    static int on = -1;
+    if (on < 0) {
+        const char *v = getenv("RUNNER_SCHEMA_TRACE");
+        on = v && *v && strcmp(v, "0") ? 1 : 0;
+    }
+    if (!on) return;
+    char esc[128];
+    int k = 0;
+    for (int i = 0; i < n && k < (int)sizeof(esc) - 5; i++) {
+        unsigned char c = (unsigned char)bytes[i];
+        if (c == '\n') { esc[k++] = '\\'; esc[k++] = 'n'; }
+        else if (c == '\t') { esc[k++] = '\\'; esc[k++] = 't'; }
+        else if (c < 32 || c > 126) k += snprintf(esc + k, sizeof(esc) - k, "\\x%02x", c);
+        else esc[k++] = (char)c;
+    }
+    esc[k] = 0;
+    fprintf(stderr, "schema-trace phase=%d n=%d visible=%d fed=%d done=%d "
+            "depth=%d bytes=\"%s\"\n",
+            e->constraint_phase, n, visible, (int)fed_ok,
+            schema ? (int)e->sv.done : (int)e->jv.done,
+            schema ? e->sv.depth : 0, esc);
+}
+
 static int constraint_accept(engine *e, bool schema, const char *bytes, int n,
                              gen_cb cb, void *ud) {
     int visible;
-    if (!constraint_feed(e, schema, bytes, n, &visible)) return 1;
+    bool fed = constraint_feed(e, schema, bytes, n, &visible);
+    schema_trace(e, schema, bytes, n, visible, fed);
+    if (!fed) return 1;
     // the hidden span is the thinking prelude (tags included); chat serving
     // opts in to receive it so its splitter can surface the reasoning
     int hidden = visible >= 0 ? visible : n;
