@@ -1354,6 +1354,32 @@ static int feed_byte(sval *v, uint8_t c) {
     return -1;
 }
 
+// Is whitespace at the current position CONTENT rather than separator?
+//
+// JSON permits insignificant whitespace between every token, so a validator
+// accepts an all-whitespace token anywhere -- and a model that is unsure what
+// to emit next will happily emit it until the budget is gone. Measured on
+// e4b-q4km with a four-way tool schema: 253 of 377 output bytes were
+// whitespace, in one 246-byte run, leaving 124 bytes of actual JSON. That is
+// the "200 tokens of nothing" and "~150 blank lines" this program has twice
+// filed as a schema defect.
+//
+// Suppressing insignificant whitespace cannot make any valid document
+// unreachable, because it is optional everywhere it is legal. Inside a string
+// it is NOT optional -- there it is the value -- so this reports that case and
+// the caller leaves such tokens alone.
+bool sval_ws_is_content(const sval *v) {
+    if (v->depth <= 0) return false;
+    const sframe *f = &v->stack[v->depth - 1];
+    if (!f->node) return false;
+    // any-subtree runs its own machine; be conservative and treat its
+    // whitespace as content rather than reach into it.
+    if (f->node->kind == SN_ANY) return true;
+    // Mid-string (P_STR with the opening quote consumed) is the content case.
+    return f->phase == P_STR &&
+           (f->node->kind == SN_STR || f->node->kind == SN_ENUM);
+}
+
 bool sval_feed(sval *v, const char *s, int len) {
     for (int i = 0; i < len; i++) {
         int r = feed_byte(v, (uint8_t)s[i]);

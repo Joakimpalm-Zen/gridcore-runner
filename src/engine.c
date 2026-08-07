@@ -776,9 +776,34 @@ static int tag_advance(const char *tag, int match, char c) {
     return 0;
 }
 
+// A token that is nothing but insignificant whitespace is rejected under a
+// schema. It is always legal JSON, which is exactly the problem: it keeps the
+// token in the candidate set at every position, and an unsure model emits runs
+// of it until -n is exhausted. Whitespace is optional wherever it is legal, so
+// refusing it removes no reachable document; inside a string it is content and
+// sval_ws_is_content() says so, leaving those tokens admissible.
+static bool all_insignificant_ws(const sval *sv, const char *bytes, int n) {
+    // RUNNER_SCHEMA_ALLOW_WS=1 restores the old behaviour, so the effect can
+    // be A/B'd in one binary rather than across two builds -- the only way
+    // this project has found to keep a before/after honest.
+    static int allow = -1;
+    if (allow < 0) {
+        const char *e = getenv("RUNNER_SCHEMA_ALLOW_WS");
+        allow = e && *e && strcmp(e, "0") ? 1 : 0;
+    }
+    if (allow) return false;
+    if (n <= 0 || sval_ws_is_content(sv)) return false;
+    for (int i = 0; i < n; i++) {
+        char c = bytes[i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return false;
+    }
+    return true;
+}
+
 static bool constraint_payload_feed(engine *e, bool schema,
                                     const char *bytes, int n) {
     if (schema) {
+        if (all_insignificant_ws(&e->sv, bytes, n)) return false;
         sval tmp = e->sv;
         if (!sval_feed(&tmp, bytes, n)) return false;
         e->sv = tmp;

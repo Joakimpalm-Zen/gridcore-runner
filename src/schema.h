@@ -54,6 +54,10 @@ typedef struct {
 
 void sval_init (sval *v, const snode *root);
 bool sval_feed (sval *v, const char *s, int n);
+// True when whitespace at the current position is string CONTENT, not an
+// insignificant separator. Callers suppress separator whitespace to stop a
+// constrained model burning its budget on blank runs; see schema.c.
+bool sval_ws_is_content(const sval *v);
 int  sval_close(sval *v, char *out, int cap);
 
 #endif // RUNNER_SCHEMA_H
