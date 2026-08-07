@@ -492,11 +492,33 @@ bool gpu_kv_q8_ok(void) {
 // oversubscribed machine it makes the tail page harder than before. Explicit
 // --gpu-layers bypasses this: an operator asking for a specific split gets it.
 static bool metal_partial_pays(const model_t *m, uint64_t wrapped) {
-    uint64_t total = m->gf.map_size;
-    uint64_t tail = total > wrapped ? total - wrapped : 0;
     uint64_t have = plat_ram_available_bytes();
-    if (!have) return false;             // cannot tell: do not gamble
-    return tail <= have;
+    if (!have) return false;                 // cannot tell: do not gamble
+    // The WRAPPED part must fit in RAM. This is the condition that matters and
+    // it is not the one this guard originally checked.
+    //
+    // The design behind partial offload argued the win was residency: wiring
+    // weights into the Metal working set makes them non-evictable, so an
+    // oversubscribed model would stop paging. That is wrong, and physics says
+    // why -- you cannot pin more bytes than the machine has. Measured twice on
+    // an 8 GB M1 with ~2.8 GB available:
+    //   gemma-4-26B, 3.8 GB wrapped:  1.5-1.7 -> 0.21 tok/s   (8x slower)
+    //   e4b-q4km,    4.3 GB wrapped:  5.6     -> 0.15 tok/s   (35x slower)
+    // Both passed the old tail-fits check. Neither could hold its wrap
+    // resident, so the pinned pages thrashed against everything else.
+    //
+    // What survives is narrow and honest: partial offload helps a model that
+    // FITS in RAM but exceeds maxBufferLength (0.75x the working set), where
+    // full offload is impossible for buffer-size reasons alone. There the win
+    // is the ordinary compute blend, not residency.
+    // So the automatic rule is the narrow case only: the WHOLE model fits in
+    // RAM, and full offload is impossible for buffer-size reasons alone. Then
+    // the split costs nothing in residency and gains the compute blend. An
+    // oversubscribed model is refused however the split is drawn, because
+    // whatever is pinned is taken from what the rest must stream through.
+    uint64_t total = m->gf.map_size;
+    uint64_t margin = have / 8;              // KV, scratch, the OS
+    return total + margin <= have && wrapped <= total;
 }
 
 static int metal_fit_layers(model_t *m, uint64_t budget, int cap,
@@ -682,15 +704,29 @@ bool gpu_init(model_t *m) {
     int gpu_K = m->n_layer;
     uint64_t ws_limit = dev.recommendedMaxWorkingSetSize;
     {
-        // The ceiling covers KV and scratch as well as weights -- measured: a
-        // 5.17 GB wrap was refused under a 5.73 GB limit -- so subtract what
-        // this load also allocates and keep a margin, rather than trusting the
-        // remainder to be exact. Erring towards wrapping less costs a layer;
-        // erring the other way costs the whole load.
+        // TWO ceilings, and the second is the one that actually bites.
+        //
+        // recommendedMaxWorkingSetSize is the total a device wants resident.
+        // maxBufferLength is the largest SINGLE MTLBuffer, and it is smaller:
+        // 4.29 GB against 5.73 on an M1, 0.75x. The weight wrap is one buffer,
+        // so it is bounded by maxBufferLength, not by the working set.
+        //
+        // Missing this produced a failure whose own message was self-
+        // contradictory -- "10.3 GB requested, device working-set limit
+        // 12.7 GB", requested < limit, yet it failed -- reported from a 16 GB
+        // M2 Pro on 2026-08-07. It also explains, correctly this time, why a
+        // 5.17 GB artifact would not load here earlier: 5.17 > 4.29. The
+        // comment that used to sit here blamed KV and scratch for that, and
+        // was wrong.
+        //
+        // The budget still subtracts KV and scratch on the working-set side,
+        // since those are separate buffers competing for the same residency.
         uint64_t other = (uint64_t)model_kv_byte_off(m, m->n_layer) * 2
                        + 512ull * 1024 * 1024;
         uint64_t budget = ws_limit > other
                         ? (uint64_t)((double)(ws_limit - other) * 0.94) : 0;
+        uint64_t max_buf = (uint64_t)dev.maxBufferLength;
+        if (budget > max_buf) budget = max_buf;
         int cap = m->gpu_layers_override;
         bool need_split = wlen > budget || (cap > 0 && cap < m->n_layer);
         if (need_split) {
@@ -721,8 +757,9 @@ bool gpu_init(model_t *m) {
                 // RAM. When it does not, pinning part of the model just takes
                 // memory from the part that is streaming.
                 return gpu_init_fail(m, g, lib,
-                    "partial offload would leave more CPU-side weights than "
-                    "RAM can hold — CPU-only is faster");
+                    "model is larger than available RAM, so no split can be "
+                    "held resident — CPU-only is faster (--gpu-layers forces "
+                    "a split anyway)");
             } else {
                 gpu_K = fit;
                 if (gpu_K < m->n_layer) {
@@ -751,12 +788,18 @@ bool gpu_init(model_t *m) {
             // with (16 GB-Mac field report, 2026-08-05)
             char why[192];
             uint64_t ws = dev.recommendedMaxWorkingSetSize;
+            // Name BOTH limits: a message quoting only the working set reads
+            // as self-contradictory whenever maxBufferLength is what refused
+            // the allocation, and that is the common case (it is 0.75x the
+            // working set). A field report spent its entire run trying to
+            // reconcile "10.3 requested, 12.7 limit, failed".
+            uint64_t mb = (uint64_t)dev.maxBufferLength;
             snprintf(why, sizeof why,
-                     "weight buffer allocation: %.1f GB requested, device "
-                     "working-set limit %.1f GB%s",
-                     wlen / 1e9, ws / 1e9,
-                     (uint64_t)wlen > ws ? " — model exceeds Metal fit ceiling"
-                                         : "");
+                     "weight buffer allocation: %.1f GB requested; device max "
+                     "single buffer %.1f GB, working set %.1f GB%s",
+                     wlen / 1e9, mb / 1e9, ws / 1e9,
+                     (uint64_t)wlen > mb ? " — exceeds the per-buffer limit"
+                     : ((uint64_t)wlen > ws ? " — exceeds the working set" : ""));
             return gpu_init_fail(m, g, lib, why);
         }
     }
