@@ -500,9 +500,12 @@ $(TEST_METAL_SHADERS): tests/test_metal_shaders.m src/kernels_metal.h
 	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
 	    tests/test_metal_shaders.m -o $@ -framework Metal -framework Foundation
 
-$(TEST_METAL_OWNERSHIP): tests/test_metal_ownership.m src/metal.m $(HDR)
+# compat.c joins the link because the partial-offload residency guard in
+# metal.m calls plat_ram_available_bytes(): deciding whether a split pays
+# needs to know how much RAM the CPU tail would have to stream through.
+$(TEST_METAL_OWNERSHIP): tests/test_metal_ownership.m src/metal.m src/compat.c $(HDR)
 	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
-	    tests/test_metal_ownership.m -o $@ $(LDFLAGS)
+	    tests/test_metal_ownership.m src/compat.c -o $@ $(LDFLAGS)
 
 # Runs inside `make test` on macOS: a shader that does not compile makes every
 # run fall back to the CPU silently, which no correctness gate can see.

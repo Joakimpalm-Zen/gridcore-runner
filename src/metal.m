@@ -4,6 +4,7 @@
 
 #include "runner.h"
 #include "kernels_metal.h"
+#include "compat.h"   // plat_ram_available_bytes: the residency guard below
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -473,6 +474,69 @@ bool gpu_kv_q8_ok(void) {
     return true;
 }
 
+// Largest K such that the prologue plus layers [0,K) fit `budget` bytes, and
+// whether a prefix wrap is legal for this file at all.
+//
+// A zero-copy wrap must be one contiguous range, and every kernel indexes
+// g->weights by a FILE offset, so the only shape needing no arithmetic change
+// is a prefix: [0, end of blk.K-1). That requires non-layer tensors to sit
+// before blk.0 and blocks to be ordered -- true of gemma-4-26B, gemma-3-4b,
+// e2b, Trinity-Nano and gpt-oss, five architectures, but a property of how
+// converters write files rather than of the format. So it is CHECKED, and a
+// file that violates it gets full offload or CPU, never a truncated wrap
+// pointed at the wrong weights.
+// Would a partial split actually help? Only if the weights the CPU keeps still
+// fit in available RAM. Wiring K layers into the Metal working set makes them
+// non-evictable, which is the whole point -- but it also removes that memory
+// from the page cache the remaining layers stream through, so on a heavily
+// oversubscribed machine it makes the tail page harder than before. Explicit
+// --gpu-layers bypasses this: an operator asking for a specific split gets it.
+static bool metal_partial_pays(const model_t *m, uint64_t wrapped) {
+    uint64_t total = m->gf.map_size;
+    uint64_t tail = total > wrapped ? total - wrapped : 0;
+    uint64_t have = plat_ram_available_bytes();
+    if (!have) return false;             // cannot tell: do not gamble
+    return tail <= have;
+}
+
+static int metal_fit_layers(model_t *m, uint64_t budget, int cap,
+                            bool *layout_ok, uint64_t *wrap_end) {
+    *layout_ok = false;
+    *wrap_end = 0;
+    uint64_t *end_of = calloc((size_t)m->n_layer + 1, sizeof(uint64_t));
+    if (!end_of) return 0;
+    uint64_t prologue_end = 0;
+    int prev_layer = -1;
+    bool ok = true;
+    for (uint64_t t = 0; t < m->gf.n_tensors && ok; t++) {
+        gguf_tensor *w = &m->gf.tensors[t];
+        uint64_t beg = (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map);
+        uint64_t end = beg + w->nbytes;
+        int li = strncmp(w->name, "blk.", 4) ? -1 : atoi(w->name + 4);
+        if (li < 0) {
+            if (prev_layer >= 0) { ok = false; break; }   // non-layer after a layer
+            if (end > prologue_end) prologue_end = end;
+        } else if (li >= m->n_layer || li < prev_layer) {
+            ok = false;                                    // out of range or unordered
+        } else {
+            prev_layer = li;
+            if (end > end_of[li + 1]) end_of[li + 1] = end;
+        }
+    }
+    int K = 0;
+    if (ok && end_of[m->n_layer] > 0) {
+        end_of[0] = prologue_end;
+        for (int i = 1; i <= m->n_layer; i++)
+            if (end_of[i] < end_of[i - 1]) end_of[i] = end_of[i - 1];
+        *layout_ok = true;
+        int top = (cap > 0 && cap < m->n_layer) ? cap : m->n_layer;
+        for (int i = 1; i <= top; i++)
+            if (end_of[i] <= budget) { K = i; *wrap_end = end_of[i]; } else break;
+    }
+    free(end_of);
+    return K;
+}
+
 bool gpu_init(model_t *m) {
     if (m->attn_out_gate) {
         fprintf(stderr, "gpu: gated attention (afmoe) is not on the metal backend yet — using CPU\n");
@@ -606,6 +670,70 @@ bool gpu_init(model_t *m) {
     // mmap always maps whole pages, so the rounded tail is valid memory)
     size_t page = 16384;
     size_t wlen = (m->gf.map_size + page - 1) & ~(page - 1);
+
+    // Choose K. Full offload stays the default and the fast path; a partial
+    // split is only entered when the whole file cannot be wrapped, because a
+    // model that fits should never pay a CPU tail.
+    //
+    // The ceiling covers KV and scratch as well as weights, not weights alone
+    // -- measured: a 5.17 GB wrap was refused under a 5.73 GB limit. So the
+    // budget subtracts what this load will also allocate, and keeps a margin
+    // on top rather than trusting the remainder to be exact.
+    int gpu_K = m->n_layer;
+    uint64_t ws_limit = dev.recommendedMaxWorkingSetSize;
+    {
+        // The ceiling covers KV and scratch as well as weights -- measured: a
+        // 5.17 GB wrap was refused under a 5.73 GB limit -- so subtract what
+        // this load also allocates and keep a margin, rather than trusting the
+        // remainder to be exact. Erring towards wrapping less costs a layer;
+        // erring the other way costs the whole load.
+        uint64_t other = (uint64_t)model_kv_byte_off(m, m->n_layer) * 2
+                       + 512ull * 1024 * 1024;
+        uint64_t budget = ws_limit > other
+                        ? (uint64_t)((double)(ws_limit - other) * 0.94) : 0;
+        int cap = m->gpu_layers_override;
+        bool need_split = wlen > budget || (cap > 0 && cap < m->n_layer);
+        if (need_split) {
+            bool layout_ok = false;
+            uint64_t wrap_end = 0;
+            int fit = metal_fit_layers(m, budget, cap, &layout_ok, &wrap_end);
+            if (!layout_ok) {
+                if (wlen > budget)
+                    return gpu_init_fail(m, g, lib,
+                        "model exceeds the Metal working set and its tensor "
+                        "layout forbids a partial split (non-layer tensors "
+                        "after blk.0, or blocks out of order)");
+                fprintf(stderr, "gpu: --gpu-layers ignored — tensor layout "
+                        "does not allow a partial split\n");
+            } else if (fit < 1) {
+                return gpu_init_fail(m, g, lib,
+                    "not even one layer fits the Metal working set");
+            } else if (wlen > budget && cap <= 0 &&
+                       !metal_partial_pays(m, wrap_end)) {
+                // Auto-selected partial offload that would make things WORSE.
+                // Measured on an 8 GB M1 with gemma-4-26B: wrapping 3.8 GB of
+                // 14.4 left the remaining 10.6 GB of CPU-side weights fighting
+                // an already-starved page cache, and decode went 1.5-1.7 ->
+                // 0.21 tok/s. An 8x regression, enabled by default, on the
+                // exact model this feature was built for.
+                //
+                // Residency only pays if the tail the CPU still owns fits in
+                // RAM. When it does not, pinning part of the model just takes
+                // memory from the part that is streaming.
+                return gpu_init_fail(m, g, lib,
+                    "partial offload would leave more CPU-side weights than "
+                    "RAM can hold — CPU-only is faster");
+            } else {
+                gpu_K = fit;
+                if (gpu_K < m->n_layer) {
+                    wlen = (size_t)((wrap_end + page - 1) & ~(uint64_t)(page - 1));
+                    if (wlen > m->gf.map_size)
+                        wlen = (m->gf.map_size + page - 1) & ~(size_t)(page - 1);
+                }
+            }
+        }
+    }
+
     g->weights = [dev newBufferWithBytesNoCopy:m->gf.map
                                         length:wlen
                                        options:MTLResourceStorageModeShared
@@ -803,12 +931,21 @@ bool gpu_init(model_t *m) {
     m->kv_owner = KV_OWNER_GPU_BACKEND;
     m->gpu = g;
     m->gpu_owner = g;
-    // Metal always runs the whole model; without this the dispatcher takes the
-    // partial-offload branch (gpu_layers == 0) and re-runs every layer on the
-    // CPU, silently discarding the GPU's work
-    m->gpu_layers = m->n_layer;
+    // K layers on the device. Full offload (K == n_layer) returns logits and
+    // never reaches the CPU loop; a partial split leaves the boundary
+    // activation in the host x buffer and the CPU finishes from layer K.
+    // Setting this wrong in either direction is silent: too high and the
+    // dispatcher asks for logits the device never computed, too low and every
+    // layer is re-run on the CPU, discarding the GPU's work.
+    m->gpu_layers = gpu_K;
     fprintf(stderr, "gpu: Metal backend on %s%s\n", dev.name.UTF8String,
             g->weights_copied ? " (weights copied)" : " (zero-copy weights)");
+    if (gpu_K < m->n_layer)
+        fprintf(stderr, "gpu: partial offload — %d of %d layers on the GPU "
+                "(%.1f GB wrapped of %.1f GB; working set %.1f GB). The "
+                "remaining %d run on the CPU.\n",
+                gpu_K, m->n_layer, wlen / 1e9, m->gf.map_size / 1e9,
+                ws_limit / 1e9, m->n_layer - gpu_K);
     return true;
 
 unsupported:
@@ -1102,6 +1239,18 @@ void gpu_free(model_t *m) {
 // must take that path or the batch would be silently wrong (the gemma3/4
 // families hit several of these at once).
 
+// Partial split hand-off: the CPU loop resumes at layer gpu_layers and reads
+// the boundary hidden state from the host x buffer. On Metal this is a copy
+// within one address space -- g->x is shared storage, so it IS host memory --
+// and it is small (n * n_embd floats; 11 KB at decode). The KV needs nothing:
+// m->kcache/m->vcache already point at g->kc/g->vc contents, so the layers
+// the device just wrote are already visible to the CPU.
+static void metal_handoff_boundary(model_t *m, int n) {
+    gpu_t *g = (gpu_t *)m->gpu;
+    if (!g || !m->x) return;
+    memcpy(m->x, g->x.contents, sizeof(float) * (size_t)n * m->n_embd);
+}
+
 bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                        bool want_logits, float **logits) {
     // One encoder for every n, decode included. There used to be a second,
@@ -1115,11 +1264,18 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 "releasing the backend, continuing on CPU\n");
         return false;
     }
+    bool partial = m->gpu_layers > 0 && m->gpu_layers < m->n_layer;
     float *lg = gpu_forward_native_batch(m, tokens, n, pos);
     if (!lg) return false;
+    if (partial) {
+        metal_handoff_boundary(m, n);
+        if (logits) *logits = NULL;
+        return true;
+    }
     if (logits) *logits = want_logits ? lg : NULL;
     return true;
 }
+
 
 static NSUInteger foff(size_t elems) {
     return (NSUInteger)(elems * sizeof(float));
@@ -1291,7 +1447,10 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
     id<MTLCommandBuffer> cb = [g->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
 
-    for (int l = 0; l < m->n_layer; l++) {
+    // Partial split: only the leading gpu_layers run here.
+    int n_gpu_layers = m->gpu_layers > 0 && m->gpu_layers < m->n_layer
+                     ? m->gpu_layers : m->n_layer;
+    for (int l = 0; l < n_gpu_layers; l++) {
         layer_t *ly = &m->layers[l];
         int hd = model_head_dim(m, l);
         int n_kv = model_n_head_kv(m, l);
@@ -1514,7 +1673,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         // Only the last position's logits are ever read (see the return
         // below), and the vocab matmul is the widest in the model — doing it
         // for every prompt token was pure waste.
-        if (l == m->n_layer - 1) {
+        if (l == m->n_layer - 1 && n_gpu_layers == m->n_layer) {
             NSUInteger xo = foff((size_t)(n - 1) * n_embd);
             NSUInteger xbo = foff((size_t)(n - 1) * xdim);
             enc_rmsnorm(g, e, g->x, xo, g->xb, xbo, g->out_norm,
