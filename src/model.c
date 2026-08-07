@@ -961,9 +961,57 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     return true;
 }
 
+// A shard of a split model, refused by name rather than by symptom.
+//
+// runner reads exactly one file's tensor table. Handed shard 1 of a 3-way
+// split it used to bind what that shard happened to hold and then print a wall
+// of "missing tensor blk.N..." — every line true, none of them the reason. The
+// count is sitting in metadata this function has already parsed.
+//
+// llama.cpp's layout, followed verbatim: `split.no` (0-based), `split.count`,
+// and filenames `<prefix>-%05d-of-%05d.gguf` 1-based.
+static bool refuse_split_model(gguf_file *g, const char *path) {
+    uint32_t count = gguf_get_u32(g, "split.count", 0);
+    if (count <= 1) return false;
+    uint32_t no = gguf_get_u32(g, "split.no", 0);
+    fprintf(stderr,
+            "error: %s is part %u of a %u-part split model, and runner reads a "
+            "single file — loading it alone would bind only the tensors this "
+            "part holds\n", path, no + 1, count);
+    // Name the whole set when the filename follows the convention, so the fix
+    // does not depend on the reader knowing what the parts are called.
+    const char *base = strrchr(path, '/');
+#ifdef _WIN32
+    const char *bs = strrchr(path, '\\');
+    if (bs && (!base || bs > base)) base = bs;
+#endif
+    base = base ? base + 1 : path;
+    char stem[512];
+    snprintf(stem, sizeof stem, "%s", base);
+    char *tail = strstr(stem, "-00001-of-");
+    if (!tail) {
+        char want[64];
+        snprintf(want, sizeof want, "-%05u-of-", no + 1);
+        tail = strstr(stem, want);
+    }
+    if (tail) {
+        *tail = 0;
+        fprintf(stderr, "  the complete set is");
+        for (uint32_t i = 1; i <= count && i <= 8; i++)
+            fprintf(stderr, " %s-%05u-of-%05u.gguf", stem, i, count);
+        if (count > 8) fprintf(stderr, " ... (%u parts)", count);
+        fprintf(stderr, "\n");
+    }
+    fprintf(stderr,
+            "  join them first: llama.cpp's `llama-gguf-split --merge "
+            "<first-part> <output.gguf>`\n");
+    return true;
+}
+
 static bool model_bind_weights(model_t *m, const char *path, const model_params *p) {
     if (!gguf_open(&m->gf, path)) return false;
     gguf_file *g = &m->gf;
+    if (refuse_split_model(g, path)) return false;
     // A profile is opt-in metadata: legacy/dense GGUFs remain admitted exactly
     // as before. Once any profile key is present, however, the contract is
     // atomic and fail-closed. Validate it before path/state/tensor allocation.
