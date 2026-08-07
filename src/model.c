@@ -420,10 +420,12 @@ void model_moe_prefetch(const model_t *m, const layer_t *ly,
     }
 }
 
-uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert) {
+// The routed expert banks alone — the only part of a layer that sparsity
+// applies to. The router and any always-on shared expert are deliberately not
+// counted here: every token touches those, so they belong to the hot set.
+static uint64_t layer_routed_expert_bytes(const layer_t *ly, int n_expert) {
     uint64_t wb = 0;
     if (!ly->is_moe) return 0;
-    if (ly->ffn_gate_inp) wb += ly->ffn_gate_inp->nbytes;
     if (ly->ffn_gate_up_exps) wb += ly->ffn_gate_up_exps->nbytes;  // gemma-4 fused
     if (ly->moe_split) {
         for (int e = 0; e < n_expert; e++)
@@ -433,12 +435,72 @@ uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert) {
         if (ly->ffn_up_exps)   wb += ly->ffn_up_exps->nbytes;
         if (ly->ffn_down_exps) wb += ly->ffn_down_exps->nbytes;
     }
+    return wb;
+}
+
+uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert) {
+    if (!ly->is_moe) return 0;
+    uint64_t wb = layer_routed_expert_bytes(ly, n_expert);
+    if (ly->ffn_gate_inp) wb += ly->ffn_gate_inp->nbytes;
     if (ly->moe_gemma) {   // dense GELU shared expert, evaluated with the layer
         if (ly->w_gate) wb += ly->w_gate->nbytes;
         if (ly->w_up)   wb += ly->w_up->nbytes;
         if (ly->w_down) wb += ly->w_down->nbytes;
     }
     return wb;
+}
+
+uint64_t model_hot_set_bytes(const model_t *m) {
+    if (m->n_expert <= 0 || m->n_expert_used <= 0 ||
+        m->n_expert_used >= m->n_expert) return 0;      // dense, or not sparse
+    uint64_t routed = 0;
+    for (int l = 0; l < m->n_layer; l++)
+        routed += layer_routed_expert_bytes(&m->layers[l], m->n_expert);
+    if (!routed || routed > m->gf.map_size) return 0;   // nothing to discount
+    uint64_t hot = routed * (uint64_t)m->n_expert_used / (uint64_t)m->n_expert;
+    return m->gf.map_size - routed + hot;
+}
+
+// Which residency warning to print, split out from the printing so both
+// branches can be tested. Available RAM cannot be forced on a build machine;
+// the choice between the wordings can.
+//
+// `hot` is the per-token hot set (0 for a dense model, where the file is the
+// hot set). The distinction matters because the dense wording is wrong in
+// degree for a sparse MoE: gemma-4-26B-A4B was measured at 8+ tok/s on a 16 GB
+// Mac while being told every token would page, because only 8 of its 128
+// experts per layer are ever touched.
+bool model_residency_warning(uint64_t need, uint64_t hot, uint64_t have,
+                             bool locked, char *buf, size_t n) {
+    if (!need || !have || need <= have) return false;
+    const char *fix = locked ? ""
+        : " --mlock pins them; a smaller model is the other fix.";
+    if (!hot || hot >= need) {                          // dense, or not sparse
+        snprintf(buf, n,
+                 "warning: weights are %.1f GB but only %.1f GB of RAM is"
+                 " available — expect the model to be evicted and every token"
+                 " to page from disk.%s",
+                 (double)need / 1e9, (double)have / 1e9, fix);
+    } else if (hot > have) {                            // sparse, still too big
+        snprintf(buf, n,
+                 "warning: weights are %.1f GB but only %.1f GB of RAM is"
+                 " available, and even the %.1f GB this sparse MoE touches per"
+                 " token does not fit — expect every token to page from"
+                 " disk.%s",
+                 (double)need / 1e9, (double)have / 1e9, (double)hot / 1e9, fix);
+    } else {                                            // sparse and it fits
+        snprintf(buf, n,
+                 "warning: weights are %.1f GB but only %.1f GB of RAM is"
+                 " available. This is a sparse MoE and touches about %.1f GB"
+                 " per token, which does fit — expect a slow start and disk"
+                 " reads whenever routing reaches a cold expert, not a stall"
+                 " on every token.",
+                 (double)need / 1e9, (double)have / 1e9, (double)hot / 1e9);
+        // Deliberately no --mlock hint here: pinning a file that does not fit
+        // is not the fix for a hot set that does.
+        (void)fix;
+    }
+    return true;
 }
 
 // Publish the per-layer expert placement for a requested host-layer count.
@@ -850,15 +912,11 @@ static bool moe_prefetch_default(const model_t *m, int flag) {
 }
 
 static void warn_if_it_will_not_stay_resident(const model_t *m, bool locked) {
-    uint64_t need = m->gf.map_size;
-    uint64_t have = plat_ram_available_bytes();
-    if (!need || !have || need <= have) return;
-    fprintf(stderr,
-            "warning: weights are %.1f GB but only %.1f GB of RAM is available"
-            " — expect the model to be evicted and every token to page from"
-            " disk.%s\n",
-            (double)need / 1e9, (double)have / 1e9,
-            locked ? "" : " --mlock pins them; a smaller model is the other fix.");
+    char msg[512];
+    if (model_residency_warning(m->gf.map_size, model_hot_set_bytes(m),
+                                plat_ram_available_bytes(), locked,
+                                msg, sizeof(msg)))
+        fprintf(stderr, "%s\n", msg);
 }
 
 bool model_load(model_t *m, const char *path, const model_params *p) {

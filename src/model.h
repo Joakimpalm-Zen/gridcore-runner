@@ -544,6 +544,13 @@ float *model_forward(model_t *m, int token, int pos);
 bool   model_moe_ffn_cpu(model_t *m, int layer, int n);
 // byte cost of one layer's expert half (router + experts + gemma shared branch)
 uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert);
+// bytes a single token actually touches: the whole file for a dense model
+// (returned as 0 — the caller already has the file size), or everything except
+// the unrouted expert banks for a sparse MoE
+uint64_t model_hot_set_bytes(const model_t *m);
+// residency warning text; false when no warning is warranted (see model.c)
+bool     model_residency_warning(uint64_t need, uint64_t hot, uint64_t have,
+                                 bool locked, char *buf, size_t n);
 // Advisory prefetch of the experts a router just selected. Fed by whichever
 // router ran, so it is architecture-agnostic; cannot change output.
 void     model_moe_prefetch(const model_t *m, const layer_t *ly,
