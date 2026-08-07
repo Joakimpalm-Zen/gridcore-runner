@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #ifdef _WIN32
@@ -67,13 +68,37 @@ static void cfg_path(char *out, size_t cap) {
     );
 }
 
-static bool g_cfg_loaded = false;
+// What the loaded config was read from. The tray used to load once per
+// process, so a hand-edited config.json needed a tray restart to take effect
+// (workmac issue 5) — and the config is exactly the file a person edits by
+// hand, since it is where a model path and port live.
+//
+// Size is compared alongside the timestamp because st_mtime is whole seconds
+// on some filesystems: an edit landing in the same second as our read is
+// invisible to the timestamp alone, and a config edit almost always changes
+// the length.
+static bool   g_cfg_loaded = false;
+static time_t g_cfg_mtime = 0;
+static long   g_cfg_size = -1;
+
+// True when the file on disk differs from what g_cfg holds. A config that
+// cannot be stat'd (deleted, or never written) counts as unchanged: the last
+// known-good values are better than blanking the menu.
+static bool cfg_is_stale(const char *path) {
+    struct stat st;
+    if (!path[0] || stat(path, &st) != 0) return false;
+    if (g_cfg_loaded && st.st_mtime == g_cfg_mtime &&
+        (long)st.st_size == g_cfg_size) return false;
+    g_cfg_mtime = st.st_mtime;
+    g_cfg_size  = (long)st.st_size;
+    return true;
+}
 
 static void cfg_load(void) {
-    if (g_cfg_loaded) return;
-    g_cfg_loaded = true;
     char path[1200];
     cfg_path(path, sizeof path);
+    if (g_cfg_loaded && !cfg_is_stale(path)) return;
+    g_cfg_loaded = true;
     FILE *f = path[0] ? fopen(path, "rb") : NULL;
     if (!f) return;
     char buf[4096];
@@ -105,6 +130,14 @@ static void cfg_save(void) {
     if (!b.failed) fwrite(b.s, 1, b.n, f);
     free(b.s);
     fclose(f);
+    // Our own write is not an external edit. Re-stamping here keeps the next
+    // menu build from re-reading a file whose contents it already holds.
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        g_cfg_mtime = st.st_mtime;
+        g_cfg_size  = (long)st.st_size;
+        g_cfg_loaded = true;
+    }
 }
 
 // --------------------------------------------------------- managed process

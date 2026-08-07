@@ -75,9 +75,9 @@ int main(int argc, char **argv) {
 #endif
     setenv_compat("GRIDCORE_TEST_HOME", g_home);
 
-    // The core reads config.json once and then owns it in memory (its own
-    // saves keep it current), so the file must exist BEFORE the first menu
-    // build. instances_dir() is <root>/instances; config.json is its sibling.
+    // The core re-reads config.json whenever it has changed on disk, but the
+    // file must still exist BEFORE the first menu build for the start row to
+    // be offered. instances_dir() is <root>/instances; config.json is a sibling.
     char cfg[700];
     const char *idir = instances_dir();
     CHECK(idir != NULL, "instances dir resolves under fake HOME");
@@ -106,6 +106,36 @@ int main(int argc, char **argv) {
     // self --serve with the configured argv
     CHECK(menu_has(items, n, "Start default runner"), "configured start row");
     CHECK(menu_has(items, n, "fake-model.gguf"), "start row names the model");
+
+    // 2a. a config edited behind the tray's back is picked up at the next menu
+    // build. This used to need a tray restart (workmac issue 5), and the tray
+    // is a long-lived process, so "restart it" is the whole cost of the bug.
+    //
+    // Deliberately written with no delay: st_mtime is whole seconds on some
+    // filesystems, so an edit landing inside the same second as the read above
+    // is invisible to the timestamp alone. The two model names differ in
+    // length, which is what the size half of the check is there for.
+    char alt[600];
+    snprintf(alt, sizeof alt, "%s/edited-model.gguf", home_json);
+    f = fopen(alt, "wb"); fputs("x", f); fclose(f);
+    f = fopen(cfg, "wb");
+    fprintf(f, "{\"last_model\": \"%s/edited-model.gguf\","
+               " \"last_args\": \"-c 512\", \"port\": 8127}\n", home_json);
+    fclose(f);
+    n = tray_menu_build(items, 128);
+    CHECK(menu_has(items, n, "edited-model.gguf"),
+          "externally edited config is visible without a tray restart");
+    CHECK(!menu_has(items, n, "fake-model.gguf"),
+          "the stale model is gone, not merely joined by the new one");
+
+    // put the original back; every step below asserts against it
+    f = fopen(cfg, "wb");
+    fprintf(f, "{\"last_model\": \"%s/fake-model.gguf\","
+               " \"last_args\": \"-c 512\", \"port\": 8127}\n", home_json);
+    fclose(f);
+    n = tray_menu_build(items, 128);
+    CHECK(menu_has(items, n, "fake-model.gguf"), "restored config re-read too");
+    remove(alt);
 
     tray_menu_act(TRAY_ACT_START_MANAGED, 0, NULL);
 
