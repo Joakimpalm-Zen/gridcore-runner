@@ -911,6 +911,15 @@ static bool constraint_done(const engine *e, bool schema) {
 // closes, ordinary tokens are allowed; stop/control tokens remain valid only
 // inside that prelude or after the constrained payload is complete.
 static bool constraint_token_ok(engine *e, int id, bool schema) {
+    // Stop and control tokens are valid only inside a declared thinking
+    // prelude or once the constrained payload is complete.
+    //
+    // Tightening this so a STOP is refused in CP_THINK too was tried on
+    // 2026-08-07 and REVERTED: the defect it was aimed at is on gemma4, which
+    // declares no think tags at all (only qwen3/qwen3moe/qwen35 do), so the
+    // change was a no-op for the case that motivated it and untestable
+    // without a think-tag model to hand. It may still be right; it is not
+    // shipping unmeasured.
     if (is_stop(e, id) || tok_is_control(e->tok, id))
         return e->constraint_phase == CP_THINK || constraint_done(e, schema);
     char buf[512];
