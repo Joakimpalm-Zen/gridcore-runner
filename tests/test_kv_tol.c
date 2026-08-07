@@ -367,7 +367,41 @@ int main(int argc, char **argv) {
         printf("  f16-cpu vs f16-gpu : skipped (no GPU)\n");
     }
 
-    // -------------------------------------------------------- q8 tolerance
+    // ------------------------------------------- q8 on the CPU, no GPU needed
+    //
+    // The GPU gate below cannot see a defect in the CPU q8 path itself, and
+    // that is where a field report landed: gemma-4-26B under --kv q8 on CPU
+    // produced deterministic garbage on an M2 Pro while its f16 control was
+    // coherent, with a Llama-3.2-3B q8 control clean on the same machine
+    // (workmac issue 6, 2026-08-07). The whole q8 half of this harness used
+    // to skip without a GPU, so a CPU-only box -- or any model too large for
+    // the device working set, which is exactly the class that needs q8 --
+    // exercised none of it.
+    //
+    // These two arms need no GPU: the reassociation floor is CPU-vs-CPU by
+    // construction, and the format cost is CPU q8 vs CPU f16. Gating the
+    // second against the first catches a CPU q8 path that has stopped
+    // agreeing with fp16 beyond what the quantiser explains.
+    if (q8c->available && q8b1->available && f16c->available) {
+        double quant_err = mean_abs_diff(q8c, f16c, n_vocab);
+        double reassoc   = mean_abs_diff(q8b1, q8c, n_vocab);
+        int n_diff;
+        double worst;
+        top1_stats(q8c, f16c, n_vocab, &n_diff, &worst);
+        printf("  q8-cpu    vs f16-cpu : mean|dlogit| %.6f, top1 diff %d/%d, "
+               "worst margin %.4f (reassoc floor %.6f)\n",
+               quant_err, n_diff, STEPS, worst, reassoc);
+        // q8 is a lossy cache, so f16 disagreement is expected -- but every
+        // disagreement must be a near-tie. A real q8 bug moves a decision,
+        // not a coin flip, which is what the field report described.
+        ck(worst <= TIE_FRAC,
+           "every q8-CPU/f16-CPU token disagreement is a near-tie, not a "
+           "decision");
+    } else {
+        printf("  q8 cpu gate        : skipped (q8 unavailable)\n");
+    }
+
+    // -------------------------------------------------------- q8 vs the GPU
     if (q8c->available && q8g->available && q8b1->available &&
         f16c->available) {
         double quant_err  = mean_abs_diff(q8c, f16c, n_vocab);  // context only
