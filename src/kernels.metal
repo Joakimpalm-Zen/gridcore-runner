@@ -319,33 +319,50 @@ kernel void k_mv_q4_K(MV_PARAMS) {
     MV_TAIL;
 }
 
+// Quarter-superblocks per lane and a vectorised body, the same two changes
+// that took q4_K and q6_K decode from behind the CPU path to ahead of it. The
+// only wrinkle is qh: unlike q4_K's q pointer it does NOT advance per quarter
+// — all four quarters read the same 32 bytes and pick different bit pairs out
+// of them — so quartering re-reads 32 of the block's 176 bytes three extra
+// times. That is a cache hit against a 22-lane occupancy win, and the
+// measurement agrees.
 kernel void k_mv_q5_K(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 256;
     device const uchar *rw = wb + a.w_off + (ulong)row * nb * 176;
     float s = 0;
-    for (int b = tiisg; b < nb; b += 32) {
+    int nq = nb * 4;                       // quarter-superblocks on this row
+    for (int u = tiisg; u < nq; u += 32) {
+        int b = u >> 2, jj = u & 3;
         device const uchar *blk = rw + (ulong)b * 176;
         float d    = (float)*(device const half *)blk;
         float dmin = (float)*(device const half *)(blk + 2);
         device const uchar *sc = blk + 4;
         device const uchar *qh = blk + 16;
-        device const uchar *q  = blk + 48;
-        device const float *xp = x + b * 256;
-        int is = 0;
-        uchar u1 = 1, u2 = 2;
-        for (int j = 0; j < 256; j += 64) {
-            uchar s1, m1, s2, m2;
-            get_scale_min_k4(is + 0, sc, &s1, &m1);
-            get_scale_min_k4(is + 1, sc, &s2, &m2);
-            float d1 = d * s1, mm1 = dmin * m1;
-            float d2 = d * s2, mm2 = dmin * m2;
-            for (int l = 0; l < 32; l++) {
-                s += (d1 * (float)((q[l] & 0xF) + ((qh[l] & u1) ? 16 : 0)) - mm1) * xp[l];
-                s += (d2 * (float)((q[l] >> 4)  + ((qh[l] & u2) ? 16 : 0)) - mm2) * xp[l + 32];
-            }
-            q += 32; is += 2; xp += 64; u1 <<= 2; u2 <<= 2;
+        device const uchar *q  = blk + 48 + jj * 32;
+        device const float *xp = x + b * 256 + jj * 64;
+        uchar s1, m1, s2, m2;
+        get_scale_min_k4(jj * 2 + 0, sc, &s1, &m1);
+        get_scale_min_k4(jj * 2 + 1, sc, &s2, &m2);
+        float d1 = d * s1, mm1 = dmin * m1;
+        float d2 = d * s2, mm2 = dmin * m2;
+        uchar u1 = (uchar)(1u << (2 * jj)), u2 = (uchar)(2u << (2 * jj));
+        // packed_uchar4 for the same reason as q6_K: 176 is a multiple of 16,
+        // but q sits at blk+48+jj*32 and qh at blk+16, so only packed types
+        // are safe without re-deriving alignment for every offset.
+        device const packed_uchar4 *q4  = (device const packed_uchar4 *)q;
+        device const packed_uchar4 *qh4 = (device const packed_uchar4 *)qh;
+        device const float4 *xlo = (device const float4 *)xp;
+        device const float4 *xhi = (device const float4 *)(xp + 32);
+        float4 a1v = 0, a2v = 0;
+        for (int k = 0; k < 8; k++) {
+            uchar4 qq = q4[k], hh = qh4[k];
+            float4 hi1 = select(float4(0.0f), float4(16.0f), (hh & u1) != 0);
+            float4 hi2 = select(float4(0.0f), float4(16.0f), (hh & u2) != 0);
+            a1v += (d1 * (float4(qq & 0xF) + hi1) - mm1) * xlo[k];
+            a2v += (d2 * (float4(qq >> 4)  + hi2) - mm2) * xhi[k];
         }
+        s += a1v.x + a1v.y + a1v.z + a1v.w + a2v.x + a2v.y + a2v.z + a2v.w;
     }
     MV_TAIL;
 }
