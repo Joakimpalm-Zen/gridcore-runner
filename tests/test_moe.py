@@ -96,7 +96,11 @@ def test_moe_expert_cpu_placement_matches_dense(runner_bin, models):
     assert proc.stdout == dense
     caps = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
                           stdout=subprocess.PIPE, check=True)
-    if b'"available":true' in caps.stdout:
+    # --caps has no "available" key and never has, so the guard this used to
+    # carry was false on every machine and the assertion below never ran. The
+    # message it looks for is printed by cuda.c alone, so the sibling test's
+    # backend check is the right guard.
+    if b'"backend":"cuda"' in caps.stdout:
         assert b"expert layers on CPU" in proc.stderr
 
 

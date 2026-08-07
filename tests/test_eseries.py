@@ -17,6 +17,7 @@ exercises them end to end without the 5 GB real file. What matters here:
 Token-level agreement with llama.cpp is measured separately, against the real
 weights, by scripts/token_divergence.py.
 """
+import json
 import os
 import pathlib
 import re
@@ -130,6 +131,48 @@ def _requires_gpu(runner_bin, tmp_path):
     if b"CUDA backend" not in proc.stderr and b"Metal" not in proc.stderr:
         pytest.skip("no GPU backend available")
     return model
+
+
+def _caps(runner_bin):
+    out = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
+                         stdout=subprocess.PIPE, check=True).stdout
+    return json.loads(out)
+
+
+def test_caps_publishes_the_eseries_boolean(runner_bin):
+    """A scheduler has to know whether this box can serve an E-series model on
+    its GPU *before* it hands one over. The kernels shipped in 0.1.11; the
+    visibility did not, so a scheduler had no way to tell a machine that runs
+    E-series on Metal from one that silently falls back to CPU (issue #3)."""
+    gpu = _caps(runner_bin)["gpu"]
+    if gpu is None:
+        pytest.skip("no GPU backend in this build")
+    assert isinstance(gpu["eseries"], bool), gpu
+    # Sits next to the other capability booleans, and means the same kind of
+    # thing: a backend-wide claim, not a per-model promise.
+    assert isinstance(gpu["moe"], bool) and isinstance(gpu["kv_q8"], bool)
+
+
+def test_the_eseries_boolean_is_not_a_lie(runner_bin, tmp_path):
+    """The failure mode a hardcoded literal has is drifting away from the code
+    it describes. So make the claim falsifiable: if this backend says true, an
+    E-series model must actually run on it rather than fall back."""
+    # A null gpu block is how --caps says "no backend"; there is no separate
+    # "available" key, and asking for one would skip this test on every machine.
+    gpu = _caps(runner_bin)["gpu"]
+    if gpu is None:
+        pytest.skip("no GPU present to check the claim against")
+    model = _make(tmp_path / "claim.gguf", shared_kv=3, ple=16)
+    err = _gpu_run(runner_bin, model, tokens=1).stderr
+    ran_on_gpu = b"CUDA backend" in err or b"Metal" in err
+    if gpu["eseries"]:
+        assert ran_on_gpu, (
+            "caps claims E-series support but the model fell back:\n"
+            + err.decode(errors="replace"))
+    else:
+        assert not ran_on_gpu, (
+            "caps denies E-series support but the model ran on the device:\n"
+            + err.decode(errors="replace"))
 
 
 @pytest.mark.parametrize("shared_kv,ple", [(3, 16), (3, 0), (0, 16)])

@@ -470,6 +470,13 @@ bool gpu_moe_ok(void) {
     return true;    // plain fused sparse-MoE routes and experts run on Metal
 }
 
+bool gpu_eseries_ok(void) {
+    // The per-layer-embedding branch landed in 0.1.11 and is gated by
+    // `make test-metal-eseries`. Before that this was honestly false, which is
+    // exactly the window a scheduler had no way to see.
+    return true;
+}
+
 bool gpu_kv_q8_ok(void) {
     return true;
 }

@@ -35,6 +35,12 @@ bool   gpu_kv_q8_ok(void);
 // Does this backend run at least one sparse-MoE family on the device? Per-model
 // gpu_init() guards still decide the exact router/layout/activation variant.
 bool   gpu_moe_ok(void);
+// Does this backend run the gemma-4 E-series per-layer-embedding path on the
+// device? Same shape of claim as gpu_moe_ok: a scheduler asking "can this box
+// serve an E-series model on its GPU" needs an answer before it hands one over,
+// and until 0.1.11 the honest answer on Metal was no. Per-model gpu_init()
+// guards still decide the rest (E2B's per-layer FFN widths, for one).
+bool   gpu_eseries_ok(void);
 // test hook for the TC tolerance gate: force the tensor-core GEMM opt-in on
 // (1) or off (0) regardless of RUNNER_CUDA_TC; -1 returns to the env default.
 // A no-op on backends without a TC path (Metal, CPU-only builds).

@@ -444,6 +444,7 @@ int main(int argc, char **argv) {
             // implemented" are different claims; gpu_init() still guards the
             // latter at load.
             printf(",\"moe\":%s", gpu_moe_ok() ? "true" : "false");
+            printf(",\"eseries\":%s", gpu_eseries_ok() ? "true" : "false");
             printf(",\"kv_q8\":%s", gpu_kv_q8_ok() ? "true" : "false");
             // Metal only: a single allocation above this fails even when the
             // file fits in RAM, so ram_available_bytes alone overstates what

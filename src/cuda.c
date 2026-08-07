@@ -617,6 +617,12 @@ bool gpu_moe_ok(void) {
     return true;    // expert banks upload and route on the device
 }
 
+bool gpu_eseries_ok(void) {
+    // stage_ple ships the per-layer-embedding pre-pass each forward and enc_ple
+    // runs the gate/proj/norm branch per layer; gpu_init has no PLE refusal.
+    return true;
+}
+
 // ------------------------------------------------- shared-weight registry
 //
 // Resident uploads, refcounted and keyed on model identity. The lock is held

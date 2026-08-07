@@ -23,6 +23,14 @@ bool gpu_kv_q8_ok(void) {
     return false;   // no backend here; the CPU path handles q8 on its own
 }
 
+bool gpu_moe_ok(void) {
+    return false;   // no backend here at all
+}
+
+bool gpu_eseries_ok(void) {
+    return false;
+}
+
 bool gpu_init(model_t *m) {
     (void)m;
     return false;
