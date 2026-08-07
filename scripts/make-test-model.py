@@ -274,6 +274,26 @@ if ESERIES_SHARED_KV or ESERIES_PLE:
         kv_u32(f"{ARCH}.rope.dimension_count", N_EMBD // N_HEAD),
         kv_f32(f"{ARCH}.final_logit_softcapping", 30.0),
     ]
+if ARCH == "gemma4" and not (ESERIES_SHARED_KV or ESERIES_PLE or G4HETERO):
+    # gemma4's loader defaults attention.key_length to 512 when the key is
+    # absent, because every official gemma-4 export publishes it. This
+    # generator did not, so a plain `--arch gemma4` fixture declared a
+    # geometry (4 heads x 512 = 2048) that its own attn_output tensor
+    # ([64,64]) contradicted, and the loader refused it:
+    #
+    #   error: tensor attn_output in blk.0 has shape [64,64],
+    #          expected [2048,>=64] for this model geometry
+    #
+    # So dense gemma4 had no working fixture at all — and because BOTH the
+    # CPU and GPU arms failed identically, a cpu-vs-metal `cmp` of their
+    # (empty) output passed. The --eseries and --gemma4-hetero branches below
+    # publish these keys already, which is why only the plain arch was dark.
+    meta_kvs += [
+        kv_u32(f"{ARCH}.attention.key_length", N_EMBD // N_HEAD),
+        kv_u32(f"{ARCH}.attention.value_length", N_EMBD // N_HEAD),
+        kv_u32(f"{ARCH}.attention.key_length_swa", N_EMBD // N_HEAD),
+        kv_u32(f"{ARCH}.rope.dimension_count", N_EMBD // N_HEAD),
+    ]
 if G4HETERO:
     pattern = [g4_swa(i) for i in range(N_LAYER)]
     meta_kvs += [
