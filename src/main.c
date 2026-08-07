@@ -16,6 +16,17 @@
 #include <limits.h>
 #include <math.h>
 
+// Bare-invocation tray launch needs to know whether a human is at the other
+// end: a piped/redirected probe (CI, scripts, `runner | head`) must get usage
+// text, never a GUI event loop.
+#ifdef _WIN32
+#include <io.h>
+#define RUNNER_TTY(f) _isatty(_fileno(f))
+#else
+#include <unistd.h>
+#define RUNNER_TTY(f) isatty(fileno(f))
+#endif
+
 // quantize_gguf is declared in runner.h
 
 // ---------------------------------------------------------------- misc
@@ -124,7 +135,11 @@ static void usage(const char *prog) {
         "  -f FILE        read prompt from file (appended after -p text)\n"
         "  -i             interactive chat mode\n"
         "  --serve        HTTP server mode (OpenAI-compatible API)\n"
-        "  --tray         desktop tray/menu-bar controller (macOS, Windows)\n"
+        "  --tray         desktop tray/menu-bar controller (macOS, Windows).\n"
+        "                 Running `runner` with no arguments in a terminal (or\n"
+        "                 double-clicking the binary) starts this by default\n"
+        "  --no-tray      never auto-start the tray; bare invocation prints\n"
+        "                 this help instead (any other argument also does)\n"
         "  --port N       server port (default 8080)\n"
         "  --parallel N   parallel inference slots in server mode (default 1)\n"
         "                 -m \"name=path,name2=path2\" serves multiple models,\n"
@@ -257,6 +272,19 @@ int main(int argc, char **argv) {
     sampler smp = { .rng = 0 };
     sampler_override ov = {0};
 
+    // A bare `runner` — double-clicked, or typed with no arguments — starts
+    // the tray on the platforms that have one. The conditions are deliberately
+    // narrow: literally zero arguments (so no scripted invocation can ever be
+    // affected — scripts always pass something), a real terminal on both
+    // stdin and stdout (so pipes and CI probes still get usage text), and a
+    // platform with a tray backend (Linux keeps printing usage). --no-tray is
+    // the standing opt-out: it suppresses this launch and nothing else, for
+    // wrappers that want bare-invocation behavior guaranteed text-only.
+#if defined(__APPLE__) || defined(_WIN32)
+    if (argc == 1 && RUNNER_TTY(stdin) && RUNNER_TTY(stdout))
+        return tray_main();
+#endif
+
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         #define NEXT (i + 1 < argc ? argv[++i] : (usage(argv[0]), exit(1), (char*)0))
@@ -272,6 +300,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-v")) verbose = true;
         else if (!strcmp(a, "--serve")) serve = true;
         else if (!strcmp(a, "--tray")) return tray_main();
+        // Accepted everywhere, acts nowhere else: its entire meaning is "do
+        // not auto-launch the tray", and any argument already suppresses
+        // that. It exists so the suppression can be SAID rather than implied
+        // — a wrapper passing --no-tray keeps its guarantee even if the
+        // auto-launch conditions ever widen.
+        else if (!strcmp(a, "--no-tray")) { /* handled above by existing */ }
         else if (!strcmp(a, "--port")) port = (int)int_arg(a, NEXT, 1, 65535);
         else if (!strcmp(a, "--parallel")) parallel = (int)int_arg(a, NEXT, 1, 16);
         else if (!strcmp(a, "--ttl")) ttl = (int)int_arg(a, NEXT, -1, INT_MAX);

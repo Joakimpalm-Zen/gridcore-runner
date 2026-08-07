@@ -260,7 +260,11 @@ KV cache for the longest shared prompt prefix across requests, so repeated
 system/template prefixes skip prompt evaluation entirely.
 
 **`--tray` puts a controller in the menu bar / notification area** (macOS and
-Windows). The grid icon lists every live runner instance on the machine with
+Windows) — and it is what a bare `runner` starts by default: double-click the
+binary or type `runner` with no arguments in a terminal and you get the
+controller, not help text. Only the literal no-argument, real-terminal case
+does this — pipes, scripts and CI get usage text as before, and `--no-tray`
+pins that down for wrappers. The grid icon lists every live runner instance on the machine with
 its loaded models — swap-mode servers are asked live over `GET /v1/models` —
 lets you stop any of them, and starts one pre-configured desktop-managed
 server with explicit lifecycle feedback (starting → running → exited-with-log,

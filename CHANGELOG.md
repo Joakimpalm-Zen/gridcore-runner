@@ -5,6 +5,20 @@ protocol and CLI may still change between alpha releases.
 
 ## Unreleased
 
+- **A bare `runner` now starts the tray** (macOS, Windows). Double-clicking
+  the binary — or typing `runner` with no arguments in a terminal — launches
+  the menu-bar controller instead of printing help text that vanishes with
+  the window. The conditions are deliberately narrow, and everything else is
+  untouched: literally zero arguments (every scripted invocation passes
+  something, so none can be affected), stdin *and* stdout must be a real
+  terminal (pipes, CI, and probes still get usage text and a nonzero exit),
+  and platforms without a tray backend (Linux) keep the old behavior
+  exactly. `--no-tray` is the standing opt-out for wrappers that want
+  bare-invocation behavior guaranteed text-only, whatever the conditions
+  above may become later. Pinned by `make test-bare-invocation`, which runs
+  the piped-stdin case — a GUI event loop there would hang every script that
+  probes the binary, including the test itself.
+
 - **MoE expert prefetch: the default is now decided per machine class, and
   Apple Silicon earned ON.** v0.1.11 shipped it off pending a second machine
   agreeing. The second machine agreed the next morning: a 16 GB M2 Pro at

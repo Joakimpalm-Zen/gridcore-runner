@@ -252,6 +252,24 @@ TEST_FILE_ID_SRC = tests/test_file_identity.c src/gguf.c src/compat.c \
 $(TEST_FILE_ID): $(TEST_FILE_ID_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_FILE_ID_SRC) -o $@ $(LDFLAGS)
 
+# A bare `runner` in a terminal starts the tray; a bare `runner` anywhere
+# else must NOT — a GUI event loop on a piped stdin would hang every script
+# that ever probes the binary, including this test. Piping stdin here is
+# therefore both the test setup and the property under test. --no-tray is the
+# documented spelling of the same suppression and must stay a known flag.
+test-bare-invocation: runner
+	@set -e; \
+	rc=0; out=$$(echo "" | ./runner 2>&1) || rc=$$?; \
+	echo "$$out" | grep -q "usage:" || { \
+		echo "FAIL: bare runner with piped stdin did not print usage"; exit 1; }; \
+	[ $$rc -ne 0 ] || { echo "FAIL: bare runner exited 0 without doing anything"; exit 1; }; \
+	out=$$(echo "" | ./runner --no-tray 2>&1) || true; \
+	echo "$$out" | grep -q "unknown option" && { \
+		echo "FAIL: --no-tray is not a recognized flag"; exit 1; }; \
+	echo "$$out" | grep -q "usage:" || { \
+		echo "FAIL: bare --no-tray did not print usage"; exit 1; }; \
+	echo "bare invocation ok (non-tty gets usage, --no-tray recognized)"
+
 # split-guard harness: same link as the shared-weights test — the guard lives
 # in the GPU registry, so it needs the real backend
 TEST_SPLIT_GUARD = $(TEST_BATCH:test-batch%=test-split-guard%)
@@ -717,6 +735,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_PARSE)
 	./$(TEST_THREAD_DEFAULT)
 	./$(TEST_MODEL_LOAD_FAILURE)
+	$(MAKE) --no-print-directory test-bare-invocation
 	$(MAKE) --no-print-directory test-metal-shader-gate
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
@@ -865,4 +884,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: clean debug ptx test test-bare-invocation test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
