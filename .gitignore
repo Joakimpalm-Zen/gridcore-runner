@@ -129,3 +129,6 @@ test-file-identity.exe
 test-file-identity.tmp
 test-tray-core
 test-tray-core.exe
+test-paging-warn
+test-paging-warn.exe
+test-metal-coverage
