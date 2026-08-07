@@ -1224,6 +1224,17 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
     }
 
     bool nantrace = metal_nan_trace();
+    // RUNNER_METAL_TIMING=1: split a forward into the CPU time spent encoding
+    // dispatches and the GPU time actually executing them. Decode on Metal is
+    // slower than CPU on an M1 and the two candidate explanations -- encode
+    // overhead at ~420 dispatches per token, versus the kernels themselves --
+    // are indistinguishable from throughput alone.
+    static int timing = -1;
+    if (timing < 0) {
+        const char *t = getenv("RUNNER_METAL_TIMING");
+        timing = t && *t && strcmp(t, "0") ? 1 : 0;
+    }
+    double t_enc0 = timing ? CFAbsoluteTimeGetCurrent() : 0;
     id<MTLCommandBuffer> cb = [g->queue commandBuffer];
     id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
 
@@ -1392,8 +1403,17 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
     }
 
     [e endEncoding];
+    double t_enc1 = timing ? CFAbsoluteTimeGetCurrent() : 0;
     [cb commit];
     [cb waitUntilCompleted];
+    if (timing) {
+        double now = CFAbsoluteTimeGetCurrent();
+        double gpu = [cb GPUEndTime] - [cb GPUStartTime];
+        fprintf(stderr, "metal-timing n=%d encode=%.2fms submit+wait=%.2fms "
+                "gpu=%.2fms total=%.2fms\n", n,
+                (t_enc1 - t_enc0) * 1e3, (now - t_enc1) * 1e3, gpu * 1e3,
+                (now - t_enc0) * 1e3);
+    }
     if (metal_command_failed(cb)) {
         fprintf(stderr, "gpu: command buffer failed — falling back to CPU\n");
         return NULL;

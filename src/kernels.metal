@@ -271,33 +271,44 @@ static inline void get_scale_min_k4(int j, device const uchar *q,
     }
 }
 
+// Work is handed out in QUARTER-superblocks (64 weights), not whole ones.
+// Whole-superblock striding starved the simdgroup on every matvec whose input
+// is n_embd: nb = n_in/256 is 10 for a 2560-wide model, so 10 lanes worked and
+// 22 idled — 31% occupancy on q/k/v/o/gate/up, and only 62% on the wider
+// ffn_down (40 blocks over 32 lanes). Idle lanes cost more than their
+// arithmetic here: a lane that does nothing also issues no load, so the
+// simdgroup had 10 memory requests in flight where it could have had 32, and
+// decode never came close to memory peak. Quartering lifts those to 62% and
+// 100%.
+//
+// A quarter is the smallest unit that does not re-read weights: 64 weights
+// live in 32 bytes of q as low and high nibbles, so splitting finer would
+// fetch the same bytes twice.
 kernel void k_mv_q4_K(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 256;
     device const uchar *rw = wb + a.w_off + (ulong)row * nb * 144;
     float s = 0;
-    for (int b = tiisg; b < nb; b += 32) {
+    int nq = nb * 4;                       // quarter-superblocks on this row
+    for (int u = tiisg; u < nq; u += 32) {
+        int b = u >> 2, jj = u & 3;
         device const uchar *blk = rw + (ulong)b * 144;
         float d    = (float)*(device const half *)blk;
         float dmin = (float)*(device const half *)(blk + 2);
         device const uchar *sc = blk + 4;
-        device const uchar *q  = blk + 16;
-        device const float *xp = x + b * 256;
-        int is = 0;
-        for (int j = 0; j < 256; j += 64) {
-            uchar s1, m1, s2, m2;
-            get_scale_min_k4(is + 0, sc, &s1, &m1);
-            get_scale_min_k4(is + 1, sc, &s2, &m2);
-            float d1 = d * s1, mm1 = dmin * m1;
-            float d2 = d * s2, mm2 = dmin * m2;
-            float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
-            for (int l = 0; l < 32; l++) {
-                t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
-                t2 += (float)(q[l] >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
-            }
-            s += d1 * t1 - mm1 * sx1 + d2 * t2 - mm2 * sx2;
-            q += 32; is += 2; xp += 64;
+        device const uchar *q  = blk + 16 + jj * 32;
+        device const float *xp = x + b * 256 + jj * 64;
+        uchar s1, m1, s2, m2;
+        get_scale_min_k4(jj * 2 + 0, sc, &s1, &m1);
+        get_scale_min_k4(jj * 2 + 1, sc, &s2, &m2);
+        float d1 = d * s1, mm1 = dmin * m1;
+        float d2 = d * s2, mm2 = dmin * m2;
+        float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
+        for (int l = 0; l < 32; l++) {
+            t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
+            t2 += (float)(q[l] >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
         }
+        s += d1 * t1 - mm1 * sx1 + d2 * t2 - mm2 * sx2;
     }
     MV_TAIL;
 }
@@ -333,35 +344,41 @@ kernel void k_mv_q5_K(MV_PARAMS) {
     MV_TAIL;
 }
 
+// Half-superblocks per lane, for the same reason k_mv_q4_K uses quarters: at
+// nb = n_in/256 = 10, whole-block striding left 22 of 32 lanes idle and the
+// simdgroup with a third of the memory requests it could have had in flight.
+// A half (128 weights) is the natural unit here — ql[l] and ql[l+32] both feed
+// one l-iteration, and qh packs four weights' high bits into one byte, so
+// splitting finer would re-read those bytes. 31% -> 62% occupancy on the
+// n_embd-wide matvecs, 62% -> 100% on ffn_down.
 kernel void k_mv_q6_K(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 256;
     device const uchar *rw = wb + a.w_off + (ulong)row * nb * 210;
     float s = 0;
-    for (int b = tiisg; b < nb; b += 32) {
+    int nh = nb * 2;                       // half-superblocks on this row
+    for (int u = tiisg; u < nh; u += 32) {
+        int b = u >> 1, half_i = u & 1;
         device const uchar *blk = rw + (ulong)b * 210;
-        device const uchar *ql = blk;
-        device const uchar *qh = blk + 128;
-        device const char  *sc = (device const char *)(blk + 192);
+        device const uchar *ql = blk + half_i * 64;
+        device const uchar *qh = blk + 128 + half_i * 32;
+        device const char  *sc = (device const char *)(blk + 192) + half_i * 8;
         float d = (float)*(device const half *)(blk + 208);
-        device const float *xp = x + b * 256;
-        for (int half_i = 0; half_i < 2; half_i++) {
-            float t[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-            for (int l = 0; l < 32; l++) {
-                int is = (l / 16) & 1;
-                int q1 = (int)((ql[l]      & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
-                int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
-                int q3 = (int)((ql[l]      >> 4)  | (((qh[l] >> 4) & 3) << 4)) - 32;
-                int q4 = (int)((ql[l + 32] >> 4)  | (((qh[l] >> 6) & 3) << 4)) - 32;
-                t[is * 4 + 0] += q1 * xp[l];
-                t[is * 4 + 1] += q2 * xp[l + 32];
-                t[is * 4 + 2] += q3 * xp[l + 64];
-                t[is * 4 + 3] += q4 * xp[l + 96];
-            }
-            s += d * (sc[0] * t[0] + sc[2] * t[1] + sc[4] * t[2] + sc[6] * t[3] +
-                      sc[1] * t[4] + sc[3] * t[5] + sc[5] * t[6] + sc[7] * t[7]);
-            ql += 64; qh += 32; sc += 8; xp += 128;
+        device const float *xp = x + b * 256 + half_i * 128;
+        float t[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        for (int l = 0; l < 32; l++) {
+            int is = (l / 16) & 1;
+            int q1 = (int)((ql[l]      & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+            int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+            int q3 = (int)((ql[l]      >> 4)  | (((qh[l] >> 4) & 3) << 4)) - 32;
+            int q4 = (int)((ql[l + 32] >> 4)  | (((qh[l] >> 6) & 3) << 4)) - 32;
+            t[is * 4 + 0] += q1 * xp[l];
+            t[is * 4 + 1] += q2 * xp[l + 32];
+            t[is * 4 + 2] += q3 * xp[l + 64];
+            t[is * 4 + 3] += q4 * xp[l + 96];
         }
+        s += d * (sc[0] * t[0] + sc[2] * t[1] + sc[4] * t[2] + sc[6] * t[3] +
+                  sc[1] * t[4] + sc[3] * t[5] + sc[5] * t[6] + sc[7] * t[7]);
     }
     MV_TAIL;
 }
