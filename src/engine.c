@@ -1361,9 +1361,19 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             if (in_prelude && e->constraint_phase != CP_OUTPUT &&
                 e->prelude_max > 0 && ++e->prelude_count >= e->prelude_max) {
                 e->prelude_exhausted = true;
-                e->pos += i;
-                if (e->dpos > e->pos) e->dpos = e->pos;
-                goto done;
+                // mirrors engine_gen_step: under a constraint, close the
+                // prelude rather than ending the turn with nothing
+                if (e->schema || e->json_mode) {
+                    e->constraint_phase = CP_OUTPUT;
+                    e->constraint_tag_possible = false;
+                    e->constraint_tag_match = 0;
+                    e->constraint_close_match = 0;
+                    constraint_payload_reset(e, e->schema != NULL);
+                } else {
+                    e->pos += i;
+                    if (e->dpos > e->pos) e->dpos = e->pos;
+                    goto done;
+                }
             }
             bool constrained_done = e->schema
                                       ? constraint_done(e, true)
@@ -1496,7 +1506,28 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
     if (in_prelude && e->constraint_phase != CP_OUTPUT && e->prelude_max > 0 &&
         ++e->prelude_count >= e->prelude_max) {
         e->prelude_exhausted = true;
-        return ENGINE_STEP_DONE;
+        // A model that opens a thinking block and never closes it used to end
+        // the request here, having produced nothing: the caller asked for a
+        // schema-constrained payload and got an empty document. Measured on
+        // e4b-q4km (gemma4, prelude tags <|channel>thought / <channel|>), two
+        // of four tool prompts did exactly this -- prelude_max is max_new/2,
+        // so -n 200 burned 100 tokens thinking and returned one newline.
+        //
+        // Under an active constraint the prelude is not the deliverable, so
+        // the budget cap now CLOSES the prelude instead of ending the turn:
+        // phase moves to output, the payload validator is reset, and the
+        // remaining half of the budget goes on the JSON that was asked for.
+        // prelude_exhausted still records why, so the server keeps reporting
+        // "reasoning_limit".
+        if (e->schema || e->json_mode) {
+            e->constraint_phase = CP_OUTPUT;
+            e->constraint_tag_possible = false;
+            e->constraint_tag_match = 0;
+            e->constraint_close_match = 0;
+            constraint_payload_reset(e, e->schema != NULL);
+        } else {
+            return ENGINE_STEP_DONE;
+        }
     }
     if ((e->schema && constraint_done(e, true)) ||
         (!e->schema && e->json_mode && constraint_done(e, false))) {

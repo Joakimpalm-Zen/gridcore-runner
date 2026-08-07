@@ -115,9 +115,23 @@ def test_thinking_prelude_is_bounded_with_distinct_finish_reason(tmp_path):
         with urllib.request.urlopen(req, timeout=10) as response:
             body = json.load(response)
         choice = body["choices"][0]
+        # The prelude stays bounded and keeps its own finish reason. What
+        # changed on 2026-08-07: hitting the cap used to END the turn, so a
+        # caller who asked for schema-constrained JSON received an empty
+        # document. It now closes the prelude and spends the rest of the
+        # budget on the payload that was actually requested.
+        #
+        # This test previously asserted `completion_tokens <= cap // 2` and
+        # empty content -- i.e. it pinned "stop and return nothing". Both are
+        # replaced by the stronger guarantee below. The behaviour it protected
+        # was measured on a real model (e4b-q4km, gemma4, whose prelude tags
+        # are <|channel>thought / <channel|>): two of four tool prompts opened
+        # a thinking block, never closed it, and returned ONE byte from 100
+        # generated tokens. With this change all four return valid calls.
         assert choice["finish_reason"] == "reasoning_limit"
-        assert body["usage"]["completion_tokens"] <= cap // 2
-        assert not choice["message"]["content"].strip()
+        assert body["usage"]["completion_tokens"] <= cap
+        payload = json.loads(choice["message"]["content"])   # must be JSON now
+        assert "answer" in payload                           # and match the schema
     finally:
         srv.stop()
 
