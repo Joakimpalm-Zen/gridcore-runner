@@ -838,6 +838,12 @@ static bool moe_prefetch_default(const model_t *m, int flag) {
     uint64_t need = m->gf.map_size, have = plat_ram_available_bytes();
     return need && have && need > have;
 #else
+    // Windows gained a working prefetch primitive on 2026-08-07
+    // (PrefetchVirtualMemory; it was a no-op before). That makes the feature
+    // AVAILABLE there, not on: no Windows A/B has been run yet, and the whole
+    // reason this default is per-class is that a win on one class does not
+    // transfer to another. `--moe-prefetch on` is how you opt in and how the
+    // A/B gets run.
     (void)m;
     return false;
 #endif
@@ -881,6 +887,16 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     warn_if_it_will_not_stay_resident(m, locked);
     m->moe_prefetch = m->n_expert > 0 && !locked &&
                       moe_prefetch_default(m, p->moe_prefetch);
+    // Refuse to announce a prefetch the platform cannot perform. Without this
+    // an A/B on such a machine compares the feature against itself and comes
+    // back flat, which reads exactly like an honest negative result — the
+    // same trap as a CPU-vs-CPU identity check that "passes".
+    if (m->moe_prefetch && !plat_willneed_available()) {
+        m->moe_prefetch = false;
+        fprintf(stderr, "moe: expert prefetch requested but this platform has "
+                "no prefetch primitive (Windows needs 8 or newer); running "
+                "without it\n");
+    }
     if (m->moe_prefetch)
         fprintf(stderr, "moe: prefetching routed experts as whole blocks "
                 "(--moe-prefetch off disables)\n");

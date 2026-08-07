@@ -26,6 +26,14 @@ void  *plat_mmap_ro(const char *path, size_t *size);
 // Ask the OS to fault a whole range in as one unit. Advisory: it can never
 // change what a later read returns, only how many faults that read costs.
 void   plat_willneed(const void *addr, size_t len);
+// Whether plat_willneed actually does anything on this build+OS. POSIX always
+// has madvise; Windows needs PrefetchVirtualMemory, which is resolved at
+// runtime and absent before Windows 8. Callers use this so nothing announces
+// a prefetch that silently is not happening — an A/B run against a banner
+// that lies is worse than no A/B, which this project has paid for once
+// already (the Metal shader library that failed to compile while --caps still
+// advertised the backend).
+bool   plat_willneed_available(void);
 void   plat_munmap(void *p, size_t size);
 
 int         plat_cpu_count(void);
