@@ -17,6 +17,7 @@ typedef struct {
     id<MTLDevice>       dev;
     id<MTLCommandQueue> queue;
     id<MTLComputePipelineState> p_rmsnorm, p_qknorm, p_headnorm, p_rope, p_store, p_attn;
+    id<MTLComputePipelineState> p_attn_chunk, p_attn_comb;
     id<MTLComputePipelineState> p_silu, p_gelu, p_add, p_scale, p_head_transform;
     id<MTLComputePipelineState> p_moe_route, p_moe_actmul, p_moe_sum;
     id<MTLComputePipelineState> p_mv[METAL_TYPE_SLOTS];       // indexed by ggml type
@@ -26,6 +27,7 @@ typedef struct {
     bool          weights_copied;
     id<MTLBuffer> kc, vc;
     id<MTLBuffer> x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
+    id<MTLBuffer> att_acc, att_ms;   // chunked-decode partials
     id<MTLBuffer> moe_logits, moe_sel, moe_selw, moe_hb, moe_hb2, moe_eout;
     id<MTLBuffer> inv_freq, inv_freq_local, out_norm, dummy;
     id<MTLBuffer> *ppn;                 // gemma4 E-series per-layer post_norm
@@ -52,6 +54,38 @@ typedef struct { int kv_dim, q8, stride; uint64_t off, row_b; } store_args;
 typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; int stride; } rope_args;
 typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8, window, has_sinks;
                  int q_stride, att_stride, out_stride; } attn_args;
+typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale;
+                 int q8, window, chunk, n_chunks, q_stride, att_stride; } attn_chunk_args;
+typedef struct { int head_dim, n_head, n_chunks, has_sinks, out_stride; } attn_comb_args;
+
+// Chunked decode attention. The split is chosen from the HEAD COUNT, not a
+// fixed span: the point of chunking is to fill the GPU, so what matters is
+// n_head * n_chunks (the threadgroup count), and n_head varies per model.
+// Targeting ~64 threadgroups put an 8-head model at 8 chunks, which is where
+// a measured sweep on an M1 landed too -- 3137 tokens of context: single-pass
+// 7.32, chunk 256 -> 7.86, 384 -> 7.94, 512 -> 7.85, 1024 -> 7.51, and 384 is
+// exactly span/8. Fewer, larger chunks starve the GPU; more, smaller ones pay
+// combine cost for parallelism it cannot use.
+// RUNNER_METAL_ATTN_CHUNK sets an explicit chunk size for measurement, and 0
+// disables the path entirely (the single-pass kernel is the A/B baseline).
+#define METAL_ATTN_MAX_CHUNKS 64
+#define METAL_ATTN_TARGET_GROUPS 64
+// Below this many positions per chunk the split is all overhead: at 40 tokens
+// of context an 8-head model would otherwise be cut into 8 chunks of 5, and
+// short-context decode measured 9.28 -> 9.20 tok/s doing exactly that. The
+// single-pass kernel keeps everything shorter than TARGET_GROUPS/n_head times
+// this.
+#define METAL_ATTN_MIN_CHUNK 128
+static int metal_attn_chunk_override(void) {
+    static int v = -2;
+    if (v == -2) {
+        const char *e = getenv("RUNNER_METAL_ATTN_CHUNK");
+        v = -1;
+        if (e && *e) { long n = strtol(e, NULL, 10); if (n >= 0) v = (int)n; }
+    }
+    return v;
+}
+
 typedef struct { int n_in, n_out; uint64_t w_off, estride; int xs, ys, has_bias, bias_stride; } moe_args;
 
 static void gpu_release_state(gpu_t *g, int n_layer) {
@@ -97,6 +131,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_moe_mv[i] release];
     [g->p_rmsnorm release]; [g->p_qknorm release]; [g->p_headnorm release];
     [g->p_rope release]; [g->p_store release]; [g->p_attn release];
+    [g->p_attn_chunk release]; [g->p_attn_comb release];
     [g->p_silu release]; [g->p_gelu release]; [g->p_add release];
     [g->p_scale release]; [g->p_head_transform release];
     [g->p_moe_route release]; [g->p_moe_actmul release];
@@ -177,6 +212,14 @@ static bool metal_ensure_batch(model_t *m, int n) {
     id<MTLBuffer> att    = new_f32_scratch(g->dev, nb * (size_t)m->n_head *
                                                    (size_t)m->n_ctx);
     id<MTLBuffer> logits = new_f32_scratch(g->dev, nb * (size_t)m->n_vocab);
+    // Chunked decode attention partials: one (max, sum, hd-vector) per
+    // (head, chunk). Decode only, so no batch dimension -- n_col > 1 already
+    // has grid.y parallelism and keeps the single-pass kernel.
+    id<MTLBuffer> att_acc = new_f32_scratch(g->dev, (size_t)m->n_head *
+                                            METAL_ATTN_MAX_CHUNKS *
+                                            (size_t)model_head_dim(m, 0));
+    id<MTLBuffer> att_ms  = new_f32_scratch(g->dev, (size_t)m->n_head *
+                                            METAL_ATTN_MAX_CHUNKS * 2);
     int P = m->n_embd_ple;
     id<MTLBuffer> ple = nil, ple_tmp = nil;
     if (P > 0) {
@@ -187,10 +230,12 @@ static bool metal_ensure_batch(model_t *m, int n) {
         !metal_buffer_ok(q) || !metal_buffer_ok(kt) || !metal_buffer_ok(vt) ||
         !metal_buffer_ok(hb) || !metal_buffer_ok(hb2) || !metal_buffer_ok(att) ||
         !metal_buffer_ok(logits) ||
+        !metal_buffer_ok(att_acc) || !metal_buffer_ok(att_ms) ||
         (P > 0 && (!metal_buffer_ok(ple) || !metal_buffer_ok(ple_tmp)))) {
         release_buf(x); release_buf(xb); release_buf(xb2); release_buf(q);
         release_buf(kt); release_buf(vt); release_buf(hb); release_buf(hb2);
         release_buf(att); release_buf(logits);
+        release_buf(att_acc); release_buf(att_ms);
         release_buf(ple); release_buf(ple_tmp);
         return false;
     }
@@ -198,9 +243,10 @@ static bool metal_ensure_batch(model_t *m, int n) {
     release_buf(g->x); release_buf(g->xb); release_buf(g->xb2);
     release_buf(g->q); release_buf(g->kt); release_buf(g->vt);
     release_buf(g->hb); release_buf(g->hb2); release_buf(g->att);
-    release_buf(g->logits);
+    release_buf(g->logits); release_buf(g->att_acc); release_buf(g->att_ms);
     g->x = x; g->xb = xb; g->xb2 = xb2; g->q = q; g->kt = kt; g->vt = vt;
     g->hb = hb; g->hb2 = hb2; g->att = att; g->logits = logits;
+    g->att_acc = att_acc; g->att_ms = att_ms;
     if (P > 0) {
         release_buf(g->ple); release_buf(g->ple_tmp);
         g->ple = ple; g->ple_tmp = ple_tmp;
@@ -498,6 +544,8 @@ bool gpu_init(model_t *m) {
     g->p_rope         = mk_pipeline(dev, lib, @"k_rope");
     g->p_store        = mk_pipeline(dev, lib, @"k_store_kv");
     g->p_attn         = mk_pipeline(dev, lib, @"k_attn");
+    g->p_attn_chunk   = mk_pipeline(dev, lib, @"k_attn_chunk");
+    g->p_attn_comb    = mk_pipeline(dev, lib, @"k_attn_combine");
     g->p_silu         = mk_pipeline(dev, lib, @"k_silu_mul");
     g->p_gelu         = mk_pipeline(dev, lib, @"k_gelu_mul");
     g->p_add          = mk_pipeline(dev, lib, @"k_add");
@@ -535,6 +583,7 @@ bool gpu_init(model_t *m) {
     [lib release];
     lib = nil;
     if (!g->p_rmsnorm || !g->p_rope || !g->p_store || !g->p_attn ||
+        !g->p_attn_chunk || !g->p_attn_comb ||
         !g->p_silu || !g->p_gelu || !g->p_add || !g->p_scale ||
         !g->p_head_transform || !g->queue || !g->p_qknorm || !g->p_headnorm ||
         !g->p_moe_route || !g->p_moe_actmul || !g->p_moe_sum ||
@@ -1310,6 +1359,58 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             }
 
+            // Chunked path: decode only (n == 1), long enough range to be
+            // worth splitting, and a head_dim the partial buffer was sized
+            // for. Everything else keeps the single-pass kernel, including
+            // all of prefill -- which already has grid.y parallelism from the
+            // batch and is the validated fast path.
+            int a_t0 = (window > 0 && pos - window + 1 > 0) ? pos - window + 1 : 0;
+            int a_span = pos - a_t0 + 1;
+            int a_ov = metal_attn_chunk_override();
+            int a_chunk, a_nch;
+            if (a_ov == 0) { a_chunk = 0; a_nch = 0; }        // path disabled
+            else if (a_ov > 0) {
+                a_chunk = a_ov;
+                a_nch = (a_span + a_chunk - 1) / a_chunk;
+            } else {
+                int want = METAL_ATTN_TARGET_GROUPS / (m->n_head > 0 ? m->n_head : 1);
+                if (want < 1) want = 1;
+                if (want > METAL_ATTN_MAX_CHUNKS) want = METAL_ATTN_MAX_CHUNKS;
+                a_chunk = (a_span + want - 1) / want;
+                if (a_chunk < METAL_ATTN_MIN_CHUNK) { a_chunk = 0; a_nch = 0; }
+                else a_nch = (a_span + a_chunk - 1) / a_chunk;
+            }
+            if (n == 1 && a_nch >= 2 && a_nch <= METAL_ATTN_MAX_CHUNKS &&
+                hd == model_head_dim(m, 0)) {
+                attn_chunk_args ca = { hd, m->n_head, n_kv, m->n_ctx, pos,
+                                       (uint64_t)model_kv_byte_off(m, l),
+                                       model_attn_scale(m, l), q8, window,
+                                       a_chunk, a_nch, q_dim,
+                                       m->n_head * m->n_ctx };
+                [e setComputePipelineState:g->p_attn_chunk];
+                [e setBuffer:g->q       offset:0 atIndex:0];
+                [e setBuffer:g->kc      offset:0 atIndex:1];
+                [e setBuffer:g->vc      offset:0 atIndex:2];
+                [e setBuffer:g->att     offset:0 atIndex:3];
+                [e setBuffer:g->att_acc offset:0 atIndex:4];
+                [e setBuffer:g->att_ms  offset:0 atIndex:5];
+                [e setBytes:&ca length:sizeof(ca) atIndex:6];
+                [e dispatchThreadgroups:MTLSizeMake(m->n_head, a_nch, 1)
+                  threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+
+                attn_comb_args cb = { hd, m->n_head, a_nch,
+                                      g->sinks[l] != nil, xdim };
+                [e setComputePipelineState:g->p_attn_comb];
+                [e setBuffer:g->att_acc offset:0 atIndex:0];
+                [e setBuffer:g->att_ms  offset:0 atIndex:1];
+                [e setBuffer:g->xb2     offset:0 atIndex:2];
+                [e setBytes:&cb length:sizeof(cb) atIndex:3];
+                [e setBuffer:g->sinks[l] ? g->sinks[l] : g->dummy offset:0 atIndex:4];
+                [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
+                  threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                goto attn_done;
+            }
+
             attn_args aa = { hd, m->n_head, n_kv, m->n_ctx, pos,
                              (uint64_t)model_kv_byte_off(m, l),
                              model_attn_scale(m, l), q8, window,
@@ -1342,6 +1443,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             }
             [e dispatchThreadgroups:MTLSizeMake(m->n_head, n, 1)
               threadsPerThreadgroup:MTLSizeMake(atpg, 1, 1)];
+            attn_done: ;
         }
 
         enc_mv_n(g, e, m, ly->wo, g->xb2, 0, g->xb, 0,

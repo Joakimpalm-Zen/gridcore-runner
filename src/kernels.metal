@@ -848,6 +848,143 @@ kernel void k_attn(device const float *q_all   [[buffer(0)]],
     }
 }
 
+// ------------------------------------------------- chunked decode attention
+//
+// k_attn gets n_head threadgroups and nothing else, so decode attention runs
+// 8 threadgroups on an 8-core GPU while its work grows linearly with context.
+// Widening threads-per-group bought ~11% at 3k and then saturated; the ceiling
+// is threadgroup COUNT. These two kernels split the position range instead, so
+// the grid becomes n_head * n_chunks.
+//
+// Standard online-softmax decomposition: each chunk reduces its own slice to
+// (max, sum, unnormalised weighted V), and the combine pass rescales every
+// chunk onto a common maximum. exp(s-m) never sees a positive argument, so the
+// split cannot overflow where the single-pass kernel would not.
+//
+// The scores still land in the shared att buffer: chunks own disjoint position
+// ranges, so they cannot collide.
+
+struct attn_chunk_args {
+    int   head_dim, n_head, n_head_kv, n_ctx, pos;
+    ulong l_off;
+    float scale;
+    int   q8;
+    int   window;
+    int   chunk;       // positions per chunk
+    int   n_chunks;
+    int   q_stride, att_stride;
+};
+
+kernel void k_attn_chunk(device const float *q_all   [[buffer(0)]],
+                         device const uchar *kc      [[buffer(1)]],
+                         device const uchar *vc      [[buffer(2)]],
+                         device float       *att_all [[buffer(3)]],
+                         device float       *acc_all [[buffer(4)]],
+                         device float       *ms_all  [[buffer(5)]],
+                         constant attn_chunk_args &a [[buffer(6)]],
+                         uint3 tgpig [[threadgroup_position_in_grid]],
+                         uint3 tid3  [[thread_position_in_threadgroup]],
+                         uint3 tpg3  [[threads_per_threadgroup]]) {
+    threadgroup float red[256];
+    uint tid = tid3.x, tpg = tpg3.x;
+    uint h = tgpig.x, z = tgpig.y;
+    int hd = a.head_dim;
+    int kvh = h / (a.n_head / a.n_head_kv);
+    int kv_dim = a.n_head_kv * hd;
+    ulong row_b = kv_row_bytes(kv_dim, a.q8);
+    ulong base = a.l_off + kv_head_off(kvh, hd, a.q8);
+    int pos = a.pos;
+    device const float *qh = q_all + h * hd;
+    device float *ah = att_all + (ulong)h * a.n_ctx;
+
+    int t0 = 0;
+    if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1;
+    int lo = t0 + (int)z * a.chunk;
+    int hi = min(lo + a.chunk - 1, pos);
+
+    device float *acc = acc_all + ((ulong)h * a.n_chunks + z) * hd;
+    device float *ms  = ms_all  + ((ulong)h * a.n_chunks + z) * 2;
+
+    if (lo > hi) {                       // empty chunk: neutral partial
+        for (int i = tid; i < hd; i += tpg) acc[i] = 0;
+        if (tid == 0) { ms[0] = -1e30f; ms[1] = 0; }
+        return;
+    }
+
+    for (int t = lo + (int)tid; t <= hi; t += tpg)
+        ah[t] = kv_dot(kc + base + (ulong)t * row_b, qh, hd, a.q8) * a.scale;
+    threadgroup_barrier(mem_flags::mem_device);
+
+    float mx = -1e30f;
+    for (int t = lo + (int)tid; t <= hi; t += tpg) mx = max(mx, ah[t]);
+    red[tid] = mx;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint off = tpg / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] = max(red[tid], red[tid + off]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    mx = red[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float sum = 0;
+    for (int t = lo + (int)tid; t <= hi; t += tpg) {
+        float e = exp(ah[t] - mx);
+        ah[t] = e;
+        sum += e;
+    }
+    red[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint off = tpg / 2; off > 0; off >>= 1) {
+        if (tid < off) red[tid] += red[tid + off];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    sum = red[0];
+    threadgroup_barrier(mem_flags::mem_device);
+
+    // UNNORMALISED: the combine pass owns the division, because the divisor is
+    // not known until every chunk's maximum is.
+    for (int i = tid; i < hd; i += tpg) {
+        float o = 0;
+        for (int t = lo; t <= hi; t++)
+            o += ah[t] * kv_pair(vc + base + (ulong)t * row_b, i / 2, a.q8)[i & 1];
+        acc[i] = o;
+    }
+    if (tid == 0) { ms[0] = mx; ms[1] = sum; }
+}
+
+struct attn_comb_args { int head_dim, n_head, n_chunks, has_sinks, out_stride; };
+
+kernel void k_attn_combine(device const float *acc_all [[buffer(0)]],
+                           device const float *ms_all  [[buffer(1)]],
+                           device float       *out_all [[buffer(2)]],
+                           constant attn_comb_args &a  [[buffer(3)]],
+                           device const float *sinks   [[buffer(4)]],
+                           uint3 tgpig [[threadgroup_position_in_grid]],
+                           uint3 tid3  [[thread_position_in_threadgroup]],
+                           uint3 tpg3  [[threads_per_threadgroup]]) {
+    uint tid = tid3.x, tpg = tpg3.x;
+    uint h = tgpig.x;
+    int hd = a.head_dim;
+    device const float *ms = ms_all + (ulong)h * a.n_chunks * 2;
+
+    float M = -1e30f;
+    for (int z = 0; z < a.n_chunks; z++) M = max(M, ms[z * 2]);
+    if (a.has_sinks) M = max(M, sinks[h]);
+
+    float denom = 0;
+    for (int z = 0; z < a.n_chunks; z++) denom += ms[z * 2 + 1] * exp(ms[z * 2] - M);
+    // A sink joins the denominator only -- it contributes no value vector --
+    // exactly as the single-pass kernel treats it.
+    if (a.has_sinks) denom += exp(sinks[h] - M);
+
+    for (int i = tid; i < hd; i += tpg) {
+        float o = 0;
+        for (int z = 0; z < a.n_chunks; z++)
+            o += acc_all[((ulong)h * a.n_chunks + z) * hd + i] * exp(ms[z * 2] - M);
+        out_all[h * hd + i] = o / denom;
+    }
+}
+
 // ---------------------------------------------------------------- elementwise
 
 kernel void k_silu_mul(device float       *g [[buffer(0)]],
