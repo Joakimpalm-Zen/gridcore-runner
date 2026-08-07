@@ -1323,8 +1323,25 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             [e setBuffer:g->xb2 offset:0 atIndex:4];
             [e setBytes:&aa length:sizeof(aa) atIndex:5];
             [e setBuffer:g->sinks[l] ? g->sinks[l] : g->dummy offset:0 atIndex:6];
+            // Widest power-of-two threadgroup this pipeline allows, capped
+            // at the red[] scratch in the kernel. The reduction halves tpg
+            // each step, so a non-power-of-two would drop lanes silently.
+            NSUInteger amax = g->p_attn.maxTotalThreadsPerThreadgroup;
+            if (amax > 256) amax = 256;   // measured optimum; red[] is sized to match
+            NSUInteger atpg = 1;
+            while (atpg * 2 <= amax) atpg *= 2;
+            if (timing) {
+                static bool told;
+                if (!told) {
+                    told = true;
+                    fprintf(stderr, "metal-timing attn threadgroups=%d x %llu "
+                            "threads (pipeline max %llu)\n", m->n_head,
+                            (unsigned long long)atpg,
+                            (unsigned long long)g->p_attn.maxTotalThreadsPerThreadgroup);
+                }
+            }
             [e dispatchThreadgroups:MTLSizeMake(m->n_head, n, 1)
-              threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+              threadsPerThreadgroup:MTLSizeMake(atpg, 1, 1)];
         }
 
         enc_mv_n(g, e, m, ly->wo, g->xb2, 0, g->xb, 0,

@@ -780,6 +780,15 @@ kernel void k_attn(device const float *q_all   [[buffer(0)]],
                    uint3 tgpig [[threadgroup_position_in_grid]],
                    uint3 tid3 [[thread_position_in_threadgroup]],
                    uint3 tpg3 [[threads_per_threadgroup]]) {
+    // Decode gives this kernel only n_head threadgroups (8 on gemma-3-4b) on
+    // an 8-core GPU, and its work grows linearly with context, so
+    // threads-per-group is the only parallelism lever short of splitting the
+    // KV range across threadgroups. 128 -> 256 is worth ~11% at 3k context;
+    // 512 and 1024 measured IDENTICAL to 256 on an M1 (the pipeline allows
+    // 1024), because per-thread work shrinks as fast as the reduction's
+    // barrier count grows. 256 is therefore the measured size, and the extra
+    // threadgroup scratch for 1024 buys nothing. The host still clamps to the
+    // pipeline limit and to a power of two, which these reductions require.
     threadgroup float red[256];
     uint tid = tid3.x, tpg = tpg3.x;
     uint h = tgpig.x, col = tgpig.y;

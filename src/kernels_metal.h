@@ -782,6 +782,15 @@ static const char *k_metal_src =
     "                   uint3 tgpig [[threadgroup_position_in_grid]],\n"
     "                   uint3 tid3 [[thread_position_in_threadgroup]],\n"
     "                   uint3 tpg3 [[threads_per_threadgroup]]) {\n"
+    "    // Decode gives this kernel only n_head threadgroups (8 on gemma-3-4b) on\n"
+    "    // an 8-core GPU, and its work grows linearly with context, so\n"
+    "    // threads-per-group is the only parallelism lever short of splitting the\n"
+    "    // KV range across threadgroups. 128 -> 256 is worth ~11% at 3k context;\n"
+    "    // 512 and 1024 measured IDENTICAL to 256 on an M1 (the pipeline allows\n"
+    "    // 1024), because per-thread work shrinks as fast as the reduction's\n"
+    "    // barrier count grows. 256 is therefore the measured size, and the extra\n"
+    "    // threadgroup scratch for 1024 buys nothing. The host still clamps to the\n"
+    "    // pipeline limit and to a power of two, which these reductions require.\n"
     "    threadgroup float red[256];\n"
     "    uint tid = tid3.x, tpg = tpg3.x;\n"
     "    uint h = tgpig.x, col = tgpig.y;\n"
@@ -1191,4 +1200,4 @@ static const char *k_metal_src =
     "\n"
 ;
 // SHA-256 of kernels.metal as embedded above.
-static const char *k_metal_sha = "450a104561de4d96cef2fd7b03b6740d8380e16a79670d00c6e80960d5637cf2";
+static const char *k_metal_sha = "773e9382cf485a74a78806c0458f12a73fbacb2750b950fca51d94ecd12e8623";
