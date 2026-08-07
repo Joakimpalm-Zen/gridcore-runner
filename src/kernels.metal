@@ -303,6 +303,12 @@ kernel void k_mv_q4_K(MV_PARAMS) {
         get_scale_min_k4(jj * 2 + 1, sc, &s2, &m2);
         float d1 = d * s1, mm1 = dmin * m1;
         float d2 = d * s2, mm2 = dmin * m2;
+        // Hand-vectorising this loop with uchar4/float4 was tried on
+        // 2026-08-07 and is SLOWER: 6.58 -> 6.43 tok/s, consistent over three
+        // runs. The scalar form lets the compiler pick its own vectorisation,
+        // and the explicit version pays for uchar4->float4 conversions and
+        // four horizontal sums that the scalar accumulators never need. Left
+        // scalar deliberately; do not "optimise" it again without measuring.
         float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
         for (int l = 0; l < 32; l++) {
             t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
@@ -366,16 +372,34 @@ kernel void k_mv_q6_K(MV_PARAMS) {
         float d = (float)*(device const half *)(blk + 208);
         device const float *xp = x + b * 256 + half_i * 128;
         float t[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-        for (int l = 0; l < 32; l++) {
-            int is = (l / 16) & 1;
-            int q1 = (int)((ql[l]      & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
-            int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
-            int q3 = (int)((ql[l]      >> 4)  | (((qh[l] >> 4) & 3) << 4)) - 32;
-            int q4 = (int)((ql[l + 32] >> 4)  | (((qh[l] >> 6) & 3) << 4)) - 32;
-            t[is * 4 + 0] += q1 * xp[l];
-            t[is * 4 + 1] += q2 * xp[l + 32];
-            t[is * 4 + 2] += q3 * xp[l + 64];
-            t[is * 4 + 3] += q4 * xp[l + 96];
+        for (int is = 0; is < 2; is++) {
+            // packed_uchar4, NOT uchar4: a q6_K superblock is 210 bytes, which
+            // is not a multiple of 4, so ql/qh sit at odd alignments for odd
+            // blocks and a uchar4 load there is undefined. It happened to
+            // return correct results on an M1 and passed the tolerance gate —
+            // which is exactly why it needed catching by reading the block
+            // size rather than by trusting the test. packed_uchar4 has
+            // 1-byte alignment and compiles to the same loads where the
+            // address does happen to be aligned.
+            device const packed_uchar4 *l4  = (device const packed_uchar4 *)(ql + is * 16);
+            device const packed_uchar4 *l4b = (device const packed_uchar4 *)(ql + 32 + is * 16);
+            device const packed_uchar4 *h4  = (device const packed_uchar4 *)(qh + is * 16);
+            device const float4 *x0 = (device const float4 *)(xp + is * 16);
+            device const float4 *x1 = (device const float4 *)(xp + 32 + is * 16);
+            device const float4 *x2 = (device const float4 *)(xp + 64 + is * 16);
+            device const float4 *x3 = (device const float4 *)(xp + 96 + is * 16);
+            float4 a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+            for (int k = 0; k < 4; k++) {
+                uchar4 lo = l4[k], hi = l4b[k], h = h4[k];   // widen on load
+                a0 += (float4(lo & 0xF) + float4((h >> 0) & 3) * 16.0f - 32.0f) * x0[k];
+                a1 += (float4(hi & 0xF) + float4((h >> 2) & 3) * 16.0f - 32.0f) * x1[k];
+                a2 += (float4(lo >> 4)  + float4((h >> 4) & 3) * 16.0f - 32.0f) * x2[k];
+                a3 += (float4(hi >> 4)  + float4((h >> 6) & 3) * 16.0f - 32.0f) * x3[k];
+            }
+            t[is * 4 + 0] = a0.x + a0.y + a0.z + a0.w;
+            t[is * 4 + 1] = a1.x + a1.y + a1.z + a1.w;
+            t[is * 4 + 2] = a2.x + a2.y + a2.z + a2.w;
+            t[is * 4 + 3] = a3.x + a3.y + a3.z + a3.w;
         }
         s += d * (sc[0] * t[0] + sc[2] * t[1] + sc[4] * t[2] + sc[6] * t[3] +
                   sc[1] * t[4] + sc[3] * t[5] + sc[5] * t[6] + sc[7] * t[7]);
