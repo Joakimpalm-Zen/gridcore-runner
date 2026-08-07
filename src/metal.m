@@ -81,6 +81,24 @@ typedef struct { int head_dim, n_head, n_chunks, has_sinks, out_stride; } attn_c
 // 32 threadgroups from the single-pass kernel and needs little splitting, while
 // an 8-head model on an 8-core GPU is starved. Raising the target to 256 leaves
 // many-head models where they were and only makes few-head models finer.
+//
+// HONEST SIZE OF THIS TUNE. Against the previous target, interleaved, 3 rounds:
+// GPU time 119.6-119.7 vs 120.7-120.9 ms/tok, disjoint, ~1.0%. End to end the
+// medians differ by +0.87% but the arms OVERLAP, so it is not separable from
+// noise on this machine. Kept because the direct measure of the thing changed
+// is clean and nothing regresses (short-context decode 9.46 tok/s, unmoved).
+// A second A/B meant to settle it was ABANDONED, not reported: macOS began
+// rendering an animated aerial wallpaper on the same GPU partway through and
+// both arms fell ~7%. Watch for that before trusting any GPU number on an idle
+// Mac -- WallpaperAerialsExtension and WindowServer are the processes to check.
+//
+// For scale, the split itself is worth +9.4% over RUNNER_METAL_ATTN_CHUNK=0
+// (7.975 vs 7.290 tok/s at 3259 ctx, arms disjoint). This tunes it, it does
+// not replace it.
+//
+// Provenance note: this change was pushed inside 5d7808b, whose message
+// describes only a Makefile fix -- `git add -A` swept it in. The measurement
+// record lives here rather than in that commit for exactly that reason.
 #define METAL_ATTN_MAX_CHUNKS 64
 #define METAL_ATTN_TARGET_GROUPS 256
 // Below this many positions per chunk the split is all overhead: at 40 tokens

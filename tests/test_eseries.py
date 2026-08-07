@@ -252,9 +252,13 @@ def test_array_ffn_widths_on_gpu_are_identical_or_refused_loudly(runner_bin, tmp
     So: if a backend engaged, its output must match the CPU byte for byte; if
     it declined, it must say so rather than fall back silently.
     """
+    # --temp 0 is load-bearing, not decoration. The default seed is the CLOCK,
+    # so without it the two arms sample independently and this byte-comparison
+    # fails whenever the sampler happens to diverge — measured at 2 failures in
+    # 8 runs. Every sibling test here already pins greedy for the same reason.
     model = _make_varff(tmp_path / "gpu-varff.gguf")
-    cpu = _run(runner_bin, model, "--gpu", "off", tokens=8)
-    gpu = _run(runner_bin, model, "--gpu", "auto", tokens=8,
+    cpu = _run(runner_bin, model, "--gpu", "off", "--temp", "0", tokens=8)
+    gpu = _run(runner_bin, model, "--gpu", "auto", "--temp", "0", tokens=8,
                env={"RUNNER_METAL_MM": "0"})
     err = gpu.stderr.decode(errors="replace")
     engaged = "Metal backend" in err or "CUDA backend" in err
