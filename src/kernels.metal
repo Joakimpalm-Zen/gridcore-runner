@@ -1175,32 +1175,36 @@ kernel void k_moe_mv_q4_0(MOE_MV_PARAMS) {
     MOE_MV_TAIL;
 }
 
+// The MoE kernels are twins of the dense k_mv_* family and carried the same
+// occupancy defect: a whole 256-weight superblock per lane means nb =
+// n_in/256 lanes work, which is 11 of 32 for a 2816-wide expert. Same fix,
+// same units -- quarters for q4_K/q5_K, halves for q6_K -- chosen so no
+// weight byte is read twice. The dense side measured 5.43 -> 9.22 tok/s from
+// this plus vectorisation.
 kernel void k_moe_mv_q4_K(MOE_MV_PARAMS) {
     MOE_MV_HEAD;
     int nb = a.n_in / 256;
     device const uchar *rw = wbase + (ulong)row * nb * 144;
-    for (int b = tiisg; b < nb; b += 32) {
+    int nq = nb * 4;
+    for (int u = tiisg; u < nq; u += 32) {
+        int b = u >> 2, jj = u & 3;
         device const uchar *blk = rw + (ulong)b * 144;
         float d    = (float)*(device const half *)blk;
         float dmin = (float)*(device const half *)(blk + 2);
         device const uchar *sc = blk + 4;
-        device const uchar *q  = blk + 16;
-        device const float *xp = xp0 + b * 256;
-        int is = 0;
-        for (int j = 0; j < 256; j += 64) {
-            uchar s1, m1, s2, m2;
-            get_scale_min_k4(is + 0, sc, &s1, &m1);
-            get_scale_min_k4(is + 1, sc, &s2, &m2);
-            float d1 = d * s1, mm1 = dmin * m1;
-            float d2 = d * s2, mm2 = dmin * m2;
-            float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
-            for (int l = 0; l < 32; l++) {
-                t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
-                t2 += (float)(q[l] >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
-            }
-            s += d1 * t1 - mm1 * sx1 + d2 * t2 - mm2 * sx2;
-            q += 32; is += 2; xp += 64;
+        device const uchar *q  = blk + 16 + jj * 32;
+        device const float *xp = xp0 + b * 256 + jj * 64;
+        uchar s1, m1, s2, m2;
+        get_scale_min_k4(jj * 2 + 0, sc, &s1, &m1);
+        get_scale_min_k4(jj * 2 + 1, sc, &s2, &m2);
+        float d1 = d * s1, mm1 = dmin * m1;
+        float d2 = d * s2, mm2 = dmin * m2;
+        float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
+        for (int l = 0; l < 32; l++) {
+            t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
+            t2 += (float)(q[l] >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
         }
+        s += d1 * t1 - mm1 * sx1 + d2 * t2 - mm2 * sx2;
     }
     MOE_MV_TAIL;
 }
@@ -1209,27 +1213,25 @@ kernel void k_moe_mv_q5_K(MOE_MV_PARAMS) {
     MOE_MV_HEAD;
     int nb = a.n_in / 256;
     device const uchar *rw = wbase + (ulong)row * nb * 176;
-    for (int b = tiisg; b < nb; b += 32) {
+    int nq = nb * 4;
+    for (int u = tiisg; u < nq; u += 32) {
+        int b = u >> 2, jj = u & 3;
         device const uchar *blk = rw + (ulong)b * 176;
         float d    = (float)*(device const half *)blk;
         float dmin = (float)*(device const half *)(blk + 2);
         device const uchar *sc = blk + 4;
-        device const uchar *qh = blk + 16;
-        device const uchar *q  = blk + 48;
-        device const float *xp = xp0 + b * 256;
-        int is = 0;
-        uchar u1 = 1, u2 = 2;
-        for (int j = 0; j < 256; j += 64) {
-            uchar s1, m1, s2, m2;
-            get_scale_min_k4(is + 0, sc, &s1, &m1);
-            get_scale_min_k4(is + 1, sc, &s2, &m2);
-            float d1 = d * s1, mm1 = dmin * m1;
-            float d2 = d * s2, mm2 = dmin * m2;
-            for (int l = 0; l < 32; l++) {
-                s += (d1 * (float)((q[l] & 0xF) + ((qh[l] & u1) ? 16 : 0)) - mm1) * xp[l];
-                s += (d2 * (float)((q[l] >> 4)  + ((qh[l] & u2) ? 16 : 0)) - mm2) * xp[l + 32];
-            }
-            q += 32; is += 2; xp += 64; u1 <<= 2; u2 <<= 2;
+        device const uchar *qh = blk + 16;   // shared by all four quarters
+        device const uchar *q  = blk + 48 + jj * 32;
+        device const float *xp = xp0 + b * 256 + jj * 64;
+        uchar s1, m1, s2, m2;
+        get_scale_min_k4(jj * 2 + 0, sc, &s1, &m1);
+        get_scale_min_k4(jj * 2 + 1, sc, &s2, &m2);
+        float d1 = d * s1, mm1 = dmin * m1;
+        float d2 = d * s2, mm2 = dmin * m2;
+        uchar u1 = (uchar)(1u << (2 * jj)), u2 = (uchar)(2u << (2 * jj));
+        for (int l = 0; l < 32; l++) {
+            s += (d1 * (float)((q[l] & 0xF) + ((qh[l] & u1) ? 16 : 0)) - mm1) * xp[l];
+            s += (d2 * (float)((q[l] >> 4)  + ((qh[l] & u2) ? 16 : 0)) - mm2) * xp[l + 32];
         }
     }
     MOE_MV_TAIL;
@@ -1239,30 +1241,43 @@ kernel void k_moe_mv_q6_K(MOE_MV_PARAMS) {
     MOE_MV_HEAD;
     int nb = a.n_in / 256;
     device const uchar *rw = wbase + (ulong)row * nb * 210;
-    for (int b = tiisg; b < nb; b += 32) {
+    int nh = nb * 2;
+    for (int u = tiisg; u < nh; u += 32) {
+        int b = u >> 1, half_i = u & 1;
         device const uchar *blk = rw + (ulong)b * 210;
-        device const uchar *ql = blk;
-        device const uchar *qh = blk + 128;
-        device const char  *sc = (device const char *)(blk + 192);
+        device const uchar *ql = blk + half_i * 64;
+        device const uchar *qh = blk + 128 + half_i * 32;
+        device const char  *sc = (device const char *)(blk + 192) + half_i * 8;
         float d = (float)*(device const half *)(blk + 208);
-        device const float *xp = xp0 + b * 256;
-        for (int half_i = 0; half_i < 2; half_i++) {
-            float t[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-            for (int l = 0; l < 32; l++) {
-                int is = (l / 16) & 1;
-                int q1 = (int)((ql[l]      & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
-                int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
-                int q3 = (int)((ql[l]      >> 4)  | (((qh[l] >> 4) & 3) << 4)) - 32;
-                int q4 = (int)((ql[l + 32] >> 4)  | (((qh[l] >> 6) & 3) << 4)) - 32;
-                t[is * 4 + 0] += q1 * xp[l];
-                t[is * 4 + 1] += q2 * xp[l + 32];
-                t[is * 4 + 2] += q3 * xp[l + 64];
-                t[is * 4 + 3] += q4 * xp[l + 96];
+        device const float *xp = xp0 + b * 256 + half_i * 128;
+        float t[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        // Vectorised exactly as the dense twin, which this shape is worth the
+        // most on: four outputs per iteration assembled from ql and qh with
+        // per-element shifts is more than the compiler folds. packed_uchar4
+        // because a 210-byte superblock leaves ql/qh at odd alignments.
+        for (int is = 0; is < 2; is++) {
+            device const packed_uchar4 *l4  = (device const packed_uchar4 *)(ql + is * 16);
+            device const packed_uchar4 *l4b = (device const packed_uchar4 *)(ql + 32 + is * 16);
+            device const packed_uchar4 *h4  = (device const packed_uchar4 *)(qh + is * 16);
+            device const float4 *x0 = (device const float4 *)(xp + is * 16);
+            device const float4 *x1 = (device const float4 *)(xp + 32 + is * 16);
+            device const float4 *x2 = (device const float4 *)(xp + 64 + is * 16);
+            device const float4 *x3 = (device const float4 *)(xp + 96 + is * 16);
+            float4 a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+            for (int k = 0; k < 4; k++) {
+                uchar4 lo = l4[k], hi = l4b[k], h = h4[k];
+                a0 += (float4(lo & 0xF) + float4((h >> 0) & 3) * 16.0f - 32.0f) * x0[k];
+                a1 += (float4(hi & 0xF) + float4((h >> 2) & 3) * 16.0f - 32.0f) * x1[k];
+                a2 += (float4(lo >> 4)  + float4((h >> 4) & 3) * 16.0f - 32.0f) * x2[k];
+                a3 += (float4(hi >> 4)  + float4((h >> 6) & 3) * 16.0f - 32.0f) * x3[k];
             }
-            s += d * (sc[0] * t[0] + sc[2] * t[1] + sc[4] * t[2] + sc[6] * t[3] +
-                      sc[1] * t[4] + sc[3] * t[5] + sc[5] * t[6] + sc[7] * t[7]);
-            ql += 64; qh += 32; sc += 8; xp += 128;
+            t[is * 4 + 0] = a0.x + a0.y + a0.z + a0.w;
+            t[is * 4 + 1] = a1.x + a1.y + a1.z + a1.w;
+            t[is * 4 + 2] = a2.x + a2.y + a2.z + a2.w;
+            t[is * 4 + 3] = a3.x + a3.y + a3.z + a3.w;
         }
+        s += d * (sc[0] * t[0] + sc[2] * t[1] + sc[4] * t[2] + sc[6] * t[3] +
+                  sc[1] * t[4] + sc[3] * t[5] + sc[5] * t[6] + sc[7] * t[7]);
     }
     MOE_MV_TAIL;
 }
