@@ -3,6 +3,31 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## Unreleased
+
+- **MoE expert prefetch: the default is now decided per machine class, and
+  Apple Silicon earned ON.** v0.1.11 shipped it off pending a second machine
+  agreeing. The second machine agreed the next morning: a 16 GB M2 Pro at
+  3.2x oversubscription measured decode 2.68 → **3.37 tok/s (1.26x)** and
+  prompt 1.65 → **2.54 (1.54x)**, three interleaved rounds, the arms fully
+  disjoint — the worst prefetch-on run beat the best prefetch-off run on
+  both metrics. Since the M2 Pro ran at *higher* oversubscription than the
+  Linux null (3.2x vs 2.24x), the differentiator is the storage class's
+  fault cost, not the oversubscription ratio. So: **auto = on for Apple
+  Silicon when weights exceed available RAM** (the two-machine measured
+  case), **off everywhere else** (the measured null). The Linux default
+  changes when someone measures a win there, not before.
+
+- **`--moe-prefetch on|off|auto` — the opt-in becomes a real flag.** Field
+  report from the 16 GB deployment: `RUNNER_MOE_PREFETCH=1` set in a shell
+  profile does not survive the tray's login LaunchAgent, which runs with
+  launchd's environment — so after a reboot the same server came up ~26%
+  slower with nothing in the banner chain to say why. A measured win that
+  silently evaporates on relaunch reads as a regression. The flag persists
+  through the tray's `last_args` like every other knob; precedence is flag
+  over env over the per-class default, pinned by tests including both
+  override directions.
+
 ## v0.1.11-alpha — 2026-08-06
 
 - **MoE expert prefetch: routed experts are handed to the OS as whole blocks.**

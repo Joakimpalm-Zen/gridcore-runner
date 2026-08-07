@@ -809,30 +809,38 @@ double model_resident_fraction(const model_t *m) {
 // in 300 s at 0% CPU. Advisory only -- the load continues either way, since
 // the estimate can be wrong and a model that fits today may not fit at noon.
 // Expert prefetch hands routed experts to the OS as whole blocks instead of
-// letting them arrive as ~16 KB fault-by-fault reads. It is OFF by default,
-// including in the bigger-than-RAM case it was written for, because the
-// evidence does not yet support turning it on.
+// letting them arrive as ~16 KB fault-by-fault reads. The default is decided
+// PER MACHINE CLASS, because that is what the measurements decided:
 //
-// It defaulted to on until 2026-08-06. The evidence for that default is real
-// but narrow: interleaved A/B on an 8 GB M1 at ~4x available RAM measured
-// decode 1.37 -> 1.96 tok/s (1.43x) on gemma-4-26B and 0.61 -> 1.04 (1.70x)
-// on gpt-oss-20b. Both are Apple Silicon, both far oversubscribed, both on
-// slow storage. On a Linux box with XFS at 425 MB/s and 2.24x oversubscription
-// the same feature measured 0.22 tok/s off vs 0.21 on, with marginally MORE
-// major faults enabled — no benefit at all. Fewer faults to save when the
-// faults are cheap, which is a coherent story, but it means "pure win when the
-// model cannot stay resident" was over-generalised from one machine class.
+// - Apple Silicon, weights over available RAM: ON. Two machines agree —
+//   interleaved A/B measured decode 1.37 -> 1.96 tok/s (1.43x) on an 8 GB M1
+//   at ~4x oversubscription, and 2.68 -> 3.37 (1.26x, arms fully disjoint
+//   across three interleaved rounds) on a 16 GB M2 Pro at ~3.2x.
+// - Everywhere else: OFF. On Linux with XFS at 425 MB/s the same feature
+//   measured nothing at any oversubscription from 1.35x to 3.36x, against a
+//   RAM cap verified to hold, replicated. The M2 Pro ran at HIGHER
+//   oversubscription than that null, so the differentiator is fault cost on
+//   the storage class, not the oversubscription ratio: many small synchronous
+//   faults are expensive on Apple NVMe via mmap and absorbed on fast direct
+//   storage. A win on one storage class does not set another's default.
 //
-// One machine class showing a win is not grounds for a default. Off until a
-// second one agrees, and then it can have the default back with a number
-// attached.
-//
-// RUNNER_MOE_PREFETCH=1 opts in, =0 forces off.
-static bool moe_prefetch_default(const model_t *m) {
+// Precedence: --moe-prefetch flag, then RUNNER_MOE_PREFETCH env, then the
+// per-class default above. The flag exists because env-only opt-in dies on
+// GUI relaunch: a tray started by a login LaunchAgent runs with launchd's
+// environment, and a measured win that evaporates on reboot reads as a
+// regression (workmac deployment report, 2026-08-07).
+static bool moe_prefetch_default(const model_t *m, int flag) {
+    if (flag > 0) return true;
+    if (flag < 0) return false;
     const char *e = getenv("RUNNER_MOE_PREFETCH");
     if (e && *e) return strcmp(e, "0") && strcmp(e, "off");
+#if defined(__APPLE__) && defined(__aarch64__)
+    uint64_t need = m->gf.map_size, have = plat_ram_available_bytes();
+    return need && have && need > have;
+#else
     (void)m;
     return false;
+#endif
 }
 
 static void warn_if_it_will_not_stay_resident(const model_t *m, bool locked) {
@@ -871,10 +879,11 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         }
     }
     warn_if_it_will_not_stay_resident(m, locked);
-    m->moe_prefetch = m->n_expert > 0 && !locked && moe_prefetch_default(m);
+    m->moe_prefetch = m->n_expert > 0 && !locked &&
+                      moe_prefetch_default(m, p->moe_prefetch);
     if (m->moe_prefetch)
         fprintf(stderr, "moe: prefetching routed experts as whole blocks "
-                "(weights exceed RAM; RUNNER_MOE_PREFETCH=0 disables)\n");
+                "(--moe-prefetch off disables)\n");
     return true;
 }
 

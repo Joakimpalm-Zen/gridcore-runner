@@ -238,3 +238,50 @@ def test_shared_always_on_expert_matches_the_dense_oracle(runner_bin, models,
     """
     dense = _generate(runner_bin, f"{models}.dense.gguf")
     assert _generate(runner_bin, f"{models}.{variant}.gguf") == dense
+
+
+BANNER = b"moe: prefetching routed experts"
+
+
+@pytest.mark.parametrize("setup,expect_banner", [
+    # flag wins over everything, both directions
+    ({"extra": ("--gpu", "off", "--moe-prefetch", "on")}, True),
+    ({"extra": ("--gpu", "off", "--moe-prefetch", "off"),
+      "env": {"RUNNER_MOE_PREFETCH": "1"}}, False),
+    ({"extra": ("--gpu", "off", "--moe-prefetch", "on"),
+      "env": {"RUNNER_MOE_PREFETCH": "0"}}, True),
+    # env decides when no flag is given
+    ({"env": {"RUNNER_MOE_PREFETCH": "1"}}, True),
+    ({"env": {"RUNNER_MOE_PREFETCH": "0"}}, False),
+    # auto on a fixture that fits RAM: off on every platform
+    ({"extra": ("--gpu", "off", "--moe-prefetch", "auto")}, False),
+])
+def test_moe_prefetch_flag_and_env_precedence(runner_bin, models, setup,
+                                              expect_banner):
+    """--moe-prefetch beats RUNNER_MOE_PREFETCH beats the per-class default.
+
+    The per-class default itself (Apple Silicon + oversubscription -> on) is
+    not testable with a fixture that fits in RAM; what is pinned here is the
+    precedence chain and both hard overrides, which are what the tray and the
+    A/B harnesses depend on. The banner is the observable: the workmac A/B
+    voids itself without it, so its exact prefix is part of the contract.
+    """
+    env = dict(os.environ)
+    env.pop("RUNNER_MOE_PREFETCH", None)
+    env.update(setup.get("env", {}))
+    proc = subprocess.run(
+        [runner_bin, "-m", f"{models}.moe1.gguf", "-p", "hi", "-n", "2",
+         "--temp", "0", *setup.get("extra", ("--gpu", "off"))],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        env=env)
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    assert (BANNER in proc.stderr) == expect_banner, proc.stderr.decode(errors="replace")
+
+
+def test_moe_prefetch_rejects_a_bad_value(runner_bin, models):
+    proc = subprocess.run(
+        [runner_bin, "-m", f"{models}.moe1.gguf", "--moe-prefetch", "banana",
+         "-p", "hi", "-n", "2", "--temp", "0"],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    assert proc.returncode != 0
+    assert b"--moe-prefetch expects" in proc.stderr

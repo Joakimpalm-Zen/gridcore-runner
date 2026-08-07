@@ -485,6 +485,12 @@ typedef struct {
     // Lossy — output is NOT token-identical to an fp16 cache — so f16 stays
     // the default. Requires every layer's head_dim to be a multiple of 32.
     bool  kv_q8;
+    // --moe-prefetch: hand routed experts to the OS as whole blocks before the
+    // FFN reads them. 0 = auto (platform default: on for Apple Silicon when
+    // weights exceed available RAM, off elsewhere — the A/B'd split), 1 =
+    // force on, -1 = force off. A flag rather than env-only because a GUI
+    // relaunch (tray LaunchAgent) does not inherit a shell's environment.
+    int   moe_prefetch;
     // --mlock: wire the mmap'd weights into RAM so the OS cannot reclaim them.
     // Opt-in and fail-soft by design: locking 5 GB on a 16 GB laptop can cause
     // the pressure it was meant to prevent, so a refusal is reported and the

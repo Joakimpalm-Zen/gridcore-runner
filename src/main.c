@@ -187,6 +187,12 @@ static void usage(const char *prog) {
         "                 little headroom, locking the model can cause the very\n"
         "                 pressure it avoids. Without it a loaded machine can\n"
         "                 page the weights out and every token reads from disk\n"
+        "  --moe-prefetch on|off|auto   hand routed experts to the OS as whole\n"
+        "                 blocks before the FFN reads them (MoE models only).\n"
+        "                 auto (default): on for Apple Silicon when the weights\n"
+        "                 exceed available RAM — measured 1.26-1.43x decode\n"
+        "                 there — and off elsewhere, where the same A/B\n"
+        "                 measured nothing on fast storage\n"
         "  --draft PATH   small same-vocab GGUF for speculative decoding\n"
         "                 (one-shot, chat, and single-model --serve)\n"
         "  --draft-k N    draft tokens per round (default 4)\n"
@@ -298,6 +304,13 @@ int main(int argc, char **argv) {
             else { fprintf(stderr, "error: --kv expects f16 or q8\n"); return 1; }
         }
         else if (!strcmp(a, "--mlock")) mp.mlock = true;
+        else if (!strcmp(a, "--moe-prefetch")) {
+            const char *v = NEXT;
+            if (!strcmp(v, "on")) mp.moe_prefetch = 1;
+            else if (!strcmp(v, "off")) mp.moe_prefetch = -1;
+            else if (!strcmp(v, "auto")) mp.moe_prefetch = 0;
+            else { fprintf(stderr, "error: --moe-prefetch expects on, off or auto\n"); return 1; }
+        }
         else if (!strcmp(a, "--draft"))   draft_path = NEXT;
         else if (!strcmp(a, "--draft-k")) draft_k = (int)int_arg(a, NEXT, 1, 15);
         else if (!strcmp(a, "--bench-json")) bench_json = true;
