@@ -447,6 +447,11 @@ bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
     return true;
 }
 
+// The CUDA kernels ship as embedded PTX, not shader source; there is no
+// equivalent string to hash here. Reporting nothing beats reporting a hash
+// of something else.
+const char *gpu_shader_source_sha(void) { return NULL; }
+
 bool gpu_max_working_set(size_t *bytes) {
     // CUDA's fit ceiling is device memory, which vram_bytes already reports
     (void)bytes;

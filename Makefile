@@ -257,6 +257,28 @@ $(TEST_FILE_ID): $(TEST_FILE_ID_SRC) $(HDR)
 # that ever probes the binary, including this test. Piping stdin here is
 # therefore both the test setup and the property under test. --no-tray is the
 # documented spelling of the same suppression and must stay a known flag.
+# The binary must carry the kernels currently in the tree. check-generated.py
+# compares src/kernels_metal.h to src/kernels.metal, but neither can see a
+# STALE BINARY, and a kernel measured against one looks exactly like an honest
+# result: on 2026-08-07 a q4_K change measured as no effect and a q5_K change
+# as +4.6%, both against builds that did not contain them. make rebuilds
+# correctly on a header change; the hazard is an A/B whose two builds land in
+# the same second, where make's newer-than test keeps the old binary.
+# Skips cleanly on a build with no embedded shader source (CUDA/CPU-only).
+test-shader-embed: runner
+	@set -e; \
+	command -v $(PYTHON) >/dev/null 2>&1 || { \
+		echo "shader embed: skip (no $(PYTHON) on this box)"; exit 0; }; \
+	caps=$$(./runner --caps 2>/dev/null); \
+	have=$$($(PYTHON) -c "import sys,json; g=json.load(sys.stdin).get('gpu') or {}; print(g.get('shader_source_sha256') or '')" <<< "$$caps"); \
+	if [ -z "$$have" ]; then echo "shader embed: skip (no embedded shader source in this build)"; exit 0; fi; \
+	want=$$($(PYTHON) -c "import hashlib;print(hashlib.sha256(open('src/kernels.metal',encoding='utf-8').read().encode()).hexdigest())"); \
+	if [ "$$have" != "$$want" ]; then \
+		echo "FAIL: runner was built from different Metal shaders than src/kernels.metal"; \
+		echo "  binary: $$have"; echo "  source: $$want"; \
+		echo "  re-run scripts/embed-metal.py and rebuild"; exit 1; fi; \
+	echo "shader embed ok (binary carries src/kernels.metal, $${have}...)"
+
 test-bare-invocation: runner
 	@set -e; \
 	rc=0; out=$$(echo "" | ./runner 2>&1) || rc=$$?; \
@@ -736,6 +758,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_THREAD_DEFAULT)
 	./$(TEST_MODEL_LOAD_FAILURE)
 	$(MAKE) --no-print-directory test-bare-invocation
+	$(MAKE) --no-print-directory test-shader-embed
 	$(MAKE) --no-print-directory test-metal-shader-gate
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
@@ -884,4 +907,4 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-bare-invocation test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard

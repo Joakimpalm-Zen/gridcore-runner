@@ -449,6 +449,11 @@ int main(int argc, char **argv) {
             // file fits in RAM, so ram_available_bytes alone overstates what
             // the GPU path can load. Same argument as moe/kv_q8: don't let a
             // scheduler read capability across a capacity cliff.
+            // Proves the binary carries the kernels currently in the tree.
+            // make test-shader-embed compares this to a fresh hash of
+            // src/kernels.metal.
+            const char *ssha = gpu_shader_source_sha();
+            if (ssha) printf(",\"shader_source_sha256\":\"%s\"", ssha);
             size_t mws = 0;
             if (gpu_max_working_set(&mws))
                 printf(",\"max_working_set_bytes\":%llu",

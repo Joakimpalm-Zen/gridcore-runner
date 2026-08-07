@@ -22,6 +22,12 @@ bool   gpu_mem_info(size_t *free_bytes, size_t *total_bytes);
 // there is a capacity cliff. false when the backend has no such limit
 // distinct from what vram_bytes already reports (CUDA), or no GPU.
 bool   gpu_max_working_set(size_t *bytes);
+// SHA-256 of the shader source compiled INTO this binary, or NULL for a
+// backend with no embedded shader source. Published in --caps so a gate can
+// prove the running binary carries the current kernels: the header-vs-source
+// drift check cannot see a stale binary, and twice on 2026-08-07 a kernel
+// change was measured against a build that did not contain it.
+const char *gpu_shader_source_sha(void);
 // does this backend's attention read a q8_0 KV cache? The CPU path always
 // can; a backend that cannot forces the cache back to f16 rather than
 // handing q8_0 blocks to kernels that would read them as fp16.

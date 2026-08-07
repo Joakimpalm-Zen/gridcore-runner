@@ -1190,3 +1190,5 @@ static const char *k_metal_src =
     "}\n"
     "\n"
 ;
+// SHA-256 of kernels.metal as embedded above.
+static const char *k_metal_sha = "450a104561de4d96cef2fd7b03b6740d8380e16a79670d00c6e80960d5637cf2";

@@ -243,6 +243,10 @@ bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
     return false;
 }
 
+// k_metal_sha is generated into kernels_metal.h alongside the source string
+// itself, so it can only agree with the shaders this binary actually holds.
+const char *gpu_shader_source_sha(void) { return k_metal_sha; }
+
 bool gpu_max_working_set(size_t *bytes) {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
     if (!dev) return false;
