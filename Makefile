@@ -271,7 +271,7 @@ test-shader-embed: runner
 	command -v $(PYTHON) >/dev/null 2>&1 || { \
 		echo "shader embed: skip (no $(PYTHON) on this box)"; exit 0; }; \
 	caps=$$(./runner --caps 2>/dev/null); \
-	have=$$($(PYTHON) -c "import sys,json; g=json.load(sys.stdin).get('gpu') or {}; print(g.get('shader_source_sha256') or '')" <<< "$$caps"); \
+	have=$$(printf '%s' "$$caps" | $(PYTHON) -c "import sys,json; g=json.load(sys.stdin).get('gpu') or {}; print(g.get('shader_source_sha256') or '')"); \
 	if [ -z "$$have" ]; then echo "shader embed: skip (no embedded shader source in this build)"; exit 0; fi; \
 	want=$$($(PYTHON) -c "import hashlib;print(hashlib.sha256(open('src/kernels.metal',encoding='utf-8').read().encode()).hexdigest())"); \
 	if [ "$$have" != "$$want" ]; then \

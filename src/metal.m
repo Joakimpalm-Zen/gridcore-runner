@@ -69,13 +69,30 @@ typedef struct { int head_dim, n_head, n_chunks, has_sinks, out_stride; } attn_c
 // combine cost for parallelism it cannot use.
 // RUNNER_METAL_ATTN_CHUNK sets an explicit chunk size for measurement, and 0
 // disables the path entirely (the single-pass kernel is the A/B baseline).
+// Revised 2026-08-07. The sweep above never tested 128, and 128 wins: at 3259
+// tokens on gemma-3-4b, chunk 128 gives 8.130 tok/s against 8.060 for the
+// span/8 the target above produces (medians of 3 interleaved rounds, arms
+// disjoint: [8.13,8.14] vs [8.06,8.07]). Every point the two sweeps share
+// agrees -- 256 and 512 land at 7.96/7.95 here against 7.86/7.85 there -- so
+// this is a new point on the curve, not a contradiction of the old one.
+//
+// The target stays expressed in threadgroups rather than a flat chunk size,
+// because the right answer does depend on n_head: a 32-head model already gets
+// 32 threadgroups from the single-pass kernel and needs little splitting, while
+// an 8-head model on an 8-core GPU is starved. Raising the target to 256 leaves
+// many-head models where they were and only makes few-head models finer.
 #define METAL_ATTN_MAX_CHUNKS 64
-#define METAL_ATTN_TARGET_GROUPS 64
+#define METAL_ATTN_TARGET_GROUPS 256
 // Below this many positions per chunk the split is all overhead: at 40 tokens
 // of context an 8-head model would otherwise be cut into 8 chunks of 5, and
-// short-context decode measured 9.28 -> 9.20 tok/s doing exactly that. The
-// single-pass kernel keeps everything shorter than TARGET_GROUPS/n_head times
-// this.
+// short-context decode measured 9.28 -> 9.20 tok/s doing exactly that.
+//
+// This is a FLOOR on the chunk size, not a veto on chunking. It used to be the
+// latter -- a target implying chunks below this disabled the split entirely --
+// which is why raising the target alone would have turned the path off at
+// exactly the contexts it helps. Short context still falls back to the
+// single-pass kernel, but via the n_chunks < 2 test below, which is the
+// condition that actually means "nothing to split".
 #define METAL_ATTN_MIN_CHUNK 128
 static int metal_attn_chunk_override(void) {
     static int v = -2;
@@ -1586,8 +1603,11 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                 if (want < 1) want = 1;
                 if (want > METAL_ATTN_MAX_CHUNKS) want = METAL_ATTN_MAX_CHUNKS;
                 a_chunk = (a_span + want - 1) / want;
-                if (a_chunk < METAL_ATTN_MIN_CHUNK) { a_chunk = 0; a_nch = 0; }
-                else a_nch = (a_span + a_chunk - 1) / a_chunk;
+                // floor, not veto: a target implying tiny chunks means "use the
+                // smallest chunk worth having", and short context then drops to
+                // the single-pass kernel through the n_chunks < 2 test below
+                if (a_chunk < METAL_ATTN_MIN_CHUNK) a_chunk = METAL_ATTN_MIN_CHUNK;
+                a_nch = (a_span + a_chunk - 1) / a_chunk;
             }
             if (n == 1 && a_nch >= 2 && a_nch <= METAL_ATTN_MAX_CHUNKS &&
                 hd == model_head_dim(m, 0)) {
