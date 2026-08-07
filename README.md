@@ -6,24 +6,38 @@ the platform C/math/threading/dynamic-loader libraries, loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
-**In 0.1.11 — Metal prefill goes from 119 to 768 tok/s, a 6.4x on the prompt
-path.** Prefill ran at decode speed because the prompt batch encoded per-token
-chains: every weight matrix was re-streamed once per token. Batching the
-dispatches gave 3.0x, and a `simdgroup_matrix` tiled GEMM behind the same
-tolerance gate the CUDA path uses took it the rest of the way — past the
-272 tok/s CPU path on the same box. MoE and the E-series joined it, so real
-**E2B** now runs on Metal rather than falling back. The tolerance gate paid for
-itself again: it caught a Q6_K nibble-indexing bug at 14 of 64 positions that
-greedy output and nine byte-identity smoke tests had all passed clean. And
-because a mismatched attribute type once made the shader library fail to
-compile *silently* — leaving Metal to fall back to CPU while `--caps` still
-advertised it — the library is now compiled at build time by a test that fails
-if any of its 40 kernels is missing.
+**In 0.1.12 — two defaults change, and one of them is a default per machine
+class.** 0.1.11 shipped the MoE expert prefetch turned *off*, because its
+1.43x came from a single 8 GB M1 and one machine is not evidence. A second
+Apple Silicon machine then agreed — a 16 GB M2 Pro at 3.2x oversubscription,
+**1.26x decode / 1.54x prompt**, three interleaved rounds with the arms fully
+disjoint — while the same A/B on fast Linux storage still measures **nothing**
+at any oversubscription up to 3.36x. The M2 Pro ran at *higher*
+oversubscription than that null, so the thing that differs is fault cost on
+the storage class, not how far over RAM you are. The default now follows the
+line the measurements actually drew: **on for Apple Silicon when weights
+exceed available RAM, off everywhere else**, with `--moe-prefetch on|off|auto`
+to override — a flag rather than an env var because a GUI relaunch does not
+inherit a shell's environment, and a measured win that evaporates on reboot
+reads as a regression.
 
-Also here, and off by default: **MoE expert prefetch**. It measures 1.43–1.70x
-decode on Apple Silicon at ~4x oversubscription, and nothing at all on a Linux
-box with fast NVMe. One machine class is not grounds for a default, so it is
-opt-in via `RUNNER_MOE_PREFETCH=1` until a second one agrees.
+And **a bare `runner` now opens the tray** on macOS and Windows. Double-click
+the binary, or type `runner` with nothing after it, and you get the menu-bar
+controller instead of help text that disappears with the window. Only the
+literal no-argument, real-terminal case — pipes, scripts and CI still get
+usage and a nonzero exit, `--no-tray` pins that for wrappers, and Linux is
+untouched.
+
+Earlier, in 0.1.11 — Metal prefill went from 119 to 768 tok/s, a 6.4x on the
+prompt path: batched dispatches for 3.0x, then a `simdgroup_matrix` tiled GEMM
+behind the same tolerance gate the CUDA path uses, past the 272 tok/s CPU path
+on the same box. MoE and the E-series joined it, so real **E2B** runs on Metal
+rather than falling back. That tolerance gate caught a Q6_K nibble-indexing bug
+at 14 of 64 positions which greedy output and nine byte-identity smoke tests
+had all passed clean — and because a mistyped attribute once made the shader
+library fail to compile *silently*, leaving Metal to fall back to CPU while
+`--caps` still advertised it, the library is now compiled at build time by a
+test that fails if any of its 40 kernels is missing.
 
 Earlier, in 0.1.10 — the Gemma families stopped falling back to CPU on Apple
 Silicon.
@@ -71,7 +85,7 @@ NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
 make                 # produces ./runner (GPU auto-detected at runtime)
-./runner --version   # -> runner 0.1.11-alpha
+./runner --version   # -> runner 0.1.12-alpha
 ```
 
 Then point it at any GGUF model:
@@ -85,7 +99,7 @@ Then point it at any GGUF model:
 ./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
 ```
 
-> **Public alpha (`0.1.11-alpha`).** CI-tested on Linux/macOS/Windows and
+> **Public alpha (`0.1.12-alpha`).** CI-tested on Linux/macOS/Windows and
 > daily-driven by the rest of the Gridcore stack, but it has met few machines
 > other than ours — which is what an alpha is for. Run your GGUF models and
 > [open an issue](../../issues) for anything that crashes, misbehaves, or

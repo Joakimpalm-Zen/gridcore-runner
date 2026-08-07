@@ -3,7 +3,7 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
-## Unreleased
+## v0.1.12-alpha — 2026-08-07
 
 - **A bare `runner` now starts the tray** (macOS, Windows). Double-clicking
   the binary — or typing `runner` with no arguments in a terminal — launches
