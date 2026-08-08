@@ -2827,3 +2827,135 @@ extern "C" __global__ void k_xielu(float *x, int n, float an, float ap,
         }
     }
 }
+// --------------------------------------------- tensor-core Q6_K prefill GEMM
+//
+// The 2026-08-08 profile said prefill is 42.7% k_gemm_q4_K_tc, 30.2% k_attn
+// and 26.0% k_gemm_q6_K -- and q6_K had NO tensor-core variant at all, so
+// `attn_v` and `ffn_down` in every Q4_K_M file (40% of GEMM calls) ran the
+// scalar path.
+//
+// Same structure as k_gemm_q4_K_tc: the block dequantizes a 64-row x 128-K
+// fp16 weight tile once, its four warps' MMAs share it, and the epilogue tile
+// aliases the weight tile to stay under the 48 KB shared cap.
+//
+// Only the unpacking differs, and it is taken verbatim from k_gemm_q6_K so the
+// arithmetic matches the scalar path element for element -- including the
+// INTEGER `sc * q` before the float multiply:
+//
+//   ql = blk + half*64, qh = blk + 128 + half*32,
+//   sc = (int8*)(blk+192) + half*8, d = f16(blk+208)
+//   K = half*128 + l      : (ql[l]    & 0xF) | ((qh[l]>>0 & 3)<<4) - 32, sc[0+is]
+//   K = half*128 + l + 32 : (ql[l+32] & 0xF) | ((qh[l]>>2 & 3)<<4) - 32, sc[2+is]
+//   K = half*128 + l + 64 : (ql[l]     >> 4) | ((qh[l]>>4 & 3)<<4) - 32, sc[4+is]
+//   K = half*128 + l + 96 : (ql[l+32]  >> 4) | ((qh[l]>>6 & 3)<<4) - 32, sc[6+is]
+//   is = l >> 4
+//
+// A thread stages 64 consecutive K of one row, so sseg 0 covers the first two
+// quarters of the 128-K half and sseg 1 the last two.
+//
+// Not bit-identical to k_gemm_q6_K by construction (the weight is dequantized
+// before the multiply and the sum is reassociated into 8-element matrix
+// steps), exactly like the q4_K tensor-core path, so it answers to the same
+// tolerance gate.
+
+extern "C" __global__ void k_gemm_q6_K_tc(MV_PARAMS) {
+    using namespace nvcuda::wmma;
+    const int tid  = threadIdx.x;
+    const int warp = tid >> 5;
+    const unsigned row0 = blockIdx.x * TC_ROWS;
+    __shared__ __half sh_w[TC_ROWS * TC_K];
+    __shared__ __half sh_x[TC_N * TC_K];
+    float *sh_c = (float *)sh_w;
+
+    fragment<matrix_a, 16, 16, 16, __half, row_major> fa;
+    fragment<matrix_b, 16, 16, 16, __half, col_major> fb;
+    fragment<accumulator, 16, 16, 16, float> fc[TC_N / 16];
+    #pragma unroll
+    for (int n = 0; n < TC_N / 16; n++) fill_fragment(fc[n], 0.0f);
+
+    int nb = a.n_in / 256;
+    int srow = tid >> 1, sseg = tid & 1;
+
+    for (int b = 0; b < nb; b++) {
+        #pragma unroll
+        for (int koff = 0; koff < 256; koff += TC_K) {
+            {   // ---- stage weights: 64 rows x 128 K, dequantized once ----
+                unsigned gr = row0 + srow;
+                __half *dst = sh_w + srow * TC_K + sseg * 64;
+                if (gr < (unsigned)a.n_out) {
+                    const uchar *blk = wb + a.w_off +
+                                       (ulong64)gr * nb * 210 + (ulong64)b * 210;
+                    const int half_ = koff >> 7;          // 0 or 1
+                    const uchar *ql = blk + half_ * 64;
+                    const uchar *qh = blk + 128 + half_ * 32;
+                    const signed char *sc =
+                        (const signed char *)(blk + 192) + half_ * 8;
+                    float d = f16f(blk + 208);
+                    // sseg 0 -> quarters 0,1 (low nibbles, qh shifts 0,2)
+                    // sseg 1 -> quarters 2,3 (high nibbles, qh shifts 4,6)
+                    const int shA = sseg * 4 + 0, shB = sseg * 4 + 2;
+                    const int scA = sseg * 4 + 0, scB = sseg * 4 + 2;
+                    #pragma unroll
+                    for (int l = 0; l < 32; l++) {
+                        int is = l >> 4;
+                        uchar a0 = ql[l], b0 = ql[l + 32], h = qh[l];
+                        int qa = (int)((sseg ? (a0 >> 4) : (a0 & 0xF))
+                                       | (((h >> shA) & 3) << 4)) - 32;
+                        int qb = (int)((sseg ? (b0 >> 4) : (b0 & 0xF))
+                                       | (((h >> shB) & 3) << 4)) - 32;
+                        dst[l]      = __float2half(d * (float)(sc[scA + is] * qa));
+                        dst[l + 32] = __float2half(d * (float)(sc[scB + is] * qb));
+                    }
+                } else {
+                    #pragma unroll
+                    for (int e = 0; e < 64; e++) dst[e] = __float2half(0.0f);
+                }
+            }
+            {   // ---- stage activations: 128 K x TC_N tokens ----
+                int col = tid / 2, part = tid % 2;
+                __half *dst = sh_x + col * TC_K + part * 64;
+                if (col < a.batch) {
+                    const float *xg = x + (ulong64)col * a.xs + b * 256 + koff
+                                      + part * 64;
+                    #pragma unroll
+                    for (int v = 0; v < 16; v++) {
+                        float4 xv = *(const float4 *)(xg + v * 4);
+                        dst[v * 4 + 0] = __float2half(xv.x);
+                        dst[v * 4 + 1] = __float2half(xv.y);
+                        dst[v * 4 + 2] = __float2half(xv.z);
+                        dst[v * 4 + 3] = __float2half(xv.w);
+                    }
+                } else {
+                    #pragma unroll
+                    for (int e = 0; e < 64; e++) dst[e] = __float2half(0.0f);
+                }
+            }
+            __syncthreads();
+            const __half *wt = sh_w + warp * 16 * TC_K;
+            #pragma unroll
+            for (int k = 0; k < TC_K; k += 16) {
+                load_matrix_sync(fa, wt + k, TC_K);
+                #pragma unroll
+                for (int n = 0; n < TC_N / 16; n++) {
+                    load_matrix_sync(fb, sh_x + n * 16 * TC_K + k, TC_K);
+                    mma_sync(fc[n], fa, fb, fc[n]);
+                }
+            }
+            __syncthreads();
+        }
+    }
+
+    __syncthreads();
+    #pragma unroll
+    for (int n = 0; n < TC_N / 16; n++)
+        store_matrix_sync(sh_c + warp * 16 * TC_N + n * 16, fc[n], TC_N,
+                          mem_row_major);
+    __syncthreads();
+    for (int idx = tid; idx < TC_ROWS * TC_N; idx += blockDim.x) {
+        int rr = idx / TC_N, tt = idx % TC_N;
+        unsigned gr = row0 + rr;
+        if (gr < (unsigned)a.n_out && tt < a.batch)
+            y[(ulong64)tt * a.ys + gr] =
+                a.has_bias ? sh_c[idx] + bias[gr] : sh_c[idx];
+    }
+}

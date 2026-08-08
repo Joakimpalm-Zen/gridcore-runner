@@ -1155,6 +1155,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         // Tensor-core kernels: resolved non-fatally so an older embedded PTX
         // (without them) still loads — TC just stays unavailable there.
         cu.ModuleGetFunction(&w->f_gemm_tc[T_Q4_K], w->mod, "k_gemm_q4_K_tc");
+        cu.ModuleGetFunction(&w->f_gemm_tc[T_Q6_K], w->mod, "k_gemm_q6_K_tc");
         cu.ModuleGetFunction(&w->f_gemm_tc[T_Q8_0], w->mod, "k_gemm_q8_0_tc");
         cu.ModuleGetFunction(&w->f_gemm_tc[T_Q4_0], w->mod, "k_gemm_q4_0_tc");
 
@@ -1807,7 +1808,9 @@ void gpu_moe_eager_force(int on) { g_moe_eager_force = on < 0 ? -1 : (on != 0); 
 // deliberately covers the dense family first. Unmeasured archs (qwen2,
 // qwen35, stablelm) are absent, not implied.
 static bool tc_promoted(const model_t *m, int type) {
-    if (type != T_Q4_K) return false;
+    // Q6_K joined 2026-08-08: the profile showed it was 26% of prefill running
+    // on the SCALAR path, because attn_v/ffn_down are Q6_K in every Q4_K_M.
+    if (type != T_Q4_K && type != T_Q6_K) return false;
     static const char *archs[] = { "llama", "phi3", "gemma4", "qwen3",
                                    "mistral", "gemma3", "smollm" };
     for (size_t i = 0; i < sizeof(archs) / sizeof(*archs); i++)
