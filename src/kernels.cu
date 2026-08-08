@@ -12,6 +12,11 @@
 #include <cuda_fp16.h>
 #include <mma.h>
 
+// mv_args / moe_args / rope_args / attn_args: ONE definition, shared with
+// src/cuda.c. They are passed to kernels by value, so host and device must
+// agree on the layout exactly (see the header).
+#include "kernel_args.h"
+
 typedef unsigned char  uchar;
 typedef unsigned short ushort16;
 typedef unsigned int   uint;
@@ -73,14 +78,6 @@ extern "C" __global__ void k_qknorm(float *v, const float *w, int hd, float eps,
 #define MVT 16  // scalar-kernel tile: register arrays and xsm size
 #define MVB 64  // activation BUFFER columns (keep in sync with cuda.c)
 
-struct mv_args {
-    int     n_in;
-    int     n_out;
-    ulong64 w_off;    // tensor byte offset inside the weight buffer
-    int     has_bias;
-    int     batch;    // 1..MVB token columns (k_mv_* ignores it)
-    int     xs, ys;   // element stride between x / y columns
-};
 
 static __device__ __forceinline__ float warp_sum(float s) {
     for (int off = 16; off > 0; off >>= 1)
@@ -1514,10 +1511,6 @@ extern "C" __global__ void k_mv_mxfp4_b(MV_PARAMS) {
 // ---------------------------------------------------------------- rope
 // grid: (ceil(half_dim/32), n_heads, batch); vs = element stride per column
 
-struct rope_args {
-    int   head_dim, n_heads, half_dim, neox;
-    float mscale;
-};
 
 extern "C" __global__ void k_rope(float *v, const float *fr, rope_args a,
                                   const int *posp, int vs) {
@@ -1629,14 +1622,6 @@ extern "C" __global__ void k_store_kv(const float *k, const float *v,
 // One block per (head, token): scores -> softmax -> weighted value sum.
 // att scratch is MVB planes of [n_head][n_ctx].
 
-struct attn_args {
-    int     head_dim, n_head, n_head_kv, n_ctx;
-    ulong64 l_off;    // this layer's BYTE offset into the kv cache
-    float   scale;
-    int     qs, os;   // q / out element stride per token column
-    int     window;   // sliding-window size for this layer (0 = full)
-    int     q8;       // cache rows are q8_0 blocks rather than fp16
-};
 
 // byte offset of head kvh's slice within a cache row
 __device__ __forceinline__ ulong64 kv_head_off(int kvh, int hd, int q8) {
@@ -2412,13 +2397,6 @@ extern "C" __global__ void k_moe_route(const float *logits, int *sel,
 // xs = x column stride per slot (0: all slots read the same input, the
 // gate/up case; nff: per-slot hidden, the down case); ys = y column stride.
 
-struct moe_args {
-    int     n_in;
-    int     n_out;
-    ulong64 w_off;      // fused expert tensor base byte offset
-    ulong64 estride;    // bytes per expert block within the fused tensor
-    int     xs, ys;     // x / y element stride between expert slots
-};
 
 #define MOE_MV_HEAD \
     unsigned row = blockIdx.x * (blockDim.x / 32) + (threadIdx.x >> 5); \

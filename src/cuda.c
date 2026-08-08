@@ -13,6 +13,7 @@
 // triggers a resync — and each GPU-written row is copied back to host so the
 // CPU path can always take over mid-run.
 #include "runner.h"
+#include "kernel_args.h"   // shared with src/kernels.cu — see the header
 
 #include <math.h>
 #include <stdarg.h>
@@ -376,13 +377,9 @@ typedef struct {
 #define GEMM_WARPS 8
 #define TC_ROWS    64  // tensor-core GEMM output rows per block (match kernels.cu)
 
-typedef struct { int n_in, n_out; uint64_t w_off; int has_bias; int batch, xs, ys; } mv_args;
 // indirect expert matvec: weight base = w_off + sel[slot]*estride, slot = grid.y
-typedef struct { int n_in, n_out; uint64_t w_off, estride; int xs, ys; } moe_args;
-typedef struct { int head_dim, n_heads, half_dim, neox; float mscale; } rope_args;
 // l_off is a BYTE offset: the cache is fp16 or q8_0 depending on m->kv_q8,
 // so element indexing is not enough (see the kv storage block in kernels.cu)
-typedef struct { int head_dim, n_head, n_head_kv, n_ctx; uint64_t l_off; float scale; int qs, os, window, q8; } attn_args;
 
 bool gpu_available(char *name, int cap) {
     if (!cu_load()) return false;
