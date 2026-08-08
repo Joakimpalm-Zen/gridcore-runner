@@ -268,6 +268,23 @@ docs instead:
   (see [docs/moe-support.md](docs/moe-support.md)); this one fits after
   `sudo sysctl iogpu.wired_limit_mb=13312`.
 
+- [**gemma-4-E2B-it-Q4_0**](https://huggingface.co/Joakimpalm-Zen/gemma-4-E2B-it-Q4_0-GGUF)
+  (2.63 GB) — the 8 GB-Mac artifact. **20.1 tok/s on Metal** against 14.5 for
+  its Q4_K_M source, and ~78% of that machine's memory-bandwidth roofline for a
+  dense model this size, so most of what remains is bandwidth rather than
+  runtime overhead. Gate: **top-1 100.0%, KLD 0.0076**, CPU and Metal
+  byte-identical.
+  **Read the provenance before using it:** this is a requantization of an
+  already-quantized file, so the weights have been through two lossy passes and
+  the gate above is measured against that `Q4_K_M` parent, **not** against the
+  original bf16 release. A Q4_0 built directly from bf16 would be at least as
+  good. It is published because it was measured rather than assumed and the
+  measured cost is small — the same standard the rest of this list is held to.
+  It exists because the alternative failed: gemma-4-26B-A4B manages 1.14 tok/s
+  on an 8 GB M1 and Metal refuses it outright, and expert pruning made that
+  model fast (10.7 tok/s) and incoherent at every size that fit — a negative
+  result, not an upload.
+
 ### Requantizing to fit a machine
 
 ```
