@@ -88,8 +88,10 @@ metal-*.out
 metal-*.err
 shared-noid.out
 split-guard.out
-test-split-guard
-test-split-guard.exe
+# renamed from test-split-guard 2026-08-08: the old name collided with the
+# .PHONY make target, which left the binary unbuilt and the guard dead
+test-split-guard-bin
+test-split-guard-bin.exe
 
 # agent worktrees (transient)
 .claude/worktrees/

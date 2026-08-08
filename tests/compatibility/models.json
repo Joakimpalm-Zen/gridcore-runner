@@ -228,6 +228,24 @@
    "notes": "greedy_reference deliberately not declared: this model is numerically chaotic, so token-for-token agreement with any second implementation is unachievable rather than merely unmet. Measured 2026-08-01 at b10076 on this exact file - runner disagrees with ITSELF on 11 of 16 prompts when only the KV cache precision changes, against the 9 it disagrees with llama.cpp on, so a perturbation inside one build moves the output further than switching engines does. Cause is discrete top-8-of-128 expert routing over Q4_0 weights; at layer 2 the 6th and 7th selected experts sat 0.0002 apart in weight. Layer 0 activations and the pre-softmax router logits do match the reference (exactly, and to ~0.1-0.5%). Re-measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap on this model. Evidence: out/divergence-study-gemma4-moe-2026-08-01.json"
   },
   {
+   "id": "gemma-4-26b-a4b-it-qat-q4_0",
+   "architecture": "gemma4-moe",
+   "family": "Gemma 4 MoE",
+   "file": "models/gemma-4-26B_q4_0-it.gguf",
+   "sha256": "3eca3b8f6d7baf218a7dd6bba5fb59a56ee25fe2d567b6f5f589b4f697eca51d",
+   "tokenizer_reference": "google/gemma-4-26b-a4b-it",
+   "reference": {
+    "implementation": "llama.cpp",
+    "revision": "b10076"
+   },
+   "checks": [
+    "load",
+    "cpu_cuda",
+    "chat"
+   ],
+   "notes": "Google's genuine QAT release (google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf), 14,439,363,584 bytes, sha verified against the HF LFS blob 2026-08-05. DISTINCT from gemma-4-26b-a4b-it-q4_0, which is ggml-org's non-QAT Q4_0 (sha d208665a) - two publishers, two artifacts, not a re-upload of one. Comparing their hashes as if they were the same file is what produced the retired 'QAT pin drift' plan item. This is the artifact behind the 16 GB recommendation, so it belongs under the automated gate rather than in prose alone. Expert tensors are uniformly Q4_0 across 60 tensors - the signature of QAT baked into the checkpoint, unlike repos that only inherit 'QAT' from the base model's lineage. greedy_reference deliberately not declared: top-8-of-128 expert routing over Q4_0 is numerically chaotic (layer 2's 6th/7th experts sat 0.0002 apart), so the runner disagrees with ITSELF under a KV-precision change more than it disagrees with llama.cpp. cpu_cuda PENDING re-verification at the 128-token contract - the 2026-08-05 CERTIFIED-WITH-CAVEAT pass was measured under the old 16-token default. Evidence: docs/cert-matrix-status.md item 4; out/divergence-study-gemma4-moe-2026-08-01.json"
+  },
+  {
    "id": "gpt-oss-20b-mxfp4",
    "architecture": "gpt-oss",
    "family": "OpenAI gpt-oss",

@@ -31,6 +31,7 @@ LDFLAGS += -lws2_32 -lpsapi -static   # psapi: QueryWorkingSetEx / GetProcessMem
 # MinGW default lib set; shell32/advapi32 are but stay explicit for clarity
 LDFLAGS += -lshell32 -lgdi32 -lcomdlg32 -ladvapi32
 GPU_SRC  = src/cuda.c
+GPU_BACKEND_DEF = -DRUNNER_GPU_CUDA
 TRAY_SRC = src/tray.c src/tray_win.c
 RUNNER_EXE = runner.exe
 TEST_JSON_SCHEMA = test-json-schema.exe
@@ -47,6 +48,7 @@ DIFFTOK = difftok.exe
 TEST_BIND = test-bind.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
+GPU_BACKEND_DEF = -DRUNNER_GPU_METAL
 LDFLAGS += -framework Metal -framework Foundation
 # AppKit only on Darwin, only for the tray backend; UniformTypeIdentifiers
 # for the non-deprecated NSOpenPanel file filter
@@ -67,6 +69,7 @@ DIFFTOK = difftok
 TEST_BIND = test-bind
 else
 GPU_SRC  = src/cuda.c
+GPU_BACKEND_DEF = -DRUNNER_GPU_CUDA
 LDFLAGS += -ldl
 TRAY_SRC = src/tray.c src/tray_stub.c
 RUNNER_EXE = runner
@@ -295,11 +298,18 @@ test-bare-invocation: runner
 
 # split-guard harness: same link as the shared-weights test — the guard lives
 # in the GPU registry, so it needs the real backend
-TEST_SPLIT_GUARD = $(TEST_BATCH:test-batch%=test-split-guard%)
+# NOT `test-split-guard%`: on POSIX $(TEST_BATCH) is `test-batch`, so that
+# substitution produced `test-split-guard` — colliding with the .PHONY test
+# target of the same name below. make then dropped this compile recipe
+# ("overriding commands"), reported a circular self-dependency, and the guard
+# binary was never built. The guard whose comment says "delete the guard and
+# this goes red" could not go red, and `make test` never referenced it at all.
+# Windows was unaffected only because `test-batch.exe` yields a distinct name.
+TEST_SPLIT_GUARD = $(TEST_BATCH:test-batch%=test-split-guard-bin%)
 TEST_SPLIT_GUARD_SRC = tests/test_split_guard.c src/gguf.c src/compat.c \
                        src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_SPLIT_GUARD): $(TEST_SPLIT_GUARD_SRC) $(HDR)
-	$(CC) $(CFLAGS) -I src $(TEST_SPLIT_GUARD_SRC) -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $(GPU_BACKEND_DEF) -I src $(TEST_SPLIT_GUARD_SRC) -o $@ $(LDFLAGS)
 
 # The split guard must be able to fire: a no-identity load of an already-
 # resident path, forced to a different split, must be reported loudly. The
@@ -749,6 +759,11 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_QUANTS_SIMD)
 	./$(TEST_INSTANCES)
 	./$(TEST_TRAY_CORE)
+	@# The split guard was absent from this list entirely, which is how a
+	@# target-name collision kept it unbuilt and unnoticed. It self-skips
+	@# without CUDA, so it costs a Mac nothing and actually fires on the boxes
+	@# that have the backend it guards.
+	$(MAKE) --no-print-directory test-split-guard
 	@# the fused-vs-eager routing gate needs a fixture whose router is not
 	@# zero: the dense-oracle MoE fixtures are 0.5/0.5 either way and can only
 	@# compare a routing path with itself (it self-skips on those, correctly)

@@ -601,6 +601,9 @@ typedef struct {
     double      saved_s;
     double      gtime;
     bool        schema, json_mode, spec;
+    // Set when the OpenAI wire value was widened to a standard one (see
+    // openai_finish): carries the reason we would otherwise have emitted.
+    const char *finish_detail;
     // Major page faults taken while serving this request. Nonzero means the
     // time went to disk, not to arithmetic.
     uint64_t    major_faults;
@@ -618,12 +621,16 @@ static void telemetry_json(sbuf *r, const resp_doc *d) {
               "\"generation_seconds\":%.6f,"
               "\"generation_tok_s\":%.3f,\"major_page_faults\":%llu,"
               "\"json_mode\":%s,"
-              "\"schema\":%s,\"speculative\":%s}",
+              "\"schema\":%s,\"speculative\":%s",
            d->cached, d->forked, d->n_prompt - d->cached, d->saved_s, d->gtime,
            d->n_gen / (d->gtime > 0 ? d->gtime : 1e-9),
            (unsigned long long)d->major_faults,
            d->json_mode ? "true" : "false", d->schema ? "true" : "false",
            d->spec ? "true" : "false");
+    // Only present when the standard finish_reason lost a distinction, so
+    // ordinary turns are byte-for-byte what they were before.
+    if (d->finish_detail) sb_fmt(r, ",\"finish_detail\":\"%s\"", d->finish_detail);
+    sb_lit(r, "}");
 }
 
 static void resp_echo(sbuf *r, jv *req, const char *key, const char *dflt) {
@@ -733,6 +740,43 @@ static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
 
 // The stop_reason vocabulary, derived from the same `finish` string the chat
 // dialect reports, so the two surfaces cannot disagree about how a turn ended.
+// The OpenAI `finish_reason` vocabulary is a CLOSED set — stop, length,
+// tool_calls, content_filter, function_call. `reasoning_limit` is ours, and
+// emitting it raw on a surface whose whole selling point is drop-in
+// compatibility breaks any typed client whose finish_reason is a closed union.
+// The official OpenAI SDK happens to deserialise it, which is what let this sit
+// unnoticed; a strictly-typed one has no case for it.
+//
+// `length` is not a euphemism here: the turn really did stop because it ran out
+// of token budget. The only thing lost is WHERE the budget went, and that
+// belongs in an extension field rather than smuggled into a standard enum —
+// which is exactly what the Responses (`max_output_tokens`) and Anthropic
+// (`max_tokens`) surfaces already do. Chat was the odd one out.
+//
+// The distinction is preserved as `finish_detail` in runner_telemetry, so no
+// information is lost: a client that cares can still tell a prelude exhaustion
+// from an ordinary truncation.
+//
+// KNOWN GAP: streamed chat/completions never carried runner_telemetry at all
+// (its only extra terminal chunk is the opt-in include_usage one), so a
+// STREAMED turn reports "length" with no detail available anywhere. Buffered
+// turns, Responses and Anthropic all keep the full distinction. Widening the
+// streamed terminal chunk is a separate wire change and is deliberately not
+// bundled here.
+//
+// Owner decision 2026-08-08. Field evidence: a reasoning model truncated inside
+// its <think> block returns an EMPTY answer, and a harness that saw the
+// non-standard reason recorded incapability instead of truncation — every
+// agent case scored 0.00 for every model in the Syntetik-MoE baseline.
+static const char *openai_finish(const char *finish) {
+    return !strcmp(finish, "reasoning_limit") ? "length" : finish;
+}
+
+// Non-NULL only when the wire value above lost a distinction worth keeping.
+static const char *finish_detail_of(const char *finish) {
+    return !strcmp(finish, "reasoning_limit") ? "reasoning_limit" : NULL;
+}
+
 static const char *anth_stop_reason(const char *finish, bool stop_hit) {
     if (!strcmp(finish, "tool_calls")) return "tool_use";
     if (!strcmp(finish, "length") ||
@@ -1634,7 +1678,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             sbuf c = {0};
             chunk_open(&g, &c);
             sb_fmt(&c, "%s,\"finish_reason\":\"%s\"}]}",
-                   chat ? "\"delta\":{}" : "\"text\":\"\"", finish);
+                   chat ? "\"delta\":{}" : "\"text\":\"\"",
+                   openai_finish(finish));
             bool ok = chunk_send(&g, &c) == 0;
             // OpenAI stream_options {"include_usage": true}: one extra chunk
             // with empty choices and the request's token accounting — AI-SDK
@@ -1823,11 +1868,12 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         sb_fmt(&r, "\"finish_reason\":\"%s\"}],"
                    "\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,"
                    "\"total_tokens\":%d},",
-               finish, n_prompt, n_gen, n_prompt + n_gen);
+               openai_finish(finish), n_prompt, n_gen, n_prompt + n_gen);
         resp_doc td = { .n_prompt = n_prompt, .n_gen = n_gen, .cached = keep,
                         .forked = reuse.forked, .saved_s = reuse.saved_s,
                         .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
                            .schema = schema != NULL,
+                        .finish_detail = finish_detail_of(finish),
                         .json_mode = e->json_mode, .spec = e->dm != NULL };
         telemetry_json(&r, &td);
         sb_lit(&r, "}");

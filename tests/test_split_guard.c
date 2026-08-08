@@ -34,6 +34,22 @@ int main(int argc, char **argv) {
                "in the GPU registry)\n");
         return 0;
     }
+#ifndef RUNNER_GPU_CUDA
+    // The guard under test is `split_guard()` in src/cuda.c — CUDA only. The
+    // old skip condition said "no GPU backend", which is not the same thing:
+    // Metal IS a GPU backend, so on a Mac this harness ran, manufactured a
+    // genuine split disagreement, and then failed looking for a message no
+    // CUDA-less build can emit. It never surfaced because a Makefile target
+    // collision meant this binary was never built at all (fixed 2026-08-08).
+    //
+    // Metal having no equivalent guard is a real gap, recorded in the suite
+    // plan rather than papered over here: two Metal slots of one server can
+    // still re-decide the split differently without a file identity, and
+    // nothing says so.
+    printf("skip: test-split-guard (guard is CUDA-only; this build has no "
+           "CUDA backend)\n");
+    return 0;
+#else
     f16_init();
     model_params p = base_params();
 
@@ -76,4 +92,5 @@ int main(int argc, char **argv) {
     model_free(&a);
     if (!fail) printf("split disagreement manufactured; see stderr\n");
     return fail;
+#endif // RUNNER_GPU_CUDA
 }

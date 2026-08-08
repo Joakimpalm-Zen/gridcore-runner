@@ -128,7 +128,13 @@ def test_thinking_prelude_is_bounded_with_distinct_finish_reason(tmp_path):
         # are <|channel>thought / <channel|>): two of four tool prompts opened
         # a thinking block, never closed it, and returned ONE byte from 100
         # generated tokens. With this change all four return valid calls.
-        assert choice["finish_reason"] == "reasoning_limit"
+        # The wire value is the OpenAI-standard "length" as of 2026-08-08 —
+        # `reasoning_limit` is not in the OpenAI enum and broke typed clients.
+        # The distinction it carried is not lost, it moved to an extension
+        # field, so this asserts BOTH halves: standards-compliant on the wire,
+        # and the prelude-specific reason still recoverable.
+        assert choice["finish_reason"] == "length"
+        assert body["runner_telemetry"]["finish_detail"] == "reasoning_limit"
         assert body["usage"]["completion_tokens"] <= cap
         payload = json.loads(choice["message"]["content"])   # must be JSON now
         assert "answer" in payload                           # and match the schema
