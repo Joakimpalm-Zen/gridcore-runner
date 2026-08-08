@@ -6,6 +6,40 @@ the platform C/math/threading/dynamic-loader libraries, loads
 standard **GGUF** models and runs them on **CPU (AVX2), CUDA, or Metal**, with
 an OpenAI-compatible server and sampler-level JSON-schema enforcement.
 
+**In 0.1.13 — CUDA prefill is 82% faster, and a profiler found most of it.**
+Prompt processing went **199.5 → 363.4 tok/s** on an RTX PRO 6000 Blackwell
+(Qwen3-4B-Q4_K_M, 3.1k prompt, interleaved rounds, spreads under 0.1%). Three
+changes, in the order they were found:
+
+- **The prefill token tile was welded to the activation buffer width** (`MVB`
+  did both jobs, so widening it spilled the scalar kernels' register arrays and
+  blew the 48 KB shared cap). Splitting the two and widening the tensor-core
+  tile 16 → 64: **+35%**.
+- **Q6_K had no tensor-core GEMM at all** — only q4_K, q8_0 and q4_0 did — so
+  `attn_v` and `ffn_down` in every `Q4_K_M` file, 40% of GEMM calls, ran the
+  scalar path. Writing one: **+9.8%**, and 2.35x on that kernel alone.
+- **Attention used 64 of 128 threads** for its V accumulation while the rest
+  idled, each walking the whole context serially. Spreading it: **+22.8%**.
+
+The second and third came out of a *single* nsys run, after four
+carefully-measured hypotheses — integer MMA three separate ways, async copies,
+multi-level tiling, quantised shared memory — had all been correctly falsified
+against a kernel that was already spent. Amdahl had capped it at 1.75x and a
+profile would have said so first. Every negative result is written up in the
+suite; the lesson is the ordinary one, learned again: measure where the time
+goes before choosing what to optimise.
+
+Decode is unchanged at matched context, and CPU/GPU stay byte-identical on
+Qwen3-4B, gemma-4-E4B, SmolLM2-135M, Qwen2.5-7B and Llama-3.1-8B.
+
+Smaller, same release: the **paging warning is MoE-aware** (it used to tell a
+16 GB Mac that every token would page while gemma-4-26B-A4B served 8+ tok/s —
+it now names the per-token hot set, 2.4 GB of a 14.4 GB file); `--caps`
+publishes **`eseries`** so a scheduler can see the E-series path; the **tray
+re-reads a hand-edited `config.json`** instead of needing a restart; and a
+**split (multi-part) GGUF is refused by name** rather than by a wall of
+"missing tensor".
+
 **In 0.1.12 — two defaults change, and one of them is a default per machine
 class.** 0.1.11 shipped the MoE expert prefetch turned *off*, because its
 1.43x came from a single 8 GB M1 and one machine is not evidence. A second
@@ -85,7 +119,7 @@ NVIDIA driver, no toolkit; offload requires NVIDIA Turing / compute capability
 ```
 git clone https://github.com/Joakimpalm-Zen/gridcore-runner && cd gridcore-runner
 make                 # produces ./runner (GPU auto-detected at runtime)
-./runner --version   # -> runner 0.1.12-alpha
+./runner --version   # -> runner 0.1.13-alpha
 ```
 
 Then point it at any GGUF model:
@@ -99,7 +133,7 @@ Then point it at any GGUF model:
 ./runner -m big.gguf --draft small.gguf -p "..."            # speculative decoding
 ```
 
-> **Public alpha (`0.1.12-alpha`).** CI-tested on Linux/macOS/Windows and
+> **Public alpha (`0.1.13-alpha`).** CI-tested on Linux/macOS/Windows and
 > daily-driven by the rest of the Gridcore stack, but it has met few machines
 > other than ours — which is what an alpha is for. Run your GGUF models and
 > [open an issue](../../issues) for anything that crashes, misbehaves, or

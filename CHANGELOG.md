@@ -3,6 +3,68 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## v0.1.13-alpha — 2026-08-08
+
+- **CUDA prefill is 82% faster: 199.5 → 363.4 tok/s** (RTX PRO 6000 Blackwell
+  MIG slice, Qwen3-4B-Q4_K_M, ~3.1k prompt, three interleaved rounds each,
+  spreads under 0.1%). Three independent changes:
+  - **Prefill token tile widened 16 → 64 (+35%).** `MVB` was doing two jobs —
+    the width every activation buffer is allocated for, *and* the compile-time
+    tile baked into the scalar kernels (`float s[MVB]`,
+    `__shared__ float xsm[MVB][256]`). At 64 the register array spills and the
+    shared tile is 64 KB against a 48 KB cap, which is why this looked blocked.
+    `MVT` is now the scalar tile and `MVB` the buffer width; fixed-tile kernels
+    run `ceil(batch/tile)` launches, generalising the split `k_gemm_q8_0`
+    already used. The epilogue tile aliases the weight tile (both 16 KB,
+    disjoint lifetimes) to stay under the cap. The decoupling alone was worth
+    +14% before any tile widened, because wider buffers widen the outer tile
+    too and norms/rope/attention now run 64 tokens per pass instead of 16.
+  - **Tensor-core Q6_K GEMM (+9.8%).** Only q4_K, q8_0 and q4_0 had `_tc`
+    kernels, so `attn_v` and `ffn_down` in every `Q4_K_M` file — 40% of all
+    GEMM calls — ran the scalar path. The new kernel is 2.35x faster on that
+    work; unpacking is lifted verbatim from `k_gemm_q6_K`, including the
+    integer `sc * q` before the float multiply, so it matches element for
+    element.
+  - **Attention V accumulation spread across the block (+22.8%).**
+    `for (i2 = tid; i2 < hd/2; i2 += tpg)` used 64 of 128 threads at
+    head_dim 128 while each walked the entire context serially. Each thread
+    now owns a (lane, position-chunk) pair. Where lanes exceed the block
+    (head_dim > 512, which gemma4's `key_length` default reaches) the original
+    loop is kept — the chunked form would leave the upper dims unwritten.
+  Decode is unchanged at matched context. CPU/GPU byte-identical on Qwen3-4B,
+  gemma-4-E4B, SmolLM2-135M, Qwen2.5-7B and Llama-3.1-8B, including the
+  sliding-window path.
+- **The paging warning is MoE-aware.** It told a 16 GB Mac that every token
+  would page from disk while gemma-4-26B-A4B was serving 8+ tok/s there. It
+  now estimates the per-token hot set — everything except the *unrouted*
+  expert banks — and reports both figures: 2.4 GB touched per token against a
+  14.4 GB file. Dense models keep the original wording verbatim, and the
+  `--mlock` hint is dropped when the hot set fits but the file does not,
+  because pinning a file that does not fit is not the fix for that.
+- **`--caps` publishes `gpu.eseries`**, so a placement scheduler can tell a box
+  that runs gemma-4 E-series on the device from one that silently falls back.
+  Follows `gpu_moe_ok()` exactly: Metal true since 0.1.11, CUDA true, stub
+  false.
+- **The tray re-reads an externally edited `config.json`.** A hand-edited model
+  path or port needed a tray restart; `cfg_load()` now stats the file and
+  re-reads on change, with size compared alongside `st_mtime` because
+  whole-second timestamps miss an edit landing in the same second as the read.
+- **A split (multi-part) GGUF is refused by name.** Handed part 1 of a 3-part
+  model, runner bound whatever that part held and printed a wall of
+  `missing tensor blk.N...` while `split.count` sat in metadata it had already
+  parsed. It now says which part, out of how many, names the expected set and
+  points at `llama-gguf-split --merge`. `scripts/gguf-split.py` produces
+  fixtures in llama.cpp's layout.
+- **`make test` no longer dies on dash.** `test-shader-embed` used a bash
+  here-string, so the suite failed at parse time on Debian/Ubuntu — i.e. most
+  Linux. CI never caught it because CI does not run `make test`.
+- Metal fixture coverage for the geometries and MoE layouts nothing pinned:
+  dense gemma3/gemma4 with and without SWA, qwen3 SWA, E-series,
+  gemma4-hetero, and identical-or-refused-loudly for the split expert layout
+  and the shared always-on expert. `--arch gemma4` fixtures did not load at
+  all before this — and because both arms failed identically, a CPU-vs-Metal
+  comparison of their empty output reported a match.
+
 ## v0.1.12-alpha — 2026-08-07
 
 - **A bare `runner` now starts the tray** (macOS, Windows). Double-clicking
