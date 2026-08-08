@@ -132,3 +132,7 @@ test-tray-core.exe
 test-paging-warn
 test-paging-warn.exe
 test-metal-coverage
+test-instances
+test-instances.exe
+test-metal-shaders
+test-metal-shaders.exe
