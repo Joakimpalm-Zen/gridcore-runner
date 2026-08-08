@@ -363,7 +363,10 @@ typedef struct {
 
 // max tokens per matvec tile — must match MVB in kernels.cu; every activation
 // buffer is allocated this many columns wide
-#define MVB 16
+#define MVB 64   // activation buffer columns (keep in sync with kernels.cu)
+#define MVT 16   // scalar-kernel fixed tile (keep in sync with MVT there)
+#define TC_N    64   // tensor-core GEMM token tile (keep in sync)
+#define Q8_COLS 8    // k_gemm_q8_0 column tile (keep in sync)
 
 // flash-decoding KV split count — must match ATTN_SPLITS in kernels.cu; fixed
 // (not context-dependent) so the decode CUDA graph stays valid across positions
@@ -1822,6 +1825,28 @@ static bool tc_on(const model_t *m, int type) {
     return tc_promoted(m, type);
 }
 
+// A kernel with a fixed compile-time column tile cannot take the full prefill
+// batch, so a wider batch runs as ceil(batch/tile) launches of the proven
+// shape. k_gemm_q8_0 already did exactly this for its 8-column tile; this
+// generalises it so the buffer width and the tile width can move apart.
+static bool launch_tiled(gpu_t *g, CUfunction f, unsigned grid, unsigned block,
+                         CUdeviceptr weights, CUdeviceptr x, CUdeviceptr y,
+                         mv_args a, CUdeviceptr bias, int tile) {
+    if (a.batch <= tile) {
+        void *p[] = { &weights, &x, &y, &a, &bias };
+        return launch(g, f, grid, 1, 1, block, p);
+    }
+    for (int off = 0; off < a.batch; off += tile) {
+        mv_args ai = a;
+        ai.batch = (a.batch - off) < tile ? (a.batch - off) : tile;
+        CUdeviceptr xi = x + (CUdeviceptr)((uint64_t)off * (uint64_t)a.xs * sizeof(float));
+        CUdeviceptr yi = y + (CUdeviceptr)((uint64_t)off * (uint64_t)a.ys * sizeof(float));
+        void *pi[] = { &weights, &xi, &yi, &ai, &bias };
+        if (!launch(g, f, grid, 1, 1, block, pi)) return false;
+    }
+    return true;
+}
+
 static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
                    CUdeviceptr y, int n_in, int n_out, CUdeviceptr bias,
                    int batch, int xs, int ys) {
@@ -1839,25 +1864,18 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
     // or forced by RUNNER_CUDA_TC: the block dequantizes a 64-row fp16 weight
     // tile once and its four warps' MMAs share it (TC_ROWS/block, 128 threads).
     if (batch > 1 && tc_on(m, w->type) && g->sw->f_gemm_tc[w->type])
-        return launch(g, g->sw->f_gemm_tc[w->type],
-                      (n_out + TC_ROWS - 1) / TC_ROWS, 1, 1, 128, p);
+        return launch_tiled(g, g->sw->f_gemm_tc[w->type],
+                            (n_out + TC_ROWS - 1) / TC_ROWS, 128,
+                            weights, x, y, a, b, TC_N);
     // Prefill (batch>1) uses the tiled-GEMM variant where available (Q8_0/Q4_K):
     // GEMM_WARPS(=8) rows per block, 256 threads, x staged in shared memory.
     if (batch > 1 && g->sw->f_gemm[w->type]) {
         // k_gemm_q8_0 keeps a fixed 8-column tile — a 16-column f32 x-tile
         // exceeds shared memory, and every narrower restructure measured
         // slower — so a wider tile runs as two launches of the proven shape.
-        if (w->type == T_Q8_0 && batch > 8) {
-            mv_args a2 = a;
-            a.batch = 8;
-            a2.batch = batch - 8;
-            CUdeviceptr x2 = x + (CUdeviceptr)(8u * (uint64_t)xs * sizeof(float));
-            CUdeviceptr y2 = y + (CUdeviceptr)(8u * (uint64_t)ys * sizeof(float));
-            void *p2[] = { &weights, &x2, &y2, &a2, &b };
-            return launch(g, g->sw->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p) &&
-                   launch(g, g->sw->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p2);
-        }
-        return launch(g, g->sw->f_gemm[w->type], (n_out + 7) / 8, 1, 1, 8 * 32, p);
+        return launch_tiled(g, g->sw->f_gemm[w->type], (n_out + 7) / 8, 8 * 32,
+                            weights, x, y, a, b,
+                            w->type == T_Q8_0 ? Q8_COLS : MVT);
     }
     // Decode (batch==1) uses the coalesced lane-per-element GEMV where available
     // (Q8_0/Q4_K); same 4-rows/block shape, so capture-compatible with no
@@ -1867,7 +1885,8 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
     // 128 threads = 4 warps = 4 rows per block; the tile variant applies each
     // decoded weight to all columns, the single variant is faster at batch 1
     CUfunction f = batch > 1 ? g->sw->f_mvb[w->type] : g->sw->f_mv[w->type];
-    return launch(g, f, (n_out + 3) / 4, 1, 1, 128, p);
+    return launch_tiled(g, f, (n_out + 3) / 4, 128, weights, x, y, a, b,
+                        batch > 1 ? MVT : MVB);
 }
 
 static bool enc_qknorm(gpu_t *g, model_t *m, CUdeviceptr v, CUdeviceptr w,

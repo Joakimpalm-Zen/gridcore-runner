@@ -70,7 +70,8 @@ extern "C" __global__ void k_qknorm(float *v, const float *w, int hd, float eps,
 // weight to all MVB columns (x buffers are always MVB columns wide, so the
 // unguarded reads for t >= batch touch valid, ignored memory).
 
-#define MVB 16  // max tokens per matvec tile (keep in sync with cuda.c)
+#define MVT 16  // scalar-kernel tile: register arrays and xsm size
+#define MVB 64  // activation BUFFER columns (keep in sync with cuda.c)
 
 struct mv_args {
     int     n_in;
@@ -98,13 +99,13 @@ static __device__ __forceinline__ float warp_sum(float s) {
 
 #define MV_HEAD_B \
     MV_HEAD; \
-    float s[MVB] = {0};
+    float s[MVT] = {0};
 
 // apply one decoded weight w at element index idx to every token column
 #define MV_FMA(w, idx) do { \
     float _w = (w); ulong64 _i = (idx); \
     _Pragma("unroll") \
-    for (int t = 0; t < MVB; t++) s[t] += _w * x[(ulong64)t * a.xs + _i]; \
+    for (int t = 0; t < MVT; t++) s[t] += _w * x[(ulong64)t * a.xs + _i]; \
 } while (0)
 
 #define MV_TAIL_B \
@@ -640,14 +641,14 @@ extern "C" __global__ void k_mv_q4_K_b(MV_PARAMS) {
 // real Q4_K model. Lane l owns elements [l*8, l*8+8): all in scale group l/4,
 // quant segment l/8, byte offset (l&3)*8, lower nibble iff group even.
 extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
-    __shared__ float xsm[MVB][256];
+    __shared__ float xsm[MVT][256];
     unsigned warp = threadIdx.x >> 5;
     unsigned lane = threadIdx.x & 31;
     unsigned row  = blockIdx.x * GEMM_WARPS + warp;
     int nb = a.n_in / 256;
     const uchar *rw = wb + a.w_off +
                       (ulong64)(row < (unsigned)a.n_out ? row : 0) * nb * 144;
-    float s[MVB] = {0};
+    float s[MVT] = {0};
     int g     = (int)(lane >> 2);         // scale/min group 0..7
     int ji    = (int)(lane >> 3);         // 32-byte quant segment 0..3
     int lo    = (((int)lane >> 2) & 1) == 0;
@@ -657,7 +658,7 @@ extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
         const uchar *blk = rw + (ulong64)b * 144;
         int base_e = b * 256;
         #pragma unroll
-        for (int t = 0; t < MVB; t++) {
+        for (int t = 0; t < MVT; t++) {
             const float *xg = x + (ulong64)t * a.xs + base_e;
             for (int e = threadIdx.x; e < 256; e += blockDim.x) xsm[t][e] = xg[e];
         }
@@ -677,7 +678,7 @@ extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
                 int nib = lo ? (byte & 0xF) : (byte >> 4);
                 float w = dg * (float)nib - mmg;
                 #pragma unroll
-                for (int t = 0; t < MVB; t++) s[t] += w * xsm[t][el + k];
+                for (int t = 0; t < MVT; t++) s[t] += w * xsm[t][el + k];
             }
         }
         __syncthreads();
@@ -712,7 +713,7 @@ extern "C" __global__ void k_gemm_q4_K(MV_PARAMS) {
 
 #define TC_ROWS 64    // output rows per block (4 warps x 16-row fragments)
 #define TC_K    128   // K-elements staged per step (half a q4_K super-block)
-#define TC_N    16    // token columns per tile (== MVB)
+#define TC_N    64    // token columns per tile (was 16; widened to amortise the weight dequantisation)
 
 extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
     using namespace nvcuda::wmma;
@@ -721,12 +722,17 @@ extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
     const unsigned row0 = blockIdx.x * TC_ROWS;
     __shared__ __half sh_w[TC_ROWS * TC_K];   // row-major, ldm = TC_K
     __shared__ __half sh_x[TC_N * TC_K];      // col-major (k,t) at [t*TC_K+k]
-    __shared__ float  sh_c[TC_ROWS * TC_N];   // row-major epilogue staging
+    // The epilogue tile ALIASES the weight tile: sh_w is 64*128 halves = 16 KB
+    // and sh_c needs TC_ROWS*TC_N floats, and their lifetimes are disjoint
+    // (weights are dead once the last MMA has run). Separate arrays would push
+    // the block past the 48 KB static shared cap at a wide tile.
+    float *sh_c = (float *)sh_w;
 
     fragment<matrix_a, 16, 16, 16, __half, row_major> fa;
     fragment<matrix_b, 16, 16, 16, __half, col_major> fb;
-    fragment<accumulator, 16, 16, 16, float> fc[1];
-    fill_fragment(fc[0], 0.0f);
+    fragment<accumulator, 16, 16, 16, float> fc[TC_N / 16];
+    #pragma unroll
+    for (int n = 0; n < TC_N / 16; n++) fill_fragment(fc[n], 0.0f);
 
     int nb = a.n_in / 256;
     // this thread stages one 64-element segment of one row per K-step:
@@ -781,13 +787,13 @@ extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
             }
             // ---- stage activations: 128 K x 16 tokens, vectorized ----
             {
-                int col = tid >> 3, part = tid & 7;     // 8 threads per column
-                __half *dst = sh_x + col * TC_K + part * 16;
+                int col = tid / 2, part = tid % 2;
+                __half *dst = sh_x + col * TC_K + part * 64;
                 if (col < a.batch) {
                     const float *xg = x + (ulong64)col * a.xs + b * 256 + koff
-                                      + part * 16;
+                                      + part * 64;
                     #pragma unroll
-                    for (int v = 0; v < 4; v++) {
+                    for (int v = 0; v < 16; v++) {
                         float4 xv = *(const float4 *)(xg + v * 4);
                         dst[v * 4 + 0] = __float2half(xv.x);
                         dst[v * 4 + 1] = __float2half(xv.y);
@@ -796,7 +802,7 @@ extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
                     }
                 } else {
                     #pragma unroll
-                    for (int e = 0; e < 16; e++) dst[e] = __float2half(0.0f);
+                    for (int e = 0; e < 64; e++) dst[e] = __float2half(0.0f);
                 }
             }
             __syncthreads();
@@ -805,13 +811,23 @@ extern "C" __global__ void k_gemm_q4_K_tc(MV_PARAMS) {
             #pragma unroll
             for (int k = 0; k < TC_K; k += 16) {
                 load_matrix_sync(fa, wt + k, TC_K);
-                load_matrix_sync(fb, sh_x + k, TC_K);
-                mma_sync(fc[0], fa, fb, fc[0]);
+                // one staged weight tile, reused across every n-tile: this is
+                // the entire point of widening TC_N
+                #pragma unroll
+                for (int n = 0; n < TC_N / 16; n++) {
+                    load_matrix_sync(fb, sh_x + n * 16 * TC_K + k, TC_K);
+                    mma_sync(fc[n], fa, fb, fc[n]);
+                }
             }
             __syncthreads();
         }
     }
-    store_matrix_sync(sh_c + warp * 16 * TC_N, fc[0], TC_N, mem_row_major);
+    // sh_c aliases sh_w: every warp must be done reading weights first
+    __syncthreads();
+    #pragma unroll
+    for (int n = 0; n < TC_N / 16; n++)
+        store_matrix_sync(sh_c + warp * 16 * TC_N + n * 16, fc[n], TC_N,
+                          mem_row_major);
     __syncthreads();
     for (int idx = tid; idx < TC_ROWS * TC_N; idx += blockDim.x) {
         int rr = idx / TC_N, tt = idx % TC_N;
@@ -1123,7 +1139,7 @@ extern "C" __global__ void k_gemv_q5_K(MV_PARAMS) {
 // in shared memory. Eight warps reuse that tile for eight output rows; each
 // warp reduces one 256-element weight block cooperatively.
 extern "C" __global__ void k_gemm_q5_K(MV_PARAMS) {
-    __shared__ float xsm[MVB][256];
+    __shared__ float xsm[MVT][256];
     unsigned warp = threadIdx.x >> 5;
     unsigned lane = threadIdx.x & 31;
     unsigned row  = blockIdx.x * GEMM_WARPS + warp;
@@ -1135,13 +1151,13 @@ extern "C" __global__ void k_gemm_q5_K(MV_PARAMS) {
     int lo    = (((int)lane >> 2) & 1) == 0;
     int bbase = ((int)lane & 3) * 8;      // byte offset within segment/qh
     int hmask = 1 << g;
-    float s[MVB] = {0};
+    float s[MVT] = {0};
 
     for (int b = 0; b < nb; b++) {
         const uchar *blk = rw + (ulong64)b * 176;
         int base_e = b * 256;
         #pragma unroll
-        for (int t = 0; t < MVB; t++) {
+        for (int t = 0; t < MVT; t++) {
             const float *xg = x + (ulong64)t * a.xs + base_e;
             for (int e = threadIdx.x; e < 256; e += blockDim.x) xsm[t][e] = xg[e];
         }
@@ -1163,7 +1179,7 @@ extern "C" __global__ void k_gemm_q5_K(MV_PARAMS) {
                          ((qh[bbase + k] & hmask) ? 16 : 0);
                 float w = dg * (float)qv - mmg;
                 #pragma unroll
-                for (int t = 0; t < MVB; t++) s[t] += w * xsm[t][el + k];
+                for (int t = 0; t < MVT; t++) s[t] += w * xsm[t][el + k];
             }
         }
         __syncthreads();
@@ -1302,7 +1318,7 @@ extern "C" __global__ void k_gemv_q6_K(MV_PARAMS) {
 // smem so decoded weights FMA against smem. Reordered k-reduction vs
 // k_mv_q6_K_b -> token identity verified empirically.
 extern "C" __global__ void k_gemm_q6_K(MV_PARAMS) {
-    __shared__ float xsm[MVB][256];
+    __shared__ float xsm[MVT][256];
     unsigned warp = threadIdx.x >> 5;
     unsigned lane = threadIdx.x & 31;
     unsigned row  = blockIdx.x * GEMM_WARPS + warp;
@@ -1310,13 +1326,13 @@ extern "C" __global__ void k_gemm_q6_K(MV_PARAMS) {
     const uchar *rw = wb + a.w_off +
                       (ulong64)(row < (unsigned)a.n_out ? row : 0) * nb * 210;
     int is = (int)(lane >> 4);
-    float s[MVB] = {0};
+    float s[MVT] = {0};
 
     for (int b = 0; b < nb; b++) {
         const uchar *blk = rw + (ulong64)b * 210;
         int base_e = b * 256;
         #pragma unroll
-        for (int t = 0; t < MVB; t++) {
+        for (int t = 0; t < MVT; t++) {
             const float *xg = x + (ulong64)t * a.xs + base_e;
             for (int e = threadIdx.x; e < 256; e += blockDim.x) xsm[t][e] = xg[e];
         }
@@ -1338,7 +1354,7 @@ extern "C" __global__ void k_gemm_q6_K(MV_PARAMS) {
                 float w4 = d * (float)(sc[6 + is] * q4);
                 int e0 = half * 128;
                 #pragma unroll
-                for (int t = 0; t < MVB; t++) {
+                for (int t = 0; t < MVT; t++) {
                     const float *xs = xsm[t];
                     s[t] += w1 * xs[e0 + lane]      + w2 * xs[e0 + lane + 32] +
                             w3 * xs[e0 + lane + 64] + w4 * xs[e0 + lane + 96];
