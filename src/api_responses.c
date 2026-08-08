@@ -401,7 +401,8 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 500, "out of memory building responses prompt");
         return;
     }
-    render_messages(s->tmpl, cm, n_cm, true, prompt, total + 256);
+    render_messages(s->tmpl, cm, n_cm, true, req_enable_thinking(req),
+                    prompt, total + 256);
     run_completion(s, fd, prompt, API_RESPONSES, req, strict ? &env : NULL);
     free(prompt);
     for (int i = 0; i < n_own; i++) free(owned[i]);

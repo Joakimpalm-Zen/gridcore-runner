@@ -18,12 +18,34 @@ int         template_from_name(const char *name); // -1 if unknown
 const char *template_name(int tmpl);
 // render messages; add_assistant appends the assistant generation prefix.
 // returns bytes written (excl. NUL)
+//
+// enable_thinking currently affects TMPL_GEMMA4 only, and it defaults to FALSE
+// because that is what the reference template defaults to:
+//
+//     {{- '<|turn>model\n' -}}
+//     {%- if not enable_thinking | default(false) -%}
+//         {{- '<|channel>thought\n<channel|>' -}}
+//     {%- endif -%}
+//
+// (llama.cpp models/templates/google-gemma-4-31B-it.jinja). Passing true
+// suppresses the empty-thought pre-seed and lets the model open its own
+// thought block — upstream's opt-in branch, not the default.
+//
+// Until 2026-08-08 runner had no parameter here and always rendered the
+// thinking-enabled shape, so it disagreed with every reference-following
+// engine on every gemma-4 turn. That is the likely cause of tool prompts that
+// opened a thought block and never closed it, returning one byte from a
+// hundred generated tokens.
 size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
-                       bool add_assistant, char *out, size_t cap);
+                       bool add_assistant, bool enable_thinking,
+                       char *out, size_t cap);
 
 // chat tool-call convention (template.c; sbuf/jv live in json.h)
 struct sbuf;
 struct jv;
+// read the per-request thinking opt-in (top level or chat_template_kwargs);
+// false when absent, which is the reference template's own default
+bool req_enable_thinking(struct jv *req);
 // render OpenAI "tools" declarations as a system turn (no-op when absent)
 void tools_render(const struct jv *tools, struct sbuf *out);
 void tools_render_for(int tmpl, const struct jv *tools, struct sbuf *out);

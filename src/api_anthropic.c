@@ -435,7 +435,8 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
     char *prompt = NULL;
     if (ok) {
         prompt = malloc(t.total + 256);
-        if (prompt) render_messages(s->tmpl, t.cm, t.n, true, prompt,
+        if (prompt) render_messages(s->tmpl, t.cm, t.n, true,
+                                    req_enable_thinking(req), prompt,
                                     t.total + 256);
         else ok = false;
     }

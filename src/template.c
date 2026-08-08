@@ -71,8 +71,24 @@ static size_t emit(char *out, size_t cap, size_t off, const char *fmt,
     return n > 0 ? off + (size_t)n : off;
 }
 
+// Per-request opt-in for the thinking shape. Accepted at the top level and
+// inside `chat_template_kwargs`, which is where llama.cpp's server takes
+// template variables — a client that already speaks to llama.cpp should not
+// have to learn a second spelling to get the same behaviour.
+//
+// Default false, matching the reference template's own default. A request that
+// says nothing gets the shape every other engine would render.
+bool req_enable_thinking(struct jv *req) {
+    if (!req) return false;
+    jv *kw = jv_get((jv *)req, "chat_template_kwargs");
+    if (kw && jv_get(kw, "enable_thinking"))
+        return jv_bool(jv_get(kw, "enable_thinking"), false);
+    return jv_bool(jv_get((jv *)req, "enable_thinking"), false);
+}
+
 size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
-                       bool add_assistant, char *out, size_t cap) {
+                       bool add_assistant, bool enable_thinking,
+                       char *out, size_t cap) {
     size_t off = 0;
     out[0] = 0;
     switch (tmpl) {
@@ -184,8 +200,33 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<|turn>%s\n", role, NULL);
             off = emit(out, cap, off, "%s<turn|>\n", msgs[i].content, NULL);
         }
-        if (add_assistant)
-            off = emit(out, cap, off, "<|turn>model\n", NULL, NULL);
+        // Reference generation prompt, transcribed from the jinja rather than
+        // approximated: the whole block is skipped when the previous message
+        // was a tool response, and the empty thought block is pre-seeded
+        // unless thinking was explicitly asked for.
+        //
+        //   {%- if ns.prev_message_type != 'tool_response'
+        //          and ns.prev_message_type != 'tool_call' -%}
+        //       {{- '<|turn>model\n' -}}
+        //       {%- if not enable_thinking | default(false) -%}
+        //           {{- '<|channel>thought\n<channel|>' -}}
+        //       {%- endif -%}
+        //   {%- endif -%}
+        //
+        // The `tool_call` half of that condition is not reproduced here: an
+        // assistant tool call is not carried as a message role in this engine
+        // (tool_history_render_for renders it separately), so there is nothing
+        // to test. Guessing at it would be worse than saying so.
+        if (add_assistant) {
+            bool after_tool = n_msgs > 0 &&
+                              !strcmp(msgs[n_msgs - 1].role, "tool");
+            if (!after_tool) {
+                off = emit(out, cap, off, "<|turn>model\n", NULL, NULL);
+                if (!enable_thinking)
+                    off = emit(out, cap, off, "<|channel>thought\n<channel|>",
+                               NULL, NULL);
+            }
+        }
         break;
     case TMPL_GEMMA: {
         // gemma has no system role: fold a system message into the first

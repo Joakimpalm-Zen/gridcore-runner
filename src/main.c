@@ -264,6 +264,7 @@ int main(int argc, char **argv) {
     int draft_k = 4;
     bool interactive = false, verbose = false, no_bos = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
+    bool enable_thinking = false;
     bool bench_json = false;
     model_params mp = {0};
     // The four sampling knobs are filled in from the model's family preset
@@ -299,6 +300,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-i")) interactive = true;
         else if (!strcmp(a, "-v")) verbose = true;
         else if (!strcmp(a, "--serve")) serve = true;
+        // gemma-4 renders a non-thinking prompt by default, matching its
+        // reference template; --think opts into the thinking shape
+        else if (!strcmp(a, "--think")) enable_thinking = true;
         else if (!strcmp(a, "--tray")) return tray_main();
         // Accepted everywhere, acts nowhere else: its entire meaning is "do
         // not auto-launch the tray", and any argument already suppresses
@@ -842,7 +846,8 @@ int main(int argc, char **argv) {
         if (first_turn && system_prompt[0])
             msgs[n_msgs++] = (chat_msg){ "system", system_prompt };
         msgs[n_msgs++] = (chat_msg){ "user", line };
-        render_messages(tmpl, msgs, n_msgs, true, rendered, sizeof(rendered));
+        render_messages(tmpl, msgs, n_msgs, true, enable_thinking,
+                        rendered, sizeof(rendered));
         n_prompt = tok_encode(&tok, rendered, toks, (int)tok_cap,
                               first_turn && !no_bos, true);
         first_turn = false;
