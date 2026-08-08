@@ -1648,11 +1648,16 @@ __device__ __forceinline__ ulong64 kv_head_off(int kvh, int hd, int q8) {
 // scan and the denominator but has NO value row, so the probabilities over
 // real positions sum to < 1 and the head's output shrinks. The sink competes
 // against ALREADY-SCALED scores; it is not itself scaled.
+// Position-chunk cap for the V accumulation. nchunk*lanes never exceeds the
+// block, so the partial buffer is bounded at tpg*2 floats regardless.
+#define ATTN_VMAX 8
+
 extern "C" __global__ void k_attn(const float *q, const unsigned char *kc,
                                   const unsigned char *vc, float *att, float *out,
                                   attn_args a, const int *posp,
                                   const float *sinks) {
     __shared__ float red[256];
+    __shared__ float vpart[256 * 2];   // nchunk*lanes <= tpg <= 256
     int h = blockIdx.x, tid = threadIdx.x, tpg = blockDim.x;
     int tk = blockIdx.y;                 // token column in the tile
     int pos = *posp + tk;
@@ -1699,15 +1704,51 @@ extern "C" __global__ void k_attn(const float *q, const unsigned char *kc,
     if (sinks) sum += expf(sinks[h] - mx);
     __syncthreads();
 
-    for (int i2 = tid; i2 < hd / 2; i2 += tpg) {
+    // V accumulation, spread over the whole block. `lanes` float2 dims x
+    // `nchunk` disjoint position strides; each thread owns one (lane, chunk)
+    // pair, and the partials are summed per lane below.
+    const int lanes  = hd / 2;
+    int nchunk = lanes > 0 ? tpg / lanes : 1;
+    if (nchunk < 1) nchunk = 1;
+    if (nchunk > ATTN_VMAX) nchunk = ATTN_VMAX;
+    const int vlane  = lanes > 0 ? tid % lanes : 0;
+    const int vchunk = lanes > 0 ? tid / lanes : 0;
+
+    // Parallel path only when every lane is covered by the block. With
+    // lanes > tpg (head_dim > 512, which gemma4 can reach) the chunking would
+    // leave the upper dims unwritten, so that case keeps the original loop.
+    if (lanes > 0 && lanes <= tpg) {
+    if (vchunk < nchunk && vlane < lanes) {
         float o0 = 0, o1 = 0;
-        for (int t = t0; t <= pos; t++) {
-            float2 vf = kv_pair(vc + base + (ulong64)t * row_b, i2, a.q8);
+        for (int t = t0 + vchunk; t <= pos; t += nchunk) {
+            float2 vf = kv_pair(vc + base + (ulong64)t * row_b, vlane, a.q8);
             o0 += ah[t] * vf.x;
             o1 += ah[t] * vf.y;
         }
-        out[(ulong64)tk * a.os + h * hd + 2 * i2]     = o0 / sum;
-        out[(ulong64)tk * a.os + h * hd + 2 * i2 + 1] = o1 / sum;
+        vpart[(vchunk * lanes + vlane) * 2 + 0] = o0;
+        vpart[(vchunk * lanes + vlane) * 2 + 1] = o1;
+    }
+    __syncthreads();
+    for (int i2 = tid; i2 < lanes; i2 += tpg) {
+        float s0 = 0, s1 = 0;
+        for (int c = 0; c < nchunk; c++) {
+            s0 += vpart[(c * lanes + i2) * 2 + 0];
+            s1 += vpart[(c * lanes + i2) * 2 + 1];
+        }
+        out[(ulong64)tk * a.os + h * hd + 2 * i2]     = s0 / sum;
+        out[(ulong64)tk * a.os + h * hd + 2 * i2 + 1] = s1 / sum;
+    }
+    } else {
+        for (int i2 = tid; i2 < lanes; i2 += tpg) {
+            float o0 = 0, o1 = 0;
+            for (int t = t0; t <= pos; t++) {
+                float2 vf = kv_pair(vc + base + (ulong64)t * row_b, i2, a.q8);
+                o0 += ah[t] * vf.x;
+                o1 += ah[t] * vf.y;
+            }
+            out[(ulong64)tk * a.os + h * hd + 2 * i2]     = o0 / sum;
+            out[(ulong64)tk * a.os + h * hd + 2 * i2 + 1] = o1 / sum;
+        }
     }
 }
 
