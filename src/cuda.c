@@ -2033,6 +2033,11 @@ static void prof_report_mode(int md, const char *label) {
     double residual = wall - gpu_sum;
     fprintf(stderr,
       "\n==== RUNNER_CUDA_PROFILE [%s] ====\n"
+      "note: CUDA graphs are DISABLED while profiling — a replayed graph never\n"
+      "      re-enters the instrumented launch path, so decode would report\n"
+      "      0.0 ms for every phase. Decode wall time is therefore pessimistic\n"
+      "      (it carries the launch overhead graphs remove); the phase SPLIT is\n"
+      "      what these numbers are for.\n"
       "tiles=%lld tokens=%lld launches=%lld (%.1f/tile, %.1f/token)\n"
       "wall: %.1f ms | %.4f ms/tile | %.4f ms/token\n"
       "-- GPU phase (CUDA events, authoritative) --\n",
@@ -3376,7 +3381,7 @@ bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
     // is fighting — a solo decode step is already graph-captured, so a batched
     // step issuing ~500 plain launches would hand back much of what it won.
     bool ran = false;
-    if (!b->graph_bad) {
+    if (!b->graph_bad && !prof.on) {   // see the note on the solo path above
         if (!b->gexec[n]) {
             prof.capturing = 1;
             if (cu.StreamBeginCapture(g->stream, 1) != 0 ||
@@ -3493,8 +3498,16 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     }
 
     bool partial = m->gpu_layers < m->n_layer;
+    // !prof.on: a replayed CUDA graph never re-enters the instrumented launch
+    // path, so every per-phase counter stays 0.0 while the wall clock keeps
+    // running — the profiler reported `GPU-TOTAL 0.0 ms` and
+    // `residual = 100% of wall` for decode that was demonstrably happening
+    // (3070, 2026-08-09). Profiling therefore runs decode EAGERLY. The
+    // trade-off is stated in the report header: eager decode carries the
+    // launch overhead graphs exist to remove, so the absolute decode wall is
+    // pessimistic and the phase SPLIT is what the profile is for.
     if (n == 1 && want_logits && !partial && !g->graph_bad && g->stream &&
-        !getenv("RUNNER_CUDA_GRAPH_OFF")) {
+        !prof.on && !getenv("RUNNER_CUDA_GRAPH_OFF")) {
         double ts0 = prof.on ? prof_now() : 0;
         if (!stage_x(g, m, tokens, 1) ||
             cu.MemcpyHtoD(g->pos_dev, &pos, sizeof(int)) != 0) return false;
