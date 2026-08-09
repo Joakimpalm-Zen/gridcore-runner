@@ -1009,6 +1009,17 @@ Models *larger* than a machine's RAM are not recommended in any
 configuration: the paging/streaming regimes were measured exhaustively and
 rejected ([docs/negative-result-expert-cache.md](docs/negative-result-expert-cache.md)).
 
+**Before building a generally-useful engine feature, search for prior art.**
+Not for licence reasons — for the answer. The MoE expert-prefetch work here was
+built first and searched afterwards, and it already existed publicly
+(CachyLLama), while llama.cpp discussion #18758 had independently reached the
+same conclusion this project reached by measurement. Both would have been found
+in minutes. A search that finds nothing costs those minutes; one that finds
+something can save a campaign, or tell you the negative result you are about to
+spend a week on is already known. This applies to anything an engine would
+plausibly want — caching tiers, scheduling policies, quantisation tricks — and
+not to Gridcore-specific plumbing.
+
 Not implemented (by design, to stay small): Vulkan (AMD/Intel run on CPU),
 `expert_shared_count`-style shared-expert MoE / MLA (Qwen2-MoE, DeepSeek/Kimi),
 other hybrid-SSM architectures (Mamba/Jamba; Qwen3.5 Gated DeltaNet is supported),
