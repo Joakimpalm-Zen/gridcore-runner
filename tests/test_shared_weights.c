@@ -251,7 +251,24 @@ int main(int argc, char **argv) {
         long long d1 = (long long)f0 - (long long)f1;
         long long d2 = (long long)f1 - (long long)f2;
         const long long TOL = 16 * 1024 * 1024;
-        if (d1 > TOL && d2 > TOL) {
+        // A SINGLE catastrophic window is also a leak, and the two-window rule
+        // alone cannot see it. Measured 2026-08-09 on an RTX 3070: leaking
+        // w->weights drained 6,895 MB in window one and then showed 0.0 MB in
+        // window two — because the first leak had exhausted the card, so the
+        // later loads had no VRAM left to allocate and leak. The noise-
+        // rejection heuristic inverts for severe leaks: the bigger the leak,
+        // the likelier it escapes. Nothing device-wide moves half a gigabyte
+        // during this test, so one window past BIG is signal on its own.
+        const long long BIG = 512 * 1024 * 1024;
+        if (d1 > BIG || d2 > BIG) {
+            fprintf(stderr, "FAIL: VRAM dropped %.1f MB in a single window "
+                    "(then %.1f MB) — far past any device-wide noise. An "
+                    "allocation is not being freed, and it is large enough to "
+                    "exhaust the device before the second window can confirm "
+                    "it.\n", (d1 > d2 ? d1 : d2) / 1e6,
+                    (d1 > d2 ? d2 : d1) / 1e6);
+            g_fail = 1;
+        } else if (d1 > TOL && d2 > TOL) {
             fprintf(stderr, "FAIL: VRAM falls every cycle window (%.1f then "
                     "%.1f MB over 3 load/free cycles each) — an allocation is "
                     "not being freed\n", d1 / 1e6, d2 / 1e6);
