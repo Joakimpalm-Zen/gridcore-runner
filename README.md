@@ -812,6 +812,19 @@ Two levels of guarantee:
   alternatives; unsupported constructs are rejected at request time with a
   clear error.
 
+  **The `oneOf` limit, and the shape that works.** Alternatives are chosen on
+  their first distinguishing byte, so branches that begin identically cannot
+  compile — a union of `{"action":"a",...}` / `{"action":"b",...}` is refused
+  with `unsupported schema: oneOf alternatives are ambiguous (share a starting
+  byte)`, because every branch opens with the same `"action"` key. Put the
+  discriminator's **value** where the branches diverge instead: a `tool`
+  `const` followed by that branch's `args` object, which is the shape above and
+  compiles today. This is a real limit rather than a bug to work around by
+  dispatching on a sibling enum's index — nothing in JSON Schema links enum
+  position to `oneOf` position, and pretending otherwise would invent
+  semantics. Lifting it needs multi-alternative tracking (keep candidates live,
+  prune as bytes arrive); a design for that is in the suite plan.
+
 Both modes: if the token budget expires after the document has begun, runner
 completes it minimally (per the schema when there is one) so the result parses,
 and reports `finish_reason: "length"`. If the model spends the entire budget on
