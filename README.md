@@ -972,6 +972,26 @@ on real hardware (or a RAM-capped equivalent) — not extrapolation:
 | **Gemma on Metal** (any Mac) | any Gemma-3 / dense Gemma-4 whose weights fit the device working set (`--caps` → `gpu.max_working_set_bytes`) | byte-identical CPU vs Metal since 0.1.10. Note Metal is **all-or-nothing**: a model above the ceiling falls back to CPU entirely rather than offloading part of it |
 | **24 GB GPU** | Qwen3-30B-A3B | ~72 tok/s on an RTX PRO 6000 24 GB MIG slice |
 
+#### Threads: sparse MoE on a many-core box wants **fewer** threads
+
+If you run a **sparse MoE model on CPU** with many cores, pass `-t 16`. The
+default (logical cores, capped at 64) is measurably wrong for this workload:
+
+| gemma-4-26B-A4B Q4_0, CPU decode, 128-core host | tok/s |
+|---|---:|
+| `-t 12` – `-t 16` | **17.0** |
+| `-t 64` (the default there) | 7.8 |
+
+That is a **2.2x self-inflicted slowdown**, and it degrades *monotonically*
+between the two — it is not a cliff you can stumble past. The signature is
+memory-bandwidth-bound MoE decode: only a few experts are touched per token,
+so past a point the threads contend for the same bandwidth instead of adding
+arithmetic. Dense models do not show this nearly as sharply.
+
+Measured 2026-08-08 by the Syntetik-MoE run on a 128-core host; a
+bandwidth-aware default is open in the plan, and until it lands the flag is the
+fix. (Note `-t` above `64` is capped, and says so since `a82758f`.)
+
 Models *larger* than a machine's RAM are not recommended in any
 configuration: the paging/streaming regimes were measured exhaustively and
 rejected ([docs/negative-result-expert-cache.md](docs/negative-result-expert-cache.md)).
