@@ -811,6 +811,100 @@ kernel void k_mm_q4_0(MM_PARAMS) {
     })
 }
 
+// Tiled-GEMM variants for the formats that only had a matvec. Without these,
+// prefill fell back to the matvec path and ran SLOWER on the GPU than on the
+// CPU (measured: tinyllama q2_K 36.9 -> 28.2 tok/s prompt, iq4_xs 101.5 ->
+// 87.5) because the matvec re-reads every weight once per token column, while
+// this reads each weight tile once for sixteen. Types that already had a
+// k_mm gained 3.7-5.3x on the same measurement, which is the prize here.
+//
+// MM_TK is 32, and `sub` is a multiple of 8, so each chunk of 8 stays inside
+// one block AND inside one nibble half -- which is what makes these as simple
+// as picking the right base pointer and shift.
+
+kernel void k_mm_bf16(MM_PARAMS) {
+    MM_BODY({
+        device const ushort *rw = (device const ushort *)(wb + a.w_off)
+                                + (ulong)row * a.n_in + k0 + sub;
+        for (int j = 0; j < 8; j++) dst[j] = bf16_to_f32_m(rw[j]);
+    })
+}
+
+kernel void k_mm_iq4_nl(MM_PARAMS) {
+    MM_BODY({
+        int k = k0 + sub, b = k >> 5, t0 = k & 31;
+        device const uchar *blk =
+            wb + a.w_off + ((ulong)row * (a.n_in >> 5) + b) * 18;
+        float d = (float)*(device const half *)blk;
+        device const uchar *q = blk + 2;
+        bool hi = t0 >= 16;
+        int base = hi ? t0 - 16 : t0;
+        for (int j = 0; j < 8; j++) {
+            uchar by = q[base + j];
+            dst[j] = d * (float)kvalues_iq4nl[hi ? (by >> 4) : (by & 0xF)];
+        }
+    })
+}
+
+kernel void k_mm_iq4_xs(MM_PARAMS) {
+    MM_BODY({
+        int k = k0 + sub, nsb = a.n_in / 256;
+        int sb = k >> 8, sbk = k & 255, ib = sbk >> 5, t0 = sbk & 31;
+        device const uchar *blk = wb + a.w_off + ((ulong)row * nsb + sb) * 136;
+        float d = (float)*(device const half *)blk;
+        uint sh = (uint)blk[2] | ((uint)blk[3] << 8);
+        int ls = ((blk[4 + (ib >> 1)] >> (4 * (ib & 1))) & 0xF) |
+                 (((sh >> (2 * ib)) & 3) << 4);
+        float dl = d * (float)(ls - 32);
+        device const uchar *q = blk + 8 + ib * 16;
+        bool hi = t0 >= 16;
+        int base = hi ? t0 - 16 : t0;
+        for (int j = 0; j < 8; j++) {
+            uchar by = q[base + j];
+            dst[j] = dl * (float)kvalues_iq4nl[hi ? (by >> 4) : (by & 0xF)];
+        }
+    })
+}
+
+kernel void k_mm_q2_K(MM_PARAMS) {
+    MM_BODY({
+        int k = k0 + sub, nsb = a.n_in / 256;
+        int sb = k >> 8, sbk = k & 255;
+        int h = sbk >> 7, rem = sbk & 127, j32 = rem >> 5, rem2 = rem & 31;
+        int g = rem2 >> 4, l0 = rem2 & 15;
+        device const uchar *blk = wb + a.w_off + ((ulong)row * nsb + sb) * 84;
+        float d    = (float)*(device const half *)(blk + 80);
+        float dmin = (float)*(device const half *)(blk + 82);
+        uchar scb  = blk[h * 8 + j32 * 2 + g];
+        float dl = d * (scb & 0xF), ml = dmin * (scb >> 4);
+        device const uchar *q = blk + 16 + h * 32 + g * 16;
+        uchar shift = (uchar)(2 * j32);
+        for (int j = 0; j < 8; j++)
+            dst[j] = dl * (float)((q[l0 + j] >> shift) & 3) - ml;
+    })
+}
+
+kernel void k_mm_q3_K(MM_PARAMS) {
+    MM_BODY({
+        int k = k0 + sub, nsb = a.n_in / 256;
+        int sb = k >> 8, sbk = k & 255;
+        int h = sbk >> 7, rem = sbk & 127, j32 = rem >> 5, rem2 = rem & 31;
+        int g = rem2 >> 4, l0 = rem2 & 15;
+        device const uchar *blk = wb + a.w_off + ((ulong)row * nsb + sb) * 110;
+        float d_all = (float)*(device const half *)(blk + 108);
+        char sc[16];
+        q3k_scales(blk + 96, sc);
+        float dl = d_all * (float)((int)sc[h * 8 + j32 * 2 + g] - 32);
+        device const uchar *hm = blk + g * 16;          /* not offset by half */
+        device const uchar *q  = blk + 32 + h * 32 + g * 16;
+        uchar shift = (uchar)(2 * j32);
+        uchar mbit  = (uchar)(1u << (h * 4 + j32));
+        for (int j = 0; j < 8; j++)
+            dst[j] = dl * (float)((int)((q[l0 + j] >> shift) & 3)
+                                  - ((hm[l0 + j] & mbit) ? 0 : 4));
+    })
+}
+
 kernel void k_mm_q4_K(MM_PARAMS) {
     MM_BODY({
         int nsb = a.n_in / 256;

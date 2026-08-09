@@ -595,6 +595,12 @@ endif
 # q2_K with q3_K (measured: tinyllama-1.1b Q2_K is 45 q2_K + 110 q3_K tensors).
 # Shipping q2_K alone would have run exactly nothing.
 #
+# Short AND long prompts, because they take different code paths: a batch of
+# more than one token uses the tiled GEMM (k_mm_*) and decode uses the matvec
+# (k_mv_*), so a short-prompt-only check leaves half of each format's kernels
+# ungated. A long prompt also spans several K-tiles and column-tiles rather
+# than one.
+#
 # The checkpoint is not in the repo, so this skips loudly rather than passing
 # vacuously -- and if the model IS present but falls back to CPU, that is a
 # FAILURE, not a skip: a parity check with both sides on the CPU compares
@@ -610,21 +616,25 @@ ifeq ($(shell uname -s),Darwin)
 	  echo "metal quant parity: SKIP (no q2_K/q3_K/iq4 checkpoint in models/)"; \
 	  exit 0; fi; \
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+	  long=$$($(PYTHON) -c "print(' '.join(['the quick brown fox jumps over the lazy dog']*40))"); \
 	  for m in $(KQUANT_MODELS); do \
-	    prompt="The capital of France is"; \
-	    ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 24 --temp 0 --gpu off \
-	      > metal-kquant-cpu.out 2>/dev/null; \
-	    ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 24 --temp 0 --gpu auto \
-	      > metal-kquant-gpu.out 2> metal-kquant-gpu.err; \
-	    if grep -q "without a Metal kernel" metal-kquant-gpu.err; then \
-	      echo "FAIL: $$m fell back to CPU — this parity check would compare"; \
-	      echo "  the CPU against itself and pass for the wrong reason"; \
-	      exit 1; fi; \
-	    grep -q "Metal backend" metal-kquant-gpu.err; \
-	    cmp -s metal-kquant-cpu.out metal-kquant-gpu.out || { \
-	      echo "FAIL: $$m Metal output differs from the CPU reference"; \
-	      exit 1; }; \
-	    echo "  metal quant parity ok ($$m, byte-identical)"; \
+	    for which in short long; do \
+	      if [ $$which = short ]; then prompt="The capital of France is"; \
+	      else prompt="$$long"; fi; \
+	      ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 12 --temp 0 --gpu off \
+	        > metal-kquant-cpu.out 2>/dev/null; \
+	      ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 12 --temp 0 --gpu auto \
+	        > metal-kquant-gpu.out 2> metal-kquant-gpu.err; \
+	      if grep -q "without a Metal kernel" metal-kquant-gpu.err; then \
+	        echo "FAIL: $$m fell back to CPU — this parity check would compare"; \
+	        echo "  the CPU against itself and pass for the wrong reason"; \
+	        exit 1; fi; \
+	      grep -q "Metal backend" metal-kquant-gpu.err; \
+	      cmp -s metal-kquant-cpu.out metal-kquant-gpu.out || { \
+	        echo "FAIL: $$m Metal output differs from CPU ($$which prompt)"; \
+	        exit 1; }; \
+	    done; \
+	    echo "  metal quant parity ok ($$m, byte-identical, short+long)"; \
 	  done; \
 	else \
 	  echo "metal quant parity: SKIP (no Metal device reported by --caps)"; \

@@ -691,6 +691,11 @@ bool gpu_init(model_t *m) {
     g->p_mm[T_F16]   = mk_pipeline(dev, lib, @"k_mm_f16");
     g->p_mm[T_Q8_0]  = mk_pipeline(dev, lib, @"k_mm_q8_0");
     g->p_mm[T_Q4_0]  = mk_pipeline(dev, lib, @"k_mm_q4_0");
+    g->p_mm[T_Q2_K]  = mk_pipeline(dev, lib, @"k_mm_q2_K");
+    g->p_mm[T_Q3_K]  = mk_pipeline(dev, lib, @"k_mm_q3_K");
+    g->p_mm[T_BF16]  = mk_pipeline(dev, lib, @"k_mm_bf16");
+    g->p_mm[T_IQ4_NL] = mk_pipeline(dev, lib, @"k_mm_iq4_nl");
+    g->p_mm[T_IQ4_XS] = mk_pipeline(dev, lib, @"k_mm_iq4_xs");
     g->p_mm[T_Q4_K]  = mk_pipeline(dev, lib, @"k_mm_q4_K");
     g->p_mm[T_Q6_K]  = mk_pipeline(dev, lib, @"k_mm_q6_K");
     g->p_mm[T_MXFP4] = mk_pipeline(dev, lib, @"k_mm_mxfp4");
@@ -1098,7 +1103,8 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     // K-quant kernels index a 256-superblock, so require that too.
     if (n_col > 1 && metal_mm_on() && g->p_mm[w->type] &&
         n_in % 32 == 0 &&
-        !((w->type == T_Q4_K || w->type == T_Q6_K) && n_in % 256 != 0)) {
+        !((w->type == T_Q4_K || w->type == T_Q6_K || w->type == T_Q2_K ||
+           w->type == T_Q3_K || w->type == T_IQ4_XS) && n_in % 256 != 0)) {
         mm_args ma = { n_in, n_out, n_col,
                        (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
                        bias != nil, x_stride, y_stride };
