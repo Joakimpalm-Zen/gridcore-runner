@@ -215,14 +215,35 @@ int main(int argc, char **argv) {
     // explicitly forces CPU because current NVIDIA drivers retain unattributed
     // process-lifetime allocations that LSan cannot suppress narrowly. The
     // ordinary target runs this device-side equivalent of a leak check: load
-    // and unload repeatedly and require free VRAM to come back. A missing
-    // MemFree makes this drift down; a double free would already have aborted.
+    // and unload repeatedly and require free VRAM to come back.
+    //
+    // THE PIN IS LOAD-BEARING, not tidiness. shared_destroy() ends with
+    // cuPrimaryCtxRelease(), and releasing a CUDA primary context reclaims
+    // EVERY allocation inside it — so when the last model unloads, a missed
+    // cuMemFree is handed back by the driver anyway and this check sees
+    // nothing. Measured 2026-08-09 on an RTX 3070: deliberately leaking
+    // w->weights (4.1 GB, six times, on an 8.59 GB card) produced 0.0 MB of
+    // drift and a GREEN result. The gate was structurally incapable of
+    // detecting the exact bug it exists for.
+    //
+    // Holding a second, unrelated model open across both windows keeps the
+    // context alive, so the cycled model's allocations are genuinely freed
+    // individually and a missed free shows up as drift. test.gguf is tiny and
+    // always built, and being a different path it gets its own shared entry —
+    // pinning with g_path instead would keep the cycled entry's refcount above
+    // zero and destroy nothing at all.
     size_t f0 = 0, f1 = 0, f2 = 0, total = 0;
+    model_t pin;
+    bool pinned = have_vram && model_load(&pin, "test.gguf", &p);
+    if (have_vram && !pinned)
+        printf("note: no context pin (test.gguf did not load) — a missed "
+               "cuMemFree may be masked by context teardown\n");
     if (have_vram && gpu_mem_info(&f0, &total)) {
         cycles(&p, 3);
         (void)gpu_mem_info(&f1, &total);
         cycles(&p, 3);
         (void)gpu_mem_info(&f2, &total);
+        if (pinned) model_free(&pin);
         // free VRAM is a device-wide figure, so another process starting up
         // mid-test can move it. A leak cannot be confused with that: it repeats,
         // in the same direction, in every window. Two consecutive windows both
