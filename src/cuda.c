@@ -1790,6 +1790,11 @@ void gpu_tc_force(int on) {
     g_tc_state = on < 0 ? TC_ENV_UNSET : (on != 0);
 }
 
+// Incremented at the one place the TC GEMM is dispatched, so a gate can ask
+// "did it run?" instead of inferring it from the output.
+static unsigned long g_tc_dispatches = 0;
+unsigned long gpu_tc_dispatches(void) { return g_tc_dispatches; }
+
 // Same hook for the MoE routing path: the fused-vs-eager tolerance gate has to
 // run both inside one process, which an env var read at first launch cannot
 // express. -1 restores the env default (RUNNER_MOE_EAGER).
@@ -1863,10 +1868,12 @@ static bool enc_mv(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
     // Prefill (batch>1), tensor-core GEMM when promoted for this (type, arch)
     // or forced by RUNNER_CUDA_TC: the block dequantizes a 64-row fp16 weight
     // tile once and its four warps' MMAs share it (TC_ROWS/block, 128 threads).
-    if (batch > 1 && tc_on(m, w->type) && g->sw->f_gemm_tc[w->type])
+    if (batch > 1 && tc_on(m, w->type) && g->sw->f_gemm_tc[w->type]) {
+        g_tc_dispatches++;
         return launch_tiled(g, g->sw->f_gemm_tc[w->type],
                             (n_out + TC_ROWS - 1) / TC_ROWS, 128,
                             weights, x, y, a, b, TC_N);
+    }
     // Prefill (batch>1) uses the tiled-GEMM variant where available (Q8_0/Q4_K):
     // GEMM_WARPS(=8) rows per block, 256 threads, x staged in shared memory.
     if (batch > 1 && g->sw->f_gemm[w->type]) {

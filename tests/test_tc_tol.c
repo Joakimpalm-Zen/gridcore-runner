@@ -301,12 +301,27 @@ int main(int argc, char **argv) {
 
     double impl = mean_abs_diff(tc, ref, n_vocab);
 
-    // bit-identity means the TC kernel never launched (unresolved symbol,
-    // older PTX): comparing a path with itself must not read as tolerance
+    // Bit-identity has TWO causes and they demand opposite verdicts:
+    //   (a) the TC kernel never launched (unresolved symbol, older PTX) —
+    //       comparing a path with itself must not read as tolerance; or
+    //   (b) it launched and matched the scalar path EXACTLY, which is the
+    //       strongest result this gate can produce.
+    // Until 2026-08-09 both were reported as (a), because engagement was
+    // inferred from "the outputs differ". Q8_0 is case (b): on
+    // Qwen3-4B-Q8_0 the TC GEMM dispatches and the logits are bit-identical,
+    // so a genuine perfect score was being recorded as "skipped, not passing".
+    // Ask the engine how many times it dispatched instead of guessing.
     if (impl == 0.0) {
-        printf("  tc-b64 vs scalar-b64 : logits BIT-IDENTICAL — the TC path "
-               "did not engage; skipping, not passing\n"
-               "tc-tol: ok (skipped)\n");
+        unsigned long fired = gpu_tc_dispatches();
+        if (fired == 0) {
+            printf("  tc-b64 vs scalar-b64 : logits BIT-IDENTICAL and the TC "
+                   "GEMM never dispatched — skipping, not passing\n"
+                   "tc-tol: ok (skipped)\n");
+            return g_fail;
+        }
+        printf("  tc-b64 vs scalar-b64 : logits BIT-IDENTICAL over %lu TC "
+               "dispatches — EXACT, 0 top-1 flips by construction\n"
+               "tc-tol: ok (exact)\n", fired);
         return g_fail;
     }
 

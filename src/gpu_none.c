@@ -23,6 +23,10 @@ bool gpu_kv_q8_ok(void) {
     return false;   // no backend here; the CPU path handles q8 on its own
 }
 
+// No GPU, so no tensor-core GEMM was ever dispatched. Present so the TC
+// tolerance gate links against a CPU-only build.
+unsigned long gpu_tc_dispatches(void) { return 0; }
+
 bool gpu_moe_ok(void) {
     return false;   // no backend here at all
 }

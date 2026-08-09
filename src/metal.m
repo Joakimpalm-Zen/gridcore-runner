@@ -490,6 +490,10 @@ void gpu_tc_force(int on) {
     g_mm_state = on < 0 ? MM_ENV_UNSET : (on != 0);
 }
 
+// Metal has no tensor-core GEMM; the counter exists so the gate links and can
+// state "never dispatched here" rather than failing to build.
+unsigned long gpu_tc_dispatches(void) { return 0; }
+
 static bool metal_mm_on(void) {
     if (g_mm_state == MM_ENV_UNSET) {
         const char *e = getenv("RUNNER_METAL_MM");

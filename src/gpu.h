@@ -45,6 +45,11 @@ bool   gpu_eseries_ok(void);
 // (1) or off (0) regardless of RUNNER_CUDA_TC; -1 returns to the env default.
 // A no-op on backends without a TC path (Metal, CPU-only builds).
 void   gpu_tc_force(int on);
+// How many times the tensor-core GEMM has actually been dispatched. The TC
+// tolerance gate used to infer engagement from "the logits differ", which
+// cannot tell an unused kernel apart from an exactly-matching one — and Q8_0
+// turns out to be the second case. Counting the dispatch removes the guess.
+unsigned long gpu_tc_dispatches(void);
 // test hook: force (1) or forbid (0) the eager MoE routing path; -1 = env
 void   gpu_moe_eager_force(int on);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
