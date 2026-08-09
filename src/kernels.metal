@@ -149,11 +149,22 @@ kernel void k_mv_f32(MV_PARAMS) {
     MV_TAIL;
 }
 
+// Widened for the same reason as k_mv_bf16 above: one half per lane step left
+// f16 decode slower on the GPU than on the CPU.
 kernel void k_mv_f16(MV_PARAMS) {
     MV_HEAD;
     device const half *rw = (device const half *)(wb + a.w_off) + (ulong)row * a.n_in;
     float s = 0;
-    for (int i = tiisg; i < a.n_in; i += 32) s += (float)rw[i] * x[i];
+    if ((a.n_in & 3) == 0) {
+        device const packed_half4 *w4 = (device const packed_half4 *)rw;
+        device const float4 *x4 = (device const float4 *)x;
+        int n4 = a.n_in >> 2;
+        float4 acc = 0;
+        for (int i = tiisg; i < n4; i += 32) acc += float4(w4[i]) * x4[i];
+        s = acc.x + acc.y + acc.z + acc.w;
+    } else {
+        for (int i = tiisg; i < a.n_in; i += 32) s += (float)rw[i] * x[i];
+    }
     MV_TAIL;
 }
 
@@ -280,12 +291,33 @@ static inline float bf16_to_f32_m(ushort h) {
     return as_type<float>((uint)h << 16);
 }
 
+// Four weights per lane step, not one. The scalar form left this kernel LOSING
+// to the CPU (measured 0.91x on a 135M model) while same-size quantised models
+// won 1.5-2.1x on the same device -- the difference was never model size, it
+// was that every quant kernel here already loads wide and these did not.
+// packed_ushort4 because the weight pointer is row-offset and carries no
+// 8-byte alignment guarantee; x is float4-indexed the way k_mv_q5_K does it.
 kernel void k_mv_bf16(MV_PARAMS) {
     MV_HEAD;
     device const ushort *rw =
         (device const ushort *)(wb + a.w_off) + (ulong)row * a.n_in;
     float s = 0;
-    for (int i = tiisg; i < a.n_in; i += 32) s += bf16_to_f32_m(rw[i]) * x[i];
+    if ((a.n_in & 3) == 0) {
+        device const packed_ushort4 *w4 = (device const packed_ushort4 *)rw;
+        device const float4 *x4 = (device const float4 *)x;
+        int n4 = a.n_in >> 2;
+        float4 acc = 0;
+        for (int i = tiisg; i < n4; i += 32) {
+            ushort4 h = w4[i];
+            acc += float4(as_type<float>((uint)h.x << 16),
+                          as_type<float>((uint)h.y << 16),
+                          as_type<float>((uint)h.z << 16),
+                          as_type<float>((uint)h.w << 16)) * x4[i];
+        }
+        s = acc.x + acc.y + acc.z + acc.w;
+    } else {
+        for (int i = tiisg; i < a.n_in; i += 32) s += bf16_to_f32_m(rw[i]) * x[i];
+    }
     MV_TAIL;
 }
 
