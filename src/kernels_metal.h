@@ -273,6 +273,24 @@ static const char *k_metal_src =
     "    }\n"
     "}\n"
     "\n"
+    "// bf16 is the top 16 bits of an f32, so widening is a shift and a reinterpret\n"
+    "// with no rounding anywhere -- exactly what bf16_to_f32() in fp16.h does, which\n"
+    "// is why this path can be bit-identical to the CPU rather than merely close.\n"
+    "// Metal has no bfloat on every target this ships to, so the weights are read as\n"
+    "// ushort and widened by hand.\n"
+    "static inline float bf16_to_f32_m(ushort h) {\n"
+    "    return as_type<float>((uint)h << 16);\n"
+    "}\n"
+    "\n"
+    "kernel void k_mv_bf16(MV_PARAMS) {\n"
+    "    MV_HEAD;\n"
+    "    device const ushort *rw =\n"
+    "        (device const ushort *)(wb + a.w_off) + (ulong)row * a.n_in;\n"
+    "    float s = 0;\n"
+    "    for (int i = tiisg; i < a.n_in; i += 32) s += bf16_to_f32_m(rw[i]) * x[i];\n"
+    "    MV_TAIL;\n"
+    "}\n"
+    "\n"
     "// The IQ4 non-linear codebook. Both iq4_nl and iq4_xs index it with a plain\n"
     "// 4-bit code, which is the whole difference from q4_0: same 16 codes per byte\n"
     "// pair, but the value is looked up rather than being the code minus eight.\n"
@@ -1533,4 +1551,4 @@ static const char *k_metal_src =
     "\n"
 ;
 // SHA-256 of kernels.metal as embedded above.
-static const char *k_metal_sha = "3ac4dc0f0f64521ca0e8c57d0cc5c456b6f1f7a59cb8d7876f9246f50b3fc583";
+static const char *k_metal_sha = "0982d1a5d9054b70aa52fa7fe85c462ea1969fb68eacc42a8ca436c5b77dc4f4";

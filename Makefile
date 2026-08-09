@@ -601,7 +601,8 @@ endif
 # nothing at all, which is the exact defect class the 2026-08-09 gate audit
 # found three times over.
 KQUANT_MODELS ?= $(wildcard models/tinyllama-q2k.gguf models/*Q2_K*.gguf \
-                   models/*q2_k*.gguf models/*IQ4_XS*.gguf models/*iq4xs*.gguf)
+                   models/*q2_k*.gguf models/*IQ4_XS*.gguf models/*iq4xs*.gguf \
+                   models/*bf16*.gguf models/*BF16*.gguf)
 test-metal-kquant: runner
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \

@@ -271,6 +271,24 @@ static inline void get_scale_min_k4(int j, device const uchar *q,
     }
 }
 
+// bf16 is the top 16 bits of an f32, so widening is a shift and a reinterpret
+// with no rounding anywhere -- exactly what bf16_to_f32() in fp16.h does, which
+// is why this path can be bit-identical to the CPU rather than merely close.
+// Metal has no bfloat on every target this ships to, so the weights are read as
+// ushort and widened by hand.
+static inline float bf16_to_f32_m(ushort h) {
+    return as_type<float>((uint)h << 16);
+}
+
+kernel void k_mv_bf16(MV_PARAMS) {
+    MV_HEAD;
+    device const ushort *rw =
+        (device const ushort *)(wb + a.w_off) + (ulong)row * a.n_in;
+    float s = 0;
+    for (int i = tiisg; i < a.n_in; i += 32) s += bf16_to_f32_m(rw[i]) * x[i];
+    MV_TAIL;
+}
+
 // The IQ4 non-linear codebook. Both iq4_nl and iq4_xs index it with a plain
 // 4-bit code, which is the whole difference from q4_0: same 16 codes per byte
 // pair, but the value is looked up rather than being the code minus eight.

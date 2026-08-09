@@ -360,8 +360,9 @@ bool gpu_device_id(char *id, int cap) {
 
 static bool gpu_type_ok(int type) {
     switch (type) {
-        case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:
-        case T_Q5_0: case T_Q5_1: case T_Q2_K: case T_Q3_K: case T_Q4_K:
+        case T_F32: case T_F16: case T_BF16: case T_Q8_0: case T_Q4_0:
+        case T_Q4_1: case T_Q5_0: case T_Q5_1: case T_Q2_K: case T_Q3_K:
+        case T_Q4_K:
         case T_Q5_K: case T_Q6_K: case T_IQ4_NL: case T_IQ4_XS: case T_MXFP4:
             return true;
         default:
@@ -702,6 +703,7 @@ bool gpu_init(model_t *m) {
     g->p_mv[T_Q5_1]   = mk_pipeline(dev, lib, @"k_mv_q5_1");
     g->p_mv[T_Q2_K]   = mk_pipeline(dev, lib, @"k_mv_q2_K");
     g->p_mv[T_Q3_K]   = mk_pipeline(dev, lib, @"k_mv_q3_K");
+    g->p_mv[T_BF16]   = mk_pipeline(dev, lib, @"k_mv_bf16");
     g->p_mv[T_IQ4_NL] = mk_pipeline(dev, lib, @"k_mv_iq4_nl");
     g->p_mv[T_IQ4_XS] = mk_pipeline(dev, lib, @"k_mv_iq4_xs");
     g->p_mv[T_Q4_K]   = mk_pipeline(dev, lib, @"k_mv_q4_K");
