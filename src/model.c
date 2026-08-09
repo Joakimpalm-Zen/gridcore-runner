@@ -2052,6 +2052,21 @@ long long model_autofit_tokens(uint64_t budget, uint64_t weights,
     return room > 0 ? room / kv_all : 0;
 }
 
+// Whether the KV-evicts-weights trade note applies. Split out for the same
+// reason as the auto-fit above: the situation only arises on a partial GPU
+// split caused by the KV cache rather than by the model simply being larger
+// than the card, which takes a model bigger than any fixture here.
+bool model_kv_trade_note(int gpu_layers, int n_layer, uint64_t kv_dev,
+                         uint64_t weights) {
+    // a full offload has made no trade, and neither has a load with nothing on
+    // the device at all
+    if (gpu_layers <= 0 || gpu_layers >= n_layer) return false;
+    if (kv_dev == 0 || weights == 0) return false;
+    // only when the KV is a big share of what is on the device: a split forced
+    // by the model's own size is not a trade the user can take back with -c
+    return kv_dev * 4 > weights;
+}
+
 int model_autofit_clamp(long long best, int n_ctx_train) {
     int n = best > (long long)n_ctx_train ? n_ctx_train : (int)best;
     if (n < 512) n = 512;   // a floor: below this the window is not usable
@@ -2298,10 +2313,10 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         // Only when the KV is actually a big share of what is on the device —
         // a partial split for any other reason (a model simply larger than the
         // card) is not a trade the user can take back by lowering -c.
-        if (m->gpu && m->gpu_layers > 0 && m->gpu_layers < m->n_layer) {
+        if (m->gpu) {
             size_t kv_dev = model_kv_boundary_bytes(m, m->gpu_layers) * 2;
             uint64_t wb = model_cuda_weight_estimate(m, p);
-            if (kv_dev > 0 && wb > 0 && kv_dev * 4 > (size_t)wb) {
+            if (model_kv_trade_note(m->gpu_layers, m->n_layer, kv_dev, wb)) {
                 fprintf(stderr,
                         "note: the KV cache for ctx %d is %.2f GB on the device"
                         " and %d of %d layers ran out of room because of it —"

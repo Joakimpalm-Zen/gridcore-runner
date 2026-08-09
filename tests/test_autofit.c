@@ -1,4 +1,6 @@
-// Reservation auto-fit arithmetic (`-c 0` with --reserve-ram/--reserve-vram).
+// Memory-placement arithmetic that no fixture can reach: the reservation
+// auto-fit (`-c 0` with --reserve-ram/--reserve-vram) and the KV-evicts-weights
+// trade note.
 //
 // This gate exists because the behaviour it covers is unreachable on any
 // machine this project is developed on. The auto-fit only runs when a budget is
@@ -106,11 +108,49 @@ static void test_clamp(void) {
        "the floor wins over a very small trained context");
 }
 
+// The KV-evicts-weights trade note. Same class of blindness: it fires only on a
+// partial GPU split that the KV cache caused, which needs a model bigger than
+// the card. It is observable in the Blackwell stress-context artifacts under
+// tests/compatibility/out/ but nothing gated the threshold, so a regression
+// would have shown up as the note quietly never appearing again.
+static void test_kv_trade_note(void) {
+    const uint64_t GB = 1000000000ull;
+
+    // the case it exists for: 3.36 GB of KV, 7 of 32 layers displaced
+    ck(model_kv_trade_note(25, 32, 3360 * (GB / 1000), 6 * GB),
+       "a KV cache dominating the device earns the note");
+
+    // a full offload traded nothing away
+    ck(!model_kv_trade_note(32, 32, 3360 * (GB / 1000), 6 * GB),
+       "a fully offloaded model gets no note");
+    // and neither did a load that put nothing on the device
+    ck(!model_kv_trade_note(0, 32, 3360 * (GB / 1000), 6 * GB),
+       "a CPU-only load gets no note");
+
+    // a split forced by the model's own size is not a trade -c can take back,
+    // so a small KV against big weights must stay quiet
+    ck(!model_kv_trade_note(25, 32, 1 * GB, 40 * GB),
+       "a model simply too big for the card gets no note");
+
+    // the threshold is strict: exactly a quarter is not "dominating"
+    ck(!model_kv_trade_note(25, 32, 5 * GB, 20 * GB),
+       "the note needs more than a quarter, not exactly a quarter");
+    ck(model_kv_trade_note(25, 32, 5 * GB + 1, 20 * GB),
+       "one byte past the threshold does earn it");
+
+    // unknown sizes must not be reported as a trade
+    ck(!model_kv_trade_note(25, 32, 0, 20 * GB),
+       "an unmeasured KV size gets no note");
+    ck(!model_kv_trade_note(25, 32, 5 * GB, 0),
+       "an unmeasured weight size gets no note");
+}
+
 int main(void) {
     test_multislot_is_not_billed_once();
     test_budget_is_never_exceeded();
     test_degenerate_inputs();
     test_clamp();
+    test_kv_trade_note();
     if (g_fail) { fprintf(stderr, "test-autofit FAILED\n"); return 1; }
     fprintf(stderr, "test-autofit: all checks passed\n");
     return 0;

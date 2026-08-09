@@ -416,6 +416,10 @@ long long model_autofit_tokens(uint64_t budget, uint64_t weights,
                                uint64_t head_per_seq, uint64_t kv_per_tok,
                                int n_seq);
 int       model_autofit_clamp(long long best, int n_ctx_train);
+// Whether to warn that the KV cache, not the model's own size, is what pushed
+// layers off the device -- the one case a smaller -c can take back.
+bool      model_kv_trade_note(int gpu_layers, int n_layer, uint64_t kv_dev,
+                              uint64_t weights);
 // Which layer physically owns layer l's KV rows. Identity everywhere except
 // gemma4 E-series shared-KV layers, which compute no K/V and read an earlier
 // layer's cache. l == n_layer is the total-size sentinel and never remapped.
