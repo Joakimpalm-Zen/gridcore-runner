@@ -197,46 +197,46 @@ static void test_name_roundtrip(void) {
     assert(template_from_name("nope") == -1);
 }
 
-// gemma-4's reference template (llama.cpp models/templates/
-// google-gemma-4-31B-it.jinja) defaults enable_thinking to FALSE and pre-seeds
-// an empty thought block. Runner rendered only the turn header until
-// 2026-08-08 -- upstream's opt-in branch -- so it disagreed with every
-// reference-following engine on every gemma-4 turn, and tool prompts opened
-// thought blocks nobody asked for.
+// gemma-4's generation prompt, from the MODEL'S OWN chat template rather than
+// a summary of llama.cpp's: it is `<|turn>model\n` and nothing else, in either
+// thinking mode. On 2026-08-08 an empty thought-block pre-seed was added here
+// on the strength of a web summary; gemma-4-E2B's planning score fell
+// 0.575 -> 0.300 and it emitted reasoning prose as its visible answer, because
+// that construct only ever appears when re-rendering a prior assistant message
+// that contained thinking text.
 //
-// Both branches are pinned here, plus the tool-response case, because the
-// default is the whole point: a regression that quietly restores the old shape
-// would otherwise look like nothing.
-static void test_gemma4_thinking_shape(void) {
+// So the assertion that matters most is the NEGATIVE one: no thought block is
+// ever pre-seeded at generation time, whatever the caller asks for.
+static void test_gemma4_generation_prompt(void) {
     const chat_msg msgs[] = { { "user", "HI" } };
     char out[512];
+    const char *base = "<|turn>user\nHI<turn|>\n<|turn>model\n";
 
-    // default: non-thinking, matching the reference
     render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_DEFAULT, out, sizeof(out));
-    assert(strcmp(out, "<|turn>user\nHI<turn|>\n"
-                       "<|turn>model\n<|channel>thought\n<channel|>") == 0);
-
-    // opt-in: no pre-seed, the model may open its own thought block
+    assert(strcmp(out, base) == 0);
+    render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_OFF, out, sizeof(out));
+    assert(strcmp(out, base) == 0);
+    // THINK_ON does not pre-seed either: the template injects <|think|> into
+    // the first SYSTEM turn instead, which this engine does not implement
     render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_ON, out, sizeof(out));
-    assert(strcmp(out, "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
+    assert(strcmp(out, base) == 0);
+    assert(strstr(out, "channel>thought") == NULL);
 
-    // no generation prompt at all after a tool response, per the reference's
-    // prev_message_type guard
+    // after a tool response the template emits NO generation prompt at all
+    // when thinking is off, and an OPEN thought tag when it is on
     const chat_msg after_tool[] = { { "user", "HI" }, { "tool", "42" } };
-    render_messages(TMPL_GEMMA4, after_tool, 2, true, THINK_DEFAULT, out, sizeof(out));
+    render_messages(TMPL_GEMMA4, after_tool, 2, true, THINK_DEFAULT,
+                    out, sizeof(out));
     assert(strstr(out, "<|turn>model") == NULL);
+    assert(strstr(out, "channel>thought") == NULL);
+    render_messages(TMPL_GEMMA4, after_tool, 2, true, THINK_ON,
+                    out, sizeof(out));
+    assert(strstr(out, "<|channel>thought\n") != NULL);
 
-    // and add_assistant=false stays bare either way
     render_messages(TMPL_GEMMA4, msgs, 1, false, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "<|turn>user\nHI<turn|>\n") == 0);
 }
 
-// Qwen3-family ChatML. The reference (Qwen/Qwen3-* tokenizer_config.json)
-// defaults enable_thinking TRUE and appends "<think>\n\n</think>\n\n" only on
-// the false branch, so THINK_DEFAULT must render exactly what plain ChatML
-// renders. Getting that backwards would silently suppress reasoning on every
-// Qwen3 turn -- the mirror image of the gemma-4 bug above, which is why both
-// families are pinned rather than assumed to behave alike.
 static void test_chatml_think_shape(void) {
     const chat_msg msgs[] = { { "user", "HI" } };
     char out[512];
@@ -291,7 +291,7 @@ int main(void) {
     test_render_system_prompt();
     test_render_without_system();
     test_name_roundtrip();
-    test_gemma4_thinking_shape();
+    test_gemma4_generation_prompt();
     test_chatml_think_shape();
 
     tokenizer_free(&t);

@@ -223,32 +223,47 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<|turn>%s\n", role, NULL);
             off = emit(out, cap, off, "%s<turn|>\n", msgs[i].content, NULL);
         }
-        // Reference generation prompt, transcribed from the jinja rather than
-        // approximated: the whole block is skipped when the previous message
-        // was a tool response, and the empty thought block is pre-seeded
-        // unless thinking was explicitly asked for.
+        // Generation prompt, read from the MODEL'S OWN chat template
+        // (gguf tokenizer.chat_template on gemma-4-E2B), not from a summary
+        // of llama.cpp's copy:
         //
-        //   {%- if ns.prev_message_type != 'tool_response'
-        //          and ns.prev_message_type != 'tool_call' -%}
-        //       {{- '<|turn>model\n' -}}
-        //       {%- if not enable_thinking | default(false) -%}
-        //           {{- '<|channel>thought\n<channel|>' -}}
-        //       {%- endif -%}
+        //   {%- if add_generation_prompt -%}
+        //     {%- if ns.prev_message_type != 'tool_response'
+        //            and ns.prev_message_type != 'tool_call' -%}
+        //         {{- '<|turn>model\n' -}}
+        //     {%- elif ns.prev_message_type == 'tool_response'
+        //              and enable_thinking -%}
+        //         {{- '<|channel>thought\n' -}}
+        //     {%- endif -%}
         //   {%- endif -%}
         //
-        // The `tool_call` half of that condition is not reproduced here: an
-        // assistant tool call is not carried as a message role in this engine
-        // (tool_history_render_for renders it separately), so there is nothing
-        // to test. Guessing at it would be worse than saying so.
+        // There is NO empty-thought-block pre-seed here, in either thinking
+        // mode. On 2026-08-08 this code grew one — `<|channel>thought\n`
+        // immediately closed by `<channel|>` — from a web summary of the
+        // llama.cpp template rather than the model's own. That construct
+        // exists in the real template only when re-rendering a PRIOR
+        // assistant message that actually contained thinking text; handing it
+        // to the model as an empty block at generation time is a state it was
+        // never trained on. Measured cost: gemma-4-E2B's planning score fell
+        // 0.575 -> 0.300 and it emitted raw reasoning prose as its visible
+        // answer. The original unconditional `<|turn>model\n` was right.
+        //
+        // Thinking is NOT selected here for this family. The template sets
+        // `enable_thinking | default(false)` and, when true, injects
+        // `<|think|>\n` at the top of the FIRST SYSTEM TURN — a different
+        // place entirely. That path is not implemented, so THINK_ON is
+        // accepted and ignored rather than approximated; see the note in
+        // template.h.
         if (add_assistant) {
             bool after_tool = n_msgs > 0 &&
                               !strcmp(msgs[n_msgs - 1].role, "tool");
-            if (!after_tool) {
+            if (!after_tool)
                 off = emit(out, cap, off, "<|turn>model\n", NULL, NULL);
-                if (thinking != THINK_ON)
-                    off = emit(out, cap, off, "<|channel>thought\n<channel|>",
-                               NULL, NULL);
-            }
+            else if (thinking == THINK_ON)
+                off = emit(out, cap, off, "<|channel>thought\n", NULL, NULL);
+            // prev was a tool response and thinking is off: emit nothing,
+            // which is what the template does and what the unconditional
+            // header used to get wrong.
         }
         break;
     case TMPL_GEMMA: {

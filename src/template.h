@@ -37,30 +37,31 @@ const char *template_name(int tmpl);
 // render messages; add_assistant appends the assistant generation prefix.
 // returns bytes written (excl. NUL)
 //
-// `thinking` is THINK_DEFAULT / THINK_ON / THINK_OFF and affects the two
-// families whose reference templates take an enable_thinking variable. It is
-// tri-state because those two references disagree about the default:
+// `thinking` is THINK_DEFAULT / THINK_ON / THINK_OFF.
 //
-//   TMPL_GEMMA4       google-gemma-4-31B-it.jinja
-//     {{- '<|turn>model\n' -}}
-//     {%- if not enable_thinking | default(false) -%}
-//         {{- '<|channel>thought\n<channel|>' -}}
-//     {%- endif -%}
-//     default FALSE -> DEFAULT and OFF pre-seed the empty thought block; ON
-//     omits it and lets the model open its own.
+//   TMPL_CHATML_THINK  Qwen/Qwen3-* tokenizer_config.json
+//     enable_thinking defaults TRUE; the false branch appends
+//     '<think>\n\n</think>\n\n' after the assistant header. So DEFAULT and ON
+//     emit nothing extra and OFF appends the closed block.
 //
-//   TMPL_CHATML_THINK Qwen/Qwen3-* tokenizer_config.json
-//     enable_thinking defaults TRUE, and the false branch appends
-//     '<think>\n\n</think>\n\n' after the assistant header.
-//     default TRUE -> DEFAULT and ON emit nothing; OFF appends the closed
-//     block, which is how a Qwen3 model is asked not to reason.
+//   TMPL_GEMMA4        gemma-4 tokenizer.chat_template (read from the GGUF)
+//     The generation prompt is '<|turn>model\n' and nothing else, in EITHER
+//     mode -- there is no pre-seeded thought block. After a tool response it
+//     emits nothing at all, or an OPEN '<|channel>thought\n' when thinking.
+//     Selecting thinking for this family happens elsewhere: the template sets
+//     enable_thinking | default(false) and, when true, injects '<|think|>\n'
+//     into the FIRST SYSTEM TURN. That is not implemented here, so THINK_ON is
+//     accepted and ignored rather than approximated.
 //
-// So THINK_DEFAULT is not "off" — it is "render what a reference-following
-// engine would render for THIS family". Until 2026-08-08 runner had no such
-// parameter and always emitted the gemma-4 thinking-enabled shape, disagreeing
-// with every reference engine on every gemma-4 turn; that is the likely cause
-// of tool prompts that opened a thought block, never closed it, and returned
-// one byte from a hundred generated tokens.
+// THINK_DEFAULT means "render what this family's own template renders", which
+// is not the same answer for both -- hence tri-state rather than a bool.
+//
+// History worth keeping: on 2026-08-08 this file claimed gemma-4's reference
+// pre-seeds an empty thought block when thinking is off, and the renderer was
+// changed to match. That came from a web summary of llama.cpp's copy of the
+// template, not the model's own, and it was wrong. gemma-4-E2B's planning
+// score fell 0.575 -> 0.300 and it began emitting reasoning prose as its
+// visible answer. Read the artifact, not a description of it.
 size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
                        bool add_assistant, int thinking,
                        char *out, size_t cap);
