@@ -1430,7 +1430,20 @@ int tpool_size(const tpool *tp) { return tp ? tp->n_threads : 0; }
 
 tpool *tpool_create(int n_threads) {
     if (n_threads < 1) n_threads = 1;
-    if (n_threads > TP_MAX) n_threads = TP_MAX;
+    // Say so. Silently discarding an explicit -t value is the wrong failure
+    // mode: the caller asked for N, got TP_MAX, and had no way to find out.
+    // Reported by the Syntetik-MoE run, which lost time to `-t 128` behaving
+    // exactly like `-t 64`. Once per process — this is called per instance and
+    // a --parallel server would otherwise repeat it per slot.
+    if (n_threads > TP_MAX) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr, "warning: %d threads requested, using %d "
+                            "(compile-time TP_MAX)\n", n_threads, TP_MAX);
+        }
+        n_threads = TP_MAX;
+    }
     tpool *tp = calloc(1, sizeof(tpool));
     if (!tp) return NULL;
     tp->n_threads = n_threads;

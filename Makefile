@@ -487,8 +487,10 @@ $(TEST_GGUF_GETTERS): tests/test_gguf_getters.c src/gguf.c src/compat.c src/quan
 $(TEST_PARSE): tests/test_parse.c src/compat.c src/compat.h
 	$(CC) $(CFLAGS) -I src tests/test_parse.c src/compat.c -o $@ $(LDFLAGS)
 
-$(TEST_THREAD_DEFAULT): tests/test_thread_default.c src/compat.c src/compat.h
-	$(CC) $(CFLAGS) -I src tests/test_thread_default.c src/compat.c -o $@ $(LDFLAGS)
+# quants.c joins for tpool_create/tpool_destroy: the test now also pins that an
+# over-large -t is clamped to TP_MAX rather than silently discarded.
+$(TEST_THREAD_DEFAULT): tests/test_thread_default.c src/compat.c src/compat.h src/quants.c
+	$(CC) $(CFLAGS) -I src tests/test_thread_default.c src/compat.c src/quants.c -o $@ $(LDFLAGS)
 
 TEST_MODEL_LOAD_FAILURE_SRC = tests/test_model_load_failure.c src/gguf.c \
                               src/compat.c src/quants.c src/model.c \

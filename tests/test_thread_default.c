@@ -1,4 +1,5 @@
 #include "compat.h"
+#include "tpool.h"
 
 #include <stdio.h>
 
@@ -30,6 +31,19 @@ int main(void) {
         ck(def == want, "Apple asymmetric default uses performance cores");
     }
 #endif
+
+    // An over-large request must be CLAMPED AND SAID SO. Silently discarding
+    // an explicit -t value is the failure mode the Syntetik-MoE run lost time
+    // to: `-t 128` behaved exactly like `-t 64` with nothing on stderr.
+    // tpool_create() caps at TP_MAX; here we pin that the cap holds and that
+    // the pool reports the clamped size rather than the requested one.
+    tpool *big = tpool_create(1024);
+    ck(big != NULL, "tpool_create survives an over-large request");
+    if (big) {
+        ck(tpool_size(big) <= 64, "over-large thread request is clamped");
+        ck(tpool_size(big) == 64, "clamp lands on TP_MAX, not something else");
+        tpool_destroy(big);
+    }
 
     if (g_fail) {
         fprintf(stderr, "thread defaults: FAILED\n");
