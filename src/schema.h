@@ -21,7 +21,10 @@ struct snode {
     bool    has_num_min, has_num_max;
     double  real_min, real_max;                     // enforced number interval
     bool    has_real_min, has_real_max;
+    // pattern_max_tail is -1 for the unbounded forms (`+`, `{n,}`) and the
+    // upper bound for the bounded ones (`{n}`, `{n,m}`)
     char   *pattern_prefix; int pattern_prefix_len, pattern_min_tail;
+    int     pattern_max_tail;
     bool    pattern_ascii[128];
 };
 

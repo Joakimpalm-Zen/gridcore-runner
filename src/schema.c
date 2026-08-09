@@ -22,6 +22,7 @@ static snode *sn_new(int kind) {
     if (!n) return NULL;
     n->kind = kind;
     n->max_items = -1;
+    n->pattern_max_tail = -1;   // unbounded until a {n} or {n,m} says otherwise
     return n;
 }
 
@@ -204,14 +205,32 @@ static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
     if (!lb) goto bad;
     const char *rb = strchr(lb + 1, ']');
     if (!rb) goto bad;
-    long min;
+    long min, max = -1;   // max -1: unbounded
     if (!strcmp(rb + 1, "+$")) {
         min = 1;
     } else {
+        // {n}  exact, {n,}  at least n, {n,m}  between n and m. Anything else
+        // is still an explicit error: this compiler only ever accepts forms it
+        // can enforce exactly.
         if (rb[1] != '{') goto bad;
         char *end = NULL;
         min = strtol(rb + 2, &end, 10);
-        if (min < 0 || min > INT_MAX || !end || strcmp(end, ",}$")) goto bad;
+        if (min < 0 || min > INT_MAX || !end || end == rb + 2) goto bad;
+        if (!strcmp(end, "}$")) {
+            max = min;                      // {n}
+        } else if (!strcmp(end, ",}$")) {
+            max = -1;                       // {n,}
+        } else if (*end == ',') {
+            char *end2 = NULL;              // {n,m}
+            max = strtol(end + 1, &end2, 10);
+            if (max < 0 || max > INT_MAX || !end2 || end2 == end + 1 ||
+                strcmp(end2, "}$")) goto bad;
+            // an empty language is a schema the caller cannot ever satisfy, and
+            // silently accepting it would deadlock decoding rather than fail
+            if (max < min) goto bad;
+        } else {
+            goto bad;
+        }
     }
     for (const char *q = p; q < lb; q++)
         if (!pattern_prefix_char_ok((unsigned char)*q)) goto bad;
@@ -220,6 +239,7 @@ static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
     n->pattern_prefix = strndup(p, (size_t)n->pattern_prefix_len);
     if (!n->pattern_prefix) return false;
     n->pattern_min_tail = (int)min;
+    n->pattern_max_tail = (int)max;
     for (const char *q = lb + 1; q < rb; q++) {
         if (*q == '\\') goto bad;  // class escapes (\d, \-, \]) are regex syntax
         unsigned char lo = (unsigned char)*q, hi = lo;
@@ -503,6 +523,15 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
             return NULL;
         }
         if (!compile_ascii_pattern(s, n, err, errcap)) {
+            schema_free(n);
+            return NULL;
+        }
+        if (n->pattern_prefix && n->pattern_max_tail >= 0 &&
+            n->min_items > n->pattern_prefix_len + n->pattern_max_tail) {
+            // a bounded pattern that can never be long enough for minLength is
+            // an empty language: refuse it at compile time rather than let a
+            // request wedge with no admissible byte
+            snprintf(err, errcap, "pattern cannot satisfy minLength");
             schema_free(n);
             return NULL;
         }
@@ -1187,7 +1216,13 @@ static int feed_byte(sval *v, uint8_t c) {
             if (c == '\\' || c >= 128) return -1;
             if (f->lit_pos < n->pattern_prefix_len) {
                 if (c != (uint8_t)n->pattern_prefix[f->lit_pos]) return -1;
-            } else if (!n->pattern_ascii[c]) return -1;
+            } else if (!n->pattern_ascii[c]) {
+                return -1;
+            } else if (n->pattern_max_tail >= 0 &&
+                       f->lit_pos - n->pattern_prefix_len >=
+                           n->pattern_max_tail) {
+                return -1;   // bounded tail is full: only the close quote now
+            }
         }
         // a full string at maxLength admits only the closing quote — reject an
         // escape opener up front so a close() can never overrun the bound

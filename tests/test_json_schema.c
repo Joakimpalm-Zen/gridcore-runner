@@ -371,6 +371,87 @@ static void test_schema_rejects_unenforceable_keywords(void) {
     }
 }
 
+// Bounded repetition: {n} and {n,m}. The unbounded forms (`+`, `{n,}`) only
+// ever needed a floor, so nothing enforced a ceiling; these do, and the ceiling
+// has to be enforced during decoding rather than at the closing quote, or the
+// model is free to emit an over-long tail and only discover it is invalid once
+// it is too late to take back.
+static void test_schema_bounded_repetition(void) {
+    struct { const char *pat; const char *ok; const char *too_short;
+             const char *too_long; } cases[] = {
+        // exactly six
+        { "^wf_[a-z0-9-]{6}$",   "\"wf_abc123\"", "\"wf_abc12\"", "\"wf_abc1234\"" },
+        // two to four
+        { "^id-[0-9]{2,4}$",     "\"id-123\"",    "\"id-1\"",     "\"id-12345\"" },
+        // a degenerate but legal range: exactly one
+        { "^v[0-9]{1,1}$",       "\"v7\"",        "\"v\"",        "\"v77\"" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        char src[128];
+        snprintf(src, sizeof(src), "{\"type\":\"string\",\"pattern\":\"%s\"}",
+                 cases[i].pat);
+        jv *j = json_parse(src, strlen(src));
+        char err[128];
+        snode *schema = schema_compile(j, err, sizeof(err));
+        assert(schema != NULL);
+
+        sval v; sval_init(&v, schema);
+        assert(sval_feed(&v, cases[i].ok, (int)strlen(cases[i].ok)) && v.done);
+
+        sval s; sval_init(&s, schema);
+        assert(!sval_feed(&s, cases[i].too_short, (int)strlen(cases[i].too_short)));
+
+        // the over-long case must be refused ON THE OFFENDING BYTE, not at the
+        // closing quote -- that is the whole point of a decode-time ceiling
+        sval l; sval_init(&l, schema);
+        assert(!sval_feed(&l, cases[i].too_long, (int)strlen(cases[i].too_long)));
+
+        // and a forced completion of a partial string must itself be valid
+        sval p; sval_init(&p, schema);
+        assert(sval_feed(&p, "\"", 1));
+        char suffix[64];
+        int nfix = sval_close(&p, suffix, sizeof(suffix));
+        assert(nfix > 0);
+        char full[128]; snprintf(full, sizeof(full), "\"%s", suffix);
+        sval chk; sval_init(&chk, schema);
+        assert(sval_feed(&chk, full, (int)strlen(full)) && chk.done);
+
+        schema_free(schema); jv_free(j);
+    }
+
+    // an upper bound below the lower bound is an empty language: refuse it at
+    // compile time rather than accept a schema no output can ever satisfy
+    const char *empty[] = {
+        "{\"type\":\"string\",\"pattern\":\"^x[a-z]{5,2}$\"}",
+        // minLength that the bounded pattern can never reach
+        "{\"type\":\"string\",\"pattern\":\"^x[a-z]{2}$\",\"minLength\":9}",
+        // malformed quantifiers stay errors rather than being reinterpreted
+        "{\"type\":\"string\",\"pattern\":\"^x[a-z]{}$\"}",
+        "{\"type\":\"string\",\"pattern\":\"^x[a-z]{2,3,4}$\"}",
+        "{\"type\":\"string\",\"pattern\":\"^x[a-z]{,3}$\"}",
+    };
+    for (size_t i = 0; i < sizeof(empty) / sizeof(*empty); i++) {
+        jv *j = json_parse(empty[i], strlen(empty[i]));
+        char err[128];
+        err[0] = 0;
+        snode *schema = schema_compile(j, err, sizeof(err));
+        assert(schema == NULL);
+        assert(err[0] != 0);
+        jv_free(j);
+    }
+
+    // the unbounded forms must keep behaving exactly as before
+    const char *unbounded = "{\"type\":\"string\",\"pattern\":\"^n[0-9]{2,}$\"}";
+    jv *j = json_parse(unbounded, strlen(unbounded));
+    char err[128];
+    snode *schema = schema_compile(j, err, sizeof(err));
+    assert(schema != NULL);
+    const char *long_ok = "\"n0123456789012345\"";
+    sval v; sval_init(&v, schema);
+    assert(sval_feed(&v, long_ok, (int)strlen(long_ok)) && v.done);
+    schema_free(schema); jv_free(j);
+}
+
 static void test_schema_agent_id_pattern_is_enforced(void) {
     const char *src =
         "{\"type\":\"string\",\"pattern\":\"^wf_[a-z0-9-]{6,}$\"}";
@@ -1171,6 +1252,7 @@ int main(void) {
     test_schema_rejects_non_integer_or_huge_bounds();
     test_schema_rejects_escaped_keys();
     test_schema_rejects_unenforceable_keywords();
+    test_schema_bounded_repetition();
     test_schema_agent_id_pattern_is_enforced();
     test_schema_pattern_regex_syntax_is_rejected_not_reinterpreted();
     test_schema_number_bounds_reject_dead_minus_and_close_in_bounds();

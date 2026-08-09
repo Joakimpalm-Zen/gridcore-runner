@@ -71,7 +71,9 @@ Claude Code exposed successive independent requirements:
 4. Metadata uses the tautological
    `propertyNames: {"type":"string"}` with an open object schema.
 5. Tool schemas use bounded `number`, an enum-plus-const `anyOf`, JSON Schema
-   2020-12 `format` annotations, and anchored repeated ASCII-class patterns.
+   2020-12 `format` annotations, and anchored repeated ASCII-class patterns —
+   `+`, `{n}`, `{n,}` and `{n,m}`, with the bounded forms enforced during
+   decoding rather than checked at the closing quote.
 
 Each item has a focused regression test. Unsupported constraints continue to
 fail at request time rather than being silently weakened.
