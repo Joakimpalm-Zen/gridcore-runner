@@ -81,6 +81,23 @@ int main(int argc, char **argv) {
     // after the final unload, which is exactly what breaks model swap.
     size_t vram_start = 0, vram_total = 0;
     bool have_vram = !g_gpu_off && gpu_mem_info(&vram_start, &vram_total);
+    // Say when the device-side leak check is NOT running, and why. It is
+    // legitimately CUDA-only — Metal's gpu_mem_info() declines by design,
+    // because unified memory has no separate VRAM pool to leak — but a silent
+    // skip makes "ok" read identically whether the check ran or not, which is
+    // the failure mode this suite has already been bitten by twice.
+    if (!have_vram)
+        printf("note: device VRAM leak check SKIPPED (no separate VRAM pool "
+               "reported — unified memory, CPU-only, or --gpu off)\n");
+    // Fixture scale governs whether this check CAN fail: it compares free VRAM
+    // across windows of 3 load/free cycles against a 16 MB tolerance, so a
+    // leak of the whole model must exceed that. At the 370 KB test.gguf that
+    // was 1.1 MB per window — mathematically incapable of firing. Pass
+    // ASAN_MODEL (or argv[1]) a model of at least ~64 MB for this to mean
+    // anything; the Makefile default now does.
+    if (have_vram && vram_total)
+        printf("vram leak check armed (free %.1f MB of %.1f MB at start)\n",
+               vram_start / 1e6, vram_total / 1e6);
 
     // --- reference: one model, one sequence, nothing else running ---
     model_t ref;
