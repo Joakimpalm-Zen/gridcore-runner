@@ -304,6 +304,22 @@ of the same model.
 binary you are actually running, so it cannot drift from it. What follows is
 the behaviour that a one-line flag description cannot carry.
 
+**Raw `-p` completions are a measurement instrument, not a product surface.**
+Use them for speed work and for byte-identity gates, where both sides of a
+comparison degenerate equally so the comparison still holds. Do **not** judge
+whether a model is good or broken from a raw prompt: instruction-tuned and
+thinking-tuned models are trained behind a chat template, and without one they
+degenerate — official builds do it too, and a "correctness bug" found this way
+once cost a wrongly-shipped catalog refusal that had to be reverted. For any
+judgement about model quality, go through the chat template (`--serve` and the
+chat endpoints, or `--chat-template`).
+
+This is also why greedy raw completions have **no repetition guard**: `--temp 0`
+deliberately disables `--repeat-penalty`, so a model that falls into a
+repetition attractor stays there. That is the instrument behaving predictably,
+not a defect to paper over — a guard would make raw output diverge from what
+the sampler actually did, which is the one property the gates depend on.
+
 **Sampling defaults come from the model.** `--temp`, `--top-k`, `--top-p`,
 `--min-p` and `--repeat-penalty` default to the served family's published
 recommended settings, chosen from the GGUF's architecture and name and logged
