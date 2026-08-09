@@ -392,6 +392,53 @@ static void test_eviction(void) {
     ck(r.keep == N - 1 && r.forked == 0,
        "the slot's own rewind still works with the shared cache off");
 
+    // The half-budget truncation clamp. This path only engages when ONE
+    // snapshot rivals the whole budget, which never happens at fixture scale
+    // with the 512 MB default -- a 135M model's 40-token entry is a rounding
+    // error against it. It is reachable in production (a long prompt on a
+    // large model) and was previously uncovered, so drive it directly by
+    // shrinking the budget until the fixture is "large" relative to it.
+    size_t per_tok = prefix_cache_entry_bytes(&s.m, 1);
+    if (per_tok == 0) {
+        ck(0, "per-token KV size is measurable");
+    } else {
+        // budget = 40 tokens' worth => half is 20, so a 40-token store must be
+        // truncated to 20 (>= PFX_MIN_TOKENS, so it still stores)
+        prefix_cache_clear();
+        size_t budget = 40 * per_tok;
+        prefix_cache_configure(budget, 3600);
+        fill_tokens(toks, N, s.m.n_vocab, 77);
+        engine_reset(&s.e);
+        engine_feed(&s.e, toks, N);
+        engine_prefix_publish(&s.e, toks, N, N, 0.01);
+        prefix_cache_stats_get(&st);
+        ck(st.entries == 1, "an oversized snapshot is truncated, not dropped");
+        ck(st.bytes <= budget / 2,
+           "one snapshot never eats more than half the budget");
+
+        // truncation must not poison reuse: a prefix of a prefix is still a
+        // valid prefix, so a fresh slot must still fork from the short entry
+        slot trunc;
+        if (slot_open(&trunc, &p)) {
+            prefix_reuse tr = engine_prefix_reuse(&trunc.e, toks, N);
+            ck(tr.forked > 0 && tr.forked < N && tr.keep == tr.forked,
+               "a truncated snapshot is still a usable prefix");
+            slot_close(&trunc);
+        }
+
+        // and a budget too small to hold even PFX_MIN_TOKENS stores nothing
+        // rather than storing a degenerate zero-length entry
+        prefix_cache_clear();
+        prefix_cache_configure(20 * per_tok, 3600);
+        fill_tokens(toks, N, s.m.n_vocab, 78);
+        engine_reset(&s.e);
+        engine_feed(&s.e, toks, N);
+        engine_prefix_publish(&s.e, toks, N, N, 0.01);
+        prefix_cache_stats_get(&st);
+        ck(st.entries == 0 && st.bytes == 0,
+           "a budget below the minimum prefix stores nothing at all");
+    }
+
     prefix_cache_clear();
     prefix_cache_configure(64u * 1024 * 1024, 600);
     slot_close(&s);
