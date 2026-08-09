@@ -101,6 +101,7 @@ TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_MOE_ROUTER = $(TEST_BATCH:test-batch%=test-moe-router%)
 TEST_PAGING_WARN = $(TEST_BATCH:test-batch%=test-paging-warn%)
+TEST_AUTOFIT = $(TEST_BATCH:test-batch%=test-autofit%)
 TEST_RESP_SM = $(TEST_BATCH:test-batch%=test-responses-sm%)
 # test_responses_sm drives the framer through a POSIX socketpair(); winsock
 # has none, so on Windows the suite skips it LOUDLY (it runs in Linux CI and
@@ -444,6 +445,13 @@ TEST_PAGING_WARN_SRC = tests/test_paging_warn.c src/gguf.c src/compat.c src/quan
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_PAGING_WARN): $(TEST_PAGING_WARN_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_PAGING_WARN_SRC) -o $@ $(LDFLAGS)
+# reservation auto-fit arithmetic: no model file, no GPU, no fixture -- the
+# regime it covers is unreachable on a dev machine, so it is fed real 7B/24 GB
+# numbers directly. See the header of tests/test_autofit.c.
+TEST_AUTOFIT_SRC = tests/test_autofit.c src/gguf.c src/compat.c src/quants.c \
+                  src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
+$(TEST_AUTOFIT): $(TEST_AUTOFIT_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_AUTOFIT_SRC) -o $@ $(LDFLAGS)
 # the Responses framing state machine, driven directly over a socketpair.
 # Includes completion.c (the framer is static there) and links the engine
 # around it — the runner's object set minus main.c, server.c and the file the
@@ -747,7 +755,7 @@ endif
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
-      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_RESP_SM_DEP) \
+      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
@@ -794,6 +802,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_MOE_TOL) test-moe-fixture.moe4.gguf
 	./$(TEST_MOE_ROUTER) test-moe-fixture
 	./$(TEST_PAGING_WARN) test-moe-fixture
+	./$(TEST_AUTOFIT)
 	@# Llama-4 attention knobs: NoPE and the position-dependent temperature
 	@mkdir -p test-attn
 	$(PYTHON) scripts/make-test-model.py test-attn/k_off.gguf
@@ -931,7 +940,7 @@ clean:
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
-	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
+	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE) \

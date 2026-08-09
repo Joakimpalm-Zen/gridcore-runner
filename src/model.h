@@ -406,6 +406,16 @@ static inline size_t model_kv_row_bytes(const model_t *m, int l) {
     int d = model_kv_dim(m, l);
     return m->kv_q8 ? (size_t)(d / 32) * 34 : (size_t)d * sizeof(f16_t);
 }
+
+// Reservation auto-fit (`-c 0` with --reserve-ram/--reserve-vram): how many
+// context tokens fit a budget once the weights and every slot's activation head
+// are paid for, and the clamp that turns that into a context length. Public so
+// the arithmetic can be gated without a machine big enough to reach the regime.
+#define MODEL_AUTOFIT_HEAD (256u << 20)   // activations + slack, per slot
+long long model_autofit_tokens(uint64_t budget, uint64_t weights,
+                               uint64_t head_per_seq, uint64_t kv_per_tok,
+                               int n_seq);
+int       model_autofit_clamp(long long best, int n_ctx_train);
 // Which layer physically owns layer l's KV rows. Identity everywhere except
 // gemma4 E-series shared-KV layers, which compute no K/V and read an earlier
 // layer's cache. l == n_layer is the total-size sentinel and never remapped.

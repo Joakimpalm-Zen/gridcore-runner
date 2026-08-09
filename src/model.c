@@ -2029,6 +2029,35 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
 // above are shared. The split is at exactly the line where the load stops
 // reading the file and starts sizing buffers -- `path` and the gguf handle are
 // not referenced past here, which is what makes the seam a clean one.
+// Reservation auto-fit arithmetic, split out from model_alloc_runtime so it can
+// be tested at all. The regime it exists for -- a budget tight enough that the
+// context has to shrink to fit -- is unreachable on a development machine with
+// a fixture model: the per-slot head term alone is 256 MB, so on an 8 GB host
+// even a 1% reservation leaves negative room and the branch never runs. Every
+// number that matters here belongs to 7B-and-up models on 24 GB cards, so the
+// only way to gate it is to feed those numbers in directly.
+long long model_autofit_tokens(uint64_t budget, uint64_t weights,
+                               uint64_t head_per_seq, uint64_t kv_per_tok,
+                               int n_seq) {
+    if (n_seq < 1) n_seq = 1;
+    if (kv_per_tok == 0) return 0;
+    // The reservation is a budget for the SERVER, not for one sequence, and the
+    // two halves of the bill scale differently: weights are uploaded once and
+    // shared by every slot, while the KV cache and the activation head are paid
+    // per slot. Billing both once over-committed a multi-slot server by nearly
+    // the slot count -- see the Qwen2.5-7B case in tests/test_autofit.c.
+    long long head   = (long long)head_per_seq * n_seq;
+    long long kv_all = (long long)kv_per_tok * n_seq;
+    long long room   = (long long)budget - (long long)weights - head;
+    return room > 0 ? room / kv_all : 0;
+}
+
+int model_autofit_clamp(long long best, int n_ctx_train) {
+    int n = best > (long long)n_ctx_train ? n_ctx_train : (int)best;
+    if (n < 512) n = 512;   // a floor: below this the window is not usable
+    return n;
+}
+
 static bool model_alloc_runtime(model_t *m, const model_params *p) {
     // The gguf handle and the architecture name come off the model rather than
     // out of the bind function's locals, because on a shared-weights hit the
@@ -2073,31 +2102,26 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
             kv_per_tok += 2ull * (m->kv_q8 ? (size_t)(d / 32) * 34
                                            : (size_t)d * sizeof(f16_t));
         }
-        size_t head = (256u << 20) * (size_t)n_seq;   // activations + slack, per slot
-        size_t kv_all = kv_per_tok * (size_t)n_seq;   // one cache per slot
         long long best = -1;
         if (p->reserve_ram_pct > 0) {
             // host budget covers the mmap'd weights plus the host KV copies
             size_t budget = plat_ram_bytes() / 100 * p->reserve_ram_pct;
-            long long room = (long long)budget - (long long)m->gf.map_size - (long long)head;
-            long long fit = room > 0 ? room / (long long)kv_all : 0;
-            best = fit;
+            best = model_autofit_tokens(budget, m->gf.map_size,
+                                        MODEL_AUTOFIT_HEAD, kv_per_tok, n_seq);
         }
         if (p->reserve_vram_pct > 0 && p->gpu_mode == GPU_AUTO) {
             size_t vfree = 0, vtotal = 0;
             if (gpu_mem_info(&vfree, &vtotal)) {
                 // device budget covers one weights copy plus every slot's KV
                 size_t budget = vtotal / 100 * p->reserve_vram_pct;
-                long long room = (long long)budget -
-                                 (long long)model_cuda_weight_estimate(m, p) -
-                                 (long long)head;
-                long long fit = room > 0 ? room / (long long)kv_all : 0;
+                long long fit = model_autofit_tokens(
+                    budget, model_cuda_weight_estimate(m, p),
+                    MODEL_AUTOFIT_HEAD, kv_per_tok, n_seq);
                 if (best < 0 || fit < best) best = fit;
             }
         }
         if (best > 0) {
-            n_ctx = best > m->n_ctx_train ? m->n_ctx_train : (int)best;
-            if (n_ctx < 512) n_ctx = 512;
+            n_ctx = model_autofit_clamp(best, m->n_ctx_train);
             if (n_seq > 1)
                 fprintf(stderr, "reservation: auto-fit context %d (train %d, "
                         "%d slots sharing the budget)\n",
