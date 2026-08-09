@@ -271,6 +271,127 @@ static inline void get_scale_min_k4(int j, device const uchar *q,
     }
 }
 
+// q3_K's 16 six-bit scales live packed in 12 bytes: the low 4 bits of each of
+// the first 8 bytes, with the top 2 bits of each scale distributed through the
+// last 4. This is the same shuffle the CPU path does with three uint32 words;
+// the bytes are assembled by hand rather than cast because a 110-byte block
+// leaves scales at blk+96 with no alignment guarantee.
+static inline void q3k_scales(device const uchar *s12, thread char *out16) {
+    const uint kmask1 = 0x03030303u, kmask2 = 0x0f0f0f0fu;
+    uint aux[4];
+    for (int i = 0; i < 3; i++)
+        aux[i] = (uint)s12[i * 4 + 0]        | ((uint)s12[i * 4 + 1] << 8) |
+                ((uint)s12[i * 4 + 2] << 16) | ((uint)s12[i * 4 + 3] << 24);
+    uint tmp = aux[2];
+    aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+    aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+    aux[0] = ( aux[0]       & kmask2) | (((tmp >> 0) & kmask1) << 4);
+    aux[1] = ( aux[1]       & kmask2) | (((tmp >> 2) & kmask1) << 4);
+    for (int i = 0; i < 4; i++)
+        for (int b = 0; b < 4; b++)
+            out16[i * 4 + b] = (char)((aux[i] >> (8 * b)) & 0xFF);
+}
+
+// q3_K, quarter-superblocks, same decomposition as q2_K below. Two differences
+// from q2_K: the scales are the packed 6-bit set above (biased by 32, and
+// signed after the bias, so a scale can be negative), and every weight carries
+// a third bit in a separate 32-byte hmask that SUBTRACTS 4 when clear. That
+// mask is indexed by weight position within the whole superblock, so unlike qs
+// it does not advance with the half -- both halves read the same 32 bytes and
+// pick different bits, one bit per (half, shift) pair.
+//
+// Scalar for the same measured reason as k_mv_q4_K. Do not vectorise blind.
+kernel void k_mv_q3_K(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    device const uchar *rw = wb + a.w_off + (ulong)row * nb * 110;
+    float s = 0;
+    int nq = nb * 4;                       // quarter-superblocks on this row
+    for (int u = tiisg; u < nq; u += 32) {
+        int b = u >> 2, jj = u & 3;
+        device const uchar *blk = rw + (ulong)b * 110;
+        device const uchar *hm  = blk;                        // hmask[32]
+        device const uchar *q   = blk + 32 + (jj >> 1) * 32;  // qs[64]
+        float d_all = (float)*(device const half *)(blk + 108);
+        char sc[16];
+        q3k_scales(blk + 96, sc);
+        device const float *xp = x + b * 256 + jj * 64;
+        int si = (jj >> 1) * 8 + (jj & 1) * 4;
+        uchar sh0 = (uchar)((jj & 1) * 4), sh1 = (uchar)(sh0 + 2);
+        uchar m0 = (uchar)(1u << ((jj >> 1) * 4 + (jj & 1) * 2));
+        uchar m1 = (uchar)(m0 << 1);
+        float d0 = d_all * (float)((int)sc[si + 0] - 32);
+        float d1 = d_all * (float)((int)sc[si + 1] - 32);
+        float d2 = d_all * (float)((int)sc[si + 2] - 32);
+        float d3 = d_all * (float)((int)sc[si + 3] - 32);
+        float t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+        for (int l = 0; l < 16; l++) {
+            uchar qa = q[l],  qb = q[l + 16];
+            uchar ha = hm[l], hb = hm[l + 16];
+            t0 += (float)((int)((qa >> sh0) & 3) - ((ha & m0) ? 0 : 4)) * xp[l];
+            t1 += (float)((int)((qb >> sh0) & 3) - ((hb & m0) ? 0 : 4)) * xp[l + 16];
+            t2 += (float)((int)((qa >> sh1) & 3) - ((ha & m1) ? 0 : 4)) * xp[l + 32];
+            t3 += (float)((int)((qb >> sh1) & 3) - ((hb & m1) ? 0 : 4)) * xp[l + 48];
+        }
+        s += d0 * t0 + d1 * t1 + d2 * t2 + d3 * t3;
+    }
+    MV_TAIL;
+}
+
+// q2_K, in quarter-superblocks for the same occupancy reason as q4_K below.
+//
+// The block is 84 bytes: scales[16], qs[64], then d and dmin as halves at the
+// END (offsets 80 and 82), unlike q4_K/q5_K which lead with them. Its 256
+// weights are two halves of 128; each half owns 32 bytes of qs and 8 scale
+// bytes, and within a half the four 2-bit shifts (0,2,4,6) each cover 32
+// weights as two groups of 16 (qs[0..15] and qs[16..31]). Each scale byte
+// carries BOTH a scale in its low nibble and a min in its high nibble, so
+// unlike q4_K there is no 6-bit unpacking helper to call.
+//
+// A quarter (64 weights) is therefore one half's worth of two adjacent shifts:
+// h = jj>>1 picks the half, and the four scale bytes at h*8 + (jj&1)*4 are
+// exactly (shift0,group0), (shift0,group1), (shift1,group0), (shift1,group1).
+// The 32 qs bytes are re-read by the other quarter of the same half, which is
+// the same cache-hit-for-occupancy trade k_mv_q5_K documents for its qh.
+//
+// Kept scalar deliberately, matching k_mv_q4_K: hand-vectorising that one was
+// measured SLOWER (see its comment). Do not vectorise this without measuring.
+kernel void k_mv_q2_K(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    device const uchar *rw = wb + a.w_off + (ulong)row * nb * 84;
+    float s = 0;
+    int nq = nb * 4;                       // quarter-superblocks on this row
+    for (int u = tiisg; u < nq; u += 32) {
+        int b = u >> 2, jj = u & 3;
+        device const uchar *blk = rw + (ulong)b * 84;
+        device const uchar *sc = blk + (jj >> 1) * 8 + (jj & 1) * 4;
+        device const uchar *q  = blk + 16 + (jj >> 1) * 32;
+        float d    = (float)*(device const half *)(blk + 80);
+        float dmin = (float)*(device const half *)(blk + 82);
+        device const float *xp = x + b * 256 + jj * 64;
+        uchar sh0 = (uchar)((jj & 1) * 4), sh1 = (uchar)(sh0 + 2);
+        uchar c0 = sc[0], c1 = sc[1], c2 = sc[2], c3 = sc[3];
+        float d0 = d * (c0 & 0xF), m0 = dmin * (c0 >> 4);
+        float d1 = d * (c1 & 0xF), m1 = dmin * (c1 >> 4);
+        float d2 = d * (c2 & 0xF), m2 = dmin * (c2 >> 4);
+        float d3 = d * (c3 & 0xF), m3 = dmin * (c3 >> 4);
+        float t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+        float sx0 = 0, sx1 = 0, sx2 = 0, sx3 = 0;
+        for (int l = 0; l < 16; l++) {
+            uchar qa = q[l], qb = q[l + 16];
+            float x0 = xp[l], x1 = xp[l + 16], x2 = xp[l + 32], x3 = xp[l + 48];
+            t0 += (float)((qa >> sh0) & 3) * x0; sx0 += x0;
+            t1 += (float)((qb >> sh0) & 3) * x1; sx1 += x1;
+            t2 += (float)((qa >> sh1) & 3) * x2; sx2 += x2;
+            t3 += (float)((qb >> sh1) & 3) * x3; sx3 += x3;
+        }
+        s += d0 * t0 - m0 * sx0 + d1 * t1 - m1 * sx1
+           + d2 * t2 - m2 * sx2 + d3 * t3 - m3 * sx3;
+    }
+    MV_TAIL;
+}
+
 // Work is handed out in QUARTER-superblocks (64 weights), not whole ones.
 // Whole-superblock striding starved the simdgroup on every matvec whose input
 // is n_embd: nb = n_in/256 is 10 for a 2560-wide model, so 10 lanes worked and

@@ -588,6 +588,48 @@ else
 	@echo "metal fallback tests skipped: macOS-only backend"
 endif
 
+# Byte-identity for the K-quants that only just got Metal kernels (q2_K, q3_K).
+#
+# They are tested TOGETHER because a checkpoint exercising only one does not
+# exist in the wild: every real "Q2_K" GGUF is a mix, and llama.cpp's mix pairs
+# q2_K with q3_K (measured: tinyllama-1.1b Q2_K is 45 q2_K + 110 q3_K tensors).
+# Shipping q2_K alone would have run exactly nothing.
+#
+# The checkpoint is not in the repo, so this skips loudly rather than passing
+# vacuously -- and if the model IS present but falls back to CPU, that is a
+# FAILURE, not a skip: a parity check with both sides on the CPU compares
+# nothing at all, which is the exact defect class the 2026-08-09 gate audit
+# found three times over.
+KQUANT_MODEL ?= $(firstword $(wildcard models/tinyllama-q2k.gguf \
+                  models/*Q2_K*.gguf models/*q2_k*.gguf))
+test-metal-kquant: runner
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if [ -z "$(KQUANT_MODEL)" ]; then \
+	  echo "metal k-quant parity: SKIP (no q2_K/q3_K checkpoint in models/)"; \
+	  exit 0; fi; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+	  prompt="The capital of France is"; \
+	  ./$(RUNNER_EXE) -m $(KQUANT_MODEL) -p "$$prompt" -n 24 --temp 0 --gpu off \
+	    > metal-kquant-cpu.out 2>/dev/null; \
+	  ./$(RUNNER_EXE) -m $(KQUANT_MODEL) -p "$$prompt" -n 24 --temp 0 --gpu auto \
+	    > metal-kquant-gpu.out 2> metal-kquant-gpu.err; \
+	  if grep -q "without a Metal kernel" metal-kquant-gpu.err; then \
+	    echo "FAIL: $(KQUANT_MODEL) fell back to CPU — this parity check would"; \
+	    echo "  compare the CPU against itself and pass for the wrong reason"; \
+	    exit 1; fi; \
+	  grep -q "Metal backend" metal-kquant-gpu.err; \
+	  cmp -s metal-kquant-cpu.out metal-kquant-gpu.out || { \
+	    echo "FAIL: q2_K/q3_K Metal output differs from the CPU reference"; \
+	    exit 1; }; \
+	  echo "metal k-quant parity ok ($(KQUANT_MODEL), byte-identical)"; \
+	else \
+	  echo "metal k-quant parity: SKIP (no Metal device reported by --caps)"; \
+	fi
+else
+	@echo "metal k-quant parity: SKIP (macOS-only backend)"
+endif
+
 test-metal-prefill: runner test.gguf
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
@@ -819,6 +861,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(MAKE) --no-print-directory test-bare-invocation
 	$(MAKE) --no-print-directory test-shader-embed
 	$(MAKE) --no-print-directory test-metal-shader-gate
+	$(MAKE) --no-print-directory test-metal-kquant
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		set -e; \
@@ -991,4 +1034,4 @@ test-makefile-sane:
 	echo "makefile ok (no discarded recipes)"
 
 
-.PHONY: makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
