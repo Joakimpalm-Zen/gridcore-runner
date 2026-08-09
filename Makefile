@@ -600,34 +600,36 @@ endif
 # FAILURE, not a skip: a parity check with both sides on the CPU compares
 # nothing at all, which is the exact defect class the 2026-08-09 gate audit
 # found three times over.
-KQUANT_MODEL ?= $(firstword $(wildcard models/tinyllama-q2k.gguf \
-                  models/*Q2_K*.gguf models/*q2_k*.gguf))
+KQUANT_MODELS ?= $(wildcard models/tinyllama-q2k.gguf models/*Q2_K*.gguf \
+                   models/*q2_k*.gguf models/*IQ4_XS*.gguf models/*iq4xs*.gguf)
 test-metal-kquant: runner
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
-	if [ -z "$(KQUANT_MODEL)" ]; then \
-	  echo "metal k-quant parity: SKIP (no q2_K/q3_K checkpoint in models/)"; \
+	if [ -z "$(KQUANT_MODELS)" ]; then \
+	  echo "metal quant parity: SKIP (no q2_K/q3_K/iq4 checkpoint in models/)"; \
 	  exit 0; fi; \
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
-	  prompt="The capital of France is"; \
-	  ./$(RUNNER_EXE) -m $(KQUANT_MODEL) -p "$$prompt" -n 24 --temp 0 --gpu off \
-	    > metal-kquant-cpu.out 2>/dev/null; \
-	  ./$(RUNNER_EXE) -m $(KQUANT_MODEL) -p "$$prompt" -n 24 --temp 0 --gpu auto \
-	    > metal-kquant-gpu.out 2> metal-kquant-gpu.err; \
-	  if grep -q "without a Metal kernel" metal-kquant-gpu.err; then \
-	    echo "FAIL: $(KQUANT_MODEL) fell back to CPU — this parity check would"; \
-	    echo "  compare the CPU against itself and pass for the wrong reason"; \
-	    exit 1; fi; \
-	  grep -q "Metal backend" metal-kquant-gpu.err; \
-	  cmp -s metal-kquant-cpu.out metal-kquant-gpu.out || { \
-	    echo "FAIL: q2_K/q3_K Metal output differs from the CPU reference"; \
-	    exit 1; }; \
-	  echo "metal k-quant parity ok ($(KQUANT_MODEL), byte-identical)"; \
+	  for m in $(KQUANT_MODELS); do \
+	    prompt="The capital of France is"; \
+	    ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 24 --temp 0 --gpu off \
+	      > metal-kquant-cpu.out 2>/dev/null; \
+	    ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 24 --temp 0 --gpu auto \
+	      > metal-kquant-gpu.out 2> metal-kquant-gpu.err; \
+	    if grep -q "without a Metal kernel" metal-kquant-gpu.err; then \
+	      echo "FAIL: $$m fell back to CPU — this parity check would compare"; \
+	      echo "  the CPU against itself and pass for the wrong reason"; \
+	      exit 1; fi; \
+	    grep -q "Metal backend" metal-kquant-gpu.err; \
+	    cmp -s metal-kquant-cpu.out metal-kquant-gpu.out || { \
+	      echo "FAIL: $$m Metal output differs from the CPU reference"; \
+	      exit 1; }; \
+	    echo "  metal quant parity ok ($$m, byte-identical)"; \
+	  done; \
 	else \
-	  echo "metal k-quant parity: SKIP (no Metal device reported by --caps)"; \
+	  echo "metal quant parity: SKIP (no Metal device reported by --caps)"; \
 	fi
 else
-	@echo "metal k-quant parity: SKIP (macOS-only backend)"
+	@echo "metal quant parity: SKIP (macOS-only backend)"
 endif
 
 test-metal-prefill: runner test.gguf

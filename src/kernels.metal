@@ -271,6 +271,66 @@ static inline void get_scale_min_k4(int j, device const uchar *q,
     }
 }
 
+// The IQ4 non-linear codebook. Both iq4_nl and iq4_xs index it with a plain
+// 4-bit code, which is the whole difference from q4_0: same 16 codes per byte
+// pair, but the value is looked up rather than being the code minus eight.
+// Must stay identical to kvalues_iq4nl in quants.c -- these kernels are gated
+// on producing bit-identical output to that path.
+constant int kvalues_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+};
+
+// iq4_nl: 18-byte blocks of 32 weights, one f16 scale, no sub-block scales.
+kernel void k_mv_iq4_nl(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 32;
+    device const uchar *rw = wb + a.w_off + (ulong)row * nb * 18;
+    float s = 0;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 18;
+        float d = (float)*(device const half *)blk;
+        device const uchar *q = blk + 2;
+        device const float *xp = x + b * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++)
+            t += (float)kvalues_iq4nl[q[j] & 0xF] * xp[j]
+               + (float)kvalues_iq4nl[q[j] >> 4]  * xp[j + 16];
+        s += d * t;
+    }
+    MV_TAIL;
+}
+
+// iq4_xs: 136-byte superblocks of 256, worked one 32-weight sub-block per lane
+// iteration. Each sub-block carries a 6-bit scale split across two places --
+// four low bits packed two-per-byte in scales_l, and the top two bits in a
+// 16-bit scales_h field -- biased by 32 like q3_K's. scales_h is read as two
+// bytes rather than a ushort because a 136-byte block gives offset 2 no
+// two-byte alignment guarantee.
+kernel void k_mv_iq4_xs(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    device const uchar *rw = wb + a.w_off + (ulong)row * nb * 136;
+    float s = 0;
+    int nq = nb * 8;
+    for (int u = tiisg; u < nq; u += 32) {
+        int b = u >> 3, ib = u & 7;
+        device const uchar *blk = rw + (ulong)b * 136;
+        float d = (float)*(device const half *)blk;
+        uint sh = (uint)blk[2] | ((uint)blk[3] << 8);
+        int ls = ((blk[4 + (ib >> 1)] >> (4 * (ib & 1))) & 0xF) |
+                 (((sh >> (2 * ib)) & 3) << 4);
+        float dl = d * (float)(ls - 32);
+        device const uchar *q  = blk + 8 + ib * 16;
+        device const float *xp = x + b * 256 + ib * 32;
+        float t = 0;
+        for (int j = 0; j < 16; j++)
+            t += (float)kvalues_iq4nl[q[j] & 0xF] * xp[j]
+               + (float)kvalues_iq4nl[q[j] >> 4]  * xp[j + 16];
+        s += dl * t;
+    }
+    MV_TAIL;
+}
+
 // q3_K's 16 six-bit scales live packed in 12 bytes: the low 4 bits of each of
 // the first 8 bytes, with the top 2 bits of each scale distributed through the
 // last 4. This is the same shuffle the CPU path does with three uint32 words;
