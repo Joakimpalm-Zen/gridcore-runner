@@ -142,6 +142,61 @@ def test_thinking_prelude_is_bounded_with_distinct_finish_reason(tmp_path):
         srv.stop()
 
 
+def test_thinking_prelude_reason_survives_streaming(tmp_path):
+    """A streamed turn must not lose the reason a buffered one keeps.
+
+    openai_finish() widens `reasoning_limit` to the standard `length` on the
+    wire, and the buffered path preserves the distinction in
+    runner_telemetry.finish_detail. Streamed chat carries no runner_telemetry
+    at all, so until 2026-08-09 the same turn was fully explained when
+    buffered and unexplained when streamed -- and a client that streams is
+    exactly the one watching tokens arrive and wondering why they stopped.
+    """
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = tmp_path / "ornith.gguf"
+    fixture_env = os.environ.copy()
+    fixture_env["ORNITH_TEST_SEED"] = "1"
+    subprocess.run([sys.executable, os.path.join(root, "scripts", "make-test-ornith.py"),
+                    str(model)], check=True, cwd=root, env=fixture_env)
+    srv = RunnerServer(find_runner(root), str(model), ctx=64, parallel=1,
+                       extra_args=["--gpu", "off", "--chat-template", "ornith"])
+    srv.start()
+    try:
+        payload = json.dumps({
+            "messages": [{"role": "user", "content": "emit json"}],
+            "max_tokens": 8,
+            "temperature": 0,
+            "stream": True,
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "answer", "schema": {"type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"]}}},
+        }).encode()
+        req = urllib.request.Request(srv.base_url + "/v1/chat/completions",
+                                     data=payload,
+                                     headers={"Content-Type": "application/json"})
+        terminal = None
+        with urllib.request.urlopen(req, timeout=10) as response:
+            for raw in response:
+                line = raw.decode().strip()
+                if not line.startswith("data: "):
+                    continue
+                blob = line[len("data: "):]
+                if blob == "[DONE]":
+                    break
+                chunk = json.loads(blob)
+                if chunk["choices"] and chunk["choices"][0].get("finish_reason"):
+                    terminal = chunk
+        assert terminal is not None, "stream ended without a finish_reason chunk"
+        # standards-compliant on the wire ...
+        assert terminal["choices"][0]["finish_reason"] == "length"
+        # ... and the prelude-specific reason still recoverable, which is the
+        # half that did not exist for streamed turns before
+        assert terminal["runner_telemetry"]["finish_detail"] == "reasoning_limit"
+    finally:
+        srv.stop()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signal contract")
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
 def test_signal_performs_clean_shutdown(sig):

@@ -1677,9 +1677,19 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             }
             sbuf c = {0};
             chunk_open(&g, &c);
-            sb_fmt(&c, "%s,\"finish_reason\":\"%s\"}]}",
+            sb_fmt(&c, "%s,\"finish_reason\":\"%s\"}]",
                    chat ? "\"delta\":{}" : "\"text\":\"\"",
                    openai_finish(finish));
+            // A streamed turn carries no runner_telemetry of its own, so
+            // without this the reason widened away by openai_finish() would be
+            // recoverable on buffered turns and nowhere at all on streamed
+            // ones. Emitted only when there IS a distinction to keep, so an
+            // ordinary stream stays byte-for-byte what it was.
+            const char *sdet = finish_detail_of(finish);
+            if (sdet)
+                sb_fmt(&c, ",\"runner_telemetry\":{\"finish_detail\":\"%s\"}",
+                       sdet, NULL);
+            sb_lit(&c, "}");
             bool ok = chunk_send(&g, &c) == 0;
             // OpenAI stream_options {"include_usage": true}: one extra chunk
             // with empty choices and the request's token accounting — AI-SDK

@@ -764,6 +764,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@# without CUDA, so it costs a Mac nothing and actually fires on the boxes
 	@# that have the backend it guards.
 	$(MAKE) --no-print-directory test-split-guard
+	$(MAKE) --no-print-directory test-makefile-sane
 	@# the fused-vs-eager routing gate needs a fixture whose router is not
 	@# zero: the dense-oracle MoE fixtures are 0.5/0.5 either way and can only
 	@# compare a routing path with itself (it self-skips on those, correctly)
@@ -934,4 +935,29 @@ ptx: src/kernels.cu
 	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
-.PHONY: clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+# A duplicate target name makes make DISCARD one recipe and say so — but only
+# as a warning, scrolling past in the build noise. That is exactly how
+# test-split-guard sat unbuilt and unreferenced for as long as it existed: the
+# diagnosis was printed on every single build and nobody was reading it.
+#
+# "overriding commands for target" is never benign. It always means a recipe
+# was silently thrown away. Promote it to a failure rather than a warning.
+#
+# -n on a do-nothing target is enough: these warnings are emitted while make
+# PARSES the makefile, before any recipe runs, so this costs a parse and no
+# work at all.
+makefile-noop:
+	@:
+
+test-makefile-sane:
+	@out=$$($(MAKE) -n --no-print-directory makefile-noop 2>&1); \
+	case "$$out" in \
+	  *"overriding commands"*) \
+	    echo "FAIL: duplicate make target — a recipe is being discarded:"; \
+	    echo "$$out" | grep -E "overriding commands|ignoring old commands"; \
+	    exit 1;; \
+	esac; \
+	echo "makefile ok (no discarded recipes)"
+
+
+.PHONY: makefile-noop test-makefile-sane clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
