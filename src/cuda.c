@@ -1812,7 +1812,28 @@ void gpu_moe_eager_force(int on) { g_moe_eager_force = on < 0 ? -1 : (on != 0); 
 static bool tc_promoted(const model_t *m, int type) {
     // Q6_K joined 2026-08-08: the profile showed it was 26% of prefill running
     // on the SCALAR path, because attn_v/ffn_down are Q6_K in every Q4_K_M.
-    if (type != T_Q4_K && type != T_Q6_K) return false;
+    //
+    // Q8_0 joined 2026-08-09, and it is the strongest row in this table:
+    // test_tc_tol on Qwen3-4B-Q8_0 reported logits BIT-IDENTICAL across 504
+    // counted TC dispatches — not "within tolerance", identical. Prefill went
+    // 113.72 -> 475.71 tok/s (4.18x) on the same model and prompt.
+    //
+    // Bit-identity is why this is promoted for the whole trusted arch list on
+    // one model's evidence, where a tolerance-based row would not be. The arch
+    // list exists because architectures differ in how much they AMPLIFY
+    // numerical difference — MoE routing amplifies fp16 noise ~86x over dense,
+    // which is why qwen3moe stays opt-in. With zero difference to amplify, that
+    // sensitivity cannot bite. The kernel is exact here because int8 weights
+    // convert to fp16 without loss and the accumulation order matches the
+    // scalar path; that is a property of the kernel, not of the model.
+    //
+    // CAVEAT, and it is the reason this row is not yet in the TC spec table:
+    // measured on sm_86 (RTX 3070), while every other row was measured on the
+    // Blackwell MIG slice (sm_120). Bit-identity is a strong claim but it is a
+    // claim about one architecture's tensor cores. Confirm on sm_120 before the
+    // next release — if it is merely near-identical there, this row needs
+    // demoting to tolerance-gated like the others.
+    if (type != T_Q4_K && type != T_Q6_K && type != T_Q8_0) return false;
     static const char *archs[] = { "llama", "phi3", "gemma4", "qwen3",
                                    "mistral", "gemma3", "smollm" };
     for (size_t i = 0; i < sizeof(archs) / sizeof(*archs); i++)
