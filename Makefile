@@ -218,9 +218,29 @@ TEST_SHARED_SRC = tests/test_shared_weights.c src/gguf.c src/compat.c \
 $(TEST_SHARED): $(TEST_SHARED_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_SHARED_SRC) -o $@ $(LDFLAGS)
 
+# ASAN_MODEL selects the fixture for the sharing / split / no-identity gates.
+# It was UNSET, so all three silently fell back to the 370 KB test.gguf —
+# which is physically incapable of moving a VRAM budget, overflowing a
+# file-size field, or forcing an eviction. The gates were not weak; their input
+# was, and a green run said nothing about that. Prefer a real model when one is
+# on the box; fall back to the fixture otherwise, and SAY WHICH either way, so
+# a pass is never mistaken for coverage it did not have.
+ASAN_MODEL ?= $(firstword $(wildcard models/SmolLM2-135M-Instruct-Q8_0.gguf \
+                                     models/e2b-q40.gguf))
+
+.PHONY: fixture-scale-note
+fixture-scale-note:
+	@if [ -z "$(ASAN_MODEL)" ]; then \
+	  echo "note: gates below run against the 370 KB test.gguf — too small to"; \
+	  echo "      exercise VRAM budgets, eviction or file-size limits. Set"; \
+	  echo "      ASAN_MODEL=<real .gguf> to make those contracts testable."; \
+	else \
+	  echo "note: gates below run against $(ASAN_MODEL)"; \
+	fi
+
 # same test under ASan/UBSan: the free-exactly-once half of it only fails
 # loudly here. Kept out of `make test` because a sanitized model load is slow.
-test-shared-asan: $(TEST_SHARED_SRC) $(HDR) test.gguf
+test-shared-asan: $(TEST_SHARED_SRC) $(HDR) test.gguf fixture-scale-note
 	$(CC) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
 	    -std=gnu11 -Wall -I src $(TEST_SHARED_SRC) -o test-shared-asan-bin $(LDFLAGS)
 	RUNNER_TEST_GPU_OFF=1 LSAN_OPTIONS=suppressions=tests/lsan.supp \
@@ -232,7 +252,7 @@ test-shared-asan: $(TEST_SHARED_SRC) $(HDR) test.gguf
 # not something incidental. A green run here means the gate can no longer
 # detect lost sharing, which is the state it was in for its whole life before
 # 2026-08-04 (see the CHANGELOG entries for the shared-weights split fix).
-test-shared-noid: $(TEST_SHARED)
+test-shared-noid: $(TEST_SHARED) fixture-scale-note
 	@set -e; \
 	if RUNNER_TEST_NO_FILE_ID=1 ./$(TEST_SHARED) $(ASAN_MODEL) > shared-noid.out 2>&1; then \
 		echo "FAIL: test-shared-weights passed with no file identity —"; \
@@ -962,4 +982,4 @@ test-makefile-sane:
 	echo "makefile ok (no discarded recipes)"
 
 
-.PHONY: makefile-noop test-makefile-sane clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
