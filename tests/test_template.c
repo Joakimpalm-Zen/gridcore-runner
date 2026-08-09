@@ -38,7 +38,7 @@ static void test_detect_zephyr_vs_phi3(tokenizer *t) {
 
     const chat_msg msgs[] = { { "user", "HI" } };
     char out[512];
-    render_messages(TMPL_PHI3, msgs, 1, true, false, out, sizeof(out));
+    render_messages(TMPL_PHI3, msgs, 1, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "<|user|>\nHI<|end|>\n<|assistant|>\n") == 0);
 }
 
@@ -65,7 +65,7 @@ static void test_detect_and_render_apertus(tokenizer *t) {
         { "assistant", "YO" }, { "user", "BYE" },
     };
     char out[1024];
-    render_messages(TMPL_APERTUS, msgs, 4, true, false, out, sizeof(out));
+    render_messages(TMPL_APERTUS, msgs, 4, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out,
         "<|system_start|>SYS<|system_end|>"
         "<|developer_start|>Deliberation: disabled\n"
@@ -83,7 +83,7 @@ static void test_detect_and_render_apertus(tokenizer *t) {
 static void test_render_apertus_without_system(void) {
     const chat_msg msgs[] = { { "user", "HI" } };
     char out[512];
-    render_messages(TMPL_APERTUS, msgs, 1, true, false, out, sizeof(out));
+    render_messages(TMPL_APERTUS, msgs, 1, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out,
         "<|developer_start|>Deliberation: disabled\n"
         "Tool Capabilities: disabled<|developer_end|>"
@@ -112,7 +112,7 @@ static void test_detect_and_render_ornith(tokenizer *t) {
         { "assistant", "<think>\nPLAN\n</think>\n\nANSWER" },
     };
     char out[1024];
-    render_messages(TMPL_ORNITH, msgs, 3, true, false, out, sizeof(out));
+    render_messages(TMPL_ORNITH, msgs, 3, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out,
         "<|im_start|>system\nSYS<|im_end|>\n"
         "<|im_start|>user\nHI<|im_end|>\n"
@@ -152,7 +152,7 @@ static void test_ornith_groups_consecutive_tool_responses(void) {
         { "user", "<tool_response>\nTWO\n</tool_response>" },
     };
     char out[1024];
-    render_messages(TMPL_ORNITH, msgs, 4, true, false, out, sizeof(out));
+    render_messages(TMPL_ORNITH, msgs, 4, true, THINK_DEFAULT, out, sizeof(out));
     assert(strstr(out,
         "<|im_start|>user\n"
         "<tool_response>\nONE\n</tool_response>\n"
@@ -166,10 +166,10 @@ static void test_render_system_prompt(void) {
     const chat_msg msgs[] = { { "system", "SYS" }, { "user", "HI" } };
     char out[1024];
 
-    render_messages(TMPL_MISTRAL, msgs, 2, true, false, out, sizeof(out));
+    render_messages(TMPL_MISTRAL, msgs, 2, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "[INST] SYS\n\nHI [/INST]") == 0);
 
-    render_messages(TMPL_LLAMA2, msgs, 2, true, false, out, sizeof(out));
+    render_messages(TMPL_LLAMA2, msgs, 2, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "[INST] <<SYS>>\nSYS\n<</SYS>>\n\nHI [/INST]") == 0);
 }
 
@@ -178,8 +178,8 @@ static void test_render_system_prompt(void) {
 static void test_render_without_system(void) {
     const chat_msg msgs[] = { { "user", "HI" } };
     char mistral[512], llama2[512];
-    render_messages(TMPL_MISTRAL, msgs, 1, true, false, mistral, sizeof(mistral));
-    render_messages(TMPL_LLAMA2, msgs, 1, true, false, llama2, sizeof(llama2));
+    render_messages(TMPL_MISTRAL, msgs, 1, true, THINK_DEFAULT, mistral, sizeof(mistral));
+    render_messages(TMPL_LLAMA2, msgs, 1, true, THINK_DEFAULT, llama2, sizeof(llama2));
     assert(strcmp(mistral, "[INST] HI [/INST]") == 0);
     assert(strcmp(mistral, llama2) == 0);
 }
@@ -212,23 +212,60 @@ static void test_gemma4_thinking_shape(void) {
     char out[512];
 
     // default: non-thinking, matching the reference
-    render_messages(TMPL_GEMMA4, msgs, 1, true, false, out, sizeof(out));
+    render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "<|turn>user\nHI<turn|>\n"
                        "<|turn>model\n<|channel>thought\n<channel|>") == 0);
 
     // opt-in: no pre-seed, the model may open its own thought block
-    render_messages(TMPL_GEMMA4, msgs, 1, true, true, out, sizeof(out));
+    render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_ON, out, sizeof(out));
     assert(strcmp(out, "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
 
     // no generation prompt at all after a tool response, per the reference's
     // prev_message_type guard
     const chat_msg after_tool[] = { { "user", "HI" }, { "tool", "42" } };
-    render_messages(TMPL_GEMMA4, after_tool, 2, true, false, out, sizeof(out));
+    render_messages(TMPL_GEMMA4, after_tool, 2, true, THINK_DEFAULT, out, sizeof(out));
     assert(strstr(out, "<|turn>model") == NULL);
 
     // and add_assistant=false stays bare either way
-    render_messages(TMPL_GEMMA4, msgs, 1, false, false, out, sizeof(out));
+    render_messages(TMPL_GEMMA4, msgs, 1, false, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "<|turn>user\nHI<turn|>\n") == 0);
+}
+
+// Qwen3-family ChatML. The reference (Qwen/Qwen3-* tokenizer_config.json)
+// defaults enable_thinking TRUE and appends "<think>\n\n</think>\n\n" only on
+// the false branch, so THINK_DEFAULT must render exactly what plain ChatML
+// renders. Getting that backwards would silently suppress reasoning on every
+// Qwen3 turn -- the mirror image of the gemma-4 bug above, which is why both
+// families are pinned rather than assumed to behave alike.
+static void test_chatml_think_shape(void) {
+    const chat_msg msgs[] = { { "user", "HI" } };
+    char out[512];
+    const char *base = "<|im_start|>user\nHI<|im_end|>\n<|im_start|>assistant\n";
+
+    // detection comes from the model's own template, not a name list
+    assert(template_detect("<|im_start|>system ... <think> ...", NULL)
+           == TMPL_CHATML_THINK);
+    assert(template_detect("<|im_start|>system", NULL) == TMPL_CHATML);
+    assert(template_from_name("chatml-think") == TMPL_CHATML_THINK);
+    assert(!strcmp(template_name(TMPL_CHATML_THINK), "chatml-think"));
+
+    // DEFAULT and ON both mean "let the model think" for this family
+    render_messages(TMPL_CHATML_THINK, msgs, 1, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, base) == 0);
+    render_messages(TMPL_CHATML_THINK, msgs, 1, true, THINK_ON,
+                    out, sizeof(out));
+    assert(strcmp(out, base) == 0);
+
+    // OFF appends the closed block, verbatim from the reference
+    render_messages(TMPL_CHATML_THINK, msgs, 1, true, THINK_OFF,
+                    out, sizeof(out));
+    assert(strcmp(out, "<|im_start|>user\nHI<|im_end|>\n"
+                       "<|im_start|>assistant\n<think>\n\n</think>\n\n") == 0);
+
+    // plain ChatML never grows a thought block, whatever is asked of it
+    render_messages(TMPL_CHATML, msgs, 1, true, THINK_OFF, out, sizeof(out));
+    assert(strcmp(out, base) == 0);
 }
 
 int main(void) {
@@ -255,6 +292,7 @@ int main(void) {
     test_render_without_system();
     test_name_roundtrip();
     test_gemma4_thinking_shape();
+    test_chatml_think_shape();
 
     tokenizer_free(&t);
     gguf_close(&g);

@@ -183,7 +183,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 500, "out of memory building chat prompt");
         return;
     }
-    render_messages(s->tmpl, cm, n_cm, true, req_enable_thinking(req),
+    render_messages(s->tmpl, cm, n_cm, true, req_thinking_mode(req),
                     prompt, total + 256);
     run_completion(s, fd, prompt, API_CHAT, req, strict ? &env : NULL);
     free(prompt);

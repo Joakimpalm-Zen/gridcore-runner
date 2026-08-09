@@ -11,7 +11,25 @@
 // first user turn rather than wrapped in markers it never saw in training.
 enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_APERTUS, TMPL_ORNITH,
-       TMPL_RAW };
+       TMPL_RAW,
+       // ChatML whose own template declares <think>: Qwen3 and relatives.
+       // Split from TMPL_CHATML only so the thinking control below has
+       // somewhere to attach -- rendering is otherwise identical, and every
+       // tmpl-dependent branch elsewhere keys on TMPL_ORNITH, so this falls
+       // into the same generic path TMPL_CHATML does.
+       TMPL_CHATML_THINK };
+
+// How the generation prompt should treat a thinking model.
+//
+// THINK_DEFAULT means "whatever this model family's reference template does",
+// and that is deliberately NOT one answer for all families:
+//   gemma-4  reference defaults enable_thinking FALSE -> pre-seed an empty
+//            thought block, suppressing reasoning
+//   Qwen3    reference defaults enable_thinking TRUE  -> emit nothing, the
+//            model opens its own <think>
+// A single boolean cannot express that, which is why this is tri-state: the
+// absence of a request field has to mean "match the reference", not "false".
+enum { THINK_DEFAULT = 0, THINK_ON, THINK_OFF };
 typedef struct { const char *role, *content; } chat_msg;
 int         template_detect(const char *meta_tmpl, tokenizer *tok);
 int         template_from_name(const char *name); // -1 if unknown
@@ -19,33 +37,41 @@ const char *template_name(int tmpl);
 // render messages; add_assistant appends the assistant generation prefix.
 // returns bytes written (excl. NUL)
 //
-// enable_thinking currently affects TMPL_GEMMA4 only, and it defaults to FALSE
-// because that is what the reference template defaults to:
+// `thinking` is THINK_DEFAULT / THINK_ON / THINK_OFF and affects the two
+// families whose reference templates take an enable_thinking variable. It is
+// tri-state because those two references disagree about the default:
 //
+//   TMPL_GEMMA4       google-gemma-4-31B-it.jinja
 //     {{- '<|turn>model\n' -}}
 //     {%- if not enable_thinking | default(false) -%}
 //         {{- '<|channel>thought\n<channel|>' -}}
 //     {%- endif -%}
+//     default FALSE -> DEFAULT and OFF pre-seed the empty thought block; ON
+//     omits it and lets the model open its own.
 //
-// (llama.cpp models/templates/google-gemma-4-31B-it.jinja). Passing true
-// suppresses the empty-thought pre-seed and lets the model open its own
-// thought block — upstream's opt-in branch, not the default.
+//   TMPL_CHATML_THINK Qwen/Qwen3-* tokenizer_config.json
+//     enable_thinking defaults TRUE, and the false branch appends
+//     '<think>\n\n</think>\n\n' after the assistant header.
+//     default TRUE -> DEFAULT and ON emit nothing; OFF appends the closed
+//     block, which is how a Qwen3 model is asked not to reason.
 //
-// Until 2026-08-08 runner had no parameter here and always rendered the
-// thinking-enabled shape, so it disagreed with every reference-following
-// engine on every gemma-4 turn. That is the likely cause of tool prompts that
-// opened a thought block and never closed it, returning one byte from a
-// hundred generated tokens.
+// So THINK_DEFAULT is not "off" — it is "render what a reference-following
+// engine would render for THIS family". Until 2026-08-08 runner had no such
+// parameter and always emitted the gemma-4 thinking-enabled shape, disagreeing
+// with every reference engine on every gemma-4 turn; that is the likely cause
+// of tool prompts that opened a thought block, never closed it, and returned
+// one byte from a hundred generated tokens.
 size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
-                       bool add_assistant, bool enable_thinking,
+                       bool add_assistant, int thinking,
                        char *out, size_t cap);
 
 // chat tool-call convention (template.c; sbuf/jv live in json.h)
 struct sbuf;
 struct jv;
-// read the per-request thinking opt-in (top level or chat_template_kwargs);
-// false when absent, which is the reference template's own default
-bool req_enable_thinking(struct jv *req);
+// read the per-request thinking control (top level or chat_template_kwargs);
+// THINK_DEFAULT when absent, so a silent request renders what the model's own
+// reference template would render
+int req_thinking_mode(struct jv *req);
 // render OpenAI "tools" declarations as a system turn (no-op when absent)
 void tools_render(const struct jv *tools, struct sbuf *out);
 void tools_render_for(int tmpl, const struct jv *tools, struct sbuf *out);

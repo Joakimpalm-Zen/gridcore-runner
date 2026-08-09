@@ -16,7 +16,12 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         if (strstr(meta_tmpl, "<function=example_function_name>") &&
             strstr(meta_tmpl, "<think>"))
             return TMPL_ORNITH;
-        if (strstr(meta_tmpl, "<|im_start|>"))        return TMPL_CHATML;
+        // Qwen3 and relatives: ChatML whose own template carries a
+        // <think> branch. Detected from the model's template rather than
+        // a name list, so it follows the checkpoint and not a guess.
+        if (strstr(meta_tmpl, "<|im_start|>"))
+            return strstr(meta_tmpl, "<think>") ? TMPL_CHATML_THINK
+                                                : TMPL_CHATML;
         if (strstr(meta_tmpl, "<|start_header_id|>")) return TMPL_LLAMA3;
         if (strstr(meta_tmpl, "<|user|>"))
             return strstr(meta_tmpl, "<|end|>") ? TMPL_PHI3 : TMPL_ZEPHYR;
@@ -37,6 +42,7 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
 
 int template_from_name(const char *name) {
     if (!strcmp(name, "chatml")) return TMPL_CHATML;
+    if (!strcmp(name, "chatml-think")) return TMPL_CHATML_THINK;
     if (!strcmp(name, "llama2")) return TMPL_LLAMA2;
     if (!strcmp(name, "llama3")) return TMPL_LLAMA3;
     if (!strcmp(name, "zephyr")) return TMPL_ZEPHYR;
@@ -53,6 +59,7 @@ int template_from_name(const char *name) {
 const char *template_name(int t) {
     switch (t) {
         case TMPL_CHATML: return "chatml";  case TMPL_LLAMA2: return "llama2";
+        case TMPL_CHATML_THINK: return "chatml-think";
         case TMPL_LLAMA3: return "llama3";  case TMPL_ZEPHYR: return "zephyr";
         case TMPL_GEMMA:  return "gemma";
         case TMPL_GEMMA4: return "gemma4";
@@ -76,18 +83,24 @@ static size_t emit(char *out, size_t cap, size_t off, const char *fmt,
 // template variables — a client that already speaks to llama.cpp should not
 // have to learn a second spelling to get the same behaviour.
 //
-// Default false, matching the reference template's own default. A request that
-// says nothing gets the shape every other engine would render.
-bool req_enable_thinking(struct jv *req) {
-    if (!req) return false;
+// Returns THINK_DEFAULT when the field is absent, so a silent request renders
+// what a reference-following engine would render for that model family. It
+// does NOT default to false: gemma-4's reference defaults thinking off and
+// Qwen3's defaults it on, so collapsing "unspecified" onto either one would
+// silently misrender the other family.
+int req_thinking_mode(struct jv *req) {
+    if (!req) return THINK_DEFAULT;
     jv *kw = jv_get((jv *)req, "chat_template_kwargs");
-    if (kw && jv_get(kw, "enable_thinking"))
-        return jv_bool(jv_get(kw, "enable_thinking"), false);
-    return jv_bool(jv_get((jv *)req, "enable_thinking"), false);
+    jv *v  = kw ? jv_get(kw, "enable_thinking") : NULL;
+    if (!v) v = jv_get((jv *)req, "enable_thinking");
+    // absent means DEFAULT, not false: the reference default differs per
+    // family, so a silent request must not be forced onto one of them
+    if (!v) return THINK_DEFAULT;
+    return jv_bool(v, false) ? THINK_ON : THINK_OFF;
 }
 
 size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
-                       bool add_assistant, bool enable_thinking,
+                       bool add_assistant, int thinking,
                        char *out, size_t cap) {
     size_t off = 0;
     out[0] = 0;
@@ -123,11 +136,21 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<|im_start|>assistant\n<think>\n", NULL, NULL);
         break;
     case TMPL_CHATML:
+    case TMPL_CHATML_THINK:
         for (int i = 0; i < n_msgs; i++)
             off = emit(out, cap, off, "<|im_start|>%s\n%s<|im_end|>\n",
                        msgs[i].role, msgs[i].content);
-        if (add_assistant)
+        if (add_assistant) {
             off = emit(out, cap, off, "<|im_start|>assistant\n", NULL, NULL);
+            // Qwen3's enable_thinking=false branch, verbatim from
+            // Qwen/Qwen3-* tokenizer_config.json: an already-closed thought
+            // block, which is how the family is asked not to reason. Its
+            // reference defaults thinking ON, so this is emitted only when a
+            // caller explicitly turns it off -- never for THINK_DEFAULT.
+            if (tmpl == TMPL_CHATML_THINK && thinking == THINK_OFF)
+                off = emit(out, cap, off, "<think>\n\n</think>\n\n",
+                           NULL, NULL);
+        }
         break;
     case TMPL_LLAMA3:
         for (int i = 0; i < n_msgs; i++)
@@ -222,7 +245,7 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
                               !strcmp(msgs[n_msgs - 1].role, "tool");
             if (!after_tool) {
                 off = emit(out, cap, off, "<|turn>model\n", NULL, NULL);
-                if (!enable_thinking)
+                if (thinking != THINK_ON)
                     off = emit(out, cap, off, "<|channel>thought\n<channel|>",
                                NULL, NULL);
             }
