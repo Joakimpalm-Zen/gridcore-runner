@@ -138,3 +138,5 @@ test-instances
 test-instances.exe
 test-metal-shaders
 test-metal-shaders.exe
+test-autofit
+test-autofit.exe
