@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <float.h>
 #include <limits.h>
 
 enum { TT_NORMAL = 1, TT_UNKNOWN = 2, TT_CONTROL = 3, TT_USER_DEFINED = 4,
@@ -140,7 +141,7 @@ static bool spm_scores_from_merges(tokenizer *t, gguf_file *g) {
         t->scores = malloc(sizeof(float) * (size_t)t->n_vocab);
         if (!t->scores) return false;
     }
-    for (int i = 0; i < t->n_vocab; i++) t->scores[i] = -INFINITY;
+    for (int i = 0; i < t->n_vocab; i++) t->scores[i] = -FLT_MAX;
 
     char buf[512];
     for (uint64_t r = 0; r < mg->arr_n; r++) {
@@ -396,7 +397,7 @@ static bool mh_pop(mheap *h, mcand *out) {
     ((NEXT)[(c).l] == (c).r && (LN)[(c).l] == (c).len_l && (LN)[(c).r] == (c).len_r)
 
 // The score floor the old scan started from. A piece that is no merge's result
-// carries -INFINITY (see spm_scores_from_merges) and must never be merged;
+// carries -FLT_MAX (see spm_scores_from_merges) and must never be merged;
 // the old loop excluded it by initialising best_score to -1e30f, so the same
 // constant is the admission test here.
 #define SPM_SCORE_FLOOR (-1e30f)

@@ -319,6 +319,8 @@ static void test_schema_rejects_non_integer_or_huge_bounds(void) {
         "{\"type\":\"array\",\"items\":{},\"minItems\":1.5}",
         "{\"type\":\"array\",\"items\":{},\"maxItems\":1e100}",
         "{\"type\":\"string\",\"minLength\":1e100}",
+        "{\"type\":\"number\",\"minimum\":\"zero\"}",
+        "{\"type\":\"integer\",\"exclusiveMaximum\":null}",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
         jv *schema_json = json_parse(bad[i], strlen(bad[i]));

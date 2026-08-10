@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 
@@ -261,39 +262,48 @@ bad:
 
 #define JSON_SAFE_INTEGER 9007199254740991LL
 
-static bool numeric_keyword(jv *s, const char *key, double *out) {
+enum numeric_keyword_state {
+    NUMERIC_ABSENT,
+    NUMERIC_VALID,
+    NUMERIC_INVALID,
+};
+
+static enum numeric_keyword_state numeric_keyword(jv *s, const char *key,
+                                                   double *out) {
     jv *v = jv_get(s, key);
-    if (!v) return false;
+    if (!v) return NUMERIC_ABSENT;
     if (v->type != J_NUM || !isfinite(v->num) ||
         v->num < -(double)JSON_SAFE_INTEGER ||
-        v->num >  (double)JSON_SAFE_INTEGER) {
-        *out = NAN;
-        return true;
-    }
+        v->num >  (double)JSON_SAFE_INTEGER)
+        return NUMERIC_INVALID;
     *out = v->num;
-    return true;
+    return NUMERIC_VALID;
 }
 
 static bool compile_integer_bounds(jv *s, snode *n, char *err, int errcap) {
     double x;
-    if (numeric_keyword(s, "minimum", &x)) {
-        if (!isfinite(x)) goto bad;
+    enum numeric_keyword_state state = numeric_keyword(s, "minimum", &x);
+    if (state == NUMERIC_INVALID) goto bad;
+    if (state == NUMERIC_VALID) {
         n->num_min = (int64_t)ceil(x);
         n->has_num_min = true;
     }
-    if (numeric_keyword(s, "exclusiveMinimum", &x)) {
-        if (!isfinite(x)) goto bad;
+    state = numeric_keyword(s, "exclusiveMinimum", &x);
+    if (state == NUMERIC_INVALID) goto bad;
+    if (state == NUMERIC_VALID) {
         int64_t v = (int64_t)floor(x) + 1;
         if (!n->has_num_min || v > n->num_min) n->num_min = v;
         n->has_num_min = true;
     }
-    if (numeric_keyword(s, "maximum", &x)) {
-        if (!isfinite(x)) goto bad;
+    state = numeric_keyword(s, "maximum", &x);
+    if (state == NUMERIC_INVALID) goto bad;
+    if (state == NUMERIC_VALID) {
         n->num_max = (int64_t)floor(x);
         n->has_num_max = true;
     }
-    if (numeric_keyword(s, "exclusiveMaximum", &x)) {
-        if (!isfinite(x)) goto bad;
+    state = numeric_keyword(s, "exclusiveMaximum", &x);
+    if (state == NUMERIC_INVALID) goto bad;
+    if (state == NUMERIC_VALID) {
         int64_t v = (int64_t)ceil(x) - 1;
         if (!n->has_num_max || v < n->num_max) n->num_max = v;
         n->has_num_max = true;
@@ -310,35 +320,26 @@ bad:
 
 static bool compile_number_bounds(jv *s, snode *n, char *err, int errcap) {
     double x;
-    if (numeric_keyword(s, "minimum", &x)) {
-        if (!isfinite(x)) goto bad;
+    enum numeric_keyword_state state = numeric_keyword(s, "minimum", &x);
+    if (state == NUMERIC_INVALID) goto bad;
+    if (state == NUMERIC_VALID) {
         n->real_min = x; n->has_real_min = true;
     }
-    if (numeric_keyword(s, "exclusiveMinimum", &x)) {
-        if (!isfinite(x)) goto bad;
+    state = numeric_keyword(s, "exclusiveMinimum", &x);
+    if (state == NUMERIC_INVALID) goto bad;
+    if (state == NUMERIC_VALID) {
         n->real_min = x; n->has_real_min = true;
-        /* Preserve exclusivity by moving to the next representable value.
-         *
-         * INFINITY here is only a DIRECTION -- x is checked finite just above,
-         * so the result is the next double, never an infinity. It is still
-         * worth a note: this file is compiled with -ffast-math, which implies
-         * -ffinite-math-only, and clang warns that INFINITY is unavailable
-         * under it (-Wnan-infinity-disabled; reported from a Mac build).
-         * Measured on gcc, the result is byte-identical with and without
-         * -ffast-math. Unverified on clang -- there is no Mac on this project
-         * -- so if that check ever runs and disagrees, the fix is to give
-         * schema.c its own translation unit without -ffast-math rather than to
-         * rewrite the arithmetic. tests/test_json_schema.c now builds with the
-         * same CFLAGS as the binary, so the test would see any divergence. */
-        n->real_min = nextafter(n->real_min, INFINITY);
+        n->real_min = nextafter(n->real_min, DBL_MAX);
     }
-    if (numeric_keyword(s, "maximum", &x)) {
-        if (!isfinite(x)) goto bad;
+    state = numeric_keyword(s, "maximum", &x);
+    if (state == NUMERIC_INVALID) goto bad;
+    if (state == NUMERIC_VALID) {
         n->real_max = x; n->has_real_max = true;
     }
-    if (numeric_keyword(s, "exclusiveMaximum", &x)) {
-        if (!isfinite(x)) goto bad;
-        n->real_max = nextafter(x, -INFINITY); n->has_real_max = true;
+    state = numeric_keyword(s, "exclusiveMaximum", &x);
+    if (state == NUMERIC_INVALID) goto bad;
+    if (state == NUMERIC_VALID) {
+        n->real_max = nextafter(x, -DBL_MAX); n->has_real_max = true;
     }
     if (n->has_real_min && n->has_real_max && n->real_min > n->real_max) {
         snprintf(err, errcap, "empty number bounds");

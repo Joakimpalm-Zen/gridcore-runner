@@ -7,6 +7,7 @@
 #include "compat.h"
 
 #include <math.h>
+#include <float.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2603,7 +2604,7 @@ static bool dbg_act_now(void) {
 }
 
 static void dbg_stat(const char *tag, int layer, const float *v, size_t n) {
-    float mn = INFINITY, mx = -INFINITY, absmx = 0;
+    float mn = FLT_MAX, mx = -FLT_MAX, absmx = 0;
     double sum = 0;
     size_t n_inf = 0, n_nan = 0, n_zero = 0;
     for (size_t i = 0; i < n; i++) {
@@ -2940,7 +2941,7 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
         int per = ne / m->n_expert_groups;
         float *gs = m->moe_group_score;
         for (int gi = 0; gi < m->n_expert_groups; gi++) {
-            float b1 = -INFINITY, b2 = -INFINITY;
+            float b1 = -FLT_MAX, b2 = -FLT_MAX;
             for (int e = gi * per; e < (gi + 1) * per; e++) {
                 if (scores[e] > b1) { b2 = b1; b1 = scores[e]; }
                 else if (scores[e] > b2) b2 = scores[e];
@@ -2950,10 +2951,10 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
         for (int k = 0; k < m->n_expert_groups - m->n_group_used; k++) {
             int worst = -1;
             for (int gi = 0; gi < m->n_expert_groups; gi++)
-                if (gs[gi] != -INFINITY && (worst < 0 || gs[gi] < gs[worst])) worst = gi;
+                if (gs[gi] != -FLT_MAX && (worst < 0 || gs[gi] < gs[worst])) worst = gi;
             if (worst < 0) break;
-            gs[worst] = -INFINITY;
-            for (int e = worst * per; e < (worst + 1) * per; e++) scores[e] = -INFINITY;
+            gs[worst] = -FLT_MAX;
+            for (int e = worst * per; e < (worst + 1) * per; e++) scores[e] = -FLT_MAX;
         }
     }
 
@@ -2961,13 +2962,13 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
     float denom = 0.0f;
     for (int t = 0; t < used; t++) {
         int best = 0;
-        float bs = -INFINITY;
+        float bs = -FLT_MAX;
         for (int e = 0; e < ne; e++)
             if (scores[e] > bs) { bs = scores[e]; best = e; }
         sel[t]  = best;
         selw[t] = probs[best];
         denom  += selw[t];
-        scores[best] = -INFINITY;               // exclude from the next round
+        scores[best] = -FLT_MAX;                // exclude from the next round
     }
 
     if (m->expert_gating == EXPERT_GATE_SOFTMAX_WEIGHT) {

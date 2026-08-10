@@ -49,6 +49,7 @@ TEST_BIND = test-bind.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 GPU_BACKEND_DEF = -DRUNNER_GPU_METAL
+CFLAGS += -Werror=nan-infinity-disabled
 LDFLAGS += -framework Metal -framework Foundation
 # AppKit only on Darwin, only for the tray backend; UniformTypeIdentifiers
 # for the non-deprecated NSOpenPanel file filter
@@ -149,14 +150,9 @@ runner-sigpipe-default: $(SRC) $(HDR) src/kernels_ptx.h
 debug: $(SRC) $(HDR)
 	$(CC) -O0 -g -fsanitize=address,undefined -std=gnu11 -Wall $(SRC) -o runner-debug $(LDFLAGS)
 
-# $(CFLAGS), not a hand-rolled flag list: schema.c implements exclusiveMinimum
-# and exclusiveMaximum with nextafter(x, +/-INFINITY), and the binary compiles
-# it with -ffast-math (which implies -ffinite-math-only). Building the test
-# without those flags gated the bounds behaviour in a configuration that does
-# not ship. Measured on gcc the results are byte-identical either way, so this
-# is a gate-integrity fix rather than a bug fix -- but clang warns here
-# (-Wnan-infinity-disabled) and clang is what a Mac uses, so the test should be
-# the one to find out, not a user.
+# $(CFLAGS), not a hand-rolled flag list: schema bounds compile in the same
+# -ffast-math configuration as the shipped binary. Building this test without
+# those flags once gated behavior in a configuration that does not ship.
 $(TEST_JSON_SCHEMA): tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c $(HDR)
 	$(CC) $(CFLAGS) -I src tests/test_json_schema.c src/json.c src/jsonmode.c src/schema.c -o $@ -lm
 
