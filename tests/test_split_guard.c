@@ -17,6 +17,7 @@
 
 static const char *g_path = "test.gguf";
 
+#ifdef RUNNER_GPU_CUDA
 static model_params base_params(void) {
     model_params p;
     memset(&p, 0, sizeof(p));
@@ -26,6 +27,7 @@ static model_params base_params(void) {
     p.n_batch   = 8;
     return p;
 }
+#endif
 
 int main(int argc, char **argv) {
     if (argc > 1) g_path = argv[1];

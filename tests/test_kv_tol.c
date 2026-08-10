@@ -61,6 +61,7 @@
 // q8 half self-skips there and `make test` still exercises the harness.
 #include "runner.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,14 +148,14 @@ static int argmax(const float *v, int n) {
 
 // Second-best value, used to size the margin at a disagreement.
 static float top2_gap(const float *v, int n, int best) {
-    float second = -INFINITY;
+    float second = -FLT_MAX;
     for (int i = 0; i < n; i++)
         if (i != best && v[i] > second) second = v[i];
     return v[best] - second;
 }
 
 static float logit_range(const float *v, int n) {
-    float lo = INFINITY, hi = -INFINITY;
+    float lo = FLT_MAX, hi = -FLT_MAX;
     for (int i = 0; i < n; i++) {
         if (v[i] < lo) lo = v[i];
         if (v[i] > hi) hi = v[i];
@@ -407,7 +408,7 @@ int main(int argc, char **argv) {
         double quant_err  = mean_abs_diff(q8c, f16c, n_vocab);  // context only
         double reassoc    = mean_abs_diff(q8b1, q8c, n_vocab);  // the floor
         double impl_err   = mean_abs_diff(q8g, q8c, n_vocab);   // the measure
-        double ratio = reassoc > 0 ? impl_err / reassoc : INFINITY;
+        double ratio = reassoc > 0 ? impl_err / reassoc : DBL_MAX;
 
         int n_diff;
         double worst;

@@ -45,6 +45,7 @@
 // Default model is test.gguf (F32 toy): the harness runs and self-skips.
 #include "runner.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -99,7 +100,7 @@ static int argmax(const float *v, int n) {
 }
 
 static float top2_gap(const float *v, int n, int best) {
-    float second = -INFINITY;
+    float second = -FLT_MAX;
     for (int i = 0; i < n; i++)
         if (i != best && v[i] > second) second = v[i];
     return v[best] - second;
@@ -111,7 +112,7 @@ static float top2_gap(const float *v, int n, int best) {
 #define SUPPRESSED_BELOW (-1e29f)
 
 static float logit_range(const float *v, int n) {
-    float lo = INFINITY, hi = -INFINITY;
+    float lo = FLT_MAX, hi = -FLT_MAX;
     for (int i = 0; i < n; i++) {
         if (v[i] <= SUPPRESSED_BELOW) continue;
         if (v[i] < lo) lo = v[i];
@@ -326,7 +327,7 @@ int main(int argc, char **argv) {
     }
 
     double range = mean_range(ref, n_vocab);
-    double frac_of_range = range > 0 ? impl / range : INFINITY;
+    double frac_of_range = range > 0 ? impl / range : DBL_MAX;
     if (ctrl->available) {
         double floor_ = mean_abs_diff(ctrl, ref, n_vocab);
         printf("  scalar-b16 vs scalar-b64 : mean|dlogit| %.6f   "
