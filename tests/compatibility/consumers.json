@@ -1,5 +1,5 @@
 {
-  "schema_version": "gridcore.runner.consumer-compat.v1",
+  "schema_version": "xyntetik.runner.consumer-compat.v1",
   "consumers": [
     {"id": "openai-python", "version": "2.47.0", "surface": "responses"},
     {"id": "openai-node", "version": "6.48.0", "surface": "responses"},

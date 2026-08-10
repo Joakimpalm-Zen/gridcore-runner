@@ -87,7 +87,7 @@ typedef enum {
 tray_icon_state tray_icon(void);
 
 // Design-review / human-click-checklist seam, the icon sibling of
-// GRIDCORE_TRAY_DUMP: render all three states to <dir>/tray-{idle,loaded,
+// XYNTETIK_TRAY_DUMP: render all three states to <dir>/tray-{idle,loaded,
 // running}.png at `px` square and return true. A menu-bar glyph is 18 px of
 // arcs that nobody can review by reading the drawing code, and this is the
 // only way to look at it without a display. Backends with no offscreen

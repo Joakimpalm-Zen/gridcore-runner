@@ -1,7 +1,37 @@
 # Changelog
 
-All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
-protocol and CLI may still change between alpha releases.
+All notable changes to xyntetik-runner (formerly gridcore-runner). This project
+is in **alpha**; the HTTP protocol and CLI may still change between alpha
+releases. Entries below the rename keep the names that were true when they
+were written.
+
+## Unreleased — 2026-08-11
+
+- **The project is renamed: Gridcore → Xyntetik.** The repo is now
+  `Joakimpalm-Zen/xyntetik-runner` (GitHub redirects the old URL), the Python
+  client distribution is `xyntetik-runner-client` with import package
+  `xyntetik_runner`, and the engine binary is unchanged in behaviour.
+- **State directory moved with a one-time migration.** `~/.gridcore/runner/`
+  (POSIX) and `%APPDATA%\gridcore\runner\` (Windows) become `~/.xyntetik/…` /
+  `%APPDATA%\xyntetik\…`. On first start after the upgrade the old tree —
+  `config.json`, `managed.log`, the instance registry — is moved to the new
+  path if the new one does not exist yet, so a live install keeps its config
+  and registry.
+- **Tray registrations migrated.** macOS: the LaunchAgent label/file
+  `ai.gridcore.runner.tray` is unloaded and re-created as
+  `ai.xyntetik.runner.tray`, preserving autostart. Windows: the `HKCU\…\Run`
+  value `GridcoreTray` is re-registered as `XyntetikTray` and the old value
+  deleted; the window class is now `XyntetikTrayWnd`.
+- **BREAKING: environment variables renamed without aliases.**
+  `GRIDCORE_TRAY_DUMP` → `XYNTETIK_TRAY_DUMP`, `GRIDCORE_TRAY_ICON_DUMP` →
+  `XYNTETIK_TRAY_ICON_DUMP` (and the test-only `GRIDCORE_TEST_HOME` →
+  `XYNTETIK_TEST_HOME`). Old names are ignored; update shell profiles.
+- **Unchanged, deliberately:** the `gridcore.agent.*` GGUF metadata keys and
+  the `gridcore` sampler-preset family (matching `general.name`
+  `"gridcore-<size>"` / `"Syntetik…"`) — both are contracts with already
+  published model artifacts, and the model project's rename is sequenced
+  separately. The VRAM registry filename prefix is now `xyntetik-vram-`; a
+  stale `gridcore-vram-*.reg` from an older build is simply ignored.
 
 ## v0.1.14-alpha — 2026-08-10
 

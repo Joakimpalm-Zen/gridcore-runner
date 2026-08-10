@@ -706,7 +706,7 @@ static void *slot_worker(void *arg) {
 }
 
 // answer tiny requests from the accept loop: single-slot serving means one
-// long generation used to block /health until the gridcore watchdog declared a
+// long generation used to block /health until the xyntetik watchdog declared a
 // live runner "unhealthy: timed out". POST /unload is answered here too — it
 // never frees anything a slot is using (handle_unload defers under an active
 // load or generation), and an operator reclaiming memory must not queue behind
@@ -730,7 +730,7 @@ static bool accept_fastpath(sock_t fd) {
     // match the path plus the space HTTP/1.x always puts before the version,
     // so "GET /healthzzz" falls through to the slot path instead of being
     // misrouted here. Bare HTTP/0.9 "GET /health\r\n" (no version) won't
-    // match, but neither curl nor the gridcore watchdog send that, so it's
+    // match, but neither curl nor the xyntetik watchdog send that, so it's
     // not worth the extra branch.
     bool health = !strncmp(hdr, "GET /health ", 12);
     bool models = !strncmp(hdr, "GET /v1/models ", 15);

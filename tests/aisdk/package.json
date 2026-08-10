@@ -1,5 +1,5 @@
 {
-  "name": "gridcore-runner-aisdk-smoke",
+  "name": "xyntetik-runner-aisdk-smoke",
   "private": true,
   "type": "module",
   "description": "Vercel AI SDK conformance smoke. Not part of the C build; see smoke.mjs.",

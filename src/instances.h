@@ -26,8 +26,8 @@ typedef struct {
     char       version[32];
 } instance_rec;
 
-// Directory the records live in: <config>/gridcore/runner/instances
-// (~/.gridcore/runner/instances on POSIX, %APPDATA%\gridcore\runner\instances
+// Directory the records live in: <config>/xyntetik/runner/instances
+// (~/.xyntetik/runner/instances on POSIX, %APPDATA%\xyntetik\runner\instances
 // on Windows). Created on first use. Returns a static buffer, or NULL if no
 // home/config directory could be resolved.
 const char *instances_dir(void);

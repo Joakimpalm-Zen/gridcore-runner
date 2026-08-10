@@ -24,8 +24,8 @@ Every runner process in a *run* mode (one-shot generation, `--serve`,
 `--tray` itself) writes one JSON record at startup:
 
 ```
-~/.gridcore/runner/instances/<pid>.json          (macOS, Linux)
-%APPDATA%\gridcore\runner\instances\<pid>.json   (Windows)
+~/.xyntetik/runner/instances/<pid>.json          (macOS, Linux)
+%APPDATA%\xyntetik\runner\instances\<pid>.json   (Windows)
 ```
 
 ```json
@@ -48,7 +48,7 @@ loaded or the call fails.
 
 ## The menu
 
-- Header row: `gridcore-runner <version>`.
+- Header row: `xyntetik-runner <version>`.
 - One row per live instance: `mode  ·  :port  ·  pid` (`●` marks the
   tray-managed instance). Its submenu lists the model names and a **Stop**
   item. The tray itself is never listed — only things you can manage are.
@@ -93,8 +93,8 @@ naming the live controller's pid.
 ## Config file
 
 ```
-~/.gridcore/runner/config.json          (macOS, Linux)
-%APPDATA%\gridcore\runner\config.json   (Windows)
+~/.xyntetik/runner/config.json          (macOS, Linux)
+%APPDATA%\xyntetik\runner\config.json   (Windows)
 ```
 
 ```json
@@ -108,10 +108,10 @@ records your file-picker choice in `last_model`.
 
 ## Autostart
 
-- macOS: `~/Library/LaunchAgents/ai.gridcore.runner.tray.plist`
+- macOS: `~/Library/LaunchAgents/ai.xyntetik.runner.tray.plist`
   (RunAtLoad, starts only the tray — never a model).
 - Windows: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value
-  `GridcoreTray`.
+  `XyntetikTray`.
 
 The checkbox creates or removes exactly that one artifact; presence of the
 artifact is the state.
@@ -121,7 +121,7 @@ artifact is the state.
 Remove, if present:
 
 - the autostart artifact above,
-- `~/.gridcore/runner/` (POSIX) or `%APPDATA%\gridcore\runner\` (Windows) —
+- `~/.xyntetik/runner/` (POSIX) or `%APPDATA%\xyntetik\runner\` (Windows) —
   contains only `config.json` and the self-healing `instances/` directory.
 
 Nothing else is written anywhere (`managed.log` lives inside the same
@@ -139,12 +139,12 @@ Nothing else is written anywhere (`managed.log` lives inside the same
 
 ## Headless validation seam
 
-`GRIDCORE_TRAY_DUMP=1 runner --tray` prints the exact menu the backend
+`XYNTETIK_TRAY_DUMP=1 runner --tray` prints the exact menu the backend
 would render (indentation = submenus, `*` = clickable, `[x]` = checkbox
 state) and exits without touching the GUI. CI and remote validation diff
 this output; the human checklist only has to confirm the pixels.
 
-`GRIDCORE_TRAY_ICON_DUMP=<dir> runner --tray` is the icon sibling: it renders
+`XYNTETIK_TRAY_ICON_DUMP=<dir> runner --tray` is the icon sibling: it renders
 all three states to `<dir>/tray-{idle,loaded,running}` and exits — PNG on
 macOS, BMP on Windows. Eighteen pixels of arcs cannot be reviewed by reading
 the drawing code, so a design change is checked by looking at these. Both

@@ -39,7 +39,7 @@ from harness import (Client, ProtocolError, RunnerServer,  # noqa: E402
                      categorize, decode_events, find_runner, parse_stream,
                      rss_kind, validate_against_schema)
 
-SCHEMA_VERSION = "gridcore.agent-torture.v2"
+SCHEMA_VERSION = "xyntetik.agent-torture.v2"
 SPEC_STATS_RE = re.compile(
     r"spec: (\d+) rounds, (\d+) drafted, (\d+) accepted .*"
     r"grammar (\d+)/(\d+)")

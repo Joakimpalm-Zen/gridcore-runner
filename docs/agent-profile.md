@@ -1,4 +1,4 @@
-# Gridcore agent profile metadata
+# Xyntetik agent profile metadata
 
 Runner admits ordinary GGUF files without an agent profile exactly as before.
 An export opts into the versioned contract by declaring any `gridcore.agent.*`

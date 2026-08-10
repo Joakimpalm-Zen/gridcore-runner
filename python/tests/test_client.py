@@ -12,7 +12,7 @@ import unittest
 from importlib.resources import files
 from pathlib import Path
 
-from gridcore_runner import (
+from xyntetik_runner import (
     ManagedRunner,
     RunnerCancelledError,
     RunnerEndpoint,
@@ -43,7 +43,7 @@ def free_port() -> int:
 
 class TypedPackageTests(unittest.TestCase):
     def test_pep561_marker_is_packaged(self):
-        self.assertTrue(files("gridcore_runner").joinpath("py.typed").is_file())
+        self.assertTrue(files("xyntetik_runner").joinpath("py.typed").is_file())
 
 
 class StartupLeaseTests(unittest.TestCase):
@@ -106,7 +106,7 @@ class StartupLeaseTests(unittest.TestCase):
 
     def test_matching_start_time_still_blocks(self):
         # The same live pid WITH the correct start time is a genuine owner.
-        from gridcore_runner.lease import _process_start_time
+        from xyntetik_runner.lease import _process_start_time
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runner.lease"
             path.write_text(

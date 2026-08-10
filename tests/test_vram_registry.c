@@ -42,7 +42,7 @@ static uint64_t fixed_free(void *ud) { return *(uint64_t *)ud; }
 // Registry file for a gpu id inside the scratch dir, matching registry_path()
 // in vramreg.c. Tests that pre-seed or inspect the ledger need the real path.
 static void reg_file(const char *dir, const char *gpu_id, char *out, size_t cap) {
-    snprintf(out, cap, "%s/gridcore-vram-%s.reg", dir, gpu_id);
+    snprintf(out, cap, "%s/xyntetik-vram-%s.reg", dir, gpu_id);
 }
 
 static long file_size(const char *path) {

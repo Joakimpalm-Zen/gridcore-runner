@@ -49,7 +49,7 @@ static bool menu_has(const tray_item *it, int n, const char *needle) {
 int main(int argc, char **argv) {
     // ---- child mode: we ARE the "managed runner" the core spawned
     if (argc > 1 && strcmp(argv[1], "--serve") == 0) {
-        const char *home = getenv("GRIDCORE_TEST_HOME");
+        const char *home = getenv("XYNTETIK_TEST_HOME");
         if (!home) return 2;
         char mp[600];
         snprintf(mp, sizeof mp, "%s/spawned.txt", home);
@@ -65,15 +65,15 @@ int main(int argc, char **argv) {
     // ---- parent mode: private registry + config under a fake HOME
     snprintf(g_home, sizeof g_home,
 #ifdef _WIN32
-             "%s\\gridcore-tray-test-%ld", getenv("TEMP"), (long)getpid());
+             "%s\\xyntetik-tray-test-%ld", getenv("TEMP"), (long)getpid());
     _mkdir(g_home);
     setenv_compat("APPDATA", g_home);
 #else
-             "/tmp/gridcore-tray-test-%ld", (long)getpid());
+             "/tmp/xyntetik-tray-test-%ld", (long)getpid());
     mkdir(g_home, 0755);
     setenv_compat("HOME", g_home);
 #endif
-    setenv_compat("GRIDCORE_TEST_HOME", g_home);
+    setenv_compat("XYNTETIK_TEST_HOME", g_home);
 
     // The core re-reads config.json whenever it has changed on disk, but the
     // file must still exist BEFORE the first menu build for the start row to

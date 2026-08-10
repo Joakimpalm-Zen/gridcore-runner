@@ -248,12 +248,34 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) {
 }
 
 // -------------------------------------------------------------- autostart
-// HKCU\Software\Microsoft\Windows\CurrentVersion\Run, value "GridcoreTray".
+// HKCU\Software\Microsoft\Windows\CurrentVersion\Run, value "XyntetikTray".
 
 #define RUN_KEY "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
-#define RUN_VAL "GridcoreTray"
+#define RUN_VAL "XyntetikTray"
+#define RUN_VAL_OLD "GridcoreTray"  // pre-rename value, migrated on sight
+
+// One-time migration of the pre-rename autostart value (Gridcore ->
+// Xyntetik): re-register under the new value with the current executable and
+// delete the old one, so autostart survives the rename without leaving two
+// registrations behind.
+static void migrate_old_autostart(void) {
+    HKEY k;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ | KEY_SET_VALUE,
+                      &k) != ERROR_SUCCESS)
+        return;
+    if (RegQueryValueExA(k, RUN_VAL_OLD, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
+        char exe[1024], cmd[1100];
+        GetModuleFileNameA(NULL, exe, sizeof exe);
+        snprintf(cmd, sizeof cmd, "\"%s\" --tray", exe);
+        RegSetValueExA(k, RUN_VAL, 0, REG_SZ,
+                       (const BYTE *)cmd, (DWORD)strlen(cmd) + 1);
+        RegDeleteValueA(k, RUN_VAL_OLD);
+    }
+    RegCloseKey(k);
+}
 
 bool tray_platform_autostart_get(void) {
+    migrate_old_autostart();
     HKEY k;
     if (RegOpenKeyExA(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_READ, &k) != ERROR_SUCCESS)
         return false;
@@ -284,13 +306,14 @@ bool tray_platform_autostart_set(bool on) {
 // -------------------------------------------------------------- main loop
 
 int tray_platform_run(void) {
+    migrate_old_autostart();
     FreeConsole();  // detach from any console we were launched from
 
     WNDCLASSA wc = { .lpfnWndProc = wndproc,
                      .hInstance = GetModuleHandleA(NULL),
-                     .lpszClassName = "GridcoreTrayWnd" };
+                     .lpszClassName = "XyntetikTrayWnd" };
     RegisterClassA(&wc);
-    g_hwnd = CreateWindowA(wc.lpszClassName, "gridcore-tray", 0, 0, 0, 0, 0,
+    g_hwnd = CreateWindowA(wc.lpszClassName, "xyntetik-tray", 0, 0, 0, 0, 0,
                            HWND_MESSAGE, NULL, wc.hInstance, NULL);
     if (!g_hwnd) return 1;
 
@@ -301,7 +324,7 @@ int tray_platform_run(void) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAY_CALLBACK;
     g_nid.hIcon = grid_icon(tray_icon());
-    snprintf(g_nid.szTip, sizeof g_nid.szTip, "gridcore-runner");
+    snprintf(g_nid.szTip, sizeof g_nid.szTip, "xyntetik-runner");
     Shell_NotifyIconA(NIM_ADD, &g_nid);
 
     SetTimer(g_hwnd, 1, 5000, NULL);  // badge refresh while menu is closed

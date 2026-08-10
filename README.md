@@ -1,4 +1,4 @@
-# Gridcore Runner
+# Xyntetik Runner
 
 Local LLM inference that behaves like infrastructure: agent tool calls that
 still parse when the token budget runs out, a shared GPU that queues instead of
@@ -25,8 +25,8 @@ Download a prebuilt binary from the [latest release](../../releases/latest)
 for Linux, macOS, or Windows, or build from source:
 
 ```sh
-git clone https://github.com/Joakimpalm-Zen/gridcore-runner
-cd gridcore-runner
+git clone https://github.com/Joakimpalm-Zen/xyntetik-runner
+cd xyntetik-runner
 make
 ./runner --version   # -> runner 0.1.14-alpha
 ```
@@ -391,7 +391,7 @@ non-loopback authorities.
 | `POST /v1/messages` | Anthropic Messages translation. |
 | `POST /v1/messages/count_tokens` | Token count for the matching Messages request. |
 | `GET /v1/models` | Registered models and current residency. |
-| `GET /v1/capabilities` | Active model, sampling preset, and optional Gridcore agent profile. |
+| `GET /v1/capabilities` | Active model, sampling preset, and optional Xyntetik agent profile. |
 | `GET /v1/runner/prefix-cache` | Prefix-cache size, limits, and counters. |
 | `POST /v1/runner/prefix-cache/clear` | Release cached prefixes without unloading the model. |
 | `GET /health` | Server and resident-model health. |
@@ -523,7 +523,7 @@ model = "runner"
 model_provider = "runner"
 
 [model_providers.runner]
-name = "Gridcore Runner"
+name = "Xyntetik Runner"
 base_url = "http://127.0.0.1:8080/v1"
 wire_api = "responses"
 env_key = "RUNNER_API_KEY"

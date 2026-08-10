@@ -1,9 +1,9 @@
-"""Clu compatibility: the schema shapes Gridcore Clu actually sends.
+"""Thane compatibility: the schema shapes Xyntetik Thane actually sends.
 
-Clu (gridcore-clu) is Runner's primary in-suite consumer and it pins
-``gridcore-runner-client @ git+...gridcore-runner.git@main``, so a Runner
-change lands in Clu the moment it merges. Every request shape asserted here
-is a verbatim structural copy of what ``clu/context.py`` builds today:
+Thane (xyntetik-thane) is Runner's primary in-suite consumer and it pins
+``xyntetik-runner-client @ git+...xyntetik-runner.git@main``, so a Runner
+change lands in Thane the moment it merges. Every request shape asserted here
+is a verbatim structural copy of what ``thane/context.py`` builds today:
 
 * ``action_schema()`` — a ``oneOf`` union of one branch per tool, each branch
   discriminated by ``{"tool": {"const": <name>}}``, with ``required`` and
@@ -12,13 +12,13 @@ is a verbatim structural copy of what ``clu/context.py`` builds today:
   ``required`` but deliberately no ``additionalProperties``.
 
 The schemas are reproduced here rather than imported: this suite must not
-depend on gridcore-clu being installed, and pinning the shape locally is the
-point — if Clu's real schema drifts from this copy, that is a Clu change that
-should be made deliberately, and if Runner stops accepting this copy, Clu
+depend on xyntetik-thane being installed, and pinning the shape locally is the
+point — if Thane's real schema drifts from this copy, that is a Thane change that
+should be made deliberately, and if Runner stops accepting this copy, Thane
 breaks in the field.
 
 The keyword gate added in "schema: reject unenforceable JSON Schema keywords"
-makes these acceptance tests load-bearing: several constructs Clu relies on
+makes these acceptance tests load-bearing: several constructs Thane relies on
 sit next to constructs that are now rejected, and two of them (an empty
 ``required`` list, and a *property named* ``pattern``) are close enough to
 rejected forms that a stricter gate could plausibly catch them by accident.
@@ -28,7 +28,7 @@ import json
 
 from harness import ProtocolError
 
-# Clu's real tool surface (gridcore_toolbox.ARG_KEYS) as of this writing.
+# Thane's real tool surface (xyntetik_loadout.ARG_KEYS) as of this writing.
 # A representative subset: one no-arg tool, one single-arg, one multi-arg
 # with optionals, one whose argument is *named* like a schema keyword.
 CLU_TOOLS = {
@@ -46,7 +46,7 @@ _ARG_TYPES = {"first_line": "integer", "last_line": "integer",
 
 
 def _clu_action_schema():
-    """Structural copy of clu.context.action_schema()."""
+    """Structural copy of thane.context.action_schema()."""
     alts = []
     for tool, (keys, required) in CLU_TOOLS.items():
         alts.append({
@@ -70,8 +70,8 @@ def _clu_action_schema():
     return {"oneOf": alts}
 
 
-# Structural copy of clu.context._SUMMARY_SCHEMA — note: no
-# additionalProperties, by design in Clu.
+# Structural copy of thane.context._SUMMARY_SCHEMA — note: no
+# additionalProperties, by design in Thane.
 CLU_SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
@@ -83,7 +83,7 @@ CLU_SUMMARY_SCHEMA = {
     "required": ["progress", "facts", "open_work", "next_step"],
 }
 
-# Clu sends exactly this envelope from clu/runner_client.py: RunnerLLM.
+# Thane sends exactly this envelope from thane/runner_client.py: RunnerLLM.
 BASE = {"messages": [{"role": "user", "content": "list the directory"}],
         "temperature": 0.2, "max_tokens": 64}
 
@@ -98,24 +98,24 @@ def _schema_request(schema, **over):
 
 # --------------------------------------------------------------- compilation
 def test_clu_action_union_compiles(client):
-    """Clu's discriminated oneOf union must be accepted.
+    """Thane's discriminated oneOf union must be accepted.
 
-    This is the single most load-bearing request Clu makes: every agent turn
-    goes through it. A 400 here means Clu cannot take a single step."""
+    This is the single most load-bearing request Thane makes: every agent turn
+    goes through it. A 400 here means Thane cannot take a single step."""
     client.chat(_schema_request(_clu_action_schema()),
-                name="clu-action-union").expect_status(200)
+                name="thane-action-union").expect_status(200)
 
 
 def test_clu_summary_schema_compiles(client):
     """The compaction summary schema carries `required` and no
-    `additionalProperties`. Clu compacts through this call; a 400 here means
-    Clu dies at ~70% context instead of compacting."""
+    `additionalProperties`. Thane compacts through this call; a 400 here means
+    Thane dies at ~70% context instead of compacting."""
     client.chat(_schema_request(CLU_SUMMARY_SCHEMA),
-                name="clu-summary-schema").expect_status(200)
+                name="thane-summary-schema").expect_status(200)
 
 
 def test_empty_required_list_is_accepted(client):
-    """`list_dir` takes only optional args, so Clu emits `"required": []`.
+    """`list_dir` takes only optional args, so Thane emits `"required": []`.
 
     An empty list is not the same as a missing `properties` map, which the
     keyword gate does reject — this pins the distinction."""
@@ -124,11 +124,11 @@ def test_empty_required_list_is_accepted(client):
               "required": [],
               "additionalProperties": False}
     client.chat(_schema_request(schema),
-                name="clu-empty-required").expect_status(200)
+                name="thane-empty-required").expect_status(200)
 
 
 def test_property_named_like_a_keyword_is_accepted(client):
-    """Clu's `search` tool has an argument called `pattern`, and `pattern` is
+    """Thane's `search` tool has an argument called `pattern`, and `pattern` is
     a *rejected* schema keyword. A property name must never be read as a
     keyword of its enclosing schema."""
     schema = {"type": "object",
@@ -138,7 +138,7 @@ def test_property_named_like_a_keyword_is_accepted(client):
               "required": ["pattern"],
               "additionalProperties": False}
     client.chat(_schema_request(schema),
-                name="clu-keyword-named-property").expect_status(200)
+                name="thane-keyword-named-property").expect_status(200)
 
 
 def test_clu_action_union_output_conforms(client, report):
@@ -149,7 +149,7 @@ def test_clu_action_union_output_conforms(client, report):
     that is a model-quality outcome, recorded rather than failed, exactly as
     test_structured_output.py does."""
     r = client.chat(_schema_request(_clu_action_schema(), max_tokens=256),
-                    name="clu-action-conforms")
+                    name="thane-action-conforms")
     r.expect_status(200)
     try:
         truncated = r.finish_reason == "length"
@@ -158,14 +158,14 @@ def test_clu_action_union_output_conforms(client, report):
         # The stub model emits near-random token ids, so the token cap can
         # fall in the middle of a multi-byte UTF-8 sequence and the response
         # body stops being decodable. That is worth knowing about (see the
-        # note below) but it is not a statement about Clu's schema.
-        report.note_quality("clu-action-conforms",
+        # note below) but it is not a statement about Thane's schema.
+        report.note_quality("thane-action-conforms",
                             "response body was not decodable UTF-8 — the token "
                             "cap can split a multi-byte sequence",
                             error=str(e))
         return
     if truncated:
-        report.note_quality("clu-action-conforms",
+        report.note_quality("thane-action-conforms",
                             "constrained action truncated by the token cap "
                             "before the document closed",
                             completion_tokens=r.usage["completion_tokens"])
@@ -179,34 +179,34 @@ def test_clu_action_union_output_conforms(client, report):
 
 # ------------------------------------------------------- request envelope
 def test_clu_scalar_types_are_accepted(client):
-    """Runner now 400s wrong-typed scalars. Clu sends temperature as a float
-    and max_tokens as an int (clu/config.py validates both), so its envelope
-    must pass — this pins that Clu's types are the accepted ones."""
+    """Runner now 400s wrong-typed scalars. Thane sends temperature as a float
+    and max_tokens as an int (thane/config.py validates both), so its envelope
+    must pass — this pins that Thane's types are the accepted ones."""
     client.chat(_schema_request(CLU_SUMMARY_SCHEMA,
                                 temperature=0.2, max_tokens=32, stream=False),
-                name="clu-scalar-types").expect_status(200)
+                name="thane-scalar-types").expect_status(200)
 
 
 def test_unnamed_model_is_accepted_on_a_single_model_server(client):
-    """Clu addresses its own runner by the tag "clu", not by filename. On a
+    """Thane addresses its own runner by the tag "thane", not by filename. On a
     non-swap server the name must be ignored rather than 404/400, or every
-    Clu request against an attached engine fails."""
-    client.chat(_schema_request(CLU_SUMMARY_SCHEMA, model="clu"),
-                name="clu-model-tag").expect_status(200)
+    Thane request against an attached engine fails."""
+    client.chat(_schema_request(CLU_SUMMARY_SCHEMA, model="thane"),
+                name="thane-model-tag").expect_status(200)
 
 
 # ------------------------------------------- constrained-decode termination
 def test_constrained_output_opens_immediately(client):
     """A schema-constrained document must begin with its opening token.
 
-    This was the whitespace livelock that cost Clu its compaction summaries.
+    This was the whitespace livelock that cost Thane its compaction summaries.
     A model that would rather emit a preamble (prose, or a thinking block)
     found every prose token rejected and whitespace the only legal move, so it
     could spend the entire max_tokens budget without ever reaching the opening
     brace. The document was then force-closed with empty values and returned
     as `{"progress":"","facts":[],...}` with finish_reason=length — schema
     *valid*, information-free, and indistinguishable from a real answer, so
-    Clu's "summary failed, use a placeholder" fallback never fired and the
+    Thane's "summary failed, use a placeholder" fallback never fired and the
     distilled session state was silently replaced with nothing.
 
     Leading whitespace is now refused by the validator, so the only legal
@@ -214,7 +214,7 @@ def test_constrained_output_opens_immediately(client):
     untouched — `{ "a" : "b" }` is ordinary model output.
     """
     r = client.chat(_schema_request(CLU_SUMMARY_SCHEMA, max_tokens=128),
-                    name="clu-opens-immediately")
+                    name="thane-opens-immediately")
     r.expect_status(200)
     try:
         content = r.content
@@ -244,7 +244,7 @@ def test_unproductive_constrained_decode_returns_nothing(client):
     now, empty content / finish_reason=length.
     """
     r = client.chat(_schema_request(CLU_SUMMARY_SCHEMA, max_tokens=128),
-                    name="clu-no-fabricated-document")
+                    name="thane-no-fabricated-document")
     r.expect_status(200)
     try:
         content = r.content

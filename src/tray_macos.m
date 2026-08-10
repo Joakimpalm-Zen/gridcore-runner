@@ -214,16 +214,38 @@ bool tray_platform_icon_dump(const char *dir, int px) {
 @end
 
 // -------------------------------------------------------------- autostart
-// LaunchAgent at ~/Library/LaunchAgents/ai.gridcore.runner.tray.plist.
+// LaunchAgent at ~/Library/LaunchAgents/ai.xyntetik.runner.tray.plist.
 // Presence of the file IS the state; no launchctl bookkeeping in v1.
 
 static void agent_path(char *out, size_t cap) {
     const char *home = getenv("HOME");
-    snprintf(out, cap, "%s/Library/LaunchAgents/ai.gridcore.runner.tray.plist",
+    snprintf(out, cap, "%s/Library/LaunchAgents/ai.xyntetik.runner.tray.plist",
              home ? home : ".");
 }
 
+// One-time migration of the pre-rename agent (Gridcore -> Xyntetik). The old
+// label must be unloaded before the new one registers, or two trays can end
+// up installed; autostart state is preserved by re-creating the agent under
+// the new label.
+static void migrate_old_agent(void) {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    const char *home = getenv("HOME");
+    char op[1024];
+    snprintf(op, sizeof op,
+             "%s/Library/LaunchAgents/ai.gridcore.runner.tray.plist",
+             home ? home : ".");
+    FILE *f = fopen(op, "rb");
+    if (!f) return;
+    fclose(f);
+    system("launchctl remove ai.gridcore.runner.tray 2>/dev/null");
+    remove(op);
+    tray_platform_autostart_set(true);
+}
+
 bool tray_platform_autostart_get(void) {
+    migrate_old_agent();
     char p[1024];
     agent_path(p, sizeof p);
     FILE *f = fopen(p, "rb");
@@ -248,7 +270,7 @@ bool tray_platform_autostart_set(bool on) {
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\""
         " \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
         "<plist version=\"1.0\"><dict>\n"
-        "  <key>Label</key><string>ai.gridcore.runner.tray</string>\n"
+        "  <key>Label</key><string>ai.xyntetik.runner.tray</string>\n"
         "  <key>ProgramArguments</key><array>\n"
         "    <string>%s</string>\n"
         "    <string>--tray</string>\n"
@@ -262,6 +284,7 @@ bool tray_platform_autostart_set(bool on) {
 // -------------------------------------------------------------- main loop
 
 int tray_platform_run(void) {
+    migrate_old_agent();
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -270,7 +293,7 @@ int tray_platform_run(void) {
         g_status = [[NSStatusBar systemStatusBar]
             statusItemWithLength:NSSquareStatusItemLength];
         g_status.button.image = core_icon(tray_icon());
-        g_status.button.toolTip = @"gridcore-runner";
+        g_status.button.toolTip = @"xyntetik-runner";
 
         NSMenu *menu = [[NSMenu alloc] init];
         menu.autoenablesItems = NO;

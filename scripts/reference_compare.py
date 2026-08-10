@@ -165,7 +165,7 @@ def main(argv=None):
                             "reference": reference_text,
                             "status": "pass" if runner_text == reference_text else "fail"})
     report = {
-        "schema_version": "gridcore.runner.greedy-reference.v1",
+        "schema_version": "xyntetik.runner.greedy-reference.v1",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "runner": command_version(args.runner),
         "reference": command_version(args.reference),

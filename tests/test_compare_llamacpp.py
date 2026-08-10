@@ -35,7 +35,7 @@ def test_llamacpp_comparison_fixture_report(tmp_path):
     assert summary["status"] == "fixture"
 
     report = json.loads((tmp_path / "comparison.json").read_text())
-    assert report["schema_version"] == "gridcore.runner.llamacpp-comparison.v1"
+    assert report["schema_version"] == "xyntetik.runner.llamacpp-comparison.v1"
     assert report["status"] == "fixture"
     assert report["real_results"] == "pending"
     assert report["settings"]["prompt"] == "fixture prompt"

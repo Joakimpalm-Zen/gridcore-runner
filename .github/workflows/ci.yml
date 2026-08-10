@@ -84,7 +84,7 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install --quiet pytest mypy
-          MYPYPATH=python/src .venv/bin/python -m mypy --strict -p gridcore_runner
+          MYPYPATH=python/src .venv/bin/python -m mypy --strict -p xyntetik_runner
           PYTHONPATH=python/src .venv/bin/python -m pytest python/tests/test_client.py
       - name: sparse MoE synthetic correctness
         run: make test-moe PYTHON=.venv/bin/python
@@ -165,7 +165,7 @@ jobs:
           kill %1
       - name: smoke test (health bypasses a busy slot)
         # a stalled request pins the only slot; /health and /v1/models must
-        # still answer from the accept loop (gridcore watchdog regression)
+        # still answer from the accept loop (xyntetik watchdog regression)
         run: |
           ./runner -m test.gguf --serve --port 8126 --parallel 1 &
           sleep 2

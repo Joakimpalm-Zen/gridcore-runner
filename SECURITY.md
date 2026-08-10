@@ -10,7 +10,7 @@ boundary is the operating-system user account, not the network:
 
 - **The server binds `127.0.0.1`, hardcoded.** There is no flag to bind
   another interface. Nothing outside the machine can reach it directly;
-  LAN access in the Gridcore suite goes through the dashboard layer, never
+  LAN access in the Xyntetik suite goes through the dashboard layer, never
   to runner itself.
 - **No authentication, by design.** Any process that can open a loopback
   socket can use the API — the same set of processes that could already

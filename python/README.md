@@ -1,4 +1,4 @@
-# Gridcore Runner Python Client
+# Xyntetik Runner Python Client
 
 The supported Python endpoint, process-launch, and startup-ownership boundary for Runner consumers.
 

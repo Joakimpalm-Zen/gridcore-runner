@@ -61,7 +61,7 @@ def read_published(results_dir=RESULTS):
 
 def fetch_json(url):
     request = Request(url, headers={"Accept": "application/json",
-                                    "User-Agent": "gridcore-runner-freshness"})
+                                    "User-Agent": "xyntetik-runner-freshness"})
     with urlopen(request, timeout=15) as response:
         return json.load(response)
 

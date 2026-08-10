@@ -443,7 +443,7 @@ int tray_menu_build(tray_item *it, int cap) {
 #define PUT(...) do { if (n < cap) { it[n] = (tray_item){__VA_ARGS__}; n++; } } while (0)
 
     PUT(.kind = TRAY_K_LABEL, .action = TRAY_ACT_NONE);
-    snprintf(it[0].label, sizeof it[0].label, "gridcore-runner %s", RUNNER_VERSION);
+    snprintf(it[0].label, sizeof it[0].label, "xyntetik-runner %s", RUNNER_VERSION);
     PUT(.kind = TRAY_K_SEP);
 
     int ni = 0;
@@ -696,11 +696,11 @@ int tray_main(void) {
     // diffs it against a tray that is currently up.
     // icon sibling of the same seam: render the three glyph states to files so
     // a design change can be reviewed, and diffed, without a menu bar.
-    const char *icon_dir = getenv("GRIDCORE_TRAY_ICON_DUMP");
+    const char *icon_dir = getenv("XYNTETIK_TRAY_ICON_DUMP");
     if (icon_dir)
         return tray_platform_icon_dump(icon_dir, 144) ? 0 : 1;
 
-    if (getenv("GRIDCORE_TRAY_DUMP")) {
+    if (getenv("XYNTETIK_TRAY_DUMP")) {
         tray_item items[128];
         int ni2 = tray_menu_build(items, 128);
         int depth = 0;

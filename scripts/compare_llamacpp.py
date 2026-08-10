@@ -798,7 +798,7 @@ def fixture_report(args):
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     command = ["fixture-only"]
     report = {
-        "schema_version": "gridcore.runner.llamacpp-comparison.v1",
+        "schema_version": "xyntetik.runner.llamacpp-comparison.v1",
         "generated_utc": now,
         "status": "fixture",
         "real_results": "pending",
@@ -863,7 +863,7 @@ def endpoints_only_report(args):
                           "measurement": "throughput_only",
                           "error": f"{type(exc).__name__}: {exc}"})
     return {
-        "schema_version": "gridcore.runner.llamacpp-comparison.v1",
+        "schema_version": "xyntetik.runner.llamacpp-comparison.v1",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "status": "endpoints_only",
         "real_results": "captured",
@@ -943,7 +943,7 @@ def real_report(args):
     gate = correctness_gate(divergence, raw_comparison,
                             args.min_shared_tokens, args.max_logprob_delta)
     return {
-        "schema_version": "gridcore.runner.llamacpp-comparison.v1",
+        "schema_version": "xyntetik.runner.llamacpp-comparison.v1",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "status": "complete",
         "real_results": "captured",

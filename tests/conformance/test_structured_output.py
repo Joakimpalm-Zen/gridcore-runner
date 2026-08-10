@@ -308,7 +308,7 @@ def test_embeddings_do_not_corrupt_the_next_completion(client):
 
 
 # --------------------------------------------------------- downstream client
-# The suite's own agent client (gridcore-clu) drives runner through
+# The suite's own agent client (xyntetik-thane) drives runner through
 # /v1/chat/completions with a hand-built discriminated union in
 # `response_format`, not through tools[]. That shape therefore exercises the
 # schema compiler by a different route than test_tool_calls.py does, and a

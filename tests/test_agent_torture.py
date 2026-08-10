@@ -102,7 +102,7 @@ def test_report_schema_and_totals(tmp_path):
     MOD.write_json(path, report)
     decoded = json.loads(path.read_text())
 
-    assert decoded["schema_version"] == "gridcore.agent-torture.v2"
+    assert decoded["schema_version"] == "xyntetik.agent-torture.v2"
     assert decoded["runtime"] == {"name": "runner", "version": "runner test"}
     assert decoded["configuration"]["model"] == "fixture.gguf"
     assert decoded["totals"] == {

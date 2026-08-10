@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gridcore-runner-client"
+name = "xyntetik-runner-client"
 version = "0.1.14a0"
-description = "Python client and process boundary for Gridcore Runner"
+description = "Python client and process boundary for Xyntetik Runner"
 readme = "README.md"
 requires-python = ">=3.11"
 
@@ -16,4 +16,4 @@ dev = ["mypy>=1.14,<2", "pytest>=8,<10"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"gridcore_runner" = ["py.typed"]
+"xyntetik_runner" = ["py.typed"]

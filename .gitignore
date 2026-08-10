@@ -64,7 +64,7 @@ test-model-load-failure.exe
 vramreg-test-*/
 # the cross-process VRAM ledger, when plat_runtime_dir() resolves to "." —
 # a runtime artifact, never a source file
-gridcore-vram-*.reg
+xyntetik-vram-*.reg
 runner-baseline
 *.gguf
 # committed vocabulary fixtures for the tokenizer tests

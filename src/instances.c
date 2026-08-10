@@ -50,6 +50,26 @@ static bool mkdir_one(const char *p) {
 #endif
 }
 
+static bool path_exists(const char *p) {
+#ifdef _WIN32
+    return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return stat(p, &st) == 0;
+#endif
+}
+
+// One-time migration of the pre-rename state dir (Gridcore -> Xyntetik):
+// move the whole old tree when the new one does not exist yet, so config.json,
+// managed.log and the instance registry survive the rename instead of
+// stranding a live install (the tray-reports-missing-model failure of 1aed406).
+static void migrate_old_tree(const char *base, char sep, const char *oldname,
+                             const char *newbase) {
+    char old[1024];
+    if (!path_child(old, sizeof old, base, sep, oldname)) return;
+    if (!path_exists(newbase) && path_exists(old)) rename(old, newbase);
+}
+
 const char *instances_dir(void) {
     static char dir[1024];
     static bool made = false;
@@ -59,24 +79,26 @@ const char *instances_dir(void) {
     const char *base = getenv("APPDATA");
     if (!base || !*base) { dir[0] = 0; return NULL; }
     char a[1024], b[1024], c[1024];
-    if (!path_child(a, sizeof a, base, '\\', "gridcore") ||
+    if (!path_child(a, sizeof a, base, '\\', "xyntetik") ||
         !path_child(b, sizeof b, a, '\\', "runner") ||
         !path_child(c, sizeof c, b, '\\', "instances")) {
         dir[0] = 0;
         return NULL;
     }
+    migrate_old_tree(base, '\\', "gridcore", a);
     if (!mkdir_one(a) || !mkdir_one(b) || !mkdir_one(c)) { dir[0] = 0; return NULL; }
     memcpy(dir, c, strlen(c) + 1);
 #else
     const char *base = getenv("HOME");
     if (!base || !*base) { dir[0] = 0; return NULL; }
     char a[1024], b[1024], c[1024];
-    if (!path_child(a, sizeof a, base, '/', ".gridcore") ||
+    if (!path_child(a, sizeof a, base, '/', ".xyntetik") ||
         !path_child(b, sizeof b, a, '/', "runner") ||
         !path_child(c, sizeof c, b, '/', "instances")) {
         dir[0] = 0;
         return NULL;
     }
+    migrate_old_tree(base, '/', ".gridcore", a);
     if (!mkdir_one(a) || !mkdir_one(b) || !mkdir_one(c)) { dir[0] = 0; return NULL; }
     memcpy(dir, c, strlen(c) + 1);
 #endif

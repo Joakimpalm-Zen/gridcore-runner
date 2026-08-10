@@ -124,7 +124,7 @@ def main(argv=None):
     except json.JSONDecodeError:
         node_packages = {}
     report = {
-        "schema_version": "gridcore.runner.consumer-compat-report.v1",
+        "schema_version": "xyntetik.runner.consumer-compat-report.v1",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "runner": subprocess.run([str(args.runner), "--version"], text=True,
                                  capture_output=True).stdout.strip(),

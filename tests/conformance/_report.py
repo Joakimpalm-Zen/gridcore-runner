@@ -130,7 +130,7 @@ class Report:
             if o["status"] == "failed" and o["category"] in by_cat:
                 by_cat[o["category"]] += 1
         doc = {
-            "schema": "gridcore-runner/conformance-report/1",
+            "schema": "xyntetik-runner/conformance-report/1",
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "duration_s": round(time.time() - self.started, 3),
             "platform": {"system": platform.system(),

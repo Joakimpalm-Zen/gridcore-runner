@@ -39,11 +39,11 @@ static void write_fake(const char *dir, long pid, const char *name) {
 int main(void) {
     char tmpl[512];
 #ifdef _WIN32
-    snprintf(tmpl, sizeof tmpl, "%s\\gridcore-test-%ld", getenv("TEMP"), (long)getpid());
+    snprintf(tmpl, sizeof tmpl, "%s\\xyntetik-test-%ld", getenv("TEMP"), (long)getpid());
     _mkdir(tmpl);
     setenv_compat("APPDATA", tmpl);
 #else
-    snprintf(tmpl, sizeof tmpl, "/tmp/gridcore-test-%ld", (long)getpid());
+    snprintf(tmpl, sizeof tmpl, "/tmp/xyntetik-test-%ld", (long)getpid());
     mkdir(tmpl, 0755);
     setenv_compat("HOME", tmpl);
 #endif

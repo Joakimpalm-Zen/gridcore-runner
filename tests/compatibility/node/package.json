@@ -1,5 +1,5 @@
 {
-  "name": "gridcore-runner-consumer-compat",
+  "name": "xyntetik-runner-consumer-compat",
   "private": true,
   "type": "module",
   "dependencies": {

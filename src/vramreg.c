@@ -98,7 +98,7 @@ static void registry_path(const char *gpu_id, char *out, size_t cap) {
                   (*p >= '0' && *p <= '9') || *p == '.' || *p == '-' || *p == '_'
                   ? *p : '_';
     id[n] = 0;
-    snprintf(out, cap, "%s/gridcore-vram-%s.reg", dir, id);
+    snprintf(out, cap, "%s/xyntetik-vram-%s.reg", dir, id);
 }
 
 // Tab-separated so a model path with spaces survives, one entry per line:

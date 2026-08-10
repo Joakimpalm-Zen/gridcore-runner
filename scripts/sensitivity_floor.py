@@ -107,7 +107,7 @@ def summarise(model, mode, pairs, tokens):
             identical += 1
         deltas.extend(abs(a[i][1] - b[i][1]) for i in range(first_div[-1]))
     return {
-        "schema_version": "gridcore.runner.sensitivity-floor.v1",
+        "schema_version": "xyntetik.runner.sensitivity-floor.v1",
         "model": model,
         "mode": mode,
         "tokens_per_prompt": tokens,

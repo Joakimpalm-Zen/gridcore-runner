@@ -199,7 +199,7 @@ def main():
     metadata = parsed["metadata"]
     layout = validate_layout(metadata, {item[0] for item in parsed["tensors"]})
     report = {
-        "schema": "gridcore-runner/ornith-reference/1",
+        "schema": "xyntetik-runner/ornith-reference/1",
         "model": {
             "path": args.model,
             "size": parsed["size"],

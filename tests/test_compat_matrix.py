@@ -17,7 +17,7 @@ def load_module():
 
 def test_model_manifest_covers_every_claimed_architecture():
     data = json.loads(MANIFEST.read_text())
-    assert data["schema_version"] == "gridcore.runner.model-compat.v1"
+    assert data["schema_version"] == "xyntetik.runner.model-compat.v1"
     models = data["models"]
     assert {m["architecture"] for m in models} == {
         "llama", "qwen2", "qwen3", "qwen35", "phi3", "gemma3", "gemma4",
@@ -35,7 +35,7 @@ def test_model_manifest_covers_every_claimed_architecture():
 def test_manifest_validation_rejects_duplicate_ids(tmp_path):
     module = load_module()
     manifest = {
-        "schema_version": "gridcore.runner.model-compat.v1",
+        "schema_version": "xyntetik.runner.model-compat.v1",
         "models": [
             {"id": "same", "architecture": "llama", "file": "a.gguf",
              "sha256": "0" * 64, "checks": ["load"]},
@@ -56,7 +56,7 @@ def test_manifest_validation_rejects_duplicate_ids(tmp_path):
 def test_consumer_gate_covers_requested_integration_layers():
     data = json.loads(
         (ROOT / "tests" / "compatibility" / "consumers.json").read_text())
-    assert data["schema_version"] == "gridcore.runner.consumer-compat.v1"
+    assert data["schema_version"] == "xyntetik.runner.consumer-compat.v1"
     assert {consumer["id"] for consumer in data["consumers"]} >= {
         "openai-python", "openai-node", "anthropic-python",
         "anthropic-node", "litellm", "langchain-openai",
@@ -92,7 +92,7 @@ def _write_manifest(tmp_path, checks):
     import hashlib
     digest = hashlib.sha256(model_file.read_bytes()).hexdigest()
     manifest = {
-        "schema_version": "gridcore.runner.model-compat.v1",
+        "schema_version": "xyntetik.runner.model-compat.v1",
         "models": [{
             "id": "m", "architecture": "llama", "file": str(model_file),
             "sha256": digest, "checks": checks,

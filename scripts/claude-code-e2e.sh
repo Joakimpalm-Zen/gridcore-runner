@@ -54,8 +54,8 @@ VERSION=$(claude --version 2>/dev/null || echo unknown)
 WORK=$(mktemp -d)
 # The sentinel is generated per run, so a pass cannot come from anything the
 # model already knew or from a stale answer cached anywhere in the stack.
-SENTINEL="GRIDCORE-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n' | tr 'a-f' 'A-F')"
-printf 'The gridcore fixture sentinel is %s\n' "$SENTINEL" > "$WORK/fixture.txt"
+SENTINEL="XYNTETIK-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n' | tr 'a-f' 'A-F')"
+printf 'The xyntetik fixture sentinel is %s\n' "$SENTINEL" > "$WORK/fixture.txt"
 
 cleanup() {
     [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null || true

@@ -174,7 +174,7 @@ def main():
             and (r["runner_gap_nats"] or 9e9) <= args.tie_nats]
     real = [r for r in diverged if r not in ties]
     report = {
-        "schema_version": "gridcore.runner.token-divergence.v1",
+        "schema_version": "xyntetik.runner.token-divergence.v1",
         "model": args.model,
         "tokens_per_prompt": args.tokens,
         "tie_threshold_nats": args.tie_nats,

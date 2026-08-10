@@ -21,7 +21,7 @@ DEFAULT_MANIFEST = ROOT / "tests" / "compatibility" / "models.json"
 
 def load_manifest(path):
     data = json.loads(Path(path).read_text())
-    if data.get("schema_version") != "gridcore.runner.model-compat.v1":
+    if data.get("schema_version") != "xyntetik.runner.model-compat.v1":
         raise ValueError("unsupported model compatibility manifest")
     seen = set()
     for model in data.get("models", []):
@@ -103,7 +103,7 @@ def main(argv=None):
         parser.error("unknown model(s): " + ", ".join(sorted(unknown)))
 
     report = {
-        "schema_version": "gridcore.runner.model-compat-report.v1",
+        "schema_version": "xyntetik.runner.model-compat-report.v1",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "host": {"os": platform.system(), "machine": platform.machine()},
         "runner": {"path": str(args.runner),
