@@ -1688,7 +1688,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             const char *sdet = finish_detail_of(finish);
             if (sdet)
                 sb_fmt(&c, ",\"runner_telemetry\":{\"finish_detail\":\"%s\"}",
-                       sdet, NULL);
+                       sdet);
             sb_lit(&c, "}");
             bool ok = chunk_send(&g, &c) == 0;
             // OpenAI stream_options {"include_usage": true}: one extra chunk
@@ -1890,7 +1890,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         send_built(fd, &r);
         free(r.s);
     }
-done:
+done: ;
     // A paging note only when there was paging. Silence is the normal case and
     // a per-request "0 page-ins" would be noise, but when the weights have been
     // evicted this line is the only thing that says the time went to the disk
