@@ -59,6 +59,11 @@ it can prove.
   so agents receive parseable arguments instead of a broken fragment. The
   committed [agent-torture gate](docs/agent-torture.md) tests this exact failure
   mode.
+- **Constrained decisions come with a confidence signal.** `choice_logprobs`
+  records each JSON-schema branch as legal alternatives, a posterior
+  renormalized over them, and the probed probability mass. The included
+  calibration tool turns labeled decisions into accuracy, Brier-score, and ECE
+  gates; this is a decision record, not ordinary token logprobs.
 - **Local-only is an invariant, not a default.** The server is fixed to
   `127.0.0.1`. There is no host flag, environment variable, config key, or
   local-network toggle that can accidentally expose it.
@@ -70,6 +75,10 @@ it can prove.
   one JSON document containing live RAM/VRAM, backend and GPU limits, CPU and
   GPU quant lists, admitted architectures, placement modes, and model-count
   limits. A controller can reject an incompatible placement before dispatch.
+- **Independent CUDA jobs coordinate before allocation.** Runner processes on
+  the same GPU share a VRAM registry. A refused load names every live holder by
+  PID, model, bytes, and uptime; `--wait-for-vram` turns the refusal into a
+  bounded queue, and stale records from dead processes are reaped.
 - **A blank is never recorded as a pass.** Compatibility evidence names the
   model hash, check, result, and scope, including `fail` and `not_executed`.
   Rejected optimizations remain published with the measurements that killed
