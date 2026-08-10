@@ -359,8 +359,8 @@ config format and uninstall notes: [docs/tray-controller.md](docs/tray-controlle
 
 Two backends implement the same small interface (`src/gpu_none.c` documents
 it); `--gpu auto` (the default) uses one whenever the model's quant formats
-have kernels (F32, F16, Q8_0, Q4_0/1, Q5_0/1, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL,
-IQ4_XS); anything
+have kernels (F32, F16, BF16 on Metal, Q8_0, Q4_0/1, Q5_0/1, Q2_K on Metal,
+Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS); anything
 else falls back to CPU with a message, as does any GPU runtime failure or a
 model that does not fit. GPU output is verified token-identical to the CPU
 path across every supported quant on both backends — on the scalar kernels.
