@@ -1,15 +1,19 @@
 # Gridcore Runner
 
-A compact local LLM inference engine written from scratch in plain C. It has
-no third-party runtime dependency or ggml, builds to one executable, reads
-standard GGUF files, and runs on portable CPU code, x86 AVX2/FMA, ARM NEON,
-CUDA, or Metal.
+Local LLM inference that behaves like infrastructure: agent tool calls that
+still parse when the token budget runs out, a shared GPU that queues instead of
+first-come-first-crash, and a query that tells you what fits before you load
+anything.
+
+It is one executable written from scratch in plain C — no third-party runtime
+dependency or ggml — reading standard GGUF on portable CPU code, x86 AVX2/FMA,
+ARM NEON, CUDA, or Metal. Its scope is deliberately explicit: supported
+architectures are named, unknown ones are refused, and backend claims are tied
+to executable gates and pinned model evidence.
 
 Runner includes interactive chat, speculative decoding, constrained JSON
 generation, a desktop controller, and loopback-only OpenAI- and
-Anthropic-compatible HTTP APIs. Its scope is deliberately explicit: supported
-architectures are named, unknown ones are refused, and backend claims are tied
-to executable gates and pinned model evidence.
+Anthropic-compatible HTTP APIs.
 
 For release history and benchmark narratives, see [CHANGELOG.md](CHANGELOG.md)
 and [docs/benchmarks.md](docs/benchmarks.md). Keeping that material there makes
@@ -29,6 +33,18 @@ make
 
 CUDA builds and releases need only an NVIDIA driver at runtime. The CUDA
 toolkit is needed only by developers regenerating the embedded PTX.
+
+Release archives name the binary for their platform — `runner-macos-arm64`,
+`runner-linux-x86_64`, `runner-windows-x86_64.exe` — so either rename it to
+`runner` or substitute that name in the commands below. A source build produces
+`runner` directly.
+
+If you have no GGUF handy, this one is 2.63 GB and runs on an 8 GB machine:
+
+```sh
+curl -L -o model.gguf \
+  https://huggingface.co/Joakimpalm-Zen/gemma-4-E2B-it-Q4_0-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
+```
 
 Run a GGUF:
 
