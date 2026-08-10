@@ -726,7 +726,13 @@ bool model_file_identity(const char *path, const char *registry,
 #endif
     struct stat st;
     if (stat(path, &st) != 0) {
-        if (registry) {
+        // ENOENT is not a sharing problem. The load is about to fail with its
+        // own, clearer error, and a warning about weight sharing and CPU/GPU
+        // splits for a file that cannot load at all buries the real cause —
+        // the header comment above justifies this warning on the grounds that
+        // "the model still loads", which is exactly false when the file is
+        // gone. Every other stat failure still warrants it.
+        if (registry && errno != ENOENT) {
             char why[128];
             snprintf(why, sizeof(why), "stat: %s", strerror(errno));
             warn_no_file_id(path, registry, why);

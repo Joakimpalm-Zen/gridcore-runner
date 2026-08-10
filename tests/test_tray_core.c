@@ -137,6 +137,40 @@ int main(int argc, char **argv) {
     CHECK(menu_has(items, n, "fake-model.gguf"), "restored config re-read too");
     remove(alt);
 
+    // 2a-bis. a configured model that no longer exists on disk must read as
+    // MISSING, never as a crash. Publishing a checkpoint and reclaiming the
+    // local copy is routine here, and before this the tray spawned a doomed
+    // child, the child died at GGUF open, and the menu said "exited (failed
+    // start or crash)" — blaming the engine for a stale pointer. Proven red by
+    // reverting the MG_MISSING branch: the Start row comes back and the spawn
+    // is attempted against a file that is not there.
+    remove(mdl);
+    n = tray_menu_build(items, 128);
+    CHECK(menu_has(items, n, "model file missing"),
+          "a deleted model is named as missing");
+    CHECK(menu_has(items, n, "Choose another model"),
+          "the menu offers the fix instead of a doomed start");
+    CHECK(!menu_has(items, n, "Start default runner"),
+          "no start row for a model that cannot load");
+    CHECK(!menu_has(items, n, "no runners active"),
+          "the missing-model row replaces the empty-state row");
+    {
+        char mp0[600];
+        marker_path(mp0, sizeof mp0);
+        remove(mp0);
+        tray_menu_act(TRAY_ACT_START_MANAGED, 0, NULL);
+        msleep(300);
+        FILE *m0 = fopen(mp0, "rb");
+        CHECK(m0 == NULL, "START_MANAGED refuses to spawn a missing model");
+        if (m0) fclose(m0);
+    }
+    // restore it: every step below asserts against a model that exists, and
+    // the state must heal on its own since MISSING is derived, not stored
+    f = fopen(mdl, "wb"); fputs("x", f); fclose(f);
+    n = tray_menu_build(items, 128);
+    CHECK(menu_has(items, n, "Start default runner"),
+          "restoring the file heals the menu with no tray restart");
+
     tray_menu_act(TRAY_ACT_START_MANAGED, 0, NULL);
 
     char mp[600];

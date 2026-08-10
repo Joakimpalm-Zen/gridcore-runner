@@ -146,20 +146,36 @@ static long g_managed_pid = 0;
 static bool g_managed_spawned = false;  // spawned since the last user stop
 static bool g_quit = false;
 
+// Is the configured model still on disk? Publishing a checkpoint and
+// reclaiming the local copy is routine, and it silently arms a config that can
+// never start again. Checked rather than remembered, so restoring the file
+// heals the menu with no bookkeeping.
+static bool model_file_present(void) {
+    if (!g_cfg.last_model[0]) return false;
+    struct stat st;
+    return stat(g_cfg.last_model, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 // Managed-instance lifecycle, derived — never stored — so the menu can't
 // show a state the world has moved past. STARTING = the child process is
 // alive but has not yet registered (model still loading); EXITED = it died
 // without the user stopping it (start failure or crash), which keeps a
-// "view log" row up until the user starts again.
-enum { MG_OFF, MG_STARTING, MG_RUNNING, MG_EXITED };
+// "view log" row up until the user starts again; MISSING = the configured
+// model no longer exists, so no start can succeed and calling it an exit
+// would blame the engine for a stale pointer.
+enum { MG_OFF, MG_STARTING, MG_RUNNING, MG_EXITED, MG_MISSING };
 
 static int managed_state(const instance_rec *recs, int nrecs) {
 #ifndef _WIN32
     // reap a dead child, else the zombie still answers kill(pid, 0)
     if (g_managed_pid > 0) waitpid((pid_t)g_managed_pid, NULL, WNOHANG);
 #endif
-    if (g_managed_pid <= 0)
+    if (g_managed_pid <= 0) {
+        // Derived exactly like the rest: a missing model outranks "exited",
+        // because it explains the exit and survives it.
+        if (g_cfg.last_model[0] && !model_file_present()) return MG_MISSING;
         return g_managed_spawned ? MG_EXITED : MG_OFF;
+    }
     if (!instance_pid_alive(g_managed_pid))
         return MG_EXITED;
     for (int i = 0; i < nrecs; i++)
@@ -215,6 +231,10 @@ static void self_exe(char *out, size_t cap);
 static void spawn_managed(void) {
     cfg_load();
     if (!g_cfg.last_model[0]) return;
+    // Refuse a spawn that cannot succeed. Letting it run would fail at GGUF
+    // open and land in MG_EXITED, which is indistinguishable from a crash and
+    // sends the user to the log for a cause the menu already knows.
+    if (!model_file_present()) return;
     char exe[1200];
     self_exe(exe, sizeof exe);
     char portbuf[16];
@@ -432,9 +452,14 @@ int tray_menu_build(tray_item *it, int cap) {
     for (int i = 0; i < ni; i++)
         if (strcmp(recs[i].mode, "tray") != 0) shown++;
 
-    if (shown == 0 && st != MG_STARTING && st != MG_EXITED) {
+    if (shown == 0 && st != MG_STARTING && st != MG_EXITED && st != MG_MISSING) {
         PUT(.kind = TRAY_K_LABEL);
         snprintf(it[n-1].label, sizeof it[n-1].label, "no runners active");
+    }
+    if (st == MG_MISSING) {
+        PUT(.kind = TRAY_K_LABEL);
+        snprintf(it[n-1].label, sizeof it[n-1].label,
+                 "⚠ model file missing: %.470s", base_name(g_cfg.last_model));
     }
     if (st == MG_STARTING) {
         PUT(.kind = TRAY_K_LABEL);
@@ -497,6 +522,12 @@ int tray_menu_build(tray_item *it, int cap) {
     } else if (st == MG_STARTING) {
         PUT(.kind = TRAY_K_LABEL);
         snprintf(it[n-1].label, sizeof it[n-1].label, "Default runner: starting…");
+    } else if (st == MG_MISSING) {
+        // No Start row: it could only ever fail. Offer the fix instead.
+        PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_PICK_MODEL);
+        snprintf(it[n-1].label, sizeof it[n-1].label,
+                 "Choose another model… (%.470s is gone)",
+                 base_name(g_cfg.last_model));
     } else if (g_cfg.last_model[0]) {
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_START_MANAGED);
         snprintf(it[n-1].label, sizeof it[n-1].label, "%s default runner (%.470s)",

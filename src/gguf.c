@@ -3,11 +3,13 @@
 #include "quants.h"
 #include "compat.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
 #include <math.h>
+#include <sys/stat.h>
 
 typedef struct {
     const uint8_t *p, *end;
@@ -108,7 +110,27 @@ bool gguf_open(gguf_file *g, const char *path) {
     memset(g, 0, sizeof(*g));
     g->map = plat_mmap_ro(path, &g->map_size);
     if (!g->map || g->map_size < 24) {
-        fprintf(stderr, "error: cannot open %s as a GGUF file\n", path);
+        // "cannot open X as a GGUF file" reads as "this file is corrupt", but
+        // plat_mmap_ro collapses four different failures into one NULL: the
+        // file is absent, it is not a regular file, it is too short to hold a
+        // header, or it could not be mapped. A deleted checkpoint reported as
+        // a malformed one sends the reader to the wrong place entirely, so ask
+        // the filesystem which failure this was instead of blaming contents we
+        // never read.
+        struct stat st;
+        if (stat(path, &st) != 0)
+            fprintf(stderr, "error: cannot open %s: %s\n", path,
+                    strerror(errno));
+        else if (!S_ISREG(st.st_mode))
+            fprintf(stderr, "error: %s is not a regular file\n", path);
+        else if ((uint64_t)st.st_size < 24)
+            fprintf(stderr,
+                    "error: %s is too small to be a GGUF file (%llu bytes)\n",
+                    path, (unsigned long long)st.st_size);
+        else
+            fprintf(stderr,
+                    "error: cannot map %s (%llu bytes) — check permissions\n",
+                    path, (unsigned long long)st.st_size);
         goto fail;
     }
 
