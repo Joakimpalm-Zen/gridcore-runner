@@ -542,6 +542,9 @@ test-moe: runner
 test-prune-experts: runner
 	$(PYTHON) -m pytest -q tests/test_prune_experts.py
 
+test-weight-io-bench:
+	$(PYTHON) -m pytest -q tests/test_weight_io_bench.py
+
 $(TEST_METAL_SHADERS): tests/test_metal_shaders.m src/kernels_metal.h
 	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
 	    tests/test_metal_shaders.m -o $@ -framework Metal -framework Foundation
