@@ -469,6 +469,10 @@ static bool gpu_type_ok(int type) {
     }
 }
 
+// The --caps answer for this backend, sourced from the admission test above so
+// the advertised list and the loader agree by construction.
+bool gpu_quant_ok(int type) { return gpu_type_ok(type); }
+
 // Expert tensor types the indirect MoE matvecs (k_moe_mv_*) cover. A type
 // outside this set is not an error — that model keeps the eager per-expert
 // path, exactly as before the device-routing work.

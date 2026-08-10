@@ -32,6 +32,14 @@ const char *gpu_shader_source_sha(void);
 // can; a backend that cannot forces the cache back to f16 rather than
 // handing q8_0 blocks to kernels that would read them as fp16.
 bool   gpu_kv_q8_ok(void);
+// Does this backend have kernels for a tensor format? Answered by the backend
+// itself so `--caps` cannot drift from what the loader will actually admit.
+// The two used to be a hand-kept literal in main.c and a switch in the backend
+// carrying "keep this in sync with gpu_type_ok()" — and they did drift, on
+// Metal, in the direction that made --caps advertise formats it could not run.
+// A published surface an advisor consumes must not be able to lie by omission
+// of a manual edit, so there is now one statement of the fact per backend.
+bool   gpu_quant_ok(int type);
 // Does this backend run at least one sparse-MoE family on the device? Per-model
 // gpu_init() guards still decide the exact router/layout/activation variant.
 bool   gpu_moe_ok(void);

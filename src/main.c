@@ -502,23 +502,36 @@ int main(int argc, char **argv) {
         // the fixed -m swap-registry capacity, so a controller bounds the set of
         // models it launches instead of overflowing it (see RUNNER_MAX_MODELS)
         printf(",\"max_models\":%d", RUNNER_MAX_MODELS);
-        printf(",\"quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
-               "\"Q5_0\",\"Q5_1\",\"Q2_K\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
-               "\"IQ4_NL\",\"IQ4_XS\",\"MXFP4\"],");
-#ifdef __APPLE__
-        // Keep this in sync with gpu_type_ok() in metal.m. gpu_init() still
-        // refuses unsupported architectures/layouts, but these tensor formats
-        // have Metal kernels in this build.
-        printf("\"gpu_quants\":[\"F32\",\"F16\",\"BF16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
-               "\"Q5_0\",\"Q5_1\",\"Q2_K\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
-               "\"IQ4_NL\",\"IQ4_XS\",\"MXFP4\"]");
-#else
-        // Keep this in sync with gpu_type_ok() in cuda.c. Q2_K and BF16 are
-        // CPU-only for CUDA builds today.
-        printf("\"gpu_quants\":[\"F32\",\"F16\",\"Q8_0\",\"Q4_0\",\"Q4_1\","
-               "\"Q5_0\",\"Q5_1\",\"Q3_K\",\"Q4_K\",\"Q5_K\",\"Q6_K\","
-               "\"IQ4_NL\",\"IQ4_XS\",\"MXFP4\"]");
-#endif
+        // One table, two consumers: `quants` is every format the engine can
+        // read, and `gpu_quants` is that same table filtered by the active
+        // backend's own admission test (gpu_quant_ok -> gpu_type_ok). These
+        // were two hand-kept literals under an #ifdef, each carrying a comment
+        // asking a human to keep it in step with a switch in another file.
+        // They drifted, and --caps advertised Metal kernels that did not
+        // exist. Sourcing the answer removes the class of bug, not just the
+        // instance: a new format needs one edit, in the backend, and both
+        // lists follow.
+        static const struct { const char *name; int type; } QUANTS[] = {
+            { "F32",    T_F32    }, { "F16",    T_F16    },
+            { "BF16",   T_BF16   }, { "Q8_0",   T_Q8_0   },
+            { "Q4_0",   T_Q4_0   }, { "Q4_1",   T_Q4_1   },
+            { "Q5_0",   T_Q5_0   }, { "Q5_1",   T_Q5_1   },
+            { "Q2_K",   T_Q2_K   }, { "Q3_K",   T_Q3_K   },
+            { "Q4_K",   T_Q4_K   }, { "Q5_K",   T_Q5_K   },
+            { "Q6_K",   T_Q6_K   }, { "IQ4_NL", T_IQ4_NL },
+            { "IQ4_XS", T_IQ4_XS }, { "MXFP4",  T_MXFP4  },
+        };
+        const size_t n_quants = sizeof QUANTS / sizeof *QUANTS;
+        printf(",\"quants\":[");
+        for (size_t qi = 0; qi < n_quants; qi++)
+            printf("%s\"%s\"", qi ? "," : "", QUANTS[qi].name);
+        // gpu_init() still refuses unsupported architectures and layouts; this
+        // is the tensor-format half only, which is what an advisor filters on.
+        printf("],\"gpu_quants\":[");
+        for (size_t qi = 0, shown_q = 0; qi < n_quants; qi++)
+            if (gpu_quant_ok(QUANTS[qi].type))
+                printf("%s\"%s\"", shown_q++ ? "," : "", QUANTS[qi].name);
+        printf("]");
         // the architectures model_load will admit, so a catalog/advisor can
         // filter unrunnable models by arch without shipping its own copy of the
         // allowlist (single source of truth: model_supported_archs)

@@ -370,6 +370,10 @@ static bool gpu_type_ok(int type) {
     }
 }
 
+// The --caps answer for this backend, sourced from the admission test above so
+// the advertised list and the loader agree by construction.
+bool gpu_quant_ok(int type) { return gpu_type_ok(type); }
+
 static bool metal_moe_type_ok(int type) {
     switch (type) {
         case T_F32: case T_F16: case T_Q8_0: case T_Q4_0:
