@@ -213,8 +213,8 @@ flags into unrelated feature sections.
 | `-f FILE` | Append file contents to the prompt. |
 | `-i` | Stateful interactive chat. |
 | `--serve` | Start the HTTP server. |
-| `--tray` | Start the macOS/Windows tray or menu-bar controller. |
-| `--no-tray` | Prevent bare invocation from auto-starting the desktop controller. |
+| `--tray` | Be the macOS/Windows tray controller instead of running a model. Required where there is no terminal. See [Desktop tray](#desktop-tray). |
+| `--no-tray` | Opt out of the tray everywhere, including the one that otherwise follows `--serve` and `-i`. |
 | `--port N` | Server port, default `8080`. |
 | `--parallel N` | Independent inference slots for a single-model server, default `1`. |
 | `--ttl N` | Swap-mode idle unload timeout, default `300`; `0` disables it. |
@@ -290,11 +290,10 @@ from metadata and vocabulary. Thinking channels are displayed separately.
 The server additionally reuses the longest shared prompt prefix across
 requests.
 
-On macOS and Windows, a literal no-argument invocation attached to a terminal
-starts the desktop controller. Pipes, scripts, CI, Linux, and any invocation
-with an argument keep text-mode behavior. The controller's config, instance
-registry, and uninstall details are in
-[docs/tray-controller.md](docs/tray-controller.md).
+On macOS and Windows, a session you sit with — a bare invocation, `--serve`, or
+`-i` — also raises the desktop tray, which is left running afterwards. One-shot
+`-p` runs, tooling modes, pipes, scripts, CI, and Linux keep text-mode
+behavior, and `--no-tray` opts out everywhere. See [Desktop tray](#desktop-tray).
 
 ## Runtime and hardware
 
@@ -540,6 +539,66 @@ Codex's system prompt and tools can consume roughly 10k input tokens before
 the user request, so use at least a 16k context for that workflow. Runner does
 not implement a response store; clients must send history each turn rather
 than use `previous_response_id`.
+
+## Desktop tray
+
+macOS and Windows ship a menu-bar / notification-area controller. It lists
+every runner instance live on the machine — however it was started — with the
+models each has loaded, and lets you stop any of them, pick a GGUF, and start
+a desktop-managed server. Linux has no tray; `--tray` there prints an honest
+error.
+
+### When it appears
+
+The tray follows a session you sit with, and is left running afterwards so the
+next model can be loaded from it.
+
+| Invocation | Tray |
+|---|---|
+| `runner` with no arguments at a terminal, or a double-click | yes |
+| `runner -m model.gguf --serve` | yes |
+| `runner -m model.gguf -i` | yes |
+| `runner -m model.gguf -p "..."` | no |
+| `--caps`, `--quantize`, `--bench-json`, `--version` | no |
+| anything with `--no-tray` | no |
+| pipes, scripts, CI, Linux | no |
+
+A terminal on **either** stdin or stdout is what counts as "a person launched
+this", so `runner --serve > server.log` still raises one while CI, which
+usually has neither, does not. A one-shot `-p` run raises nothing on purpose:
+a two-second process should not leave a menu-bar icon behind it.
+
+`--tray` means *be* the tray rather than run a model. It is required wherever
+there is no terminal — launchd, Task Scheduler, a service wrapper — because
+every launch in the table above needs one. `--no-tray` opts out everywhere.
+
+One tray runs per machine; a second exits naming the pid that owns the icon.
+The tray is spawned detached with its own session, so stopping a server with
+Ctrl-C leaves the menu bar alone, and it outlives the run that raised it.
+
+### Icon states
+
+A rounded-square core with a signal motif around it. On macOS it is a template
+image, so it follows light and dark menu bars.
+
+| State | Glyph | Meaning |
+|---|---|---|
+| Idle | hollow core, two opposing sweeps | No runner registered. |
+| Model loaded | solid core, two opposing sweeps | A runner is up with a model resident, nothing in flight. |
+| Running | solid core, four-segment ring | Inference is in flight. |
+
+The ring is segmented rather than closed because a menu-bar template image
+cannot animate: four gaps read as motion where a circle reads as a badge.
+
+"Loaded" and "running" are told apart by `active_requests` from `/health`,
+polled on the same 5-second timer that refreshes the icon — so a request
+shorter than the tick can pass unseen. It is an indicator, not telemetry. When
+the count cannot be read the icon shows "model loaded", because a server that
+is up but unreachable still has a model resident.
+
+Configuration, the instance registry, autostart, uninstall, and the headless
+validation seams are documented in
+[docs/tray-controller.md](docs/tray-controller.md).
 
 ## Structured output
 

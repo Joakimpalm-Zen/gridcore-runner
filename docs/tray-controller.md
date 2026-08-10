@@ -1,14 +1,22 @@
 # Tray / menu-bar controller
 
-`runner --tray` puts a small grid icon in the macOS menu bar or the Windows
-notification area. Clicking it shows **every runner instance live on the
-machine** — however it was started — with its loaded models, and lets you
-stop any of them or launch one pre-configured "desktop-managed" server.
-macOS and Windows only in v1; on Linux `--tray` prints an honest error.
+The tray puts a small icon in the macOS menu bar or the Windows notification
+area. Clicking it shows **every runner instance live on the machine** — however
+it was started — with its loaded models, and lets you stop any of them or
+launch one pre-configured "desktop-managed" server. macOS and Windows only in
+v1; on Linux `--tray` prints an honest error.
 
-The CLI is completely unaffected when `--tray` is not passed. The only
-thing the tray adds to normal runs is the discovery record described below,
-and writing it is best-effort: a failure to write never affects the run.
+`--tray` means *be* the tray rather than run a model, and is required wherever
+there is no terminal (launchd, Task Scheduler, a service wrapper). A session
+you sit with — a bare invocation, `--serve`, or `-i` — raises one for you and
+leaves it running afterwards; one-shot `-p` runs and tooling modes do not, and
+`--no-tray` opts out everywhere. The README's Desktop tray section has the full
+table.
+
+That spawned tray is a detached child with its own session, so Ctrl-C on a
+server does not reach it. Beyond raising it, the only thing the tray adds to a
+normal run is the discovery record described below, and writing it is
+best-effort: a failure to write never affects the run.
 
 ## How instances are discovered
 
@@ -71,8 +79,13 @@ Stop semantics: SIGTERM, 3 s grace, SIGKILL on macOS. On Windows v1 uses
 console process outside your own console group; the registry record is
 swept either way, and the server holds no state that outlives the process.
 
-The icon shows a filled center cell while at least one instance is running
-and refreshes every 5 s.
+The icon is a rounded-square core with a signal motif and carries three
+states, refreshed every 5 s: hollow core with two sweeps when no runner is
+registered, solid core with two sweeps when one is up with a model resident,
+and solid core with a four-segment ring while inference is in flight. The
+third is read from `active_requests` in `/health`; when it cannot be read the
+icon falls back to "model loaded", since an unreachable-but-live server still
+has a model resident. See the README's Desktop tray section for the table.
 
 Only one tray runs per machine: a second `--tray` exits with an error
 naming the live controller's pid.
@@ -130,3 +143,10 @@ Nothing else is written anywhere (`managed.log` lives inside the same
 would render (indentation = submenus, `*` = clickable, `[x]` = checkbox
 state) and exits without touching the GUI. CI and remote validation diff
 this output; the human checklist only has to confirm the pixels.
+
+`GRIDCORE_TRAY_ICON_DUMP=<dir> runner --tray` is the icon sibling: it renders
+all three states to `<dir>/tray-{idle,loaded,running}` and exits — PNG on
+macOS, BMP on Windows. Eighteen pixels of arcs cannot be reviewed by reading
+the drawing code, so a design change is checked by looking at these. Both
+backends paint from one geometry scaled to the requested size, so the review
+render and the live icon are the same drawing rather than two that can drift.
