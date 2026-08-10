@@ -12,9 +12,9 @@
 #include <time.h>
 
 #ifdef _WIN32
-#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #include <process.h>
 #define getpid _getpid
 typedef SOCKET sock_t;
@@ -405,6 +405,14 @@ static const char *base_name(const char *p) {
     return b ? b + 1 : p;
 }
 
+static void label_copy(char *out, size_t cap, const char *text) {
+    if (!cap) return;
+    size_t n = strlen(text);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, text, n);
+    out[n] = 0;
+}
+
 int tray_menu_build(tray_item *it, int cap) {
     cfg_load();
     int n = 0;
@@ -431,7 +439,7 @@ int tray_menu_build(tray_item *it, int cap) {
     if (st == MG_STARTING) {
         PUT(.kind = TRAY_K_LABEL);
         snprintf(it[n-1].label, sizeof it[n-1].label,
-                 "● starting %s… (loading model)", base_name(g_cfg.last_model));
+                 "● starting %.470s… (loading model)", base_name(g_cfg.last_model));
         PUT(.kind = TRAY_K_SUB_BEGIN);
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_STOP_INSTANCE,
             .arg = g_managed_pid);
@@ -466,7 +474,7 @@ int tray_menu_build(tray_item *it, int cap) {
             int ns = fetch_served_models(recs[i].port, served, 16);
             for (int m = 0; m < ns; m++) {
                 PUT(.kind = TRAY_K_LABEL);
-                snprintf(it[n-1].label, sizeof it[n-1].label, "%s", served[m]);
+                label_copy(it[n-1].label, sizeof it[n-1].label, served[m]);
             }
             if (ns == 0) {
                 PUT(.kind = TRAY_K_LABEL);
@@ -491,7 +499,7 @@ int tray_menu_build(tray_item *it, int cap) {
         snprintf(it[n-1].label, sizeof it[n-1].label, "Default runner: starting…");
     } else if (g_cfg.last_model[0]) {
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_START_MANAGED);
-        snprintf(it[n-1].label, sizeof it[n-1].label, "%s default runner (%s)",
+        snprintf(it[n-1].label, sizeof it[n-1].label, "%s default runner (%.470s)",
                  st == MG_EXITED ? "Restart" : "Start",
                  base_name(g_cfg.last_model));
     } else {

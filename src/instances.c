@@ -32,6 +32,16 @@
 
 // ------------------------------------------------------------------ paths
 
+static bool path_child(char *out, size_t cap, const char *base,
+                       char separator, const char *name) {
+    size_t nb = strlen(base), nn = strlen(name);
+    if (nb >= cap || nn >= cap - nb - 1) return false;
+    memcpy(out, base, nb);
+    out[nb] = separator;
+    memcpy(out + nb + 1, name, nn + 1);
+    return true;
+}
+
 static bool mkdir_one(const char *p) {
 #ifdef _WIN32
     return _mkdir(p) == 0 || errno == EEXIST || GetLastError() == ERROR_ALREADY_EXISTS;
@@ -49,20 +59,26 @@ const char *instances_dir(void) {
     const char *base = getenv("APPDATA");
     if (!base || !*base) { dir[0] = 0; return NULL; }
     char a[1024], b[1024], c[1024];
-    snprintf(a, sizeof a, "%s\\gridcore", base);
-    snprintf(b, sizeof b, "%s\\runner", a);
-    snprintf(c, sizeof c, "%s\\instances", b);
+    if (!path_child(a, sizeof a, base, '\\', "gridcore") ||
+        !path_child(b, sizeof b, a, '\\', "runner") ||
+        !path_child(c, sizeof c, b, '\\', "instances")) {
+        dir[0] = 0;
+        return NULL;
+    }
     if (!mkdir_one(a) || !mkdir_one(b) || !mkdir_one(c)) { dir[0] = 0; return NULL; }
-    snprintf(dir, sizeof dir, "%s", c);
+    memcpy(dir, c, strlen(c) + 1);
 #else
     const char *base = getenv("HOME");
     if (!base || !*base) { dir[0] = 0; return NULL; }
     char a[1024], b[1024], c[1024];
-    snprintf(a, sizeof a, "%s/.gridcore", base);
-    snprintf(b, sizeof b, "%s/runner", a);
-    snprintf(c, sizeof c, "%s/instances", b);
+    if (!path_child(a, sizeof a, base, '/', ".gridcore") ||
+        !path_child(b, sizeof b, a, '/', "runner") ||
+        !path_child(c, sizeof c, b, '/', "instances")) {
+        dir[0] = 0;
+        return NULL;
+    }
     if (!mkdir_one(a) || !mkdir_one(b) || !mkdir_one(c)) { dir[0] = 0; return NULL; }
-    snprintf(dir, sizeof dir, "%s", c);
+    memcpy(dir, c, strlen(c) + 1);
 #endif
     return dir;
 }

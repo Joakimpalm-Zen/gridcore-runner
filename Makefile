@@ -26,6 +26,7 @@ LDFLAGS  = -lm -lpthread
 ifeq ($(OS),Windows_NT)
 # -static: link winpthread/libgcc into the exe so it runs outside an MSYS2
 # shell (otherwise it dies at load with STATUS_DLL_NOT_FOUND on libwinpthread-1.dll)
+CFLAGS += -Werror=format-truncation -Werror=cpp
 LDFLAGS += -lws2_32 -lpsapi -static   # psapi: QueryWorkingSetEx / GetProcessMemoryInfo
 # tray: gdi32 (icon painting) and comdlg32 (GetOpenFileName) are not in the
 # MinGW default lib set; shell32/advapi32 are but stay explicit for clarity
