@@ -7,9 +7,9 @@ CUDA, or Metal.
 
 Runner includes interactive chat, speculative decoding, constrained JSON
 generation, a desktop controller, and loopback-only OpenAI- and
-Anthropic-compatible HTTP APIs. It is intentionally smaller and narrower than
-llama.cpp: supported architectures are explicit, unknown ones are refused, and
-backend claims are tied to executable gates and pinned model evidence.
+Anthropic-compatible HTTP APIs. Its scope is deliberately explicit: supported
+architectures are named, unknown ones are refused, and backend claims are tied
+to executable gates and pinned model evidence.
 
 For release history and benchmark narratives, see [CHANGELOG.md](CHANGELOG.md)
 and [docs/benchmarks.md](docs/benchmarks.md). Keeping that material there makes
@@ -49,24 +49,37 @@ Run a GGUF:
 
 ## Why runner
 
-- **Auditable deployment.** The engine, tokenizers, samplers, HTTP surfaces,
-  and GPU backends are all in this repository. CUDA PTX and Metal source are
-  embedded in the executable.
-- **Fail-closed model admission.** Unknown architectures, unsupported layouts,
-  and split GGUF parts are refused with a reason instead of being interpreted
-  as a similar architecture.
-- **Evidence with boundaries.** Compatibility is recorded per check and per
-  SHA-256-pinned GGUF. CPU/GPU token identity is claimed only where that exact
-  path and file passed; reassociated tiled GEMMs use numerical tolerance gates.
-- **Structured output in the sampler.** JSON, JSON Schema, and tool-call
-  constraints filter tokens during generation. A started document is closed
-  minimally when the token budget ends, so truncated tool arguments still
-  parse and conform.
-- **Local by construction.** The server binds only to `127.0.0.1`. There is no
-  `--host`, environment variable, or config key that can expose it.
-- **Negative results stay published.** Rejected expert caching, pruning, and
-  quantization experiments live beside the successful work instead of being
-  omitted from the project record.
+Choose Runner when local inference needs to behave like dependable
+infrastructure: easy to deploy, bounded by the machine, and explicit about what
+it can prove.
+
+- **The binary is the deployment.** One executable contains the CPU engine,
+  HTTP APIs, CUDA PTX, Metal kernels, and desktop controller. Deploy the binary
+  and a GGUF; CUDA machines need only an NVIDIA driver.
+- **Tool calls survive the token limit.** JSON Schema is enforced inside the
+  sampler, not checked after generation. Once a document starts, Runner emits
+  the smallest legal ending when the budget expires, so agents receive
+  parseable, schema-conformant arguments instead of a broken fragment.
+- **Local cannot become public by configuration.** The server is fixed to
+  `127.0.0.1`. There is no host flag, environment variable, or config key that
+  can accidentally expose it to the network.
+- **A hardware switch is a measured change.** CPU/GPU identity results belong
+  to an exact SHA-256-pinned model and execution path. Faster kernels that
+  reassociate floating-point sums must pass numerical tolerance gates; they do
+  not inherit a correctness claim from the backend name.
+- **Unsupported means a clear refusal.** Unknown architectures, unsupported
+  tensor layouts, and split GGUF parts stop at admission with a reason. Runner
+  does not substitute similar-looking transformer math and return plausible
+  output from an unverified path.
+- **Automation can place work before loading it.** `--caps` reports the actual
+  machine, backend, quant, architecture, memory, and placement capabilities.
+  Reservations bound RAM, VRAM, and CPU; the VRAM registry prevents competing
+  processes from blindly overcommitting; swap mode keeps multiple named models
+  behind one endpoint.
+- **Claims come with receipts.** Compatibility records name the exact model
+  hash, check, result, and scope. Failed checks, unexecuted checks, and rejected
+  optimization experiments remain published, so a missing result cannot be
+  mistaken for a pass.
 
 The full compatibility method is in
 [docs/compatibility-program.md](docs/compatibility-program.md), performance
