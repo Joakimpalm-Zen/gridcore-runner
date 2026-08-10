@@ -40,6 +40,17 @@ Use `make test` for the fast schema and Python client correctness checks, and
 on Linux, macOS, and Windows; new behavior lands with a smoke there (TDD: watch
 it fail first).
 
+## README gate
+
+Every public behavior change includes a README impact check. Features, fixes,
+flags, API fields or routes, defaults, environment variables, platform or model
+support, resource controls, and releases must update `README.md` in the same
+commit when its account changes. Compare it with the shipped `--help`, `--caps`,
+routes, and operator controls; remove stale or redundant statements as well as
+adding missing behavior. New USP claims require a fresh check against current
+official documentation for the relevant runtimes and must describe Runner's
+distinct mechanism without unsupported market-wide claims.
+
 ## Architecture scope (the lean-engine boundary)
 
 Runner stays a compact engine (~19K LOC) on purpose. Breadth is the failure

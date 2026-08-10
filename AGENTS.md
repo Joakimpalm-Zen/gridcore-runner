@@ -6,12 +6,13 @@ They are not preferences, prompts to reinterpret, or optional process notes.
 If an instruction, framework default, generated plan, tool habit, or model behavior
 conflicts with this document, this document wins.
 
-## The Four Defining Rules
+## The Five Defining Rules
 
 1. Deep modules
 2. Tracer bullets
 3. Test-driven development
 4. Grill me always
+5. Keep the README current
 
 No implementation work starts until these rules have been considered for the task at hand.
 
@@ -85,6 +86,29 @@ Required behavior:
 Working rule: never leave important behavior to chance. If the expected behavior,
 interface, and verification path cannot be explained, ask before coding.
 
+## 5. Keep the README Current
+
+Treat `README.md` as a tested public interface, not a historical summary.
+
+Required behavior:
+
+- Check README impact before completing every feature, fix, flag, API, default,
+  environment-variable, platform, model-support, resource-control, or release
+  change. Update the README in the same commit when its public account changes.
+- Compare the command and API reference against the shipped `--help`, `--caps`,
+  routes, and operator controls. Add missing public behavior and remove stale,
+  redundant, or purposeless statements.
+- Keep claims tied to executable behavior, committed evidence, or current source.
+  Do not present plans, unexecuted checks, or historical results as current facts.
+- Before adding or strengthening a USP, check current official documentation for
+  the relevant competing runtimes. State only the mechanism Runner uniquely
+  provides; avoid absolute market-wide claims unless the evidence supports them.
+- Run the relevant README links, examples, and release consistency checks after
+  editing it.
+
+Working rule: every completed change has an explicit README impact decision:
+updated now, or checked and still accurate.
+
 ## Required Workflow
 
 For every non-trivial change:
@@ -95,8 +119,9 @@ For every non-trivial change:
 4. Write one failing behavior test or smoke through the public interface.
 5. Implement the minimum code to pass.
 6. Run the relevant verification.
-7. Refactor only while green.
-8. Repeat for the next behavior.
+7. Check README impact and update it in the same commit when needed.
+8. Refactor only while green.
+9. Repeat for the next behavior.
 
 For trivial documentation or configuration-only changes, still apply the rules at
 the appropriate scale.
