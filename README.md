@@ -214,6 +214,7 @@ flags into unrelated feature sections.
 | `-b N` | Prompt batch size, default `64`. |
 | `-t N` | Worker threads; defaults to physical cores and is capped at `64`. |
 | `-s N` | RNG seed; default is time-based. |
+| `--think` / `--no-think` | Request the model family's thinking or non-thinking prompt shape. With neither flag, Runner renders whatever that family's own reference template renders, which is not the same answer for every family. Families without a distinct thinking prompt accept the flag and ignore it rather than approximate one. |
 | `--temp F` | Temperature; `0` is greedy and disables repeat penalty. |
 | `--top-k N` | Top-k sampling; `0` disables it. |
 | `--top-p F` | Nucleus sampling threshold. |
@@ -428,6 +429,12 @@ Chat supports buffered and SSE responses, part-array content, assistant
 `logprobs`/`top_logprobs`, `min_p`, `repeat_penalty`, up to four stop strings,
 and `keep_alive` in swap mode. Tool declarations are rendered into the model
 prompt and constrained back into well-formed `tool_calls`.
+
+`enable_thinking`, either at the top level or inside `chat_template_kwargs`,
+is the request-level form of `--think`/`--no-think`. Omitting it is not the
+same as sending `false`: an absent field renders whatever the model family's
+own reference template renders, and that default differs per family, so
+collapsing "unspecified" onto one of them would misrender the other.
 
 ```python
 import openai
