@@ -3,6 +3,81 @@
 All notable changes to gridcore-runner. This project is in **alpha**; the HTTP
 protocol and CLI may still change between alpha releases.
 
+## v0.1.14-alpha — 2026-08-10
+
+- **Metal stops falling back to the CPU on the formats small Macs actually
+  use.** `--caps` advertised IQ4_NL and IQ4_XS as GPU-capable while the Metal
+  backend accepted neither, so an Apple Silicon user got a silent full-CPU
+  fallback on exactly the quants an 8–16 GB machine reaches for. Five matvec
+  kernels are new — q2_K, q3_K, iq4_nl, iq4_xs and bf16 — each byte-identical
+  to the CPU path, and `--caps` now reports Metal's real support.
+- **Metal prefill went from a regression to a large win.** The new matvec
+  kernels sped up decode but left prefill on a fallback that re-reads every
+  weight once per token column, which was slower on the GPU than on the CPU.
+  Tiled GEMM for the same five types fixes it (prompt tok/s, M1):
+
+  | model | CPU | Metal (matvec) | Metal (tiled) |
+  |---|---:|---:|---:|
+  | tinyllama-1.1b Q2_K | 36.91 | 28.20 | **192.10** |
+  | SmolLM2-360M IQ4_XS | 101.21 | 87.50 | **445.80** |
+  | SmolLM2-135M Q2_K | 285.79 | — | **892.83** |
+  | SmolLM2-135M bf16 | 296.23 | — | **848.69** |
+
+  0.76x against the CPU becomes 5.20x, and 0.86x becomes 4.40x.
+- **f16 and bf16 decode now beat the CPU instead of losing to it.** Both loaded
+  one weight per lane step while every quant kernel already loaded wide; four
+  per step takes f16 from 0.91x to 1.03x and bf16 from 0.91x to 1.04x on an M1
+  (135M model, medians of three interleaved runs), output unchanged.
+- **CUDA: Q8_0 runs on tensor cores by default.** Prefill goes 113.72 → 475.71
+  tok/s, 4.18x, on Qwen3-4B-Q8_0. The logits are bit-identical across 504
+  counted tensor-core dispatches rather than merely within tolerance: int8
+  weights convert to fp16 without loss and the accumulation order matches the
+  scalar path, so there is no numerical difference for an architecture to
+  amplify. The kernel already existed and was simply never dispatched. Measured
+  on sm_86.
+- **Structured output supports bounded repetition.** Schema patterns accept
+  `{n}` and `{n,m}` alongside the two unbounded forms. The ceiling is enforced
+  during decoding rather than at the closing quote, which is what the previous
+  floor-only validator could not express.
+- **Qwen3 can be asked not to reason.** A ChatML variant whose own template
+  declares `<think>` carries a tri-state thinking control, because the
+  references disagree; detection reads the model's template rather than
+  matching names, so it follows the checkpoint.
+- **`reasoning_limit` is no longer emitted on the OpenAI surfaces.** It is not
+  in the OpenAI `finish_reason` enum; it maps to the standard `length`.
+  `finish_detail` is now carried into streamed turns.
+- **A thread count above the pool maximum is clamped loudly.** `-t 128`
+  behaved exactly like `-t 64` with nothing on stderr; the caller asked for N,
+  got 64, and had no way to find out.
+- **Two gates were vacuous and are now real.** The VRAM leak gate could not
+  detect the bug it exists for: a deliberate 4.1 GB leak, six times, on an
+  8.59 GB card produced 0.0 MB of drift and a green result, because releasing
+  the CUDA primary context reclaims every allocation inside it. It now pins the
+  context, and treats a single catastrophic window as a leak rather than
+  requiring both windows to lose memory — the two-window rule inverts when the
+  first leak exhausts the card. The tensor-core tolerance gate now tells
+  "matched exactly" apart from "never ran", which are bit-identical outcomes
+  demanding opposite verdicts.
+- **A gemma-4 prompt change was reverted after measuring it.** An empty
+  thought-block pre-seed was added to the non-thinking generation prompt from a
+  summary of the reference template; the construct does not exist in the
+  model's own `tokenizer.chat_template`, and it cost 0.275. The original
+  unconditional form was correct.
+- **The build fails on discarded recipes.** "overriding commands for target" is
+  never benign — it always means a recipe was silently thrown away, and it had
+  been hiding a dead test target on every build. Windows warnings are
+  actionable and the fast-math sentinel warnings are gone.
+- New `scripts/weight-io-bench.py` reports mapped-fault versus explicit-read
+  bandwidth for large weight files, with tests and `make test-weight-io-bench`.
+- New gates cover the Metal f16 parity path, Metal K-quant index geometry, the
+  prefix half-budget truncation clamp, reservation auto-fit arithmetic, and the
+  KV-evicts-weights threshold.
+
+Known limitation: `--caps` still describes CPU and GPU quant support with one
+hardcoded list, which cannot be correct for both backends — CUDA has IQ4 and no
+q2_K, Metal now has q2_K. It currently understates Metal, which is the safe
+direction, but it is not accurate.
+
 ## v0.1.13-alpha — 2026-08-08
 
 - **CUDA prefill is 82% faster: 199.5 → 363.4 tok/s** (RTX PRO 6000 Blackwell
