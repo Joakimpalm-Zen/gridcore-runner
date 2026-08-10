@@ -53,33 +53,27 @@ Choose Runner when local inference needs to behave like dependable
 infrastructure: easy to deploy, bounded by the machine, and explicit about what
 it can prove.
 
-- **The binary is the deployment.** One executable contains the CPU engine,
-  HTTP APIs, CUDA PTX, Metal kernels, and desktop controller. Deploy the binary
-  and a GGUF; CUDA machines need only an NVIDIA driver.
-- **Tool calls survive the token limit.** JSON Schema is enforced inside the
-  sampler, not checked after generation. Once a document starts, Runner emits
-  the smallest legal ending when the budget expires, so agents receive
-  parseable, schema-conformant arguments instead of a broken fragment.
-- **Local cannot become public by configuration.** The server is fixed to
-  `127.0.0.1`. There is no host flag, environment variable, or config key that
-  can accidentally expose it to the network.
-- **A hardware switch is a measured change.** CPU/GPU identity results belong
+- **Tool calls stay valid at the cutoff.** The differentiator is not ordinary
+  JSON Schema support; it is forced-truncation recovery. Once a document starts,
+  Runner emits the smallest schema-legal ending when the token budget expires,
+  so agents receive parseable arguments instead of a broken fragment. The
+  committed [agent-torture gate](docs/agent-torture.md) tests this exact failure
+  mode.
+- **Local-only is an invariant, not a default.** The server is fixed to
+  `127.0.0.1`. There is no host flag, environment variable, config key, or
+  local-network toggle that can accidentally expose it.
+- **A hardware switch has a correctness contract.** CPU/GPU identity belongs
   to an exact SHA-256-pinned model and execution path. Faster kernels that
   reassociate floating-point sums must pass numerical tolerance gates; they do
   not inherit a correctness claim from the backend name.
-- **Unsupported means a clear refusal.** Unknown architectures, unsupported
-  tensor layouts, and split GGUF parts stop at admission with a reason. Runner
-  does not substitute similar-looking transformer math and return plausible
-  output from an unverified path.
-- **Automation can place work before loading it.** `--caps` reports the actual
-  machine, backend, quant, architecture, memory, and placement capabilities.
-  Reservations bound RAM, VRAM, and CPU; the VRAM registry prevents competing
-  processes from blindly overcommitting; swap mode keeps multiple named models
-  behind one endpoint.
-- **Claims come with receipts.** Compatibility records name the exact model
-  hash, check, result, and scope. Failed checks, unexecuted checks, and rejected
-  optimization experiments remain published, so a missing result cannot be
-  mistaken for a pass.
+- **Schedulers get a pre-load contract.** `--caps` needs no model and returns
+  one JSON document containing live RAM/VRAM, backend and GPU limits, CPU and
+  GPU quant lists, admitted architectures, placement modes, and model-count
+  limits. A controller can reject an incompatible placement before dispatch.
+- **A blank is never recorded as a pass.** Compatibility evidence names the
+  model hash, check, result, and scope, including `fail` and `not_executed`.
+  Rejected optimizations remain published with the measurements that killed
+  them.
 
 The full compatibility method is in
 [docs/compatibility-program.md](docs/compatibility-program.md), performance
