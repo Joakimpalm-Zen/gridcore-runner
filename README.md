@@ -51,38 +51,48 @@ Run a GGUF:
 
 Choose Runner when local inference needs to behave like dependable
 infrastructure: easy to deploy, bounded by the machine, and explicit about what
-it can prove.
+it can prove. The list below is ordered by how much difference each one makes in
+practice, most first.
 
-- **Tool calls stay valid at the cutoff.** The differentiator is not ordinary
-  JSON Schema support; it is forced-truncation recovery. Once a document starts,
-  Runner emits the smallest schema-legal ending when the token budget expires,
-  so agents receive parseable arguments instead of a broken fragment. The
+- **Tool calls survive the token limit.** An agent that receives broken JSON
+  cannot proceed; it retries from scratch, burning tokens, time, and context
+  window. The mechanism here is not ordinary JSON Schema support, it is
+  forced-truncation recovery: once a document starts, Runner emits the smallest
+  schema-legal ending when the token budget expires, so the arguments still
+  parse. On local models, where context is tight and generation is slow, that is
+  the difference between an agent loop that finishes and one that crashes. The
   committed [agent-torture gate](docs/agent-torture.md) tests this exact failure
   mode.
+- **A shared GPU stops being first-come, first-crash.** Run a coding agent
+  beside an embeddings model beside a draft model and the usual outcome is that
+  one load kills another. Runner processes on the same GPU share a VRAM
+  registry: a refused load names every live holder by PID, model, bytes, and
+  uptime, `--wait-for-vram` turns that refusal into a bounded queue, and records
+  left by dead processes are reaped. It makes a GPU something you can schedule
+  rather than something you hope fits.
+- **You can ask what fits before loading anything.** The usual way to find out
+  whether a model fits is to load it and wait for the failure. `--caps` needs no
+  model file and returns one JSON document containing live RAM/VRAM, backend and
+  GPU limits, CPU and GPU quant lists, admitted architectures, placement modes,
+  and model-count limits. A supervisor, tray controller, or CI job can reject an
+  incompatible placement before dispatch, which removes a whole class of
+  load-wait-fail-retry loops.
 - **Constrained decisions come with a confidence signal.** `choice_logprobs`
   records each JSON-schema branch as legal alternatives, a posterior
-  renormalized over them, and the probed probability mass. The included
-  calibration tool turns labeled decisions into accuracy, Brier-score, and ECE
-  gates; this is a decision record, not ordinary token logprobs.
-- **Local-only is an invariant, not a default.** The server is fixed to
-  `127.0.0.1`. There is no host flag, environment variable, config key, or
-  local-network toggle that can accidentally expose it.
-- **A hardware switch has a correctness contract.** CPU/GPU identity belongs
-  to an exact SHA-256-pinned model and execution path. Faster kernels that
-  reassociate floating-point sums must pass numerical tolerance gates; they do
-  not inherit a correctness claim from the backend name.
-- **Schedulers get a pre-load contract.** `--caps` needs no model and returns
-  one JSON document containing live RAM/VRAM, backend and GPU limits, CPU and
-  GPU quant lists, admitted architectures, placement modes, and model-count
-  limits. A controller can reject an incompatible placement before dispatch.
-- **Independent CUDA jobs coordinate before allocation.** Runner processes on
-  the same GPU share a VRAM registry. A refused load names every live holder by
-  PID, model, bytes, and uptime; `--wait-for-vram` turns the refusal into a
-  bounded queue, and stale records from dead processes are reaped.
-- **A blank is never recorded as a pass.** Compatibility evidence names the
-  model hash, check, result, and scope, including `fail` and `not_executed`.
-  Rejected optimizations remain published with the measurements that killed
-  them.
+  renormalized over them, and the probed probability mass — how confident the
+  model was choosing one branch over another, which is what routing and
+  calibrated classification actually need. The included calibration tool turns
+  labeled decisions into accuracy, Brier-score, and ECE gates. This is a
+  decision record rather than ordinary token logprobs, and a power-user feature:
+  most workloads will never reach for it.
+- **A hardware switch has a correctness contract.** If you move a workload
+  between backends and the output quietly changes, that is a bug, not a tuning
+  artifact. CPU/GPU identity here belongs to an exact SHA-256-pinned model and
+  execution path, and faster kernels that reassociate floating-point sums must
+  pass numerical tolerance gates rather than inherit a correctness claim from the
+  backend name. Most users never compare outputs across backends; this is
+  documented because the project treats correctness as a gate, not because it is
+  a headline.
 
 The full compatibility method is in
 [docs/compatibility-program.md](docs/compatibility-program.md), performance
@@ -347,9 +357,11 @@ Start a single-model server:
 ./runner -m model.gguf --serve --port 8080 --parallel 2
 ```
 
-The server is HTTP on loopback only, with no TLS or authentication. Put it
-behind an authenticated reverse proxy or tunnel when remote access is needed;
-do not forward the port directly. Host and Origin validation rejects
+The server is HTTP on loopback only, with no TLS or authentication. Binding to
+`127.0.0.1` is an invariant rather than a default: there is no host flag,
+environment variable, config key, or local-network toggle that can expose it.
+Put it behind an authenticated reverse proxy or tunnel when remote access is
+needed; do not forward the port directly. Host and Origin validation rejects
 non-loopback authorities.
 
 ### Endpoints
