@@ -491,6 +491,54 @@ static void test_schema_agent_id_pattern_is_enforced(void) {
     schema_free(schema); jv_free(j);
 }
 
+static void test_schema_pattern_shorthand_classes(void) {
+    // ^\d{5}$ — postal codes, order numbers, IDs — is the most common
+    // fixed-length pattern there is, and it used to be refused over a
+    // spelling: the compiler demanded a bracket set, so [0-9]{5} compiled and
+    // \d{5} did not. \d and \w now expand to exactly the ASCII sets their
+    // bracket equivalents would, in every position the class is legal.
+    struct { const char *pat; const char *good; const char *bad; } cases[] = {
+        { "^\\\\d{5}$",     "\"12345\"",      "\"1234a\""      },
+        { "^\\\\d{5}$",     "\"00000\"",      "\"123456\""     },
+        { "^\\\\w{3}$",     "\"a_9\"",        "\"a-9\""        },
+        { "^\\\\w{3}$",     "\"ABC\"",        "\"AB\""         },
+        { "^ORD-\\\\d{6}$", "\"ORD-100000\"", "\"XRD-100000\"" },
+        { "^\\\\d{2,4}$",   "\"123\"",        "\"12345\""      },
+        { "^\\\\d+$",       "\"7\"",          "\"x\""          },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        char src[160];
+        snprintf(src, sizeof(src), "{\"type\":\"string\",\"pattern\":\"%s\"}",
+                 cases[i].pat);
+        jv *j = json_parse(src, strlen(src));
+        assert(j != NULL);
+        char err[128];
+        snode *schema = schema_compile(j, err, sizeof(err));
+        assert(schema != NULL);
+        sval good; sval_init(&good, schema);
+        assert(sval_feed(&good, cases[i].good, (int)strlen(cases[i].good)) &&
+               good.done);
+        sval bad; sval_init(&bad, schema);
+        // either rejected outright, or accepted-but-not-complete; both mean
+        // the declared language is being enforced rather than waved through
+        assert(!(sval_feed(&bad, cases[i].bad, (int)strlen(cases[i].bad)) &&
+                 bad.done));
+        schema_free(schema); jv_free(j);
+    }
+    // \s is NOT supported, on purpose: it includes tab/newline/CR, and JSON
+    // forbids raw control characters inside a string, so a grammar emitting
+    // them would produce output the caller cannot parse. Narrowing it to
+    // "space" would enforce a different language than the one declared, so it
+    // fails closed like every other form this compiler cannot honour exactly.
+    const char *ws = "{\"type\":\"string\",\"pattern\":\"^\\\\s{2}$\"}";
+    jv *j = json_parse(ws, strlen(ws));
+    assert(j != NULL);
+    char err[128];
+    assert(schema_compile(j, err, sizeof(err)) == NULL);
+    assert(strstr(err, "pattern") != NULL);
+    jv_free(j);
+}
+
 static void test_schema_pattern_regex_syntax_is_rejected_not_reinterpreted(void) {
     // the compiler matches prefix and class LITERALLY; regex syntax it would
     // silently reinterpret (escapes, negation, prefix metacharacters) must be
@@ -1256,6 +1304,7 @@ int main(void) {
     test_schema_rejects_unenforceable_keywords();
     test_schema_bounded_repetition();
     test_schema_agent_id_pattern_is_enforced();
+    test_schema_pattern_shorthand_classes();
     test_schema_pattern_regex_syntax_is_rejected_not_reinterpreted();
     test_schema_number_bounds_reject_dead_minus_and_close_in_bounds();
     test_schema_merges_enum_and_const_anyof();

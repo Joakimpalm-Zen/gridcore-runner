@@ -183,17 +183,44 @@ static bool compile_bound(jv *v, int dflt, int *out) {
 }
 
 /* Compile the anchored prefix + ASCII class form used by coding-agent IDs,
-   e.g. ^wf_[a-z0-9-]{6,}$. Other regex forms remain explicit errors.
+   e.g. ^wf_[a-z0-9-]{6,}$. The class may be written as a bracket set or as the
+   \d / \w shorthand, so ^\d{5}$ — a postal code, an order number, an ID, the
+   single most common fixed-length pattern there is — compiles rather than
+   being refused for a spelling. Other regex forms remain explicit errors.
 
    Both halves are matched LITERALLY at runtime, so any regex syntax we would
    silently reinterpret must be a compile error instead: a metacharacter in
-   the prefix (`.` `\` `$` ...) or an escape/negation in the class (`\d`,
-   `[^a]`) would make the enforced language differ from the declared pattern
-   — and a constraint that differs from the one the caller declared is the
-   exact failure this compiler exists to prevent. */
+   the prefix (`.` `\` `$` ...), a negated class (`[^a]`), or an escape INSIDE
+   a bracket set (`[\d]`) would make the enforced language differ from the
+   declared pattern — and a constraint that differs from the one the caller
+   declared is the exact failure this compiler exists to prevent. */
 static bool pattern_prefix_char_ok(unsigned char c) {
     if (c >= 128) return false;
     return strchr(".\\*+?()|{}$^", (char)c) == NULL;
+}
+
+/* The shorthand classes a JSON string can carry literally. \d and \w expand to
+   printable ASCII, so the enforced language is exactly the declared one.
+
+   \s is deliberately absent. It includes tab, newline and CR, and JSON forbids
+   raw control characters inside a string — a grammar that emitted them would
+   produce output the caller cannot parse. Silently narrowing \s to "space" is
+   the other way to be wrong, so it stays a compile error like any other form
+   this compiler cannot enforce exactly. */
+static bool pattern_shorthand_class(char c, bool *ascii) {
+    switch (c) {
+        case 'd':
+            for (unsigned x = '0'; x <= '9'; x++) ascii[x] = true;
+            return true;
+        case 'w':
+            for (unsigned x = '0'; x <= '9'; x++) ascii[x] = true;
+            for (unsigned x = 'A'; x <= 'Z'; x++) ascii[x] = true;
+            for (unsigned x = 'a'; x <= 'z'; x++) ascii[x] = true;
+            ascii['_'] = true;
+            return true;
+        default:
+            return false;
+    }
 }
 
 static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
@@ -202,21 +229,38 @@ static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
     if (pv->type != J_STR) goto bad;
     const char *p = pv->str;
     if (*p++ != '^') goto bad;
-    const char *lb = strchr(p, '[');
-    if (!lb) goto bad;
-    const char *rb = strchr(lb + 1, ']');
-    if (!rb) goto bad;
+    // The repeated class is either a bracket set or a shorthand escape;
+    // whichever appears first is the class, and everything before it is the
+    // literal prefix (which can contain neither — pattern_prefix_char_ok bars
+    // both `[` via the class scan and `\` outright).
+    const char *lb  = strchr(p, '[');
+    const char *esc = strchr(p, '\\');
+    bool shorthand = esc && (!lb || esc < lb);
+    // Reject an unsupported shorthand here, before anything is allocated, so
+    // the failure path stays a plain goto with nothing to unwind.
+    if (shorthand && !(esc[1] == 'd' || esc[1] == 'w')) goto bad;
+    const char *cls = shorthand ? esc : lb;   // first byte of the class token
+    const char *rb  = NULL;                   // ']', bracket form only
+    const char *quant;                        // first byte after the class
+    if (shorthand) {
+        quant = esc + 2;
+    } else {
+        if (!lb) goto bad;
+        rb = strchr(lb + 1, ']');
+        if (!rb) goto bad;
+        quant = rb + 1;
+    }
     long min, max = -1;   // max -1: unbounded
-    if (!strcmp(rb + 1, "+$")) {
+    if (!strcmp(quant, "+$")) {
         min = 1;
     } else {
         // {n}  exact, {n,}  at least n, {n,m}  between n and m. Anything else
         // is still an explicit error: this compiler only ever accepts forms it
         // can enforce exactly.
-        if (rb[1] != '{') goto bad;
+        if (quant[0] != '{') goto bad;
         char *end = NULL;
-        min = strtol(rb + 2, &end, 10);
-        if (min < 0 || min > INT_MAX || !end || end == rb + 2) goto bad;
+        min = strtol(quant + 1, &end, 10);
+        if (min < 0 || min > INT_MAX || !end || end == quant + 1) goto bad;
         if (!strcmp(end, "}$")) {
             max = min;                      // {n}
         } else if (!strcmp(end, ",}$")) {
@@ -233,29 +277,35 @@ static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
             goto bad;
         }
     }
-    for (const char *q = p; q < lb; q++)
+    for (const char *q = p; q < cls; q++)
         if (!pattern_prefix_char_ok((unsigned char)*q)) goto bad;
-    if (lb[1] == '^') goto bad;  // negated class: not literally matchable
-    n->pattern_prefix_len = (int)(lb - p);
+    if (!shorthand && lb[1] == '^') goto bad;  // negated: not literally matchable
+    n->pattern_prefix_len = (int)(cls - p);
     n->pattern_prefix = strndup(p, (size_t)n->pattern_prefix_len);
     if (!n->pattern_prefix) return false;
     n->pattern_min_tail = (int)min;
     n->pattern_max_tail = (int)max;
-    for (const char *q = lb + 1; q < rb; q++) {
-        if (*q == '\\') goto bad;  // class escapes (\d, \-, \]) are regex syntax
-        unsigned char lo = (unsigned char)*q, hi = lo;
-        if (q + 2 < rb && q[1] == '-') {
-            if (q[2] == '\\') goto bad;
-            hi = (unsigned char)q[2];
-            q += 2;
+    if (shorthand) {
+        // validated above, so this cannot fail with the prefix already owned
+        pattern_shorthand_class(esc[1], n->pattern_ascii);
+    } else {
+        for (const char *q = lb + 1; q < rb; q++) {
+            if (*q == '\\') goto bad;  // escapes inside [] are still regex syntax
+            unsigned char lo = (unsigned char)*q, hi = lo;
+            if (q + 2 < rb && q[1] == '-') {
+                if (q[2] == '\\') goto bad;
+                hi = (unsigned char)q[2];
+                q += 2;
+            }
+            if (lo >= 128 || hi >= 128 || lo > hi) goto bad;
+            for (unsigned c = lo; c <= hi; c++) n->pattern_ascii[c] = true;
         }
-        if (lo >= 128 || hi >= 128 || lo > hi) goto bad;
-        for (unsigned c = lo; c <= hi; c++) n->pattern_ascii[c] = true;
     }
     return true;
 bad:
     snprintf(err, errcap,
-             "pattern only supports anchored prefix plus repeated ASCII class (got %.48s)",
+             "pattern only supports an anchored prefix plus one repeated ASCII "
+             "class ([...], \\d or \\w) (got %.48s)",
              pv && pv->type == J_STR ? pv->str : "non-string");
     return false;
 }
