@@ -588,12 +588,14 @@ else
 	@echo "metal fallback tests skipped: macOS-only backend"
 endif
 
-# Byte-identity for the K-quants that only just got Metal kernels (q2_K, q3_K).
+# Byte-identity for the Metal paths that only just got new kernels or widening:
+# q2_K/q3_K/iq4_xs tiled+matvec coverage, and f16/bf16 matvec widening.
 #
 # They are tested TOGETHER because a checkpoint exercising only one does not
 # exist in the wild: every real "Q2_K" GGUF is a mix, and llama.cpp's mix pairs
 # q2_K with q3_K (measured: tinyllama-1.1b Q2_K is 45 q2_K + 110 q3_K tensors).
-# Shipping q2_K alone would have run exactly nothing.
+# Shipping q2_K alone would have run exactly nothing. f16 and bf16 are included
+# here because their widened decode kernels carry the broadest blast radius.
 #
 # Short AND long prompts, because they take different code paths: a batch of
 # more than one token uses the tiled GEMM (k_mm_*) and decode uses the matvec
@@ -608,12 +610,14 @@ endif
 # found three times over.
 KQUANT_MODELS ?= $(wildcard models/tinyllama-q2k.gguf models/*Q2_K*.gguf \
                    models/*q2_k*.gguf models/*IQ4_XS*.gguf models/*iq4xs*.gguf \
+                   models/*-f16*.gguf models/*-F16*.gguf \
+                   models/*_f16*.gguf models/*_F16*.gguf \
                    models/*bf16*.gguf models/*BF16*.gguf)
 test-metal-kquant: runner
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
 	if [ -z "$(KQUANT_MODELS)" ]; then \
-	  echo "metal quant parity: SKIP (no q2_K/q3_K/iq4 checkpoint in models/)"; \
+	  echo "metal quant parity: SKIP (no q2_K/q3_K/iq4_xs/f16/bf16 checkpoint in models/)"; \
 	  exit 0; fi; \
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 	  long=$$($(PYTHON) -c "print(' '.join(['the quick brown fox jumps over the lazy dog']*40))"); \
