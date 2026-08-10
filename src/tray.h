@@ -55,6 +55,29 @@ void tray_menu_act(int action, long arg, const char *text);
 // True while ≥1 runner instance is live — the backend shows the badge dot.
 bool tray_any_running(void);
 
+// Which glyph the menu-bar / notification-area icon should draw. Three states,
+// each sourced from something real rather than inferred:
+//   IDLE    no runner instance registered at all
+//   LOADED  a runner is up with a model resident, nothing in flight
+//   RUNNING inference is actually in flight (active_requests from /health)
+// LOADED is the honest answer whenever the busy question cannot be asked — a
+// server that is up but unreachable on loopback is still a loaded model, and
+// claiming it is working would be the one reading that is definitely wrong.
+typedef enum {
+    TRAY_ICON_IDLE = 0,
+    TRAY_ICON_LOADED,
+    TRAY_ICON_RUNNING,
+} tray_icon_state;
+tray_icon_state tray_icon(void);
+
+// Design-review / human-click-checklist seam, the icon sibling of
+// GRIDCORE_TRAY_DUMP: render all three states to <dir>/tray-{idle,loaded,
+// running}.png at `px` square and return true. A menu-bar glyph is 18 px of
+// arcs that nobody can review by reading the drawing code, and this is the
+// only way to look at it without a display. Backends with no offscreen
+// renderer return false.
+bool tray_platform_icon_dump(const char *dir, int px);
+
 // True when the platform loop should exit (set by TRAY_ACT_QUIT).
 bool tray_should_quit(void);
 

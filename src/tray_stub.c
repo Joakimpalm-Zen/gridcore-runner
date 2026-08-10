@@ -10,4 +10,11 @@ int tray_platform_run(void) {
 }
 
 bool tray_platform_autostart_get(void) { return false; }
+
+// no offscreen renderer in the stub; the seam reports failure rather than
+// writing nothing and claiming success
+bool tray_platform_icon_dump(const char *dir, int px) {
+    (void)dir; (void)px;
+    return false;
+}
 bool tray_platform_autostart_set(bool on) { (void)on; return false; }

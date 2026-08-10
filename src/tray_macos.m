@@ -15,31 +15,110 @@
 static NSStatusItem *g_status;
 
 // ---------------------------------------------------------------- the icon
-// Code-drawn 3×3 grid glyph, template image so macOS recolors it for
-// light/dark menu bars. `filled` adds the running-dot in the center cell.
-static NSImage *grid_icon(bool filled) {
-    NSImage *img = [NSImage imageWithSize:NSMakeSize(18, 18)
+// One rounded-square core with a signal motif around it, drawn in code as a
+// template image so macOS recolors it for light and dark menu bars. Three
+// states, matching the three the core can actually distinguish:
+//
+//   IDLE     hollow core, two sweeps      nothing loaded
+//   LOADED   solid core, two sweeps       model resident, waiting
+//   RUNNING  solid core, full broken ring inference in flight
+//
+// The ring is segmented rather than continuous because a menu-bar template
+// image cannot animate: four gaps read as motion where a closed circle would
+// read as a static badge. Everything is drawn from the centre of an 18×18 box
+// so the three glyphs share an optical weight and the icon does not appear to
+// shift when the state changes.
+static NSImage *core_icon_px(tray_icon_state st, CGFloat px) {
+    const CGFloat s = px / 18.0;   // geometry below is authored in 18-pt units
+    NSImage *img = [NSImage imageWithSize:NSMakeSize(px, px)
                                   flipped:NO
                            drawingHandler:^BOOL(NSRect rect) {
+        (void)rect;
         [[NSColor blackColor] setFill];
-        CGFloat cell = 4.0, gap = 1.5, x0 = 1.5, y0 = 1.5;
-        for (int r = 0; r < 3; r++)
-            for (int c = 0; c < 3; c++) {
-                NSRect cr = NSMakeRect(x0 + c * (cell + gap),
-                                       y0 + r * (cell + gap), cell, cell);
-                NSBezierPath *p =
-                    [NSBezierPath bezierPathWithRoundedRect:cr xRadius:1 yRadius:1];
-                if (r == 1 && c == 1 && filled) {
-                    [p fill];
-                } else {
-                    p.lineWidth = 1.0;
-                    [p stroke];
-                }
-            }
+        [[NSColor blackColor] setStroke];
+        const CGFloat cx = 9.0 * s, cy = 9.0 * s;
+
+        NSPoint c = NSMakePoint(cx, cy);
+        void (^sweep)(CGFloat, CGFloat, CGFloat, CGFloat) =
+            ^(CGFloat r, CGFloat mid, CGFloat half, CGFloat w) {
+            NSBezierPath *p = [NSBezierPath bezierPath];
+            p.lineWidth = w;
+            p.lineCapStyle = NSLineCapStyleRound;
+            [p appendBezierPathWithArcWithCenter:c
+                                          radius:r
+                                      startAngle:mid - half
+                                        endAngle:mid + half];
+            [p stroke];
+        };
+
+        // the core
+        const CGFloat side = 7.2 * s;
+        if (st == TRAY_ICON_IDLE) {
+            // inset by half the line width so the hollow core keeps the solid
+            // one's outer edge instead of growing outward by half a stroke
+            const CGFloat w = 1.3 * s;
+            NSBezierPath *core = [NSBezierPath bezierPathWithRoundedRect:
+                NSMakeRect(cx - side / 2 + w / 2, cy - side / 2 + w / 2,
+                           side - w, side - w)
+                                                                xRadius:1.8 * s
+                                                                yRadius:1.8 * s];
+            core.lineWidth = w;
+            [core stroke];
+        } else {
+            [[NSBezierPath bezierPathWithRoundedRect:
+                NSMakeRect(cx - side / 2, cy - side / 2, side, side)
+                                             xRadius:2.2 * s
+                                             yRadius:2.2 * s] fill];
+        }
+
+        if (st == TRAY_ICON_RUNNING) {
+            for (int i = 0; i < 4; i++)
+                sweep(6.5 * s, 45.0 + i * 90.0, 32.0, 1.5 * s);
+        } else {
+            // two opposing sweeps: upper-right and lower-left
+            sweep(6.3 * s, 45.0, 30.0, 1.3 * s);
+            sweep(6.3 * s, 225.0, 30.0, 1.3 * s);
+        }
         return YES;
     }];
     [img setTemplate:YES];
     return img;
+}
+
+static NSImage *core_icon(tray_icon_state st) { return core_icon_px(st, 18.0); }
+
+bool tray_platform_icon_dump(const char *dir, int px) {
+    @autoreleasepool {
+        const char *names[] = { "idle", "loaded", "running" };
+        for (int i = 0; i < 3; i++) {
+            // template images carry no colour, so paint the glyph onto an
+            // opaque white ground — otherwise the PNG is black-on-transparent
+            // and unreviewable in most viewers
+            NSImage *glyph = core_icon_px((tray_icon_state)i, px);
+            NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+                initWithBitmapDataPlanes:NULL pixelsWide:px pixelsHigh:px
+                            bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES
+                                 isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace
+                              bytesPerRow:0 bitsPerPixel:0];
+            [NSGraphicsContext saveGraphicsState];
+            NSGraphicsContext.currentContext =
+                [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
+            [[NSColor whiteColor] setFill];
+            NSRectFill(NSMakeRect(0, 0, px, px));
+            [glyph drawInRect:NSMakeRect(0, 0, px, px)];
+            [NSGraphicsContext restoreGraphicsState];
+
+            NSData *png = [rep representationUsingType:NSBitmapImageFileTypePNG
+                                            properties:@{}];
+            char path[1200];
+            snprintf(path, sizeof path, "%s/tray-%s.png", dir, names[i]);
+            if (![png writeToFile:[NSString stringWithUTF8String:path]
+                       atomically:YES])
+                return false;
+            printf("wrote %s\n", path);
+        }
+    }
+    return true;
 }
 
 // ------------------------------------------------------------- menu bridge
@@ -96,7 +175,7 @@ static NSImage *grid_icon(bool filled) {
         }
         }
     }
-    g_status.button.image = grid_icon(tray_any_running());
+    g_status.button.image = core_icon(tray_icon());
 }
 
 - (void)clicked:(NSMenuItem *)sender {
@@ -124,12 +203,12 @@ static NSImage *grid_icon(bool filled) {
     if (tray_should_quit())
         [NSApp stop:nil];
     else
-        g_status.button.image = grid_icon(tray_any_running());
+        g_status.button.image = core_icon(tray_icon());
 }
 
 - (void)tick:(NSTimer *)timer {
     if (tray_should_quit()) { [NSApp stop:nil]; return; }
-    g_status.button.image = grid_icon(tray_any_running());
+    g_status.button.image = core_icon(tray_icon());
 }
 
 @end
@@ -190,7 +269,7 @@ int tray_platform_run(void) {
         TrayDelegate *del = [[TrayDelegate alloc] init];
         g_status = [[NSStatusBar systemStatusBar]
             statusItemWithLength:NSSquareStatusItemLength];
-        g_status.button.image = grid_icon(tray_any_running());
+        g_status.button.image = core_icon(tray_icon());
         g_status.button.toolTip = @"gridcore-runner";
 
         NSMenu *menu = [[NSMenu alloc] init];

@@ -339,14 +339,26 @@ static void handle_embeddings(slot_t *s, sock_t fd, jv *req) {
 static void send_health(sock_t fd) {
     char b[384];
     int n, res = resident_load();
+    // Inference requests in flight. "A model is loaded" and "the model is
+    // working" look identical from outside the process, and the tray needs to
+    // tell them apart to show the right glyph. This is the count the server
+    // already keeps for swap and unload decisions, so reading it costs an
+    // atomic load and adds nothing to the request path. /health is not itself
+    // counted (the increment at dispatch covers the inference routes only), so
+    // a poller never sees its own request here.
+    int active = atomic_load(&SV.active_requests);
     if (SV.n_reg > 0 && res >= 0) {
         char esc[192];
         json_escape(SV.reg[res].name, strlen(SV.reg[res].name), esc, sizeof(esc));
-        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":\"%s\"}", esc);
+        n = snprintf(b, sizeof(b),
+                     "{\"status\":\"ok\",\"resident\":\"%s\","
+                     "\"active_requests\":%d}", esc, active);
     } else if (SV.n_reg > 0) {
-        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":null}");
+        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":null,"
+                                   "\"active_requests\":%d}", active);
     } else {
-        n = snprintf(b, sizeof(b), "{\"status\":\"ok\"}");
+        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"active_requests\":%d}",
+                     active);
     }
     send_response(fd, 200, "application/json", b, n);
 }

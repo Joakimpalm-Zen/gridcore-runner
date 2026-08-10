@@ -358,18 +358,17 @@ static void self_exe(char *out, size_t cap) {
 
 // ---------------------------------------------------- swap-serve enrichment
 
-// A swap-mode server registers with an empty models list (models come and
-// go at runtime), so the menu asks the instance itself: GET /v1/models on
-// loopback with a short timeout, parse the ids. Best-effort — on any
-// failure the menu just shows the placeholder row.
-static int fetch_served_models(int port, char names[][128], int cap) {
+// One loopback GET, best-effort: fills `out` with the raw response (headers
+// included) and returns false on any failure. Shared by the model list and the
+// activity poll so there is one timeout policy and one socket teardown path.
+static bool http_get_loopback(int port, const char *path, char *out, int cap) {
 #ifdef _WIN32
     static bool wsa_up = false;
     if (!wsa_up) { WSADATA w; wsa_up = WSAStartup(MAKEWORD(2, 2), &w) == 0; }
-    if (!wsa_up) return 0;
+    if (!wsa_up) return false;
 #endif
     sock_t s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s == INVALID_SOCKET) return 0;
+    if (s == INVALID_SOCKET) return false;
 #ifdef _WIN32
     DWORD tmo = 500;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tmo, sizeof tmo);
@@ -383,22 +382,27 @@ static int fetch_served_models(int port, char names[][128], int cap) {
     a.sin_family = AF_INET;
     a.sin_port = htons((unsigned short)port);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(s, (struct sockaddr *)&a, sizeof a) != 0) { sock_close(s); return 0; }
+    if (connect(s, (struct sockaddr *)&a, sizeof a) != 0) { sock_close(s); return false; }
 
-    char req[128];
+    char req[160];
     int rl = snprintf(req, sizeof req,
-                      "GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
-                      "Connection: close\r\n\r\n", port);
-    if (send(s, req, rl, 0) != rl) { sock_close(s); return 0; }
+                      "GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                      "Connection: close\r\n\r\n", path, port);
+    if (send(s, req, rl, 0) != rl) { sock_close(s); return false; }
 
-    char buf[16384];
     int n = 0, r;
-    while (n < (int)sizeof buf - 1 &&
-           (r = (int)recv(s, buf + n, sizeof buf - 1 - n, 0)) > 0)
+    while (n < cap - 1 && (r = (int)recv(s, out + n, cap - 1 - n, 0)) > 0)
         n += r;
     sock_close(s);
-    buf[n] = 0;
+    out[n] = 0;
+    return n > 0;
+}
 
+// A swap-mode server registers with an empty models list (models come and go
+// at runtime), so the menu asks the instance itself and parses the ids.
+static int fetch_served_models(int port, char names[][128], int cap) {
+    char buf[16384];
+    if (!http_get_loopback(port, "/v1/models", buf, sizeof buf)) return 0;
     char *body = strstr(buf, "\r\n\r\n");
     if (!body) return 0;
     jv *v = json_parse(body + 4, strlen(body + 4));
@@ -598,6 +602,39 @@ bool tray_any_running(void) {
     return live > 0;
 }
 
+// GET /health on loopback and read active_requests. Same best-effort shape as
+// fetch_served_models: short timeout, and any failure returns 0 so an
+// unreachable server reads as "not working" rather than inventing activity.
+static int fetch_active_requests(int port) {
+    char buf[2048];
+    if (!http_get_loopback(port, "/health", buf, sizeof buf)) return 0;
+    char *body = strstr(buf, "\r\n\r\n");
+    if (!body) return 0;
+    jv *v = json_parse(body + 4, strlen(body + 4));
+    if (!v) return 0;
+    int active = (int)jv_num(jv_get(v, "active_requests"), 0);
+    jv_free(v);
+    return active;
+}
+
+tray_icon_state tray_icon(void) {
+    int n = 0;
+    instance_rec *r = instances_list(&n);
+    bool loaded = false;
+    int  active = 0;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(r[i].mode, "tray") == 0) continue;  // the tray is not a runner
+        loaded = true;
+        // Only a serving instance can be asked. A `cli` run holds a model too,
+        // and counts as loaded, but has no port to answer on.
+        if (r[i].port > 0 && active == 0)
+            active = fetch_active_requests(r[i].port);
+    }
+    instances_list_free(r, n);
+    if (!loaded) return TRAY_ICON_IDLE;
+    return active > 0 ? TRAY_ICON_RUNNING : TRAY_ICON_LOADED;
+}
+
 bool tray_should_quit(void) { return g_quit; }
 
 int tray_main(void) {
@@ -608,6 +645,12 @@ int tray_main(void) {
     // a display; also what the human-click checklist diffs against. Runs
     // BEFORE the single-instance guard — it is read-only, and the checklist
     // diffs it against a tray that is currently up.
+    // icon sibling of the same seam: render the three glyph states to files so
+    // a design change can be reviewed, and diffed, without a menu bar.
+    const char *icon_dir = getenv("GRIDCORE_TRAY_ICON_DUMP");
+    if (icon_dir)
+        return tray_platform_icon_dump(icon_dir, 144) ? 0 : 1;
+
     if (getenv("GRIDCORE_TRAY_DUMP")) {
         tray_item items[128];
         int ni2 = tray_menu_build(items, 128);
