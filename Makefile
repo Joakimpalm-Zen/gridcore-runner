@@ -121,6 +121,7 @@ TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
 TEST_PARSE = $(TEST_BATCH:test-batch%=test-parse%)
 TEST_METAL_OWNERSHIP = $(TEST_BATCH:test-batch%=test-metal-ownership%)
 TEST_METAL_SHADERS = $(TEST_BATCH:test-batch%=test-metal-shaders%)
+TEST_METAL_KQUANTS = $(TEST_BATCH:test-batch%=test-metal-kquants%)
 TEST_MODEL_LOAD_FAILURE = $(TEST_BATCH:test-batch%=test-model-load-failure%)
 TEST_THREAD_DEFAULT = $(TEST_BATCH:test-batch%=test-thread-default%)
 
@@ -545,6 +546,11 @@ $(TEST_METAL_SHADERS): tests/test_metal_shaders.m src/kernels_metal.h
 	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
 	    tests/test_metal_shaders.m -o $@ -framework Metal -framework Foundation
 
+$(TEST_METAL_KQUANTS): tests/test_metal_kquants.m src/kernels_metal.h src/quants.c $(HDR)
+	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
+	    tests/test_metal_kquants.m src/quants.c -o $@ -lm -lpthread \
+	    -framework Metal -framework Foundation
+
 # compat.c joins the link because the partial-offload residency guard in
 # metal.m calls plat_ram_available_bytes(): deciding whether a split pays
 # needs to know how much RAM the CPU tail would have to stream through.
@@ -556,8 +562,9 @@ $(TEST_METAL_OWNERSHIP): tests/test_metal_ownership.m src/metal.m src/compat.c $
 # run fall back to the CPU silently, which no correctness gate can see.
 test-metal-shader-gate:
 ifeq ($(shell uname -s),Darwin)
-	@$(MAKE) --no-print-directory $(TEST_METAL_SHADERS) >/dev/null
+	@$(MAKE) --no-print-directory $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) >/dev/null
 	@./$(TEST_METAL_SHADERS)
+	@./$(TEST_METAL_KQUANTS)
 else
 	@echo "metal shader gate skipped: macOS-only backend"
 endif
@@ -1000,7 +1007,7 @@ clean:
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
-	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_MODEL_LOAD_FAILURE) \
+	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \
 	      $(TEST_SPLIT_GUARD) split-guard.out
 	rm -rf test-attn

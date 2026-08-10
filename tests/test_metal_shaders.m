@@ -27,13 +27,16 @@
 // Every kernel mk_pipeline() asks for in src/metal.m. Keep in step with it:
 // scripts/check-generated.py cannot see a name that was renamed in both files.
 static const char *KERNELS[] = {
-    "k_add", "k_attn", "k_gelu_mul", "k_head_rmsnorm", "k_head_transform",
-    "k_mm_f16", "k_mm_f32", "k_mm_mxfp4", "k_mm_q4_0", "k_mm_q4_K",
+    "k_add", "k_attn", "k_attn_chunk", "k_attn_combine", "k_gelu_mul",
+    "k_head_rmsnorm", "k_head_transform",
+    "k_mm_bf16", "k_mm_f16", "k_mm_f32", "k_mm_iq4_nl", "k_mm_iq4_xs",
+    "k_mm_mxfp4", "k_mm_q2_K", "k_mm_q3_K", "k_mm_q4_0", "k_mm_q4_K",
     "k_mm_q6_K", "k_mm_q8_0",
     "k_moe_actmul", "k_moe_mv_f16", "k_moe_mv_f32", "k_moe_mv_mxfp4",
     "k_moe_mv_q4_0", "k_moe_mv_q4_K", "k_moe_mv_q5_K", "k_moe_mv_q6_K",
     "k_moe_mv_q8_0", "k_moe_route", "k_moe_sum",
-    "k_mv_f16", "k_mv_f32", "k_mv_mxfp4", "k_mv_q4_0", "k_mv_q4_1",
+    "k_mv_bf16", "k_mv_f16", "k_mv_f32", "k_mv_iq4_nl", "k_mv_iq4_xs",
+    "k_mv_mxfp4", "k_mv_q2_K", "k_mv_q3_K", "k_mv_q4_0", "k_mv_q4_1",
     "k_mv_q4_K", "k_mv_q5_0", "k_mv_q5_1", "k_mv_q5_K", "k_mv_q6_K",
     "k_mv_q8_0",
     "k_qknorm", "k_rmsnorm", "k_rope", "k_scale", "k_silu_mul", "k_store_kv",
