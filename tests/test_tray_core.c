@@ -278,6 +278,25 @@ int main(int argc, char **argv) {
     CHECK(menu_has(items, n, "Start default runner"), "start row back after quit");
     CHECK(!menu_has(items, n, "exited"), "no exited warning after intentional stop");
 
+    // 5. tray_ensure_running() is idempotent. A tray now follows every --serve
+    // and -i session, so this runs constantly and MUST NOT stack processes;
+    // the one-tray-per-machine guard is the child's backstop, not the caller's
+    // licence to spawn.
+    //
+    // Only the already-registered branch is exercised, deliberately. The spawn
+    // branch re-execs argv[0] with --tray, and argv[0] here is this test — it
+    // would recurse into the suite rather than start a tray. The spawn path is
+    // covered by the manual checks recorded in the commit.
+    instances_register("tray", 0, NULL, NULL, 0);
+    int before = 0;
+    instances_list_free(instances_list(&before), before);
+    tray_ensure_running();
+    msleep(300);
+    int after = 0;
+    instances_list_free(instances_list(&after), after);
+    CHECK(after == before, "no second tray spawned when one is already registered");
+    instances_unregister();
+
     remove(foreign);
     remove(mp);
     remove(cfg);

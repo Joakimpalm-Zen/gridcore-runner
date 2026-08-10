@@ -55,6 +55,22 @@ void tray_menu_act(int action, long arg, const char *text);
 // True while ≥1 runner instance is live — the backend shows the badge dot.
 bool tray_any_running(void);
 
+// Make sure a tray controller exists, without becoming one. Spawns a detached
+// `<self> --tray` when no tray record is live, and does nothing when one is.
+//
+// Spawning rather than hosting is what keeps this cheap: AppKit demands the
+// main thread, so a tray inside a serving process would mean moving the server
+// off it. A separate process needs none of that, and the tray already lists
+// every registered runner, so the serve it was launched beside shows up with no
+// extra plumbing.
+//
+// The child is detached (its own session / process group) on purpose: killing
+// the server with Ctrl-C must not take the tray with it, because the whole
+// point is that you can load the next model from it afterwards. Racing callers
+// are harmless — the child runs the one-tray-per-machine guard itself and the
+// loser exits.
+void tray_ensure_running(void);
+
 // Which glyph the menu-bar / notification-area icon should draw. Three states,
 // each sourced from something real rather than inferred:
 //   IDLE    no runner instance registered at all

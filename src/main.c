@@ -135,11 +135,17 @@ static void usage(const char *prog) {
         "  -f FILE        read prompt from file (appended after -p text)\n"
         "  -i             interactive chat mode\n"
         "  --serve        HTTP server mode (OpenAI-compatible API)\n"
-        "  --tray         desktop tray/menu-bar controller (macOS, Windows).\n"
-        "                 Running `runner` with no arguments in a terminal (or\n"
-        "                 double-clicking the binary) starts this by default\n"
-        "  --no-tray      never auto-start the tray; bare invocation prints\n"
-        "                 this help instead (any other argument also does)\n"
+        "  --tray         BE the desktop tray/menu-bar controller (macOS,\n"
+        "                 Windows) instead of running a model. Required when\n"
+        "                 there is no terminal — launchd, Task Scheduler, a\n"
+        "                 service wrapper — since the launches below all need\n"
+        "                 one. Bare `runner` at a terminal, or a double-click,\n"
+        "                 does the same thing without the flag\n"
+        "  --no-tray      opt out of the tray entirely. The tray otherwise\n"
+        "                 follows any session you sit with (--serve, -i) at a\n"
+        "                 terminal and is LEFT RUNNING afterwards, so the next\n"
+        "                 model can be loaded from it. One-shot -p runs and\n"
+        "                 tooling modes never raise one\n"
         "  --port N       server port (default 8080)\n"
         "  --parallel N   parallel inference slots in server mode (default 1)\n"
         "                 -m \"name=path,name2=path2\" serves multiple models,\n"
@@ -268,6 +274,7 @@ int main(int argc, char **argv) {
     int draft_k = 4;
     bool interactive = false, verbose = false, no_bos = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
+    bool no_tray = false;
     int thinking = THINK_DEFAULT;
     bool bench_json = false;
     model_params mp = {0};
@@ -309,12 +316,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--think")) thinking = THINK_ON;
         else if (!strcmp(a, "--no-think")) thinking = THINK_OFF;
         else if (!strcmp(a, "--tray")) return tray_main();
-        // Accepted everywhere, acts nowhere else: its entire meaning is "do
-        // not auto-launch the tray", and any argument already suppresses
-        // that. It exists so the suppression can be SAID rather than implied
-        // — a wrapper passing --no-tray keeps its guarantee even if the
-        // auto-launch conditions ever widen.
-        else if (!strcmp(a, "--no-tray")) { /* handled above by existing */ }
+        // The standing opt-out, and no longer a no-op: it suppresses both the
+        // bare-invocation launch above and the tray that otherwise follows a
+        // --serve or -i session below.
+        else if (!strcmp(a, "--no-tray")) no_tray = true;
         else if (!strcmp(a, "--port")) port = (int)int_arg(a, NEXT, 1, 65535);
         else if (!strcmp(a, "--parallel")) parallel = (int)int_arg(a, NEXT, 1, 16);
         else if (!strcmp(a, "--ttl")) ttl = (int)int_arg(a, NEXT, -1, INT_MAX);
@@ -567,6 +572,25 @@ int main(int argc, char **argv) {
         usage(argv[0]);
         return 1;
     }
+    // The tray follows a session a person will sit with — a server or an
+    // interactive chat — and is left running afterwards so the next model can
+    // be loaded from it. One-shot -p runs and tooling modes (--caps,
+    // --quantize, --bench-json) deliberately raise nothing: a two-second
+    // process should not leave a menu-bar icon behind it.
+    //
+    // A terminal on EITHER stdin or stdout counts as "a person launched this".
+    // Requiring both, the way the bare-invocation guard above does, would drop
+    // the most ordinary case there is — `runner --serve > server.log` — while
+    // CI and pipes typically have neither and stay unaffected. --no-tray is the
+    // explicit escape for a wrapper that wants the guarantee in writing.
+#if defined(__APPLE__) || defined(_WIN32)
+    if (!no_tray && (serve || interactive) &&
+        (RUNNER_TTY(stdin) || RUNNER_TTY(stdout)))
+        tray_ensure_running();
+#else
+    (void)no_tray;
+#endif
+
     if (smp.rng == 0) smp.rng = (uint64_t)time(NULL) ^ 0x9E3779B97F4A7C15ull;
 
     if (n_threads <= 0) {

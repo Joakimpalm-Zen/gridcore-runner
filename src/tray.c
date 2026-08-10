@@ -592,6 +592,55 @@ void tray_menu_act(int action, long arg, const char *text) {
     }
 }
 
+void tray_ensure_running(void) {
+    int n = 0;
+    instance_rec *r = instances_list(&n);
+    bool have_tray = false;
+    for (int i = 0; i < n; i++)
+        if (strcmp(r[i].mode, "tray") == 0) have_tray = true;
+    instances_list_free(r, n);
+    if (have_tray) return;
+
+    char exe[1200];
+    self_exe(exe, sizeof exe);
+    char *argv[] = { exe, (char *)"--tray", NULL };
+
+#ifdef _WIN32
+    char cmd[1400];
+    snprintf(cmd, sizeof cmd, "\"%s\" --tray", exe);
+    STARTUPINFOA si = { .cb = sizeof si };
+    PROCESS_INFORMATION pi;
+    // DETACHED_PROCESS: no console of its own and none inherited, so a tray
+    // launched beside a server does not scribble over the server's output
+    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE,
+                       DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                       NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+#else
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    // stdio to /dev/null: the tray has nothing to say on a terminal it shares
+    // with a server, and inheriting the tty would let it interleave output
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, 1, 2);
+
+    posix_spawnattr_t at;
+    posix_spawnattr_init(&at);
+#ifdef POSIX_SPAWN_SETSID
+    // own session, so SIGINT to the server's foreground process group does
+    // not reach the tray — Ctrl-C must stop the server, not the menu bar
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSID);
+#endif
+    pid_t pid;
+    posix_spawn(&pid, exe, &fa, &at, argv, environ);
+    posix_spawnattr_destroy(&at);
+    posix_spawn_file_actions_destroy(&fa);
+#endif
+}
+
 bool tray_any_running(void) {
     int n = 0, live = 0;
     instance_rec *r = instances_list(&n);
