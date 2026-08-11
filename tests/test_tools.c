@@ -359,6 +359,24 @@ static void test_atem_truncated_string_enum_recovers_closest_member(void) {
     free(content.s); free(calls.s); jv_free(tools);
 }
 
+static void test_atem_truncated_integer_respects_declared_bounds(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"set_level\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"level\":{\"type\":\"integer\",\"minimum\":5,\"maximum\":9}},"
+        "\"required\":[\"level\"]}}}]"
+    );
+    tool_envelope e = {.atem = true, .tools = tools};
+    const char *doc = " to=set_level<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"set_level\">\n"
+        "<atem:parameter name=\"level\"></atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "{\\\"level\\\":5}"));
+    free(content.s); free(calls.s); jv_free(tools);
+}
+
 static const char *TOOLS =
     "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
       "\"description\":\"look up weather\",\"parameters\":{\"type\":\"object\","
@@ -1041,6 +1059,7 @@ int main(void) {
     test_muse_generic_envelope_is_constrained_behind_user_recipient();
     test_atem_auto_user_branch_honors_response_schema();
     test_atem_truncated_string_enum_recovers_closest_member();
+    test_atem_truncated_integer_respects_declared_bounds();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();

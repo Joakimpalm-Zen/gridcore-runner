@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 int template_detect(const char *meta_tmpl, tokenizer *tok) {
     if (meta_tmpl) {
@@ -1029,6 +1030,25 @@ static const char *atem_enum_recovery(jv *choices, const char *raw,
     return best;
 }
 
+static void atem_number_recovery(sbuf *out, jv *schema, bool integer) {
+    double value = 0.0;
+    jv *bound = jv_get(schema, "minimum");
+    if (bound && bound->type == J_NUM && value < bound->num)
+        value = integer ? ceil(bound->num) : bound->num;
+    bound = jv_get(schema, "exclusiveMinimum");
+    if (bound && bound->type == J_NUM && value <= bound->num)
+        value = integer ? floor(bound->num) + 1.0
+                        : nextafter(bound->num, INFINITY);
+    bound = jv_get(schema, "maximum");
+    if (bound && bound->type == J_NUM && value > bound->num)
+        value = integer ? floor(bound->num) : bound->num;
+    bound = jv_get(schema, "exclusiveMaximum");
+    if (bound && bound->type == J_NUM && value >= bound->num)
+        value = integer ? ceil(bound->num) - 1.0
+                        : nextafter(bound->num, -INFINITY);
+    sb_fmt(out, integer ? "%.0f" : "%.17g", value);
+}
+
 static int atem_map(const tool_envelope *e, const char *doc, size_t n,
                     sbuf *content, sbuf *tc) {
     const char *p = doc, *end = doc + n;
@@ -1078,7 +1098,7 @@ static int atem_map(const tool_envelope *e, const char *doc, size_t n,
                 else if (!strcmp(pt, "null")) sb_lit(&args, "null");
                 else if (!strcmp(pt, "object")) sb_lit(&args, "{}");
                 else if (!strcmp(pt, "array")) sb_lit(&args, "[]");
-                else sb_lit(&args, "0");
+                else atem_number_recovery(&args, ps, !strcmp(pt, "integer"));
             } else {
                 const char *sv = val;
                 size_t sn = vn;

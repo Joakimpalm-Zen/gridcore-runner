@@ -477,7 +477,8 @@ before the recipient constraint. If generation is cut at the token limit,
 the atem automaton closes the current parameter/invoke/function-call tail;
 raw scalar recovery uses the declared parameter type so the resulting OpenAI
 arguments document remains executable, and an incomplete string enum is
-completed to the member sharing its longest prefix. A native `to=user` text answer ends at
+completed to the member sharing its longest prefix. Missing numeric text is
+recovered within the parameter's declared bounds. A native `to=user` text answer ends at
 the model's own end-of-turn token and reports `finish_reason:"stop"`; only a
 genuine token-limit cut reports `"length"`.
 
