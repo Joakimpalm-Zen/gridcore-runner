@@ -190,6 +190,21 @@ static void check_mxfp4_dequant(void) {
     printf("ok: MXFP4 block dequantizes to spec (E8M0 scale x E2M1 code)\n");
 }
 
+// finding B (2026-08-11 external evaluation): general.file_type must
+// describe the OUTPUT, not the parent. The published gemma artifact carried
+// its Q4_K_M parent's declaration over a mixed Q4_0/Q4_K result, and
+// llama.cpp printed the stale label in its own model line.
+static void check_file_type(const char *path, uint32_t want) {
+    gguf_file g;
+    assert(gguf_open(&g, path));
+    uint32_t got = gguf_get_u32(&g, "general.file_type", 9999);
+    if (got != want) {
+        fprintf(stderr, "file_type: got %u want %u for %s\n", got, want, path);
+        assert(0);
+    }
+    gguf_close(&g);
+}
+
 int main(void) {
     f16_init();   // dequant_row's scale lookup table (unused by the quantizer
                   // itself, but the round-trip check below dequantizes)
@@ -201,6 +216,20 @@ int main(void) {
     check_valid_q8(out);
     assert(!exists("q_out.gguf.partial"));        // temp cleaned up on success
     printf("ok: alignment honored, round-trips, no leftover .partial\n");
+
+    // finding B: the declared file_type follows the OUTPUT histogram.
+    // f32 fixture -> q8_0: MOSTLY_Q8_0 (7). That file -> q4_0: every
+    // quantized tensor converts, so MOSTLY_Q4_0 (2) — the evaluator's exact
+    // local repro, which used to keep MOSTLY_Q8_0. And q4_0 -> q8_0: the
+    // never-grow retention rule keeps every tensor at Q4_0, so the honest
+    // declaration STAYS MOSTLY_Q4_0 (2), not the requested target's 7.
+    check_file_type(out, 7);
+    const char *q40 = "q_ft40.gguf", *q80back = "q_ft80.gguf";
+    assert(quantize_gguf(out, q40, T_Q4_0, NULL) == 0);
+    check_file_type(q40, 2);
+    assert(quantize_gguf(q40, q80back, T_Q8_0, NULL) == 0);
+    check_file_type(q80back, 2);
+    printf("ok: general.file_type follows the output histogram\n");
 
     // RNR-015: in-place requant must not truncate its own input
     const char *inplace = "q_inplace.gguf";

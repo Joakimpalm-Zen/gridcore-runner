@@ -1592,8 +1592,15 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     const char *finish = e->oom ? "error"
                        : e->prelude_exhausted ? "reasoning_limit"
                        : g.stopped || e->hit_stop ? "stop" : "length";
-    // a streamed call reports the same terminal reason a buffered one does
-    if (g.tsx_on && tool_stream_called(&g.tsx)) finish = "tool_calls";
+    // a streamed call reports the same terminal reason a buffered one does.
+    // Only a CLEANLY FINISHED document may claim "tool_calls": a budget
+    // truncation still parses (the closer guarantees that) but the envelope
+    // must keep saying "length", or the caller executes a half-generated
+    // call as if it were complete — finding A of the 2026-08-11 external
+    // evaluation, which found the Responses incomplete path dead whenever a
+    // tool call was present.
+    if (g.tsx_on && tool_stream_called(&g.tsx) && !strcmp(finish, "stop"))
+        finish = "tool_calls";
 
     if (stream && api == API_RESPONSES) {
         // whatever item was still streaming is closed first: an item announced
@@ -1716,14 +1723,17 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         if (env) {
             // Strict mode: the whole response IS the envelope, guaranteed by
             // the schema rather than fished out of free text. A truncated
-            // call was closed to a legal document by sval_close, so it is
-            // still executable and still reports "tool_calls".
+            // call was closed to a legal document by sval_close, so it still
+            // PARSES — but only a cleanly finished document reports
+            // "tool_calls"; a truncated one keeps "length" so the caller
+            // knows the arguments are minimal closures, not the model's
+            // intent (finding A, 2026-08-11 evaluation).
             sbuf mapped = {0};
             int rc = tool_envelope_map(env, g.out.s ? g.out.s : "", g.out.n,
                                        &mapped, &tc);
             if (rc >= 1) {
                 n_tc = rc;              // parallel turns map several at once
-                finish = "tool_calls";
+                if (!strcmp(finish, "stop")) finish = "tool_calls";
                 g.out.n = 0;
                 free(mapped.s);
             } else if (rc == 0) {
@@ -1735,7 +1745,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         } else if (chat) {
             n_tc = tool_calls_parse_for(s->tmpl, &g.out, &tc);
             if (n_tc) {
-                finish = "tool_calls";
+                if (!strcmp(finish, "stop")) finish = "tool_calls";
                 g.out.n = 0; // OpenAI convention: no content alongside
                              // tool_calls (whatever followed was the model
                              // faking a result)

@@ -2,7 +2,9 @@
   "created_at": "<number>",
   "error": null,
   "id": "<redacted>",
-  "incomplete_details": null,
+  "incomplete_details": {
+    "reason": "<redacted>"
+  },
   "instructions": null,
   "max_output_tokens": "<number>",
   "metadata": null,

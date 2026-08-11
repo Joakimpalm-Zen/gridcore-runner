@@ -485,34 +485,21 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
         }
     }
 
-    wr_u32(&w, 0x46554747);
-    wr_u32(&w, 3);
-    wr_u64(&w, g.n_tensors);
-    wr_u64(&w, g.n_kv);
-    for (uint64_t i = 0; i < g.n_kv; i++) wr_kv(&w, &g.kv[i]);
-
-    // tensor table with new types/offsets (data alignment `align`)
-    uint64_t off = 0;
+    // Output types are decided BEFORE the header goes out, because
+    // general.file_type must describe the OUTPUT: copying the parent's
+    // declaration shipped a mixed Q4_0/Q4_K artifact labeled by its parent
+    // (finding B of the 2026-08-11 external evaluation — the same
+    // mixed-tensor trap this project's own cert matrix fails third parties
+    // for). The declared value is computed from the histogram of what is
+    // actually written, and the histogram itself is printed so a mixed
+    // result is visible in the log, not just in a header field.
     int *out_type = malloc(sizeof(int) * g.n_tensors);
-    uint64_t *out_off = malloc(sizeof(uint64_t) * g.n_tensors);
-    // effective (possibly pruned) ne[] this tensor is WRITTEN with — equal
-    // to t->ne[] unless resolve_prune() slices its expert axis
-    int64_t (*eff_ne)[4] = malloc(sizeof(int64_t[4]) * (g.n_tensors ? g.n_tensors : 1));
-    if ((g.n_tensors > 0 && (!out_type || !out_off || !eff_ne))) w.ok = false;
-    for (uint64_t i = 0; i < g.n_tensors; i++) {
+    if (g.n_tensors > 0 && !out_type) w.ok = false;
+    for (uint64_t i = 0; w.ok && i < g.n_tensors; i++) {
         gguf_tensor *t = &g.tensors[i];
-        if (!w.ok) break;
-        for (int d = 0; d < 4; d++) eff_ne[i][d] = t->ne[d];
-        const prune_layer_t *pl = resolve_prune(t, &plan);
-        if (pl) eff_ne[i][t->n_dims - 1] = pl->n_ids;
-
         if (target == T_KEEP) {
             out_type[i] = t->type;
         } else {
-            // diagnostic: RUNNER_REQUANT_ONLY=<substr> converts just the
-            // tensors whose name contains <substr> and leaves every other
-            // tensor at its ORIGINAL type, so a model can be bisected group
-            // by group
             const char *only = getenv("RUNNER_REQUANT_ONLY");
             bool filtered = only && *only && !strstr(t->name, only);
             if (filtered)
@@ -528,6 +515,76 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
                 ggml_row_size(t->type, t->ne[0]) <= ggml_row_size(target, t->ne[0]))
                 out_type[i] = t->type;
         }
+    }
+    uint32_t ftype_out = 0;
+    if (w.ok && g.n_tensors > 0) {
+        // dominant non-f32 output type -> its MOSTLY_* code. The K-quant
+        // S/M/L distinction is not recoverable from a one-type histogram;
+        // the M code is the closest honest label and the printed histogram
+        // carries the exact truth.
+        static const struct { int t; uint32_t ftype; const char *name; } FT[] = {
+            { T_F16, 1, "F16" }, { T_BF16, 32, "BF16" },
+            { T_Q4_0, 2, "Q4_0" }, { T_Q4_1, 3, "Q4_1" },
+            { T_Q5_0, 8, "Q5_0" }, { T_Q5_1, 9, "Q5_1" },
+            { T_Q8_0, 7, "Q8_0" },
+            { T_Q2_K, 10, "Q2_K" }, { T_Q3_K, 12, "Q3_K" },
+            { T_Q4_K, 15, "Q4_K" }, { T_Q5_K, 17, "Q5_K" },
+            { T_Q6_K, 18, "Q6_K" },
+            { T_IQ2_XXS, 19, "IQ2_XXS" }, { T_IQ2_XS, 20, "IQ2_XS" },
+            { T_IQ2_S, 28, "IQ2_S" }, { T_IQ3_XXS, 23, "IQ3_XXS" },
+            { T_IQ3_S, 26, "IQ3_S" }, { T_IQ1_S, 24, "IQ1_S" },
+            { T_IQ1_M, 31, "IQ1_M" }, { T_IQ4_NL, 25, "IQ4_NL" },
+            { T_IQ4_XS, 30, "IQ4_XS" }, { T_MXFP4, 38, "MXFP4" },
+        };
+        uint64_t counts[sizeof(FT) / sizeof(*FT)] = {0};
+        uint64_t f32s = 0;
+        for (uint64_t i = 0; i < g.n_tensors; i++) {
+            if (out_type[i] == T_F32) { f32s++; continue; }
+            for (size_t k = 0; k < sizeof(FT) / sizeof(*FT); k++)
+                if (FT[k].t == out_type[i]) { counts[k]++; break; }
+        }
+        size_t dom = 0;
+        uint64_t best = 0;
+        for (size_t k = 0; k < sizeof(FT) / sizeof(*FT); k++)
+            if (counts[k] > best) { best = counts[k]; dom = k; }
+        ftype_out = best ? FT[dom].ftype : 0;   // all-f32 -> ALL_F32
+        fprintf(stderr, "quantize: general.file_type %u (MOSTLY_%s) — output histogram:",
+                ftype_out, best ? FT[dom].name : "F32");
+        if (f32s) fprintf(stderr, " F32:%llu", (unsigned long long)f32s);
+        for (size_t k = 0; k < sizeof(FT) / sizeof(*FT); k++)
+            if (counts[k]) fprintf(stderr, " %s:%llu", FT[k].name,
+                                   (unsigned long long)counts[k]);
+        fprintf(stderr, "\n");
+    }
+    bool had_ftype = gguf_get(&g, "general.file_type") != NULL;
+
+    wr_u32(&w, 0x46554747);
+    wr_u32(&w, 3);
+    wr_u64(&w, g.n_tensors);
+    wr_u64(&w, g.n_kv - (had_ftype ? 1 : 0) + 1);
+    for (uint64_t i = 0; i < g.n_kv; i++) {
+        if (!strcmp(g.kv[i].key, "general.file_type")) continue;
+        wr_kv(&w, &g.kv[i]);
+    }
+    wr_str(&w, "general.file_type", strlen("general.file_type"));
+    wr_u32(&w, 4);            // GGUF_T_U32
+    wr_u32(&w, ftype_out);
+
+    // tensor table with new types/offsets (data alignment `align`)
+    uint64_t off = 0;
+    uint64_t *out_off = malloc(sizeof(uint64_t) * g.n_tensors);
+    // effective (possibly pruned) ne[] this tensor is WRITTEN with — equal
+    // to t->ne[] unless resolve_prune() slices its expert axis
+    int64_t (*eff_ne)[4] = malloc(sizeof(int64_t[4]) * (g.n_tensors ? g.n_tensors : 1));
+    if ((g.n_tensors > 0 && (!out_type || !out_off || !eff_ne))) w.ok = false;
+    for (uint64_t i = 0; i < g.n_tensors; i++) {
+        gguf_tensor *t = &g.tensors[i];
+        if (!w.ok) break;
+        for (int d = 0; d < 4; d++) eff_ne[i][d] = t->ne[d];
+        const prune_layer_t *pl = resolve_prune(t, &plan);
+        if (pl) eff_ne[i][t->n_dims - 1] = pl->n_ids;
+        // out_type[i] was decided in the pre-pass above, before the header
+        // (general.file_type is derived from it)
         uint64_t rows, bytes, end;
         if (!checked_u64_mul((uint64_t)eff_ne[i][1], (uint64_t)eff_ne[i][2], &rows) ||
             !checked_u64_mul(rows, (uint64_t)eff_ne[i][3], &rows) ||

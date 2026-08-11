@@ -623,10 +623,15 @@ branches must diverge at a supported discriminator. This is a subset of JSON
 Schema 2020-12, not full JSON Schema or GBNF.
 
 If the budget ends after a document starts, runner emits the minimal legal
-suffix and reports a length finish. If the model never starts the document,
-runner returns empty content rather than inventing required values. Syntax and
-schema shape are guaranteed; semantic correctness and tool selection remain
-the model's responsibility.
+suffix and reports a length finish — on the tool-call path too: a truncated
+call is still returned as a parseable `tool_calls` entry, but the envelope
+keeps the truncation signal (`finish_reason: "length"`, Responses
+`status: "incomplete"` with `max_output_tokens`, Anthropic
+`stop_reason: "max_tokens"`) so a caller knows the arguments are minimal
+closures rather than the model's completed intent. If the model never starts
+the document, runner returns empty content rather than inventing required
+values. Syntax and schema shape are guaranteed; semantic correctness and tool
+selection remain the model's responsibility.
 
 ## Support matrix
 

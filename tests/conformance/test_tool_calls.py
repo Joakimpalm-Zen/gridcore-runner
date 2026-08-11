@@ -92,14 +92,27 @@ def _assert_conforms(r, name, arguments):
 
 def test_required_always_produces_a_conforming_call(client):
     """tool_choice "required" removes the no-call branch, so the union the
-    sampler is held to contains nothing but tool calls."""
+    sampler is held to contains nothing but tool calls. The finish reason is
+    part of the contract BOTH ways since finding A: "tool_calls" may only be
+    claimed when the document closed inside the budget, and a budget
+    exhaustion must say "length" (the call is still present and conformant
+    either way — that is the truncation-recovery feature)."""
     r = client.chat(dict(BASE, max_tokens=64, tools=TOOLS,
                          tool_choice="required"),
                     name="tools-required")
     r.expect_status(200)
-    if r.finish_reason != "tool_calls":
-        raise ProtocolError("a guaranteed tool call must report "
-                            "finish_reason \"tool_calls\"",
+    used = (r.json.get("usage") or {}).get("completion_tokens")
+    if r.finish_reason == "tool_calls":
+        if used is not None and used >= 64:
+            raise ProtocolError("budget exhausted but finish_reason claims a "
+                                "clean call", request=r.name, used=used)
+    elif r.finish_reason == "length":
+        if used is not None and used < 64:
+            raise ProtocolError("finish_reason \"length\" without an "
+                                "exhausted budget", request=r.name, used=used)
+    else:
+        raise ProtocolError("a guaranteed tool call must finish with "
+                            "\"tool_calls\" or \"length\"",
                             request=r.name, got=r.finish_reason)
     if r.content:
         raise ProtocolError("content must be empty alongside tool_calls",
@@ -360,3 +373,69 @@ def test_tools_are_still_advisory_when_absent(client):
                          parallel_tool_calls=True),
                     name="tool-flags-without-tools")
     r.expect_status(200)
+
+
+# --- finding A (2026-08-11 external evaluation): a truncated tool call must
+# keep the truncation signal. The document still parses — that is the
+# feature — but the ENVELOPE must say the budget expired, or the agent loop
+# executes a half-generated call as if it were complete. The plain schema
+# path already reports "length"; these pin the tool path on all three
+# dialects.
+
+def test_truncated_tool_call_reports_length(client):
+    r = client.chat(dict(BASE, max_tokens=4, tools=TOOLS,
+                         tool_choice="required"),
+                    name="tools-truncated-chat")
+    r.expect_status(200)
+    # the call is still present and still conformant — truncation recovery
+    _, name, arguments = _only_call(r)
+    _assert_conforms(r, name, arguments)
+    # ...but the finish reason must not claim a clean call
+    if r.finish_reason != "length":
+        raise ProtocolError("a budget-truncated tool call must report "
+                            "finish_reason \"length\", not pretend the call "
+                            "completed", request=r.name, got=r.finish_reason)
+
+
+def test_truncated_tool_call_reports_incomplete_on_responses(client):
+    r = client.responses({"input": [{"role": "user",
+                                     "content": "what is the weather?"}],
+                          "temperature": 0, "max_output_tokens": 4,
+                          "tools": TOOLS, "tool_choice": "required"},
+                         name="tools-truncated-responses")
+    r.expect_status(200)
+    d = r.json
+    if d.get("status") != "incomplete":
+        raise ProtocolError("a budget-truncated tool call must set "
+                            "status \"incomplete\"", request=r.name,
+                            got=d.get("status"))
+    inc = d.get("incomplete_details") or {}
+    if inc.get("reason") != "max_output_tokens":
+        raise ProtocolError("incomplete_details.reason must be "
+                            "\"max_output_tokens\"", request=r.name,
+                            got=inc)
+
+
+def test_truncated_tool_call_reports_max_tokens_on_messages(client):
+    r = client.messages({"messages": [{"role": "user",
+                                       "content": "what is the weather?"}],
+                         "temperature": 0, "max_tokens": 4,
+                         "tools": [{"name": "get_weather",
+                                    "description": "look up the weather",
+                                    "input_schema":
+                                        WEATHER["function"]["parameters"]},
+                                   {"name": "add",
+                                    "input_schema":
+                                        ADD["function"]["parameters"]}],
+                         "tool_choice": {"type": "any"}},
+                        name="tools-truncated-messages")
+    r.expect_status(200)
+    d = r.json
+    if d.get("stop_reason") != "max_tokens":
+        raise ProtocolError("a budget-truncated tool call must report "
+                            "stop_reason \"max_tokens\", not \"tool_use\"",
+                            request=r.name, got=d.get("stop_reason"))
+    kinds = [b.get("type") for b in d.get("content", [])]
+    if "tool_use" not in kinds:
+        raise ProtocolError("the truncated call must still be present as a "
+                            "tool_use block", request=r.name, got=kinds)
