@@ -77,10 +77,13 @@ KLD; 2-bit drops to 72%/0.25), so this is a property of the checkpoint at
 3 bits, not of any one quantization scheme. The sub-4-bit wall previously
 measured on much smaller models holds at 30B: the official 4-bit
 (16.8 GB) is the floor of certifiable quality, and it needs a 24 GB-class
-machine. Remaining engine follow-up: SIMD dot kernels for the IQ family
-(the generic dequant-then-dot path decodes the 30B at ~0.8 tok/s on CPU)
-and device kernels — worth it only if an IQ artifact ever has a quality
-case.
+machine. Engine follow-up DONE same session (owner-directed): NEON + AVX2 dequant
+kernels for all seven i-quant types at the dequant_block seam (runner
+`7156690`), differential-gated on both ISAs against independent
+double-precision references and re-verified byte-identical to llama.cpp
+on the real IQ3_XXS file. Measured on the 30B (Blackwell CPU): decode
+0.76 → 2.21 tok/s (2.9x), prefill 3.8 → 9.4 tok/s (2.5x). Device
+kernels remain future work with no current quality case.
 
 ## Footprint (route B) — depth-prune kill-experiment
 
