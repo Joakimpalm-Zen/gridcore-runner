@@ -1974,6 +1974,12 @@ int sval_close(sval *v, char *out, int cap) {
             for (int i = f->idx; i < n->n_props && !eq_full(&q); i++)
                 emit_min_choice(&q, n->props[i], 0, choice);
             break;
+        case P_RAW:
+            // Bytes already matching the sentinel are part of the generated
+            // prefix; append only the unmatched suffix, then the enclosing
+            // sequence contributes its fixed newline/invoke/calls closes.
+            eq_put(&q, n->pattern_prefix + f->lit_pos);
+            break;
         }
         v->depth--;
     }

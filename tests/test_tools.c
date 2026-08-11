@@ -110,6 +110,33 @@ static void test_atem_scalar_is_raw_until_parameter_close(void) {
     jv_free(tools);
 }
 
+static void test_atem_truncation_closes_started_call(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"notes.save\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_tools(tools, err, sizeof(err));
+    assert(root != NULL);
+    const char *prefix =
+        "<atem:function_calls>\n<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">half-written <";
+    sval partial;
+    sval_init(&partial, root);
+    assert(sval_feed(&partial, prefix, (int)strlen(prefix)));
+    char tail[512];
+    int tail_n = sval_close(&partial, tail, sizeof(tail));
+    assert(tail_n > 0);
+    char full[1024];
+    snprintf(full, sizeof(full), "%s%s", prefix, tail);
+    assert(accepts(root, full));
+    assert(strstr(full, "</atem:parameter>\n</atem:invoke>\n"
+                        "</atem:function_calls>") != NULL);
+    schema_free(root);
+    jv_free(tools);
+}
+
 static const char *TOOLS =
     "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
       "\"description\":\"look up weather\",\"parameters\":{\"type\":\"object\","
@@ -744,6 +771,7 @@ static void test_system_turn_teaches_the_envelope(void) {
 int main(void) {
     test_atem_structured_tool_automaton();
     test_atem_scalar_is_raw_until_parameter_close();
+    test_atem_truncation_closes_started_call();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();
