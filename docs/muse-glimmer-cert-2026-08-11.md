@@ -112,12 +112,20 @@ With the fixed tool (greedy, "The capital of France is"):
 | keep-40 (−12) | 13.3 GB | word-salad collapse |
 | keep-38 (−14) | 12.7 GB | numeric garbage |
 
-**Verdict: KILL.** The smallest cut that reaches the 16 GB-Mac envelope
-(−12 layers) destroys the model; the cuts that preserve it (−2, −4) save
-at most 1.6 GB of 17. Un-healed depth-pruning of this dense distilled
-checkpoint behaves exactly as the literature warned, now measured rather
-than assumed. KLD rows for keep-50/keep-48 quantify the healthy edge of
-the frontier below.
+KLD vs the official kquant (same 400-position protocol as route A):
+
+| variant | size | top-1 | mean KLD | top-8 |
+|---|---|---|---|---|
+| keep-50 (−2) | 16.2 GB | **66.75%** | 0.394 | 0.676 |
+| keep-48 (−4) | 15.7 GB | **58.0%** | 0.681 | 0.578 |
+
+**Verdict: KILL, decisively.** Removing TWO of 52 layers does more damage
+(66.75% top-1) than compressing every weight to 3 bits (81%), while
+saving 0.6 GB where the 3-bit quants save 4.5–5.3. Quantization
+dominates depth-pruning at every measured point of this checkpoint's
+frontier; the −12-layer cut the envelope requires collapses the model
+outright. Un-healed depth-pruning of a dense distilled checkpoint
+behaves exactly as the literature warned — now measured, not assumed.
 
 ## DFlash drafter
 

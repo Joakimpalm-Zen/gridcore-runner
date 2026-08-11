@@ -1,0 +1,66 @@
+{
+  "n_pass": 3,
+  "n_total": 6,
+  "results": [
+    {
+      "tag": "a",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 114,
+      "ref_sha256": "8519ad5999a98be64f8ecff49b8bfe2f36b5e417380820136ab5cb2d9379fb63",
+      "runner_sha256": "71eb54a1df6b8f780e4ce49c09bbcf671d50c580c52396a51f15d01676b51eb6",
+      "ref_tail": "The Paris area is one of the largest population centers in E",
+      "runner_tail": "The Paris Region had a population of 12,405,426 in January 2"
+    },
+    {
+      "tag": "b",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "f3946746b3f277008f512fe1332f737133d734c644fd9355c9a1c4d7f68c9685",
+      "runner_sha256": "f3946746b3f277008f512fe1332f737133d734c644fd9355c9a1c4d7f68c9685",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "c",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "9570f36d05f923f5618dc48c1644865cc9e53dd569451f026b226ed4e7d72e5f",
+      "runner_sha256": "9570f36d05f923f5618dc48c1644865cc9e53dd569451f026b226ed4e7d72e5f",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "d",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 222,
+      "ref_sha256": "a56e4d56a3ec259b3c3bbd275cd0ede3bbeb6345492cf7fb4503ab49041d605f",
+      "runner_sha256": "1f92d56c8dd4332d45fcdf15ff6fd6108b21aec6cef433668ed59f76b9d89222",
+      "ref_tail": "r, vilket visar temperaturen på",
+      "runner_tail": "r, vilket gör att man"
+    },
+    {
+      "tag": "b-long",
+      "n": 256,
+      "identical": false,
+      "first_divergent_byte": 323,
+      "ref_sha256": "a38379abe87cedeea6abf46a1cf097144be69c545dea00ccd04d264e1744c5ad",
+      "runner_sha256": "a682725c8c16b67f4cd3b0e0ce4be01db3519c4383b3da2a7c154fa77349398a",
+      "ref_tail": "n `reverse_linked_list`.\nTo solve this problem, we need to r",
+      "runner_tail": "n `reverseList`.\n```\nThe task is to reverse a singly linked "
+    },
+    {
+      "tag": "c-long",
+      "n": 256,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "fca87f6d1cbe8bf08a98aaa3f666f74526602acfad572056987d6642b176ed14",
+      "runner_sha256": "fca87f6d1cbe8bf08a98aaa3f666f74526602acfad572056987d6642b176ed14",
+      "ref_tail": "",
+      "runner_tail": ""
+    }
+  ]
+}

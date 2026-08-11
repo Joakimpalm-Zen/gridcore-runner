@@ -1,0 +1,901 @@
+{
+  "cases": [
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-000-nested_arguments",
+      "latency_ms": 120100.23,
+      "ordinal": 0,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-001-tool_selection",
+      "latency_ms": 81165.65,
+      "ordinal": 1,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-002-forced_truncation",
+      "latency_ms": 106605.91,
+      "ordinal": 2,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-003-stream_normalization",
+      "latency_ms": 40757.76,
+      "ordinal": 3,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-004-large_enum_selection",
+      "latency_ms": 120099.33,
+      "ordinal": 4,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-005-reasoning_then_tool",
+      "latency_ms": 120006.98,
+      "ordinal": 5,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-006-structured_final",
+      "latency_ms": 93901.63,
+      "ordinal": 6,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-007-nested_arguments",
+      "latency_ms": 36204.76,
+      "ordinal": 7,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-008-tool_selection",
+      "latency_ms": 65838.61,
+      "ordinal": 8,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-009-forced_truncation",
+      "latency_ms": 105929.28,
+      "ordinal": 9,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-010-stream_normalization",
+      "latency_ms": 11031.82,
+      "ordinal": 10,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-011-large_enum_selection",
+      "latency_ms": 120099.88,
+      "ordinal": 11,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-012-reasoning_then_tool",
+      "latency_ms": 120099.98,
+      "ordinal": 12,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-013-structured_final",
+      "latency_ms": 84634.82,
+      "ordinal": 13,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-014-nested_arguments",
+      "latency_ms": 36122.1,
+      "ordinal": 14,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-015-tool_selection",
+      "latency_ms": 63776.58,
+      "ordinal": 15,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-016-forced_truncation",
+      "latency_ms": 106279.55,
+      "ordinal": 16,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-017-stream_normalization",
+      "latency_ms": 11319.31,
+      "ordinal": 17,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-018-large_enum_selection",
+      "latency_ms": 120065.06,
+      "ordinal": 18,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-019-reasoning_then_tool",
+      "latency_ms": 120021.74,
+      "ordinal": 19,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-020-structured_final",
+      "latency_ms": 85152.22,
+      "ordinal": 20,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-021-nested_arguments",
+      "latency_ms": 32120.65,
+      "ordinal": 21,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-022-tool_selection",
+      "latency_ms": 65895.27,
+      "ordinal": 22,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-023-forced_truncation",
+      "latency_ms": 106809.77,
+      "ordinal": 23,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-024-stream_normalization",
+      "latency_ms": 11579.79,
+      "ordinal": 24,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-025-large_enum_selection",
+      "latency_ms": 120100.08,
+      "ordinal": 25,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-026-reasoning_then_tool",
+      "latency_ms": 120099.99,
+      "ordinal": 26,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-027-structured_final",
+      "latency_ms": 85116.27,
+      "ordinal": 27,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-028-nested_arguments",
+      "latency_ms": 33973.05,
+      "ordinal": 28,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-029-tool_selection",
+      "latency_ms": 63693.4,
+      "ordinal": 29,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-030-forced_truncation",
+      "latency_ms": 107668.1,
+      "ordinal": 30,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-031-stream_normalization",
+      "latency_ms": 11858.03,
+      "ordinal": 31,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-032-large_enum_selection",
+      "latency_ms": 120090.64,
+      "ordinal": 32,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-033-reasoning_then_tool",
+      "latency_ms": 120036.95,
+      "ordinal": 33,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-034-structured_final",
+      "latency_ms": 85059.76,
+      "ordinal": 34,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-035-nested_arguments",
+      "latency_ms": 34040.21,
+      "ordinal": 35,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-036-tool_selection",
+      "latency_ms": 65981.68,
+      "ordinal": 36,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-037-forced_truncation",
+      "latency_ms": 105713.25,
+      "ordinal": 37,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-038-stream_normalization",
+      "latency_ms": 10782.35,
+      "ordinal": 38,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-039-large_enum_selection",
+      "latency_ms": 120100.26,
+      "ordinal": 39,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-040-reasoning_then_tool",
+      "latency_ms": 120099.99,
+      "ordinal": 40,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-041-structured_final",
+      "latency_ms": 94619.36,
+      "ordinal": 41,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-042-nested_arguments",
+      "latency_ms": 33901.42,
+      "ordinal": 42,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-043-tool_selection",
+      "latency_ms": 63758.99,
+      "ordinal": 43,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-044-forced_truncation",
+      "latency_ms": 106018.06,
+      "ordinal": 44,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-045-stream_normalization",
+      "latency_ms": 11056.41,
+      "ordinal": 45,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-046-large_enum_selection",
+      "latency_ms": 120100.11,
+      "ordinal": 46,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-047-reasoning_then_tool",
+      "latency_ms": 120063.91,
+      "ordinal": 47,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-048-structured_final",
+      "latency_ms": 84849.12,
+      "ordinal": 48,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-049-nested_arguments",
+      "latency_ms": 33871.03,
+      "ordinal": 49,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-050-tool_selection",
+      "latency_ms": 65798.67,
+      "ordinal": 50,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-051-forced_truncation",
+      "latency_ms": 106128.35,
+      "ordinal": 51,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-052-stream_normalization",
+      "latency_ms": 11291.45,
+      "ordinal": 52,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-053-large_enum_selection",
+      "latency_ms": 120099.87,
+      "ordinal": 53,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-054-reasoning_then_tool",
+      "latency_ms": 120099.9,
+      "ordinal": 54,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-055-structured_final",
+      "latency_ms": 84079.91,
+      "ordinal": 55,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-056-nested_arguments",
+      "latency_ms": 33866.16,
+      "ordinal": 56,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-057-tool_selection",
+      "latency_ms": 63691.34,
+      "ordinal": 57,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-058-forced_truncation",
+      "latency_ms": 106805.96,
+      "ordinal": 58,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-059-stream_normalization",
+      "latency_ms": 11589.37,
+      "ordinal": 59,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-060-large_enum_selection",
+      "latency_ms": 120068.88,
+      "ordinal": 60,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-061-reasoning_then_tool",
+      "latency_ms": 120099.89,
+      "ordinal": 61,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-062-structured_final",
+      "latency_ms": 84521.96,
+      "ordinal": 62,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-063-nested_arguments",
+      "latency_ms": 34216.0,
+      "ordinal": 63,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-064-tool_selection",
+      "latency_ms": 65827.73,
+      "ordinal": 64,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-065-forced_truncation",
+      "latency_ms": 107637.07,
+      "ordinal": 65,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-066-stream_normalization",
+      "latency_ms": 11847.6,
+      "ordinal": 66,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-067-large_enum_selection",
+      "latency_ms": 120049.96,
+      "ordinal": 67,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-068-reasoning_then_tool",
+      "latency_ms": 120099.35,
+      "ordinal": 68,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-069-structured_final",
+      "latency_ms": 84378.56,
+      "ordinal": 69,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-070-nested_arguments",
+      "latency_ms": 32883.94,
+      "ordinal": 70,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-071-tool_selection",
+      "latency_ms": 63703.11,
+      "ordinal": 71,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-072-forced_truncation",
+      "latency_ms": 105675.34,
+      "ordinal": 72,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-073-stream_normalization",
+      "latency_ms": 10768.37,
+      "ordinal": 73,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-074-large_enum_selection",
+      "latency_ms": 120099.62,
+      "ordinal": 74,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-075-reasoning_then_tool",
+      "latency_ms": 120039.32,
+      "ordinal": 75,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-076-structured_final",
+      "latency_ms": 84761.25,
+      "ordinal": 76,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-077-nested_arguments",
+      "latency_ms": 33947.08,
+      "ordinal": 77,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-078-tool_selection",
+      "latency_ms": 66023.69,
+      "ordinal": 78,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-079-forced_truncation",
+      "latency_ms": 105998.15,
+      "ordinal": 79,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-080-stream_normalization",
+      "latency_ms": 11030.48,
+      "ordinal": 80,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-081-large_enum_selection",
+      "latency_ms": 120100.0,
+      "ordinal": 81,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-082-reasoning_then_tool",
+      "latency_ms": 120100.31,
+      "ordinal": 82,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-083-structured_final",
+      "latency_ms": 84601.98,
+      "ordinal": 83,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-084-nested_arguments",
+      "latency_ms": 32803.66,
+      "ordinal": 84,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-085-tool_selection",
+      "latency_ms": 63663.93,
+      "ordinal": 85,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-086-forced_truncation",
+      "latency_ms": 106166.85,
+      "ordinal": 86,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-087-stream_normalization",
+      "latency_ms": 11323.95,
+      "ordinal": 87,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-088-large_enum_selection",
+      "latency_ms": 120099.27,
+      "ordinal": 88,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-089-reasoning_then_tool",
+      "latency_ms": 120059.1,
+      "ordinal": 89,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-090-structured_final",
+      "latency_ms": 84744.19,
+      "ordinal": 90,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-091-nested_arguments",
+      "latency_ms": 36063.84,
+      "ordinal": 91,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-092-tool_selection",
+      "latency_ms": 65822.52,
+      "ordinal": 92,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-093-forced_truncation",
+      "latency_ms": 106785.41,
+      "ordinal": 93,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-094-stream_normalization",
+      "latency_ms": 11589.68,
+      "ordinal": 94,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-095-large_enum_selection",
+      "latency_ms": 120025.87,
+      "ordinal": 95,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-096-reasoning_then_tool",
+      "latency_ms": 120099.33,
+      "ordinal": 96,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-097-structured_final",
+      "latency_ms": 84961.66,
+      "ordinal": 97,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "id": "runner-098-nested_arguments",
+      "latency_ms": 35768.02,
+      "ordinal": 98,
+      "status": "passed"
+    },
+    {
+      "category": "tool_selection",
+      "id": "runner-099-tool_selection",
+      "latency_ms": 63706.73,
+      "ordinal": 99,
+      "status": "passed"
+    },
+    {
+      "category": "forced_truncation",
+      "id": "runner-100-forced_truncation",
+      "latency_ms": 107657.18,
+      "ordinal": 100,
+      "status": "passed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-101-stream_normalization",
+      "latency_ms": 11870.85,
+      "ordinal": 101,
+      "status": "passed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-102-large_enum_selection",
+      "latency_ms": 120099.54,
+      "ordinal": 102,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "transport",
+        "message": "[transport] read timed out\n    received = 0\n    error = 'timed out'"
+      },
+      "id": "runner-103-reasoning_then_tool",
+      "latency_ms": 120011.42,
+      "ordinal": 103,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-104-structured_final",
+      "latency_ms": 95027.28,
+      "ordinal": 104,
+      "status": "passed"
+    }
+  ],
+  "configuration": {
+    "model": "/home/lab/workspace/Gridcore/muse-glimmer/Muse-Glimmer-30B-Q3_K_S.gguf",
+    "temperature": 0
+  },
+  "metrics": {
+    "elapsed_ms": 8290422.62,
+    "valid_structured_tasks_per_second": 0.009
+  },
+  "resources": {
+    "peak_rss_kb": 13164972,
+    "peak_rss_kind": "peak"
+  },
+  "runtime": {
+    "name": "runner",
+    "version": "runner 0.1.14-alpha"
+  },
+  "schema_version": "xyntetik.agent-torture.v2",
+  "totals": {
+    "failed": 34,
+    "failures_by_category": {
+      "protocol": 3,
+      "transport": 31
+    },
+    "passed": 71,
+    "requests": 105
+  }
+}
