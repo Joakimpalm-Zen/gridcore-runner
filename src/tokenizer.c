@@ -182,6 +182,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     else if (strcmp(pre, "smollm") == 0) t->pre = TOK_PRE_SMOLLM;
     else if (strcmp(pre, "afmoe") == 0)  t->pre = TOK_PRE_AFMOE;
     else if (strcmp(pre, "tekken") == 0) t->pre = TOK_PRE_TEKKEN;
+    else if (strcmp(pre, "llama4") == 0) t->pre = TOK_PRE_LLAMA4;
     else                                 t->pre = TOK_PRE_GPT2;
 
     gguf_kv *toks = gguf_get(g, "tokenizer.ggml.tokens");
@@ -781,6 +782,50 @@ static int tekken_split_next(const uint32_t *cp, int i, int ncp) {
     }
 }
 
+// One pre-token of the o200k-family regex (llama.cpp maps pre "llama4" onto
+// PRE_TYPE_GPT4O; Muse Glimmer ships this):
+//   [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+//   | [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+//   | \p{N}{1,3} | ?[^\s\p{L}\p{N}]+[\r\n/]* | \s*[\r\n]+ | \s+(?!\S) | \s+
+//
+// The letter alternatives are exactly tekken's (case-transition splitting),
+// with the contraction attached as a SUFFIX of the letter run — not a leading
+// alternative as in llama3, so "it's" stays one pre-token here where llama3
+// gives it|'s. Digits run to three like llama3, and '/' joins the punctuation
+// tail like tekken.
+static int llama4_split_next(const uint32_t *cp, int i, int ncp) {
+    int adv = tekken_letters(cp, i, ncp);
+    if (adv > i) {
+        int c = contraction_len(cp, adv, ncp);   // (?i:...) — already caseless
+        return adv + c;
+    }
+
+    if (cp_digit(cp[i])) {
+        int j = i;
+        while (j < ncp && cp_digit(cp[j]) && j - i < 3) j++;
+        return j;
+    }
+
+    {   // optional leading space, then a run of symbols/punctuation
+        int j = (cp[i] == ' ' && i + 1 < ncp && cp_other(cp[i + 1])) ? i + 1 : i;
+        if (j < ncp && cp_other(cp[j])) {
+            while (j < ncp && cp_other(cp[j])) j++;
+            while (j < ncp && (cp[j] == '\r' || cp[j] == '\n' || cp[j] == '/')) j++;
+            return j;
+        }
+    }
+    {   // \s*[\r\n]+ | \s+(?!\S) | \s+
+        int j = i;
+        while (j < ncp && cp_space(cp[j])) j++;
+        int last_nl = -1;
+        for (int k = i; k < j; k++)
+            if (cp[k] == '\r' || cp[k] == '\n') last_nl = k;
+        if (last_nl >= 0) return last_nl + 1;
+        if (j < ncp && j - i > 1) j--;
+        return j;
+    }
+}
+
 // afmoe (Arcee Trinity) composes three passes (llama.cpp
 // unicode_regex_split_custom_afmoe + llama-vocab.cpp pre "afmoe"), folded
 // into one scanner because earlier passes only ever produce fragments the
@@ -1038,6 +1083,7 @@ static int bpe_encode_text(tokenizer *t, const char *text, size_t n,
     int max_digits = t->pre == TOK_PRE_LLAMA3 ? 3 : t->pre == TOK_PRE_QWEN2 ? 1 : 0;
     for (int i = 0; i < ncp; ) {
         int end = t->pre == TOK_PRE_TEKKEN    ? tekken_split_next(cp, i, ncp)
+                : t->pre == TOK_PRE_LLAMA4    ? llama4_split_next(cp, i, ncp)
                 : max_digits                  ? pre_split_next(cp, i, ncp, max_digits)
                 : t->pre == TOK_PRE_SMOLLM    ? smollm_split_next(cp, i, ncp)
                 : t->pre == TOK_PRE_AFMOE     ? afmoe_split_next(cp, i, ncp)

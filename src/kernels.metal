@@ -1322,6 +1322,17 @@ kernel void k_silu_mul(device float       *g [[buffer(0)]],
     }
 }
 
+// attention output gate (afmoe / muse-glimmer): x *= sigmoid(gate), the
+// same arithmetic as the CPU's 1/(1+expf(-g)) and CUDA's k_q35_attn_gate.
+// exp() overflow on a large negative gate saturates to 0 exactly as libm's
+// expf does, so no clamp is needed for identity with the CPU oracle.
+kernel void k_sigmoid_mul(device float       *x [[buffer(0)]],
+                          device const float *g [[buffer(1)]],
+                          constant int       &n [[buffer(2)]],
+                          uint i [[thread_position_in_grid]]) {
+    if ((int)i < n) x[i] *= 1.0f / (1.0f + exp(-g[i]));
+}
+
 kernel void k_gelu_mul(device float       *g [[buffer(0)]],
                        device const float *u [[buffer(1)]],
                        constant int       &n [[buffer(2)]],

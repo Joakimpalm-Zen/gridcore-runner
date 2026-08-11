@@ -20,6 +20,7 @@ typedef struct {
     id<MTLComputePipelineState> p_rmsnorm, p_qknorm, p_headnorm, p_rope, p_store, p_attn;
     id<MTLComputePipelineState> p_attn_chunk, p_attn_comb;
     id<MTLComputePipelineState> p_silu, p_gelu, p_add, p_scale, p_head_transform;
+    id<MTLComputePipelineState> p_sigmul;   // attention output gate (x *= sigmoid(g))
     id<MTLComputePipelineState> p_moe_route, p_moe_actmul, p_moe_sum;
     id<MTLComputePipelineState> p_mv[METAL_TYPE_SLOTS];       // indexed by ggml type
     id<MTLComputePipelineState> p_mm[METAL_TYPE_SLOTS];       // tiled prefill GEMM
@@ -28,6 +29,7 @@ typedef struct {
     bool          weights_copied;
     id<MTLBuffer> kc, vc;
     id<MTLBuffer> x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
+    id<MTLBuffer> agate;             // [n][q_dim] attention output gate scratch
     id<MTLBuffer> att_acc, att_ms;   // chunked-decode partials
     id<MTLBuffer> moe_logits, moe_sel, moe_selw, moe_hb, moe_hb2, moe_eout;
     id<MTLBuffer> inv_freq, inv_freq_local, out_norm, dummy;
@@ -160,7 +162,8 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
                              g->logits, g->moe_logits, g->moe_sel, g->moe_selw,
                              g->moe_hb, g->moe_hb2, g->moe_eout,
                              g->inv_freq, g->inv_freq_local, g->out_norm,
-                             g->dummy, g->suppress, g->ple, g->ple_tmp };
+                             g->dummy, g->suppress, g->ple, g->ple_tmp,
+                             g->agate };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mv[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mm[i] release];
@@ -169,6 +172,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     [g->p_rope release]; [g->p_store release]; [g->p_attn release];
     [g->p_attn_chunk release]; [g->p_attn_comb release];
     [g->p_silu release]; [g->p_gelu release]; [g->p_add release];
+    [g->p_sigmul release];
     [g->p_scale release]; [g->p_head_transform release];
     [g->p_moe_route release]; [g->p_moe_actmul release];
     [g->p_moe_sum release];
@@ -262,17 +266,21 @@ static bool metal_ensure_batch(model_t *m, int n) {
         ple     = new_f32_scratch(g->dev, nb * (size_t)m->n_layer * P);
         ple_tmp = new_f32_scratch(g->dev, nb * (size_t)P);
     }
+    id<MTLBuffer> agate = nil;
+    if (m->attn_out_gate)
+        agate = new_f32_scratch(g->dev, nb * (size_t)q_dim);
     if (!metal_buffer_ok(x) || !metal_buffer_ok(xb) || !metal_buffer_ok(xb2) ||
         !metal_buffer_ok(q) || !metal_buffer_ok(kt) || !metal_buffer_ok(vt) ||
         !metal_buffer_ok(hb) || !metal_buffer_ok(hb2) || !metal_buffer_ok(att) ||
         !metal_buffer_ok(logits) ||
         !metal_buffer_ok(att_acc) || !metal_buffer_ok(att_ms) ||
-        (P > 0 && (!metal_buffer_ok(ple) || !metal_buffer_ok(ple_tmp)))) {
+        (P > 0 && (!metal_buffer_ok(ple) || !metal_buffer_ok(ple_tmp))) ||
+        (m->attn_out_gate && !metal_buffer_ok(agate))) {
         release_buf(x); release_buf(xb); release_buf(xb2); release_buf(q);
         release_buf(kt); release_buf(vt); release_buf(hb); release_buf(hb2);
         release_buf(att); release_buf(logits);
         release_buf(att_acc); release_buf(att_ms);
-        release_buf(ple); release_buf(ple_tmp);
+        release_buf(ple); release_buf(ple_tmp); release_buf(agate);
         return false;
     }
 
@@ -286,6 +294,10 @@ static bool metal_ensure_batch(model_t *m, int n) {
     if (P > 0) {
         release_buf(g->ple); release_buf(g->ple_tmp);
         g->ple = ple; g->ple_tmp = ple_tmp;
+    }
+    if (m->attn_out_gate) {
+        release_buf(g->agate);
+        g->agate = agate;
     }
     g->batch_cap = n;
     return true;
@@ -611,12 +623,15 @@ static int metal_fit_layers(model_t *m, uint64_t budget, int cap,
 }
 
 bool gpu_init(model_t *m) {
-    if (m->attn_out_gate) {
-        fprintf(stderr, "gpu: gated attention (afmoe) is not on the metal backend yet — using CPU\n");
-        return false;
-    }
     if (m->qwen35) {
         fprintf(stderr, "gpu: qwen35 hybrid path is not on the metal backend yet — using CPU\n");
+        return false;
+    }
+    if (m->attn_out_gate && m->n_expert > 0) {
+        // the dense output gate (muse-glimmer) is implemented below; gate +
+        // sparse MoE (afmoe) has never been run against the identity gates,
+        // so it keeps its CPU fallback rather than gaining silent support
+        fprintf(stderr, "gpu: gated attention with sparse MoE (afmoe) is not on the metal backend yet — using CPU\n");
         return false;
     }
     if (!metal_moe_supported(m))
@@ -627,8 +642,11 @@ bool gpu_init(model_t *m) {
                 m->arch);
         return false;
     }
-    if (m->no_rope_layer_step > 0 || m->attn_temp_scale != 0.0f) {
-        fprintf(stderr, "gpu: '%s' NoPE/attention-temperature knobs are not on the metal backend yet — using CPU\n",
+    if (m->attn_temp_scale != 0.0f) {
+        // NoPE layers just skip the rope dispatch (model_layer_ropes), but the
+        // llama-4 attention temperature scales Q per token position and has no
+        // kernel here yet
+        fprintf(stderr, "gpu: '%s' attention-temperature knob is not on the metal backend yet — using CPU\n",
                 m->arch);
         return false;
     }
@@ -647,8 +665,8 @@ bool gpu_init(model_t *m) {
             return false;
         }
         gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
-                              ly->w_gate, ly->w_up, ly->w_down };
-        for (int i = 0; i < 7; i++)
+                              ly->w_gate, ly->w_up, ly->w_down, ly->wq_gate };
+        for (int i = 0; i < 8; i++)
             if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
     }
 
@@ -686,6 +704,7 @@ bool gpu_init(model_t *m) {
     g->p_silu         = mk_pipeline(dev, lib, @"k_silu_mul");
     g->p_gelu         = mk_pipeline(dev, lib, @"k_gelu_mul");
     g->p_add          = mk_pipeline(dev, lib, @"k_add");
+    g->p_sigmul       = mk_pipeline(dev, lib, @"k_sigmoid_mul");
     g->p_scale        = mk_pipeline(dev, lib, @"k_scale");
     g->p_head_transform = mk_pipeline(dev, lib, @"k_head_transform");
     g->p_moe_route    = mk_pipeline(dev, lib, @"k_moe_route");
@@ -731,7 +750,7 @@ bool gpu_init(model_t *m) {
     lib = nil;
     if (!g->p_rmsnorm || !g->p_rope || !g->p_store || !g->p_attn ||
         !g->p_attn_chunk || !g->p_attn_comb ||
-        !g->p_silu || !g->p_gelu || !g->p_add || !g->p_scale ||
+        !g->p_silu || !g->p_gelu || !g->p_add || !g->p_scale || !g->p_sigmul ||
         !g->p_head_transform || !g->queue || !g->p_qknorm || !g->p_headnorm ||
         !g->p_moe_route || !g->p_moe_actmul || !g->p_moe_sum ||
         !g->p_mv[T_F32] || !g->p_mv[T_F16] || !g->p_mv[T_Q8_0] ||
@@ -1522,8 +1541,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         dequant_row(m->tok_embd->type,
                     (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
                     xp, n_embd);
-        if (m->embd_scale != 1.0f)
-            for (int i = 0; i < n_embd; i++) xp[i] *= m->embd_scale;
+        model_embd_transform(m, xp);
     }
     // E-series per-layer embedding table. model_forward_batch deliberately
     // skips its own prepass under full offload (CUDA stages the table on the
@@ -1571,6 +1589,11 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                       n_embd, m->rms_eps, n, n_embd, xdim);
         enc_mv_n(g, e, m, ly->wq, g->xb, 0, g->q,  0,
                  n_embd, q_dim_l,  g->bq[l], n, xdim, q_dim);
+        // the output gate projects the same normed input as Q; xb is
+        // overwritten by the wo matvec below, so project it here
+        if (m->attn_out_gate && ly->wq_gate)
+            enc_mv_n(g, e, m, ly->wq_gate, g->xb, 0, g->agate, 0,
+                     n_embd, q_dim_l, nil, n, xdim, q_dim);
         // gemma-4 E-series shared-KV layers project Q as usual but compute no
         // K/V of their own: they attend over the cache an earlier layer filled,
         // which model_kv_byte_off() below already aliases to. Projecting and
@@ -1606,9 +1629,11 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             // kernels derive their column's position from pos + col, so every
             // token still rotates at, writes to, and attends over exactly the
             // range a per-token submit gave it.
-            enc_rope_n(g, e, m, g->q,  0, m->n_head, pos, l, n, q_dim);
+            if (model_layer_ropes(m, l))
+                enc_rope_n(g, e, m, g->q,  0, m->n_head, pos, l, n, q_dim);
             if (owns_kv) {
-                enc_rope_n(g, e, m, g->kt, 0, n_kv, pos, l, n, kv_dim);
+                if (model_layer_ropes(m, l))
+                    enc_rope_n(g, e, m, g->kt, 0, n_kv, pos, l, n, kv_dim);
 
                 store_args sa = { kv_dim_l, q8, kv_dim,
                                   model_kv_byte_off(m, l) + (uint64_t)pos * row_b,
@@ -1713,11 +1738,15 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             attn_done: ;
         }
 
+        if (m->attn_out_gate && ly->wq_gate)
+            for (int b = 0; b < n; b++)
+                enc_elem(g, e, g->p_sigmul, g->xb2, foff((size_t)b * xdim),
+                         g->agate, foff((size_t)b * q_dim), q_dim_l);
         enc_mv_n(g, e, m, ly->wo, g->xb2, 0, g->xb, 0,
                  q_dim_l, n_embd, g->bo[l], n, xdim, xdim);
         if (g->pan[l])
             enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pan[l],
-                          n_embd, m->rms_eps, n, xdim, xdim);
+                          n_embd, m->post_norm_eps, n, xdim, xdim);
         for (int b = 0; b < n; b++)
             enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
                      g->xb, foff((size_t)b * xdim), n_embd);
@@ -1757,7 +1786,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         }
         if (g->pfn[l])
             enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pfn[l],
-                          n_embd, m->rms_eps, n, xdim, xdim);
+                          n_embd, m->post_norm_eps, n, xdim, xdim);
         for (int b = 0; b < n; b++)
             enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
                      g->xb, foff((size_t)b * xdim), n_embd);

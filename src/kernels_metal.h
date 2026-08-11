@@ -1324,6 +1324,17 @@ static const char *k_metal_src =
     "    }\n"
     "}\n"
     "\n"
+    "// attention output gate (afmoe / muse-glimmer): x *= sigmoid(gate), the\n"
+    "// same arithmetic as the CPU's 1/(1+expf(-g)) and CUDA's k_q35_attn_gate.\n"
+    "// exp() overflow on a large negative gate saturates to 0 exactly as libm's\n"
+    "// expf does, so no clamp is needed for identity with the CPU oracle.\n"
+    "kernel void k_sigmoid_mul(device float       *x [[buffer(0)]],\n"
+    "                          device const float *g [[buffer(1)]],\n"
+    "                          constant int       &n [[buffer(2)]],\n"
+    "                          uint i [[thread_position_in_grid]]) {\n"
+    "    if ((int)i < n) x[i] *= 1.0f / (1.0f + exp(-g[i]));\n"
+    "}\n"
+    "\n"
     "kernel void k_gelu_mul(device float       *g [[buffer(0)]],\n"
     "                       device const float *u [[buffer(1)]],\n"
     "                       constant int       &n [[buffer(2)]],\n"
@@ -1677,4 +1688,4 @@ static const char *k_metal_src =
     "\n"
 ;
 // SHA-256 of kernels.metal as embedded above.
-static const char *k_metal_sha = "179836266ebc8eb98c166d9ddfb59fd4955bfd7e4a52108bd766e03d9c625aea";
+static const char *k_metal_sha = "8af00ac2b1e0130cc733a8d730c53607d7f8c0cda52913020f4185e15ee52c6a";

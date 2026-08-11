@@ -239,7 +239,7 @@ flags into unrelated feature sections.
 | `--rope-scale F` | Force linear rope position scaling. |
 | `--rope-base F` | Override the rope frequency base. |
 | `--system TEXT` | System prompt in interactive chat. |
-| `--chat-template NAME` | Force `chatml`, `llama2`, `llama3`, `mistral`, `zephyr`, `phi3`, `gemma`, `gemma4`, `apertus`, `ornith`, or `raw`; default is auto-detection. |
+| `--chat-template NAME` | Force `chatml`, `llama2`, `llama3`, `mistral`, `zephyr`, `phi3`, `gemma`, `gemma4`, `apertus`, `ornith`, `muse`, or `raw`; default is auto-detection. |
 | `--no-bos` | Do not add the beginning-of-sequence token. |
 | `--ignore-eos` | Continue generation past end-of-text tokens. |
 
@@ -644,6 +644,7 @@ the model's responsibility.
 | `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. |
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
+| `muse-glimmer` | Meta Muse Glimmer 30B (text): gated attention, QK + sandwich norms, SWA pattern with NoPE globals, scaled + softcapped logits; CPU, CUDA and Metal. Vision encoder and atem tool syntax not implemented. |
 
 Admission remains layout-specific. Shared-expert MoE, unsupported split expert
 layouts, or architecture-specific tensor arrangements can still be refused
@@ -652,7 +653,7 @@ even when the architecture ID is listed.
 | Area | Current support |
 |---|---|
 | File format | GGUF v2/v3, mmap/file-mapped host weights, single-file models only. |
-| Tokenizers | SPM and byte-level BPE with llama, qwen2, smollm, tekken, Gemma, and GPT-2-family pre-tokenization rules. |
+| Tokenizers | SPM and byte-level BPE with llama, qwen2, smollm, tekken, llama4/o200k, Gemma, and GPT-2-family pre-tokenization rules. |
 | Transformer | RMSNorm, adjacent-pair and NeoX RoPE, grouped-query attention, SwiGLU/GELU/xIELU family paths, tied embeddings, dense and selected sparse MoE. |
 | Sampling | Greedy, temperature, top-k, top-p, min-p, repeat penalty, stop strings, JSON/schema constraints, speculative decoding. |
 | Context | Batched prefill, f16/q8 KV, linear/YaRN/llama-3 scaling, automatic extension. |

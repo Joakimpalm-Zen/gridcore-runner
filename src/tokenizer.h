@@ -11,7 +11,7 @@ enum { TOK_SPM, TOK_BPE, TOK_BPE_SPM }; // BPE_SPM: gemma4 (spaces to U+2581, ra
 // non-letter/non-digit character lead a letter run and cap digit runs, which
 // changes where pre-token boundaries fall. Unrecognised values stay on GPT2.
 enum { TOK_PRE_GPT2, TOK_PRE_LLAMA3, TOK_PRE_QWEN2, TOK_PRE_SMOLLM, TOK_PRE_AFMOE,
-       TOK_PRE_TEKKEN };
+       TOK_PRE_TEKKEN, TOK_PRE_LLAMA4 };
 
 typedef struct { const char *key; uint32_t klen; int32_t val; } hmap_ent;
 typedef struct { hmap_ent *e; size_t cap; } hmap;

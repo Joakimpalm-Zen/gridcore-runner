@@ -1417,10 +1417,17 @@ bool gpu_init(model_t *m) {
                 "running on CPU\n");
         goto unsupported;
     }
-    if (m->attn_out_gate) {
-        // afmoe's per-element attention output gate has no device kernel yet;
-        // running without it would be silently wrong, so the whole model
-        // stays on the host.
+    // The DENSE attention output gate (muse-glimmer) rides qwen35's
+    // machinery: wq_gate is already in every weight table and k_q35_attn_gate
+    // applies exactly the CPU's x *= 1/(1+expf(-g)); only the projection into
+    // q35_gate is arch-specific, added in the layer loop below. The gate
+    // PLUS sparse MoE (afmoe) stays on the host: that combination has never
+    // been run against the identity gates, and enabling it as a side effect
+    // of the dense port would be an unmeasured support claim.
+    if (m->attn_out_gate && m->n_expert > 0) {
+        // afmoe: per-element attention output gate + sparse MoE has no
+        // certified device path; running it would be unverified, so the
+        // whole model stays on the host.
         goto unsupported;
     }
     if (m->ffn_var) {
@@ -1574,6 +1581,10 @@ bool gpu_init(model_t *m) {
             CK(cu.MemsetD8(g->q35_hist_prev, 0, sizeof(float) * hist_alloc));
             CK(cu.MemsetD8(g->q35_state_prev, 0, sizeof(float) * state_elems));
         }
+        // gated attention without the rest of qwen35 (afmoe, muse-glimmer):
+        // only the gate scratch is needed
+        if (m->attn_out_gate && !m->qwen35)
+            CK(cu.MemAlloc(&g->q35_gate, sizeof(float) * MVB * q_dim));
         if (m->n_expert > 0) {
             // sparse-MoE buffers, sized for both the fused indirect path
             // (device routing for a whole tile, per-slot expert scratch) and
@@ -2185,8 +2196,7 @@ static bool stage_x(gpu_t *g, model_t *m, const int32_t *tokens, int tn) {
         dequant_row(m->tok_embd->type,
                     (uint8_t *)m->tok_embd->data + (size_t)tokens[b] * ers,
                     hx, m->n_embd);
-        if (m->embd_scale != 1.0f)
-            for (int i = 0; i < m->n_embd; i++) hx[i] *= m->embd_scale;
+        model_embd_transform(m, hx);
     }
     if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * tn * m->n_embd) != 0)
         return false;
@@ -2914,6 +2924,11 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         } else {
             ok = ok && enc_mv(g, m, ly->wq, g->xb, g->q, n_embd, q_dim,
                               g->sw->bq[l], tn, xdim, q_dim);
+            // the output gate projects the same normed input as Q, and xb is
+            // overwritten by wo below, so this must run before attention
+            if (m->attn_out_gate && ly->wq_gate)
+                ok = ok && enc_mv(g, m, ly->wq_gate, g->xb, g->q35_gate,
+                                  n_embd, q_dim, 0, tn, xdim, q_dim);
         }
         // gemma4 E-series shared-KV layers project Q as usual but compute no
         // K/V: they attend over the cache an earlier layer filled, which the
@@ -2986,7 +3001,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         }
         prof_mark(g, PH_ATTN);
 
-        if (m->qwen35) {
+        if (m->qwen35 || (m->attn_out_gate && ly->wq_gate)) {
             int gate_stride = q_dim;
             void *pg[] = { &g->xb2, &g->q35_gate, &q_dim, &xdim, &gate_stride };
             ok = ok && launch(g, g->sw->f_q35_gate, (q_dim + 255) / 256,
@@ -2997,7 +3012,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         prof_mark(g, PH_MATVEC);
     attention_done:
         if (g->sw->pan[l])
-            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->rms_eps,
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->post_norm_eps,
                                    tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         prof_mark(g, PH_ELEM);
@@ -3053,7 +3068,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         }
     ffn_done:
         if (g->sw->pfn[l])
-            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->rms_eps,
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->post_norm_eps,
                                    tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         ok = ok && enc_ple(g, m, ly, l, tn, xdim);
@@ -3132,9 +3147,12 @@ static bool batch_eligible(model_t **seqs, int n, gpu_t **lead_out) {
         if (!m || !m->gpu) return false;
         gpu_t *g = m->gpu;
         if (m->gpu_layers < m->n_layer) return false;
-        // fwd_batch runs a dense FFN unconditionally; MoE (sparse experts or the
-        // gemma-4 dual-branch) has no path there, so keep those on fwd_tile
-        if (m->n_expert > 0 || m->moe_gemma || m->qwen35) return false;
+        // fwd_batch runs a dense FFN unconditionally; MoE (sparse experts or
+        // the gemma-4 dual-branch) has no path there, and it neither projects
+        // the attention output gate nor skips rope on nope_on_full layers —
+        // keep all of those on fwd_tile
+        if (m->n_expert > 0 || m->moe_gemma || m->qwen35 ||
+            m->attn_out_gate || m->nope_on_full) return false;
         if (!g->sw->f_rope_seq || !g->sw->f_store_seq || !g->sw->f_attn_dec_seq)
             return false;
         if (!lead) lead = g;
@@ -3304,7 +3322,7 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
 
         ok = ok && enc_mv_batch(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->sw->bo[l], tn, xdim, xdim);
         if (g->sw->pan[l])
-            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->rms_eps, tn, xdim, xdim);
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->post_norm_eps, tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
 
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->ffn_norm[l], n_embd, m->rms_eps, tn, n_embd, xdim);
@@ -3313,7 +3331,7 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
         ok = ok && enc_actmul(g, m, g->hb, g->hb2, tn * m->n_ff);
         ok = ok && enc_mv_batch(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
         if (g->sw->pfn[l])
-            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->rms_eps, tn, xdim, xdim);
+            ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->post_norm_eps, tn, xdim, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         ok = ok && enc_ple(g, m, ly, l, tn, xdim);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
@@ -3337,8 +3355,7 @@ static bool stage_x_batch(gpu_batch *B, model_t *m, const int32_t *tok, int n) {
         dequant_row(m->tok_embd->type,
                     (uint8_t *)m->tok_embd->data + (size_t)tok[b] * ers,
                     hx, m->n_embd);
-        if (m->embd_scale != 1.0f)
-            for (int i = 0; i < m->n_embd; i++) hx[i] *= m->embd_scale;
+        model_embd_transform(m, hx);
     }
     if (cu.MemcpyHtoD(g->x, g->h_x, sizeof(float) * (size_t)n * m->n_embd) != 0)
         return false;
@@ -3357,7 +3374,9 @@ bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
     // position, and this path keeps positions on the device. Decline rather
     // than scale with the wrong factor; the caller decodes sequentially,
     // which is the same retreat it already takes for a bad index.
-    if (b->n > 0 && b->seqs[idx[0]] && b->seqs[idx[0]]->no_rope_layer_step > 0)
+    if (b->n > 0 && b->seqs[idx[0]] &&
+        (b->seqs[idx[0]]->no_rope_layer_step > 0 ||
+         b->seqs[idx[0]]->nope_on_full))
         return false;
     // A microbatch of one is just a decode step with extra staging, and the
     // solo path is better at it: narrower matvec kernels, x straight from

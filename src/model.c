@@ -615,7 +615,7 @@ const char *const *model_supported_archs(size_t *count) {
     static const char *const arches[] = {
         "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
         "smollm", "stablelm", "gemma3", "gemma4", "phi3", "gpt-oss",
-        "apertus", "afmoe",
+        "apertus", "afmoe", "muse-glimmer",
     };
     if (count) *count = sizeof(arches) / sizeof(arches[0]);
     return arches;
@@ -1173,6 +1173,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     // qwen2 (and other HF-layout archs) need NeoX-style half-split rotation
     m->rope_neox   = strcmp(arch, "llama") != 0 && strcmp(arch, "mistral") != 0;
     m->embd_scale  = 1.0f;
+    m->logit_scale = 1.0f;
     m->rope_dim_local = m->rope_dim;
     if (strcmp(arch, "gemma3") == 0) {
         // gemma3: scaled embeddings, GELU ffn, sliding-window attention on 5
@@ -1487,11 +1488,68 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             m->kv_src[i] = src;
         }
     }
+    if (strcmp(arch, "muse-glimmer") == 0) {
+        // muse-glimmer (Meta Muse Glimmer 30B). Transcribed from llama.cpp
+        // b10353 src/models/muse-glimmer.cpp, not inferred:
+        //   * weightless RMS norm on the embedding row, no embedding scale;
+        //   * afmoe's output-gated attention (blk.N.attn_gate, sigmoid
+        //     between SDPA out and o_proj) plus qwen3-style per-head QK
+        //     norms (conversion folds qk_scale_factor into attn_q_norm and
+        //     ships attn_k_norm as identity);
+        //   * sandwich norms at a FIXED 1e-8 eps (llama.cpp hardcodes
+        //     post_norm_eps) while the pre-norms keep the declared epsilon;
+        //   * SWA with a per-layer bool pattern array (30B: 3 local : 1
+        //     global); rope runs ONLY on the sliding layers — llama.cpp maps
+        //     this arch to LLAMA_ROPE_TYPE_NORM, i.e. adjacent-pair like
+        //     llama — at freq_base_swa, seeded from the MAIN base exactly
+        //     like gpt-oss; the full-attention layers are NoPE;
+        //   * final logits: x logit_scale (a required key), then softcap.
+        m->attn_out_gate = true;
+        m->nope_on_full  = true;
+        m->embd_norm     = true;
+        m->rope_neox     = false;
+        m->post_norm_eps = 1e-8f;
+        m->logit_softcap = gguf_get_f32(g, AK("final_logit_softcapping"), 0.0f);
+        m->logit_scale   = gguf_get_f32(g, AK("logit_scale"), 0.0f);
+        if (m->logit_scale <= 0.0f) {
+            // llama.cpp reads the key as required; a build that silently
+            // defaulted it would emit uncapped-scale logits on every token
+            fprintf(stderr, "error: muse-glimmer requires %s\n",
+                    AK("logit_scale"));
+            return false;
+        }
+        m->swa_window = (int)gguf_get_u32(g, AK("attention.sliding_window"), 2048);
+        int period = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 4);
+        if (period < 1) period = 4;
+        m->l_is_swa = calloc(m->n_layer, sizeof(bool));
+        if (!m->l_is_swa) return false;
+        if (!swa_pattern_array(g, AK("attention.sliding_window_pattern"),
+                               m->l_is_swa, m->n_layer))
+            for (int i = 0; i < m->n_layer; i++)
+                m->l_is_swa[i] = m->swa_window > 0 && ((i + 1) % period) != 0;
+        // sliding layers share the global rope regime unless the export
+        // declares a genuinely different local base
+        float sbase = gguf_get_f32(g, AK("rope.freq_base_swa"), 0.0f);
+        m->swa_rope_global = sbase <= 0.0f || sbase == m->rope_base;
+        // Reasoning is a separate assistant turn addressed to the model
+        // itself: ` to=self<|message|>THINKING<|eom|><|start|>assistant
+        // to=user<|message|>ANSWER`. The control tokens decode to nothing,
+        // so on the visible stream the pair below is exactly what brackets
+        // the thinking text (see the TMPL_MUSE note in template.c).
+        m->think_open  = " to=self";
+        m->think_close = "assistant to=user";
+    }
+    // The sandwich norms run at rms_eps everywhere except where an arch block
+    // above pinned them (muse-glimmer's fixed 1e-8); resolve the default after
+    // every block that can still change rms_eps has run.
+    if (m->post_norm_eps <= 0.0f) m->post_norm_eps = m->rms_eps;
     // Llama-4 attention knobs, off unless the GGUF asks for them.
     m->no_rope_layer_step   = (int)gguf_get_u32(g, AK("attention.no_rope_layer_step"), 0);
     // afmoe's GGUF carries no no_rope key; llama.cpp defaults the step to the
     // SWA period (4) for this arch, so the global layers are the NoPE layers.
-    if (m->attn_out_gate && m->no_rope_layer_step == 0)
+    // muse-glimmer also gates its attention but derives NoPE from the pattern
+    // array (nope_on_full) — the afmoe default must not stack onto it.
+    if (m->attn_out_gate && !m->nope_on_full && m->no_rope_layer_step == 0)
         m->no_rope_layer_step = 4;
     m->attn_temp_floor_scale = (int)gguf_get_u32(g, AK("attention.attn_temp_floor_scale"), 0);
     m->attn_temp_scale       = gguf_get_f32(g, AK("attention.attn_temp_scale"), 0.0f);
@@ -2768,10 +2826,24 @@ static void suppress_logits(const model_t *m, float *logits) {
 // never-emit tokens. No-op on a NULL buffer (a want_logits==false step).
 static void apply_head_transforms(const model_t *m, float *logits) {
     if (!logits) return;
+    // muse-glimmer scales BEFORE the softcap (llama.cpp: ggml_scale, then
+    // the tanh squashing); the order is observable through the cap
+    if (m->logit_scale != 1.0f && m->logit_scale != 0.0f)
+        for (int i = 0; i < m->n_vocab; i++)
+            logits[i] *= m->logit_scale;
     if (m->logit_softcap > 0)
         for (int i = 0; i < m->n_vocab; i++)
             logits[i] = m->logit_softcap * tanhf(logits[i] / m->logit_softcap);
     if (m->n_suppress) suppress_logits(m, logits);
+}
+
+// See model.h: the one definition of what happens to a dequantized embedding
+// row, shared by the CPU forward and the CUDA/Metal host-side staging copies.
+void model_embd_transform(const model_t *m, float *row) {
+    if (m->embd_scale != 1.0f)
+        for (int i = 0; i < m->n_embd; i++) row[i] *= m->embd_scale;
+    if (m->embd_norm)
+        rmsnorm(row, row, NULL, m->n_embd, m->rms_eps);
 }
 
 // One CPU Gated DeltaNet layer for Qwen3.5. State is stored transposed
@@ -3444,7 +3516,7 @@ bool model_moe_ffn_cpu(model_t *m, int layer, int n) {
         for (int b = 0; b < n; b++)
             rmsnorm(m->xb + (size_t)b * xs,
                     m->xb + (size_t)b * xs,
-                    ly->post_ffn_norm_w, ne, m->rms_eps);
+                    ly->post_ffn_norm_w, ne, m->post_norm_eps);
     for (int b = 0; b < n; b++)
         for (int i = 0; i < ne; i++)
             m->x[(size_t)b * ne + i] += m->xb[(size_t)b * xs + i];
@@ -3506,9 +3578,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             dequant_row(m->tok_embd->type,
                         (uint8_t *)m->tok_embd->data + (size_t)id * ers,
                         m->x + (size_t)b * n_embd, n_embd);
-            if (m->embd_scale != 1.0f)
-                for (int i = 0; i < n_embd; i++)
-                    m->x[(size_t)b * n_embd + i] *= m->embd_scale;
+            model_embd_transform(m, m->x + (size_t)b * n_embd);
         }
         model_ple_prepass(m, tokens, n, m->x, m->ple, m->ple_tmp);
     }
@@ -3551,9 +3621,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             dequant_row(m->tok_embd->type,
                         (uint8_t *)m->tok_embd->data + (size_t)id * ers,
                         m->x + (size_t)b * n_embd, n_embd);
-            if (m->embd_scale != 1.0f)
-                for (int i = 0; i < n_embd; i++)
-                    m->x[(size_t)b * n_embd + i] *= m->embd_scale;
+            model_embd_transform(m, m->x + (size_t)b * n_embd);
         }
         if (dbg) dbg_stat("post-embd", -1, m->x + (size_t)(n - 1) * n_embd, n_embd);
         if (m->n_embd_ple > 0)
@@ -3705,7 +3773,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         if (ly->post_attn_norm_w)
             for (int b = 0; b < n; b++)
                 rmsnorm(m->xb + (size_t)b * xdim, m->xb + (size_t)b * xdim,
-                        ly->post_attn_norm_w, n_embd, m->rms_eps);
+                        ly->post_attn_norm_w, n_embd, m->post_norm_eps);
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
@@ -3757,7 +3825,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         if (ly->post_ffn_norm_w)
             for (int b = 0; b < n; b++)
                 rmsnorm(m->xb + (size_t)b * xdim, m->xb + (size_t)b * xdim,
-                        ly->post_ffn_norm_w, n_embd, m->rms_eps);
+                        ly->post_ffn_norm_w, n_embd, m->post_norm_eps);
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];

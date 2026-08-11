@@ -16,6 +16,11 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         if (strstr(meta_tmpl, "<function=example_function_name>") &&
             strstr(meta_tmpl, "<think>"))
             return TMPL_ORNITH;
+        // muse-glimmer: the atem tool-call syntax and the <|start|>role
+        // <|message|> framing appear in no other family's template
+        if (strstr(meta_tmpl, "atem:function_calls") ||
+            (strstr(meta_tmpl, "<|start|>") && strstr(meta_tmpl, "<|eot|>")))
+            return TMPL_MUSE;
         // Qwen3 and relatives: ChatML whose own template carries a
         // <think> branch. Detected from the model's template rather than
         // a name list, so it follows the checkpoint and not a guess.
@@ -31,6 +36,8 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
             return strstr(meta_tmpl, "<<SYS>>") ? TMPL_LLAMA2 : TMPL_MISTRAL;
     }
     if (tok_find(tok, "<|assistant_start|>") >= 0) return TMPL_APERTUS;
+    if (tok_find(tok, "<|eot|>") >= 0 && tok_find(tok, "<|message|>") >= 0)
+        return TMPL_MUSE;
     if (tok_find(tok, "<|im_start|>") >= 0)        return TMPL_CHATML;
     if (tok_find(tok, "<|start_header_id|>") >= 0) return TMPL_LLAMA3;
     if (tok_find(tok, "<|user|>") >= 0)
@@ -52,6 +59,7 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "phi3"))    return TMPL_PHI3;
     if (!strcmp(name, "apertus")) return TMPL_APERTUS;
     if (!strcmp(name, "ornith")) return TMPL_ORNITH;
+    if (!strcmp(name, "muse"))   return TMPL_MUSE;
     if (!strcmp(name, "raw"))    return TMPL_RAW;
     return -1;
 }
@@ -67,6 +75,7 @@ const char *template_name(int t) {
         case TMPL_PHI3:    return "phi3";
         case TMPL_APERTUS: return "apertus";
         case TMPL_ORNITH: return "ornith";
+        case TMPL_MUSE:   return "muse";
         default: return "raw";
     }
 }
@@ -211,6 +220,57 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
         }
         if (add_assistant)
             off = emit(out, cap, off, "<|assistant_start|>", NULL, NULL);
+        break;
+    }
+    case TMPL_MUSE: {
+        // muse-glimmer (reference: the model's OWN tokenizer.chat_template,
+        // read from the official meta-models GGUF, not a summary):
+        // <|start|>ROLE<|message|>CONTENT<|eot|> per turn; assistant turns
+        // carry a recipient — ` to=user` for answers, ` to=self` for
+        // reasoning turns, which is what the think_open/close pair splits.
+        // When no system message is present the reference injects a default
+        // one whose constant parts are reproduced here; its current-date
+        // line is conditional in the template (`current_date is defined`)
+        // and omitted here — a live date would also defeat the prefix cache.
+        // Tool declarations (the atem syntax) are not rendered: tool calling
+        // for this family is unimplemented, not approximated.
+        static const char *muse_sys_tail =
+            "\n\nReasoning strength: high."
+            "\n\n# Valid recipients: \"self\", \"user\".<|eot|>";
+        bool has_system = false;
+        for (int i = 0; i < n_msgs; i++)
+            if (!strcmp(msgs[i].role, "system")) has_system = true;
+        if (!has_system) {
+            off = emit(out, cap, off,
+                       "<|start|>system<|message|>You are a helpful AI "
+                       "assistant.\nKnowledge cutoff: 2026-01-04.", NULL, NULL);
+            off = emit(out, cap, off, "%s", muse_sys_tail, NULL);
+        }
+        for (int i = 0; i < n_msgs; i++) {
+            const chat_msg *mm = &msgs[i];
+            if (!strcmp(mm->role, "system")) {
+                off = emit(out, cap, off, "<|start|>system<|message|>%s",
+                           mm->content, NULL);
+                off = emit(out, cap, off, "%s", muse_sys_tail, NULL);
+            } else if (!strcmp(mm->role, "assistant")) {
+                off = emit(out, cap, off, "<|start|>assistant to=user"
+                           "<|message|>%s<|eot|>", mm->content, NULL);
+            } else {
+                // user and anything else (a tool result arrives as its own
+                // named role in the reference) render as a plain named turn
+                off = emit(out, cap, off, "<|start|>%s<|message|>",
+                           mm->role, NULL);
+                off = emit(out, cap, off, "%s<|eot|>", mm->content, NULL);
+            }
+        }
+        // The reference generation prompt is the bare header: the model then
+        // chooses its recipient, opening ` to=self` when it wants a
+        // reasoning turn. THINK_OFF pins the recipient instead, which is the
+        // one place the format lets a caller suppress reasoning.
+        if (add_assistant)
+            off = emit(out, cap, off, thinking == THINK_OFF
+                       ? "<|start|>assistant to=user<|message|>"
+                       : "<|start|>assistant", NULL, NULL);
         break;
     }
     case TMPL_GEMMA4:

@@ -30,6 +30,9 @@ ESERIES_PLE = 0
 FFN_WIDTHS = None  # per-layer FFN widths -> ARRAY-typed feed_forward_length
 G4HETERO = False   # gemma4 heterogeneous attention geometry (26B/12B shape)
 ACT_OVERFLOW = 0   # scale on ffn_gate weights, to drive the activation extreme
+MUSE = False       # muse-glimmer: gated attention + QK/sandwich norms + NoPE
+MUSE_GATE_FLAT = False  # zero the attn_gate weights (sigmoid -> flat 0.5)
+MUSE_ALL_SWA = False    # pattern array all-sliding (every layer ropes)
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -83,6 +86,18 @@ while i < len(args):
         # emitted only token 0. Real models reach these magnitudes; the
         # default fixture weights (±0.04) never do.
         ACT_OVERFLOW = 400.0
+    elif a == "--muse-glimmer":
+        # muse-glimmer scaled down but shape-preserving: head_dim decoupled
+        # from n_embd/n_head (real: 32x128=4096 vs n_embd 6656), afmoe-style
+        # attn_gate, QK norms, sandwich norms, the real 3-local:1-global bool
+        # pattern array (full layers NoPE), scaled+softcapped logits, and an
+        # untied output tensor.
+        MUSE = True
+        ARCH = "muse-glimmer"
+    elif a == "--muse-gate-flat":
+        MUSE_GATE_FLAT = True
+    elif a == "--muse-all-swa":
+        MUSE_ALL_SWA = True
     elif a == "--gemma4-hetero":
         # the real gemma-4 26B/12B attention shape, scaled down: sliding
         # layers (i%3 != 2) rotate fewer dims on smaller heads with fewer KV
@@ -112,6 +127,10 @@ if ESERIES_SHARED_KV or ESERIES_PLE or G4HETERO:
     # enough layers for a sliding/full pattern (with a shared-KV tail for
     # the E-series variants)
     N_LAYER = 6
+MUSE_HD = 24         # decoupled head_dim: N_HEAD*24 = 96, not N_EMBD (64)
+if MUSE:
+    N_LAYER = 8      # two full periods of the 3-sliding:1-full pattern
+def muse_swa(i):  return True if MUSE_ALL_SWA else (i % 4) != 3
 
 # gemma4-hetero per-layer geometry: full-attention layers (i%3 == 2) use
 # head_dim 32 / 2 KV heads / no V tensor; sliding layers head_dim 16 /
@@ -195,6 +214,9 @@ for i in range(N_LAYER + MTP_LAYERS):
     if G4HETERO:
         q_dim  = N_HEAD * g4_hd(i)
         kv_dim = g4_kv(i) * g4_hd(i)
+    elif MUSE:
+        q_dim  = N_HEAD * MUSE_HD
+        kv_dim = N_KV * MUSE_HD
     else:
         q_dim  = N_EMBD
         kv_dim = N_KV * (N_EMBD // N_HEAD)
@@ -223,6 +245,16 @@ for i in range(N_LAYER + MTP_LAYERS):
             (f"blk.{i}.layer_output_scale.weight", [1],
              struct.pack("<f", 0.91 + 0.02 * i) if G4HETERO else ones(1)),
         ]
+    if MUSE:
+        tensors += [
+            (f"blk.{i}.attn_q_norm.weight", [MUSE_HD], ones(MUSE_HD)),
+            (f"blk.{i}.attn_k_norm.weight", [MUSE_HD], ones(MUSE_HD)),
+            (f"blk.{i}.attn_gate.weight", [N_EMBD, q_dim],
+             struct.pack(f"<{N_EMBD * q_dim}f", *([0.0] * (N_EMBD * q_dim)))
+             if MUSE_GATE_FLAT else tensor_data(N_EMBD * q_dim)),
+            (f"blk.{i}.post_attention_norm.weight", [N_EMBD], ones(N_EMBD)),
+            (f"blk.{i}.post_ffw_norm.weight", [N_EMBD], ones(N_EMBD)),
+        ]
     if ESERIES_PLE:
         tensors += [
             (f"blk.{i}.inp_gate.weight", [N_EMBD, ESERIES_PLE],
@@ -231,6 +263,11 @@ for i in range(N_LAYER + MTP_LAYERS):
              tensor_data(ESERIES_PLE * N_EMBD)),
             (f"blk.{i}.post_norm.weight", [N_EMBD], ones(N_EMBD)),
         ]
+
+if MUSE:
+    # the real model's lm head is untied from the embeddings
+    tensors.append(("output.weight", [N_EMBD, N_VOCAB],
+                    tensor_data(N_EMBD * N_VOCAB)))
 
 if ESERIES_PLE:
     width = ESERIES_PLE * N_LAYER
@@ -305,6 +342,17 @@ if G4HETERO:
         kv_arr_bool(f"{ARCH}.attention.sliding_window_pattern", pattern),
         kv_u32(f"{ARCH}.rope.dimension_count", 32),
         kv_u32(f"{ARCH}.rope.dimension_count_swa", 16),
+        kv_f32(f"{ARCH}.final_logit_softcapping", 30.0),
+    ]
+if MUSE:
+    meta_kvs += [
+        kv_u32(f"{ARCH}.attention.key_length", MUSE_HD),
+        kv_u32(f"{ARCH}.attention.value_length", MUSE_HD),
+        kv_u32(f"{ARCH}.rope.dimension_count", MUSE_HD),
+        kv_u32(f"{ARCH}.attention.sliding_window", 32),
+        kv_arr_bool(f"{ARCH}.attention.sliding_window_pattern",
+                    [muse_swa(i) for i in range(N_LAYER)]),
+        kv_f32(f"{ARCH}.logit_scale", 0.5),
         kv_f32(f"{ARCH}.final_logit_softcapping", 30.0),
     ]
 if ESERIES_SHARED_KV:

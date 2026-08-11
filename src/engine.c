@@ -40,7 +40,12 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
                                    "<end_of_turn>", "<turn|>",
                                    // phi3 ends assistant turns with <|end|>,
                                    // which is not its declared eos_token_id
-                                   "<|end|>" };
+                                   "<|end|>",
+                                   // muse-glimmer ends turns with <|eot|>,
+                                   // also not its declared eos (<|eom|> is
+                                   // NOT a stop: it separates a reasoning
+                                   // turn from the answer that follows it)
+                                   "<|eot|>" };
     for (size_t i = 0; i < sizeof(stops) / sizeof(*stops); i++) {
         int id = tok_find(tok, stops[i]);
         if (id < 0 || e->n_stop >= (int)(sizeof(e->stop_ids) / sizeof(*e->stop_ids)))
@@ -191,6 +196,8 @@ static uint64_t model_identity(const model_t *m, const tokenizer *tok) {
     h = h64f(h, m->rms_eps);       h = h64f(h, m->rope_base);
     h = h64f(h, m->rope_mscale);   h = h64f(h, m->embd_scale);
     h = h64f(h, m->attn_scale);    h = h64f(h, m->logit_softcap);
+    h = h64f(h, m->logit_scale);   h = h64f(h, m->post_norm_eps);
+    h = h64i(h, m->embd_norm);     h = h64i(h, m->nope_on_full);
     for (int l = 0; l < m->n_layer; l++) {
         h = h64i(h, model_kv_dim(m, l));
         h = h64i(h, model_rope_dim(m, l));

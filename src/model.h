@@ -232,6 +232,14 @@ typedef struct {
     int       full_attn_interval;
     int       ssm_conv_kernel, ssm_inner, ssm_state, ssm_v_heads, ssm_groups;
     float     logit_softcap; // final logits = c*tanh(x/c) when > 0
+    float     logit_scale;   // final logits *= this BEFORE the softcap
+                             // (muse-glimmer <arch>.logit_scale; 1 = off)
+    float     post_norm_eps; // eps for the sandwich norms (post_attention_norm
+                             // / post_ffw_norm) ONLY: muse-glimmer fixes these
+                             // at 1e-8 while pre-norms keep rms_eps. 0 = use
+                             // rms_eps, which every other arch does.
+    bool      embd_norm;     // weightless RMS norm on the embedding row
+                             // (muse-glimmer), applied where embd_scale is
     int32_t  *suppress;      // token ids forced to -inf in the logits
     int       n_suppress;    // (tokenizer.ggml.suppress_tokens)
     const char *think_open, *think_close; // architecture thinking-tag pair, or NULL
@@ -300,6 +308,10 @@ typedef struct {
     // else-branch of the rope test in llama.cpp's llama4 graph) Q is scaled by
     // a per-token factor that grows with position.
     int    no_rope_layer_step;    // 0 = every layer ropes
+    bool   nope_on_full;          // muse-glimmer: rope exactly the sliding
+                                  // layers; full-attention layers are NoPE.
+                                  // Follows l_is_swa (a bool pattern array in
+                                  // the GGUF) rather than a periodic step.
     int    attn_temp_floor_scale;
     float  attn_temp_scale;
     float  attn_temp_offset;
@@ -376,7 +388,11 @@ static inline bool model_moe_router_is_plain(const model_t *m) {
 }
 // Does layer l apply rope? llama.cpp: n_no_rope_layer_step > 0 &&
 // (il + 1) % n_no_rope_layer_step != 0.
+// muse-glimmer instead ropes exactly its sliding layers (use_rope =
+// is_swa(il)), whose pattern is a per-layer bool array, so nope_on_full
+// follows l_is_swa rather than a periodic step.
 static inline bool model_layer_ropes(const model_t *m, int l) {
+    if (m->nope_on_full) return m->l_is_swa != NULL && m->l_is_swa[l];
     return !(m->no_rope_layer_step > 0 &&
              (l + 1) % m->no_rope_layer_step == 0);
 }
@@ -579,6 +595,11 @@ bool   model_spec_verify_ok(const model_t *m);
 float *model_spec_row_logits(model_t *m, int b);
 // mean-pooled L2-normalized embedding of toks; clobbers KV slots [0, n)
 bool   model_embed(model_t *m, const int32_t *toks, int n, float *out);
+// The per-row embedding transforms every forward path applies right after the
+// dequantized table row lands in a host buffer: the gemma-family sqrt(n_embd)
+// scale, then muse-glimmer's weightless RMS norm. One function so the CPU,
+// CUDA and Metal host-side copies cannot drift (same reasoning as RNC-2).
+void   model_embd_transform(const model_t *m, float *row);
 // ------------------------------------------------ continuous batching (Phase 6)
 //
 // The decode primitive continuous batching is built on: advance N independent
