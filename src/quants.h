@@ -11,7 +11,14 @@ enum ggml_type {
     T_F32 = 0, T_F16 = 1, T_Q4_0 = 2, T_Q4_1 = 3,
     T_Q5_0 = 6, T_Q5_1 = 7, T_Q8_0 = 8,
     T_Q2_K = 10, T_Q3_K = 11, T_Q4_K = 12, T_Q5_K = 13, T_Q6_K = 14,
-    T_IQ4_NL = 20, T_IQ4_XS = 23,
+    // codebook i-quants (sub-4-bit; dequant transcribed from llama.cpp
+    // b10353 ggml-quants.c, grids in quants_iq_grids.h). CPU only: the
+    // device backends refuse these types and fall back loudly.
+    T_IQ2_XXS = 16, T_IQ2_XS = 17, T_IQ3_XXS = 18, T_IQ1_S = 19,
+    T_IQ4_NL = 20,
+    T_IQ3_S = 21, T_IQ2_S = 22,
+    T_IQ4_XS = 23,
+    T_IQ1_M = 29,
     T_BF16 = 30,
     T_MXFP4 = 39,   // OCP microscaling FP4 (E2M1 codes + per-block E8M0 scale); gpt-oss
 };

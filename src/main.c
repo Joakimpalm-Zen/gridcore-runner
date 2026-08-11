@@ -525,6 +525,10 @@ int main(int argc, char **argv) {
             { "Q4_K",   T_Q4_K   }, { "Q5_K",   T_Q5_K   },
             { "Q6_K",   T_Q6_K   }, { "IQ4_NL", T_IQ4_NL },
             { "IQ4_XS", T_IQ4_XS }, { "MXFP4",  T_MXFP4  },
+            { "IQ1_S",  T_IQ1_S  }, { "IQ1_M",  T_IQ1_M  },
+            { "IQ2_XXS", T_IQ2_XXS }, { "IQ2_XS", T_IQ2_XS },
+            { "IQ2_S",  T_IQ2_S  },
+            { "IQ3_XXS", T_IQ3_XXS }, { "IQ3_S", T_IQ3_S },
         };
         const size_t n_quants = sizeof QUANTS / sizeof *QUANTS;
         printf(",\"quants\":[");

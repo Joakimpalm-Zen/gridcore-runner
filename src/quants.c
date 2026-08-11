@@ -60,6 +60,17 @@ typedef struct { f16_t d; uint16_t scales_h; uint8_t scales_l[QK_K / 64]; uint8_
 // OCP microscaling FP4: one E8M0 (power-of-two) block scale byte + 32 packed
 // E2M1 4-bit codes (the gpt-oss expert-tensor format).
 typedef struct { uint8_t e; uint8_t qs[QK / 2]; }               block_mxfp4; // 17
+// codebook i-quants (llama.cpp b10353 ggml-common.h shapes, byte-identical)
+typedef struct { f16_t d; uint16_t qs[QK_K / 8]; } block_iq2_xxs; // 66
+typedef struct { f16_t d; uint16_t qs[QK_K / 8]; uint8_t scales[QK_K / 32]; } block_iq2_xs; // 74
+typedef struct { f16_t d; uint8_t qs[QK_K / 4]; uint8_t qh[QK_K / 32]; uint8_t scales[QK_K / 32]; } block_iq2_s; // 82
+typedef struct { f16_t d; uint8_t qs[3 * QK_K / 8]; } block_iq3_xxs; // 98
+typedef struct { f16_t d; uint8_t qs[QK_K / 4]; uint8_t qh[QK_K / 32]; uint8_t signs[QK_K / 8]; uint8_t scales[QK_K / 64]; } block_iq3_s; // 110
+typedef struct { f16_t d; uint8_t qs[QK_K / 8]; uint16_t qh[QK_K / 32]; } block_iq1_s; // 50
+typedef struct { uint8_t qs[QK_K / 8]; uint8_t qh[QK_K / 16]; uint8_t scales[QK_K / 32]; } block_iq1_m; // 56
+#define IQ1S_DELTA 0.125f
+#include "quants_iq_grids.h"
+
 
 static const int8_t kvalues_iq4nl[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
@@ -84,7 +95,10 @@ int ggml_block_size(int type) {
         case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1: case T_Q8_0:
         case T_IQ4_NL: case T_MXFP4: return QK;
         case T_Q4_K: case T_Q5_K: case T_Q6_K: case T_Q2_K: case T_Q3_K:
-        case T_IQ4_XS: return QK_K;
+        case T_IQ4_XS:
+        case T_IQ2_XXS: case T_IQ2_XS: case T_IQ2_S:
+        case T_IQ3_XXS: case T_IQ3_S:
+        case T_IQ1_S: case T_IQ1_M: return QK_K;
         default: return 1;
     }
 }
@@ -106,6 +120,13 @@ size_t ggml_type_size(int type) {
         case T_Q3_K: return sizeof(block_q3_K);
         case T_IQ4_NL: return sizeof(block_iq4_nl);
         case T_IQ4_XS: return sizeof(block_iq4_xs);
+        case T_IQ2_XXS: return sizeof(block_iq2_xxs);
+        case T_IQ2_XS: return sizeof(block_iq2_xs);
+        case T_IQ2_S: return sizeof(block_iq2_s);
+        case T_IQ3_XXS: return sizeof(block_iq3_xxs);
+        case T_IQ3_S: return sizeof(block_iq3_s);
+        case T_IQ1_S: return sizeof(block_iq1_s);
+        case T_IQ1_M: return sizeof(block_iq1_m);
         case T_MXFP4: return sizeof(block_mxfp4);
         default:     return 1;
     }
@@ -120,6 +141,10 @@ const char *ggml_type_name(int type) {
         case T_Q4_K: return "Q4_K"; case T_Q5_K: return "Q5_K"; case T_Q6_K: return "Q6_K";
         case T_Q2_K: return "Q2_K"; case T_Q3_K: return "Q3_K";
         case T_IQ4_NL: return "IQ4_NL"; case T_IQ4_XS: return "IQ4_XS";
+        case T_IQ2_XXS: return "IQ2_XXS"; case T_IQ2_XS: return "IQ2_XS";
+        case T_IQ2_S: return "IQ2_S";
+        case T_IQ3_XXS: return "IQ3_XXS"; case T_IQ3_S: return "IQ3_S";
+        case T_IQ1_S: return "IQ1_S"; case T_IQ1_M: return "IQ1_M";
         case T_MXFP4: return "MXFP4";
         default: return "?";
     }
@@ -131,6 +156,8 @@ bool ggml_type_supported(int type) {
         case T_Q4_0: case T_Q4_1: case T_Q5_0: case T_Q5_1: case T_Q8_0:
         case T_Q2_K: case T_Q3_K: case T_Q4_K: case T_Q5_K: case T_Q6_K:
         case T_IQ4_NL: case T_IQ4_XS: case T_MXFP4:
+        case T_IQ2_XXS: case T_IQ2_XS: case T_IQ2_S:
+        case T_IQ3_XXS: case T_IQ3_S: case T_IQ1_S: case T_IQ1_M:
             return true;
         default:
             return false;
@@ -323,6 +350,175 @@ static void dq_iq4_xs(const block_iq4_xs *b, float *y) {
             y[j + 16] = dl * kvalues_iq4nl[qs[j] >> 4];
         }
         qs += 16; y += 32;
+    }
+}
+
+// ------------------------------------------------- codebook i-quant dequant
+// Transcribed per-block from llama.cpp b10353 ggml-quants.c
+// dequantize_row_iq* (the outer nb loop lives in dequant_row here); the
+// codebook grids and sign tables are in quants_iq_grids.h, verbatim.
+
+static void dq_iq2_xxs(const block_iq2_xxs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    uint32_t aux32[2];
+    const uint8_t *aux8 = (const uint8_t *)aux32;
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        memcpy(aux32, b->qs + 4 * ib32, 2 * sizeof(uint32_t));
+        float db = d * (0.5f + (aux32[1] >> 28)) * 0.25f;
+        for (int l = 0; l < 4; l++) {
+            const uint8_t *grid = (const uint8_t *)(iq2xxs_grid + aux8[l]);
+            uint8_t signs = ksigns_iq2xs[(aux32[1] >> 7 * l) & 127];
+            for (int j = 0; j < 8; j++)
+                y[j] = db * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f);
+            y += 8;
+        }
+    }
+}
+
+static void dq_iq2_xs(const block_iq2_xs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    float db[2];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        db[0] = d * (0.5f + (b->scales[ib32] & 0xf)) * 0.25f;
+        db[1] = d * (0.5f + (b->scales[ib32] >> 4)) * 0.25f;
+        for (int l = 0; l < 4; l++) {
+            const uint8_t *grid =
+                (const uint8_t *)(iq2xs_grid + (b->qs[4 * ib32 + l] & 511));
+            uint8_t signs = ksigns_iq2xs[b->qs[4 * ib32 + l] >> 9];
+            for (int j = 0; j < 8; j++)
+                y[j] = db[l / 2] * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f);
+            y += 8;
+        }
+    }
+}
+
+static void dq_iq2_s(const block_iq2_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *qh = b->qh, *signs = b->qs + QK_K / 8;
+    float db[2];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        db[0] = d * (0.5f + (b->scales[ib32] & 0xf)) * 0.25f;
+        db[1] = d * (0.5f + (b->scales[ib32] >> 4)) * 0.25f;
+        for (int l = 0; l < 4; l++) {
+            float dl = db[l / 2];
+            const uint8_t *grid = (const uint8_t *)
+                (iq2s_grid + (qs[l] | ((qh[ib32] << (8 - 2 * l)) & 0x300)));
+            for (int j = 0; j < 8; j++)
+                y[j] = dl * grid[j] * (signs[l] & kmask_iq2xs[j] ? -1.f : 1.f);
+            y += 8;
+        }
+        qs += 4;
+        signs += 4;
+    }
+}
+
+static void dq_iq3_xxs(const block_iq3_xxs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *scales_and_signs = b->qs + QK_K / 4;
+    uint32_t aux32;
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        memcpy(&aux32, scales_and_signs + 4 * ib32, sizeof(uint32_t));
+        float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+        for (int l = 0; l < 4; l++) {
+            uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * l) & 127];
+            const uint8_t *grid1 = (const uint8_t *)(iq3xxs_grid + qs[2 * l + 0]);
+            const uint8_t *grid2 = (const uint8_t *)(iq3xxs_grid + qs[2 * l + 1]);
+            for (int j = 0; j < 4; j++) {
+                y[j + 0] = db * grid1[j] * (signs & kmask_iq2xs[j + 0] ? -1.f : 1.f);
+                y[j + 4] = db * grid2[j] * (signs & kmask_iq2xs[j + 4] ? -1.f : 1.f);
+            }
+            y += 8;
+        }
+        qs += 8;
+    }
+}
+
+static void dq_iq3_s(const block_iq3_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *qh = b->qh, *signs = b->signs;
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32 += 2) {
+        float db1 = d * (1 + 2 * (b->scales[ib32 / 2] & 0xf));
+        float db2 = d * (1 + 2 * (b->scales[ib32 / 2] >> 4));
+        for (int l = 0; l < 4; l++) {
+            const uint8_t *grid1 = (const uint8_t *)
+                (iq3s_grid + (qs[2 * l + 0] | ((qh[0] << (8 - 2 * l)) & 256)));
+            const uint8_t *grid2 = (const uint8_t *)
+                (iq3s_grid + (qs[2 * l + 1] | ((qh[0] << (7 - 2 * l)) & 256)));
+            for (int j = 0; j < 4; j++) {
+                y[j + 0] = db1 * grid1[j] * (signs[l] & kmask_iq2xs[j + 0] ? -1.f : 1.f);
+                y[j + 4] = db1 * grid2[j] * (signs[l] & kmask_iq2xs[j + 4] ? -1.f : 1.f);
+            }
+            y += 8;
+        }
+        qs += 8;
+        signs += 4;
+        for (int l = 0; l < 4; l++) {
+            const uint8_t *grid1 = (const uint8_t *)
+                (iq3s_grid + (qs[2 * l + 0] | ((qh[1] << (8 - 2 * l)) & 256)));
+            const uint8_t *grid2 = (const uint8_t *)
+                (iq3s_grid + (qs[2 * l + 1] | ((qh[1] << (7 - 2 * l)) & 256)));
+            for (int j = 0; j < 4; j++) {
+                y[j + 0] = db2 * grid1[j] * (signs[l] & kmask_iq2xs[j + 0] ? -1.f : 1.f);
+                y[j + 4] = db2 * grid2[j] * (signs[l] & kmask_iq2xs[j + 4] ? -1.f : 1.f);
+            }
+            y += 8;
+        }
+        qh += 2;
+        qs += 8;
+        signs += 4;
+    }
+}
+
+static void dq_iq1_s(const block_iq1_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs;
+    const uint16_t *qh = b->qh;
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        float dl = d * (2 * ((qh[ib] >> 12) & 7) + 1);
+        float delta = qh[ib] & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA;
+        for (int l = 0; l < 4; l++) {
+            const int8_t *grid = (const int8_t *)
+                (iq1s_grid + (qs[l] | (((qh[ib] >> 3 * l) & 7) << 8)));
+            for (int j = 0; j < 8; j++) y[j] = dl * (grid[j] + delta);
+            y += 8;
+        }
+        qs += 4;
+    }
+}
+
+static void dq_iq1_m(const block_iq1_m *b, float *y) {
+    // the block-level fp16 scale is scattered across the top nibbles of the
+    // four 16-bit scale words (llama.cpp iq1m_scale_t)
+    const uint16_t *sc = (const uint16_t *)b->scales;
+    f16_t sd = (f16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) |
+                       ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000));
+    float d = f16_to_f32(sd);
+    const uint8_t *qs = b->qs, *qh = b->qh;
+    float delta[4];
+    uint16_t idx[4];
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        float dl1 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) + 1);
+        float dl2 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) + 1);
+        idx[0] = qs[0] | ((qh[0] << 8) & 0x700);
+        idx[1] = qs[1] | ((qh[0] << 4) & 0x700);
+        idx[2] = qs[2] | ((qh[1] << 8) & 0x700);
+        idx[3] = qs[3] | ((qh[1] << 4) & 0x700);
+        delta[0] = qh[0] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA;
+        delta[1] = qh[0] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA;
+        delta[2] = qh[1] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA;
+        delta[3] = qh[1] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA;
+        for (int l = 0; l < 2; l++) {
+            const int8_t *grid = (const int8_t *)(iq1s_grid + idx[l]);
+            for (int j = 0; j < 8; j++) y[j] = dl1 * (grid[j] + delta[l]);
+            y += 8;
+        }
+        for (int l = 2; l < 4; l++) {
+            const int8_t *grid = (const int8_t *)(iq1s_grid + idx[l]);
+            for (int j = 0; j < 8; j++) y[j] = dl2 * (grid[j] + delta[l]);
+            y += 8;
+        }
+        qs += 4;
+        qh += 2;
     }
 }
 
@@ -588,6 +784,13 @@ static void dequant_block(int type, const void *src, float *dst) {
         case T_Q6_K: dq_q6_K(src, dst); break;
         case T_IQ4_NL: dq_iq4_nl(src, dst); break;
         case T_IQ4_XS: dq_iq4_xs(src, dst); break;
+        case T_IQ2_XXS: dq_iq2_xxs(src, dst); break;
+        case T_IQ2_XS: dq_iq2_xs(src, dst); break;
+        case T_IQ2_S: dq_iq2_s(src, dst); break;
+        case T_IQ3_XXS: dq_iq3_xxs(src, dst); break;
+        case T_IQ3_S: dq_iq3_s(src, dst); break;
+        case T_IQ1_S: dq_iq1_s(src, dst); break;
+        case T_IQ1_M: dq_iq1_m(src, dst); break;
         case T_MXFP4: dq_mxfp4(src, dst); break;
     }
 }
