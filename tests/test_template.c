@@ -5,6 +5,7 @@
 // still required for the fallback path that looks for special tokens, and any
 // fixture vocabulary serves for that.
 #include "runner.h"
+#include "json.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -268,6 +269,69 @@ static void test_chatml_think_shape(void) {
     assert(strcmp(out, base) == 0);
 }
 
+// Muse's own template places tool metadata after the reasoning-strength line,
+// derives valid recipient namespaces from dotted function names, and renders
+// tool results as named tool turns.  Keep the whole turn byte-exact: moving
+// any of these fragments changes the prompt the real model sees.
+static void test_muse_tools_and_result_golden(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"city\":{\"type\":\"string\"}}}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"math.add\","
+        "\"description\":\"Add values\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"a\":{\"type\":\"integer\"}}}}}]";
+    jv *tools = json_parse(src, strlen(src));
+    assert(tools != NULL);
+    const chat_msg msgs[] = {
+        { .role = "user", .content = "Weather?" },
+        { .role = "tool", .content = "sunny", .name = "weather.get" },
+    };
+    char out[8192];
+    render_messages_with_tools(TMPL_MUSE, msgs, 2, true, THINK_DEFAULT,
+                               tools, out, sizeof(out));
+    assert(strcmp(out,
+        "<|start|>system<|message|>You are a helpful AI assistant.\n"
+        "Knowledge cutoff: 2026-01-04.\n\nReasoning strength: high.\n\n"
+        "In this environment you have access to a set of tools you can use to answer the user's question.\n\n"
+        "You can invoke a function by writing a \"<atem:function_calls>\" block like the following:\n"
+        "<atem:function_calls>\n<atem:invoke name=\"$FUNCTION_NAME\">\n"
+        "<atem:parameter name=\"$PARAMETER_NAME\">$PARAMETER_VALUE</atem:parameter>\n"
+        "...\n</atem:invoke>\n</atem:function_calls>\n\n"
+        "String and scalar parameters should be specified as is, while lists and objects should use JSON format. Note that spaces for string values are not stripped. The output is not expected to be valid XML and is parsed with regular expressions.\n"
+        "Here are the functions available in JSONSchema format:\n// Tool metadata\n"
+        "{\"name\": \"weather\", \"description\": \"\"}\n"
+        "{\"name\": \"math\", \"description\": \"\"}\n"
+        "// Function schemas\n"
+        "{\"name\": \"weather.get\", \"description\": \"Get weather\", \"parameters\": {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+        "{\"name\": \"math.add\", \"description\": \"Add values\", \"parameters\": {\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}}\n\n"
+        "Here's an example of how to call a function in the tool set:\n"
+        "(If the tool namespace is not specified, invoke the function directly as `example_function_name` rather than `example_tool_name.example_function_name`)\n\n"
+        "to=example_tool_name.example_function_name\n\n"
+        "<atem:function_calls>\n<atem:invoke name=\"example_tool_name.example_function_name\">\n"
+        "<atem:parameter name=\"example_parameter_1\">value_1</atem:parameter>\n"
+        "<atem:parameter name=\"example_parameter_2\">This is the value for the second parameter\nthat can span\n\"multiple\" lines\n</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>\n\n"
+        "# Valid recipients: \"self\", \"weather.*\", \"math.*\", \"user\".<|eot|>"
+        "<|start|>user<|message|>Weather?<|eot|>"
+        "<|start|>tool weather.get<|message|><tool_output name=\"weather.get\">\n"
+        "sunny\n</tool_output><|eot|>"
+        "<|start|>assistant") == 0);
+    jv_free(tools);
+}
+
+static void test_muse_tool_result_id_resolves_prior_name(void) {
+    const char *src =
+        "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_7\","
+        "\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"arguments\":\"{}\"}}]},"
+        "{\"role\":\"tool\",\"tool_call_id\":\"call_7\",\"content\":\"sunny\"}]";
+    jv *messages = json_parse(src, strlen(src));
+    assert(messages != NULL);
+    assert(!strcmp(tool_result_name(messages, 1), "weather.get"));
+    jv_free(messages);
+}
+
 int main(void) {
     gguf_file g;
     if (!gguf_open(&g, FIXTURE)) {
@@ -293,6 +357,8 @@ int main(void) {
     test_name_roundtrip();
     test_gemma4_generation_prompt();
     test_chatml_think_shape();
+    test_muse_tools_and_result_golden();
+    test_muse_tool_result_id_resolves_prior_name();
 
     tokenizer_free(&t);
     gguf_close(&g);

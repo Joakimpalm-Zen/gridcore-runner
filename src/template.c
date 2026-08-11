@@ -112,9 +112,74 @@ int req_thinking_mode(struct jv *req) {
     return jv_bool(v, false) ? THINK_ON : THINK_OFF;
 }
 
-size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
-                       bool add_assistant, int thinking,
-                       char *out, size_t cap) {
+static void muse_json_string(sbuf *b, const char *s) {
+    sb_lit(b, "\"");
+    sb_esc(b, s ? s : "", strlen(s ? s : ""));
+    sb_lit(b, "\"");
+}
+
+static jv *muse_tool_fn(const jv *tool) {
+    jv *fn = jv_get((jv *)tool, "function");
+    return fn ? fn : (jv *)tool;
+}
+
+static bool muse_namespace_seen(const jv *tools, int before,
+                                const char *name, size_t nsn) {
+    for (int i = 0; i < before; i++) {
+        const char *prior = jv_str(jv_get(muse_tool_fn(tools->items[i]),
+                                         "name"), "");
+        const char *dot = strchr(prior, '.');
+        size_t n = dot ? (size_t)(dot - prior) : strlen(prior);
+        if (n == nsn && !memcmp(prior, name, n)) return true;
+    }
+    return false;
+}
+
+static void muse_render_tool_defs(const jv *tools, sbuf *b) {
+    if (!tools || tools->type != J_ARR || tools->n == 0) return;
+    sb_lit(b,
+        "In this environment you have access to a set of tools you can use to answer the user's question.\n\n"
+        "You can invoke a function by writing a \"<atem:function_calls>\" block like the following:\n"
+        "<atem:function_calls>\n<atem:invoke name=\"$FUNCTION_NAME\">\n"
+        "<atem:parameter name=\"$PARAMETER_NAME\">$PARAMETER_VALUE</atem:parameter>\n"
+        "...\n</atem:invoke>\n</atem:function_calls>\n\n"
+        "String and scalar parameters should be specified as is, while lists and objects should use JSON format. Note that spaces for string values are not stripped. The output is not expected to be valid XML and is parsed with regular expressions.\n"
+        "Here are the functions available in JSONSchema format:\n// Tool metadata\n");
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = muse_tool_fn(tools->items[i]);
+        const char *name = jv_str(jv_get(fn, "name"), "");
+        const char *dot = strchr(name, '.');
+        size_t nsn = dot ? (size_t)(dot - name) : strlen(name);
+        if (muse_namespace_seen(tools, i, name, nsn)) continue;
+        sb_lit(b, "{\"name\": \""); sb_esc(b, name, nsn);
+        sb_lit(b, "\", \"description\": \"\"}\n");
+    }
+    sb_lit(b, "// Function schemas");
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = muse_tool_fn(tools->items[i]);
+        sb_lit(b, "\n{\"name\": ");
+        muse_json_string(b, jv_str(jv_get(fn, "name"), ""));
+        sb_lit(b, ", \"description\": ");
+        muse_json_string(b, jv_str(jv_get(fn, "description"), ""));
+        sb_lit(b, ", \"parameters\": ");
+        jv *params = jv_get(fn, "parameters");
+        if (params) jv_dump(params, b); else sb_lit(b, "{}");
+        sb_lit(b, "}");
+    }
+    sb_lit(b,
+        "\n\nHere's an example of how to call a function in the tool set:\n"
+        "(If the tool namespace is not specified, invoke the function directly as `example_function_name` rather than `example_tool_name.example_function_name`)\n\n"
+        "to=example_tool_name.example_function_name\n\n"
+        "<atem:function_calls>\n<atem:invoke name=\"example_tool_name.example_function_name\">\n"
+        "<atem:parameter name=\"example_parameter_1\">value_1</atem:parameter>\n"
+        "<atem:parameter name=\"example_parameter_2\">This is the value for the second parameter\nthat can span\n\"multiple\" lines\n</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>");
+}
+
+size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
+                                  bool add_assistant, int thinking,
+                                  const jv *tools,
+                                  char *out, size_t cap) {
     size_t off = 0;
     out[0] = 0;
     switch (tmpl) {
@@ -236,11 +301,27 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
         // one whose constant parts are reproduced here; its current-date
         // line is conditional in the template (`current_date is defined`)
         // and omitted here — a live date would also defeat the prefix cache.
-        // Tool declarations (the atem syntax) are not rendered: tool calling
-        // for this family is unimplemented, not approximated.
-        static const char *muse_sys_tail =
-            "\n\nReasoning strength: high."
-            "\n\n# Valid recipients: \"self\", \"user\".<|eot|>";
+        // Structured tools are rendered below with the model's native atem
+        // declaration macro; the legacy wrapper passes NULL and stays plain.
+        sbuf muse_tail = {0};
+        sb_lit(&muse_tail, "\n\nReasoning strength: high.");
+        if (tools && tools->type == J_ARR && tools->n) {
+            sb_lit(&muse_tail, "\n\n");
+            muse_render_tool_defs(tools, &muse_tail);
+        }
+        sb_lit(&muse_tail, "\n\n# Valid recipients: \"self\"");
+        if (tools && tools->type == J_ARR) {
+            for (int i = 0; i < tools->n; i++) {
+                jv *fn = muse_tool_fn(tools->items[i]);
+                const char *name = jv_str(jv_get(fn, "name"), "");
+                const char *dot = strchr(name, '.');
+                size_t nsn = dot ? (size_t)(dot - name) : strlen(name);
+                if (muse_namespace_seen(tools, i, name, nsn)) continue;
+                sb_lit(&muse_tail, ", \""); sb_put(&muse_tail, name, nsn);
+                sb_lit(&muse_tail, ".*\"");
+            }
+        }
+        sb_lit(&muse_tail, ", \"user\".<|eot|>");
         bool has_system = false;
         for (int i = 0; i < n_msgs; i++)
             if (!strcmp(msgs[i].role, "system")) has_system = true;
@@ -248,17 +329,25 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off,
                        "<|start|>system<|message|>You are a helpful AI "
                        "assistant.\nKnowledge cutoff: 2026-01-04.", NULL, NULL);
-            off = emit(out, cap, off, "%s", muse_sys_tail, NULL);
+            off = emit(out, cap, off, "%s", muse_tail.s, NULL);
         }
         for (int i = 0; i < n_msgs; i++) {
             const chat_msg *mm = &msgs[i];
             if (!strcmp(mm->role, "system")) {
                 off = emit(out, cap, off, "<|start|>system<|message|>%s",
                            mm->content, NULL);
-                off = emit(out, cap, off, "%s", muse_sys_tail, NULL);
+                off = emit(out, cap, off, "%s", muse_tail.s, NULL);
             } else if (!strcmp(mm->role, "assistant")) {
-                off = emit(out, cap, off, "<|start|>assistant to=user"
-                           "<|message|>%s<|eot|>", mm->content, NULL);
+                off = emit(out, cap, off, "<|start|>assistant to=%s<|message|>",
+                           mm->name ? mm->name : "user", NULL);
+                off = emit(out, cap, off, "%s<|eot|>", mm->content, NULL);
+            } else if (!strcmp(mm->role, "tool") && mm->name) {
+                off = emit(out, cap, off, "<|start|>tool %s<|message|>",
+                           mm->name, NULL);
+                off = emit(out, cap, off, "<tool_output name=\"%s\">\n",
+                           mm->name, NULL);
+                off = emit(out, cap, off, "%s\n</tool_output><|eot|>",
+                           mm->content, NULL);
             } else {
                 // user and anything else (a tool result arrives as its own
                 // named role in the reference) render as a plain named turn
@@ -275,6 +364,7 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, thinking == THINK_OFF
                        ? "<|start|>assistant to=user<|message|>"
                        : "<|start|>assistant", NULL, NULL);
+        free(muse_tail.s);
         break;
     }
     case TMPL_GRANITE:
@@ -398,6 +488,13 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
         break;
     }
     return off;
+}
+
+size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
+                       bool add_assistant, int thinking,
+                       char *out, size_t cap) {
+    return render_messages_with_tools(tmpl, msgs, n_msgs, add_assistant,
+                                      thinking, NULL, out, cap);
 }
 
 // ------------------------------------------------- thinking-tag splitter
@@ -534,6 +631,27 @@ void tools_render_for(int tmpl, const jv *tools, sbuf *out) {
         "tool call, but no text may follow it.\n</IMPORTANT>");
 }
 
+const char *tool_result_name(const jv *messages, int message_index) {
+    if (!messages || messages->type != J_ARR || message_index < 0 ||
+        message_index >= messages->n) return NULL;
+    jv *result = messages->items[message_index];
+    const char *name = jv_str(jv_get(result, "name"), NULL);
+    if (name && name[0]) return name;
+    const char *id = jv_str(jv_get(result, "tool_call_id"), NULL);
+    if (!id) return NULL;
+    for (int i = 0; i < message_index; i++) {
+        jv *calls = jv_get(messages->items[i], "tool_calls");
+        if (!calls || calls->type != J_ARR) continue;
+        for (int k = 0; k < calls->n; k++) {
+            const char *candidate = jv_str(jv_get(calls->items[k], "id"), NULL);
+            if (!candidate || strcmp(candidate, id)) continue;
+            jv *fn = jv_get(calls->items[k], "function");
+            return jv_str(jv_get(fn, "name"), NULL);
+        }
+    }
+    return id[0] ? id : NULL;
+}
+
 void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
     if (!calls || calls->type != J_ARR) return;
     for (int i = 0; i < calls->n; i++) {
@@ -541,11 +659,29 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
         const char *name = jv_str(jv_get(fn, "name"), NULL);
         const char *args = jv_str(jv_get(fn, "arguments"), "{}");
         if (!name) continue;
-        if (tmpl != TMPL_ORNITH) {
+        if (tmpl != TMPL_ORNITH && tmpl != TMPL_MUSE) {
             sb_fmt(out, "<|tool_call>call:%s%s<tool_call|>", name, args);
             continue;
         }
         jv *obj = json_parse(args, strlen(args));
+        if (tmpl == TMPL_MUSE) {
+            sb_fmt(out, "<atem:function_calls>\n<atem:invoke name=\"%s\">\n",
+                   name);
+            if (obj && obj->type == J_OBJ) {
+                for (int k = 0; k < obj->n; k++) {
+                    sb_fmt(out, "<atem:parameter name=\"%s\">", obj->keys[k]);
+                    if (obj->items[k]->type == J_STR)
+                        sb_put(out, obj->items[k]->str,
+                               strlen(obj->items[k]->str));
+                    else
+                        jv_dump(obj->items[k], out);
+                    sb_lit(out, "</atem:parameter>\n");
+                }
+            }
+            sb_lit(out, "</atem:invoke>\n</atem:function_calls>");
+            jv_free(obj);
+            continue;
+        }
         sb_fmt(out, "<tool_call>\n<function=%s>\n", name);
         if (obj && obj->type == J_OBJ) {
             for (int k = 0; k < obj->n; k++) {

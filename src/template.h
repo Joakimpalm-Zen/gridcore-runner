@@ -31,7 +31,13 @@ enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
 // A single boolean cannot express that, which is why this is tri-state: the
 // absence of a request field has to mean "match the reference", not "false".
 enum { THINK_DEFAULT = 0, THINK_ON, THINK_OFF };
-typedef struct { const char *role, *content; } chat_msg;
+struct jv;
+typedef struct {
+    const char *role, *content;
+    // Native templates whose tool-result turn names the invoked function use
+    // this optional field. Ordinary messages leave it NULL.
+    const char *name;
+} chat_msg;
 int         template_detect(const char *meta_tmpl, tokenizer *tok);
 int         template_from_name(const char *name); // -1 if unknown
 const char *template_name(int tmpl);
@@ -66,6 +72,12 @@ const char *template_name(int tmpl);
 size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
                        bool add_assistant, int thinking,
                        char *out, size_t cap);
+// Structured-tools variant used by native templates. The legacy entry above
+// is exactly this call with tools == NULL.
+size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
+                                  bool add_assistant, int thinking,
+                                  const struct jv *tools,
+                                  char *out, size_t cap);
 
 // chat tool-call convention (template.c; sbuf/jv live in json.h)
 struct sbuf;
@@ -78,6 +90,9 @@ int req_thinking_mode(struct jv *req);
 void tools_render(const struct jv *tools, struct sbuf *out);
 void tools_render_for(int tmpl, const struct jv *tools, struct sbuf *out);
 void tool_history_render_for(int tmpl, const struct jv *calls, struct sbuf *out);
+// Resolve a tool result's native turn name from message.name or from its
+// tool_call_id and a preceding assistant tool_calls entry. Borrowed pointer.
+const char *tool_result_name(const struct jv *messages, int message_index);
 // parse tool-call blocks out of content into OpenAI tool_calls items;
 // returns the call count, content is compacted in place
 int  tool_calls_parse(struct sbuf *content, struct sbuf *tc);

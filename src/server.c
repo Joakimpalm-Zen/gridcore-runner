@@ -124,7 +124,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     if (rc < 0) { send_error(fd, 400, terr); return; }
     // Ornith is specifically trained on qwen3_xml. Keep its native protocol
     // instead of forcing the model into runner's generic JSON envelope.
-    bool strict = rc == 1 && s->tmpl != TMPL_ORNITH;
+    bool strict = rc == 1 && s->tmpl != TMPL_ORNITH && s->tmpl != TMPL_MUSE;
     // When the strict envelope does not apply — no tools declared, or the
     // ornith template's native protocol — the flag is vacuous and stays
     // TOLERATED, exactly as before: ordinary OpenAI-shaped traffic sends
@@ -132,7 +132,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     // and rejecting those would break it.
     sbuf ts = {0};
     if (strict) sb_put(&ts, env.system_turn, strlen(env.system_turn));
-    else        tools_render_for(s->tmpl, tools, &ts);
+    else if (s->tmpl != TMPL_MUSE) tools_render_for(s->tmpl, tools, &ts);
     bool ornith_merged_system = false;
     if (s->tmpl == TMPL_ORNITH && ts.n && msgs->n > 0 &&
         !strcmp(jv_str(jv_get(msgs->items[0], "role"), ""), "system")) {
@@ -160,11 +160,21 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     for (int i = 0; i < msgs->n; i++) {
         if (i == 0 && ornith_merged_system) continue;
         const char *role = jv_str(jv_get(msgs->items[i], "role"), "user");
+        const char *turn_name = NULL;
+        if (s->tmpl == TMPL_MUSE && !strcmp(role, "tool"))
+            turn_name = tool_result_name(msgs, i);
+        if (s->tmpl == TMPL_MUSE && !strcmp(role, "assistant")) {
+            jv *calls = jv_get(msgs->items[i], "tool_calls");
+            if (calls && calls->type == J_ARR && calls->n) {
+                jv *fn = jv_get(calls->items[0], "function");
+                turn_name = jv_str(jv_get(fn, "name"), NULL);
+            }
+        }
         char *content = message_text(msgs->items[i], s->tmpl);
         if (!content) continue;
         owned[n_own++] = content;
         if (s->tmpl == TMPL_ORNITH && !strcmp(role, "tool")) role = "user";
-        cm[n_cm++] = (chat_msg){ role, content };
+        cm[n_cm++] = (chat_msg){ role, content, turn_name };
         total += strlen(role) + strlen(content) + 64;
     }
     if (n_cm == 0) {
@@ -175,6 +185,10 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 400, "no message content");
         return;
     }
+    sbuf tool_bytes = {0};
+    if (s->tmpl == TMPL_MUSE && tools) jv_dump(tools, &tool_bytes);
+    total += tool_bytes.n + 4096;
+    free(tool_bytes.s);
     char *prompt = malloc(total + 256);
     if (!prompt) {
         for (int i = 0; i < n_own; i++) free(owned[i]);
@@ -183,8 +197,10 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 500, "out of memory building chat prompt");
         return;
     }
-    render_messages(s->tmpl, cm, n_cm, true, req_thinking_mode(req),
-                    prompt, total + 256);
+    render_messages_with_tools(s->tmpl, cm, n_cm, true,
+                               req_thinking_mode(req),
+                               s->tmpl == TMPL_MUSE ? tools : NULL,
+                               prompt, total + 256);
     run_completion(s, fd, prompt, API_CHAT, req, strict ? &env : NULL);
     free(prompt);
     for (int i = 0; i < n_own; i++) free(owned[i]);

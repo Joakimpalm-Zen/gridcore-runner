@@ -644,7 +644,7 @@ the model's responsibility.
 | `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. |
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
-| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md`. No vision encoder or atem tool syntax. |
+| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md`. No vision encoder. Native atem tool definitions and result history are rendered; constrained atem generation and response parsing are not yet implemented. |
 | `granite` | IBM Granite dense (3.x/4.1): the four muP scalars (embedding, fixed attention, residual, divided logit). CPU, CUDA and Metal. granitemoe and granitehybrid are separate arch ids and not admitted. |
 
 Admission remains layout-specific. Shared-expert MoE, unsupported split expert
