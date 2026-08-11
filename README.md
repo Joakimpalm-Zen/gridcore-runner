@@ -464,8 +464,9 @@ is still constrained behind Muse's `to=user` recipient header, so the override
 does not leak prompt syntax into `content`. `tool_choice` (`auto`, `required`,
 named, and `none`) still controls the allowed recipients.
 `parallel_tool_calls:true` with a required/named native choice constrains a
-bounded two-call turn. Other model families keep the existing JSON-schema tool
-path unchanged.
+bounded two-call turn. With native `tool_choice:"auto"`, the same flag retains
+the auto turn and therefore permits at most one call. Other model families keep
+the existing JSON-schema tool path unchanged.
 
 When native `tool_choice:"auto"` is combined with a JSON-schema
 `response_format`, the `to=user` alternative is compiled against that final
