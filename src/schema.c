@@ -42,7 +42,10 @@ void schema_free(snode *n) {
     for (int i = 0; i < n->n_lits; i++) free(n->lits[i]);
     free(n->lits);
     free(n->pattern_prefix);
-    for (int i = 0; i < n->n_props; i++) { free(n->keys[i]); schema_free(n->props[i]); }
+    for (int i = 0; i < n->n_props; i++) {
+        if (n->keys) free(n->keys[i]);
+        schema_free(n->props[i]);
+    }
     free(n->keys); free(n->key_len); free(n->props); free(n->req);
     schema_free(n->items);
     for (int i = 0; i < n->n_alts; i++) schema_free(n->alts[i]);
@@ -903,6 +906,136 @@ snode *schema_compile(struct jv *schema, char *err, int errcap) {
     return n;
 }
 
+// A sequence is an internal composition node: its children are the existing
+// literal and JSON-value machines, consumed in order. It is deliberately not
+// a second grammar engine; atem is compiled into the same snode/sval stack.
+static snode *atem_seq(int count) {
+    snode *n = sn_new(SN_SEQ);
+    if (!n) return NULL;
+    n->props = calloc((size_t)count, sizeof(*n->props));
+    if (!n->props) { schema_free(n); return NULL; }
+    return n;
+}
+
+static snode *atem_lit(const char *s) {
+    snode *n = sn_new(SN_ENUM);
+    if (!n) return NULL;
+    n->lits = calloc(1, sizeof(*n->lits));
+    if (!n->lits) { schema_free(n); return NULL; }
+    n->lits[0] = strdup(s);
+    if (!n->lits[0]) { schema_free(n); return NULL; }
+    n->n_lits = 1;
+    return n;
+}
+
+static bool atem_seq_add(snode *seq, snode *child) {
+    if (!child) return false;
+    seq->props[seq->n_props++] = child;
+    return true;
+}
+
+static bool atem_required(jv *required, const char *key) {
+    if (!required || required->type != J_ARR) return false;
+    for (int i = 0; i < required->n; i++)
+        if (!strcmp(jv_str(required->items[i], ""), key)) return true;
+    return false;
+}
+
+static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
+    jv *fn = jv_get(tool, "function");
+    if (!fn) fn = tool;
+    jv *params = jv_get(fn, "parameters");
+    jv *props = params ? jv_get(params, "properties") : NULL;
+    jv *required = params ? jv_get(params, "required") : NULL;
+    if (props && props->type != J_OBJ) {
+        snprintf(err, errcap, "atem tool parameters.properties must be an object");
+        return NULL;
+    }
+    int count = 2 + (props ? props->n * 3 : 0);
+    snode *seq = atem_seq(count);
+    if (!seq) return NULL;
+    if (!atem_seq_add(seq, atem_lit("\">\n"))) goto oom;
+    for (int i = 0; props && i < props->n; i++) {
+        if (!atem_required(required, props->keys[i])) {
+            snprintf(err, errcap,
+                     "optional atem parameter '%s' is not yet supported",
+                     props->keys[i]);
+            schema_free(seq); return NULL;
+        }
+        jv *ty = jv_get(props->items[i], "type");
+        const char *type = jv_str(ty, "");
+        if (strcmp(type, "object") && strcmp(type, "array")) {
+            snprintf(err, errcap,
+                     "scalar atem parameter '%s' requires raw-value support",
+                     props->keys[i]);
+            schema_free(seq); return NULL;
+        }
+        sbuf open = {0};
+        sb_fmt(&open, "<atem:parameter name=\"%s\">", props->keys[i]);
+        if (open.failed || !atem_seq_add(seq, atem_lit(open.s))) {
+            free(open.s); goto oom;
+        }
+        free(open.s);
+        snode *value = compile_node(props->items[i], err, errcap, 0);
+        if (!value || !atem_seq_add(seq, value)) {
+            schema_free(value);
+            if (!err[0]) goto oom;
+            schema_free(seq); return NULL;
+        }
+        if (!atem_seq_add(seq, atem_lit("</atem:parameter>\n"))) goto oom;
+    }
+    if (!atem_seq_add(seq,
+            atem_lit("</atem:invoke>\n</atem:function_calls>"))) goto oom;
+    return seq;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem tools");
+    schema_free(seq);
+    return NULL;
+}
+
+snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap) {
+    err[0] = 0;
+    if (!tools || tools->type != J_ARR || tools->n <= 0 || tools->n > 60) {
+        snprintf(err, errcap, "atem tools must be a non-empty array of at most 60 tools");
+        return NULL;
+    }
+    snode *root = atem_seq(3);
+    snode *names = sn_new(SN_ENUM);
+    snode *choice = sn_new(SN_COND);
+    if (!root || !names || !choice) goto oom;
+    names->lits = calloc((size_t)tools->n, sizeof(*names->lits));
+    choice->alts = calloc((size_t)tools->n, sizeof(*choice->alts));
+    if (!names->lits || !choice->alts) goto oom;
+    names->min_items = 1; // this enum selects the following conditional tail
+    if (!atem_seq_add(root,
+            atem_lit("<atem:function_calls>\n<atem:invoke name=\""))) goto oom;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        if (!fn) fn = tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!name || !name[0]) {
+            snprintf(err, errcap, "atem tool %d has no function name", i);
+            goto fail;
+        }
+        names->lits[names->n_lits] = strdup(name);
+        if (!names->lits[names->n_lits]) goto oom;
+        names->n_lits++;
+        choice->alts[choice->n_alts] = atem_tool_tail(tools->items[i], err, errcap);
+        if (!choice->alts[choice->n_alts]) goto fail;
+        choice->n_alts++;
+    }
+    if (!atem_seq_add(root, names)) goto oom;
+    names = NULL;
+    if (!atem_seq_add(root, choice)) goto oom;
+    choice = NULL;
+    return root;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem tools");
+fail:
+    schema_free(names); schema_free(choice); schema_free(root);
+    return NULL;
+}
+
 // ---------------------------------------------------------------- validate
 
 // frame phases
@@ -918,6 +1051,7 @@ enum {
     P_STR,            // inside string
     P_LIT,            // enum / bool / null literal
     P_NUM,
+    P_SEQ,
 };
 
 // number micro-states (frame->sub)
@@ -964,6 +1098,7 @@ static void frame_done(sval *v);
 
 // child value finished: advance parent
 static void frame_done(sval *v) {
+    const snode *child = v->stack[v->depth - 1].node;
     v->depth--;
     if (v->depth == 0) { v->done = true; return; }
     sframe *f = &v->stack[v->depth - 1];
@@ -972,6 +1107,11 @@ static void frame_done(sval *v) {
             !strcmp(f->node->keys[f->sub], "tool"))
             f->disc = (uint16_t)(v->last_enum + 1);
         f->phase = P_OBJ_NEXT;
+    } else if (f->node->kind == SN_SEQ) {
+        if (child->kind == SN_ENUM && child->min_items && v->last_enum >= 0)
+            f->disc = (uint16_t)(v->last_enum + 1);
+        if (f->idx >= f->node->n_props) frame_done(v);
+        else f->phase = P_SEQ;
     } else {
         f->phase = P_ARR_NEXT; // SN_ARR
     }
@@ -996,7 +1136,14 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
                     if (c == a->lits[j][0]) return a;
                 break;
             case SN_OBJ:  if (c == '{') return a; break;
-            case SN_ARR:  if (c == '[') return a; break;
+        case SN_ARR:  if (c == '[') return a; break;
+            case SN_SEQ:
+                if (a->n_props > 0) {
+                    bool starts[256] = {0};
+                    if (union_start_bytes(a->props[0], starts) && starts[c])
+                        return a;
+                }
+                break;
             case SN_BOOL: if (c == 't' || c == 'f') return a; break;
             case SN_NULL: if (c == 'n') return a; break;
             case SN_NUM: case SN_INT:
@@ -1258,6 +1405,12 @@ static int feed_byte(sval *v, uint8_t c) {
             if (c != '[') return -1;
             f->phase = P_ARR_FIRST; f->idx = 0;
             return 0;
+        case SN_SEQ:
+            if (n->n_props <= 0) { frame_done(v); return 1; }
+            f->phase = P_SEQ;
+            f->idx = 1;
+            if (!push_value(v, n->props[0])) return -1;
+            return feed_byte(v, c);
         default:
             return -1;
         }
@@ -1436,6 +1589,10 @@ static int feed_byte(sval *v, uint8_t c) {
             return 0;
         }
         return -1;
+
+    case P_SEQ:
+        if (f->idx >= n->n_props) { frame_done(v); return 1; }
+        return push_value(v, n->props[f->idx++]) ? feed_byte(v, c) : -1;
     }
     return -1;
 }
@@ -1612,6 +1769,10 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
             eq_putc(q, '}');
             break;
         }
+        case SN_SEQ:
+            for (int i = 0; i < n->n_props; i++)
+                emit_min_choice(q, n->props[i], depth + 1, choice);
+            break;
         case SN_COND:
             break;
     }
@@ -1773,6 +1934,10 @@ int sval_close(sval *v, char *out, int cap) {
                 emit_min_choice(&q, n->items, 0, -1);
             }
             eq_putc(&q, ']');
+            break;
+        case P_SEQ:
+            for (int i = f->idx; i < n->n_props && !eq_full(&q); i++)
+                emit_min_choice(&q, n->props[i], 0, choice);
             break;
         }
         v->depth--;

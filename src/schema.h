@@ -7,7 +7,7 @@
 #include "jsonmode.h"
 
 enum sn_kind { SN_ANY, SN_NULL, SN_BOOL, SN_NUM, SN_INT, SN_STR, SN_ENUM,
-               SN_OBJ, SN_ARR, SN_UNION, SN_COND };
+               SN_OBJ, SN_ARR, SN_UNION, SN_COND, SN_SEQ };
 
 typedef struct snode snode;
 struct snode {
@@ -30,6 +30,9 @@ struct snode {
 
 struct jv;
 snode *schema_compile(struct jv *schema, char *err, int errcap);
+// Compile OpenAI tools[] to Muse's native atem call block. Scalar parameter
+// values are added in S3; S2 admits structured JSON values.
+snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap);
 void   schema_free(snode *n);
 
 // streaming validator state (memcpy-copyable for token lookahead)

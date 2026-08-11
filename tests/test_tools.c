@@ -36,7 +36,49 @@ static snode *compile(const tool_envelope *e) {
 static bool accepts(const snode *root, const char *doc) {
     sval v;
     sval_init(&v, root);
-    return sval_feed(&v, doc, (int)strlen(doc)) && v.done;
+    for (int i = 0; doc[i]; i++) {
+        if (!sval_feed(&v, doc + i, 1)) {
+            if (getenv("RUNNER_SCHEMA_TRACE"))
+                fprintf(stderr, "schema rejected byte %d (%#x) in %s\n",
+                        i, (unsigned char)doc[i], doc);
+            return false;
+        }
+    }
+    return v.done;
+}
+
+static void test_atem_structured_tool_automaton(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"data.store\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"payload\":{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"integer\"}},\"required\":[\"x\"]},"
+        "\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+        "\"required\":[\"payload\",\"tags\"]}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"data.clear\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_tools(tools, err, sizeof(err));
+    if (!root) fprintf(stderr, "atem tools did not compile: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"data.store\">\n"
+        "<atem:parameter name=\"payload\">{\"x\":2}</atem:parameter>\n"
+        "<atem:parameter name=\"tags\">[\"a\",\"b\"]</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    assert(accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"data.clear\">\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    assert(!accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"data.store\">\n"
+        "<atem:parameter name=\"tags\">[]</atem:parameter>\n"
+        "<atem:parameter name=\"payload\">{\"x\":2}</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    assert(!accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"data.clear\">\n"
+        "</atem:invoke>"));
+    schema_free(root);
+    jv_free(tools);
 }
 
 static const char *TOOLS =
@@ -671,6 +713,7 @@ static void test_system_turn_teaches_the_envelope(void) {
 }
 
 int main(void) {
+    test_atem_structured_tool_automaton();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();
