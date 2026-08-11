@@ -5,9 +5,11 @@
 // still required for the fallback path that looks for special tokens, and any
 // fixture vocabulary serves for that.
 #include "runner.h"
+#include "json.h"
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define FIXTURE "tests/fixtures/vocab-bpe-llama3.gguf"
@@ -144,6 +146,50 @@ static void test_ornith_split_starts_inside_prompted_think(void) {
     think_free(&split);
 }
 
+// Constrained flow: reasoning bytes arrive freely, the <|eom|> control that
+// really ends the turn decodes to no bytes, so engine.c's
+// constraint_finish_think feeds the literal close to the splitter itself.
+// The splitter only has to flip on that synthetic feed; the payload machine
+// owns everything after it.
+static void test_muse_split_closes_on_fed_reasoning_boundary(void) {
+    think_split split;
+    split_capture got = {0};
+    think_init_reasoning(&split, " to=self", "assistant to=user");
+    const char *reasoning = "compute 17*23";
+    for (size_t i = 0; i < strlen(reasoning); i++)
+        think_feed(&split, reasoning + i, 1, capture_split, &got);
+    const char *fed_close = "assistant to=user"; // constraint_finish_think
+    think_feed(&split, fed_close, strlen(fed_close), capture_split, &got);
+    const char *payload = "record_conclusion<|message|><atem:invoke>";
+    for (size_t i = 0; i < strlen(payload); i++)
+        think_feed(&split, payload + i, 1, capture_split, &got);
+    think_finish(&split, capture_split, &got);
+    assert(!strcmp(got.reason, "compute 17*23"));
+    assert(!strcmp(got.content,
+                   "record_conclusion<|message|><atem:invoke>"));
+    think_free(&split);
+}
+
+// Unconstrained plain chat, the shape the real model emits at temp 0:
+// ` to=self` THINKING `<|eom|><|start|>` decode to nothing around the
+// literal `assistant to=user`, then the answer. The full close string must
+// be consumed so no recipient residue reaches content and no `assistant`
+// tail sticks to reasoning (both leaked when the close was narrowed to
+// ` to=`; measured live 2026-08-11, content came back as "user391").
+static void test_muse_plain_thinking_close_leaves_no_recipient_residue(void) {
+    think_split split;
+    split_capture got = {0};
+    think_init(&split, " to=self", "assistant to=user");
+    const char *generated = " to=selfSeventeen times 23 is 391."
+                            "assistant to=user391";
+    for (size_t i = 0; i < strlen(generated); i++)
+        think_feed(&split, generated + i, 1, capture_split, &got);
+    think_finish(&split, capture_split, &got);
+    assert(!strcmp(got.reason, "Seventeen times 23 is 391."));
+    assert(!strcmp(got.content, "391"));
+    think_free(&split);
+}
+
 static void test_ornith_groups_consecutive_tool_responses(void) {
     const chat_msg msgs[] = {
         { "user", "HI" },
@@ -268,6 +314,95 @@ static void test_chatml_think_shape(void) {
     assert(strcmp(out, base) == 0);
 }
 
+// Muse's own template places tool metadata after the reasoning-strength line,
+// derives valid recipient namespaces from dotted function names, and renders
+// tool results as named tool turns.  Keep the whole turn byte-exact: moving
+// any of these fragments changes the prompt the real model sees.
+static void test_muse_tools_and_result_golden(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"city\":{\"type\":\"string\"}}}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"math.add\","
+        "\"description\":\"Add values\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"a\":{\"type\":\"integer\"}}}}}]";
+    jv *tools = json_parse(src, strlen(src));
+    assert(tools != NULL);
+    const chat_msg msgs[] = {
+        { .role = "user", .content = "Weather?" },
+        { .role = "tool", .content = "sunny", .name = "weather.get" },
+    };
+    char out[8192];
+    render_messages_with_tools(TMPL_MUSE, msgs, 2, true, THINK_DEFAULT,
+                               tools, out, sizeof(out));
+    assert(strcmp(out,
+        "<|start|>system<|message|>You are a helpful AI assistant.\n"
+        "Knowledge cutoff: 2026-01-04.\n\nReasoning strength: high.\n\n"
+        "In this environment you have access to a set of tools you can use to answer the user's question.\n\n"
+        "You can invoke a function by writing a \"<atem:function_calls>\" block like the following:\n"
+        "<atem:function_calls>\n<atem:invoke name=\"$FUNCTION_NAME\">\n"
+        "<atem:parameter name=\"$PARAMETER_NAME\">$PARAMETER_VALUE</atem:parameter>\n"
+        "...\n</atem:invoke>\n</atem:function_calls>\n\n"
+        "String and scalar parameters should be specified as is, while lists and objects should use JSON format. Note that spaces for string values are not stripped. The output is not expected to be valid XML and is parsed with regular expressions.\n"
+        "Here are the functions available in JSONSchema format:\n// Tool metadata\n"
+        "{\"name\": \"weather\", \"description\": \"\"}\n"
+        "{\"name\": \"math\", \"description\": \"\"}\n"
+        "// Function schemas\n"
+        "{\"name\": \"weather.get\", \"description\": \"Get weather\", \"parameters\": {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
+        "{\"name\": \"math.add\", \"description\": \"Add values\", \"parameters\": {\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}}\n\n"
+        "Here's an example of how to call a function in the tool set:\n"
+        "(If the tool namespace is not specified, invoke the function directly as `example_function_name` rather than `example_tool_name.example_function_name`)\n\n"
+        "to=example_tool_name.example_function_name\n\n"
+        "<atem:function_calls>\n<atem:invoke name=\"example_tool_name.example_function_name\">\n"
+        "<atem:parameter name=\"example_parameter_1\">value_1</atem:parameter>\n"
+        "<atem:parameter name=\"example_parameter_2\">This is the value for the second parameter\nthat can span\n\"multiple\" lines\n</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>\n\n"
+        "# Valid recipients: \"self\", \"weather.*\", \"math.*\", \"user\".<|eot|>"
+        "<|start|>user<|message|>Weather?<|eot|>"
+        "<|start|>tool weather.get<|message|><tool_output name=\"weather.get\">\n"
+        "sunny\n</tool_output><|eot|>"
+        "<|start|>assistant") == 0);
+    jv_free(tools);
+}
+
+static void test_muse_tool_result_id_resolves_prior_name(void) {
+    const char *src =
+        "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_7\","
+        "\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"arguments\":\"{}\"}}]},"
+        "{\"role\":\"tool\",\"tool_call_id\":\"call_7\",\"content\":\"sunny\"}]";
+    jv *messages = json_parse(src, strlen(src));
+    assert(messages != NULL);
+    assert(!strcmp(tool_result_name(messages, 1), "weather.get"));
+    jv_free(messages);
+}
+
+static void test_muse_parallel_tool_history_has_native_turn_boundaries(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"arguments\":\"{\\\"city\\\":\\\"Bergen\\\"}\"}}]";
+    jv *calls = json_parse(src, strlen(src));
+    assert(calls != NULL);
+    sbuf out = {0};
+    tool_history_render_for(TMPL_MUSE, calls, &out);
+    assert(out.s != NULL);
+    assert(strstr(out.s,
+        "</atem:function_calls><|eom|><|start|>assistant to=weather.get"
+        "<|message|><atem:function_calls>") != NULL);
+    free(out.s);
+    jv_free(calls);
+}
+
+static void test_muse_user_payload_strip_removes_only_recipient_header(void) {
+    sbuf payload = {0};
+    sb_lit(&payload, " to=user<|message|>{\"summary\":\"ok\"}");
+    assert(muse_user_payload_strip(&payload));
+    assert(payload.s && !strcmp(payload.s, "{\"summary\":\"ok\"}"));
+    free(payload.s);
+}
+
 int main(void) {
     gguf_file g;
     if (!gguf_open(&g, FIXTURE)) {
@@ -286,6 +421,8 @@ int main(void) {
     test_detect_and_render_ornith(&t);
     test_ornith_groups_consecutive_tool_responses();
     test_ornith_split_starts_inside_prompted_think();
+    test_muse_split_closes_on_fed_reasoning_boundary();
+    test_muse_plain_thinking_close_leaves_no_recipient_residue();
     test_detect_and_render_apertus(&t);
     test_render_apertus_without_system();
     test_render_system_prompt();
@@ -293,6 +430,10 @@ int main(void) {
     test_name_roundtrip();
     test_gemma4_generation_prompt();
     test_chatml_think_shape();
+    test_muse_tools_and_result_golden();
+    test_muse_tool_result_id_resolves_prior_name();
+    test_muse_parallel_tool_history_has_native_turn_boundaries();
+    test_muse_user_payload_strip_removes_only_recipient_header();
 
     tokenizer_free(&t);
     gguf_close(&g);

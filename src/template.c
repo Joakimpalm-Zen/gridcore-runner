@@ -112,9 +112,74 @@ int req_thinking_mode(struct jv *req) {
     return jv_bool(v, false) ? THINK_ON : THINK_OFF;
 }
 
-size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
-                       bool add_assistant, int thinking,
-                       char *out, size_t cap) {
+static void muse_json_string(sbuf *b, const char *s) {
+    sb_lit(b, "\"");
+    sb_esc(b, s ? s : "", strlen(s ? s : ""));
+    sb_lit(b, "\"");
+}
+
+static jv *muse_tool_fn(const jv *tool) {
+    jv *fn = jv_get((jv *)tool, "function");
+    return fn ? fn : (jv *)tool;
+}
+
+static bool muse_namespace_seen(const jv *tools, int before,
+                                const char *name, size_t nsn) {
+    for (int i = 0; i < before; i++) {
+        const char *prior = jv_str(jv_get(muse_tool_fn(tools->items[i]),
+                                         "name"), "");
+        const char *dot = strchr(prior, '.');
+        size_t n = dot ? (size_t)(dot - prior) : strlen(prior);
+        if (n == nsn && !memcmp(prior, name, n)) return true;
+    }
+    return false;
+}
+
+static void muse_render_tool_defs(const jv *tools, sbuf *b) {
+    if (!tools || tools->type != J_ARR || tools->n == 0) return;
+    sb_lit(b,
+        "In this environment you have access to a set of tools you can use to answer the user's question.\n\n"
+        "You can invoke a function by writing a \"<atem:function_calls>\" block like the following:\n"
+        "<atem:function_calls>\n<atem:invoke name=\"$FUNCTION_NAME\">\n"
+        "<atem:parameter name=\"$PARAMETER_NAME\">$PARAMETER_VALUE</atem:parameter>\n"
+        "...\n</atem:invoke>\n</atem:function_calls>\n\n"
+        "String and scalar parameters should be specified as is, while lists and objects should use JSON format. Note that spaces for string values are not stripped. The output is not expected to be valid XML and is parsed with regular expressions.\n"
+        "Here are the functions available in JSONSchema format:\n// Tool metadata\n");
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = muse_tool_fn(tools->items[i]);
+        const char *name = jv_str(jv_get(fn, "name"), "");
+        const char *dot = strchr(name, '.');
+        size_t nsn = dot ? (size_t)(dot - name) : strlen(name);
+        if (muse_namespace_seen(tools, i, name, nsn)) continue;
+        sb_lit(b, "{\"name\": \""); sb_esc(b, name, nsn);
+        sb_lit(b, "\", \"description\": \"\"}\n");
+    }
+    sb_lit(b, "// Function schemas");
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = muse_tool_fn(tools->items[i]);
+        sb_lit(b, "\n{\"name\": ");
+        muse_json_string(b, jv_str(jv_get(fn, "name"), ""));
+        sb_lit(b, ", \"description\": ");
+        muse_json_string(b, jv_str(jv_get(fn, "description"), ""));
+        sb_lit(b, ", \"parameters\": ");
+        jv *params = jv_get(fn, "parameters");
+        if (params) jv_dump(params, b); else sb_lit(b, "{}");
+        sb_lit(b, "}");
+    }
+    sb_lit(b,
+        "\n\nHere's an example of how to call a function in the tool set:\n"
+        "(If the tool namespace is not specified, invoke the function directly as `example_function_name` rather than `example_tool_name.example_function_name`)\n\n"
+        "to=example_tool_name.example_function_name\n\n"
+        "<atem:function_calls>\n<atem:invoke name=\"example_tool_name.example_function_name\">\n"
+        "<atem:parameter name=\"example_parameter_1\">value_1</atem:parameter>\n"
+        "<atem:parameter name=\"example_parameter_2\">This is the value for the second parameter\nthat can span\n\"multiple\" lines\n</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>");
+}
+
+size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
+                                  bool add_assistant, int thinking,
+                                  const jv *tools,
+                                  char *out, size_t cap) {
     size_t off = 0;
     out[0] = 0;
     switch (tmpl) {
@@ -236,11 +301,27 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
         // one whose constant parts are reproduced here; its current-date
         // line is conditional in the template (`current_date is defined`)
         // and omitted here — a live date would also defeat the prefix cache.
-        // Tool declarations (the atem syntax) are not rendered: tool calling
-        // for this family is unimplemented, not approximated.
-        static const char *muse_sys_tail =
-            "\n\nReasoning strength: high."
-            "\n\n# Valid recipients: \"self\", \"user\".<|eot|>";
+        // Structured tools are rendered below with the model's native atem
+        // declaration macro; the legacy wrapper passes NULL and stays plain.
+        sbuf muse_tail = {0};
+        sb_lit(&muse_tail, "\n\nReasoning strength: high.");
+        if (tools && tools->type == J_ARR && tools->n) {
+            sb_lit(&muse_tail, "\n\n");
+            muse_render_tool_defs(tools, &muse_tail);
+        }
+        sb_lit(&muse_tail, "\n\n# Valid recipients: \"self\"");
+        if (tools && tools->type == J_ARR) {
+            for (int i = 0; i < tools->n; i++) {
+                jv *fn = muse_tool_fn(tools->items[i]);
+                const char *name = jv_str(jv_get(fn, "name"), "");
+                const char *dot = strchr(name, '.');
+                size_t nsn = dot ? (size_t)(dot - name) : strlen(name);
+                if (muse_namespace_seen(tools, i, name, nsn)) continue;
+                sb_lit(&muse_tail, ", \""); sb_put(&muse_tail, name, nsn);
+                sb_lit(&muse_tail, ".*\"");
+            }
+        }
+        sb_lit(&muse_tail, ", \"user\".<|eot|>");
         bool has_system = false;
         for (int i = 0; i < n_msgs; i++)
             if (!strcmp(msgs[i].role, "system")) has_system = true;
@@ -248,17 +329,25 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off,
                        "<|start|>system<|message|>You are a helpful AI "
                        "assistant.\nKnowledge cutoff: 2026-01-04.", NULL, NULL);
-            off = emit(out, cap, off, "%s", muse_sys_tail, NULL);
+            off = emit(out, cap, off, "%s", muse_tail.s, NULL);
         }
         for (int i = 0; i < n_msgs; i++) {
             const chat_msg *mm = &msgs[i];
             if (!strcmp(mm->role, "system")) {
                 off = emit(out, cap, off, "<|start|>system<|message|>%s",
                            mm->content, NULL);
-                off = emit(out, cap, off, "%s", muse_sys_tail, NULL);
+                off = emit(out, cap, off, "%s", muse_tail.s, NULL);
             } else if (!strcmp(mm->role, "assistant")) {
-                off = emit(out, cap, off, "<|start|>assistant to=user"
-                           "<|message|>%s<|eot|>", mm->content, NULL);
+                off = emit(out, cap, off, "<|start|>assistant to=%s<|message|>",
+                           mm->name ? mm->name : "user", NULL);
+                off = emit(out, cap, off, "%s<|eot|>", mm->content, NULL);
+            } else if (!strcmp(mm->role, "tool") && mm->name) {
+                off = emit(out, cap, off, "<|start|>tool %s<|message|>",
+                           mm->name, NULL);
+                off = emit(out, cap, off, "<tool_output name=\"%s\">\n",
+                           mm->name, NULL);
+                off = emit(out, cap, off, "%s\n</tool_output><|eot|>",
+                           mm->content, NULL);
             } else {
                 // user and anything else (a tool result arrives as its own
                 // named role in the reference) render as a plain named turn
@@ -268,13 +357,21 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
             }
         }
         // The reference generation prompt is the bare header: the model then
-        // chooses its recipient, opening ` to=self` when it wants a
-        // reasoning turn. THINK_OFF pins the recipient instead, which is the
-        // one place the format lets a caller suppress reasoning.
-        if (add_assistant)
-            off = emit(out, cap, off, thinking == THINK_OFF
-                       ? "<|start|>assistant to=user<|message|>"
-                       : "<|start|>assistant", NULL, NULL);
+        // chooses its recipient, opening ` to=self` when it wants a reasoning
+        // turn. An explicit THINK_ON starts that self-addressed turn in the
+        // prompt, which makes reasoning-before-tool deterministic. With tools,
+        // THINK_OFF still leaves the recipient to the constrained header (it
+        // cannot pin `user`, because a required tool must remain reachable).
+        if (add_assistant) {
+            bool have_tools = tools && tools->type == J_ARR && tools->n;
+            const char *head = thinking == THINK_ON
+                         ? "<|start|>assistant to=self<|message|>"
+                         : thinking == THINK_OFF && !have_tools
+                         ? "<|start|>assistant to=user<|message|>"
+                         : "<|start|>assistant";
+            off = emit(out, cap, off, "%s", head, NULL);
+        }
+        free(muse_tail.s);
         break;
     }
     case TMPL_GRANITE:
@@ -398,6 +495,13 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
         break;
     }
     return off;
+}
+
+size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
+                       bool add_assistant, int thinking,
+                       char *out, size_t cap) {
+    return render_messages_with_tools(tmpl, msgs, n_msgs, add_assistant,
+                                      thinking, NULL, out, cap);
 }
 
 // ------------------------------------------------- thinking-tag splitter
@@ -534,6 +638,27 @@ void tools_render_for(int tmpl, const jv *tools, sbuf *out) {
         "tool call, but no text may follow it.\n</IMPORTANT>");
 }
 
+const char *tool_result_name(const jv *messages, int message_index) {
+    if (!messages || messages->type != J_ARR || message_index < 0 ||
+        message_index >= messages->n) return NULL;
+    jv *result = messages->items[message_index];
+    const char *name = jv_str(jv_get(result, "name"), NULL);
+    if (name && name[0]) return name;
+    const char *id = jv_str(jv_get(result, "tool_call_id"), NULL);
+    if (!id) return NULL;
+    for (int i = 0; i < message_index; i++) {
+        jv *calls = jv_get(messages->items[i], "tool_calls");
+        if (!calls || calls->type != J_ARR) continue;
+        for (int k = 0; k < calls->n; k++) {
+            const char *candidate = jv_str(jv_get(calls->items[k], "id"), NULL);
+            if (!candidate || strcmp(candidate, id)) continue;
+            jv *fn = jv_get(calls->items[k], "function");
+            return jv_str(jv_get(fn, "name"), NULL);
+        }
+    }
+    return id[0] ? id : NULL;
+}
+
 void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
     if (!calls || calls->type != J_ARR) return;
     for (int i = 0; i < calls->n; i++) {
@@ -541,11 +666,32 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
         const char *name = jv_str(jv_get(fn, "name"), NULL);
         const char *args = jv_str(jv_get(fn, "arguments"), "{}");
         if (!name) continue;
-        if (tmpl != TMPL_ORNITH) {
+        if (tmpl != TMPL_ORNITH && tmpl != TMPL_MUSE) {
             sb_fmt(out, "<|tool_call>call:%s%s<tool_call|>", name, args);
             continue;
         }
         jv *obj = json_parse(args, strlen(args));
+        if (tmpl == TMPL_MUSE) {
+            if (i > 0)
+                sb_fmt(out, "<|eom|><|start|>assistant to=%s<|message|>",
+                       name);
+            sb_fmt(out, "<atem:function_calls>\n<atem:invoke name=\"%s\">\n",
+                   name);
+            if (obj && obj->type == J_OBJ) {
+                for (int k = 0; k < obj->n; k++) {
+                    sb_fmt(out, "<atem:parameter name=\"%s\">", obj->keys[k]);
+                    if (obj->items[k]->type == J_STR)
+                        sb_put(out, obj->items[k]->str,
+                               strlen(obj->items[k]->str));
+                    else
+                        jv_dump(obj->items[k], out);
+                    sb_lit(out, "</atem:parameter>\n");
+                }
+            }
+            sb_lit(out, "</atem:invoke>\n</atem:function_calls>");
+            jv_free(obj);
+            continue;
+        }
         sb_fmt(out, "<tool_call>\n<function=%s>\n", name);
         if (obj && obj->type == J_OBJ) {
             for (int k = 0; k < obj->n; k++) {
@@ -680,6 +826,10 @@ int tool_envelope_build_ex(jv *tools, jv *choice, jv *final_schema,
     }
 
     out->kind = kind;
+    if (kind == TCH_NAMED) {
+        out->named = strdup(named);
+        if (!out->named) { snprintf(err, errcap, "out of memory building tool choice"); return -1; }
+    }
     out->final_is_text = final_schema == NULL;
     out->parallel = parallel;
     out->max_calls = parallel ? PARALLEL_MAX_CALLS : 1;
@@ -783,6 +933,7 @@ int tool_envelope_build_ex(jv *tools, jv *choice, jv *final_schema,
 bad:
     free(schema.s);
     free(turn.s);
+    free(out->named);
     memset(out, 0, sizeof(*out));
     return -1;
 }
@@ -791,7 +942,8 @@ void tool_envelope_free(tool_envelope *e) {
     if (!e) return;
     free(e->schema_src);
     free(e->system_turn);
-    e->schema_src = e->system_turn = NULL;
+    free(e->named);
+    e->schema_src = e->system_turn = e->named = NULL;
 }
 
 // Map ONE envelope entry. Shared by the single-call document and each element
@@ -829,8 +981,154 @@ static int envelope_entry_map(const tool_envelope *e, jv *v, int index,
     return 1;
 }
 
+static const char *atem_attr(const char *p, const char *end, const char *key,
+                             const char **value_end) {
+    size_t kn = strlen(key);
+    const char *k = strstr(p, key);
+    if (!k || k >= end || k + kn >= end || k[kn] != '"') return NULL;
+    const char *v = k + kn + 1;
+    const char *q = memchr(v, '"', (size_t)(end - v));
+    if (!q) return NULL;
+    *value_end = q;
+    return v;
+}
+
+static jv *atem_param_schema(const tool_envelope *e,
+                             const char *tool, size_t tool_n,
+                             const char *param, size_t param_n) {
+    if (!e || !e->tools || e->tools->type != J_ARR) return NULL;
+    for (int i = 0; i < e->tools->n; i++) {
+        jv *fn = jv_get(e->tools->items[i], "function");
+        if (!fn) fn = e->tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), "");
+        if (strlen(name) != tool_n || memcmp(name, tool, tool_n)) continue;
+        jv *props = jv_get(jv_get(fn, "parameters"), "properties");
+        if (!props || props->type != J_OBJ) return NULL;
+        for (int k = 0; k < props->n; k++)
+            if (strlen(props->keys[k]) == param_n &&
+                !memcmp(props->keys[k], param, param_n)) return props->items[k];
+    }
+    return NULL;
+}
+
+static int atem_map(const tool_envelope *e, const char *doc, size_t n,
+                    sbuf *content, sbuf *tc) {
+    const char *p = doc, *end = doc + n;
+    int calls = 0;
+    while (p < end) {
+        const char *inv = strstr(p, "<atem:invoke name=\"");
+        if (!inv || inv >= end) break;
+        const char *name_end = NULL;
+        const char *name = atem_attr(inv, end, "name=", &name_end);
+        if (!name) return -1;
+        const char *open_end = strstr(name_end, ">");
+        const char *inv_end = open_end ? strstr(open_end, "</atem:invoke>") : NULL;
+        if (!open_end || !inv_end || inv_end > end) return -1;
+
+        sbuf args = {0};
+        sb_lit(&args, "{");
+        int params = 0;
+        const char *q = open_end + 1;
+        while (q < inv_end) {
+            const char *par = strstr(q, "<atem:parameter name=\"");
+            if (!par || par >= inv_end) break;
+            const char *pn_end = NULL;
+            const char *pn = atem_attr(par, inv_end, "name=", &pn_end);
+            const char *val = pn_end ? strstr(pn_end, ">") : NULL;
+            if (!pn || !val || val >= inv_end) { free(args.s); return -1; }
+            val++;
+            const char *close = strstr(val, "</atem:parameter>");
+            if (!close || close > inv_end) { free(args.s); return -1; }
+            if (params++) sb_lit(&args, ",");
+            sb_lit(&args, "\""); sb_esc(&args, pn, (size_t)(pn_end - pn));
+            sb_lit(&args, "\":");
+            size_t vn = (size_t)(close - val);
+            jv *ps = atem_param_schema(e, name, (size_t)(name_end - name),
+                                      pn, (size_t)(pn_end - pn));
+            const char *pt = jv_str(jv_get(ps, "type"), "string");
+            bool json_value = !strcmp(pt, "object") || !strcmp(pt, "array") ||
+                              !strcmp(pt, "integer") || !strcmp(pt, "number") ||
+                              !strcmp(pt, "boolean") || !strcmp(pt, "null");
+            jv *structured = json_value ? json_parse(val, vn) : NULL;
+            if (structured) { jv_dump(structured, &args); jv_free(structured); }
+            else if (json_value) {
+                // A token-budget close may leave a raw scalar prefix that is
+                // not valid JSON (empty, `-`, `tru`, ...). The native atem
+                // value itself is untyped text; use the declared parameter
+                // type to keep the recovered OpenAI arguments executable.
+                if (!strcmp(pt, "boolean")) sb_lit(&args, "false");
+                else if (!strcmp(pt, "null")) sb_lit(&args, "null");
+                else if (!strcmp(pt, "object")) sb_lit(&args, "{}");
+                else if (!strcmp(pt, "array")) sb_lit(&args, "[]");
+                else sb_lit(&args, "0");
+            } else {
+                const char *sv = val;
+                size_t sn = vn;
+                jv *choices = jv_get(ps, "enum");
+                if (choices && choices->type == J_ARR && choices->n) {
+                    bool member = false;
+                    for (int z = 0; z < choices->n; z++) {
+                        const char *candidate = jv_str(choices->items[z], NULL);
+                        if (candidate && strlen(candidate) == vn &&
+                            !memcmp(candidate, val, vn)) member = true;
+                    }
+                    if (!member) {
+                        const char *fallback = jv_str(choices->items[0], "");
+                        sv = fallback;
+                        sn = strlen(fallback);
+                    }
+                }
+                sb_lit(&args, "\""); sb_esc(&args, sv, sn); sb_lit(&args, "\"");
+            }
+            q = close + strlen("</atem:parameter>");
+        }
+        sb_lit(&args, "}");
+        if (args.failed) { free(args.s); return -1; }
+        if (calls) sb_lit(tc, ",");
+        sb_fmt(tc, "{\"id\":\"call_%d\",\"type\":\"function\","
+                   "\"function\":{\"name\":\"", calls);
+        sb_esc(tc, name, (size_t)(name_end - name));
+        sb_lit(tc, "\",\"arguments\":\"");
+        sb_esc(tc, args.s, args.n);
+        sb_lit(tc, "\"}}");
+        free(args.s);
+        calls++;
+        p = inv_end + strlen("</atem:invoke>");
+    }
+    if (calls) return calls;
+
+    // A native direct answer is addressed to the user. Keep the recipient
+    // header out of content just as the JSON envelope syntax is kept out.
+    const char *u = strstr(doc, " to=user<|message|>");
+    if (!u) return -1;
+    u += strlen(" to=user<|message|>");
+    const char *stop = strstr(u, "<|eot|>");
+    sb_put(content, u, stop && stop <= end ? (size_t)(stop - u)
+                                           : (size_t)(end - u));
+    return 0;
+}
+
+bool muse_user_payload_strip(sbuf *payload) {
+    if (!payload || !payload->s) return false;
+    const char *message = strstr(payload->s, "<|message|>");
+    if (!message || message >= payload->s + payload->n) return false;
+    size_t off = (size_t)(message - payload->s) + strlen("<|message|>");
+    memmove(payload->s, payload->s + off, payload->n - off);
+    payload->n -= off;
+    payload->s[payload->n] = 0;
+    return true;
+}
+
 int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
+    if (e && e->atem) return atem_map(e, doc, n, content, tc);
+    if (e && e->muse_user_header) {
+        const char *message = strstr(doc, "<|message|>");
+        if (!message || message >= doc + n) return -1;
+        message += strlen("<|message|>");
+        n -= (size_t)(message - doc);
+        doc = message;
+    }
     jv *v = json_parse(doc, n);
     if (!v || v->type != J_OBJ) { jv_free(v); return -1; }
 
@@ -893,7 +1191,8 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
 // envelope syntax out of the client's `content` — by the time a byte is
 // forwarded, it is already known to be assistant text or tool arguments.
 
-enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_DONE };
+enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_ATEM,
+       TS_MUSE_HEADER, TS_MUSE_CONTENT, TS_DONE };
 
 static void head_put(tool_stream *s, const char *b, size_t n) {
     if (s->head_n + n + 1 > s->head_cap) {
@@ -1115,13 +1414,78 @@ void tool_stream_init(tool_stream *s, const tool_envelope *e,
     memset(s, 0, sizeof(*s));
     s->env = e;
     if (sink) s->sink = *sink;
-    s->state = TS_TOOL;
+    s->state = e && e->atem ? TS_ATEM
+             : e && e->muse_plain_payload ? TS_MUSE_HEADER : TS_TOOL;
+}
+
+static int ts_muse_header(tool_stream *s, const char *bytes, int n) {
+    head_put(s, bytes, (size_t)n);
+    if (s->state == TS_DONE) return 0;
+    const char *message = s->head ? strstr(s->head, "<|message|>") : NULL;
+    if (!message) return 0;
+    size_t off = (size_t)(message - s->head) + strlen("<|message|>");
+    head_drop(s, off);
+    s->state = TS_MUSE_CONTENT;
+    int rc = s->head_n && s->sink.content
+               ? s->sink.content(s->sink.ud, s->head, (int)s->head_n) : 0;
+    s->head_n = 0;
+    if (s->head) s->head[0] = 0;
+    return rc;
+}
+
+static int ts_atem(tool_stream *s, const char *bytes, int n) {
+    head_put(s, bytes, (size_t)n);
+    if (s->state == TS_DONE) return 0;
+    for (;;) {
+        const char *inv = s->head ? strstr(s->head, "<atem:invoke name=\"") : NULL;
+        if (inv) {
+            const char *close = strstr(inv, "</atem:invoke>");
+            if (!close) return 0;
+            size_t upto = (size_t)(close - s->head) + strlen("</atem:invoke>");
+            sbuf content = {0}, tc = {0}, wrapped = {0};
+            int mapped = atem_map(s->env, inv, upto - (size_t)(inv - s->head),
+                                  &content, &tc);
+            sb_lit(&wrapped, "["); sb_put(&wrapped, tc.s, tc.n); sb_lit(&wrapped, "]");
+            jv *arr = mapped == 1 ? json_parse(wrapped.s, wrapped.n) : NULL;
+            jv *fn = arr && arr->type == J_ARR && arr->n == 1
+                       ? jv_get(arr->items[0], "function") : NULL;
+            const char *name = jv_str(jv_get(fn, "name"), NULL);
+            const char *args = jv_str(jv_get(fn, "arguments"), NULL);
+            int rc = 0;
+            if (!name || !args) rc = 0;
+            else {
+                s->called = true;
+                if (s->sink.call_begin) rc = s->sink.call_begin(s->sink.ud, name);
+                if (!rc && s->sink.call_args)
+                    rc = s->sink.call_args(s->sink.ud, args, (int)strlen(args));
+                if (!rc && s->sink.call_end) rc = s->sink.call_end(s->sink.ud);
+            }
+            jv_free(arr); free(content.s); free(tc.s); free(wrapped.s);
+            head_drop(s, upto);
+            if (rc) return rc;
+            continue;
+        }
+        const char *user = s->head ? strstr(s->head, " to=user<|message|>") : NULL;
+        const char *eot = user ? strstr(user, "<|eot|>") : NULL;
+        if (user && eot) {
+            user += strlen(" to=user<|message|>");
+            int rc = s->sink.content
+                       ? s->sink.content(s->sink.ud, user, (int)(eot - user)) : 0;
+            s->state = TS_DONE;
+            return rc;
+        }
+        return 0;
+    }
 }
 
 int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
     if (n <= 0) return 0;
     switch (s->state) {
     case TS_DONE:      return 0;   // trailing envelope syntax: not the client's
+    case TS_ATEM:      return ts_atem(s, bytes, n);
+    case TS_MUSE_HEADER:return ts_muse_header(s, bytes, n);
+    case TS_MUSE_CONTENT:
+        return s->sink.content ? s->sink.content(s->sink.ud, bytes, n) : 0;
     case TS_VALUE:     return ts_value(s, bytes, n);
     case TS_FINAL_STR: return ts_final_str(s, bytes, n);
     default:

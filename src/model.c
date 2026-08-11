@@ -1561,9 +1561,17 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         m->swa_rope_global = sbase <= 0.0f || sbase == m->rope_base;
         // Reasoning is a separate assistant turn addressed to the model
         // itself: ` to=self<|message|>THINKING<|eom|><|start|>assistant
-        // to=user<|message|>ANSWER`. The control tokens decode to nothing,
-        // so on the visible stream the pair below is exactly what brackets
-        // the thinking text (see the TMPL_MUSE note in template.c).
+        // to=RECIPIENT<|message|>ANSWER`. `<|eom|>`, `<|start|>` and
+        // `<|message|>` decode to no bytes, so on an unconstrained byte
+        // stream the pair below is exactly what brackets the thinking text
+        // and nothing else marks where the answer begins. Narrowing the
+        // close to ` to=` (to make tool recipients closable) leaked the
+        // recipient word into content and `assistant` into reasoning on
+        // plain thinking chats — measured live, content came back "user391".
+        // Constrained runs never wait for these bytes: engine.c recognizes
+        // the <|eom|> control id and feeds this close to the splitter
+        // itself (constraint_finish_think), then the recipient-turn
+        // automaton owns everything that follows.
         m->think_open  = " to=self";
         m->think_close = "assistant to=user";
     }

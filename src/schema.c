@@ -42,7 +42,10 @@ void schema_free(snode *n) {
     for (int i = 0; i < n->n_lits; i++) free(n->lits[i]);
     free(n->lits);
     free(n->pattern_prefix);
-    for (int i = 0; i < n->n_props; i++) { free(n->keys[i]); schema_free(n->props[i]); }
+    for (int i = 0; i < n->n_props; i++) {
+        if (n->keys) free(n->keys[i]);
+        schema_free(n->props[i]);
+    }
     free(n->keys); free(n->key_len); free(n->props); free(n->req);
     schema_free(n->items);
     for (int i = 0; i < n->n_alts; i++) schema_free(n->alts[i]);
@@ -903,6 +906,306 @@ snode *schema_compile(struct jv *schema, char *err, int errcap) {
     return n;
 }
 
+// A sequence is an internal composition node: its children are the existing
+// literal and JSON-value machines, consumed in order. It is deliberately not
+// a second grammar engine; atem is compiled into the same snode/sval stack.
+static snode *atem_seq(int count) {
+    snode *n = sn_new(SN_SEQ);
+    if (!n) return NULL;
+    n->props = calloc((size_t)count, sizeof(*n->props));
+    if (!n->props) { schema_free(n); return NULL; }
+    return n;
+}
+
+static snode *atem_lit(const char *s) {
+    snode *n = sn_new(SN_ENUM);
+    if (!n) return NULL;
+    n->lits = calloc(1, sizeof(*n->lits));
+    if (!n->lits) { schema_free(n); return NULL; }
+    n->lits[0] = strdup(s);
+    if (!n->lits[0]) { schema_free(n); return NULL; }
+    n->n_lits = 1;
+    n->max_items = 1; // internal raw literal; whitespace is significant
+    return n;
+}
+
+static snode *atem_raw(const char *sentinel) {
+    snode *n = sn_new(SN_RAW);
+    if (!n) return NULL;
+    n->pattern_prefix = strdup(sentinel);
+    if (!n->pattern_prefix) { schema_free(n); return NULL; }
+    n->pattern_prefix_len = (int)strlen(sentinel);
+    return n;
+}
+
+static bool atem_seq_add(snode *seq, snode *child) {
+    if (!child) return false;
+    seq->props[seq->n_props++] = child;
+    return true;
+}
+
+static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
+    jv *fn = jv_get(tool, "function");
+    if (!fn) fn = tool;
+    jv *params = jv_get(fn, "parameters");
+    jv *props = params ? jv_get(params, "properties") : NULL;
+    if (props && props->type != J_OBJ) {
+        snprintf(err, errcap, "atem tool parameters.properties must be an object");
+        return NULL;
+    }
+    int count = 2 + (props ? props->n * 4 : 0);
+    snode *seq = atem_seq(count);
+    if (!seq) return NULL;
+    if (!atem_seq_add(seq, atem_lit("\">\n"))) goto oom;
+    for (int i = 0; props && i < props->n; i++) {
+        jv *ty = jv_get(props->items[i], "type");
+        const char *type = jv_str(ty, "");
+        sbuf open = {0};
+        sb_fmt(&open, "<atem:parameter name=\"%s\">", props->keys[i]);
+        if (open.failed || !atem_seq_add(seq, atem_lit(open.s))) {
+            free(open.s); goto oom;
+        }
+        free(open.s);
+        bool structured = !strcmp(type, "object") || !strcmp(type, "array");
+        snode *value = structured
+                     ? compile_node(props->items[i], err, errcap, 0)
+                     : atem_raw("</atem:parameter>");
+        if (!value || !atem_seq_add(seq, value)) {
+            schema_free(value);
+            if (!err[0]) goto oom;
+            schema_free(seq); return NULL;
+        }
+        if (structured &&
+            !atem_seq_add(seq, atem_lit("</atem:parameter>"))) goto oom;
+        if (!atem_seq_add(seq, atem_lit("\n"))) goto oom;
+    }
+    if (!atem_seq_add(seq,
+            atem_lit("</atem:invoke>\n</atem:function_calls>"))) goto oom;
+    return seq;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem tools");
+    schema_free(seq);
+    return NULL;
+}
+
+snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap) {
+    err[0] = 0;
+    if (!tools || tools->type != J_ARR || tools->n <= 0 || tools->n > 60) {
+        snprintf(err, errcap, "atem tools must be a non-empty array of at most 60 tools");
+        return NULL;
+    }
+    snode *root = atem_seq(3);
+    snode *names = sn_new(SN_ENUM);
+    snode *choice = sn_new(SN_COND);
+    if (!root || !names || !choice) goto oom;
+    names->lits = calloc((size_t)tools->n, sizeof(*names->lits));
+    choice->alts = calloc((size_t)tools->n, sizeof(*choice->alts));
+    if (!names->lits || !choice->alts) goto oom;
+    names->min_items = 1; // this enum selects the following conditional tail
+    names->max_items = 1; // names are raw attribute text, not JSON literals
+    if (!atem_seq_add(root,
+            atem_lit("<atem:function_calls>\n<atem:invoke name=\""))) goto oom;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        if (!fn) fn = tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!name || !name[0]) {
+            snprintf(err, errcap, "atem tool %d has no function name", i);
+            goto fail;
+        }
+        names->lits[names->n_lits] = strdup(name);
+        if (!names->lits[names->n_lits]) goto oom;
+        names->n_lits++;
+        choice->alts[choice->n_alts] = atem_tool_tail(tools->items[i], err, errcap);
+        if (!choice->alts[choice->n_alts]) goto fail;
+        choice->n_alts++;
+    }
+    if (!atem_seq_add(root, names)) goto oom;
+    names = NULL;
+    if (!atem_seq_add(root, choice)) goto oom;
+    choice = NULL;
+    return root;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem tools");
+fail:
+    schema_free(names); schema_free(choice); schema_free(root);
+    return NULL;
+}
+
+static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
+                                              const char *only_tool,
+                                              struct jv *final_schema,
+                                              const char *prefix,
+                                              char *err, int errcap) {
+    err[0] = 0;
+    if (!tools || tools->type != J_ARR || tools->n <= 0 || tools->n > 59) {
+        snprintf(err, errcap, "atem turn needs 1 to 59 tools");
+        return NULL;
+    }
+    snode *root = atem_seq(prefix[0] ? 3 : 2);
+    snode *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
+    if (!root || !names || !choice) goto oom;
+    root->max_items = prefix[0] == ' '; // leading protocol space is significant
+    int selected = 0;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function"); if (!fn) fn = tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!only_tool || (name && !strcmp(name, only_tool))) selected++;
+    }
+    if (!selected) { snprintf(err, errcap, "named atem tool is not declared"); goto fail; }
+    int branches = selected + (allow_user ? 1 : 0);
+    names->lits = calloc((size_t)branches, sizeof(*names->lits));
+    choice->alts = calloc((size_t)branches, sizeof(*choice->alts));
+    if (!names->lits || !choice->alts) goto oom;
+    names->min_items = names->max_items = 1;
+    if (prefix[0] && !atem_seq_add(root, atem_lit(prefix))) goto oom;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        if (!fn) fn = tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!name || !name[0]) { snprintf(err, errcap, "atem tool %d has no name", i); goto fail; }
+        if (only_tool && strcmp(name, only_tool)) continue;
+        names->lits[names->n_lits++] = strdup(name);
+        snode *tail = atem_seq(3);
+        if (!names->lits[names->n_lits - 1] || !tail ||
+            !atem_seq_add(tail, atem_lit("<|message|><atem:function_calls>\n<atem:invoke name=\"")) ||
+            !atem_seq_add(tail, atem_lit(name)) ||
+            !atem_seq_add(tail, atem_tool_tail(tools->items[i], err, errcap))) {
+            schema_free(tail); goto fail;
+        }
+        choice->alts[choice->n_alts++] = tail;
+    }
+    if (allow_user) {
+        names->lits[names->n_lits++] = strdup("user");
+        snode *answer = atem_seq(2);
+        snode *answer_value = final_schema
+                            ? compile_node(final_schema, err, errcap, 0)
+                            : atem_raw("<|eot|>");
+        if (!names->lits[names->n_lits - 1] || !answer ||
+            !atem_seq_add(answer, atem_lit("<|message|>")) ||
+            !atem_seq_add(answer, answer_value)) {
+            schema_free(answer_value);
+            schema_free(answer); goto oom;
+        }
+        choice->alts[choice->n_alts++] = answer;
+    }
+    if (!atem_seq_add(root, names)) goto oom;
+    names = NULL;
+    if (!atem_seq_add(root, choice)) goto oom;
+    choice = NULL;
+    return root;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem turn");
+fail:
+    schema_free(names); schema_free(choice); schema_free(root);
+    return NULL;
+}
+
+snode *schema_compile_atem_turn_ex(struct jv *tools, bool allow_user,
+                                   const char *only_tool,
+                                   char *err, int errcap) {
+    return schema_compile_atem_turn_prefix(tools, allow_user, only_tool,
+                                           NULL, " to=", err, errcap);
+}
+
+snode *schema_compile_atem_after_reasoning(struct jv *tools, bool allow_user,
+                                           const char *only_tool,
+                                           char *err, int errcap) {
+    return schema_compile_atem_turn_prefix(tools, allow_user, only_tool,
+                                           NULL, "", err, errcap);
+}
+
+snode *schema_compile_atem_recipient_turn_with_final(
+    struct jv *tools, bool allow_user, const char *only_tool,
+    struct jv *final_schema, char *err, int errcap) {
+    snode *direct = schema_compile_atem_turn_prefix(
+        tools, allow_user, only_tool, final_schema, " to=", err, errcap);
+    snode *after = direct ? schema_compile_atem_turn_prefix(
+        tools, allow_user, only_tool, final_schema, "", err, errcap) : NULL;
+    snode *root = after ? sn_new(SN_UNION) : NULL;
+    if (!root) {
+        schema_free(direct); schema_free(after);
+        if (!err[0]) snprintf(err, errcap, "out of memory compiling atem recipient turn");
+        return NULL;
+    }
+    root->alts = calloc(2, sizeof(*root->alts));
+    if (!root->alts) {
+        schema_free(direct); schema_free(after); schema_free(root);
+        snprintf(err, errcap, "out of memory compiling atem recipient turn");
+        return NULL;
+    }
+    root->max_items = 1;
+    root->alts[root->n_alts++] = direct;
+    root->alts[root->n_alts++] = after;
+    return root;
+}
+
+snode *schema_compile_atem_recipient_turn(struct jv *tools, bool allow_user,
+                                          const char *only_tool,
+                                          char *err, int errcap) {
+    return schema_compile_atem_recipient_turn_with_final(
+        tools, allow_user, only_tool, NULL, err, errcap);
+}
+
+snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap) {
+    return schema_compile_atem_turn_ex(tools, true, NULL, err, errcap);
+}
+
+snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
+                                    char *err, int errcap) {
+    // Muse separates native calls with <|eom|><|start|>; those controls decode
+    // to no visible bytes, leaving the literal `assistant` before the next
+    // recipient header. A parallel request asks for a bounded pair, keeping
+    // truncation closable while exercising the model's trained multi-turn form.
+    snode *root = atem_seq(3);
+    snode *first = schema_compile_atem_turn_ex(tools, false, only_tool,
+                                               err, errcap);
+    snode *second = schema_compile_atem_turn_ex(tools, false, only_tool,
+                                                err, errcap);
+    if (!root || !first || !second) {
+        schema_free(first); schema_free(second); schema_free(root);
+        if (!err[0]) snprintf(err, errcap, "out of memory compiling parallel atem turn");
+        return NULL;
+    }
+    root->max_items = 1;
+    root->props[root->n_props++] = first;
+    snode *middle = atem_lit("assistant");
+    if (!middle) { schema_free(second); schema_free(root); goto parallel_oom; }
+    root->props[root->n_props++] = middle;
+    root->props[root->n_props++] = second;
+    return root;
+parallel_oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling parallel atem turn");
+    return NULL;
+}
+
+snode *schema_compile_muse_user_payload(struct jv *schema,
+                                        char *err, int errcap) {
+    err[0] = 0;
+    snode *root = sn_new(SN_UNION);
+    snode *direct = atem_seq(2), *after = atem_seq(2);
+    snode *p1 = compile_node(schema, err, errcap, 0);
+    snode *p2 = compile_node(schema, err, errcap, 0);
+    if (!root || !direct || !after || !p1 || !p2) goto fail;
+    root->alts = calloc(2, sizeof(*root->alts));
+    if (!root->alts) goto fail;
+    root->max_items = 1;   // leading space in the direct branch is syntax
+    direct->max_items = 1;
+    direct->props[direct->n_props++] = atem_lit(" to=user<|message|>");
+    after->props[after->n_props++] = atem_lit("user<|message|>");
+    if (!direct->props[0] || !after->props[0]) goto fail;
+    direct->props[direct->n_props++] = p1; p1 = NULL;
+    after->props[after->n_props++] = p2; p2 = NULL;
+    root->alts[root->n_alts++] = direct; direct = NULL;
+    root->alts[root->n_alts++] = after; after = NULL;
+    return root;
+fail:
+    schema_free(p1); schema_free(p2);
+    schema_free(direct); schema_free(after); schema_free(root);
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling Muse user payload");
+    return NULL;
+}
+
 // ---------------------------------------------------------------- validate
 
 // frame phases
@@ -918,6 +1221,8 @@ enum {
     P_STR,            // inside string
     P_LIT,            // enum / bool / null literal
     P_NUM,
+    P_SEQ,
+    P_RAW,
 };
 
 // number micro-states (frame->sub)
@@ -964,6 +1269,7 @@ static void frame_done(sval *v);
 
 // child value finished: advance parent
 static void frame_done(sval *v) {
+    const snode *child = v->stack[v->depth - 1].node;
     v->depth--;
     if (v->depth == 0) { v->done = true; return; }
     sframe *f = &v->stack[v->depth - 1];
@@ -972,6 +1278,11 @@ static void frame_done(sval *v) {
             !strcmp(f->node->keys[f->sub], "tool"))
             f->disc = (uint16_t)(v->last_enum + 1);
         f->phase = P_OBJ_NEXT;
+    } else if (f->node->kind == SN_SEQ) {
+        if (child->kind == SN_ENUM && child->min_items && v->last_enum >= 0)
+            f->disc = (uint16_t)(v->last_enum + 1);
+        if (f->idx >= f->node->n_props) frame_done(v);
+        else f->phase = P_SEQ;
     } else {
         f->phase = P_ARR_NEXT; // SN_ARR
     }
@@ -996,7 +1307,14 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
                     if (c == a->lits[j][0]) return a;
                 break;
             case SN_OBJ:  if (c == '{') return a; break;
-            case SN_ARR:  if (c == '[') return a; break;
+        case SN_ARR:  if (c == '[') return a; break;
+            case SN_SEQ:
+                if (a->n_props > 0) {
+                    bool starts[256] = {0};
+                    if (union_start_bytes(a->props[0], starts) && starts[c])
+                        return a;
+                }
+                break;
             case SN_BOOL: if (c == 't' || c == 'f') return a; break;
             case SN_NULL: if (c == 'n') return a; break;
             case SN_NUM: case SN_INT:
@@ -1208,7 +1526,10 @@ static int feed_byte(sval *v, uint8_t c) {
 
     switch (f->phase) {
     case P_START:
-        if (is_ws(c)) return leading_ws_ok(v);
+        if (is_ws(c) && !((n->kind == SN_ENUM || n->kind == SN_SEQ ||
+                           n->kind == SN_UNION) &&
+                          n->max_items == 1))
+            return leading_ws_ok(v);
         switch (n->kind) {
         case SN_COND: {
             int choice = frame_choice(v, v->depth - 1);
@@ -1258,6 +1579,16 @@ static int feed_byte(sval *v, uint8_t c) {
             if (c != '[') return -1;
             f->phase = P_ARR_FIRST; f->idx = 0;
             return 0;
+        case SN_SEQ:
+            if (n->n_props <= 0) { frame_done(v); return 1; }
+            f->phase = P_SEQ;
+            f->idx = 1;
+            if (!push_value(v, n->props[0])) return -1;
+            return feed_byte(v, c);
+        case SN_RAW:
+            f->phase = P_RAW;
+            f->lit_pos = 0;
+            return feed_byte(v, c);
         default:
             return -1;
         }
@@ -1436,6 +1767,25 @@ static int feed_byte(sval *v, uint8_t c) {
             return 0;
         }
         return -1;
+
+    case P_SEQ:
+        if (f->idx >= n->n_props) { frame_done(v); return 1; }
+        return push_value(v, n->props[f->idx++]) ? feed_byte(v, c) : -1;
+
+    case P_RAW: {
+        const char *sentinel = n->pattern_prefix;
+        int pos = f->lit_pos;
+        if (c == (uint8_t)sentinel[pos]) {
+            if (++pos == n->pattern_prefix_len) {
+                frame_done(v);
+                return 0;
+            }
+            f->lit_pos = pos;
+            return 0;
+        }
+        f->lit_pos = c == (uint8_t)sentinel[0] ? 1 : 0;
+        return 0;
+    }
     }
     return -1;
 }
@@ -1461,9 +1811,36 @@ bool sval_ws_is_content(const sval *v) {
     // any-subtree runs its own machine; be conservative and treat its
     // whitespace as content rather than reach into it.
     if (f->node->kind == SN_ANY) return true;
+    if (f->node->kind == SN_RAW && f->phase == P_RAW) return true;
     // Mid-string (P_STR with the opening quote consumed) is the content case.
     return f->phase == P_STR &&
            (f->node->kind == SN_STR || f->node->kind == SN_ENUM);
+}
+
+// A trailing raw node (Muse's to=user free-text answer) has no terminator
+// the byte machine can ever see: its sentinel is the spelled form of the
+// model's end-of-turn token, which decodes to no bytes when the model
+// actually emits it. Report whether the validator sits inside such a tail —
+// a raw frame (entered, or about to be entered as the last child) with only
+// exhausted sequence frames above it — so the engine can accept a stop token
+// there as the answer's natural end instead of forcing the branch to burn
+// the whole token budget and finish "length".
+bool sval_at_raw_tail(const sval *v) {
+    if (!v || v->done || v->depth <= 0) return false;
+    for (int i = 0; i < v->depth; i++) {
+        const sframe *f = &v->stack[i];
+        if (i == v->depth - 1) {
+            if (f->node->kind == SN_RAW) return f->phase == P_RAW;
+            // between the header literal and the answer's first byte the raw
+            // child is not yet pushed; an empty answer is still an answer
+            return f->node->kind == SN_SEQ && f->phase == P_SEQ &&
+                   f->idx == f->node->n_props - 1 &&
+                   f->node->props[f->idx]->kind == SN_RAW;
+        }
+        if (f->node->kind != SN_SEQ || f->idx < f->node->n_props)
+            return false;
+    }
+    return false;
 }
 
 bool sval_feed(sval *v, const char *s, int len) {
@@ -1612,6 +1989,13 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
             eq_putc(q, '}');
             break;
         }
+        case SN_SEQ:
+            for (int i = 0; i < n->n_props; i++)
+                emit_min_choice(q, n->props[i], depth + 1, choice);
+            break;
+        case SN_RAW:
+            eq_put(q, n->pattern_prefix);
+            break;
         case SN_COND:
             break;
     }
@@ -1773,6 +2157,16 @@ int sval_close(sval *v, char *out, int cap) {
                 emit_min_choice(&q, n->items, 0, -1);
             }
             eq_putc(&q, ']');
+            break;
+        case P_SEQ:
+            for (int i = f->idx; i < n->n_props && !eq_full(&q); i++)
+                emit_min_choice(&q, n->props[i], 0, choice);
+            break;
+        case P_RAW:
+            // Bytes already matching the sentinel are part of the generated
+            // prefix; append only the unmatched suffix, then the enclosing
+            // sequence contributes its fixed newline/invoke/calls closes.
+            eq_put(&q, n->pattern_prefix + f->lit_pos);
             break;
         }
         v->depth--;

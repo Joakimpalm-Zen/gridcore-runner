@@ -445,6 +445,41 @@ Chat supports buffered and SSE responses, part-array content, assistant
 and `keep_alive` in swap mode. Tool declarations are rendered into the model
 prompt and constrained back into well-formed `tool_calls`.
 
+Muse's native atem format carries scalar parameter values as raw text rather
+than JSON strings. Consequently a scalar value cannot contain the literal
+`</atem:parameter>` sequence: atem itself uses that sentinel as the value
+boundary and its reference template describes the output as regex-parsed,
+not XML-escaped.
+
+For Muse, the recipient header is part of the constrained turn: `to=user`
+selects a plain answer and a declared tool recipient pins the matching
+`<atem:invoke>` name. Buffered and SSE parsing collect consecutive native
+calls separated by `<|eom|>` into ordered OpenAI `tool_calls`; the separator
+is not treated as a global stop token.
+
+Native atem calling is selected automatically when a loaded Muse Glimmer
+model receives `tools`. Set `atem_tool_calling:false` on a Chat Completions
+request to use Runner's generic JSON-schema tool envelope instead; its payload
+is still constrained behind Muse's `to=user` recipient header, so the override
+does not leak prompt syntax into `content`. `tool_choice` (`auto`, `required`,
+named, and `none`) still controls the allowed recipients.
+`parallel_tool_calls:true` with a required/named native choice constrains a
+bounded two-call turn. Other model families keep the existing JSON-schema tool
+path unchanged.
+
+When native `tool_choice:"auto"` is combined with a JSON-schema
+`response_format`, the `to=user` alternative is compiled against that final
+schema; choosing not to call a tool therefore does not weaken structured
+output.
+
+An explicit `enable_thinking:true` starts Muse's self-addressed reasoning turn
+before the recipient constraint. If generation is cut at the token limit,
+the atem automaton closes the current parameter/invoke/function-call tail;
+raw scalar recovery uses the declared parameter type so the resulting OpenAI
+arguments document remains executable. A native `to=user` text answer ends at
+the model's own end-of-turn token and reports `finish_reason:"stop"`; only a
+genuine token-limit cut reports `"length"`.
+
 `enable_thinking`, either at the top level or inside `chat_template_kwargs`,
 is the request-level form of `--think`/`--no-think`. Omitting it is not the
 same as sending `false`: an absent field renders whatever the model family's
@@ -649,7 +684,7 @@ selection remain the model's responsibility.
 | `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. |
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
-| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md`. No vision encoder or atem tool syntax. |
+| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md` and `docs/muse-atem-cert-2026-08-11.md`. No vision encoder. Native atem definitions/results, recipient-constrained generation, truncation recovery, multi-call mapping, and buffered/SSE parsing are implemented and selected automatically for tool requests. |
 | `granite` | IBM Granite dense (3.x/4.1): the four muP scalars (embedding, fixed attention, residual, divided logit). CPU, CUDA and Metal. Certified; evidence in `docs/granite-cert-2026-08-11.md`. granitemoe and granitehybrid are separate arch ids and not admitted. |
 
 Admission remains layout-specific. Shared-expert MoE, unsupported split expert

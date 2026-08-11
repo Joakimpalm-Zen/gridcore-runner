@@ -60,6 +60,7 @@ typedef struct {
     uint8_t constraint_phase;
     bool    constraint_tag_possible;
     int     constraint_tag_match, constraint_close_match;
+    int     think_end_id;       // Muse <|eom|>: decoded-empty reasoning close
     int     prelude_max, prelude_count;
     bool    prelude_exhausted;
     bool progress;         // print prompt progress to stderr

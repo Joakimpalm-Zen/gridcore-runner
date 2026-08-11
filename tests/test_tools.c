@@ -36,7 +36,323 @@ static snode *compile(const tool_envelope *e) {
 static bool accepts(const snode *root, const char *doc) {
     sval v;
     sval_init(&v, root);
-    return sval_feed(&v, doc, (int)strlen(doc)) && v.done;
+    for (int i = 0; doc[i]; i++) {
+        if (!sval_feed(&v, doc + i, 1)) {
+            if (getenv("RUNNER_SCHEMA_TRACE"))
+                fprintf(stderr, "schema rejected byte %d (%#x), depth=%d "
+                        "kind=%d phase=%d idx=%d lit=%s in %s\n",
+                        i, (unsigned char)doc[i], v.depth,
+                        v.stack[v.depth - 1].node->kind,
+                        v.stack[v.depth - 1].phase,
+                        v.stack[v.depth - 1].idx,
+                        v.stack[v.depth - 1].node->n_lits
+                            ? v.stack[v.depth - 1].node->lits[0] : "-",
+                        doc);
+            return false;
+        }
+    }
+    return v.done;
+}
+
+static void test_atem_structured_tool_automaton(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"data.store\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"payload\":{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"integer\"}},\"required\":[\"x\"]},"
+        "\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+        "\"required\":[\"payload\",\"tags\"]}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"data.clear\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_tools(tools, err, sizeof(err));
+    if (!root) fprintf(stderr, "atem tools did not compile: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"data.store\">\n"
+        "<atem:parameter name=\"payload\">{\"x\":2}</atem:parameter>\n"
+        "<atem:parameter name=\"tags\">[\"a\",\"b\"]</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    assert(accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"data.clear\">\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    assert(!accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"data.store\">\n"
+        "<atem:parameter name=\"tags\">[]</atem:parameter>\n"
+        "<atem:parameter name=\"payload\">{\"x\":2}</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    assert(!accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"data.clear\">\n"
+        "</atem:invoke>"));
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_atem_scalar_is_raw_until_parameter_close(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"notes.save\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_tools(tools, err, sizeof(err));
+    if (!root) fprintf(stderr, "raw atem tool did not compile: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">raw \"quotes\" and \\slashes"
+        "</atem:parameter>\n</atem:invoke>\n</atem:function_calls>"));
+    assert(!accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">unterminated\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_atem_truncation_closes_started_call(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"notes.save\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_tools(tools, err, sizeof(err));
+    assert(root != NULL);
+    const char *prefix =
+        "<atem:function_calls>\n<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">half-written <";
+    sval partial;
+    sval_init(&partial, root);
+    assert(sval_feed(&partial, prefix, (int)strlen(prefix)));
+    char tail[512];
+    int tail_n = sval_close(&partial, tail, sizeof(tail));
+    assert(tail_n > 0);
+    char full[1024];
+    snprintf(full, sizeof(full), "%s%s", prefix, tail);
+    assert(accepts(root, full));
+    assert(strstr(full, "</atem:parameter>\n</atem:invoke>\n"
+                        "</atem:function_calls>") != NULL);
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_atem_buffered_maps_reasoning_and_multiple_calls(void) {
+    tool_envelope e = {0};
+    e.atem = true;
+    const char *doc =
+        " to=self<|message|>check both cities<|eom|><|start|>assistant"
+        " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Oslo</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls><|eom|><|start|>assistant"
+        " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Bergen</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 2);
+    assert(content.n == 0);
+    assert(calls.s && strstr(calls.s, "\"id\":\"call_0\""));
+    assert(strstr(calls.s, "\"id\":\"call_1\""));
+    assert(strstr(calls.s, "\\\"city\\\":\\\"Oslo\\\""));
+    assert(strstr(calls.s, "\\\"city\\\":\\\"Bergen\\\""));
+    free(content.s);
+    free(calls.s);
+}
+
+static void test_atem_header_discriminates_matching_invoke(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"data.store\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"data.clear\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, " to=data.store<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.store\">\n</atem:invoke>\n</atem:function_calls>"));
+    assert(!accepts(root, " to=data.store<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
+    assert(accepts(root, " to=user<|message|>plain answer<|eot|>"));
+    schema_free(root);
+    root = schema_compile_atem_after_reasoning(tools, false, "data.clear",
+                                               err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, "data.clear<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
+    schema_free(root);
+    root = schema_compile_atem_recipient_turn(tools, false, "data.clear",
+                                              err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, " to=data.clear<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
+    assert(accepts(root, "data.clear<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
+    schema_free(root);
+    jv_free(tools);
+}
+
+// The to=user free-text answer ends at the model's own stop token, which
+// decodes to no bytes — the automaton's spelled `<|eot|>` sentinel never
+// arrives on the byte stream. sval_at_raw_tail is what lets the engine accept
+// a stop there; without it every native plain answer burned the full token
+// budget and finished "length" (measured live 2026-08-11).
+static void test_atem_stop_token_is_valid_at_the_raw_answer_tail(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    assert(root != NULL);
+
+    sval v;
+    sval_init(&v, root);
+    const char *answer = " to=user<|message|>The answer is 391";
+    assert(sval_feed(&v, answer, (int)strlen(answer)));
+    assert(sval_at_raw_tail(&v));      // mid-answer: stop is a natural end
+
+    sval_init(&v, root);
+    const char *empty = " to=user<|message|>";
+    assert(sval_feed(&v, empty, (int)strlen(empty)));
+    assert(sval_at_raw_tail(&v));      // an empty answer is still an answer
+
+    sval_init(&v, root);
+    const char *header = " to=us";
+    assert(sval_feed(&v, header, (int)strlen(header)));
+    assert(!sval_at_raw_tail(&v));     // mid-header: stop would truncate it
+
+    sval_init(&v, root);
+    const char *param = " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Osl";
+    assert(sval_feed(&v, param, (int)strlen(param)));
+    assert(!sval_at_raw_tail(&v));     // a parameter value is NOT the tail:
+                                       // close tags must still be emitted
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_atem_declared_optional_parameters_are_constrained(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"search\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"query\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}},"
+        "\"required\":[\"query\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, " to=search<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"search\">\n"
+        "<atem:parameter name=\"query\">muse</atem:parameter>\n"
+        "<atem:parameter name=\"limit\">5</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    tool_envelope e = {.atem = true, .tools = tools};
+    const char *doc = " to=search<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"search\">\n"
+        "<atem:parameter name=\"query\">muse</atem:parameter>\n"
+        "<atem:parameter name=\"limit\">5</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "{\\\"query\\\":\\\"muse\\\",\\\"limit\\\":5}"));
+    free(content.s); free(calls.s);
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_atem_parallel_turn_constrains_two_recipient_calls(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_parallel(tools, NULL, err, sizeof(err));
+    assert(root != NULL);
+    const char *doc =
+        " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Oslo</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>assistant"
+        " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Bergen</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    assert(accepts(root, doc));
+    schema_free(root); jv_free(tools);
+}
+
+static void test_muse_generic_envelope_is_constrained_behind_user_recipient(void) {
+    jv *schema = parse(
+        "{\"type\":\"object\",\"properties\":{\"tool\":{\"const\":\"ping\"},"
+        "\"args\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "\"required\":[\"tool\",\"args\"]}"
+    );
+    char err[192];
+    snode *root = schema_compile_muse_user_payload(schema, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root,
+        " to=user<|message|>{\"tool\":\"ping\",\"args\":{}}"));
+    assert(accepts(root,
+        "user<|message|>{\"tool\":\"ping\",\"args\":{}}"));
+    assert(!accepts(root,
+        " to=ping<|message|>{\"tool\":\"ping\",\"args\":{}}"));
+    schema_free(root);
+    jv_free(schema);
+
+    jv *tools = parse("[{\"type\":\"function\",\"function\":{\"name\":\"ping\","
+                      "\"parameters\":{\"type\":\"object\",\"properties\":{},"
+                      "\"required\":[]}}}]");
+    tool_envelope e;
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+    e.muse_user_header = true;
+    const char *doc = " to=user<|message|>{\"tool\":\"ping\",\"args\":{}}";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "\"name\":\"ping\""));
+    free(content.s); free(calls.s);
+    tool_envelope_free(&e); jv_free(tools);
+}
+
+static void test_atem_auto_user_branch_honors_response_schema(void) {
+    jv *tools = parse("[{\"type\":\"function\",\"function\":{\"name\":\"ping\","
+                      "\"parameters\":{\"type\":\"object\",\"properties\":{},"
+                      "\"required\":[]}}}]");
+    jv *final = parse("{\"type\":\"object\",\"properties\":{"
+                      "\"summary\":{\"type\":\"string\"}},"
+                      "\"required\":[\"summary\"]}");
+    char err[192];
+    snode *root = schema_compile_atem_recipient_turn_with_final(
+        tools, true, NULL, final, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root,
+        " to=user<|message|>{\"summary\":\"ok\"}"));
+    assert(!accepts(root,
+        " to=user<|message|>{\"summary\":4}"));
+    schema_free(root); jv_free(final); jv_free(tools);
+}
+
+static void test_atem_truncated_string_enum_recovers_declared_member(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"classify\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"label\":{\"type\":\"string\",\"enum\":[\"alpha\",\"beta\"]}},"
+        "\"required\":[\"label\"]}}}]"
+    );
+    tool_envelope e = {.atem = true, .tools = tools};
+    const char *doc = " to=classify<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"classify\">\n"
+        "<atem:parameter name=\"label\"></atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "{\\\"label\\\":\\\"alpha\\\"}"));
+    free(content.s); free(calls.s); jv_free(tools);
 }
 
 static const char *TOOLS =
@@ -341,7 +657,7 @@ static int log_args(void *ud, const char *b, int n) {
 static void demux_step(const tool_envelope *e, const char *doc, size_t step,
                        demux_log *l) {
     memset(l, 0, sizeof(*l));
-    tool_stream_sink sink = { l, log_content, log_begin, log_args };
+    tool_stream_sink sink = { l, log_content, log_begin, log_args, NULL };
     tool_stream s;
     tool_stream_init(&s, e, &sink);
     size_t len = strlen(doc);
@@ -350,7 +666,7 @@ static void demux_step(const tool_envelope *e, const char *doc, size_t step,
         size_t k = len - i < step ? len - i : step;
         assert(tool_stream_feed(&s, doc + i, (int)k) == 0);
     }
-    if (tool_stream_called(&s)) assert(l->begins == 1);
+    if (tool_stream_called(&s)) assert(l->begins >= 1);
     tool_stream_free(&s);
 }
 
@@ -438,6 +754,45 @@ static void test_stream_demux_is_boundary_independent(void) {
 
     tool_envelope_free(&e);
     jv_free(tools);
+}
+
+static void test_atem_stream_demux_is_boundary_independent(void) {
+    tool_envelope e = {0};
+    e.atem = true;
+    const char *doc =
+        " to=notes.save<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">raw \"quote\"</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls><|eom|><|start|>assistant"
+        " to=notes.save<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">again</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    demux_every_split(&e, doc);
+    demux_log l;
+    demux(&e, doc, &l);
+    assert(l.begins == 2);
+    assert(!strcmp(l.name, "notes.save"));
+    assert(l.content.n == 0);
+    assert(l.args.s && !strcmp(l.args.s,
+        "{\"text\":\"raw \\\"quote\\\"\"}{\"text\":\"again\"}"));
+    log_free(&l);
+
+    demux(&e, " to=user<|message|>plain answer<|eot|>", &l);
+    assert(l.begins == 0 && l.args.n == 0);
+    assert(l.content.s && !strcmp(l.content.s, "plain answer"));
+    log_free(&l);
+}
+
+static void test_muse_schema_payload_stream_hides_recipient_header(void) {
+    tool_envelope e = {.muse_plain_payload = true};
+    const char *doc = " to=user<|message|>{\"summary\":\"ok\"}";
+    demux_every_split(&e, doc);
+    demux_log l;
+    demux(&e, doc, &l);
+    assert(l.begins == 0 && l.args.n == 0);
+    assert(l.content.s && !strcmp(l.content.s, "{\"summary\":\"ok\"}"));
+    log_free(&l);
 }
 
 // max_tokens can cut the envelope anywhere. sval_close completes it before
@@ -671,6 +1026,17 @@ static void test_system_turn_teaches_the_envelope(void) {
 }
 
 int main(void) {
+    test_atem_structured_tool_automaton();
+    test_atem_scalar_is_raw_until_parameter_close();
+    test_atem_truncation_closes_started_call();
+    test_atem_buffered_maps_reasoning_and_multiple_calls();
+    test_atem_header_discriminates_matching_invoke();
+    test_atem_stop_token_is_valid_at_the_raw_answer_tail();
+    test_atem_declared_optional_parameters_are_constrained();
+    test_atem_parallel_turn_constrains_two_recipient_calls();
+    test_muse_generic_envelope_is_constrained_behind_user_recipient();
+    test_atem_auto_user_branch_honors_response_schema();
+    test_atem_truncated_string_enum_recovers_declared_member();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();
@@ -681,6 +1047,8 @@ int main(void) {
     test_map_produces_openai_tool_call_items();
     test_stream_demux_never_leaks_the_envelope();
     test_stream_demux_is_boundary_independent();
+    test_atem_stream_demux_is_boundary_independent();
+    test_muse_schema_payload_stream_hides_recipient_header();
     test_stream_demux_holds_back_an_undecided_prefix();
     test_malformed_tool_declarations_are_rejected();
     test_malformed_tool_choice_is_rejected();

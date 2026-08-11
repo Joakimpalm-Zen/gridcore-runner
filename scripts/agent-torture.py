@@ -219,7 +219,8 @@ def build_cases(count=105):
         raise ValueError("count must be positive")
     cases = []
     categories = ("nested_arguments", "tool_selection", "forced_truncation",
-                  "stream_normalization", "large_enum_selection",
+                  "stream_normalization", "tool_stream_normalization",
+                  "large_enum_selection",
                   "reasoning_then_tool", "structured_final")
     ordinals = Counter()
     for index in range(count):
@@ -243,6 +244,13 @@ def build_cases(count=105):
         elif category == "forced_truncation":
             payload = dict(base, max_tokens=(1, 2, 3, 5, 8)[ordinal % 5],
                            tools=[NESTED_TOOL], tool_choice="required")
+        elif category == "tool_stream_normalization":
+            payload = dict(base, max_tokens=64, stream=True,
+                           tools=[SELECT_TOOLS[0]],
+                           tool_choice={"type": "function", "function": {
+                               "name": "lookup_weather"}},
+                           messages=[{"role": "user", "content":
+                                      "Look up the weather in Oslo."}])
         elif category == "large_enum_selection":
             # nudge the model toward a label that is a near-miss of an enum
             # member; only schema-constrained decode guarantees an exact member
@@ -290,14 +298,24 @@ def normalize_sse(raw, chunks=None):
     events = parse_stream(raw, chunks)
     decoded, saw_done = decode_events(events)
     text = []
+    calls = {}
     finish = None
     for event in decoded:
         for choice in event.get("choices", []):
             delta = choice.get("delta") or {}
             text.append(delta.get("content") or choice.get("text") or "")
+            for call in delta.get("tool_calls") or []:
+                idx = call.get("index", 0)
+                dst = calls.setdefault(idx, {"name": "", "arguments": ""})
+                fn = call.get("function") or {}
+                if fn.get("name") is not None:
+                    dst["name"] += fn["name"]
+                if fn.get("arguments") is not None:
+                    dst["arguments"] += fn["arguments"]
             finish = choice.get("finish_reason") or finish
     return {"events": decoded, "saw_done": saw_done,
-            "text": "".join(text), "finish_reason": finish}
+            "text": "".join(text), "tool_calls": [calls[k] for k in sorted(calls)],
+            "finish_reason": finish}
 
 
 def _only_tool(response):
@@ -374,7 +392,7 @@ def _verify_buffered(case, response):
         validate_against_schema(arguments, schema)
 
 
-def _verify_stream(stream):
+def _verify_stream(stream, expect_tool=False):
     stream.expect_sse()
     reference = normalize_sse(stream.raw, [stream.raw])
     # Three deterministic transport segmentations catch normalization errors
@@ -386,9 +404,25 @@ def _verify_stream(stream):
                                 split_at=point)
     if not reference["saw_done"]:
         raise ProtocolError("SSE stream omitted [DONE]")
-    if reference["finish_reason"] not in ("stop", "length"):
+    allowed = ("tool_calls",) if expect_tool else ("stop", "length")
+    if reference["finish_reason"] not in allowed:
         raise ProtocolError("SSE stream has no usable finish reason",
                             got=reference["finish_reason"])
+    if expect_tool:
+        if len(reference["tool_calls"]) != 1:
+            raise ProtocolError("expected one streamed tool call",
+                                got=reference["tool_calls"])
+        call = reference["tool_calls"][0]
+        if call["name"] != "lookup_weather":
+            raise ProtocolError("wrong streamed tool selected",
+                                expected="lookup_weather", got=call["name"])
+        try:
+            arguments = json.loads(call["arguments"])
+        except ValueError as exc:
+            raise ProtocolError("streamed tool arguments are invalid JSON",
+                                arguments=call["arguments"][:200]) from exc
+        validate_against_schema(arguments,
+                                SELECT_TOOLS[0]["function"]["parameters"])
     return reference
 
 
@@ -520,12 +554,14 @@ def run(target, runtime_name, version, model_label, out, count,
                         "category": case["category"], "request": case["request"]}
             failure = None
             try:
-                if case["category"] == "stream_normalization":
+                if case["category"] in ("stream_normalization",
+                                        "tool_stream_normalization"):
                     stream = client.chat_stream(case["request"], name=case["id"])
                     artifact["response"] = {
                         "encoding": "base64", "media_type": "text/event-stream",
                         "body": base64.b64encode(stream.raw).decode("ascii")}
-                    artifact["normalized"] = _verify_stream(stream)
+                    artifact["normalized"] = _verify_stream(
+                        stream, case["category"] == "tool_stream_normalization")
                 else:
                     response = client.chat(case["request"], name=case["id"])
                     artifact["response"] = {

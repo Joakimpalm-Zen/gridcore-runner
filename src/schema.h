@@ -7,7 +7,7 @@
 #include "jsonmode.h"
 
 enum sn_kind { SN_ANY, SN_NULL, SN_BOOL, SN_NUM, SN_INT, SN_STR, SN_ENUM,
-               SN_OBJ, SN_ARR, SN_UNION, SN_COND };
+               SN_OBJ, SN_ARR, SN_UNION, SN_COND, SN_SEQ, SN_RAW };
 
 typedef struct snode snode;
 struct snode {
@@ -30,6 +30,30 @@ struct snode {
 
 struct jv;
 snode *schema_compile(struct jv *schema, char *err, int errcap);
+// Compile OpenAI tools[] to Muse's native atem call block. Scalar parameter
+// values are added in S3; S2 admits structured JSON values.
+snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap);
+// Compile the recipient header together with the native call. The duplicated
+// invoke name is pinned by the header discriminator; `user` selects raw text.
+snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap);
+snode *schema_compile_atem_turn_ex(struct jv *tools, bool allow_user,
+                                   const char *only_tool,
+                                   char *err, int errcap);
+snode *schema_compile_atem_after_reasoning(struct jv *tools, bool allow_user,
+                                           const char *only_tool,
+                                           char *err, int errcap);
+snode *schema_compile_atem_recipient_turn(struct jv *tools, bool allow_user,
+                                          const char *only_tool,
+                                          char *err, int errcap);
+snode *schema_compile_atem_recipient_turn_with_final(
+    struct jv *tools, bool allow_user, const char *only_tool,
+    struct jv *final_schema, char *err, int errcap);
+snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
+                                    char *err, int errcap);
+// Wrap a JSON/schema payload in Muse's user-recipient header. The second
+// branch starts after a reasoning close has already consumed ` to=`.
+snode *schema_compile_muse_user_payload(struct jv *schema,
+                                        char *err, int errcap);
 void   schema_free(snode *n);
 
 // streaming validator state (memcpy-copyable for token lookahead)
@@ -61,6 +85,10 @@ bool sval_feed (sval *v, const char *s, int n);
 // insignificant separator. Callers suppress separator whitespace to stop a
 // constrained model burning its budget on blank runs; see schema.c.
 bool sval_ws_is_content(const sval *v);
+// true while the validator is inside a trailing raw value whose only
+// terminator is the model's own stop token (which decodes to no bytes); the
+// engine accepts a stop token there as the answer's natural end
+bool sval_at_raw_tail(const sval *v);
 int  sval_close(sval *v, char *out, int cap);
 
 #endif // RUNNER_SCHEMA_H
