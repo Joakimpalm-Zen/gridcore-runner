@@ -28,7 +28,7 @@ for Linux, macOS, or Windows, or build from source:
 git clone https://github.com/Joakimpalm-Zen/xyntetik-runner
 cd xyntetik-runner
 make
-./runner --version   # -> runner 0.1.14-alpha
+./runner --version   # -> runner 0.1.15-alpha
 ```
 
 CUDA builds and releases need only an NVIDIA driver at runtime. The CUDA
@@ -57,7 +57,7 @@ Run a GGUF:
 ./runner -m big.gguf --draft small.gguf -p "Continue this code"
 ```
 
-> **Public alpha (`0.1.14-alpha`).** CI builds and smoke-tests Linux, macOS,
+> **Public alpha (`0.1.15-alpha`).** CI builds and smoke-tests Linux, macOS,
 > and Windows, but the project still has limited hardware coverage. Include
 > `runner --version`, `runner --caps`, the model's exact filename, and the load
 > log in issue reports. Read [SECURITY.md](SECURITY.md) for the threat model and
@@ -654,7 +654,7 @@ even when the architecture ID is listed.
 |---|---|
 | File format | GGUF v2/v3, mmap/file-mapped host weights, single-file models only. |
 | Tokenizers | SPM and byte-level BPE with llama, qwen2, smollm, tekken, llama4/o200k, Gemma, and GPT-2-family pre-tokenization rules. |
-| Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1–IQ3 family is CPU-only with NEON/AVX2 dequant kernels; the CUDA and Metal backends refuse those files loudly instead of computing wrong. |
+| Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1, IQ2 and IQ3 families are CPU-only with NEON/AVX2 dequant kernels; the CUDA and Metal backends refuse those files loudly instead of computing wrong. |
 | Transformer | RMSNorm, adjacent-pair and NeoX RoPE, grouped-query attention, SwiGLU/GELU/xIELU family paths, tied embeddings, dense and selected sparse MoE. |
 | Sampling | Greedy, temperature, top-k, top-p, min-p, repeat penalty, stop strings, JSON/schema constraints, speculative decoding. |
 | Context | Batched prefill, f16/q8 KV, linear/YaRN/llama-3 scaling, automatic extension. |

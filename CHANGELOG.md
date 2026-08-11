@@ -5,7 +5,40 @@ is in **alpha**; the HTTP protocol and CLI may still change between alpha
 releases. Entries below the rename keep the names that were true when they
 were written.
 
-## Unreleased — 2026-08-11
+## v0.1.15-alpha — 2026-08-11
+
+- **New architecture: `muse-glimmer` (Meta Muse Glimmer 30B, text path),
+  certified.** Gated attention, per-head QK norms, sandwich norms at a fixed
+  1e-8 epsilon, a sliding-window pattern array whose full-attention layers are
+  NoPE, and a scaled + softcapped logit head — transcribed from the reference
+  implementation and gated on real weights: tokenizer differential 0/721,
+  CPU/CUDA 6/6 byte-identical at full offload, greedy reference identity at
+  the model's measured sensitivity floor, chat with the reasoning turn split
+  into `reasoning_content`. Evidence: `docs/muse-glimmer-cert-2026-08-11.md`.
+  The separate vision encoder and the atem tool syntax are not implemented.
+- **New tokenizer pre-type: `llama4`** (the o200k family) — cased letter runs
+  with attached case-insensitive contractions, three-digit runs, and `/` in
+  the punctuation tail. Previously these files silently fell back to GPT-2
+  split rules.
+- **New chat template: `muse`** (`<|start|>role<|message|>…<|eot|>`), with
+  `<|eot|>` added to the stop-token probes and `enable_thinking:false`
+  pinning the generation prompt to a direct answer.
+- **Metal: dense gated attention and NoPE layers now run on the GPU** (new
+  `k_sigmoid_mul` kernel; NoPE layers skip the rope dispatch). CUDA gains the
+  same dense attention gate. Gate-plus-MoE models (afmoe) deliberately keep
+  their CPU fallback — that combination has not been run against the
+  identity gates.
+- **Codebook i-quants: IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S now load and run**
+  (CPU only; CUDA and Metal refuse them loudly), with NEON and AVX2 dequant
+  kernels — measured 2.9x decode / 2.5x prefill on a 30B IQ3_XXS versus the
+  scalar path. Differentially gated against the reference engine's own
+  quantizations of the test fixture plus independent double-precision
+  decoders in `test_quants_simd`. `--caps` advertises the new formats.
+- **New tools:** `scripts/gguf-depth-slice.py` (drop whole transformer layers
+  from a GGUF with per-layer metadata arrays filtered to the survivors; its
+  fixture gate compares surviving tensor bytes) and the `RUNNER_LAYER_SIM`
+  diagnostic (per-layer residual input/output cosine, the measurement a
+  depth-prune plan needs).
 
 - **The project is renamed: Gridcore → Xyntetik.** The repo is now
   `Joakimpalm-Zen/xyntetik-runner` (GitHub redirects the old URL), the Python

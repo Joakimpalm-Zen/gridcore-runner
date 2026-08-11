@@ -24,6 +24,11 @@ void model_ple_prepass(model_t *m, const int32_t *tokens, int n,
     abort();
 }
 
+void model_embd_transform(const model_t *m, float *row) {
+    (void)m; (void)row;
+    abort();
+}
+
 int main(void) {
     model_t m = {0};
     gpu_t *g = calloc(1, sizeof(*g));
