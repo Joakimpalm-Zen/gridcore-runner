@@ -102,7 +102,10 @@ static bool request_model_matches(const char *want, const char *served) {
     // Local clients often address an attached single-model runner by a stable
     // engine tag rather than the GGUF basename. Keep those aliases explicit so
     // "gpt-4o" or any other arbitrary provider name is not silently accepted.
-    static const char *const aliases[] = { "runner", "default", "local", "test", "clu" };
+    // "clu" is the pre-rename spelling of "thane", kept so an old client
+    // against a new runner still resolves.
+    static const char *const aliases[] = { "runner", "default", "local", "test",
+                                           "thane", "clu" };
     for (size_t i = 0; i < sizeof aliases / sizeof *aliases; i++)
         if (!strcmp(want, aliases[i])) return true;
     return false;
