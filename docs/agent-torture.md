@@ -142,6 +142,12 @@ so their totals cover the four original categories.
   — still lands every call. The wedge widens as the model weakens; the readout
   is explicit that this is a mechanism difference, not the model reasoning better.
 
+The current matrix is **v3 (120 cases, eight categories)**: the atem work
+added `tool_stream_normalization` (streamed tool-call verification), and 105
+does not divide by eight, so the count moved to 8 x 15 = 120. Earlier result
+sets remain valid on their own terms and are not case-for-case comparable
+with v3.
+
 Three newer result sets use the v2 matrix (105 cases, seven categories):
 
 - [2026-08-03 — Runner vs vLLM, SmolLM2-1.7B, v2 matrix](../tests/torture/results/2026-08-03-smollm2-1.7b-v2/README.md):

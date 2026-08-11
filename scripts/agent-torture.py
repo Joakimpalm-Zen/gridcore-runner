@@ -39,7 +39,7 @@ from harness import (Client, ProtocolError, RunnerServer,  # noqa: E402
                      categorize, decode_events, find_runner, parse_stream,
                      rss_kind, validate_against_schema)
 
-SCHEMA_VERSION = "xyntetik.agent-torture.v2"
+SCHEMA_VERSION = "xyntetik.agent-torture.v3"
 SPEC_STATS_RE = re.compile(
     r"spec: (\d+) rounds, (\d+) drafted, (\d+) accepted .*"
     r"grammar (\d+)/(\d+)")
@@ -213,7 +213,7 @@ FINAL_SCHEMA = {
 }
 
 
-def build_cases(count=105):
+def build_cases(count=120):
     """Return the stable public request matrix (round-robin by category)."""
     if count < 1:
         raise ValueError("count must be positive")
@@ -615,7 +615,7 @@ def main(argv=None):
     parser.add_argument("--model", type=Path, default=ROOT / "test.gguf")
     parser.add_argument("--out", type=Path,
                         default=ROOT / "tests" / "torture" / "out")
-    parser.add_argument("--cases", type=int, default=105)
+    parser.add_argument("--cases", type=int, default=120)
     args = parser.parse_args(argv)
 
     if args.draft and args.endpoint:

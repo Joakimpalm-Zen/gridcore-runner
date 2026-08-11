@@ -1024,9 +1024,19 @@ static int constraint_accept(engine *e, bool schema, const char *bytes, int n,
 static int constraint_finish_think(engine *e, bool schema,
                                    gen_cb cb, void *ud) {
     int rc = 0;
-    if (e->emit_think_prelude && cb && e->m->think_close)
-        rc = cb(ud, e->m->think_close, (int)strlen(e->m->think_close));
-    e->constraint_phase = CP_AFTER_THINK;
+    // Only an OPENED thinking block gets the close-and-swallow treatment.
+    // CP_PROBE means the model never opened one — an ambiguous-whitespace
+    // prelude, say — and feeding a close tag there injects it into content:
+    // measured as `    </think>` (no payload) on the ornith conformance
+    // fixture, where the pre-atem behavior was `    {"answer":""}`. From the
+    // probe the correct exit is the old silent flip to output.
+    if (e->constraint_phase == CP_THINK) {
+        if (e->emit_think_prelude && cb && e->m->think_close)
+            rc = cb(ud, e->m->think_close, (int)strlen(e->m->think_close));
+        e->constraint_phase = CP_AFTER_THINK;
+    } else {
+        e->constraint_phase = CP_OUTPUT;
+    }
     e->constraint_tag_possible = false;
     e->constraint_tag_match = e->constraint_close_match = 0;
     constraint_payload_reset(e, schema);

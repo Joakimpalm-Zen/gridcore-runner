@@ -12,19 +12,21 @@ SPEC.loader.exec_module(MOD)
 
 
 def test_default_matrix_is_repeatable_and_balanced():
-    """105, not 100: seven families divide evenly into it and the published bar
-    is a >=100-request matrix. v1's 100/5 results stay valid on their own terms
-    but are not case-for-case comparable with v2 — hence the SCHEMA_VERSION
-    bump, which is what tells a reader which matrix a result file describes."""
+    """120: eight families divide evenly into it and the published bar is a
+    >=100-request matrix. v2's 105/7 results (and v1's 100/5) stay valid on
+    their own terms but are not case-for-case comparable with v3 — hence the
+    SCHEMA_VERSION bump, which is what tells a reader which matrix a result
+    file describes. v3 added tool_stream_normalization when the atem work
+    taught the harness to verify streamed tool calls."""
     first = MOD.build_cases()
     second = MOD.build_cases()
     assert first == second
-    assert len(first) == 105
-    assert len({case["id"] for case in first}) == 105
+    assert len(first) == 120
+    assert len({case["id"] for case in first}) == 120
     assert {case["category"] for case in first} == {
         "nested_arguments", "tool_selection", "forced_truncation",
-        "stream_normalization", "large_enum_selection",
-        "reasoning_then_tool", "structured_final",
+        "stream_normalization", "tool_stream_normalization",
+        "large_enum_selection", "reasoning_then_tool", "structured_final",
     }
     assert all(sum(c["category"] == category for c in first) == 15
                for category in {c["category"] for c in first})
@@ -102,7 +104,7 @@ def test_report_schema_and_totals(tmp_path):
     MOD.write_json(path, report)
     decoded = json.loads(path.read_text())
 
-    assert decoded["schema_version"] == "xyntetik.agent-torture.v2"
+    assert decoded["schema_version"] == "xyntetik.agent-torture.v3"
     assert decoded["runtime"] == {"name": "runner", "version": "runner test"}
     assert decoded["configuration"]["model"] == "fixture.gguf"
     assert decoded["totals"] == {
