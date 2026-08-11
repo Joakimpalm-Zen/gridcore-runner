@@ -407,14 +407,16 @@ static const sampler_preset PRESETS[] = {
     { "teuken", "Teuken-7B-instruct model card usage example (OpenGPT-X)",
       0.70f, 0.95f, 0.00f, 1.10f, 0 },
 
-    // Gridcore Syntetik (gridcore-model): the suite's own from-scratch
+    // Gridcore Syntetik (repo xyntetik-shade, model project Shade — the
+    // preset name is a published-artifact contract and stays "gridcore"):
+    // the suite's own from-scratch
     // decoder that compiles requests into auditable execution contracts.
     // A contract compiler wants deterministic, reproducible output under
     // schema enforcement — not creative sampling — so the preset is greedy
     // with no repeat penalty (a penalty on a constrained JSON grammar only
     // distorts a distribution the schema already pins). PROVISIONAL: aligned
     // to Syntetik's stated "auditable/deterministic" design; the model team
-    // (gridcore-model) should confirm or override once training settles.
+    // (xyntetik-shade) should confirm or override once training settles.
     { "gridcore", "Gridcore Syntetik contract compiler (deterministic)",
       0.00f, 1.00f, 0.00f, 1.00f, 0 },
 };
