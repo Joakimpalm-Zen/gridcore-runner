@@ -1034,6 +1034,7 @@ fail:
 
 static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
                                               const char *only_tool,
+                                              struct jv *final_schema,
                                               const char *prefix,
                                               char *err, int errcap) {
     err[0] = 0;
@@ -1077,9 +1078,13 @@ static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
     if (allow_user) {
         names->lits[names->n_lits++] = strdup("user");
         snode *answer = atem_seq(2);
+        snode *answer_value = final_schema
+                            ? compile_node(final_schema, err, errcap, 0)
+                            : atem_raw("<|eot|>");
         if (!names->lits[names->n_lits - 1] || !answer ||
             !atem_seq_add(answer, atem_lit("<|message|>")) ||
-            !atem_seq_add(answer, atem_raw("<|eot|>"))) {
+            !atem_seq_add(answer, answer_value)) {
+            schema_free(answer_value);
             schema_free(answer); goto oom;
         }
         choice->alts[choice->n_alts++] = answer;
@@ -1100,14 +1105,46 @@ snode *schema_compile_atem_turn_ex(struct jv *tools, bool allow_user,
                                    const char *only_tool,
                                    char *err, int errcap) {
     return schema_compile_atem_turn_prefix(tools, allow_user, only_tool,
-                                           " to=", err, errcap);
+                                           NULL, " to=", err, errcap);
 }
 
 snode *schema_compile_atem_after_reasoning(struct jv *tools, bool allow_user,
                                            const char *only_tool,
                                            char *err, int errcap) {
     return schema_compile_atem_turn_prefix(tools, allow_user, only_tool,
-                                           "", err, errcap);
+                                           NULL, "", err, errcap);
+}
+
+snode *schema_compile_atem_recipient_turn_with_final(
+    struct jv *tools, bool allow_user, const char *only_tool,
+    struct jv *final_schema, char *err, int errcap) {
+    snode *direct = schema_compile_atem_turn_prefix(
+        tools, allow_user, only_tool, final_schema, " to=", err, errcap);
+    snode *after = direct ? schema_compile_atem_turn_prefix(
+        tools, allow_user, only_tool, final_schema, "", err, errcap) : NULL;
+    snode *root = after ? sn_new(SN_UNION) : NULL;
+    if (!root) {
+        schema_free(direct); schema_free(after);
+        if (!err[0]) snprintf(err, errcap, "out of memory compiling atem recipient turn");
+        return NULL;
+    }
+    root->alts = calloc(2, sizeof(*root->alts));
+    if (!root->alts) {
+        schema_free(direct); schema_free(after); schema_free(root);
+        snprintf(err, errcap, "out of memory compiling atem recipient turn");
+        return NULL;
+    }
+    root->max_items = 1;
+    root->alts[root->n_alts++] = direct;
+    root->alts[root->n_alts++] = after;
+    return root;
+}
+
+snode *schema_compile_atem_recipient_turn(struct jv *tools, bool allow_user,
+                                          const char *only_tool,
+                                          char *err, int errcap) {
+    return schema_compile_atem_recipient_turn_with_final(
+        tools, allow_user, only_tool, NULL, err, errcap);
 }
 
 snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap) {
@@ -1139,6 +1176,33 @@ snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
     return root;
 parallel_oom:
     if (!err[0]) snprintf(err, errcap, "out of memory compiling parallel atem turn");
+    return NULL;
+}
+
+snode *schema_compile_muse_user_payload(struct jv *schema,
+                                        char *err, int errcap) {
+    err[0] = 0;
+    snode *root = sn_new(SN_UNION);
+    snode *direct = atem_seq(2), *after = atem_seq(2);
+    snode *p1 = compile_node(schema, err, errcap, 0);
+    snode *p2 = compile_node(schema, err, errcap, 0);
+    if (!root || !direct || !after || !p1 || !p2) goto fail;
+    root->alts = calloc(2, sizeof(*root->alts));
+    if (!root->alts) goto fail;
+    root->max_items = 1;   // leading space in the direct branch is syntax
+    direct->max_items = 1;
+    direct->props[direct->n_props++] = atem_lit(" to=user<|message|>");
+    after->props[after->n_props++] = atem_lit("user<|message|>");
+    if (!direct->props[0] || !after->props[0]) goto fail;
+    direct->props[direct->n_props++] = p1; p1 = NULL;
+    after->props[after->n_props++] = p2; p2 = NULL;
+    root->alts[root->n_alts++] = direct; direct = NULL;
+    root->alts[root->n_alts++] = after; after = NULL;
+    return root;
+fail:
+    schema_free(p1); schema_free(p2);
+    schema_free(direct); schema_free(after); schema_free(root);
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling Muse user payload");
     return NULL;
 }
 
@@ -1462,7 +1526,8 @@ static int feed_byte(sval *v, uint8_t c) {
 
     switch (f->phase) {
     case P_START:
-        if (is_ws(c) && !((n->kind == SN_ENUM || n->kind == SN_SEQ) &&
+        if (is_ws(c) && !((n->kind == SN_ENUM || n->kind == SN_SEQ ||
+                           n->kind == SN_UNION) &&
                           n->max_items == 1))
             return leading_ws_ok(v);
         switch (n->kind) {

@@ -9,6 +9,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define FIXTURE "tests/fixtures/vocab-bpe-llama3.gguf"
@@ -346,6 +347,32 @@ static void test_muse_tool_result_id_resolves_prior_name(void) {
     jv_free(messages);
 }
 
+static void test_muse_parallel_tool_history_has_native_turn_boundaries(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"arguments\":\"{\\\"city\\\":\\\"Bergen\\\"}\"}}]";
+    jv *calls = json_parse(src, strlen(src));
+    assert(calls != NULL);
+    sbuf out = {0};
+    tool_history_render_for(TMPL_MUSE, calls, &out);
+    assert(out.s != NULL);
+    assert(strstr(out.s,
+        "</atem:function_calls><|eom|><|start|>assistant to=weather.get"
+        "<|message|><atem:function_calls>") != NULL);
+    free(out.s);
+    jv_free(calls);
+}
+
+static void test_muse_user_payload_strip_removes_only_recipient_header(void) {
+    sbuf payload = {0};
+    sb_lit(&payload, " to=user<|message|>{\"summary\":\"ok\"}");
+    assert(muse_user_payload_strip(&payload));
+    assert(payload.s && !strcmp(payload.s, "{\"summary\":\"ok\"}"));
+    free(payload.s);
+}
+
 int main(void) {
     gguf_file g;
     if (!gguf_open(&g, FIXTURE)) {
@@ -374,6 +401,8 @@ int main(void) {
     test_chatml_think_shape();
     test_muse_tools_and_result_golden();
     test_muse_tool_result_id_resolves_prior_name();
+    test_muse_parallel_tool_history_has_native_turn_boundaries();
+    test_muse_user_payload_strip_removes_only_recipient_header();
 
     tokenizer_free(&t);
     gguf_close(&g);

@@ -1367,19 +1367,27 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         char serr[128] = "envelope did not parse";
         if (env->atem) {
             const char *only = env->kind == TCH_NAMED ? env->named : NULL;
-            schema = muse_forced_think
+            jv *final = env->kind == TCH_AUTO ? request_schema(req) : NULL;
+            schema = final
+                       ? schema_compile_atem_recipient_turn_with_final(
+                             env->tools, true, only, final,
+                             serr, sizeof(serr))
+                       : muse_forced_think
                        ? schema_compile_atem_after_reasoning(
                              env->tools, env->kind == TCH_AUTO, only,
                              serr, sizeof(serr))
                        : env->parallel && env->kind != TCH_AUTO
                        ? schema_compile_atem_parallel(env->tools, only,
                                                      serr, sizeof(serr))
-                       : schema_compile_atem_turn_ex(env->tools,
-                                                     env->kind == TCH_AUTO,
-                                                     only, serr, sizeof(serr));
+                       : schema_compile_atem_recipient_turn(
+                             env->tools, env->kind == TCH_AUTO, only,
+                             serr, sizeof(serr));
         } else {
             jv *ej = json_parse(env->schema_src, strlen(env->schema_src));
-            schema = ej ? schema_compile(ej, serr, sizeof(serr)) : NULL;
+            schema = ej ? (env->muse_user_header
+                           ? schema_compile_muse_user_payload(ej, serr,
+                                                              sizeof(serr))
+                           : schema_compile(ej, serr, sizeof(serr))) : NULL;
             jv_free(ej);
         }
         if (!schema) {
@@ -1390,7 +1398,9 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         }
     } else if (sch) {
         char serr[128];
-        schema = schema_compile(sch, serr, sizeof(serr));
+        schema = chat && s->tmpl == TMPL_MUSE
+                   ? schema_compile_muse_user_payload(sch, serr, sizeof(serr))
+                   : schema_compile(sch, serr, sizeof(serr));
         if (!schema) {
             char msg[192];
             snprintf(msg, sizeof(msg), "unsupported json schema: %s", serr);
@@ -1542,16 +1552,20 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
                   .stop_strs = stops, .n_stop = n_stops,
                   .created = (long)time(NULL) };
+    tool_envelope muse_plain_env = {.muse_plain_payload = true};
     snprintf(g.id, sizeof(g.id), "%s", req_id);
     // split thinking channels out of chat responses; raw completions stay raw
     if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think)
         think_init_reasoning(&g.ts, m->think_open, m->think_close);
     else
         think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);
-    if (stream && env) {
+    const tool_envelope *stream_env = env ? env
+        : stream && chat && s->tmpl == TMPL_MUSE && schema
+        ? &muse_plain_env : NULL;
+    if (stream && stream_env) {
         tool_stream_sink sink = { &g, sink_content, sink_call_begin,
                                   sink_call_args, sink_call_end };
-        tool_stream_init(&g.tsx, env, &sink);
+        tool_stream_init(&g.tsx, stream_env, &sink);
         g.tsx_on = true;
     }
 
@@ -1603,32 +1617,6 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     int n_gen = sched_generate(s, logits, max_tokens, gen_collect, &g, &gtime,
                                req_deadline);
     think_finish(&g.ts, gen_emit, &g);
-    // Muse control tokens can erase the recipient boundary from the decoded
-    // stream when a self-addressed turn was pinned in the prompt. If the
-    // generic splitter consequently retained the native block in reasoning,
-    // recover at the format's unambiguous opening tag before buffered mapping.
-    // The constrained automaton guarantees everything from this tag onward.
-    if (!stream && muse_forced_think && env && env->atem && g.out.n == 0 &&
-        g.reason.s) {
-        char *call = strstr(g.reason.s, "<atem:function_calls>");
-        if (call) {
-            size_t at = (size_t)(call - g.reason.s);
-            sb_put(&g.out, call, g.reason.n - at);
-            size_t reason_end = at;
-            if (env->named) {
-                char *scan = g.reason.s, *last = NULL, *hit;
-                while ((hit = strstr(scan, env->named)) && hit < call) {
-                    last = hit;
-                    scan = hit + 1;
-                }
-                char *message = last ? strstr(last, "<|message|>") : NULL;
-                if (message && message < call)
-                    reason_end = (size_t)(last - g.reason.s);
-            }
-            g.reason.n = reason_end;
-            g.reason.s[reason_end] = 0;
-        }
-    }
     // generation ended without a stop match: the withheld partial-match
     // tail was ordinary output after all
     if (!g.stopped && g.hold.n > 0) {
@@ -1787,6 +1775,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                 free(mapped.s);      // unparseable: hand back what was generated
             }
         } else if (chat) {
+            if (s->tmpl == TMPL_MUSE && schema)
+                muse_user_payload_strip(&g.out);
             n_tc = tool_calls_parse_for(s->tmpl, &g.out, &tc);
             if (n_tc) {
                 finish = "tool_calls";

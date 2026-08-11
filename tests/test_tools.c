@@ -183,6 +183,14 @@ static void test_atem_header_discriminates_matching_invoke(void) {
     assert(accepts(root, "data.clear<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
     schema_free(root);
+    root = schema_compile_atem_recipient_turn(tools, false, "data.clear",
+                                              err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, " to=data.clear<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
+    assert(accepts(root, "data.clear<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
+    schema_free(root);
     jv_free(tools);
 }
 
@@ -235,6 +243,74 @@ static void test_atem_parallel_turn_constrains_two_recipient_calls(void) {
         "</atem:invoke>\n</atem:function_calls>";
     assert(accepts(root, doc));
     schema_free(root); jv_free(tools);
+}
+
+static void test_muse_generic_envelope_is_constrained_behind_user_recipient(void) {
+    jv *schema = parse(
+        "{\"type\":\"object\",\"properties\":{\"tool\":{\"const\":\"ping\"},"
+        "\"args\":{\"type\":\"object\",\"properties\":{},\"required\":[]}},"
+        "\"required\":[\"tool\",\"args\"]}"
+    );
+    char err[192];
+    snode *root = schema_compile_muse_user_payload(schema, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root,
+        " to=user<|message|>{\"tool\":\"ping\",\"args\":{}}"));
+    assert(accepts(root,
+        "user<|message|>{\"tool\":\"ping\",\"args\":{}}"));
+    assert(!accepts(root,
+        " to=ping<|message|>{\"tool\":\"ping\",\"args\":{}}"));
+    schema_free(root);
+    jv_free(schema);
+
+    jv *tools = parse("[{\"type\":\"function\",\"function\":{\"name\":\"ping\","
+                      "\"parameters\":{\"type\":\"object\",\"properties\":{},"
+                      "\"required\":[]}}}]");
+    tool_envelope e;
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+    e.muse_user_header = true;
+    const char *doc = " to=user<|message|>{\"tool\":\"ping\",\"args\":{}}";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "\"name\":\"ping\""));
+    free(content.s); free(calls.s);
+    tool_envelope_free(&e); jv_free(tools);
+}
+
+static void test_atem_auto_user_branch_honors_response_schema(void) {
+    jv *tools = parse("[{\"type\":\"function\",\"function\":{\"name\":\"ping\","
+                      "\"parameters\":{\"type\":\"object\",\"properties\":{},"
+                      "\"required\":[]}}}]");
+    jv *final = parse("{\"type\":\"object\",\"properties\":{"
+                      "\"summary\":{\"type\":\"string\"}},"
+                      "\"required\":[\"summary\"]}");
+    char err[192];
+    snode *root = schema_compile_atem_recipient_turn_with_final(
+        tools, true, NULL, final, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root,
+        " to=user<|message|>{\"summary\":\"ok\"}"));
+    assert(!accepts(root,
+        " to=user<|message|>{\"summary\":4}"));
+    schema_free(root); jv_free(final); jv_free(tools);
+}
+
+static void test_atem_truncated_string_enum_recovers_declared_member(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"classify\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"label\":{\"type\":\"string\",\"enum\":[\"alpha\",\"beta\"]}},"
+        "\"required\":[\"label\"]}}}]"
+    );
+    tool_envelope e = {.atem = true, .tools = tools};
+    const char *doc = " to=classify<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"classify\">\n"
+        "<atem:parameter name=\"label\"></atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "{\\\"label\\\":\\\"alpha\\\"}"));
+    free(content.s); free(calls.s); jv_free(tools);
 }
 
 static const char *TOOLS =
@@ -666,6 +742,17 @@ static void test_atem_stream_demux_is_boundary_independent(void) {
     log_free(&l);
 }
 
+static void test_muse_schema_payload_stream_hides_recipient_header(void) {
+    tool_envelope e = {.muse_plain_payload = true};
+    const char *doc = " to=user<|message|>{\"summary\":\"ok\"}";
+    demux_every_split(&e, doc);
+    demux_log l;
+    demux(&e, doc, &l);
+    assert(l.begins == 0 && l.args.n == 0);
+    assert(l.content.s && !strcmp(l.content.s, "{\"summary\":\"ok\"}"));
+    log_free(&l);
+}
+
 // max_tokens can cut the envelope anywhere. sval_close completes it before
 // the last bytes reach us, but a prefix that stops earlier still must not
 // leak: whatever was undecided stays held back rather than becoming content.
@@ -904,6 +991,9 @@ int main(void) {
     test_atem_header_discriminates_matching_invoke();
     test_atem_declared_optional_parameters_are_constrained();
     test_atem_parallel_turn_constrains_two_recipient_calls();
+    test_muse_generic_envelope_is_constrained_behind_user_recipient();
+    test_atem_auto_user_branch_honors_response_schema();
+    test_atem_truncated_string_enum_recovers_declared_member();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();
@@ -915,6 +1005,7 @@ int main(void) {
     test_stream_demux_never_leaks_the_envelope();
     test_stream_demux_is_boundary_independent();
     test_atem_stream_demux_is_boundary_independent();
+    test_muse_schema_payload_stream_hides_recipient_header();
     test_stream_demux_holds_back_an_undecided_prefix();
     test_malformed_tool_declarations_are_rejected();
     test_malformed_tool_choice_is_rejected();

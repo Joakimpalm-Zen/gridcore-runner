@@ -127,6 +127,8 @@ typedef struct {
     bool  parallel;
     int   max_calls;
     bool  atem;           // Muse native recipient + <atem:invoke> protocol
+    bool  muse_user_header; // generic JSON override follows to=user header
+    bool  muse_plain_payload; // stream a schema payload after to=user header
     struct jv *tools;     // borrowed request declarations for native compiler
     char *named;          // owned named-tool choice, when kind == TCH_NAMED
 } tool_envelope;
@@ -154,6 +156,7 @@ void tool_envelope_free(tool_envelope *e);
 // branches contribute content, any tool branches contribute calls.
 int  tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                        struct sbuf *content, struct sbuf *tc);
+bool muse_user_payload_strip(struct sbuf *payload);
 
 // Streaming counterpart of tool_envelope_map.
 //

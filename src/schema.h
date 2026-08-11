@@ -42,8 +42,18 @@ snode *schema_compile_atem_turn_ex(struct jv *tools, bool allow_user,
 snode *schema_compile_atem_after_reasoning(struct jv *tools, bool allow_user,
                                            const char *only_tool,
                                            char *err, int errcap);
+snode *schema_compile_atem_recipient_turn(struct jv *tools, bool allow_user,
+                                          const char *only_tool,
+                                          char *err, int errcap);
+snode *schema_compile_atem_recipient_turn_with_final(
+    struct jv *tools, bool allow_user, const char *only_tool,
+    struct jv *final_schema, char *err, int errcap);
 snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
                                     char *err, int errcap);
+// Wrap a JSON/schema payload in Muse's user-recipient header. The second
+// branch starts after a reasoning close has already consumed ` to=`.
+snode *schema_compile_muse_user_payload(struct jv *schema,
+                                        char *err, int errcap);
 void   schema_free(snode *n);
 
 // streaming validator state (memcpy-copyable for token lookahead)

@@ -458,12 +458,19 @@ calls separated by `<|eom|>` into ordered OpenAI `tool_calls`; the separator
 is not treated as a global stop token.
 
 Native atem calling is selected automatically when a loaded Muse Glimmer
-model receives `tools`; there is deliberately no request switch to put Muse
-behind the generic JSON envelope, because that envelope is not its trained
-assistant-turn format. `tool_choice` (`auto`, `required`, named, and `none`)
-still controls the allowed recipients. `parallel_tool_calls:true` with a
-required/named choice constrains a bounded two-call native turn. Other model
-families keep the existing JSON-schema tool path unchanged.
+model receives `tools`. Set `atem_tool_calling:false` on a Chat Completions
+request to use Runner's generic JSON-schema tool envelope instead; its payload
+is still constrained behind Muse's `to=user` recipient header, so the override
+does not leak prompt syntax into `content`. `tool_choice` (`auto`, `required`,
+named, and `none`) still controls the allowed recipients.
+`parallel_tool_calls:true` with a required/named native choice constrains a
+bounded two-call turn. Other model families keep the existing JSON-schema tool
+path unchanged.
+
+When native `tool_choice:"auto"` is combined with a JSON-schema
+`response_format`, the `to=user` alternative is compiled against that final
+schema; choosing not to call a tool therefore does not weaken structured
+output.
 
 An explicit `enable_thinking:true` starts Muse's self-addressed reasoning turn
 before the recipient constraint. If generation is cut at the token limit,

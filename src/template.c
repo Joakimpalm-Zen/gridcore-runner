@@ -672,6 +672,9 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
         }
         jv *obj = json_parse(args, strlen(args));
         if (tmpl == TMPL_MUSE) {
+            if (i > 0)
+                sb_fmt(out, "<|eom|><|start|>assistant to=%s<|message|>",
+                       name);
             sb_fmt(out, "<atem:function_calls>\n<atem:invoke name=\"%s\">\n",
                    name);
             if (obj && obj->type == J_OBJ) {
@@ -1058,7 +1061,25 @@ static int atem_map(const tool_envelope *e, const char *doc, size_t n,
                 else if (!strcmp(pt, "object")) sb_lit(&args, "{}");
                 else if (!strcmp(pt, "array")) sb_lit(&args, "[]");
                 else sb_lit(&args, "0");
-            } else { sb_lit(&args, "\""); sb_esc(&args, val, vn); sb_lit(&args, "\""); }
+            } else {
+                const char *sv = val;
+                size_t sn = vn;
+                jv *choices = jv_get(ps, "enum");
+                if (choices && choices->type == J_ARR && choices->n) {
+                    bool member = false;
+                    for (int z = 0; z < choices->n; z++) {
+                        const char *candidate = jv_str(choices->items[z], NULL);
+                        if (candidate && strlen(candidate) == vn &&
+                            !memcmp(candidate, val, vn)) member = true;
+                    }
+                    if (!member) {
+                        const char *fallback = jv_str(choices->items[0], "");
+                        sv = fallback;
+                        sn = strlen(fallback);
+                    }
+                }
+                sb_lit(&args, "\""); sb_esc(&args, sv, sn); sb_lit(&args, "\"");
+            }
             q = close + strlen("</atem:parameter>");
         }
         sb_lit(&args, "}");
@@ -1087,9 +1108,27 @@ static int atem_map(const tool_envelope *e, const char *doc, size_t n,
     return 0;
 }
 
+bool muse_user_payload_strip(sbuf *payload) {
+    if (!payload || !payload->s) return false;
+    const char *message = strstr(payload->s, "<|message|>");
+    if (!message || message >= payload->s + payload->n) return false;
+    size_t off = (size_t)(message - payload->s) + strlen("<|message|>");
+    memmove(payload->s, payload->s + off, payload->n - off);
+    payload->n -= off;
+    payload->s[payload->n] = 0;
+    return true;
+}
+
 int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
     if (e && e->atem) return atem_map(e, doc, n, content, tc);
+    if (e && e->muse_user_header) {
+        const char *message = strstr(doc, "<|message|>");
+        if (!message || message >= doc + n) return -1;
+        message += strlen("<|message|>");
+        n -= (size_t)(message - doc);
+        doc = message;
+    }
     jv *v = json_parse(doc, n);
     if (!v || v->type != J_OBJ) { jv_free(v); return -1; }
 
@@ -1152,7 +1191,8 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
 // envelope syntax out of the client's `content` — by the time a byte is
 // forwarded, it is already known to be assistant text or tool arguments.
 
-enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_ATEM, TS_DONE };
+enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_ATEM,
+       TS_MUSE_HEADER, TS_MUSE_CONTENT, TS_DONE };
 
 static void head_put(tool_stream *s, const char *b, size_t n) {
     if (s->head_n + n + 1 > s->head_cap) {
@@ -1374,7 +1414,23 @@ void tool_stream_init(tool_stream *s, const tool_envelope *e,
     memset(s, 0, sizeof(*s));
     s->env = e;
     if (sink) s->sink = *sink;
-    s->state = e && e->atem ? TS_ATEM : TS_TOOL;
+    s->state = e && e->atem ? TS_ATEM
+             : e && e->muse_plain_payload ? TS_MUSE_HEADER : TS_TOOL;
+}
+
+static int ts_muse_header(tool_stream *s, const char *bytes, int n) {
+    head_put(s, bytes, (size_t)n);
+    if (s->state == TS_DONE) return 0;
+    const char *message = s->head ? strstr(s->head, "<|message|>") : NULL;
+    if (!message) return 0;
+    size_t off = (size_t)(message - s->head) + strlen("<|message|>");
+    head_drop(s, off);
+    s->state = TS_MUSE_CONTENT;
+    int rc = s->head_n && s->sink.content
+               ? s->sink.content(s->sink.ud, s->head, (int)s->head_n) : 0;
+    s->head_n = 0;
+    if (s->head) s->head[0] = 0;
+    return rc;
 }
 
 static int ts_atem(tool_stream *s, const char *bytes, int n) {
@@ -1427,6 +1483,9 @@ int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
     switch (s->state) {
     case TS_DONE:      return 0;   // trailing envelope syntax: not the client's
     case TS_ATEM:      return ts_atem(s, bytes, n);
+    case TS_MUSE_HEADER:return ts_muse_header(s, bytes, n);
+    case TS_MUSE_CONTENT:
+        return s->sink.content ? s->sink.content(s->sink.ud, bytes, n) : 0;
     case TS_VALUE:     return ts_value(s, bytes, n);
     case TS_FINAL_STR: return ts_final_str(s, bytes, n);
     default:

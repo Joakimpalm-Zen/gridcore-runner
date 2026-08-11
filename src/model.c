@@ -1562,8 +1562,9 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         // Reasoning is a separate assistant turn addressed to the model
         // itself: ` to=self<|message|>THINKING<|eom|><|start|>assistant
         // to=RECIPIENT<|message|>ANSWER`. The recipient can be `user` or a
-        // declared tool. The decoded common boundary is ` to=`; forced
-        // reasoning consumes it and constrains from the recipient name.
+        // declared tool. `<|eom|>` itself decodes to no bytes, so engine.c
+        // recognizes that control-token id and feeds this logical ` to=`
+        // boundary to the channel splitter before constraining the recipient.
         m->think_open  = " to=self";
         m->think_close = " to=";
     }

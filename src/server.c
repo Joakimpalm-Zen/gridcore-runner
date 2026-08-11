@@ -108,7 +108,13 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 400, "stream must be a boolean");
         return;
     }
-    if (parallel && want_stream && s->tmpl != TMPL_MUSE) {
+    bool atem_tool_calling = true;
+    if (!request_bool(req, "atem_tool_calling", true, &atem_tool_calling)) {
+        send_error(fd, 400, "atem_tool_calling must be a boolean");
+        return;
+    }
+    if (parallel && want_stream &&
+        (s->tmpl != TMPL_MUSE || !atem_tool_calling)) {
         // The streaming demultiplexer tracks one call per turn; emitting
         // several would need per-index delta state it does not have. Refuse
         // rather than quietly downgrade to one call.
@@ -126,7 +132,8 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     // instead of forcing the model into runner's generic JSON envelope.
     bool strict = rc == 1 && s->tmpl != TMPL_ORNITH;
     if (strict && s->tmpl == TMPL_MUSE) {
-        env.atem = true;
+        env.atem = atem_tool_calling;
+        env.muse_user_header = !atem_tool_calling;
         env.tools = tools;
     }
     // When the strict envelope does not apply — no tools declared, or the
@@ -135,7 +142,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     // parallel_tool_calls alongside requests that will never call anything,
     // and rejecting those would break it.
     sbuf ts = {0};
-    if (strict && s->tmpl != TMPL_MUSE)
+    if (strict && (s->tmpl != TMPL_MUSE || !env.atem))
         sb_put(&ts, env.system_turn, strlen(env.system_turn));
     else if (s->tmpl != TMPL_MUSE) tools_render_for(s->tmpl, tools, &ts);
     bool ornith_merged_system = false;
@@ -204,7 +211,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     }
     render_messages_with_tools(s->tmpl, cm, n_cm, true,
                                req_thinking_mode(req),
-                               s->tmpl == TMPL_MUSE ? tools : NULL,
+                               s->tmpl == TMPL_MUSE && env.atem ? tools : NULL,
                                prompt, total + 256);
     run_completion(s, fd, prompt, API_CHAT, req, strict ? &env : NULL);
     free(prompt);

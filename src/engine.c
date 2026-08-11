@@ -13,7 +13,7 @@
 
 double now_s(void) { return plat_now(); }
 
-enum { CP_PROBE, CP_THINK, CP_OUTPUT };
+enum { CP_PROBE, CP_THINK, CP_AFTER_THINK, CP_OUTPUT };
 
 // everything that decides what this engine's KV bytes mean; see the shared
 // prefix cache below, which is the only thing that consumes it
@@ -33,6 +33,7 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     e->m = m;
     e->tok = tok;
     e->smp = smp;
+    e->think_end_id = -1;
     e->stop_ids[e->n_stop++] = tok->eos_id;
     static const char *stops[] = { "<|im_end|>", "<|eot_id|>", "<|end_of_text|>",
                                    "<|endoftext|>", "</s>",
@@ -54,6 +55,8 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
         for (int j = 0; j < e->n_stop; j++) if (e->stop_ids[j] == id) dup = true;
         if (!dup) e->stop_ids[e->n_stop++] = id;
     }
+    if (!strcmp(m->arch, "muse-glimmer"))
+        e->think_end_id = tok_find(tok, "<|eom|>");
     // A stop token is not repetition: the chat template puts it in the prompt,
     // the prompt seeds the penalty window, and penalising it can leave a model
     // unable to end its turn at all.
@@ -842,6 +845,13 @@ static bool constraint_feed(engine *e, bool schema, const char *bytes, int n,
         return true;
     }
 
+    if (e->constraint_phase == CP_AFTER_THINK) {
+        e->constraint_phase = CP_OUTPUT;
+        if (!constraint_payload_feed(e, schema, bytes, n)) return false;
+        *visible = 0;
+        return true;
+    }
+
     const char *open = e->m->think_open;
     const char *close = e->m->think_close;
     if (e->constraint_phase == CP_THINK) {
@@ -929,7 +939,9 @@ static bool constraint_token_ok(engine *e, int id, bool schema) {
     // without a think-tag model to hand. It may still be right; it is not
     // shipping unmeasured.
     if (is_stop(e, id) || tok_is_control(e->tok, id))
-        return e->constraint_phase == CP_THINK || constraint_done(e, schema);
+        return e->constraint_phase == CP_THINK ||
+               e->constraint_phase == CP_AFTER_THINK ||
+               constraint_done(e, schema);
     char buf[512];
     int n = tok_decode(e->tok, id, buf, sizeof(buf));
     if (n == 0)
@@ -992,6 +1004,29 @@ static int constraint_accept(engine *e, bool schema, const char *bytes, int n,
     }
     return cb && visible >= 0 && visible < n
              ? cb(ud, bytes + visible, n - visible) : 0;
+}
+
+// Muse's <|eom|> is a decoded-empty control token, so the byte matcher cannot
+// observe it. It is nevertheless the authoritative boundary between the
+// self-addressed reasoning turn and the next assistant recipient. Feed the
+// model's logical close marker to the channel splitter, reset the payload,
+// then permit decoded-empty start/role controls until the recipient arrives.
+static int constraint_finish_think(engine *e, bool schema,
+                                   gen_cb cb, void *ud) {
+    int rc = 0;
+    if (e->emit_think_prelude && cb && e->m->think_close)
+        rc = cb(ud, e->m->think_close, (int)strlen(e->m->think_close));
+    e->constraint_phase = CP_AFTER_THINK;
+    e->constraint_tag_possible = false;
+    e->constraint_tag_match = e->constraint_close_match = 0;
+    constraint_payload_reset(e, schema);
+    return rc;
+}
+
+static int constraint_control_accept(engine *e, int tok, bool schema,
+                                     gen_cb cb, void *ud) {
+    if (e->constraint_phase != CP_THINK || tok != e->think_end_id) return 0;
+    return constraint_finish_think(e, schema, cb, ud);
 }
 
 // logprob capture: raw-logit log-softmax stats taken BEFORE sample_pick
@@ -1365,18 +1400,19 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                    : e->json_mode && n > 0
                        ? constraint_accept(e, false, buf, n, cb, ud)
                    : cb && n > 0 ? cb(ud, buf, n) : 0;
+            if (!rc && constrained)
+                rc = constraint_control_accept(e, tok, e->schema != NULL,
+                                               cb, ud);
             n_gen++;
-            if (in_prelude && e->constraint_phase != CP_OUTPUT &&
+            if (in_prelude && (e->constraint_phase == CP_PROBE ||
+                               e->constraint_phase == CP_THINK) &&
                 e->prelude_max > 0 && ++e->prelude_count >= e->prelude_max) {
                 e->prelude_exhausted = true;
                 // mirrors engine_gen_step: under a constraint, close the
                 // prelude rather than ending the turn with nothing
                 if (e->schema || e->json_mode) {
-                    e->constraint_phase = CP_OUTPUT;
-                    e->constraint_tag_possible = false;
-                    e->constraint_tag_match = 0;
-                    e->constraint_close_match = 0;
-                    constraint_payload_reset(e, e->schema != NULL);
+                    rc = constraint_finish_think(e, e->schema != NULL,
+                                                 cb, ud);
                 } else {
                     e->pos += i;
                     if (e->dpos > e->pos) e->dpos = e->pos;
@@ -1509,9 +1545,12 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
            : e->json_mode && n > 0
                ? constraint_accept(e, false, buf, n, cb, ud)
            : cb && n > 0 ? cb(ud, buf, n) : 0;
+    if (!rc && (e->schema || e->json_mode))
+        rc = constraint_control_accept(e, tok, e->schema != NULL, cb, ud);
     if (rc != 0) { e->gen_count++; return ENGINE_STEP_DONE; } // client gone
     e->gen_count++;
-    if (in_prelude && e->constraint_phase != CP_OUTPUT && e->prelude_max > 0 &&
+    if (in_prelude && (e->constraint_phase == CP_PROBE ||
+                       e->constraint_phase == CP_THINK) && e->prelude_max > 0 &&
         ++e->prelude_count >= e->prelude_max) {
         e->prelude_exhausted = true;
         // A model that opens a thinking block and never closes it used to end
@@ -1528,11 +1567,8 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
         // prelude_exhausted still records why, so the server keeps reporting
         // "reasoning_limit".
         if (e->schema || e->json_mode) {
-            e->constraint_phase = CP_OUTPUT;
-            e->constraint_tag_possible = false;
-            e->constraint_tag_match = 0;
-            e->constraint_close_match = 0;
-            constraint_payload_reset(e, e->schema != NULL);
+            if (constraint_finish_think(e, e->schema != NULL, cb, ud) != 0)
+                return ENGINE_STEP_DONE;
         } else {
             return ENGINE_STEP_DONE;
         }

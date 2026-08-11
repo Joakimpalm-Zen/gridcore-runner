@@ -21,10 +21,23 @@ The server was built from `atem-tool-calling` and exercised through
 - A one-token forced truncation closed the nested atem call. Raw boolean
   recovery used its declared type (`false`), leaving schema-valid executable
   OpenAI arguments.
-- The five-case real-model torture slice, including nested arguments, correct
-  named selection, one-token truncation, ordinary streaming, and tool-bearing
-  streaming normalization, passed 5/5. Its transport test reparsed the same
-  SSE bytes at deterministic split points and obtained identical calls.
+- The complete 105-request real-model torture matrix passed 105/105. It
+  repeatedly covered nested arguments, rotating named selection, 1/2/3/5/8
+  token truncation, large string enums, prior-reasoning history, structured
+  finals, ordinary streaming, and tool-bearing streaming normalization. Its
+  transport tests reparsed identical SSE bytes at deterministic split points
+  and obtained identical calls.
+- Explicit reasoning was also verified over SSE: reasoning deltas contained no
+  recipient/atem residue, the call reconstructed as
+  `record_conclusion({"result":"391"})`, and the terminal reason was
+  `tool_calls`.
+- The documented `atem_tool_calling:false` override produced the same
+  `ping({})` call through the generic JSON envelope in both buffered and SSE
+  requests. A non-boolean override was rejected with HTTP 400.
+- Muse JSON-schema output passed buffered and SSE without leaking its
+  `to=user` header. Native `tools` plus `tool_choice:"auto"` and a final
+  response schema selected the user branch and returned a schema-valid JSON
+  object.
 
 Targeted C gates (`test-template`, `test-tools`) and the mandatory temperature-0
 real-model JSON-schema regression passed before the full repository gate.
