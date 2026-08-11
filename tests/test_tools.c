@@ -169,7 +169,8 @@ static void test_atem_header_discriminates_matching_invoke(void) {
         "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}}]"
     );
     char err[192];
-    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    snode *root = schema_compile_atem_turn(
+        tools, true, NULL, NULL, ATEM_TURN_DIRECT, err, sizeof(err));
     assert(root != NULL);
     assert(accepts(root, " to=data.store<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"data.store\">\n</atem:invoke>\n</atem:function_calls>"));
@@ -177,14 +178,15 @@ static void test_atem_header_discriminates_matching_invoke(void) {
         "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
     assert(accepts(root, " to=user<|message|>plain answer<|eot|>"));
     schema_free(root);
-    root = schema_compile_atem_after_reasoning(tools, false, "data.clear",
-                                               err, sizeof(err));
+    root = schema_compile_atem_turn(tools, false, "data.clear", NULL,
+                                    ATEM_TURN_AFTER_REASONING,
+                                    err, sizeof(err));
     assert(root != NULL);
     assert(accepts(root, "data.clear<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
     schema_free(root);
-    root = schema_compile_atem_recipient_turn(tools, false, "data.clear",
-                                              err, sizeof(err));
+    root = schema_compile_atem_turn(tools, false, "data.clear", NULL,
+                                    ATEM_TURN_EITHER, err, sizeof(err));
     assert(root != NULL);
     assert(accepts(root, " to=data.clear<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
@@ -206,7 +208,8 @@ static void test_atem_stop_token_is_valid_at_the_raw_answer_tail(void) {
         "\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]"
     );
     char err[192];
-    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    snode *root = schema_compile_atem_turn(
+        tools, true, NULL, NULL, ATEM_TURN_DIRECT, err, sizeof(err));
     assert(root != NULL);
 
     sval v;
@@ -244,7 +247,8 @@ static void test_atem_declared_optional_parameters_are_constrained(void) {
         "\"required\":[\"query\"]}}}]"
     );
     char err[192];
-    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    snode *root = schema_compile_atem_turn(
+        tools, true, NULL, NULL, ATEM_TURN_DIRECT, err, sizeof(err));
     assert(root != NULL);
     assert(accepts(root, " to=search<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"search\">\n"
@@ -327,8 +331,8 @@ static void test_atem_auto_user_branch_honors_response_schema(void) {
                       "\"summary\":{\"type\":\"string\"}},"
                       "\"required\":[\"summary\"]}");
     char err[192];
-    snode *root = schema_compile_atem_recipient_turn_with_final(
-        tools, true, NULL, final, err, sizeof(err));
+    snode *root = schema_compile_atem_turn(
+        tools, true, NULL, final, ATEM_TURN_EITHER, err, sizeof(err));
     assert(root != NULL);
     assert(accepts(root,
         " to=user<|message|>{\"summary\":\"ok\"}"));

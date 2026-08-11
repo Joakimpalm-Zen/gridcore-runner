@@ -1102,23 +1102,19 @@ fail:
     return NULL;
 }
 
-snode *schema_compile_atem_turn_ex(struct jv *tools, bool allow_user,
-                                   const char *only_tool,
-                                   char *err, int errcap) {
-    return schema_compile_atem_turn_prefix(tools, allow_user, only_tool,
-                                           NULL, " to=", err, errcap);
-}
-
-snode *schema_compile_atem_after_reasoning(struct jv *tools, bool allow_user,
-                                           const char *only_tool,
-                                           char *err, int errcap) {
-    return schema_compile_atem_turn_prefix(tools, allow_user, only_tool,
-                                           NULL, "", err, errcap);
-}
-
-snode *schema_compile_atem_recipient_turn_with_final(
-    struct jv *tools, bool allow_user, const char *only_tool,
-    struct jv *final_schema, char *err, int errcap) {
+snode *schema_compile_atem_turn(struct jv *tools, bool allow_user,
+                                const char *only_tool,
+                                struct jv *final_schema,
+                                enum atem_turn_start start,
+                                char *err, int errcap) {
+    if (start == ATEM_TURN_DIRECT || start == ATEM_TURN_AFTER_REASONING)
+        return schema_compile_atem_turn_prefix(
+            tools, allow_user, only_tool, final_schema,
+            start == ATEM_TURN_DIRECT ? " to=" : "", err, errcap);
+    if (start != ATEM_TURN_EITHER) {
+        snprintf(err, errcap, "invalid atem turn start");
+        return NULL;
+    }
     snode *direct = schema_compile_atem_turn_prefix(
         tools, allow_user, only_tool, final_schema, " to=", err, errcap);
     snode *after = direct ? schema_compile_atem_turn_prefix(
@@ -1141,17 +1137,6 @@ snode *schema_compile_atem_recipient_turn_with_final(
     return root;
 }
 
-snode *schema_compile_atem_recipient_turn(struct jv *tools, bool allow_user,
-                                          const char *only_tool,
-                                          char *err, int errcap) {
-    return schema_compile_atem_recipient_turn_with_final(
-        tools, allow_user, only_tool, NULL, err, errcap);
-}
-
-snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap) {
-    return schema_compile_atem_turn_ex(tools, true, NULL, err, errcap);
-}
-
 snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
                                     char *err, int errcap) {
     // Muse separates native calls with <|eom|><|start|>; those controls decode
@@ -1159,10 +1144,10 @@ snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
     // recipient header. A parallel request asks for a bounded pair, keeping
     // truncation closable while exercising the model's trained multi-turn form.
     snode *root = atem_seq(3);
-    snode *first = schema_compile_atem_turn_ex(tools, false, only_tool,
-                                               err, errcap);
-    snode *second = schema_compile_atem_turn_ex(tools, false, only_tool,
-                                                err, errcap);
+    snode *first = schema_compile_atem_turn(
+        tools, false, only_tool, NULL, ATEM_TURN_DIRECT, err, errcap);
+    snode *second = schema_compile_atem_turn(
+        tools, false, only_tool, NULL, ATEM_TURN_DIRECT, err, errcap);
     if (!root || !first || !second) {
         schema_free(first); schema_free(second); schema_free(root);
         if (!err[0]) snprintf(err, errcap, "out of memory compiling parallel atem turn");

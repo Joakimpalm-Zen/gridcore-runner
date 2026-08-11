@@ -35,20 +35,18 @@ snode *schema_compile(struct jv *schema, char *err, int errcap);
 // values are added in S3; S2 admits structured JSON values.
 snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap);
 // Compile the recipient header together with the native call. The duplicated
-// invoke name is pinned by the header discriminator; `user` selects raw text.
-snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap);
-snode *schema_compile_atem_turn_ex(struct jv *tools, bool allow_user,
-                                   const char *only_tool,
-                                   char *err, int errcap);
-snode *schema_compile_atem_after_reasoning(struct jv *tools, bool allow_user,
-                                           const char *only_tool,
-                                           char *err, int errcap);
-snode *schema_compile_atem_recipient_turn(struct jv *tools, bool allow_user,
-                                          const char *only_tool,
-                                          char *err, int errcap);
-snode *schema_compile_atem_recipient_turn_with_final(
-    struct jv *tools, bool allow_user, const char *only_tool,
-    struct jv *final_schema, char *err, int errcap);
+// invoke name is pinned by the header discriminator; `user` selects raw text
+// or final_schema when supplied.
+enum atem_turn_start {
+    ATEM_TURN_DIRECT,
+    ATEM_TURN_AFTER_REASONING,
+    ATEM_TURN_EITHER,
+};
+snode *schema_compile_atem_turn(struct jv *tools, bool allow_user,
+                                const char *only_tool,
+                                struct jv *final_schema,
+                                enum atem_turn_start start,
+                                char *err, int errcap);
 snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
                                     char *err, int errcap);
 // Wrap a JSON/schema payload in Muse's user-recipient header. The second

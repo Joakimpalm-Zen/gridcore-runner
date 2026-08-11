@@ -1369,18 +1369,20 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             const char *only = env->kind == TCH_NAMED ? env->named : NULL;
             jv *final = env->kind == TCH_AUTO ? request_schema(req) : NULL;
             schema = final
-                       ? schema_compile_atem_recipient_turn_with_final(
-                             env->tools, true, only, final,
+                       ? schema_compile_atem_turn(
+                             env->tools, true, only, final, ATEM_TURN_EITHER,
                              serr, sizeof(serr))
                        : muse_forced_think
-                       ? schema_compile_atem_after_reasoning(
-                             env->tools, env->kind == TCH_AUTO, only,
+                       ? schema_compile_atem_turn(
+                             env->tools, env->kind == TCH_AUTO, only, NULL,
+                             ATEM_TURN_AFTER_REASONING,
                              serr, sizeof(serr))
                        : env->parallel && env->kind != TCH_AUTO
                        ? schema_compile_atem_parallel(env->tools, only,
                                                      serr, sizeof(serr))
-                       : schema_compile_atem_recipient_turn(
-                             env->tools, env->kind == TCH_AUTO, only,
+                       : schema_compile_atem_turn(
+                             env->tools, env->kind == TCH_AUTO, only, NULL,
+                             ATEM_TURN_EITHER,
                              serr, sizeof(serr));
         } else {
             jv *ej = json_parse(env->schema_src, strlen(env->schema_src));
