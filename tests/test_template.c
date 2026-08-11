@@ -395,6 +395,22 @@ static void test_muse_parallel_tool_history_has_native_turn_boundaries(void) {
     jv_free(calls);
 }
 
+static void test_muse_tool_history_skips_bad_calls_without_leading_boundary(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"arguments\":\"{}\"}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"ping\","
+        "\"arguments\":\"{}\"}}]";
+    jv *calls = json_parse(src, strlen(src));
+    assert(calls != NULL);
+    sbuf out = {0};
+    tool_history_render_for(TMPL_MUSE, calls, &out);
+    assert(out.s != NULL);
+    assert(!strncmp(out.s, "<atem:function_calls>", 21));
+    assert(strstr(out.s, "<|eom|><|start|>") == NULL);
+    free(out.s);
+    jv_free(calls);
+}
+
 static void test_muse_user_payload_strip_removes_only_recipient_header(void) {
     sbuf payload = {0};
     sb_lit(&payload, " to=user<|message|>{\"summary\":\"ok\"}");
@@ -433,6 +449,7 @@ int main(void) {
     test_muse_tools_and_result_golden();
     test_muse_tool_result_id_resolves_prior_name();
     test_muse_parallel_tool_history_has_native_turn_boundaries();
+    test_muse_tool_history_skips_bad_calls_without_leading_boundary();
     test_muse_user_payload_strip_removes_only_recipient_header();
 
     tokenizer_free(&t);

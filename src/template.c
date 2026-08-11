@@ -662,6 +662,7 @@ const char *tool_result_name(const jv *messages, int message_index) {
 
 void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
     if (!calls || calls->type != J_ARR) return;
+    int muse_calls = 0;
     for (int i = 0; i < calls->n; i++) {
         jv *fn = jv_get(calls->items[i], "function");
         const char *name = jv_str(jv_get(fn, "name"), NULL);
@@ -673,7 +674,7 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
         }
         jv *obj = json_parse(args, strlen(args));
         if (tmpl == TMPL_MUSE) {
-            if (i > 0)
+            if (muse_calls++)
                 sb_fmt(out, "<|eom|><|start|>assistant to=%s<|message|>",
                        name);
             sb_fmt(out, "<atem:function_calls>\n<atem:invoke name=\"%s\">\n",
