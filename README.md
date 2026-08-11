@@ -476,7 +476,9 @@ An explicit `enable_thinking:true` starts Muse's self-addressed reasoning turn
 before the recipient constraint. If generation is cut at the token limit,
 the atem automaton closes the current parameter/invoke/function-call tail;
 raw scalar recovery uses the declared parameter type so the resulting OpenAI
-arguments document remains executable.
+arguments document remains executable. A native `to=user` text answer ends at
+the model's own end-of-turn token and reports `finish_reason:"stop"`; only a
+genuine token-limit cut reports `"length"`.
 
 `enable_thinking`, either at the top level or inside `chat_template_kwargs`,
 is the request-level form of `--think`/`--no-think`. Omitting it is not the

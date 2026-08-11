@@ -1817,6 +1817,32 @@ bool sval_ws_is_content(const sval *v) {
            (f->node->kind == SN_STR || f->node->kind == SN_ENUM);
 }
 
+// A trailing raw node (Muse's to=user free-text answer) has no terminator
+// the byte machine can ever see: its sentinel is the spelled form of the
+// model's end-of-turn token, which decodes to no bytes when the model
+// actually emits it. Report whether the validator sits inside such a tail —
+// a raw frame (entered, or about to be entered as the last child) with only
+// exhausted sequence frames above it — so the engine can accept a stop token
+// there as the answer's natural end instead of forcing the branch to burn
+// the whole token budget and finish "length".
+bool sval_at_raw_tail(const sval *v) {
+    if (!v || v->done || v->depth <= 0) return false;
+    for (int i = 0; i < v->depth; i++) {
+        const sframe *f = &v->stack[i];
+        if (i == v->depth - 1) {
+            if (f->node->kind == SN_RAW) return f->phase == P_RAW;
+            // between the header literal and the answer's first byte the raw
+            // child is not yet pushed; an empty answer is still an answer
+            return f->node->kind == SN_SEQ && f->phase == P_SEQ &&
+                   f->idx == f->node->n_props - 1 &&
+                   f->node->props[f->idx]->kind == SN_RAW;
+        }
+        if (f->node->kind != SN_SEQ || f->idx < f->node->n_props)
+            return false;
+    }
+    return false;
+}
+
 bool sval_feed(sval *v, const char *s, int len) {
     for (int i = 0; i < len; i++) {
         int r = feed_byte(v, (uint8_t)s[i]);

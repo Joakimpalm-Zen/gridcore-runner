@@ -146,17 +146,47 @@ static void test_ornith_split_starts_inside_prompted_think(void) {
     think_free(&split);
 }
 
-static void test_muse_split_starts_inside_prompted_reasoning(void) {
+// Constrained flow: reasoning bytes arrive freely, the <|eom|> control that
+// really ends the turn decodes to no bytes, so engine.c's
+// constraint_finish_think feeds the literal close to the splitter itself.
+// The splitter only has to flip on that synthetic feed; the payload machine
+// owns everything after it.
+static void test_muse_split_closes_on_fed_reasoning_boundary(void) {
     think_split split;
     split_capture got = {0};
-    think_init_reasoning(&split, " to=self", " to=");
-    const char *generated = "compute 17*23 to=record_conclusion<|message|><atem:invoke>";
-    for (size_t i = 0; i < strlen(generated); i++)
-        think_feed(&split, generated + i, 1, capture_split, &got);
+    think_init_reasoning(&split, " to=self", "assistant to=user");
+    const char *reasoning = "compute 17*23";
+    for (size_t i = 0; i < strlen(reasoning); i++)
+        think_feed(&split, reasoning + i, 1, capture_split, &got);
+    const char *fed_close = "assistant to=user"; // constraint_finish_think
+    think_feed(&split, fed_close, strlen(fed_close), capture_split, &got);
+    const char *payload = "record_conclusion<|message|><atem:invoke>";
+    for (size_t i = 0; i < strlen(payload); i++)
+        think_feed(&split, payload + i, 1, capture_split, &got);
     think_finish(&split, capture_split, &got);
     assert(!strcmp(got.reason, "compute 17*23"));
     assert(!strcmp(got.content,
                    "record_conclusion<|message|><atem:invoke>"));
+    think_free(&split);
+}
+
+// Unconstrained plain chat, the shape the real model emits at temp 0:
+// ` to=self` THINKING `<|eom|><|start|>` decode to nothing around the
+// literal `assistant to=user`, then the answer. The full close string must
+// be consumed so no recipient residue reaches content and no `assistant`
+// tail sticks to reasoning (both leaked when the close was narrowed to
+// ` to=`; measured live 2026-08-11, content came back as "user391").
+static void test_muse_plain_thinking_close_leaves_no_recipient_residue(void) {
+    think_split split;
+    split_capture got = {0};
+    think_init(&split, " to=self", "assistant to=user");
+    const char *generated = " to=selfSeventeen times 23 is 391."
+                            "assistant to=user391";
+    for (size_t i = 0; i < strlen(generated); i++)
+        think_feed(&split, generated + i, 1, capture_split, &got);
+    think_finish(&split, capture_split, &got);
+    assert(!strcmp(got.reason, "Seventeen times 23 is 391."));
+    assert(!strcmp(got.content, "391"));
     think_free(&split);
 }
 
@@ -391,7 +421,8 @@ int main(void) {
     test_detect_and_render_ornith(&t);
     test_ornith_groups_consecutive_tool_responses();
     test_ornith_split_starts_inside_prompted_think();
-    test_muse_split_starts_inside_prompted_reasoning();
+    test_muse_split_closes_on_fed_reasoning_boundary();
+    test_muse_plain_thinking_close_leaves_no_recipient_residue();
     test_detect_and_render_apertus(&t);
     test_render_apertus_without_system();
     test_render_system_prompt();

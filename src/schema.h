@@ -85,6 +85,10 @@ bool sval_feed (sval *v, const char *s, int n);
 // insignificant separator. Callers suppress separator whitespace to stop a
 // constrained model burning its budget on blank runs; see schema.c.
 bool sval_ws_is_content(const sval *v);
+// true while the validator is inside a trailing raw value whose only
+// terminator is the model's own stop token (which decodes to no bytes); the
+// engine accepts a stop token there as the answer's natural end
+bool sval_at_raw_tail(const sval *v);
 int  sval_close(sval *v, char *out, int cap);
 
 #endif // RUNNER_SCHEMA_H

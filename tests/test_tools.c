@@ -194,6 +194,48 @@ static void test_atem_header_discriminates_matching_invoke(void) {
     jv_free(tools);
 }
 
+// The to=user free-text answer ends at the model's own stop token, which
+// decodes to no bytes — the automaton's spelled `<|eot|>` sentinel never
+// arrives on the byte stream. sval_at_raw_tail is what lets the engine accept
+// a stop there; without it every native plain answer burned the full token
+// budget and finished "length" (measured live 2026-08-11).
+static void test_atem_stop_token_is_valid_at_the_raw_answer_tail(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    assert(root != NULL);
+
+    sval v;
+    sval_init(&v, root);
+    const char *answer = " to=user<|message|>The answer is 391";
+    assert(sval_feed(&v, answer, (int)strlen(answer)));
+    assert(sval_at_raw_tail(&v));      // mid-answer: stop is a natural end
+
+    sval_init(&v, root);
+    const char *empty = " to=user<|message|>";
+    assert(sval_feed(&v, empty, (int)strlen(empty)));
+    assert(sval_at_raw_tail(&v));      // an empty answer is still an answer
+
+    sval_init(&v, root);
+    const char *header = " to=us";
+    assert(sval_feed(&v, header, (int)strlen(header)));
+    assert(!sval_at_raw_tail(&v));     // mid-header: stop would truncate it
+
+    sval_init(&v, root);
+    const char *param = " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Osl";
+    assert(sval_feed(&v, param, (int)strlen(param)));
+    assert(!sval_at_raw_tail(&v));     // a parameter value is NOT the tail:
+                                       // close tags must still be emitted
+    schema_free(root);
+    jv_free(tools);
+}
+
 static void test_atem_declared_optional_parameters_are_constrained(void) {
     jv *tools = parse(
         "[{\"type\":\"function\",\"function\":{\"name\":\"search\","
@@ -989,6 +1031,7 @@ int main(void) {
     test_atem_truncation_closes_started_call();
     test_atem_buffered_maps_reasoning_and_multiple_calls();
     test_atem_header_discriminates_matching_invoke();
+    test_atem_stop_token_is_valid_at_the_raw_answer_tail();
     test_atem_declared_optional_parameters_are_constrained();
     test_atem_parallel_turn_constrains_two_recipient_calls();
     test_muse_generic_envelope_is_constrained_behind_user_recipient();

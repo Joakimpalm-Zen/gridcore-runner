@@ -941,7 +941,17 @@ static bool constraint_token_ok(engine *e, int id, bool schema) {
     if (is_stop(e, id) || tok_is_control(e->tok, id))
         return e->constraint_phase == CP_THINK ||
                e->constraint_phase == CP_AFTER_THINK ||
-               constraint_done(e, schema);
+               constraint_done(e, schema) ||
+               // A trailing raw value (Muse's to=user free-text answer) can
+               // only ever end at the model's own stop token: its byte
+               // sentinel is the SPELLED stop marker, which the token
+               // decodes to no bytes. A stop there is the answer's natural
+               // end; refusing it forced every such answer to burn the whole
+               // token budget and finish "length". Controls that are not
+               // stops stay refused — a turn header mid-answer is corruption.
+               (is_stop(e, id) && schema &&
+                e->constraint_phase == CP_OUTPUT &&
+                sval_at_raw_tail(&e->sv));
     char buf[512];
     int n = tok_decode(e->tok, id, buf, sizeof(buf));
     if (n == 0)

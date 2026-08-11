@@ -41,3 +41,38 @@ The server was built from `atem-tool-calling` and exercised through
 
 Targeted C gates (`test-template`, `test-tools`) and the mandatory temperature-0
 real-model JSON-schema regression passed before the full repository gate.
+
+## Addendum — review fixes, 2026-08-12
+
+A branch review before merge found two defects the matrix above never
+exercised; both were confirmed live at temperature 0 on the same box and
+fixed on this branch.
+
+**Plain thinking chat leaked recipient residue (regression).** Narrowing
+`think_close` to ` to=` made the unconstrained splitter close early on
+`assistant to=user`: content came back `user391`, reasoning trailed
+`assistant` (no tools, `enable_thinking:true` or default; THINK_OFF was
+unaffected). The close is restored to the full `assistant to=user`;
+constrained runs never depended on those bytes — `constraint_finish_think`
+feeds the close on the `<|eom|>` control. Re-measured after the fix:
+content `391`, reasoning ends at the model's own last sentence, in
+think-on, think-default and think-off modes.
+
+**The `to=user` free-text answer could not terminate.** Its automaton ends
+at the SPELLED `<|eot|>` sentinel, but the model's real end-of-turn is the
+`<|eot|>` token, which decodes to no bytes and was masked until the
+automaton completed — so every native plain answer burned the full
+`max_tokens` and finished `length`. `sval_at_raw_tail` now reports the
+trailing-raw state and the engine accepts a stop token there as the
+answer's natural end. Gated after the fix: tool call via required and
+named choice, reasoning-then-call, 3-token truncation recovery, and
+streaming required-call all unchanged and green.
+
+**Known issue, pre-existing (control-verified on the unfixed binary):**
+with `tool_choice:"auto"`, a model that declines the tool must spell the
+` to=user<|message|>` header as literal text; on some prompts greedy
+decoding then loops emitting `<|message|>` to the token limit ("Just say
+hello" reproduces it; a substantive question does not). The loop is
+identical with and without these fixes. The natural-stop fix bounds the
+damage only when the model produces a real answer; the header-forcing
+design itself is the open item.
