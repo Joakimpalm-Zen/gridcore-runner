@@ -1,7 +1,7 @@
 # Compatibility program
 
 Runner is an inference engine. Its compatibility boundary is model execution
-and the APIs consumed by Clu, SDKs, gateways, frameworks and agent clients. A
+and the APIs consumed by Thane, SDKs, gateways, frameworks and agent clients. A
 separate third-party web UI is therefore not part of this matrix.
 
 ## Real-model matrix
@@ -193,7 +193,7 @@ forward as a fresh pass. Editor extensions such as Roo Code require a real
 VS Code-compatible host; replaying a captured request is useful protocol
 coverage but is not advertised as end-to-end client compatibility.
 
-Clu is the UI consumer in scope. Its runner-client, gateway and CLI integration
+Thane is the UI consumer in scope. Its runner-client, gateway and CLI integration
 tests are part of the evidence sweep; unrelated third-party web UIs are not.
 
 Evidence lives under `tests/compatibility/out/`. Each aggregate record includes

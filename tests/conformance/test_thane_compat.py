@@ -31,7 +31,7 @@ from harness import ProtocolError
 # Thane's real tool surface (xyntetik_loadout.ARG_KEYS) as of this writing.
 # A representative subset: one no-arg tool, one single-arg, one multi-arg
 # with optionals, one whose argument is *named* like a schema keyword.
-CLU_TOOLS = {
+THANE_TOOLS = {
     "read_file": (("path",), ("path",)),
     "write_file": (("path", "content", "append"), ("path", "content")),
     "edit_lines": (("path", "first_line", "last_line", "replace"),
@@ -45,10 +45,10 @@ _ARG_TYPES = {"first_line": "integer", "last_line": "integer",
               "append": "boolean"}
 
 
-def _clu_action_schema():
+def _thane_action_schema():
     """Structural copy of thane.context.action_schema()."""
     alts = []
-    for tool, (keys, required) in CLU_TOOLS.items():
+    for tool, (keys, required) in THANE_TOOLS.items():
         alts.append({
             "type": "object",
             "properties": {
@@ -72,7 +72,7 @@ def _clu_action_schema():
 
 # Structural copy of thane.context._SUMMARY_SCHEMA — note: no
 # additionalProperties, by design in Thane.
-CLU_SUMMARY_SCHEMA = {
+THANE_SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
         "progress": {"type": "string"},
@@ -97,20 +97,20 @@ def _schema_request(schema, **over):
 
 
 # --------------------------------------------------------------- compilation
-def test_clu_action_union_compiles(client):
+def test_thane_action_union_compiles(client):
     """Thane's discriminated oneOf union must be accepted.
 
     This is the single most load-bearing request Thane makes: every agent turn
     goes through it. A 400 here means Thane cannot take a single step."""
-    client.chat(_schema_request(_clu_action_schema()),
+    client.chat(_schema_request(_thane_action_schema()),
                 name="thane-action-union").expect_status(200)
 
 
-def test_clu_summary_schema_compiles(client):
+def test_thane_summary_schema_compiles(client):
     """The compaction summary schema carries `required` and no
     `additionalProperties`. Thane compacts through this call; a 400 here means
     Thane dies at ~70% context instead of compacting."""
-    client.chat(_schema_request(CLU_SUMMARY_SCHEMA),
+    client.chat(_schema_request(THANE_SUMMARY_SCHEMA),
                 name="thane-summary-schema").expect_status(200)
 
 
@@ -141,14 +141,14 @@ def test_property_named_like_a_keyword_is_accepted(client):
                 name="thane-keyword-named-property").expect_status(200)
 
 
-def test_clu_action_union_output_conforms(client, report):
+def test_thane_action_union_output_conforms(client, report):
     """Constrained output must be one of the declared branches, with the
     discriminator and its own args — never another branch's arg names.
 
     The stub model may exhaust the token cap before closing the document;
     that is a model-quality outcome, recorded rather than failed, exactly as
     test_structured_output.py does."""
-    r = client.chat(_schema_request(_clu_action_schema(), max_tokens=256),
+    r = client.chat(_schema_request(_thane_action_schema(), max_tokens=256),
                     name="thane-action-conforms")
     r.expect_status(200)
     try:
@@ -172,17 +172,17 @@ def test_clu_action_union_output_conforms(client, report):
         return
     doc = json.loads(content)
     assert set(doc) == {"thinking", "tool", "args"}, doc
-    assert doc["tool"] in CLU_TOOLS, doc["tool"]
-    allowed = set(CLU_TOOLS[doc["tool"]][0])
+    assert doc["tool"] in THANE_TOOLS, doc["tool"]
+    allowed = set(THANE_TOOLS[doc["tool"]][0])
     assert set(doc["args"]) <= allowed, (doc["tool"], doc["args"])
 
 
 # ------------------------------------------------------- request envelope
-def test_clu_scalar_types_are_accepted(client):
+def test_thane_scalar_types_are_accepted(client):
     """Runner now 400s wrong-typed scalars. Thane sends temperature as a float
     and max_tokens as an int (thane/config.py validates both), so its envelope
     must pass — this pins that Thane's types are the accepted ones."""
-    client.chat(_schema_request(CLU_SUMMARY_SCHEMA,
+    client.chat(_schema_request(THANE_SUMMARY_SCHEMA,
                                 temperature=0.2, max_tokens=32, stream=False),
                 name="thane-scalar-types").expect_status(200)
 
@@ -191,7 +191,7 @@ def test_unnamed_model_is_accepted_on_a_single_model_server(client):
     """Thane addresses its own runner by the tag "thane", not by filename. On a
     non-swap server the name must be ignored rather than 404/400, or every
     Thane request against an attached engine fails."""
-    client.chat(_schema_request(CLU_SUMMARY_SCHEMA, model="thane"),
+    client.chat(_schema_request(THANE_SUMMARY_SCHEMA, model="thane"),
                 name="thane-model-tag").expect_status(200)
 
 
@@ -213,7 +213,7 @@ def test_constrained_output_opens_immediately(client):
     first token is one that opens the document. Interior whitespace is
     untouched — `{ "a" : "b" }` is ordinary model output.
     """
-    r = client.chat(_schema_request(CLU_SUMMARY_SCHEMA, max_tokens=128),
+    r = client.chat(_schema_request(THANE_SUMMARY_SCHEMA, max_tokens=128),
                     name="thane-opens-immediately")
     r.expect_status(200)
     try:
@@ -243,7 +243,7 @@ def test_unproductive_constrained_decode_returns_nothing(client):
     before this, `{"progress":"","next_step":""}` / finish_reason=length;
     now, empty content / finish_reason=length.
     """
-    r = client.chat(_schema_request(CLU_SUMMARY_SCHEMA, max_tokens=128),
+    r = client.chat(_schema_request(THANE_SUMMARY_SCHEMA, max_tokens=128),
                     name="thane-no-fabricated-document")
     r.expect_status(200)
     try:
@@ -259,4 +259,4 @@ def test_unproductive_constrained_decode_returns_nothing(client):
         return
     # anything actually generated still has to parse and conform
     doc = json.loads(content)
-    assert set(doc) <= set(CLU_SUMMARY_SCHEMA["properties"]), doc
+    assert set(doc) <= set(THANE_SUMMARY_SCHEMA["properties"]), doc

@@ -263,7 +263,7 @@ GPU numbers. CI continues to exercise the harness with fixtures.
   the CPU, so the two backends compute the same dequant), and the gpt-oss
   architecture itself runs on both backends — see the CHANGELOG entries for
   the CPU path (2026-07-31), the SWA-rope fix and the CUDA support.
-- **Advisor / runner-control — DONE.** The advisor scores MoE throughput by
+- **Advisor / Ramp — DONE.** The advisor scores MoE throughput by
   *active* params (a MoE decodes at the speed of its active experts, not its
   full resident weight) while VRAM fit stays by total size; it surfaces expert
   residency, and the catalog gained Qwen3-30B-A3B and Mixtral-8x7B entries.

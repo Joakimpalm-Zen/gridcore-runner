@@ -210,7 +210,7 @@ static void test_json_mode_leading_whitespace_is_refused(void) {
 // That is indistinguishable from an answer the model actually produced, so a
 // caller could not tell that its whole token budget had gone on a reasoning
 // prelude that never reached the opening brace. Measured on Qwen3-4B, this
-// silently replaced Clu's compaction summaries with empty session state.
+// silently replaced Thane's compaction summaries with empty session state.
 //
 // jsonv_close has always declined to fabricate ("returns 0 if generation
 // never started an object"); sval_close must honour the same contract, so an

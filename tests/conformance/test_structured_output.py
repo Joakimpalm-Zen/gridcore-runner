@@ -314,8 +314,8 @@ def test_embeddings_do_not_corrupt_the_next_completion(client):
 # schema compiler by a different route than test_tool_calls.py does, and a
 # change to either path could break it without any other test noticing. It is
 # pinned here so it cannot regress silently. Kept structurally identical to
-# clu/context.py:action_schema -- if that file changes shape, change this too.
-CLU_ACTION_SCHEMA = {
+# thane/context.py:action_schema -- if that file changes shape, change this too.
+THANE_ACTION_SCHEMA = {
     "oneOf": [
         {
             "type": "object",
@@ -352,7 +352,7 @@ CLU_ACTION_SCHEMA = {
 }
 
 
-def test_clu_action_schema_still_compiles(client, report):
+def test_thane_action_schema_still_compiles(client, report):
     """A discriminated union built by hand in response_format, as the project's
     own agent client sends it: `const` discriminators, nested required args and
     additionalProperties:false on both levels."""
@@ -361,34 +361,34 @@ def test_clu_action_schema_still_compiles(client, report):
                      "response_format": {
                          "type": "json_schema",
                          "json_schema": {"name": "action",
-                                         "schema": CLU_ACTION_SCHEMA}}},
-                    name="clu-action-schema").expect_status(200)
+                                         "schema": THANE_ACTION_SCHEMA}}},
+                    name="thane-action-schema").expect_status(200)
     if r.telemetry.get("schema") is not True:
         raise ProtocolError("the client's action schema was accepted but not "
                             "applied as a decoding constraint",
                             telemetry=r.telemetry)
-    _expect_json_prefix(r.content, "clu-action", report, "clu_action_schema")
-    value = _decode_constrained(r, report, "clu_action_schema", "clu-action")
+    _expect_json_prefix(r.content, "thane-action", report, "thane_action_schema")
+    value = _decode_constrained(r, report, "thane_action_schema", "thane-action")
     if value is None:
         return
     if value.get("tool") not in ("read_file", "finish"):
         raise SchemaError("discriminator is not one of the declared branches",
                           got=value.get("tool"))
-    branch = next(b for b in CLU_ACTION_SCHEMA["oneOf"]
+    branch = next(b for b in THANE_ACTION_SCHEMA["oneOf"]
                   if b["properties"]["tool"]["const"] == value["tool"])
     validate_against_schema(value, branch)
 
 
-def test_clu_action_schema_streams(client, report):
-    """The same shape on the streaming path: clu renders `thinking` live, so
+def test_thane_action_schema_streams(client, report):
+    """The same shape on the streaming path: Thane renders `thinking` live, so
     the declared key order has to survive streaming too."""
     st = client.chat_stream({"messages": [{"role": "user", "content": "read a file"}],
                              "max_tokens": 64, "temperature": 0,
                              "response_format": {
                                  "type": "json_schema",
                                  "json_schema": {"name": "action",
-                                                 "schema": CLU_ACTION_SCHEMA}}},
-                            name="clu-action-stream").expect_sse()
+                                                 "schema": THANE_ACTION_SCHEMA}}},
+                            name="thane-action-stream").expect_sse()
     text = st.text.lstrip()
     if text and not text.startswith("{"):
         raise SchemaError("streamed constrained output does not open a JSON object",
