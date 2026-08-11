@@ -33,6 +33,9 @@ snode *schema_compile(struct jv *schema, char *err, int errcap);
 // Compile OpenAI tools[] to Muse's native atem call block. Scalar parameter
 // values are added in S3; S2 admits structured JSON values.
 snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap);
+// Compile the recipient header together with the native call. The duplicated
+// invoke name is pinned by the header discriminator; `user` selects raw text.
+snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap);
 void   schema_free(snode *n);
 
 // streaming validator state (memcpy-copyable for token lookahead)

@@ -137,6 +137,49 @@ static void test_atem_truncation_closes_started_call(void) {
     jv_free(tools);
 }
 
+static void test_atem_buffered_maps_reasoning_and_multiple_calls(void) {
+    tool_envelope e = {0};
+    e.atem = true;
+    const char *doc =
+        " to=self<|message|>check both cities<|eom|><|start|>assistant"
+        " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Oslo</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls><|eom|><|start|>assistant"
+        " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Bergen</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 2);
+    assert(content.n == 0);
+    assert(calls.s && strstr(calls.s, "\"id\":\"call_0\""));
+    assert(strstr(calls.s, "\"id\":\"call_1\""));
+    assert(strstr(calls.s, "\\\"city\\\":\\\"Oslo\\\""));
+    assert(strstr(calls.s, "\\\"city\\\":\\\"Bergen\\\""));
+    free(content.s);
+    free(calls.s);
+}
+
+static void test_atem_header_discriminates_matching_invoke(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"data.store\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"data.clear\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{},\"required\":[]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, " to=data.store<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.store\">\n</atem:invoke>\n</atem:function_calls>"));
+    assert(!accepts(root, " to=data.store<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
+    assert(accepts(root, " to=user<|message|>plain answer<|eot|>"));
+    schema_free(root);
+    jv_free(tools);
+}
+
 static const char *TOOLS =
     "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
       "\"description\":\"look up weather\",\"parameters\":{\"type\":\"object\","
@@ -448,7 +491,7 @@ static void demux_step(const tool_envelope *e, const char *doc, size_t step,
         size_t k = len - i < step ? len - i : step;
         assert(tool_stream_feed(&s, doc + i, (int)k) == 0);
     }
-    if (tool_stream_called(&s)) assert(l->begins == 1);
+    if (tool_stream_called(&s)) assert(l->begins >= 1);
     tool_stream_free(&s);
 }
 
@@ -536,6 +579,34 @@ static void test_stream_demux_is_boundary_independent(void) {
 
     tool_envelope_free(&e);
     jv_free(tools);
+}
+
+static void test_atem_stream_demux_is_boundary_independent(void) {
+    tool_envelope e = {0};
+    e.atem = true;
+    const char *doc =
+        " to=notes.save<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">raw \"quote\"</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls><|eom|><|start|>assistant"
+        " to=notes.save<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">again</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    demux_every_split(&e, doc);
+    demux_log l;
+    demux(&e, doc, &l);
+    assert(l.begins == 2);
+    assert(!strcmp(l.name, "notes.save"));
+    assert(l.content.n == 0);
+    assert(l.args.s && !strcmp(l.args.s,
+        "{\"text\":\"raw \\\"quote\\\"\"}{\"text\":\"again\"}"));
+    log_free(&l);
+
+    demux(&e, " to=user<|message|>plain answer<|eot|>", &l);
+    assert(l.begins == 0 && l.args.n == 0);
+    assert(l.content.s && !strcmp(l.content.s, "plain answer"));
+    log_free(&l);
 }
 
 // max_tokens can cut the envelope anywhere. sval_close completes it before
@@ -772,6 +843,8 @@ int main(void) {
     test_atem_structured_tool_automaton();
     test_atem_scalar_is_raw_until_parameter_close();
     test_atem_truncation_closes_started_call();
+    test_atem_buffered_maps_reasoning_and_multiple_calls();
+    test_atem_header_discriminates_matching_invoke();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();
@@ -782,6 +855,7 @@ int main(void) {
     test_map_produces_openai_tool_call_items();
     test_stream_demux_never_leaks_the_envelope();
     test_stream_demux_is_boundary_independent();
+    test_atem_stream_demux_is_boundary_independent();
     test_stream_demux_holds_back_an_undecided_prefix();
     test_malformed_tool_declarations_are_rejected();
     test_malformed_tool_choice_is_rejected();

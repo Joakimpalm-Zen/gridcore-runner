@@ -451,6 +451,12 @@ than JSON strings. Consequently a scalar value cannot contain the literal
 boundary and its reference template describes the output as regex-parsed,
 not XML-escaped.
 
+For Muse, the recipient header is part of the constrained turn: `to=user`
+selects a plain answer and a declared tool recipient pins the matching
+`<atem:invoke>` name. Buffered and SSE parsing collect consecutive native
+calls separated by `<|eom|>` into ordered OpenAI `tool_calls`; the separator
+is not treated as a global stop token.
+
 `enable_thinking`, either at the top level or inside `chat_template_kwargs`,
 is the request-level form of `--think`/`--no-think`. Omitting it is not the
 same as sending `false`: an absent field renders whatever the model family's
@@ -650,7 +656,7 @@ the model's responsibility.
 | `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. |
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
-| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md`. No vision encoder. Native atem tool definitions and result history are rendered; constrained atem generation and response parsing are not yet implemented. |
+| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md`. No vision encoder. Native atem tool definitions/results, recipient-constrained turns, buffered parsing, and boundary-independent streaming parsing are implemented. Automatic request wiring and real-model tool certification are tracked in the next atem section. |
 | `granite` | IBM Granite dense (3.x/4.1): the four muP scalars (embedding, fixed attention, residual, divided logit). CPU, CUDA and Metal. granitemoe and granitehybrid are separate arch ids and not admitted. |
 
 Admission remains layout-specific. Shared-expert MoE, unsupported split expert

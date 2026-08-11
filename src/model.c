@@ -1561,11 +1561,11 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         m->swa_rope_global = sbase <= 0.0f || sbase == m->rope_base;
         // Reasoning is a separate assistant turn addressed to the model
         // itself: ` to=self<|message|>THINKING<|eom|><|start|>assistant
-        // to=user<|message|>ANSWER`. The control tokens decode to nothing,
-        // so on the visible stream the pair below is exactly what brackets
-        // the thinking text (see the TMPL_MUSE note in template.c).
+        // to=RECIPIENT<|message|>ANSWER`. The recipient can be `user` or a
+        // declared tool, so the common close stops before ` to=`; that header
+        // is the native turn discriminator and belongs to the constraint.
         m->think_open  = " to=self";
-        m->think_close = "assistant to=user";
+        m->think_close = "assistant";
     }
     // The sandwich norms run at rms_eps everywhere except where an arch block
     // above pinned them (muse-glimmer's fixed 1e-8); resolve the default after

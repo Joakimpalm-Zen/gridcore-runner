@@ -1046,6 +1046,56 @@ fail:
     return NULL;
 }
 
+snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap) {
+    err[0] = 0;
+    if (!tools || tools->type != J_ARR || tools->n <= 0 || tools->n > 59) {
+        snprintf(err, errcap, "atem turn needs 1 to 59 tools");
+        return NULL;
+    }
+    snode *root = atem_seq(3), *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
+    if (!root || !names || !choice) goto oom;
+    root->max_items = 1; // the leading space in ` to=` is protocol syntax
+    int branches = tools->n + 1;
+    names->lits = calloc((size_t)branches, sizeof(*names->lits));
+    choice->alts = calloc((size_t)branches, sizeof(*choice->alts));
+    if (!names->lits || !choice->alts) goto oom;
+    names->min_items = names->max_items = 1;
+    if (!atem_seq_add(root, atem_lit(" to="))) goto oom;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        if (!fn) fn = tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!name || !name[0]) { snprintf(err, errcap, "atem tool %d has no name", i); goto fail; }
+        names->lits[names->n_lits++] = strdup(name);
+        snode *tail = atem_seq(3);
+        if (!names->lits[i] || !tail ||
+            !atem_seq_add(tail, atem_lit("<|message|><atem:function_calls>\n<atem:invoke name=\"")) ||
+            !atem_seq_add(tail, atem_lit(name)) ||
+            !atem_seq_add(tail, atem_tool_tail(tools->items[i], err, errcap))) {
+            schema_free(tail); goto fail;
+        }
+        choice->alts[choice->n_alts++] = tail;
+    }
+    names->lits[names->n_lits++] = strdup("user");
+    snode *answer = atem_seq(2);
+    if (!names->lits[names->n_lits - 1] || !answer ||
+        !atem_seq_add(answer, atem_lit("<|message|>")) ||
+        !atem_seq_add(answer, atem_raw("<|eot|>"))) {
+        schema_free(answer); goto oom;
+    }
+    choice->alts[choice->n_alts++] = answer;
+    if (!atem_seq_add(root, names)) goto oom;
+    names = NULL;
+    if (!atem_seq_add(root, choice)) goto oom;
+    choice = NULL;
+    return root;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem turn");
+fail:
+    schema_free(names); schema_free(choice); schema_free(root);
+    return NULL;
+}
+
 // ---------------------------------------------------------------- validate
 
 // frame phases
@@ -1366,7 +1416,8 @@ static int feed_byte(sval *v, uint8_t c) {
 
     switch (f->phase) {
     case P_START:
-        if (is_ws(c) && !(n->kind == SN_ENUM && n->max_items == 1))
+        if (is_ws(c) && !((n->kind == SN_ENUM || n->kind == SN_SEQ) &&
+                          n->max_items == 1))
             return leading_ws_ok(v);
         switch (n->kind) {
         case SN_COND: {

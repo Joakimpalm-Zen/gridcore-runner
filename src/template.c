@@ -965,8 +965,84 @@ static int envelope_entry_map(const tool_envelope *e, jv *v, int index,
     return 1;
 }
 
+static const char *atem_attr(const char *p, const char *end, const char *key,
+                             const char **value_end) {
+    size_t kn = strlen(key);
+    const char *k = strstr(p, key);
+    if (!k || k >= end || k + kn >= end || k[kn] != '"') return NULL;
+    const char *v = k + kn + 1;
+    const char *q = memchr(v, '"', (size_t)(end - v));
+    if (!q) return NULL;
+    *value_end = q;
+    return v;
+}
+
+static int atem_map(const char *doc, size_t n, sbuf *content, sbuf *tc) {
+    const char *p = doc, *end = doc + n;
+    int calls = 0;
+    while (p < end) {
+        const char *inv = strstr(p, "<atem:invoke name=\"");
+        if (!inv || inv >= end) break;
+        const char *name_end = NULL;
+        const char *name = atem_attr(inv, end, "name=", &name_end);
+        if (!name) return -1;
+        const char *open_end = strstr(name_end, ">");
+        const char *inv_end = open_end ? strstr(open_end, "</atem:invoke>") : NULL;
+        if (!open_end || !inv_end || inv_end > end) return -1;
+
+        sbuf args = {0};
+        sb_lit(&args, "{");
+        int params = 0;
+        const char *q = open_end + 1;
+        while (q < inv_end) {
+            const char *par = strstr(q, "<atem:parameter name=\"");
+            if (!par || par >= inv_end) break;
+            const char *pn_end = NULL;
+            const char *pn = atem_attr(par, inv_end, "name=", &pn_end);
+            const char *val = pn_end ? strstr(pn_end, ">") : NULL;
+            if (!pn || !val || val >= inv_end) { free(args.s); return -1; }
+            val++;
+            const char *close = strstr(val, "</atem:parameter>");
+            if (!close || close > inv_end) { free(args.s); return -1; }
+            if (params++) sb_lit(&args, ",");
+            sb_lit(&args, "\""); sb_esc(&args, pn, (size_t)(pn_end - pn));
+            sb_lit(&args, "\":");
+            size_t vn = (size_t)(close - val);
+            jv *structured = (vn && (*val == '{' || *val == '['))
+                                ? json_parse(val, vn) : NULL;
+            if (structured) { jv_dump(structured, &args); jv_free(structured); }
+            else { sb_lit(&args, "\""); sb_esc(&args, val, vn); sb_lit(&args, "\""); }
+            q = close + strlen("</atem:parameter>");
+        }
+        sb_lit(&args, "}");
+        if (args.failed) { free(args.s); return -1; }
+        if (calls) sb_lit(tc, ",");
+        sb_fmt(tc, "{\"id\":\"call_%d\",\"type\":\"function\","
+                   "\"function\":{\"name\":\"", calls);
+        sb_esc(tc, name, (size_t)(name_end - name));
+        sb_lit(tc, "\",\"arguments\":\"");
+        sb_esc(tc, args.s, args.n);
+        sb_lit(tc, "\"}}");
+        free(args.s);
+        calls++;
+        p = inv_end + strlen("</atem:invoke>");
+    }
+    if (calls) return calls;
+
+    // A native direct answer is addressed to the user. Keep the recipient
+    // header out of content just as the JSON envelope syntax is kept out.
+    const char *u = strstr(doc, " to=user<|message|>");
+    if (!u) return -1;
+    u += strlen(" to=user<|message|>");
+    const char *stop = strstr(u, "<|eot|>");
+    sb_put(content, u, stop && stop <= end ? (size_t)(stop - u)
+                                           : (size_t)(end - u));
+    return 0;
+}
+
 int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
+    if (e && e->atem) return atem_map(doc, n, content, tc);
     jv *v = json_parse(doc, n);
     if (!v || v->type != J_OBJ) { jv_free(v); return -1; }
 
@@ -1029,7 +1105,7 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
 // envelope syntax out of the client's `content` — by the time a byte is
 // forwarded, it is already known to be assistant text or tool arguments.
 
-enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_DONE };
+enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_ATEM, TS_DONE };
 
 static void head_put(tool_stream *s, const char *b, size_t n) {
     if (s->head_n + n + 1 > s->head_cap) {
@@ -1251,13 +1327,58 @@ void tool_stream_init(tool_stream *s, const tool_envelope *e,
     memset(s, 0, sizeof(*s));
     s->env = e;
     if (sink) s->sink = *sink;
-    s->state = TS_TOOL;
+    s->state = e && e->atem ? TS_ATEM : TS_TOOL;
+}
+
+static int ts_atem(tool_stream *s, const char *bytes, int n) {
+    head_put(s, bytes, (size_t)n);
+    if (s->state == TS_DONE) return 0;
+    for (;;) {
+        const char *inv = s->head ? strstr(s->head, "<atem:invoke name=\"") : NULL;
+        if (inv) {
+            const char *close = strstr(inv, "</atem:invoke>");
+            if (!close) return 0;
+            size_t upto = (size_t)(close - s->head) + strlen("</atem:invoke>");
+            sbuf content = {0}, tc = {0}, wrapped = {0};
+            int mapped = atem_map(inv, upto - (size_t)(inv - s->head),
+                                  &content, &tc);
+            sb_lit(&wrapped, "["); sb_put(&wrapped, tc.s, tc.n); sb_lit(&wrapped, "]");
+            jv *arr = mapped == 1 ? json_parse(wrapped.s, wrapped.n) : NULL;
+            jv *fn = arr && arr->type == J_ARR && arr->n == 1
+                       ? jv_get(arr->items[0], "function") : NULL;
+            const char *name = jv_str(jv_get(fn, "name"), NULL);
+            const char *args = jv_str(jv_get(fn, "arguments"), NULL);
+            int rc = 0;
+            if (!name || !args) rc = 0;
+            else {
+                s->called = true;
+                if (s->sink.call_begin) rc = s->sink.call_begin(s->sink.ud, name);
+                if (!rc && s->sink.call_args)
+                    rc = s->sink.call_args(s->sink.ud, args, (int)strlen(args));
+            }
+            jv_free(arr); free(content.s); free(tc.s); free(wrapped.s);
+            head_drop(s, upto);
+            if (rc) return rc;
+            continue;
+        }
+        const char *user = s->head ? strstr(s->head, " to=user<|message|>") : NULL;
+        const char *eot = user ? strstr(user, "<|eot|>") : NULL;
+        if (user && eot) {
+            user += strlen(" to=user<|message|>");
+            int rc = s->sink.content
+                       ? s->sink.content(s->sink.ud, user, (int)(eot - user)) : 0;
+            s->state = TS_DONE;
+            return rc;
+        }
+        return 0;
+    }
 }
 
 int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
     if (n <= 0) return 0;
     switch (s->state) {
     case TS_DONE:      return 0;   // trailing envelope syntax: not the client's
+    case TS_ATEM:      return ts_atem(s, bytes, n);
     case TS_VALUE:     return ts_value(s, bytes, n);
     case TS_FINAL_STR: return ts_final_str(s, bytes, n);
     default:

@@ -126,6 +126,7 @@ typedef struct {
     // truncation waiting to happen.
     bool  parallel;
     int   max_calls;
+    bool  atem;           // Muse native recipient + <atem:invoke> protocol
 } tool_envelope;
 
 // Build the envelope for one request. `final_schema` is the caller's
