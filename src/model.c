@@ -3636,6 +3636,25 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         int q_dim    = model_q_dim(m, l);
         int kv_dim   = model_kv_dim(m, l);
         float scale  = model_attn_scale(m, l);
+        // RUNNER_LAYER_SIM=1: per-layer input/output cosine over the residual
+        // stream (ShortGPT-style block influence is 1 - cos). Diagnostic in
+        // the RUNNER_ACT family: measurement the depth-prune planning needs,
+        // printed per forward, aggregated by whoever is reading stderr.
+        static float *sim_snap;
+        static size_t sim_cap;
+        bool sim = getenv("RUNNER_LAYER_SIM") != NULL;
+        if (sim) {
+            size_t need = (size_t)n * n_embd;
+            if (need > sim_cap) {
+                free(sim_snap);
+                sim_snap = malloc(sizeof(float) * need);
+                sim_cap = sim_snap ? need : 0;
+            }
+            if (sim_snap)
+                memcpy(sim_snap, m->x, sizeof(float) * (size_t)n * n_embd);
+            else
+                sim = false;
+        }
         uint8_t *kc_l = (uint8_t *)m->kcache + model_kv_byte_off(m, l);
         uint8_t *vc_l = (uint8_t *)m->vcache + model_kv_byte_off(m, l);
         size_t row_b = model_kv_row_bytes(m, l);
@@ -3862,6 +3881,21 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                 for (int i = 0; i < n_embd; i++)
                     m->x[(size_t)b * n_embd + i] *= ly->out_scale;
         if (dbg) dbg_stat("layer-out", l, m->x + (size_t)(n - 1) * n_embd, n_embd);
+        if (sim) {
+            double cs = 0;
+            for (int b = 0; b < n; b++) {
+                const float *pre = sim_snap + (size_t)b * n_embd;
+                const float *post = m->x + (size_t)b * n_embd;
+                double dp = 0, na = 0, nb2 = 0;
+                for (int i = 0; i < n_embd; i++) {
+                    dp += (double)pre[i] * post[i];
+                    na += (double)pre[i] * pre[i];
+                    nb2 += (double)post[i] * post[i];
+                }
+                if (na > 0 && nb2 > 0) cs += dp / (sqrt(na) * sqrt(nb2));
+            }
+            fprintf(stderr, "LAYERSIM l=%d n=%d cos=%.6f\n", l, n, cs / n);
+        }
     }
 
     if (!want_logits) return NULL;
