@@ -445,6 +445,45 @@
     "chat"
    ],
    "notes": "Official meta-models GGUF (muse-glimmer-30B-kquant-17gb.gguf, 4-bit k-quant). Text path only: the separate vision encoder (mmproj) and atem tool syntax are out of scope. Evidence: docs/muse-glimmer-cert-2026-08-11.md."
+  },
+  {
+   "id": "granite-4.1-8b-q4_0",
+   "architecture": "granite",
+   "family": "IBM Granite 4.1",
+   "file": "models/granite-4.1-8b-Q4_0.gguf",
+   "sha256": "5adf9b6b78921093bd4a805e1060f85d7f744c3eafc14d1ca449364d1e721a1a",
+   "tokenizer_reference": "ibm-granite/granite-4.1-8b",
+   "reference": {
+    "implementation": "llama.cpp",
+    "revision": "b10353"
+   },
+   "checks": [
+    "load",
+    "tokenizer",
+    "greedy_reference",
+    "cpu_cuda",
+    "chat"
+   ],
+   "notes": "Official IBM GGUF. CERTIFIED: greedy 6/6 vs b10353, tokenizer 0/721, cpu_cuda 11/12 with the single flip measured at the model's own floor. Evidence: docs/granite-cert-2026-08-11.md."
+  },
+  {
+   "id": "granite-4.1-30b-q3_k_s",
+   "architecture": "granite",
+   "family": "IBM Granite 4.1",
+   "file": "models/granite-4.1-30b-Q3_K_S.gguf",
+   "sha256": "a807f6ea95a69a2e159978299fcbb310c14307cbaaa2a64cbb18b7fc7a087df3",
+   "tokenizer_reference": "ibm-granite/granite-4.1-30b",
+   "reference": {
+    "implementation": "llama.cpp",
+    "revision": "b10353"
+   },
+   "checks": [
+    "load",
+    "tokenizer",
+    "cpu_cuda",
+    "chat"
+   ],
+   "notes": "Official IBM GGUF. Engine-correct (cpu_cuda 6/6, chat clean) but FAILS the 16GB-tier quality bar: KLD 71%/0.314 vs Q8_0. The Q8_0 sibling is CERTIFIED-WITH-CAVEAT (greedy 3/6, divergences <=0.19 nats). Evidence: docs/granite-cert-2026-08-11.md."
   }
  ]
 }

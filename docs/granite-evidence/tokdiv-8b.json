@@ -1,0 +1,146 @@
+{
+  "schema_version": "xyntetik.runner.token-divergence.v1",
+  "model": "/home/lab/workspace/models/granite-4.1-8b-Q4_0/granite-4.1-8b-Q4_0.gguf",
+  "tokens_per_prompt": 64,
+  "tie_threshold_nats": 0.25,
+  "results": [
+    {
+      "prompt": "The capital of France is",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.06785680500793456
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.10042228989982604
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.02270510400390624
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.08678170388031003
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.09591692621231074
+    },
+    {
+      "prompt": "The three laws of thermodynamics are",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.07063159484481807
+    },
+    {
+      "prompt": "import numpy as np\n",
+      "status": "diverged",
+      "position": 6,
+      "matched_tokens": 6,
+      "runner_token": "import",
+      "runner_id": 475,
+      "reference_token": "from",
+      "reference_id": 1527,
+      "runner_gap_nats": 0.07408099999999995,
+      "reference_gap_nats": 0.0951005220413208,
+      "max_logprob_delta": 0.030125835594177253
+    },
+    {
+      "prompt": "Q: What is 17 * 23?\nA:",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.05766738805389404
+    },
+    {
+      "prompt": "The quick brown fox",
+      "status": "diverged",
+      "position": 63,
+      "matched_tokens": 63,
+      "runner_token": " The",
+      "runner_id": 578,
+      "reference_token": " It",
+      "reference_id": 1102,
+      "runner_gap_nats": 0.002987000000000073,
+      "reference_gap_nats": 0.1961708664894104,
+      "max_logprob_delta": 0.10466929389572144
+    },
+    {
+      "prompt": "class Stack:\n    def __init__(self):",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.10955619897079472
+    },
+    {
+      "prompt": "In 1969, humans first",
+      "status": "diverged",
+      "position": 6,
+      "matched_tokens": 6,
+      "runner_token": " This",
+      "runner_id": 1115,
+      "reference_token": " The",
+      "reference_id": 578,
+      "runner_gap_nats": 0.025652000000000008,
+      "reference_gap_nats": 0.08948898315429688,
+      "max_logprob_delta": 0.025922608905792233
+    },
+    {
+      "prompt": "SELECT name, age FROM users WHERE",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.18293383576583866
+    },
+    {
+      "prompt": "The mitochondria is the",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.11966155165481562
+    },
+    {
+      "prompt": "for i in range(10):\n    print(",
+      "status": "diverged",
+      "position": 45,
+      "matched_tokens": 45,
+      "runner_token": "for",
+      "runner_id": 2000,
+      "reference_token": "def",
+      "reference_id": 755,
+      "runner_gap_nats": 0.08258200000000004,
+      "reference_gap_nats": 0.07755470275878906,
+      "max_logprob_delta": 0.05549152572631835
+    },
+    {
+      "prompt": "Water boils at",
+      "status": "identical",
+      "matched_tokens": 64,
+      "max_logprob_delta": 0.12904464807891847
+    },
+    {
+      "prompt": "A haiku about autumn:\n",
+      "status": "diverged",
+      "position": 34,
+      "matched_tokens": 34,
+      "runner_token": "po",
+      "runner_id": 5481,
+      "reference_token": "text",
+      "reference_id": 1342,
+      "runner_gap_nats": 0.22852300000000003,
+      "reference_gap_nats": 0.048133909702301025,
+      "max_logprob_delta": 0.1912734704666137
+    }
+  ],
+  "totals": {
+    "prompts": 16,
+    "identical": 11,
+    "diverged_at_a_tie": 5,
+    "diverged_for_real": 0,
+    "max_logprob_delta": 0.1912734704666137
+  }
+}

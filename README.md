@@ -645,7 +645,7 @@ the model's responsibility.
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
 | `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md`. No vision encoder or atem tool syntax. |
-| `granite` | IBM Granite dense (3.x/4.1): the four muP scalars (embedding, fixed attention, residual, divided logit). CPU, CUDA and Metal. granitemoe and granitehybrid are separate arch ids and not admitted. |
+| `granite` | IBM Granite dense (3.x/4.1): the four muP scalars (embedding, fixed attention, residual, divided logit). CPU, CUDA and Metal. Certified; evidence in `docs/granite-cert-2026-08-11.md`. granitemoe and granitehybrid are separate arch ids and not admitted. |
 
 Admission remains layout-specific. Shared-expert MoE, unsupported split expert
 layouts, or architecture-specific tensor arrangements can still be refused

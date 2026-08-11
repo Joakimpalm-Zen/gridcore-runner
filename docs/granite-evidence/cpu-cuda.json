@@ -1,0 +1,14 @@
+{
+ "8b:a": true,
+ "8b:b": true,
+ "8b:c": true,
+ "8b:d": false,
+ "8b:b-long": true,
+ "8b:c-long": true,
+ "30b:a": true,
+ "30b:b": true,
+ "30b:c": true,
+ "30b:d": true,
+ "30b:b-long": true,
+ "30b:c-long": true
+}

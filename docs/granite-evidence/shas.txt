@@ -1,0 +1,2 @@
+5adf9b6b78921093bd4a805e1060f85d7f744c3eafc14d1ca449364d1e721a1a  /home/lab/workspace/models/granite-4.1-8b-Q4_0/granite-4.1-8b-Q4_0.gguf
+a807f6ea95a69a2e159978299fcbb310c14307cbaaa2a64cbb18b7fc7a087df3  /home/lab/workspace/models/granite-4.1-30b-Q3_K_S/granite-4.1-30b-Q3_K_S.gguf

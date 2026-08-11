@@ -1,0 +1,66 @@
+{
+  "n_pass": 6,
+  "n_total": 6,
+  "results": [
+    {
+      "tag": "a",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "65ab5dbc7a9a008c80c78bd86ceb78ec95f4e7c31ca8244330ddab7ad72697f1",
+      "runner_sha256": "65ab5dbc7a9a008c80c78bd86ceb78ec95f4e7c31ca8244330ddab7ad72697f1",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "b",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "5801ffa788a7be5fdd813507a5b3a67c00eef0025ed2f376f62133230b4686de",
+      "runner_sha256": "5801ffa788a7be5fdd813507a5b3a67c00eef0025ed2f376f62133230b4686de",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "c",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "001185cbacce8fdb8d5b2febb705b2f53768bbac41fed3963c978d2f3e6517b5",
+      "runner_sha256": "001185cbacce8fdb8d5b2febb705b2f53768bbac41fed3963c978d2f3e6517b5",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "d",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "4d9a03c19c3cc831fa8e67cb8ba3dba6994ad5046c093de3c2d2b458b419d446",
+      "runner_sha256": "4d9a03c19c3cc831fa8e67cb8ba3dba6994ad5046c093de3c2d2b458b419d446",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "b-long",
+      "n": 256,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "b91e14b4d9141f83bebb6f71c7cea84823557a0c28d67d247809d0b9de8a89b0",
+      "runner_sha256": "b91e14b4d9141f83bebb6f71c7cea84823557a0c28d67d247809d0b9de8a89b0",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "c-long",
+      "n": 256,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "001185cbacce8fdb8d5b2febb705b2f53768bbac41fed3963c978d2f3e6517b5",
+      "runner_sha256": "001185cbacce8fdb8d5b2febb705b2f53768bbac41fed3963c978d2f3e6517b5",
+      "ref_tail": "",
+      "runner_tail": ""
+    }
+  ]
+}

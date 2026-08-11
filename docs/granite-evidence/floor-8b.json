@@ -1,0 +1,11 @@
+{
+  "schema_version": "xyntetik.runner.sensitivity-floor.v1",
+  "model": "/home/lab/workspace/models/granite-4.1-8b-Q4_0/granite-4.1-8b-Q4_0.gguf",
+  "mode": "runner f16-KV vs runner q8-KV",
+  "tokens_per_prompt": 64,
+  "prompts": 16,
+  "identical": 14,
+  "mean_tokens_before_divergence": 58.69,
+  "max_logprob_delta": 0.2516,
+  "mean_logprob_delta": 0.00738
+}

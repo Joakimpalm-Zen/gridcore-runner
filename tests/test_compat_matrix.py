@@ -22,7 +22,7 @@ def test_model_manifest_covers_every_claimed_architecture():
     assert {m["architecture"] for m in models} == {
         "llama", "qwen2", "qwen3", "qwen35", "phi3", "gemma3", "gemma4",
         "qwen3moe", "gemma4-moe", "gpt-oss", "apertus", "afmoe",
-        "muse-glimmer",
+        "muse-glimmer", "granite",
     }
     assert len({m["id"] for m in models}) == len(models)
     for model in models:

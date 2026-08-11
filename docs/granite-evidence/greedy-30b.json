@@ -1,0 +1,66 @@
+{
+  "n_pass": 1,
+  "n_total": 6,
+  "results": [
+    {
+      "tag": "a",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 239,
+      "ref_sha256": "a5ce5495e8d024e27e77b0d288471924471e11a7eaeb5e44fc6b97ca4d1ae644",
+      "runner_sha256": "3b95929c36c8f234e3bca1e3fa4ed24e99b147ca4f65fa3b8e4dcb57f3c95932",
+      "ref_tail": "stion and cannot be classified as true or false.\n\n- **Comman",
+      "runner_tail": "stion and does not assert anything that can be true or false"
+    },
+    {
+      "tag": "b",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "766498ba3147038c3a373efba46ebd47b00926fe508cabc5e47e1ed023b80743",
+      "runner_sha256": "766498ba3147038c3a373efba46ebd47b00926fe508cabc5e47e1ed023b80743",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "c",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 14,
+      "ref_sha256": "2d70ed482a9defc09d7972717a141e41e0b97cc6fab8010db4bd31c211fb7ff1",
+      "runner_sha256": "82c20af8d9747c4ac1abcc19ed401704d71e23a5fb983e5e40d1da9026d8b28c",
+      "ref_tail": "1969, the world witnessed a monumental moment in human histo",
+      "runner_tail": "1969, the Apollo 11 mission successfully landed on the Moon,"
+    },
+    {
+      "tag": "d",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 55,
+      "ref_sha256": "d181b1f75995456243e442085f09b2df3c668bfb6006a28ea2a3baa84380d8df",
+      "runner_sha256": "5e438fbb5aa95a1e1e396817cddd88a0f93232c4c4caf97e52c096e3a277e620",
+      "ref_tail": " glasbulb som innehåller kvicksilver. När temperaturen stige",
+      "runner_tail": " glasbulb med en tunn röre som är fylld med kvicksilver. När"
+    },
+    {
+      "tag": "b-long",
+      "n": 256,
+      "identical": false,
+      "first_divergent_byte": 360,
+      "ref_sha256": "8b5041675c126d2d73e13500f4c7022e73a0dd1b052646e90e53cd1d858cd7c4",
+      "runner_sha256": "027340a446869971bc80c001c7dfcd6fa7ed3e6bb4bcf1f700b41717d20634b8",
+      "ref_tail": "le current:\n        next_node = current.next\n        current",
+      "runner_tail": "le current is not None:\n        next_node = current.next\n   "
+    },
+    {
+      "tag": "c-long",
+      "n": 256,
+      "identical": false,
+      "first_divergent_byte": 14,
+      "ref_sha256": "2d70ed482a9defc09d7972717a141e41e0b97cc6fab8010db4bd31c211fb7ff1",
+      "runner_sha256": "82c20af8d9747c4ac1abcc19ed401704d71e23a5fb983e5e40d1da9026d8b28c",
+      "ref_tail": "1969, the world witnessed a monumental moment in human histo",
+      "runner_tail": "1969, the Apollo 11 mission successfully landed on the Moon,"
+    }
+  ]
+}
