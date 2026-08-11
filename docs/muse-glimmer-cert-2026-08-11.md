@@ -55,10 +55,22 @@ mean KLD 0.0 / top-1 100% / top-8 overlap 1.0**.
 
 | candidate | size | result |
 |---|---|---|
-| bartowski IQ3_XXS | 11.5 GB | **REFUSED — engine gap, not a quality verdict.** `error: tensor token_embd.weight has unsupported type 21` (IQ3_S; the file mixes IQ3_XXS/IQS3_S tensors). The runner's quant roster has no IQ1–IQ3 family. The plan's preferred 11.5–12.3 GB tier is unreachable until IQ3 dequant support exists |
-| bartowski IQ3_XS | 12.3 GB | **REFUSED** — same IQ3 gap |
-| bartowski Q3_K_S | 12.8 GB | measured below |
-| bartowski Q2_K | 11.0 GB | measured below |
+| bartowski IQ3_XXS | 11.5 GB | ~~REFUSED (no IQ1–IQ3 dequant, type 21)~~ → **loads and decodes after the same-day i-quant port** (runner `792d316`, owner-approved scope): IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S transcribed from llama.cpp b10353 with verbatim grids. Gate: all SEVEN types byte-identical to llama-server greedy on llama.cpp's own quantizations of the test fixture (imatrix included); real-file identity + KLD below. CPU-only by design — device backends refuse i-quants loudly |
+| bartowski IQ3_XS | 12.3 GB | loads after the same port; KLD below |
+| bartowski Q3_K_S | 12.8 GB | **FAILS the quality gate** — 400 positions: top-1 **81.25%**, mean KLD **0.153**, top-8 overlap 0.788, vs the ≥97% / ≤0.05 bar. Same-engine quant-vs-quant with an exact-zero baseline, so this is pure quantization damage |
+| bartowski Q2_K | 11.0 GB | **FAILS, worse** — top-1 **72.0%**, mean KLD **0.253**, top-8 overlap 0.745. The degradation gradient is monotone with bits, as expected |
+
+**Route A verdict: at the tier the engine can load today, quantization-only
+does NOT fit this model into the 16 GB-Mac envelope at certification
+quality.** The sub-4-bit wall, previously measured on much smaller models,
+holds at 30B: the official 4-bit is the floor of certifiable quality for
+this checkpoint. Two follow-ups fall out, both decisions rather than tasks:
+IQ1–IQ3 dequant support in the engine (would unlock the untested, likely
+better imatrix IQ3_XS 12.3 GB tier — the measured refusal above is the
+concrete trigger the prior-art rule wants), and the plan's route B
+depth-prune kill-experiment (expected-fail per the literature on un-healed
+distilled models; healing hardware exists now, but that is an owner-scoped
+experiment, not a certification step).
 
 ## DFlash drafter
 
