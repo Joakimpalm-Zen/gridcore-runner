@@ -17,6 +17,7 @@ struct snode {
     bool   *req;  int n_props;                      //   (declared order)
     snode  *items; int min_items, max_items;        // array
     snode **alts; int n_alts;                       // type unions
+    bool    whitespace_significant;                 // protocol literals/branches
     int64_t num_min, num_max;                       // enforced integer interval
     bool    has_num_min, has_num_max;
     double  real_min, real_max;                     // enforced number interval

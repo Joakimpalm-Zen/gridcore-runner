@@ -925,7 +925,7 @@ static snode *atem_lit(const char *s) {
     n->lits[0] = strdup(s);
     if (!n->lits[0]) { schema_free(n); return NULL; }
     n->n_lits = 1;
-    n->max_items = 1; // internal raw literal; whitespace is significant
+    n->whitespace_significant = true;
     return n;
 }
 
@@ -1002,7 +1002,7 @@ snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap) {
     choice->alts = calloc((size_t)tools->n, sizeof(*choice->alts));
     if (!names->lits || !choice->alts) goto oom;
     names->min_items = 1; // this enum selects the following conditional tail
-    names->max_items = 1; // names are raw attribute text, not JSON literals
+    names->whitespace_significant = true;
     if (!atem_seq_add(root,
             atem_lit("<atem:function_calls>\n<atem:invoke name=\""))) goto oom;
     for (int i = 0; i < tools->n; i++) {
@@ -1045,7 +1045,7 @@ static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
     snode *root = atem_seq(prefix[0] ? 3 : 2);
     snode *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
     if (!root || !names || !choice) goto oom;
-    root->max_items = prefix[0] == ' '; // leading protocol space is significant
+    root->whitespace_significant = prefix[0] == ' ';
     int selected = 0;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function"); if (!fn) fn = tools->items[i];
@@ -1057,7 +1057,8 @@ static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
     names->lits = calloc((size_t)branches, sizeof(*names->lits));
     choice->alts = calloc((size_t)branches, sizeof(*choice->alts));
     if (!names->lits || !choice->alts) goto oom;
-    names->min_items = names->max_items = 1;
+    names->min_items = 1;
+    names->whitespace_significant = true;
     if (prefix[0] && !atem_seq_add(root, atem_lit(prefix))) goto oom;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function");
@@ -1134,7 +1135,7 @@ snode *schema_compile_atem_recipient_turn_with_final(
         snprintf(err, errcap, "out of memory compiling atem recipient turn");
         return NULL;
     }
-    root->max_items = 1;
+    root->whitespace_significant = true;
     root->alts[root->n_alts++] = direct;
     root->alts[root->n_alts++] = after;
     return root;
@@ -1167,7 +1168,7 @@ snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
         if (!err[0]) snprintf(err, errcap, "out of memory compiling parallel atem turn");
         return NULL;
     }
-    root->max_items = 1;
+    root->whitespace_significant = true;
     root->props[root->n_props++] = first;
     snode *middle = atem_lit("assistant");
     if (!middle) { schema_free(second); schema_free(root); goto parallel_oom; }
@@ -1189,8 +1190,8 @@ snode *schema_compile_muse_user_payload(struct jv *schema,
     if (!root || !direct || !after || !p1 || !p2) goto fail;
     root->alts = calloc(2, sizeof(*root->alts));
     if (!root->alts) goto fail;
-    root->max_items = 1;   // leading space in the direct branch is syntax
-    direct->max_items = 1;
+    root->whitespace_significant = true;
+    direct->whitespace_significant = true;
     direct->props[direct->n_props++] = atem_lit(" to=user<|message|>");
     after->props[after->n_props++] = atem_lit("user<|message|>");
     if (!direct->props[0] || !after->props[0]) goto fail;
@@ -1307,7 +1308,7 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
                     if (c == a->lits[j][0]) return a;
                 break;
             case SN_OBJ:  if (c == '{') return a; break;
-        case SN_ARR:  if (c == '[') return a; break;
+            case SN_ARR:  if (c == '[') return a; break;
             case SN_SEQ:
                 if (a->n_props > 0) {
                     bool starts[256] = {0};
@@ -1526,9 +1527,7 @@ static int feed_byte(sval *v, uint8_t c) {
 
     switch (f->phase) {
     case P_START:
-        if (is_ws(c) && !((n->kind == SN_ENUM || n->kind == SN_SEQ ||
-                           n->kind == SN_UNION) &&
-                          n->max_items == 1))
+            if (is_ws(c) && !n->whitespace_significant)
             return leading_ws_ok(v);
         switch (n->kind) {
         case SN_COND: {
