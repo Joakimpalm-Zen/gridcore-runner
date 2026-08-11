@@ -32,6 +32,17 @@ typedef struct { uint8_t ql[QK_K / 2]; uint8_t qh[QK_K / 4]; int8_t scales[QK_K 
 typedef struct { f16_t d; uint8_t qs[QK / 2]; }                  block_iq4_nl;
 typedef struct { f16_t d; uint16_t scales_h; uint8_t scales_l[QK_K / 64]; uint8_t qs[QK_K / 2]; } block_iq4_xs;
 typedef struct { uint8_t e; uint8_t qs[QK / 2]; }                block_mxfp4;
+typedef struct { f16_t d; uint16_t qs[QK_K / 8]; } block_iq2_xxs;
+typedef struct { f16_t d; uint16_t qs[QK_K / 8]; uint8_t scales[QK_K / 32]; } block_iq2_xs;
+typedef struct { f16_t d; uint8_t qs[QK_K / 4]; uint8_t qh[QK_K / 32]; uint8_t scales[QK_K / 32]; } block_iq2_s;
+typedef struct { f16_t d; uint8_t qs[3 * QK_K / 8]; } block_iq3_xxs;
+typedef struct { f16_t d; uint8_t qs[QK_K / 4]; uint8_t qh[QK_K / 32]; uint8_t signs[QK_K / 8]; uint8_t scales[QK_K / 64]; } block_iq3_s;
+typedef struct { f16_t d; uint8_t qs[QK_K / 8]; uint16_t qh[QK_K / 32]; } block_iq1_s;
+typedef struct { uint8_t qs[QK_K / 8]; uint8_t qh[QK_K / 16]; uint8_t scales[QK_K / 32]; } block_iq1_m;
+// the i-quant references need the same codebooks the kernels read; the
+// header is data extracted verbatim from llama.cpp, shared, not duplicated
+#include "../src/quants_iq_grids.h"
+#define IQ1S_DELTA 0.125
 
 static const double kv_mxfp4[16] = {
     0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6,
@@ -52,6 +63,150 @@ static float frnd(void) { return (float)(int32_t)rnd32() / 2147483648.0f; } // [
 static f16_t sane_f16(void) { return f32_to_f16(0.01f + 0.5f * fabsf(frnd())); }
 
 // ------------------------------------------------- independent block decode
+
+static void ref_dq_iq2_xxs(const block_iq2_xxs *b, double *y) {
+    double d = f16_to_f32(b->d);
+    uint32_t aux32[2];
+    const uint8_t *aux8 = (const uint8_t *)aux32;
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        memcpy(aux32, b->qs + 4 * ib32, 8);
+        double db = d * (0.5 + (aux32[1] >> 28)) * 0.25;
+        for (int l = 0; l < 4; l++) {
+            const uint8_t *grid = (const uint8_t *)(iq2xxs_grid + aux8[l]);
+            uint8_t signs = ksigns_iq2xs[(aux32[1] >> 7 * l) & 127];
+            for (int j = 0; j < 8; j++)
+                y[j] = db * grid[j] * (signs & kmask_iq2xs[j] ? -1.0 : 1.0);
+            y += 8;
+        }
+    }
+}
+
+static void ref_dq_iq2_xs(const block_iq2_xs *b, double *y) {
+    double d = f16_to_f32(b->d);
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        double db[2] = { d * (0.5 + (b->scales[ib32] & 0xf)) * 0.25,
+                         d * (0.5 + (b->scales[ib32] >> 4)) * 0.25 };
+        for (int l = 0; l < 4; l++) {
+            const uint8_t *grid =
+                (const uint8_t *)(iq2xs_grid + (b->qs[4 * ib32 + l] & 511));
+            uint8_t signs = ksigns_iq2xs[b->qs[4 * ib32 + l] >> 9];
+            for (int j = 0; j < 8; j++)
+                y[j] = db[l / 2] * grid[j] * (signs & kmask_iq2xs[j] ? -1.0 : 1.0);
+            y += 8;
+        }
+    }
+}
+
+static void ref_dq_iq2_s(const block_iq2_s *b, double *y) {
+    double d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *qh = b->qh, *signs = b->qs + QK_K / 8;
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        double db[2] = { d * (0.5 + (b->scales[ib32] & 0xf)) * 0.25,
+                         d * (0.5 + (b->scales[ib32] >> 4)) * 0.25 };
+        for (int l = 0; l < 4; l++) {
+            const uint8_t *grid = (const uint8_t *)
+                (iq2s_grid + (qs[l] | ((qh[ib32] << (8 - 2 * l)) & 0x300)));
+            for (int j = 0; j < 8; j++)
+                y[j] = db[l / 2] * grid[j] * (signs[l] & kmask_iq2xs[j] ? -1.0 : 1.0);
+            y += 8;
+        }
+        qs += 4;
+        signs += 4;
+    }
+}
+
+static void ref_dq_iq3_xxs(const block_iq3_xxs *b, double *y) {
+    double d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *sas = b->qs + QK_K / 4;
+    uint32_t aux32;
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        memcpy(&aux32, sas + 4 * ib32, 4);
+        double db = d * (0.5 + (aux32 >> 28)) * 0.5;
+        for (int l = 0; l < 4; l++) {
+            uint8_t signs = ksigns_iq2xs[(aux32 >> 7 * l) & 127];
+            const uint8_t *g1 = (const uint8_t *)(iq3xxs_grid + qs[2 * l]);
+            const uint8_t *g2 = (const uint8_t *)(iq3xxs_grid + qs[2 * l + 1]);
+            for (int j = 0; j < 4; j++) {
+                y[j]     = db * g1[j] * (signs & kmask_iq2xs[j] ? -1.0 : 1.0);
+                y[j + 4] = db * g2[j] * (signs & kmask_iq2xs[j + 4] ? -1.0 : 1.0);
+            }
+            y += 8;
+        }
+        qs += 8;
+    }
+}
+
+static void ref_dq_iq3_s(const block_iq3_s *b, double *y) {
+    double d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *qh = b->qh, *signs = b->signs;
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32 += 2) {
+        double db1 = d * (1 + 2 * (b->scales[ib32 / 2] & 0xf));
+        double db2 = d * (1 + 2 * (b->scales[ib32 / 2] >> 4));
+        for (int k = 0; k < 2; k++) {
+            double db = k ? db2 : db1;
+            for (int l = 0; l < 4; l++) {
+                const uint8_t *g1 = (const uint8_t *)
+                    (iq3s_grid + (qs[2 * l] | ((qh[k] << (8 - 2 * l)) & 256)));
+                const uint8_t *g2 = (const uint8_t *)
+                    (iq3s_grid + (qs[2 * l + 1] | ((qh[k] << (7 - 2 * l)) & 256)));
+                for (int j = 0; j < 4; j++) {
+                    y[j]     = db * g1[j] * (signs[l] & kmask_iq2xs[j] ? -1.0 : 1.0);
+                    y[j + 4] = db * g2[j] * (signs[l] & kmask_iq2xs[j + 4] ? -1.0 : 1.0);
+                }
+                y += 8;
+            }
+            qs += 8;
+            signs += 4;
+        }
+        qh += 2;
+    }
+}
+
+static void ref_dq_iq1_s(const block_iq1_s *b, double *y) {
+    double d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs;
+    const uint16_t *qh = b->qh;
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        double dl = d * (2 * ((qh[ib] >> 12) & 7) + 1);
+        double delta = qh[ib] & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA;
+        for (int l = 0; l < 4; l++) {
+            const int8_t *grid = (const int8_t *)
+                (iq1s_grid + (qs[l] | (((qh[ib] >> 3 * l) & 7) << 8)));
+            for (int j = 0; j < 8; j++) y[j] = dl * (grid[j] + delta);
+            y += 8;
+        }
+        qs += 4;
+    }
+}
+
+static void ref_dq_iq1_m(const block_iq1_m *b, double *y) {
+    const uint16_t *sc = (const uint16_t *)b->scales;
+    f16_t sd = (f16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) |
+                       ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000));
+    double d = f16_to_f32(sd);
+    const uint8_t *qs = b->qs, *qh = b->qh;
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        double dl1 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) + 1);
+        double dl2 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) + 1);
+        uint16_t idx[4] = { (uint16_t)(qs[0] | ((qh[0] << 8) & 0x700)),
+                            (uint16_t)(qs[1] | ((qh[0] << 4) & 0x700)),
+                            (uint16_t)(qs[2] | ((qh[1] << 8) & 0x700)),
+                            (uint16_t)(qs[3] | ((qh[1] << 4) & 0x700)) };
+        double delta[4] = { qh[0] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA,
+                            qh[0] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA,
+                            qh[1] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA,
+                            qh[1] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA };
+        for (int l = 0; l < 4; l++) {
+            const int8_t *grid = (const int8_t *)(iq1s_grid + idx[l]);
+            double dl = l < 2 ? dl1 : dl2;
+            for (int j = 0; j < 8; j++) y[j] = dl * (grid[j] + delta[l]);
+            y += 8;
+        }
+        qs += 4;
+        qh += 2;
+    }
+}
+
 
 static void ref_dq_q8_0(const block_q8_0 *b, double *y) {
     double d = f16_to_f32(b->d);
@@ -141,6 +296,23 @@ static void make_row(int type, uint8_t *row, int n) {
             case T_IQ4_NL: ((block_iq4_nl *)p)->d = sane_f16(); break;
             case T_IQ4_XS: ((block_iq4_xs *)p)->d = sane_f16(); break;
             case T_MXFP4: ((block_mxfp4 *)p)->e = (uint8_t)(117 + rnd32() % 21); break;
+            case T_IQ2_XXS: ((block_iq2_xxs *)p)->d = sane_f16(); break;
+            case T_IQ2_XS: ((block_iq2_xs *)p)->d = sane_f16(); break;
+            case T_IQ2_S: ((block_iq2_s *)p)->d = sane_f16(); break;
+            case T_IQ3_XXS: ((block_iq3_xxs *)p)->d = sane_f16(); break;
+            case T_IQ3_S: ((block_iq3_s *)p)->d = sane_f16(); break;
+            case T_IQ1_S: ((block_iq1_s *)p)->d = sane_f16(); break;
+            case T_IQ1_M: {
+                // the fp16 block scale hides in the top nibbles of the four
+                // scale words; plant a sane one there or the reference is NaN
+                uint16_t *sc = (uint16_t *)((block_iq1_m *)p)->scales;
+                uint16_t d16 = sane_f16();
+                sc[0] = (uint16_t)((sc[0] & 0x0fff) | ((d16 & 0x000f) << 12));
+                sc[1] = (uint16_t)((sc[1] & 0x0fff) | ((d16 & 0x00f0) << 8));
+                sc[2] = (uint16_t)((sc[2] & 0x0fff) | ((d16 & 0x0f00) << 4));
+                sc[3] = (uint16_t)((sc[3] & 0x0fff) | (d16 & 0xf000));
+                break;
+            }
         }
     }
     if (type == T_F32) { float *f = (float *)row; for (int i = 0; i < n; i++) f[i] = frnd(); }
@@ -171,6 +343,27 @@ static void ref_weights(int type, const uint8_t *row, double *w, int n) {
             return;
         case T_MXFP4:
             for (int i = 0; i < n; i += bs) ref_dq_mxfp4((const block_mxfp4 *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ2_XXS:
+            for (int i = 0; i < n; i += bs) ref_dq_iq2_xxs((const block_iq2_xxs *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ2_XS:
+            for (int i = 0; i < n; i += bs) ref_dq_iq2_xs((const block_iq2_xs *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ2_S:
+            for (int i = 0; i < n; i += bs) ref_dq_iq2_s((const block_iq2_s *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ3_XXS:
+            for (int i = 0; i < n; i += bs) ref_dq_iq3_xxs((const block_iq3_xxs *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ3_S:
+            for (int i = 0; i < n; i += bs) ref_dq_iq3_s((const block_iq3_s *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ1_S:
+            for (int i = 0; i < n; i += bs) ref_dq_iq1_s((const block_iq1_s *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ1_M:
+            for (int i = 0; i < n; i += bs) ref_dq_iq1_m((const block_iq1_m *)(row + (i / bs) * ts), w + i);
             return;
         default: {
             float *tmp = malloc((size_t)n * sizeof(float));
@@ -310,10 +503,18 @@ int main(void) {
     CHECK(ggml_type_size(T_IQ4_NL) == sizeof(block_iq4_nl), "iq4_nl size");
     CHECK(ggml_type_size(T_IQ4_XS) == sizeof(block_iq4_xs), "iq4_xs size");
     CHECK(ggml_type_size(T_MXFP4) == sizeof(block_mxfp4), "mxfp4 size");
+    CHECK(ggml_type_size(T_IQ2_XXS) == sizeof(block_iq2_xxs), "iq2_xxs size");
+    CHECK(ggml_type_size(T_IQ2_XS) == sizeof(block_iq2_xs), "iq2_xs size");
+    CHECK(ggml_type_size(T_IQ2_S) == sizeof(block_iq2_s), "iq2_s size");
+    CHECK(ggml_type_size(T_IQ3_XXS) == sizeof(block_iq3_xxs), "iq3_xxs size");
+    CHECK(ggml_type_size(T_IQ3_S) == sizeof(block_iq3_s), "iq3_s size");
+    CHECK(ggml_type_size(T_IQ1_S) == sizeof(block_iq1_s), "iq1_s size");
+    CHECK(ggml_type_size(T_IQ1_M) == sizeof(block_iq1_m), "iq1_m size");
 
     static const int types[] = {
         T_F32, T_F16, T_BF16, T_Q4_0, T_Q4_1, T_Q5_0, T_Q5_1, T_Q8_0,
         T_Q2_K, T_Q3_K, T_Q4_K, T_Q5_K, T_Q6_K, T_IQ4_NL, T_IQ4_XS, T_MXFP4,
+        T_IQ2_XXS, T_IQ2_XS, T_IQ2_S, T_IQ3_XXS, T_IQ3_S, T_IQ1_S, T_IQ1_M,
     };
     for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
         test_vec_dot(types[t], 4096);
@@ -323,6 +524,13 @@ int main(void) {
     test_dequant(T_Q4_K, 4096);
     test_dequant(T_Q6_K, 4096);
     test_dequant(T_MXFP4, 4096);
+    test_dequant(T_IQ2_XXS, 4096);
+    test_dequant(T_IQ2_XS, 4096);
+    test_dequant(T_IQ2_S, 4096);
+    test_dequant(T_IQ3_XXS, 4096);
+    test_dequant(T_IQ3_S, 4096);
+    test_dequant(T_IQ1_S, 4096);
+    test_dequant(T_IQ1_M, 4096);
     test_q8_kv(512);
     test_multi();
 

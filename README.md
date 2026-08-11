@@ -644,7 +644,7 @@ the model's responsibility.
 | `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. |
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
-| `muse-glimmer` | Meta Muse Glimmer 30B (text): gated attention, QK + sandwich norms, SWA pattern with NoPE globals, scaled + softcapped logits; CPU, CUDA and Metal. Vision encoder and atem tool syntax not implemented. |
+| `muse-glimmer` | Meta Muse Glimmer 30B (text): gated attention, QK + sandwich norms, SWA pattern with NoPE globals, scaled + softcapped logits; CPU, CUDA and Metal. Certified against llama.cpp b10353 (tokenizer 0/721, cpu_cuda 6/6; greedy 3/6 at the measured sensitivity floor — evidence in `docs/muse-glimmer-cert-2026-08-11.md`). Vision encoder and atem tool syntax not implemented. |
 
 Admission remains layout-specific. Shared-expert MoE, unsupported split expert
 layouts, or architecture-specific tensor arrangements can still be refused
@@ -654,7 +654,7 @@ even when the architecture ID is listed.
 |---|---|
 | File format | GGUF v2/v3, mmap/file-mapped host weights, single-file models only. |
 | Tokenizers | SPM and byte-level BPE with llama, qwen2, smollm, tekken, llama4/o200k, Gemma, and GPT-2-family pre-tokenization rules. |
-| Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1–IQ3 family is CPU-only: the CUDA and Metal backends refuse those files loudly instead of computing wrong. |
+| Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1–IQ3 family is CPU-only with NEON/AVX2 dequant kernels; the CUDA and Metal backends refuse those files loudly instead of computing wrong. |
 | Transformer | RMSNorm, adjacent-pair and NeoX RoPE, grouped-query attention, SwiGLU/GELU/xIELU family paths, tied embeddings, dense and selected sparse MoE. |
 | Sampling | Greedy, temperature, top-k, top-p, min-p, repeat penalty, stop strings, JSON/schema constraints, speculative decoding. |
 | Context | Batched prefill, f16/q8 KV, linear/YaRN/llama-3 scaling, automatic extension. |

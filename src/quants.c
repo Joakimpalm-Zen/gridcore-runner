@@ -603,6 +603,186 @@ static void dq_q6_K_avx2(const block_q6_K *b, float *y) {
         y += 128; ql += 64; qh += 32; sc += 8;
     }
 }
+
+// ---- codebook i-quants (same shapes as the NEON versions below: signed
+// byte negate-select applies the sign table, then one widen+scale pass)
+static const uint8_t avx2_iq_kmask[16] = { 1, 2, 4, 8, 16, 32, 64, 128,
+                                           1, 2, 4, 8, 16, 32, 64, 128 };
+
+static inline void avx2_iq_sign16(const uint8_t *mag, uint8_t s0, uint8_t s1,
+                                  float *y, float db) {
+    __m128i m = _mm_loadu_si128((const __m128i *)mag);
+    __m128i sv = _mm_set_epi64x((long long)(0x0101010101010101ULL * s1),
+                                (long long)(0x0101010101010101ULL * s0));
+    __m128i km = _mm_loadu_si128((const __m128i *)avx2_iq_kmask);
+    __m128i neg = _mm_cmpeq_epi8(_mm_and_si128(sv, km), km);
+    __m128i v = _mm_blendv_epi8(m, _mm_sub_epi8(_mm_setzero_si128(), m), neg);
+    st16i(y, v);
+    scale16(y, db);
+}
+
+static inline void avx2_iq1_16(const int8_t *g16, float dl, float d0, float d1,
+                               float *y) {
+    __m128i v = _mm_loadu_si128((const __m128i *)g16);
+    __m256 lo = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(v));
+    __m256 hi = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(v, 8)));
+    lo = _mm256_mul_ps(_mm256_add_ps(lo, _mm256_set1_ps(d0)), _mm256_set1_ps(dl));
+    hi = _mm256_mul_ps(_mm256_add_ps(hi, _mm256_set1_ps(d1)), _mm256_set1_ps(dl));
+    _mm256_storeu_ps(y, lo);
+    _mm256_storeu_ps(y + 8, hi);
+}
+
+static void dq_iq2_xxs_avx2(const block_iq2_xxs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    uint32_t aux32[2];
+    const uint8_t *aux8 = (const uint8_t *)aux32;
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        memcpy(aux32, b->qs + 4 * ib32, 2 * sizeof(uint32_t));
+        float db = d * (0.5f + (aux32[1] >> 28)) * 0.25f;
+        for (int half = 0; half < 2; half++) {
+            memcpy(mag,     iq2xxs_grid + aux8[2 * half],     8);
+            memcpy(mag + 8, iq2xxs_grid + aux8[2 * half + 1], 8);
+            avx2_iq_sign16(mag,
+                           ksigns_iq2xs[(aux32[1] >> (14 * half)) & 127],
+                           ksigns_iq2xs[(aux32[1] >> (14 * half + 7)) & 127],
+                           y, db);
+            y += 16;
+        }
+    }
+}
+
+static void dq_iq2_xs_avx2(const block_iq2_xs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        float db[2] = { d * (0.5f + (b->scales[ib32] & 0xf)) * 0.25f,
+                        d * (0.5f + (b->scales[ib32] >> 4)) * 0.25f };
+        for (int half = 0; half < 2; half++) {
+            uint16_t q0 = b->qs[4 * ib32 + 2 * half];
+            uint16_t q1 = b->qs[4 * ib32 + 2 * half + 1];
+            memcpy(mag,     iq2xs_grid + (q0 & 511), 8);
+            memcpy(mag + 8, iq2xs_grid + (q1 & 511), 8);
+            avx2_iq_sign16(mag, ksigns_iq2xs[q0 >> 9], ksigns_iq2xs[q1 >> 9],
+                           y, db[half]);
+            y += 16;
+        }
+    }
+}
+
+static void dq_iq2_s_avx2(const block_iq2_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *qh = b->qh, *signs = b->qs + QK_K / 8;
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        float db[2] = { d * (0.5f + (b->scales[ib32] & 0xf)) * 0.25f,
+                        d * (0.5f + (b->scales[ib32] >> 4)) * 0.25f };
+        for (int half = 0; half < 2; half++) {
+            int l0 = 2 * half, l1 = 2 * half + 1;
+            memcpy(mag, iq2s_grid + (qs[l0] | ((qh[ib32] << (8 - 2 * l0)) & 0x300)), 8);
+            memcpy(mag + 8, iq2s_grid + (qs[l1] | ((qh[ib32] << (8 - 2 * l1)) & 0x300)), 8);
+            avx2_iq_sign16(mag, signs[l0], signs[l1], y, db[half]);
+            y += 16;
+        }
+        qs += 4;
+        signs += 4;
+    }
+}
+
+static void dq_iq3_xxs_avx2(const block_iq3_xxs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *sas = b->qs + QK_K / 4;
+    uint32_t aux32;
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        memcpy(&aux32, sas + 4 * ib32, sizeof(uint32_t));
+        float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+        for (int half = 0; half < 2; half++) {
+            const uint8_t *q = qs + 4 * half;
+            memcpy(mag,      iq3xxs_grid + q[0], 4);
+            memcpy(mag + 4,  iq3xxs_grid + q[1], 4);
+            memcpy(mag + 8,  iq3xxs_grid + q[2], 4);
+            memcpy(mag + 12, iq3xxs_grid + q[3], 4);
+            avx2_iq_sign16(mag,
+                           ksigns_iq2xs[(aux32 >> (14 * half)) & 127],
+                           ksigns_iq2xs[(aux32 >> (14 * half + 7)) & 127],
+                           y, db);
+            y += 16;
+        }
+        qs += 8;
+    }
+}
+
+static void dq_iq3_s_avx2(const block_iq3_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *qh = b->qh, *signs = b->signs;
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32 += 2) {
+        float db1 = d * (1 + 2 * (b->scales[ib32 / 2] & 0xf));
+        float db2 = d * (1 + 2 * (b->scales[ib32 / 2] >> 4));
+        for (int k = 0; k < 2; k++) {
+            float db = k ? db2 : db1;
+            for (int half = 0; half < 2; half++) {
+                int l0 = 2 * half, l1 = 2 * half + 1;
+                memcpy(mag, iq3s_grid + (qs[2 * l0] | ((qh[k] << (8 - 2 * l0)) & 256)), 4);
+                memcpy(mag + 4, iq3s_grid + (qs[2 * l0 + 1] | ((qh[k] << (7 - 2 * l0)) & 256)), 4);
+                memcpy(mag + 8, iq3s_grid + (qs[2 * l1] | ((qh[k] << (8 - 2 * l1)) & 256)), 4);
+                memcpy(mag + 12, iq3s_grid + (qs[2 * l1 + 1] | ((qh[k] << (7 - 2 * l1)) & 256)), 4);
+                avx2_iq_sign16(mag, signs[l0], signs[l1], y, db);
+                y += 16;
+            }
+            qs += 8;
+            signs += 4;
+        }
+        qh += 2;
+    }
+}
+
+static void dq_iq1_s_avx2(const block_iq1_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs;
+    const uint16_t *qh = b->qh;
+    int8_t g16[16];
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        float dl = d * (2 * ((qh[ib] >> 12) & 7) + 1);
+        float delta = qh[ib] & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA;
+        for (int half = 0; half < 2; half++) {
+            int l0 = 2 * half, l1 = 2 * half + 1;
+            memcpy(g16, iq1s_grid + (qs[l0] | (((qh[ib] >> 3 * l0) & 7) << 8)), 8);
+            memcpy(g16 + 8, iq1s_grid + (qs[l1] | (((qh[ib] >> 3 * l1) & 7) << 8)), 8);
+            avx2_iq1_16(g16, dl, delta, delta, y);
+            y += 16;
+        }
+        qs += 4;
+    }
+}
+
+static void dq_iq1_m_avx2(const block_iq1_m *b, float *y) {
+    const uint16_t *sc = (const uint16_t *)b->scales;
+    f16_t sd = (f16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) |
+                       ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000));
+    float d = f16_to_f32(sd);
+    const uint8_t *qs = b->qs, *qh = b->qh;
+    int8_t g16[16];
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        float dl1 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) + 1);
+        float dl2 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) + 1);
+        memcpy(g16,     iq1s_grid + (qs[0] | ((qh[0] << 8) & 0x700)), 8);
+        memcpy(g16 + 8, iq1s_grid + (qs[1] | ((qh[0] << 4) & 0x700)), 8);
+        avx2_iq1_16(g16, dl1,
+                    qh[0] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA,
+                    qh[0] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA, y);
+        y += 16;
+        memcpy(g16,     iq1s_grid + (qs[2] | ((qh[1] << 8) & 0x700)), 8);
+        memcpy(g16 + 8, iq1s_grid + (qs[3] | ((qh[1] << 4) & 0x700)), 8);
+        avx2_iq1_16(g16, dl2,
+                    qh[1] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA,
+                    qh[1] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA, y);
+        y += 16;
+        qs += 4;
+        qh += 2;
+    }
+}
 #endif
 
 // NEON kernels (aarch64). Same math as the scalar code — only the
@@ -754,6 +934,188 @@ static void dq_q6_K_neon(const block_q6_K *b, float *y) {
         y += 128; ql += 64; qh += 32; sc += 8;
     }
 }
+
+// ---- codebook i-quants. The grids hold u8 magnitudes <= 62, so a signed
+// byte negate-select applies the sign table before the one widen+scale pass.
+// kmask duplicated across both halves: lane j tests bit j%8 of its sign byte.
+static const uint8_t neon_iq_kmask[16] = { 1, 2, 4, 8, 16, 32, 64, 128,
+                                           1, 2, 4, 8, 16, 32, 64, 128 };
+
+// y[0..15] = db * +/-mag[0..15], sign bit j of s0 (first 8) / s1 (second 8)
+static inline void neon_iq_sign16(const uint8_t *mag, uint8_t s0, uint8_t s1,
+                                  float *y, float db) {
+    int8x16_t m = vld1q_s8((const int8_t *)mag);
+    uint8x16_t neg = vtstq_u8(vcombine_u8(vdup_n_u8(s0), vdup_n_u8(s1)),
+                              vld1q_u8(neon_iq_kmask));
+    int8x16_t v = vbslq_s8(neg, vnegq_s8(m), m);
+    float32x4_t f[4];
+    i8_to_f32x4(v, f);
+    st16f(y, f, db);
+}
+
+static void dq_iq2_xxs_neon(const block_iq2_xxs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    uint32_t aux32[2];
+    const uint8_t *aux8 = (const uint8_t *)aux32;
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        memcpy(aux32, b->qs + 4 * ib32, 2 * sizeof(uint32_t));
+        float db = d * (0.5f + (aux32[1] >> 28)) * 0.25f;
+        for (int half = 0; half < 2; half++) {
+            memcpy(mag,     iq2xxs_grid + aux8[2 * half],     8);
+            memcpy(mag + 8, iq2xxs_grid + aux8[2 * half + 1], 8);
+            neon_iq_sign16(mag,
+                           ksigns_iq2xs[(aux32[1] >> (14 * half)) & 127],
+                           ksigns_iq2xs[(aux32[1] >> (14 * half + 7)) & 127],
+                           y, db);
+            y += 16;
+        }
+    }
+}
+
+static void dq_iq2_xs_neon(const block_iq2_xs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        float db[2] = { d * (0.5f + (b->scales[ib32] & 0xf)) * 0.25f,
+                        d * (0.5f + (b->scales[ib32] >> 4)) * 0.25f };
+        for (int half = 0; half < 2; half++) {
+            uint16_t q0 = b->qs[4 * ib32 + 2 * half];
+            uint16_t q1 = b->qs[4 * ib32 + 2 * half + 1];
+            memcpy(mag,     iq2xs_grid + (q0 & 511), 8);
+            memcpy(mag + 8, iq2xs_grid + (q1 & 511), 8);
+            neon_iq_sign16(mag, ksigns_iq2xs[q0 >> 9], ksigns_iq2xs[q1 >> 9],
+                           y, db[half]);
+            y += 16;
+        }
+    }
+}
+
+static void dq_iq2_s_neon(const block_iq2_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *qh = b->qh, *signs = b->qs + QK_K / 8;
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        float db[2] = { d * (0.5f + (b->scales[ib32] & 0xf)) * 0.25f,
+                        d * (0.5f + (b->scales[ib32] >> 4)) * 0.25f };
+        for (int half = 0; half < 2; half++) {
+            int l0 = 2 * half, l1 = 2 * half + 1;
+            memcpy(mag, iq2s_grid + (qs[l0] | ((qh[ib32] << (8 - 2 * l0)) & 0x300)), 8);
+            memcpy(mag + 8, iq2s_grid + (qs[l1] | ((qh[ib32] << (8 - 2 * l1)) & 0x300)), 8);
+            neon_iq_sign16(mag, signs[l0], signs[l1], y, db[half]);
+            y += 16;
+        }
+        qs += 4;
+        signs += 4;
+    }
+}
+
+static void dq_iq3_xxs_neon(const block_iq3_xxs *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *sas = b->qs + QK_K / 4;
+    uint32_t aux32;
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+        memcpy(&aux32, sas + 4 * ib32, sizeof(uint32_t));
+        float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+        for (int half = 0; half < 2; half++) {
+            const uint8_t *q = qs + 4 * half;
+            memcpy(mag,      iq3xxs_grid + q[0], 4);
+            memcpy(mag + 4,  iq3xxs_grid + q[1], 4);
+            memcpy(mag + 8,  iq3xxs_grid + q[2], 4);
+            memcpy(mag + 12, iq3xxs_grid + q[3], 4);
+            neon_iq_sign16(mag,
+                           ksigns_iq2xs[(aux32 >> (14 * half)) & 127],
+                           ksigns_iq2xs[(aux32 >> (14 * half + 7)) & 127],
+                           y, db);
+            y += 16;
+        }
+        qs += 8;
+    }
+}
+
+static void dq_iq3_s_neon(const block_iq3_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs, *qh = b->qh, *signs = b->signs;
+    uint8_t mag[16];
+    for (int ib32 = 0; ib32 < QK_K / 32; ib32 += 2) {
+        float db1 = d * (1 + 2 * (b->scales[ib32 / 2] & 0xf));
+        float db2 = d * (1 + 2 * (b->scales[ib32 / 2] >> 4));
+        for (int k = 0; k < 2; k++) {
+            float db = k ? db2 : db1;
+            for (int half = 0; half < 2; half++) {
+                int l0 = 2 * half, l1 = 2 * half + 1;
+                memcpy(mag, iq3s_grid + (qs[2 * l0] | ((qh[k] << (8 - 2 * l0)) & 256)), 4);
+                memcpy(mag + 4, iq3s_grid + (qs[2 * l0 + 1] | ((qh[k] << (7 - 2 * l0)) & 256)), 4);
+                memcpy(mag + 8, iq3s_grid + (qs[2 * l1] | ((qh[k] << (8 - 2 * l1)) & 256)), 4);
+                memcpy(mag + 12, iq3s_grid + (qs[2 * l1 + 1] | ((qh[k] << (7 - 2 * l1)) & 256)), 4);
+                neon_iq_sign16(mag, signs[l0], signs[l1], y, db);
+                y += 16;
+            }
+            qs += 8;
+            signs += 4;
+        }
+        qh += 2;
+    }
+}
+
+// iq1: signed int8 grid values plus a per-group delta, y = dl * (g + delta)
+static inline void neon_iq1_16(const int8_t *g16, float dl, float d0, float d1,
+                               float *y) {
+    float32x4_t f[4];
+    i8_to_f32x4(vld1q_s8(g16), f);
+    f[0] = vaddq_f32(f[0], vdupq_n_f32(d0));
+    f[1] = vaddq_f32(f[1], vdupq_n_f32(d0));
+    f[2] = vaddq_f32(f[2], vdupq_n_f32(d1));
+    f[3] = vaddq_f32(f[3], vdupq_n_f32(d1));
+    st16f(y, f, dl);
+}
+
+static void dq_iq1_s_neon(const block_iq1_s *b, float *y) {
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs;
+    const uint16_t *qh = b->qh;
+    int8_t g16[16];
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        float dl = d * (2 * ((qh[ib] >> 12) & 7) + 1);
+        float delta = qh[ib] & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA;
+        for (int half = 0; half < 2; half++) {
+            int l0 = 2 * half, l1 = 2 * half + 1;
+            memcpy(g16, iq1s_grid + (qs[l0] | (((qh[ib] >> 3 * l0) & 7) << 8)), 8);
+            memcpy(g16 + 8, iq1s_grid + (qs[l1] | (((qh[ib] >> 3 * l1) & 7) << 8)), 8);
+            neon_iq1_16(g16, dl, delta, delta, y);
+            y += 16;
+        }
+        qs += 4;
+    }
+}
+
+static void dq_iq1_m_neon(const block_iq1_m *b, float *y) {
+    const uint16_t *sc = (const uint16_t *)b->scales;
+    f16_t sd = (f16_t)((sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) |
+                       ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000));
+    float d = f16_to_f32(sd);
+    const uint8_t *qs = b->qs, *qh = b->qh;
+    int8_t g16[16];
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        float dl1 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) + 1);
+        float dl2 = d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) + 1);
+        memcpy(g16,     iq1s_grid + (qs[0] | ((qh[0] << 8) & 0x700)), 8);
+        memcpy(g16 + 8, iq1s_grid + (qs[1] | ((qh[0] << 4) & 0x700)), 8);
+        neon_iq1_16(g16, dl1,
+                    qh[0] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA,
+                    qh[0] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA, y);
+        y += 16;
+        memcpy(g16,     iq1s_grid + (qs[2] | ((qh[1] << 8) & 0x700)), 8);
+        memcpy(g16 + 8, iq1s_grid + (qs[3] | ((qh[1] << 4) & 0x700)), 8);
+        neon_iq1_16(g16, dl2,
+                    qh[1] & 0x08 ? -IQ1S_DELTA : IQ1S_DELTA,
+                    qh[1] & 0x80 ? -IQ1S_DELTA : IQ1S_DELTA, y);
+        y += 16;
+        qs += 4;
+        qh += 2;
+    }
+}
 #endif // RUNNER_NEON
 
 static void dequant_block(int type, const void *src, float *dst) {
@@ -762,6 +1124,13 @@ static void dequant_block(int type, const void *src, float *dst) {
         case T_Q8_0: dq_q8_0_avx2(src, dst); return;
         case T_Q4_K: dq_q4_K_avx2(src, dst); return;
         case T_Q6_K: dq_q6_K_avx2(src, dst); return;
+        case T_IQ2_XXS: dq_iq2_xxs_avx2(src, dst); return;
+        case T_IQ2_XS: dq_iq2_xs_avx2(src, dst); return;
+        case T_IQ2_S: dq_iq2_s_avx2(src, dst); return;
+        case T_IQ3_XXS: dq_iq3_xxs_avx2(src, dst); return;
+        case T_IQ3_S: dq_iq3_s_avx2(src, dst); return;
+        case T_IQ1_S: dq_iq1_s_avx2(src, dst); return;
+        case T_IQ1_M: dq_iq1_m_avx2(src, dst); return;
     }
 #elif RUNNER_NEON
     switch (type) {
@@ -769,6 +1138,13 @@ static void dequant_block(int type, const void *src, float *dst) {
         case T_Q4_K:  dq_q4_K_neon(src, dst); return;
         case T_Q6_K:  dq_q6_K_neon(src, dst); return;
         case T_MXFP4: dq_mxfp4_neon(src, dst); return;
+        case T_IQ2_XXS: dq_iq2_xxs_neon(src, dst); return;
+        case T_IQ2_XS: dq_iq2_xs_neon(src, dst); return;
+        case T_IQ2_S: dq_iq2_s_neon(src, dst); return;
+        case T_IQ3_XXS: dq_iq3_xxs_neon(src, dst); return;
+        case T_IQ3_S: dq_iq3_s_neon(src, dst); return;
+        case T_IQ1_S: dq_iq1_s_neon(src, dst); return;
+        case T_IQ1_M: dq_iq1_m_neon(src, dst); return;
     }
 #endif
     switch (type) {
