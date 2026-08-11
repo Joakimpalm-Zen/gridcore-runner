@@ -337,7 +337,7 @@ static void test_atem_auto_user_branch_honors_response_schema(void) {
     schema_free(root); jv_free(final); jv_free(tools);
 }
 
-static void test_atem_truncated_string_enum_recovers_declared_member(void) {
+static void test_atem_truncated_string_enum_recovers_closest_member(void) {
     jv *tools = parse(
         "[{\"type\":\"function\",\"function\":{\"name\":\"classify\","
         "\"parameters\":{\"type\":\"object\",\"properties\":{"
@@ -347,11 +347,11 @@ static void test_atem_truncated_string_enum_recovers_declared_member(void) {
     tool_envelope e = {.atem = true, .tools = tools};
     const char *doc = " to=classify<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"classify\">\n"
-        "<atem:parameter name=\"label\"></atem:parameter>\n"
+        "<atem:parameter name=\"label\">bet</atem:parameter>\n"
         "</atem:invoke>\n</atem:function_calls>";
     sbuf content = {0}, calls = {0};
     assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
-    assert(calls.s && strstr(calls.s, "{\\\"label\\\":\\\"alpha\\\"}"));
+    assert(calls.s && strstr(calls.s, "{\\\"label\\\":\\\"beta\\\"}"));
     free(content.s); free(calls.s); jv_free(tools);
 }
 
@@ -1036,7 +1036,7 @@ int main(void) {
     test_atem_parallel_turn_constrains_two_recipient_calls();
     test_muse_generic_envelope_is_constrained_behind_user_recipient();
     test_atem_auto_user_branch_honors_response_schema();
-    test_atem_truncated_string_enum_recovers_declared_member();
+    test_atem_truncated_string_enum_recovers_closest_member();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();

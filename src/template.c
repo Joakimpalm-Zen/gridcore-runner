@@ -1011,6 +1011,24 @@ static jv *atem_param_schema(const tool_envelope *e,
     return NULL;
 }
 
+static const char *atem_enum_recovery(jv *choices, const char *raw,
+                                      size_t raw_n) {
+    const char *best = jv_str(choices->items[0], "");
+    size_t best_prefix = 0;
+    for (int i = 0; i < choices->n; i++) {
+        const char *candidate = jv_str(choices->items[i], NULL);
+        if (!candidate) continue;
+        size_t candidate_n = strlen(candidate), prefix = 0;
+        size_t limit = raw_n < candidate_n ? raw_n : candidate_n;
+        while (prefix < limit && raw[prefix] == candidate[prefix]) prefix++;
+        if (prefix > best_prefix) {
+            best = candidate;
+            best_prefix = prefix;
+        }
+    }
+    return best;
+}
+
 static int atem_map(const tool_envelope *e, const char *doc, size_t n,
                     sbuf *content, sbuf *tc) {
     const char *p = doc, *end = doc + n;
@@ -1073,7 +1091,8 @@ static int atem_map(const tool_envelope *e, const char *doc, size_t n,
                             !memcmp(candidate, val, vn)) member = true;
                     }
                     if (!member) {
-                        const char *fallback = jv_str(choices->items[0], "");
+                        const char *fallback = atem_enum_recovery(
+                            choices, val, vn);
                         sv = fallback;
                         sn = strlen(fallback);
                     }
