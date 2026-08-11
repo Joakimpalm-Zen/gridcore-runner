@@ -43,7 +43,7 @@ If you have no GGUF handy, this one is 2.63 GB and runs on an 8 GB machine:
 
 ```sh
 curl -L -o model.gguf \
-  https://huggingface.co/Joakimpalm-Zen/gemma-4-E2B-it-Q4_0-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
+  https://huggingface.co/Joakimpalm-Zen/gemma-4-E2B-it-Q4_0-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M-Q4_0-mix.gguf
 ```
 
 Run a GGUF:
@@ -194,7 +194,7 @@ derivative as equivalent to an original checkpoint.
 
 - [gpt-oss-20b-keep30-MXFP4](https://huggingface.co/Joakimpalm-Zen/gpt-oss-20b-keep30-MXFP4-GGUF)
   is an 11.5 GB, 32-to-30-expert derivative intended for a 16 GB envelope.
-- [gemma-4-E2B-it-Q4_0](https://huggingface.co/Joakimpalm-Zen/gemma-4-E2B-it-Q4_0-GGUF)
+- [gemma-4-E2B-it Q4_K_M/Q4_0 mix](https://huggingface.co/Joakimpalm-Zen/gemma-4-E2B-it-Q4_0-GGUF) — renamed 2026-08-11 to say what it is (mixed retention, not a straight Q4_0; bytes unchanged)
   is a 2.63 GB requantization of a Q4_K_M parent. Its published quality gate
   is against that parent, not the original bf16 checkpoint.
 
