@@ -644,7 +644,7 @@ the model's responsibility.
 | `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. |
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
-| `muse-glimmer` | Meta Muse Glimmer 30B (text): gated attention, QK + sandwich norms, SWA pattern with NoPE globals, scaled + softcapped logits; CPU, CUDA and Metal. Certified against llama.cpp b10353 (tokenizer 0/721, cpu_cuda 6/6; greedy 3/6 at the measured sensitivity floor — evidence in `docs/muse-glimmer-cert-2026-08-11.md`). Vision encoder and atem tool syntax not implemented. |
+| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md`. No vision encoder or atem tool syntax. |
 
 Admission remains layout-specific. Shared-expert MoE, unsupported split expert
 layouts, or architecture-specific tensor arrangements can still be refused
