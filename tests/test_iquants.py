@@ -10,13 +10,21 @@ scale packing) cannot survive that comparison, while a unit test against
 hand-computed blocks would only re-state the transcription.
 
 Needs a llama.cpp build directory in RUNNER_LLAMA_CPP_BIN (llama-quantize,
-llama-imatrix, llama-cli); skipped when absent. IQ2/IQ1 quantization
+llama-imatrix, llama-server); skipped when absent. IQ2/IQ1 quantization
 requires an importance matrix, generated here from the fixture itself.
+The reference is queried through llama-server's /completion (explicit
+pure-greedy sampler, cache_prompt off) — the same protocol as
+cert-greedy-identity.py, because llama-cli's interactive TUI cannot be
+scripted reliably.
 """
+import json
 import os
 import pathlib
+import socket
 import subprocess
 import sys
+import time
+import urllib.request
 
 import pytest
 
@@ -62,23 +70,49 @@ def iq_files(tmp_path_factory):
     return files
 
 
+def _ref_completion(model, prompt, n):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen(
+        [pathlib.Path(BIN) / "llama-server", "-m", model,
+         "--port", str(port), "--host", "127.0.0.1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(120):
+            if proc.poll() is not None:
+                raise RuntimeError(f"llama-server exited {proc.returncode}")
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.5)
+        body = json.dumps({
+            "prompt": prompt, "temperature": 0, "n_predict": n,
+            "repeat_penalty": 1.0, "top_k": 0, "top_p": 1.0, "min_p": 0.0,
+            "seed": 0, "cache_prompt": False,
+        }).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/completion", data=body,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return json.loads(r.read())["content"]
+    finally:
+        proc.kill()
+        proc.wait()
+
+
 @pytest.mark.parametrize("t", IQ_TYPES)
 def test_iquant_matches_llamacpp_greedy(runner_bin, iq_files, t):
     model = iq_files[t]
+    prompt = "hello world"
     ours = subprocess.run(
-        [runner_bin, "-m", model, "-p", "hello world", "-n", "16",
+        [runner_bin, "-m", model, "-p", prompt, "-n", "16",
          "--temp", "0", "--gpu", "off"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
     assert ours.returncode == 0, ours.stderr.decode(errors="replace")
-    theirs = subprocess.run(
-        [pathlib.Path(BIN) / "llama-cli", "-m", model, "-p", "hello world",
-         "-n", "16", "--temp", "0", "-no-cnv", "--no-warmup", "--seed", "0"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=300)
-    assert theirs.returncode == 0
-    # llama-cli echoes the prompt inside its own framing; compare the
-    # completion tail after the shared prompt text on both sides
     a = ours.stdout.decode(errors="replace")
-    b = theirs.stdout.decode(errors="replace")
-    ta = a.split("hello world", 1)[1].strip()
-    tb = b.split("hello world", 1)[1].strip()
+    assert a.startswith(prompt), a[:80]
+    ta = a[len(prompt):].strip()
+    tb = _ref_completion(model, prompt, 16).strip()
     assert ta and ta == tb, f"{t}: runner={ta!r} llama.cpp={tb!r}"
