@@ -145,6 +145,20 @@ static void test_ornith_split_starts_inside_prompted_think(void) {
     think_free(&split);
 }
 
+static void test_muse_split_starts_inside_prompted_reasoning(void) {
+    think_split split;
+    split_capture got = {0};
+    think_init_reasoning(&split, " to=self", " to=");
+    const char *generated = "compute 17*23 to=record_conclusion<|message|><atem:invoke>";
+    for (size_t i = 0; i < strlen(generated); i++)
+        think_feed(&split, generated + i, 1, capture_split, &got);
+    think_finish(&split, capture_split, &got);
+    assert(!strcmp(got.reason, "compute 17*23"));
+    assert(!strcmp(got.content,
+                   "record_conclusion<|message|><atem:invoke>"));
+    think_free(&split);
+}
+
 static void test_ornith_groups_consecutive_tool_responses(void) {
     const chat_msg msgs[] = {
         { "user", "HI" },
@@ -350,6 +364,7 @@ int main(void) {
     test_detect_and_render_ornith(&t);
     test_ornith_groups_consecutive_tool_responses();
     test_ornith_split_starts_inside_prompted_think();
+    test_muse_split_starts_inside_prompted_reasoning();
     test_detect_and_render_apertus(&t);
     test_render_apertus_without_system();
     test_render_system_prompt();

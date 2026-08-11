@@ -1562,10 +1562,10 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         // Reasoning is a separate assistant turn addressed to the model
         // itself: ` to=self<|message|>THINKING<|eom|><|start|>assistant
         // to=RECIPIENT<|message|>ANSWER`. The recipient can be `user` or a
-        // declared tool, so the common close stops before ` to=`; that header
-        // is the native turn discriminator and belongs to the constraint.
+        // declared tool. The decoded common boundary is ` to=`; forced
+        // reasoning consumes it and constrains from the recipient name.
         m->think_open  = " to=self";
-        m->think_close = "assistant";
+        m->think_close = " to=";
     }
     // The sandwich norms run at rms_eps everywhere except where an arch block
     // above pinned them (muse-glimmer's fixed 1e-8); resolve the default after

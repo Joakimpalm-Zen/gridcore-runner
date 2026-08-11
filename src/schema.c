@@ -944,19 +944,11 @@ static bool atem_seq_add(snode *seq, snode *child) {
     return true;
 }
 
-static bool atem_required(jv *required, const char *key) {
-    if (!required || required->type != J_ARR) return false;
-    for (int i = 0; i < required->n; i++)
-        if (!strcmp(jv_str(required->items[i], ""), key)) return true;
-    return false;
-}
-
 static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
     jv *fn = jv_get(tool, "function");
     if (!fn) fn = tool;
     jv *params = jv_get(fn, "parameters");
     jv *props = params ? jv_get(params, "properties") : NULL;
-    jv *required = params ? jv_get(params, "required") : NULL;
     if (props && props->type != J_OBJ) {
         snprintf(err, errcap, "atem tool parameters.properties must be an object");
         return NULL;
@@ -966,12 +958,6 @@ static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
     if (!seq) return NULL;
     if (!atem_seq_add(seq, atem_lit("\">\n"))) goto oom;
     for (int i = 0; props && i < props->n; i++) {
-        if (!atem_required(required, props->keys[i])) {
-            snprintf(err, errcap,
-                     "optional atem parameter '%s' is not yet supported",
-                     props->keys[i]);
-            schema_free(seq); return NULL;
-        }
         jv *ty = jv_get(props->items[i], "type");
         const char *type = jv_str(ty, "");
         sbuf open = {0};
@@ -1046,29 +1032,41 @@ fail:
     return NULL;
 }
 
-snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap) {
+static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
+                                              const char *only_tool,
+                                              const char *prefix,
+                                              char *err, int errcap) {
     err[0] = 0;
     if (!tools || tools->type != J_ARR || tools->n <= 0 || tools->n > 59) {
         snprintf(err, errcap, "atem turn needs 1 to 59 tools");
         return NULL;
     }
-    snode *root = atem_seq(3), *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
+    snode *root = atem_seq(prefix[0] ? 3 : 2);
+    snode *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
     if (!root || !names || !choice) goto oom;
-    root->max_items = 1; // the leading space in ` to=` is protocol syntax
-    int branches = tools->n + 1;
+    root->max_items = prefix[0] == ' '; // leading protocol space is significant
+    int selected = 0;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function"); if (!fn) fn = tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!only_tool || (name && !strcmp(name, only_tool))) selected++;
+    }
+    if (!selected) { snprintf(err, errcap, "named atem tool is not declared"); goto fail; }
+    int branches = selected + (allow_user ? 1 : 0);
     names->lits = calloc((size_t)branches, sizeof(*names->lits));
     choice->alts = calloc((size_t)branches, sizeof(*choice->alts));
     if (!names->lits || !choice->alts) goto oom;
     names->min_items = names->max_items = 1;
-    if (!atem_seq_add(root, atem_lit(" to="))) goto oom;
+    if (prefix[0] && !atem_seq_add(root, atem_lit(prefix))) goto oom;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function");
         if (!fn) fn = tools->items[i];
         const char *name = jv_str(jv_get(fn, "name"), NULL);
         if (!name || !name[0]) { snprintf(err, errcap, "atem tool %d has no name", i); goto fail; }
+        if (only_tool && strcmp(name, only_tool)) continue;
         names->lits[names->n_lits++] = strdup(name);
         snode *tail = atem_seq(3);
-        if (!names->lits[i] || !tail ||
+        if (!names->lits[names->n_lits - 1] || !tail ||
             !atem_seq_add(tail, atem_lit("<|message|><atem:function_calls>\n<atem:invoke name=\"")) ||
             !atem_seq_add(tail, atem_lit(name)) ||
             !atem_seq_add(tail, atem_tool_tail(tools->items[i], err, errcap))) {
@@ -1076,14 +1074,16 @@ snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap) {
         }
         choice->alts[choice->n_alts++] = tail;
     }
-    names->lits[names->n_lits++] = strdup("user");
-    snode *answer = atem_seq(2);
-    if (!names->lits[names->n_lits - 1] || !answer ||
-        !atem_seq_add(answer, atem_lit("<|message|>")) ||
-        !atem_seq_add(answer, atem_raw("<|eot|>"))) {
-        schema_free(answer); goto oom;
+    if (allow_user) {
+        names->lits[names->n_lits++] = strdup("user");
+        snode *answer = atem_seq(2);
+        if (!names->lits[names->n_lits - 1] || !answer ||
+            !atem_seq_add(answer, atem_lit("<|message|>")) ||
+            !atem_seq_add(answer, atem_raw("<|eot|>"))) {
+            schema_free(answer); goto oom;
+        }
+        choice->alts[choice->n_alts++] = answer;
     }
-    choice->alts[choice->n_alts++] = answer;
     if (!atem_seq_add(root, names)) goto oom;
     names = NULL;
     if (!atem_seq_add(root, choice)) goto oom;
@@ -1093,6 +1093,52 @@ oom:
     if (!err[0]) snprintf(err, errcap, "out of memory compiling atem turn");
 fail:
     schema_free(names); schema_free(choice); schema_free(root);
+    return NULL;
+}
+
+snode *schema_compile_atem_turn_ex(struct jv *tools, bool allow_user,
+                                   const char *only_tool,
+                                   char *err, int errcap) {
+    return schema_compile_atem_turn_prefix(tools, allow_user, only_tool,
+                                           " to=", err, errcap);
+}
+
+snode *schema_compile_atem_after_reasoning(struct jv *tools, bool allow_user,
+                                           const char *only_tool,
+                                           char *err, int errcap) {
+    return schema_compile_atem_turn_prefix(tools, allow_user, only_tool,
+                                           "", err, errcap);
+}
+
+snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap) {
+    return schema_compile_atem_turn_ex(tools, true, NULL, err, errcap);
+}
+
+snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
+                                    char *err, int errcap) {
+    // Muse separates native calls with <|eom|><|start|>; those controls decode
+    // to no visible bytes, leaving the literal `assistant` before the next
+    // recipient header. A parallel request asks for a bounded pair, keeping
+    // truncation closable while exercising the model's trained multi-turn form.
+    snode *root = atem_seq(3);
+    snode *first = schema_compile_atem_turn_ex(tools, false, only_tool,
+                                               err, errcap);
+    snode *second = schema_compile_atem_turn_ex(tools, false, only_tool,
+                                                err, errcap);
+    if (!root || !first || !second) {
+        schema_free(first); schema_free(second); schema_free(root);
+        if (!err[0]) snprintf(err, errcap, "out of memory compiling parallel atem turn");
+        return NULL;
+    }
+    root->max_items = 1;
+    root->props[root->n_props++] = first;
+    snode *middle = atem_lit("assistant");
+    if (!middle) { schema_free(second); schema_free(root); goto parallel_oom; }
+    root->props[root->n_props++] = middle;
+    root->props[root->n_props++] = second;
+    return root;
+parallel_oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling parallel atem turn");
     return NULL;
 }
 

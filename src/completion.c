@@ -309,8 +309,10 @@ static int sink_content(void *ud, const char *b, int n) {
 // deltas that follow carry argument text only, keyed by the same index
 static int resp_open_item(gen_ctx *g, const char *kind);
 static int resp_delta(gen_ctx *g, const char *kind, const char *bytes, int n);
+static int resp_close_item(gen_ctx *g);
 
 static int anth_open_block(gen_ctx *g, const char *kind);
+static int anth_close_block(gen_ctx *g);
 
 static int sink_call_begin(void *ud, const char *name) {
     gen_ctx *g = ud;
@@ -348,6 +350,15 @@ static int sink_call_args(void *ud, const char *b, int n) {
     sb_esc(&c, b, n);
     sb_lit(&c, "\"}}]},\"finish_reason\":null}]}");
     return chunk_send(g, &c);
+}
+
+static int sink_call_end(void *ud) {
+    gen_ctx *g = ud;
+    int rc = 0;
+    if (g->api == API_RESPONSES) rc = resp_close_item(g);
+    else if (g->api == API_MESSAGES) rc = anth_close_block(g);
+    if (!rc) g->tool_index++;
+    return rc;
 }
 
 // ------------------------------------------------- Responses API framing
@@ -1133,6 +1144,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     bool chat = api != API_TEXT; // chat-shaped: thinking channels, tools
     model_t *m = s->m;
     engine *e = &s->e;
+    bool muse_forced_think = chat && s->tmpl == TMPL_MUSE &&
+                             req_thinking_mode(req) == THINK_ON;
     // Major faults are page-ins that went to disk, so the delta across a
     // request IS the paging stall rather than an inference from wall-clock: a
     // slow request that took no major faults was slow for some other reason.
@@ -1352,9 +1365,23 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     jv *sch = env ? NULL : request_schema(req);
     if (env) {
         char serr[128] = "envelope did not parse";
-        jv *ej = json_parse(env->schema_src, strlen(env->schema_src));
-        schema = ej ? schema_compile(ej, serr, sizeof(serr)) : NULL;
-        jv_free(ej);
+        if (env->atem) {
+            const char *only = env->kind == TCH_NAMED ? env->named : NULL;
+            schema = muse_forced_think
+                       ? schema_compile_atem_after_reasoning(
+                             env->tools, env->kind == TCH_AUTO, only,
+                             serr, sizeof(serr))
+                       : env->parallel && env->kind != TCH_AUTO
+                       ? schema_compile_atem_parallel(env->tools, only,
+                                                     serr, sizeof(serr))
+                       : schema_compile_atem_turn_ex(env->tools,
+                                                     env->kind == TCH_AUTO,
+                                                     only, serr, sizeof(serr));
+        } else {
+            jv *ej = json_parse(env->schema_src, strlen(env->schema_src));
+            schema = ej ? schema_compile(ej, serr, sizeof(serr)) : NULL;
+            jv_free(ej);
+        }
         if (!schema) {
             char msg[256];
             snprintf(msg, sizeof(msg), "unsupported tool schema: %s", serr);
@@ -1509,20 +1536,21 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                           "context_length_exceeded");
         return;
     }
-    if (chat && s->tmpl == TMPL_ORNITH) engine_think_started(e);
+    if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think)
+        engine_think_started(e);
 
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
                   .stop_strs = stops, .n_stop = n_stops,
                   .created = (long)time(NULL) };
     snprintf(g.id, sizeof(g.id), "%s", req_id);
     // split thinking channels out of chat responses; raw completions stay raw
-    if (chat && s->tmpl == TMPL_ORNITH)
+    if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think)
         think_init_reasoning(&g.ts, m->think_open, m->think_close);
     else
         think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);
     if (stream && env) {
         tool_stream_sink sink = { &g, sink_content, sink_call_begin,
-                                  sink_call_args };
+                                  sink_call_args, sink_call_end };
         tool_stream_init(&g.tsx, env, &sink);
         g.tsx_on = true;
     }
@@ -1575,6 +1603,32 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     int n_gen = sched_generate(s, logits, max_tokens, gen_collect, &g, &gtime,
                                req_deadline);
     think_finish(&g.ts, gen_emit, &g);
+    // Muse control tokens can erase the recipient boundary from the decoded
+    // stream when a self-addressed turn was pinned in the prompt. If the
+    // generic splitter consequently retained the native block in reasoning,
+    // recover at the format's unambiguous opening tag before buffered mapping.
+    // The constrained automaton guarantees everything from this tag onward.
+    if (!stream && muse_forced_think && env && env->atem && g.out.n == 0 &&
+        g.reason.s) {
+        char *call = strstr(g.reason.s, "<atem:function_calls>");
+        if (call) {
+            size_t at = (size_t)(call - g.reason.s);
+            sb_put(&g.out, call, g.reason.n - at);
+            size_t reason_end = at;
+            if (env->named) {
+                char *scan = g.reason.s, *last = NULL, *hit;
+                while ((hit = strstr(scan, env->named)) && hit < call) {
+                    last = hit;
+                    scan = hit + 1;
+                }
+                char *message = last ? strstr(last, "<|message|>") : NULL;
+                if (message && message < call)
+                    reason_end = (size_t)(last - g.reason.s);
+            }
+            g.reason.n = reason_end;
+            g.reason.s[reason_end] = 0;
+        }
+    }
     // generation ended without a stop match: the withheld partial-match
     // tail was ordinary output after all
     if (!g.stopped && g.hold.n > 0) {

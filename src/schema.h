@@ -36,6 +36,14 @@ snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap);
 // Compile the recipient header together with the native call. The duplicated
 // invoke name is pinned by the header discriminator; `user` selects raw text.
 snode *schema_compile_atem_turn(struct jv *tools, char *err, int errcap);
+snode *schema_compile_atem_turn_ex(struct jv *tools, bool allow_user,
+                                   const char *only_tool,
+                                   char *err, int errcap);
+snode *schema_compile_atem_after_reasoning(struct jv *tools, bool allow_user,
+                                           const char *only_tool,
+                                           char *err, int errcap);
+snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
+                                    char *err, int errcap);
 void   schema_free(snode *n);
 
 // streaming validator state (memcpy-copyable for token lookahead)

@@ -357,13 +357,20 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             }
         }
         // The reference generation prompt is the bare header: the model then
-        // chooses its recipient, opening ` to=self` when it wants a
-        // reasoning turn. THINK_OFF pins the recipient instead, which is the
-        // one place the format lets a caller suppress reasoning.
-        if (add_assistant)
-            off = emit(out, cap, off, thinking == THINK_OFF
-                       ? "<|start|>assistant to=user<|message|>"
-                       : "<|start|>assistant", NULL, NULL);
+        // chooses its recipient, opening ` to=self` when it wants a reasoning
+        // turn. An explicit THINK_ON starts that self-addressed turn in the
+        // prompt, which makes reasoning-before-tool deterministic. With tools,
+        // THINK_OFF still leaves the recipient to the constrained header (it
+        // cannot pin `user`, because a required tool must remain reachable).
+        if (add_assistant) {
+            bool have_tools = tools && tools->type == J_ARR && tools->n;
+            const char *head = thinking == THINK_ON
+                         ? "<|start|>assistant to=self<|message|>"
+                         : thinking == THINK_OFF && !have_tools
+                         ? "<|start|>assistant to=user<|message|>"
+                         : "<|start|>assistant";
+            off = emit(out, cap, off, "%s", head, NULL);
+        }
         free(muse_tail.s);
         break;
     }
@@ -816,6 +823,10 @@ int tool_envelope_build_ex(jv *tools, jv *choice, jv *final_schema,
     }
 
     out->kind = kind;
+    if (kind == TCH_NAMED) {
+        out->named = strdup(named);
+        if (!out->named) { snprintf(err, errcap, "out of memory building tool choice"); return -1; }
+    }
     out->final_is_text = final_schema == NULL;
     out->parallel = parallel;
     out->max_calls = parallel ? PARALLEL_MAX_CALLS : 1;
@@ -919,6 +930,7 @@ int tool_envelope_build_ex(jv *tools, jv *choice, jv *final_schema,
 bad:
     free(schema.s);
     free(turn.s);
+    free(out->named);
     memset(out, 0, sizeof(*out));
     return -1;
 }
@@ -927,7 +939,8 @@ void tool_envelope_free(tool_envelope *e) {
     if (!e) return;
     free(e->schema_src);
     free(e->system_turn);
-    e->schema_src = e->system_turn = NULL;
+    free(e->named);
+    e->schema_src = e->system_turn = e->named = NULL;
 }
 
 // Map ONE envelope entry. Shared by the single-call document and each element
@@ -977,7 +990,26 @@ static const char *atem_attr(const char *p, const char *end, const char *key,
     return v;
 }
 
-static int atem_map(const char *doc, size_t n, sbuf *content, sbuf *tc) {
+static jv *atem_param_schema(const tool_envelope *e,
+                             const char *tool, size_t tool_n,
+                             const char *param, size_t param_n) {
+    if (!e || !e->tools || e->tools->type != J_ARR) return NULL;
+    for (int i = 0; i < e->tools->n; i++) {
+        jv *fn = jv_get(e->tools->items[i], "function");
+        if (!fn) fn = e->tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), "");
+        if (strlen(name) != tool_n || memcmp(name, tool, tool_n)) continue;
+        jv *props = jv_get(jv_get(fn, "parameters"), "properties");
+        if (!props || props->type != J_OBJ) return NULL;
+        for (int k = 0; k < props->n; k++)
+            if (strlen(props->keys[k]) == param_n &&
+                !memcmp(props->keys[k], param, param_n)) return props->items[k];
+    }
+    return NULL;
+}
+
+static int atem_map(const tool_envelope *e, const char *doc, size_t n,
+                    sbuf *content, sbuf *tc) {
     const char *p = doc, *end = doc + n;
     int calls = 0;
     while (p < end) {
@@ -1008,10 +1040,25 @@ static int atem_map(const char *doc, size_t n, sbuf *content, sbuf *tc) {
             sb_lit(&args, "\""); sb_esc(&args, pn, (size_t)(pn_end - pn));
             sb_lit(&args, "\":");
             size_t vn = (size_t)(close - val);
-            jv *structured = (vn && (*val == '{' || *val == '['))
-                                ? json_parse(val, vn) : NULL;
+            jv *ps = atem_param_schema(e, name, (size_t)(name_end - name),
+                                      pn, (size_t)(pn_end - pn));
+            const char *pt = jv_str(jv_get(ps, "type"), "string");
+            bool json_value = !strcmp(pt, "object") || !strcmp(pt, "array") ||
+                              !strcmp(pt, "integer") || !strcmp(pt, "number") ||
+                              !strcmp(pt, "boolean") || !strcmp(pt, "null");
+            jv *structured = json_value ? json_parse(val, vn) : NULL;
             if (structured) { jv_dump(structured, &args); jv_free(structured); }
-            else { sb_lit(&args, "\""); sb_esc(&args, val, vn); sb_lit(&args, "\""); }
+            else if (json_value) {
+                // A token-budget close may leave a raw scalar prefix that is
+                // not valid JSON (empty, `-`, `tru`, ...). The native atem
+                // value itself is untyped text; use the declared parameter
+                // type to keep the recovered OpenAI arguments executable.
+                if (!strcmp(pt, "boolean")) sb_lit(&args, "false");
+                else if (!strcmp(pt, "null")) sb_lit(&args, "null");
+                else if (!strcmp(pt, "object")) sb_lit(&args, "{}");
+                else if (!strcmp(pt, "array")) sb_lit(&args, "[]");
+                else sb_lit(&args, "0");
+            } else { sb_lit(&args, "\""); sb_esc(&args, val, vn); sb_lit(&args, "\""); }
             q = close + strlen("</atem:parameter>");
         }
         sb_lit(&args, "}");
@@ -1042,7 +1089,7 @@ static int atem_map(const char *doc, size_t n, sbuf *content, sbuf *tc) {
 
 int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
-    if (e && e->atem) return atem_map(doc, n, content, tc);
+    if (e && e->atem) return atem_map(e, doc, n, content, tc);
     jv *v = json_parse(doc, n);
     if (!v || v->type != J_OBJ) { jv_free(v); return -1; }
 
@@ -1340,7 +1387,7 @@ static int ts_atem(tool_stream *s, const char *bytes, int n) {
             if (!close) return 0;
             size_t upto = (size_t)(close - s->head) + strlen("</atem:invoke>");
             sbuf content = {0}, tc = {0}, wrapped = {0};
-            int mapped = atem_map(inv, upto - (size_t)(inv - s->head),
+            int mapped = atem_map(s->env, inv, upto - (size_t)(inv - s->head),
                                   &content, &tc);
             sb_lit(&wrapped, "["); sb_put(&wrapped, tc.s, tc.n); sb_lit(&wrapped, "]");
             jv *arr = mapped == 1 ? json_parse(wrapped.s, wrapped.n) : NULL;
@@ -1355,6 +1402,7 @@ static int ts_atem(tool_stream *s, const char *bytes, int n) {
                 if (s->sink.call_begin) rc = s->sink.call_begin(s->sink.ud, name);
                 if (!rc && s->sink.call_args)
                     rc = s->sink.call_args(s->sink.ud, args, (int)strlen(args));
+                if (!rc && s->sink.call_end) rc = s->sink.call_end(s->sink.ud);
             }
             jv_free(arr); free(content.s); free(tc.s); free(wrapped.s);
             head_drop(s, upto);

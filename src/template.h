@@ -127,6 +127,8 @@ typedef struct {
     bool  parallel;
     int   max_calls;
     bool  atem;           // Muse native recipient + <atem:invoke> protocol
+    struct jv *tools;     // borrowed request declarations for native compiler
+    char *named;          // owned named-tool choice, when kind == TCH_NAMED
 } tool_envelope;
 
 // Build the envelope for one request. `final_schema` is the caller's
@@ -175,6 +177,7 @@ typedef struct {
     int (*content)(void *ud, const char *bytes, int n);
     int (*call_begin)(void *ud, const char *name);
     int (*call_args)(void *ud, const char *bytes, int n);
+    int (*call_end)(void *ud); // native protocols may carry another call
 } tool_stream_sink;
 
 typedef struct {

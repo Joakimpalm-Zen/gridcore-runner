@@ -108,7 +108,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 400, "stream must be a boolean");
         return;
     }
-    if (parallel && want_stream) {
+    if (parallel && want_stream && s->tmpl != TMPL_MUSE) {
         // The streaming demultiplexer tracks one call per turn; emitting
         // several would need per-index delta state it does not have. Refuse
         // rather than quietly downgrade to one call.
@@ -124,14 +124,19 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     if (rc < 0) { send_error(fd, 400, terr); return; }
     // Ornith is specifically trained on qwen3_xml. Keep its native protocol
     // instead of forcing the model into runner's generic JSON envelope.
-    bool strict = rc == 1 && s->tmpl != TMPL_ORNITH && s->tmpl != TMPL_MUSE;
+    bool strict = rc == 1 && s->tmpl != TMPL_ORNITH;
+    if (strict && s->tmpl == TMPL_MUSE) {
+        env.atem = true;
+        env.tools = tools;
+    }
     // When the strict envelope does not apply — no tools declared, or the
     // ornith template's native protocol — the flag is vacuous and stays
     // TOLERATED, exactly as before: ordinary OpenAI-shaped traffic sends
     // parallel_tool_calls alongside requests that will never call anything,
     // and rejecting those would break it.
     sbuf ts = {0};
-    if (strict) sb_put(&ts, env.system_turn, strlen(env.system_turn));
+    if (strict && s->tmpl != TMPL_MUSE)
+        sb_put(&ts, env.system_turn, strlen(env.system_turn));
     else if (s->tmpl != TMPL_MUSE) tools_render_for(s->tmpl, tools, &ts);
     bool ornith_merged_system = false;
     if (s->tmpl == TMPL_ORNITH && ts.n && msgs->n > 0 &&

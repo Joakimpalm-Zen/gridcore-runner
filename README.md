@@ -457,6 +457,20 @@ selects a plain answer and a declared tool recipient pins the matching
 calls separated by `<|eom|>` into ordered OpenAI `tool_calls`; the separator
 is not treated as a global stop token.
 
+Native atem calling is selected automatically when a loaded Muse Glimmer
+model receives `tools`; there is deliberately no request switch to put Muse
+behind the generic JSON envelope, because that envelope is not its trained
+assistant-turn format. `tool_choice` (`auto`, `required`, named, and `none`)
+still controls the allowed recipients. `parallel_tool_calls:true` with a
+required/named choice constrains a bounded two-call native turn. Other model
+families keep the existing JSON-schema tool path unchanged.
+
+An explicit `enable_thinking:true` starts Muse's self-addressed reasoning turn
+before the recipient constraint. If generation is cut at the token limit,
+the atem automaton closes the current parameter/invoke/function-call tail;
+raw scalar recovery uses the declared parameter type so the resulting OpenAI
+arguments document remains executable.
+
 `enable_thinking`, either at the top level or inside `chat_template_kwargs`,
 is the request-level form of `--think`/`--no-think`. Omitting it is not the
 same as sending `false`: an absent field renders whatever the model family's
@@ -656,7 +670,7 @@ the model's responsibility.
 | `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. |
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
-| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md`. No vision encoder. Native atem tool definitions/results, recipient-constrained turns, buffered parsing, and boundary-independent streaming parsing are implemented. Automatic request wiring and real-model tool certification are tracked in the next atem section. |
+| `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md` and `docs/muse-atem-cert-2026-08-11.md`. No vision encoder. Native atem definitions/results, recipient-constrained generation, truncation recovery, multi-call mapping, and buffered/SSE parsing are implemented and selected automatically for tool requests. |
 | `granite` | IBM Granite dense (3.x/4.1): the four muP scalars (embedding, fixed attention, residual, divided logit). CPU, CUDA and Metal. granitemoe and granitehybrid are separate arch ids and not admitted. |
 
 Admission remains layout-specific. Shared-expert MoE, unsupported split expert

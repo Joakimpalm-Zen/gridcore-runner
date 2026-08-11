@@ -177,7 +177,64 @@ static void test_atem_header_discriminates_matching_invoke(void) {
         "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
     assert(accepts(root, " to=user<|message|>plain answer<|eot|>"));
     schema_free(root);
+    root = schema_compile_atem_after_reasoning(tools, false, "data.clear",
+                                               err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, "data.clear<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"data.clear\">\n</atem:invoke>\n</atem:function_calls>"));
+    schema_free(root);
     jv_free(tools);
+}
+
+static void test_atem_declared_optional_parameters_are_constrained(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"search\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"query\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}},"
+        "\"required\":[\"query\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_turn(tools, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, " to=search<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"search\">\n"
+        "<atem:parameter name=\"query\">muse</atem:parameter>\n"
+        "<atem:parameter name=\"limit\">5</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    tool_envelope e = {.atem = true, .tools = tools};
+    const char *doc = " to=search<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"search\">\n"
+        "<atem:parameter name=\"query\">muse</atem:parameter>\n"
+        "<atem:parameter name=\"limit\">5</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "{\\\"query\\\":\\\"muse\\\",\\\"limit\\\":5}"));
+    free(content.s); free(calls.s);
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_atem_parallel_turn_constrains_two_recipient_calls(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_parallel(tools, NULL, err, sizeof(err));
+    assert(root != NULL);
+    const char *doc =
+        " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Oslo</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>assistant"
+        " to=weather.get<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"weather.get\">\n"
+        "<atem:parameter name=\"city\">Bergen</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    assert(accepts(root, doc));
+    schema_free(root); jv_free(tools);
 }
 
 static const char *TOOLS =
@@ -482,7 +539,7 @@ static int log_args(void *ud, const char *b, int n) {
 static void demux_step(const tool_envelope *e, const char *doc, size_t step,
                        demux_log *l) {
     memset(l, 0, sizeof(*l));
-    tool_stream_sink sink = { l, log_content, log_begin, log_args };
+    tool_stream_sink sink = { l, log_content, log_begin, log_args, NULL };
     tool_stream s;
     tool_stream_init(&s, e, &sink);
     size_t len = strlen(doc);
@@ -845,6 +902,8 @@ int main(void) {
     test_atem_truncation_closes_started_call();
     test_atem_buffered_maps_reasoning_and_multiple_calls();
     test_atem_header_discriminates_matching_invoke();
+    test_atem_declared_optional_parameters_are_constrained();
+    test_atem_parallel_turn_constrains_two_recipient_calls();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();
