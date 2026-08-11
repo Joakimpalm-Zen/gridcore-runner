@@ -161,6 +161,22 @@ static void test_atem_buffered_maps_reasoning_and_multiple_calls(void) {
     free(calls.s);
 }
 
+static void test_atem_buffered_mapper_honors_nonterminated_length(void) {
+    tool_envelope e = {.atem = true};
+    const char *source =
+        " to=ping<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"ping\">\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    size_t n = strlen(source);
+    char *doc = malloc(n);
+    assert(doc != NULL);
+    memcpy(doc, source, n); /* deliberately no trailing NUL */
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, n, &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "\"name\":\"ping\""));
+    free(doc); free(content.s); free(calls.s);
+}
+
 static void test_atem_header_discriminates_matching_invoke(void) {
     jv *tools = parse(
         "[{\"type\":\"function\",\"function\":{\"name\":\"data.store\","
@@ -1052,6 +1068,7 @@ int main(void) {
     test_atem_scalar_is_raw_until_parameter_close();
     test_atem_truncation_closes_started_call();
     test_atem_buffered_maps_reasoning_and_multiple_calls();
+    test_atem_buffered_mapper_honors_nonterminated_length();
     test_atem_header_discriminates_matching_invoke();
     test_atem_stop_token_is_valid_at_the_raw_answer_tail();
     test_atem_declared_optional_parameters_are_constrained();

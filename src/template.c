@@ -982,10 +982,20 @@ static int envelope_entry_map(const tool_envelope *e, jv *v, int index,
     return 1;
 }
 
+static const char *atem_find(const char *p, const char *end,
+                             const char *needle) {
+    size_t n = strlen(needle);
+    if (p > end || n > (size_t)(end - p)) return NULL;
+    const char *last = end - n;
+    for (; p <= last; p++)
+        if (!memcmp(p, needle, n)) return p;
+    return NULL;
+}
+
 static const char *atem_attr(const char *p, const char *end, const char *key,
                              const char **value_end) {
     size_t kn = strlen(key);
-    const char *k = strstr(p, key);
+    const char *k = atem_find(p, end, key);
     if (!k || k >= end || k + kn >= end || k[kn] != '"') return NULL;
     const char *v = k + kn + 1;
     const char *q = memchr(v, '"', (size_t)(end - v));
@@ -1054,13 +1064,14 @@ static int atem_map(const tool_envelope *e, const char *doc, size_t n,
     const char *p = doc, *end = doc + n;
     int calls = 0;
     while (p < end) {
-        const char *inv = strstr(p, "<atem:invoke name=\"");
+        const char *inv = atem_find(p, end, "<atem:invoke name=\"");
         if (!inv || inv >= end) break;
         const char *name_end = NULL;
         const char *name = atem_attr(inv, end, "name=", &name_end);
         if (!name) return -1;
-        const char *open_end = strstr(name_end, ">");
-        const char *inv_end = open_end ? strstr(open_end, "</atem:invoke>") : NULL;
+        const char *open_end = atem_find(name_end, end, ">");
+        const char *inv_end = open_end
+                            ? atem_find(open_end, end, "</atem:invoke>") : NULL;
         if (!open_end || !inv_end || inv_end > end) return -1;
 
         sbuf args = {0};
@@ -1068,14 +1079,15 @@ static int atem_map(const tool_envelope *e, const char *doc, size_t n,
         int params = 0;
         const char *q = open_end + 1;
         while (q < inv_end) {
-            const char *par = strstr(q, "<atem:parameter name=\"");
+            const char *par = atem_find(q, inv_end,
+                                        "<atem:parameter name=\"");
             if (!par || par >= inv_end) break;
             const char *pn_end = NULL;
             const char *pn = atem_attr(par, inv_end, "name=", &pn_end);
-            const char *val = pn_end ? strstr(pn_end, ">") : NULL;
+            const char *val = pn_end ? atem_find(pn_end, inv_end, ">") : NULL;
             if (!pn || !val || val >= inv_end) { free(args.s); return -1; }
             val++;
-            const char *close = strstr(val, "</atem:parameter>");
+            const char *close = atem_find(val, inv_end, "</atem:parameter>");
             if (!close || close > inv_end) { free(args.s); return -1; }
             if (params++) sb_lit(&args, ",");
             sb_lit(&args, "\""); sb_esc(&args, pn, (size_t)(pn_end - pn));
@@ -1138,10 +1150,10 @@ static int atem_map(const tool_envelope *e, const char *doc, size_t n,
 
     // A native direct answer is addressed to the user. Keep the recipient
     // header out of content just as the JSON envelope syntax is kept out.
-    const char *u = strstr(doc, " to=user<|message|>");
+    const char *u = atem_find(doc, end, " to=user<|message|>");
     if (!u) return -1;
     u += strlen(" to=user<|message|>");
-    const char *stop = strstr(u, "<|eot|>");
+    const char *stop = atem_find(u, end, "<|eot|>");
     sb_put(content, u, stop && stop <= end ? (size_t)(stop - u)
                                            : (size_t)(end - u));
     return 0;
