@@ -64,6 +64,11 @@ values are emitted RAW (unquoted, unescaped), terminating at
   `# Valid recipients:` line to include the tool namespaces.
 - Render tool RESULTS: a message with role `tool` becomes
   `<|start|>tool NAME<|message|><tool_output name="NAME">\n...\n</tool_output><|eot|>`.
+  When the message carries only `tool_call_id`, resolve NAME from the prior
+  assistant turn's matching tool call, exactly as the reference template does.
+- Tool names may be NAMESPACED (`ns.func`); preserve them verbatim everywhere
+  (defs, recipients line, header, invoke attribute) — the reference template
+  derives its `# Valid recipients:` namespaces by splitting on the first `.`.
 - Gate: `tests/test_template.c` (or the muse template test) — golden-string
   render of a 2-tool request + a tool-result turn, byte-compared to the
   template's output for the same input.
@@ -104,17 +109,39 @@ values are emitted RAW (unquoted, unescaped), terminating at
   parses as a complete atem block with the started call intact. This is the
   headline capability; do not skip it.
 
-### S5 — Parse atem output back into `tool_calls`
-- Buffered + streaming, in `template.c`. The `tool_stream` demultiplexer
-  (TS_TOOL/TS_ARGS states, ~line 876) and the ornith envelope parser
-  (`render_atem`/gemma4 `<|tool_call>` parser at ~line 480) are the direct
-  precedents — do NOT write a third parser from scratch; extend the envelope
-  abstraction. Map `<atem:invoke name="X">` → tool name, each
+### S5 — Turn-header mechanics + parse atem output back into `tool_calls`
+**The header IS part of the format — read this first.** Per the reference
+template, a tool-call turn is `<|start|>assistant to=TOOLNAME<|message|>`
+followed by the atem block, ended by `<|eom|>` when another call follows in
+the same turn (`<|eot|>`/end token otherwise), and the model may emit a
+` to=self` reasoning turn BEFORE the tool call. Three requirements fall out:
+- **Constrain from the header.** After the (optional, freely-sampled)
+  reasoning turn closes, the constraint begins at ` to=` with a union over the
+  declared tool names (plus `user` for a plain answer) — the recipient header
+  is the TRUE first discriminator, and starting there makes the
+  `<atem:invoke name="X">` attribute consistent with the header by
+  construction instead of by parse-time validation. Reuse the existing
+  constrained-thinking-prelude machinery (probe think_open, sample freely to
+  the close, then enforce — engine.h documents it); note the current
+  think_close is the literal "assistant to=user", which a tool turn does NOT
+  emit — the close condition must become recipient-aware or the raw
+  ` to=toolname` text leaks into visible content exactly like the known
+  to=user residue case.
+- **Multi-call turns.** `<|eom|>` between calls means "another call follows".
+  Collect consecutive `<|start|>assistant to=TOOL<|message|><atem...>` turns
+  into ONE response with multiple `tool_calls` entries, stop generation when
+  the turn ends, and set `finish_reason: "tool_calls"`. `<|eom|>` must NOT be
+  a global stop token (it also separates reasoning from the answer).
+- **Parsing.** Buffered + streaming, in `template.c`. The `tool_stream`
+  demultiplexer (TS_TOOL/TS_ARGS states, ~line 876) and the ornith/gemma4
+  envelope parsers (~line 480) are the direct precedents — do NOT write a
+  third parser from scratch; extend the envelope abstraction. Map the header
+  recipient + `<atem:invoke name="X">` → tool name, each
   `<atem:parameter name="K">V</atem:parameter>` → an arguments key, assembling
-  the OpenAI `{"id","type":"function","function":{"name","arguments"}}` shape.
-  Because generation was constrained (S2-S4), the block is guaranteed
-  well-formed — the parser does not need to handle arbitrary garbage, only the
-  format.
+  the OpenAI `{"id","type":"function","function":{"name","arguments"}}` shape
+  (arguments is a JSON STRING of the assembled object). Because generation was
+  constrained (S2-S4), the block is guaranteed well-formed — the parser
+  handles the format, not arbitrary garbage.
 - Gate: extend `scripts/agent-torture.py`'s tool matrix to run against the muse
   model with atem calling on; assert valid `tool_calls`, correct tool
   selection, and transport-invariant streaming (same verdicts the JSON path
@@ -143,6 +170,8 @@ values are emitted RAW (unquoted, unescaped), terminating at
 ## Definition of done
 S1-S6 landed on this branch, each with its gate green; `make test` green on
 the Blackwell; the real muse model completes a constrained atem tool call at
-temp 0 and the atem tail still parses when the token budget is cut mid-call;
+temp 0 — including one run where it reasons (` to=self`) BEFORE calling, and
+one multi-call turn collected into a single tool_calls response — and the
+atem tail still parses when the token budget is cut mid-call;
 README and the muse support row updated; evidence note committed. Then stop and
 report — do not merge to main or tag.
