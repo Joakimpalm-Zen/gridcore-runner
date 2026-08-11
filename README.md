@@ -445,6 +445,12 @@ Chat supports buffered and SSE responses, part-array content, assistant
 and `keep_alive` in swap mode. Tool declarations are rendered into the model
 prompt and constrained back into well-formed `tool_calls`.
 
+Muse's native atem format carries scalar parameter values as raw text rather
+than JSON strings. Consequently a scalar value cannot contain the literal
+`</atem:parameter>` sequence: atem itself uses that sentinel as the value
+boundary and its reference template describes the output as regex-parsed,
+not XML-escaped.
+
 `enable_thinking`, either at the top level or inside `chat_template_kwargs`,
 is the request-level form of `--think`/`--no-think`. Omitting it is not the
 same as sending `false`: an absent field renders whatever the model family's

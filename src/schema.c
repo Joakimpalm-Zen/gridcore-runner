@@ -925,6 +925,16 @@ static snode *atem_lit(const char *s) {
     n->lits[0] = strdup(s);
     if (!n->lits[0]) { schema_free(n); return NULL; }
     n->n_lits = 1;
+    n->max_items = 1; // internal raw literal; whitespace is significant
+    return n;
+}
+
+static snode *atem_raw(const char *sentinel) {
+    snode *n = sn_new(SN_RAW);
+    if (!n) return NULL;
+    n->pattern_prefix = strdup(sentinel);
+    if (!n->pattern_prefix) { schema_free(n); return NULL; }
+    n->pattern_prefix_len = (int)strlen(sentinel);
     return n;
 }
 
@@ -951,7 +961,7 @@ static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
         snprintf(err, errcap, "atem tool parameters.properties must be an object");
         return NULL;
     }
-    int count = 2 + (props ? props->n * 3 : 0);
+    int count = 2 + (props ? props->n * 4 : 0);
     snode *seq = atem_seq(count);
     if (!seq) return NULL;
     if (!atem_seq_add(seq, atem_lit("\">\n"))) goto oom;
@@ -964,25 +974,24 @@ static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
         }
         jv *ty = jv_get(props->items[i], "type");
         const char *type = jv_str(ty, "");
-        if (strcmp(type, "object") && strcmp(type, "array")) {
-            snprintf(err, errcap,
-                     "scalar atem parameter '%s' requires raw-value support",
-                     props->keys[i]);
-            schema_free(seq); return NULL;
-        }
         sbuf open = {0};
         sb_fmt(&open, "<atem:parameter name=\"%s\">", props->keys[i]);
         if (open.failed || !atem_seq_add(seq, atem_lit(open.s))) {
             free(open.s); goto oom;
         }
         free(open.s);
-        snode *value = compile_node(props->items[i], err, errcap, 0);
+        bool structured = !strcmp(type, "object") || !strcmp(type, "array");
+        snode *value = structured
+                     ? compile_node(props->items[i], err, errcap, 0)
+                     : atem_raw("</atem:parameter>");
         if (!value || !atem_seq_add(seq, value)) {
             schema_free(value);
             if (!err[0]) goto oom;
             schema_free(seq); return NULL;
         }
-        if (!atem_seq_add(seq, atem_lit("</atem:parameter>\n"))) goto oom;
+        if (structured &&
+            !atem_seq_add(seq, atem_lit("</atem:parameter>"))) goto oom;
+        if (!atem_seq_add(seq, atem_lit("\n"))) goto oom;
     }
     if (!atem_seq_add(seq,
             atem_lit("</atem:invoke>\n</atem:function_calls>"))) goto oom;
@@ -1007,6 +1016,7 @@ snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap) {
     choice->alts = calloc((size_t)tools->n, sizeof(*choice->alts));
     if (!names->lits || !choice->alts) goto oom;
     names->min_items = 1; // this enum selects the following conditional tail
+    names->max_items = 1; // names are raw attribute text, not JSON literals
     if (!atem_seq_add(root,
             atem_lit("<atem:function_calls>\n<atem:invoke name=\""))) goto oom;
     for (int i = 0; i < tools->n; i++) {
@@ -1052,6 +1062,7 @@ enum {
     P_LIT,            // enum / bool / null literal
     P_NUM,
     P_SEQ,
+    P_RAW,
 };
 
 // number micro-states (frame->sub)
@@ -1355,7 +1366,8 @@ static int feed_byte(sval *v, uint8_t c) {
 
     switch (f->phase) {
     case P_START:
-        if (is_ws(c)) return leading_ws_ok(v);
+        if (is_ws(c) && !(n->kind == SN_ENUM && n->max_items == 1))
+            return leading_ws_ok(v);
         switch (n->kind) {
         case SN_COND: {
             int choice = frame_choice(v, v->depth - 1);
@@ -1410,6 +1422,10 @@ static int feed_byte(sval *v, uint8_t c) {
             f->phase = P_SEQ;
             f->idx = 1;
             if (!push_value(v, n->props[0])) return -1;
+            return feed_byte(v, c);
+        case SN_RAW:
+            f->phase = P_RAW;
+            f->lit_pos = 0;
             return feed_byte(v, c);
         default:
             return -1;
@@ -1593,6 +1609,21 @@ static int feed_byte(sval *v, uint8_t c) {
     case P_SEQ:
         if (f->idx >= n->n_props) { frame_done(v); return 1; }
         return push_value(v, n->props[f->idx++]) ? feed_byte(v, c) : -1;
+
+    case P_RAW: {
+        const char *sentinel = n->pattern_prefix;
+        int pos = f->lit_pos;
+        if (c == (uint8_t)sentinel[pos]) {
+            if (++pos == n->pattern_prefix_len) {
+                frame_done(v);
+                return 0;
+            }
+            f->lit_pos = pos;
+            return 0;
+        }
+        f->lit_pos = c == (uint8_t)sentinel[0] ? 1 : 0;
+        return 0;
+    }
     }
     return -1;
 }
@@ -1618,6 +1649,7 @@ bool sval_ws_is_content(const sval *v) {
     // any-subtree runs its own machine; be conservative and treat its
     // whitespace as content rather than reach into it.
     if (f->node->kind == SN_ANY) return true;
+    if (f->node->kind == SN_RAW && f->phase == P_RAW) return true;
     // Mid-string (P_STR with the opening quote consumed) is the content case.
     return f->phase == P_STR &&
            (f->node->kind == SN_STR || f->node->kind == SN_ENUM);
@@ -1772,6 +1804,9 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
         case SN_SEQ:
             for (int i = 0; i < n->n_props; i++)
                 emit_min_choice(q, n->props[i], depth + 1, choice);
+            break;
+        case SN_RAW:
+            eq_put(q, n->pattern_prefix);
             break;
         case SN_COND:
             break;

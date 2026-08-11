@@ -7,7 +7,7 @@
 #include "jsonmode.h"
 
 enum sn_kind { SN_ANY, SN_NULL, SN_BOOL, SN_NUM, SN_INT, SN_STR, SN_ENUM,
-               SN_OBJ, SN_ARR, SN_UNION, SN_COND, SN_SEQ };
+               SN_OBJ, SN_ARR, SN_UNION, SN_COND, SN_SEQ, SN_RAW };
 
 typedef struct snode snode;
 struct snode {

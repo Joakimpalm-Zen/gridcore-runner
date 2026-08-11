@@ -39,8 +39,15 @@ static bool accepts(const snode *root, const char *doc) {
     for (int i = 0; doc[i]; i++) {
         if (!sval_feed(&v, doc + i, 1)) {
             if (getenv("RUNNER_SCHEMA_TRACE"))
-                fprintf(stderr, "schema rejected byte %d (%#x) in %s\n",
-                        i, (unsigned char)doc[i], doc);
+                fprintf(stderr, "schema rejected byte %d (%#x), depth=%d "
+                        "kind=%d phase=%d idx=%d lit=%s in %s\n",
+                        i, (unsigned char)doc[i], v.depth,
+                        v.stack[v.depth - 1].node->kind,
+                        v.stack[v.depth - 1].phase,
+                        v.stack[v.depth - 1].idx,
+                        v.stack[v.depth - 1].node->n_lits
+                            ? v.stack[v.depth - 1].node->lits[0] : "-",
+                        doc);
             return false;
         }
     }
@@ -77,6 +84,28 @@ static void test_atem_structured_tool_automaton(void) {
     assert(!accepts(root,
         "<atem:function_calls>\n<atem:invoke name=\"data.clear\">\n"
         "</atem:invoke>"));
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_atem_scalar_is_raw_until_parameter_close(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"notes.save\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_tools(tools, err, sizeof(err));
+    if (!root) fprintf(stderr, "raw atem tool did not compile: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">raw \"quotes\" and \\slashes"
+        "</atem:parameter>\n</atem:invoke>\n</atem:function_calls>"));
+    assert(!accepts(root,
+        "<atem:function_calls>\n<atem:invoke name=\"notes.save\">\n"
+        "<atem:parameter name=\"text\">unterminated\n"
+        "</atem:invoke>\n</atem:function_calls>"));
     schema_free(root);
     jv_free(tools);
 }
@@ -714,6 +743,7 @@ static void test_system_turn_teaches_the_envelope(void) {
 
 int main(void) {
     test_atem_structured_tool_automaton();
+    test_atem_scalar_is_raw_until_parameter_close();
     test_ornith_native_tool_protocol();
     test_auto_envelope_constrains_names_and_arguments();
     test_truncated_call_stays_valid_and_executable();
