@@ -135,9 +135,10 @@ def main():
             continue
         out_kvs.append(s(key) + struct.pack("<I", t) + rawv)
 
-    # tensor table
-    data_start = (r.p + align - 1) & ~(align - 1)
-    tensors = []  # (name, ndim_raw, type, abs_off, nbytes)
+    # tensor table — data_start is the aligned END of the table, so it can
+    # only be computed after the table has been parsed (misplacing this one
+    # line reads every blob from garbage offsets while still producing a
+    # loadable file, which is why the fixture gate compares tensor BYTES)
     table = []
     for _ in range(n_tensors):
         name = r.st().decode()
@@ -146,6 +147,7 @@ def main():
         tt = r.u32()
         off = r.u64()
         table.append((name, nd, ne, tt, off))
+    data_start = (r.p + align - 1) & ~(align - 1)
     # sizes come from the gap to the next offset; compute via sorted offsets
     by_off = sorted(table, key=lambda x: x[4])
     end = len(raw) - data_start
