@@ -177,6 +177,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     // than being silently retokenized by rules it was not checked against.
     const char *pre = gguf_get_str(g, "tokenizer.ggml.pre", "");
     if (strcmp(pre, "llama-bpe") == 0)   t->pre = TOK_PRE_LLAMA3;
+    else if (strcmp(pre, "dbrx") == 0)   t->pre = TOK_PRE_LLAMA3; // llama.cpp: "same as llama3" (granite 4.1 ships this)
     else if (strcmp(pre, "qwen2") == 0 ||
              strcmp(pre, "qwen35") == 0) t->pre = TOK_PRE_QWEN2;
     else if (strcmp(pre, "smollm") == 0) t->pre = TOK_PRE_SMOLLM;

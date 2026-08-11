@@ -11,7 +11,7 @@
 // first user turn rather than wrapped in markers it never saw in training.
 enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_APERTUS, TMPL_ORNITH,
-       TMPL_MUSE,
+       TMPL_MUSE, TMPL_GRANITE,
        TMPL_RAW,
        // ChatML whose own template declares <think>: Qwen3 and relatives.
        // Split from TMPL_CHATML only so the thinking control below has

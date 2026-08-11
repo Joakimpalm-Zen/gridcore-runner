@@ -21,6 +21,7 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         if (strstr(meta_tmpl, "atem:function_calls") ||
             (strstr(meta_tmpl, "<|start|>") && strstr(meta_tmpl, "<|eot|>")))
             return TMPL_MUSE;
+        if (strstr(meta_tmpl, "<|start_of_role|>")) return TMPL_GRANITE;
         // Qwen3 and relatives: ChatML whose own template carries a
         // <think> branch. Detected from the model's template rather than
         // a name list, so it follows the checkpoint and not a guess.
@@ -38,6 +39,7 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
     if (tok_find(tok, "<|assistant_start|>") >= 0) return TMPL_APERTUS;
     if (tok_find(tok, "<|eot|>") >= 0 && tok_find(tok, "<|message|>") >= 0)
         return TMPL_MUSE;
+    if (tok_find(tok, "<|start_of_role|>") >= 0)   return TMPL_GRANITE;
     if (tok_find(tok, "<|im_start|>") >= 0)        return TMPL_CHATML;
     if (tok_find(tok, "<|start_header_id|>") >= 0) return TMPL_LLAMA3;
     if (tok_find(tok, "<|user|>") >= 0)
@@ -60,6 +62,7 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "apertus")) return TMPL_APERTUS;
     if (!strcmp(name, "ornith")) return TMPL_ORNITH;
     if (!strcmp(name, "muse"))   return TMPL_MUSE;
+    if (!strcmp(name, "granite")) return TMPL_GRANITE;
     if (!strcmp(name, "raw"))    return TMPL_RAW;
     return -1;
 }
@@ -76,6 +79,7 @@ const char *template_name(int t) {
         case TMPL_APERTUS: return "apertus";
         case TMPL_ORNITH: return "ornith";
         case TMPL_MUSE:   return "muse";
+        case TMPL_GRANITE: return "granite";
         default: return "raw";
     }
 }
@@ -273,6 +277,22 @@ size_t render_messages(int tmpl, const chat_msg *msgs, int n_msgs,
                        : "<|start|>assistant", NULL, NULL);
         break;
     }
+    case TMPL_GRANITE:
+        // granite 4.1 (reference: the model's OWN tokenizer.chat_template):
+        // <|start_of_role|>ROLE<|end_of_role|>CONTENT<|end_of_text|>\n per
+        // turn, assistant included. Tool declarations and the Hermes-style
+        // <tool_call> JSON blocks the template also defines are not rendered
+        // here — granite tool calling is unimplemented, not approximated.
+        for (int i = 0; i < n_msgs; i++) {
+            off = emit(out, cap, off, "<|start_of_role|>%s<|end_of_role|>",
+                       msgs[i].role, NULL);
+            off = emit(out, cap, off, "%s<|end_of_text|>\n",
+                       msgs[i].content, NULL);
+        }
+        if (add_assistant)
+            off = emit(out, cap, off, "<|start_of_role|>assistant<|end_of_role|>",
+                       NULL, NULL);
+        break;
     case TMPL_GEMMA4:
         // gemma4 (reference: llama.cpp models/templates/google-gemma-4-31B-it
         // .jinja): <|turn>role\n CONTENT <turn|>\n per turn, a native system

@@ -240,6 +240,9 @@ typedef struct {
                              // rms_eps, which every other arch does.
     bool      embd_norm;     // weightless RMS norm on the embedding row
                              // (muse-glimmer), applied where embd_scale is
+    float     resid_scale;   // granite muP: BOTH branch outputs (attention
+                             // and FFN) x this before their residual adds;
+                             // 1 = off, which every other arch keeps
     int32_t  *suppress;      // token ids forced to -inf in the logits
     int       n_suppress;    // (tokenizer.ggml.suppress_tokens)
     const char *think_open, *think_close; // architecture thinking-tag pair, or NULL

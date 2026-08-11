@@ -3014,6 +3014,8 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         if (g->sw->pan[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->post_norm_eps,
                                    tn, xdim, xdim);
+        if (m->resid_scale != 1.0f)  // granite muP branch scale
+            ok = ok && enc_scale(g, g->xb, m->resid_scale, n_embd, tn, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         prof_mark(g, PH_ELEM);
 
@@ -3070,6 +3072,8 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         if (g->sw->pfn[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->post_norm_eps,
                                    tn, xdim, xdim);
+        if (m->resid_scale != 1.0f)
+            ok = ok && enc_scale(g, g->xb, m->resid_scale, n_embd, tn, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         ok = ok && enc_ple(g, m, ly, l, tn, xdim);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
@@ -3323,6 +3327,8 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
         ok = ok && enc_mv_batch(g, m, ly->wo, g->xb2, g->xb, q_dim, n_embd, g->sw->bo[l], tn, xdim, xdim);
         if (g->sw->pan[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pan[l], n_embd, m->post_norm_eps, tn, xdim, xdim);
+        if (m->resid_scale != 1.0f)
+            ok = ok && enc_scale(g, g->xb, m->resid_scale, n_embd, tn, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
 
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->ffn_norm[l], n_embd, m->rms_eps, tn, n_embd, xdim);
@@ -3332,6 +3338,8 @@ static bool fwd_batch(gpu_batch *B, model_t *m, int tn) {
         ok = ok && enc_mv_batch(g, m, ly->w_down, g->hb, g->xb, m->n_ff, n_embd, 0, tn, m->n_ff, xdim);
         if (g->sw->pfn[l])
             ok = ok && enc_rmsnorm(g, g->xb, g->xb, g->sw->pfn[l], n_embd, m->post_norm_eps, tn, xdim, xdim);
+        if (m->resid_scale != 1.0f)
+            ok = ok && enc_scale(g, g->xb, m->resid_scale, n_embd, tn, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         ok = ok && enc_ple(g, m, ly, l, tn, xdim);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)

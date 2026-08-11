@@ -1747,6 +1747,10 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         if (g->pan[l])
             enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pan[l],
                           n_embd, m->post_norm_eps, n, xdim, xdim);
+        if (m->resid_scale != 1.0f)  // granite muP branch scale
+            for (int b = 0; b < n; b++)
+                enc_scale(g, e, g->xb, foff((size_t)b * xdim), n_embd,
+                          m->resid_scale);
         for (int b = 0; b < n; b++)
             enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
                      g->xb, foff((size_t)b * xdim), n_embd);
@@ -1787,6 +1791,10 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         if (g->pfn[l])
             enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pfn[l],
                           n_embd, m->post_norm_eps, n, xdim, xdim);
+        if (m->resid_scale != 1.0f)
+            for (int b = 0; b < n; b++)
+                enc_scale(g, e, g->xb, foff((size_t)b * xdim), n_embd,
+                          m->resid_scale);
         for (int b = 0; b < n; b++)
             enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
                      g->xb, foff((size_t)b * xdim), n_embd);

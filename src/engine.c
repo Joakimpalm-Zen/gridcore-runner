@@ -197,6 +197,7 @@ static uint64_t model_identity(const model_t *m, const tokenizer *tok) {
     h = h64f(h, m->rope_mscale);   h = h64f(h, m->embd_scale);
     h = h64f(h, m->attn_scale);    h = h64f(h, m->logit_softcap);
     h = h64f(h, m->logit_scale);   h = h64f(h, m->post_norm_eps);
+    h = h64f(h, m->resid_scale);
     h = h64i(h, m->embd_norm);     h = h64i(h, m->nope_on_full);
     for (int l = 0; l < m->n_layer; l++) {
         h = h64i(h, model_kv_dim(m, l));

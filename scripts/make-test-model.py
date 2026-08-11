@@ -33,6 +33,8 @@ ACT_OVERFLOW = 0   # scale on ffn_gate weights, to drive the activation extreme
 MUSE = False       # muse-glimmer: gated attention + QK/sandwich norms + NoPE
 MUSE_GATE_FLAT = False  # zero the attn_gate weights (sigmoid -> flat 0.5)
 MUSE_ALL_SWA = False    # pattern array all-sliding (every layer ropes)
+GRANITE = False    # granite: four muP scalars, tied embeddings
+GRANITE_RESID = 0.5  # residual_scale for the fixture (CLI-overridable)
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -98,6 +100,15 @@ while i < len(args):
         MUSE_GATE_FLAT = True
     elif a == "--muse-all-swa":
         MUSE_ALL_SWA = True
+    elif a == "--granite":
+        # IBM Granite dense: embedding_scale, a FIXED attention scale,
+        # residual_scale on both branch outputs, divided logit scale, tied
+        # embeddings (no output tensor). Scaled-down but shape-preserving.
+        GRANITE = True
+        ARCH = "granite"
+    elif a == "--granite-resid":
+        i += 1
+        GRANITE_RESID = float(args[i])
     elif a == "--gemma4-hetero":
         # the real gemma-4 26B/12B attention shape, scaled down: sliding
         # layers (i%3 != 2) rotate fewer dims on smaller heads with fewer KV
@@ -264,8 +275,14 @@ for i in range(N_LAYER + MTP_LAYERS):
             (f"blk.{i}.post_norm.weight", [N_EMBD], ones(N_EMBD)),
         ]
 
-if MUSE:
-    # the real model's lm head is untied from the embeddings
+if MUSE or GRANITE:
+    # muse: the real model's lm head is untied from the embeddings.
+    # granite: the real models ARE tied, but a tied byte-vocab fixture locks
+    # greedy argmax onto the input's last token (embedding self-similarity
+    # survives any residual perturbation — even residual_scale 0), which
+    # made the scalar-differential test vacuous. A random untied head makes
+    # logits direction-sensitive; the tied layout is covered at real-model
+    # certification.
     tensors.append(("output.weight", [N_EMBD, N_VOCAB],
                     tensor_data(N_EMBD * N_VOCAB)))
 
@@ -343,6 +360,17 @@ if G4HETERO:
         kv_u32(f"{ARCH}.rope.dimension_count", 32),
         kv_u32(f"{ARCH}.rope.dimension_count_swa", 16),
         kv_f32(f"{ARCH}.final_logit_softcapping", 30.0),
+    ]
+if GRANITE:
+    # same keys and code paths as the real exports, but fixture-sane
+    # magnitudes: the real muP values (embedding x12, attention x0.0078)
+    # collapse a 64-dim random model into single-token degeneracy, which
+    # made the residual-scale differential test vacuously pass-or-fail
+    meta_kvs += [
+        kv_f32(f"{ARCH}.embedding_scale", 2.0),
+        kv_f32(f"{ARCH}.attention.scale", 0.25),
+        kv_f32(f"{ARCH}.residual_scale", GRANITE_RESID),
+        kv_f32(f"{ARCH}.logit_scale", 16.0),
     ]
 if MUSE:
     meta_kvs += [

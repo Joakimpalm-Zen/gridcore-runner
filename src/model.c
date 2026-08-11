@@ -615,7 +615,7 @@ const char *const *model_supported_archs(size_t *count) {
     static const char *const arches[] = {
         "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
         "smollm", "stablelm", "gemma3", "gemma4", "phi3", "gpt-oss",
-        "apertus", "afmoe", "muse-glimmer",
+        "apertus", "afmoe", "muse-glimmer", "granite",
     };
     if (count) *count = sizeof(arches) / sizeof(arches[0]);
     return arches;
@@ -1105,7 +1105,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     // architectures whose weights load fine llama-style but whose math is
     // silently wrong without arch-specific handling (scalar multipliers,
     // logit softcapping): refuse instead of generating plausible gibberish
-    if (strcmp(arch, "granite") == 0 || strcmp(arch, "gemma2") == 0 ||
+    if (strcmp(arch, "gemma2") == 0 ||
         strcmp(arch, "gemma") == 0) {
         fprintf(stderr, "error: unsupported architecture '%s' — it would load "
                 "but produce incorrect output without its scaling/softcapping\n", arch);
@@ -1174,6 +1174,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     m->rope_neox   = strcmp(arch, "llama") != 0 && strcmp(arch, "mistral") != 0;
     m->embd_scale  = 1.0f;
     m->logit_scale = 1.0f;
+    m->resid_scale = 1.0f;
     m->rope_dim_local = m->rope_dim;
     if (strcmp(arch, "gemma3") == 0) {
         // gemma3: scaled embeddings, GELU ffn, sliding-window attention on 5
@@ -1486,6 +1487,33 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 return false;
             }
             m->kv_src[i] = src;
+        }
+    }
+    if (strcmp(arch, "granite") == 0) {
+        // granite (IBM Granite dense, 3.x/4.1; reference: llama.cpp b10353
+        // src/models/granite.cpp + build_inp_embd). The four muP scalars are
+        // the whole family quirk — and running the arch llama-style without
+        // them is exactly why it sat on the wrong-math refusal list:
+        //   * embeddings x embedding_scale (build_inp_embd);
+        //   * kq_scale is the FIXED attention.scale value, not 1/sqrt(hd);
+        //   * BOTH branch outputs x residual_scale before their residual
+        //     adds (granite.cpp:241/301);
+        //   * final logits x 1/logit_scale — llama.cpp DIVIDES where the
+        //     runner's knob multiplies, so store the reciprocal.
+        // Rope is adjacent-pair (LLAMA_ROPE_TYPE_NORM, like llama), gated by
+        // rope.scaling.finetuned which defaults ON; a NoPE granite export is
+        // refused rather than mis-rotated. granitemoe/granitehybrid are
+        // different arch ids and stay unadmitted.
+        m->rope_neox   = false;
+        m->embd_scale  = gguf_get_f32(g, AK("embedding_scale"), 1.0f);
+        m->attn_scale  = gguf_get_f32(g, AK("attention.scale"), 0.0f);
+        m->resid_scale = gguf_get_f32(g, AK("residual_scale"), 1.0f);
+        float ls = gguf_get_f32(g, AK("logit_scale"), 0.0f);
+        if (ls > 0.0f) m->logit_scale = 1.0f / ls;
+        if (!gguf_get_bool(g, AK("rope.scaling.finetuned"), true)) {
+            fprintf(stderr, "error: granite export disables rope "
+                    "(rope.scaling.finetuned=false) — unsupported layout\n");
+            return false;
         }
     }
     if (strcmp(arch, "muse-glimmer") == 0) {
@@ -3793,6 +3821,10 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             for (int b = 0; b < n; b++)
                 rmsnorm(m->xb + (size_t)b * xdim, m->xb + (size_t)b * xdim,
                         ly->post_attn_norm_w, n_embd, m->post_norm_eps);
+        if (m->resid_scale != 1.0f)
+            for (int b = 0; b < n; b++)
+                for (int i = 0; i < n_embd; i++)
+                    m->xb[(size_t)b * xdim + i] *= m->resid_scale;
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
@@ -3845,6 +3877,10 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             for (int b = 0; b < n; b++)
                 rmsnorm(m->xb + (size_t)b * xdim, m->xb + (size_t)b * xdim,
                         ly->post_ffn_norm_w, n_embd, m->post_norm_eps);
+        if (m->resid_scale != 1.0f)
+            for (int b = 0; b < n; b++)
+                for (int i = 0; i < n_embd; i++)
+                    m->xb[(size_t)b * xdim + i] *= m->resid_scale;
         for (int b = 0; b < n; b++)
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
