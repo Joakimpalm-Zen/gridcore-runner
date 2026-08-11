@@ -55,22 +55,69 @@ mean KLD 0.0 / top-1 100% / top-8 overlap 1.0**.
 
 | candidate | size | result |
 |---|---|---|
-| bartowski IQ3_XXS | 11.5 GB | ~~REFUSED (no IQ1–IQ3 dequant, type 21)~~ → **loads and decodes after the same-day i-quant port** (runner `792d316`, owner-approved scope): IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S transcribed from llama.cpp b10353 with verbatim grids. Gate: all SEVEN types byte-identical to llama-server greedy on llama.cpp's own quantizations of the test fixture (imatrix included); real-file identity + KLD below. CPU-only by design — device backends refuse i-quants loudly |
-| bartowski IQ3_XS | 12.3 GB | loads after the same port; KLD below |
+| bartowski IQ3_XXS | 11.5 GB | ~~REFUSED (no IQ1–IQ3 dequant, type 21)~~ → loads after the same-day i-quant port (runner `792d316`, owner-approved): IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S transcribed from llama.cpp b10353, gated 7/7 byte-identical vs llama-server on llama.cpp-quantized fixtures, plus real-file greedy identity on this exact file. **KLD: FAILS — top-1 81.25%, mean KLD 0.152**, top-8 0.796 |
+| bartowski IQ3_XS | 12.3 GB | **FAILS — top-1 80.75%, mean KLD 0.132**, top-8 0.808 (best of the sub-4-bit tier, still nowhere near the bar) |
 | bartowski Q3_K_S | 12.8 GB | **FAILS the quality gate** — 400 positions: top-1 **81.25%**, mean KLD **0.153**, top-8 overlap 0.788, vs the ≥97% / ≤0.05 bar. Same-engine quant-vs-quant with an exact-zero baseline, so this is pure quantization damage |
 | bartowski Q2_K | 11.0 GB | **FAILS, worse** — top-1 **72.0%**, mean KLD **0.253**, top-8 overlap 0.745. The degradation gradient is monotone with bits, as expected |
 
-**Route A verdict: at the tier the engine can load today, quantization-only
-does NOT fit this model into the 16 GB-Mac envelope at certification
-quality.** The sub-4-bit wall, previously measured on much smaller models,
-holds at 30B: the official 4-bit is the floor of certifiable quality for
-this checkpoint. Two follow-ups fall out, both decisions rather than tasks:
-IQ1–IQ3 dequant support in the engine (would unlock the untested, likely
-better imatrix IQ3_XS 12.3 GB tier — the measured refusal above is the
-concrete trigger the prior-art rule wants), and the plan's route B
-depth-prune kill-experiment (expected-fail per the literature on un-healed
-distilled models; healing hardware exists now, but that is an owner-scoped
-experiment, not a certification step).
+Agent-torture on Q3_K_S (GPU-served, 105 requests): **71/105**, and the
+split matters more than the total — tool_selection 15/15,
+structured_final 15/15, stream_normalization 15/15, nested_arguments
+14/15, forced_truncation 12/15; ALL 30 hard failures are
+large_enum_selection/reasoning_then_tool **transport timeouts** (the
+reasoning model thinking past the harness's 120 s deadline at ~19 tok/s),
+not wrong answers. The agentic verdicts that measure correctness pass;
+the failures measure latency of a thinking model under a fixed clock.
+
+**Route A verdict: quantization-only does NOT fit this model into the
+16 GB-Mac envelope at certification quality — measured across BOTH quant
+families.** All four sub-13.3 GB candidates cluster at the same wall
+(three independent 3-bit formats land within 81±0.5% top-1 / 0.13–0.15
+KLD; 2-bit drops to 72%/0.25), so this is a property of the checkpoint at
+3 bits, not of any one quantization scheme. The sub-4-bit wall previously
+measured on much smaller models holds at 30B: the official 4-bit
+(16.8 GB) is the floor of certifiable quality, and it needs a 24 GB-class
+machine. Remaining engine follow-up: SIMD dot kernels for the IQ family
+(the generic dequant-then-dot path decodes the 30B at ~0.8 tok/s on CPU)
+and device kernels — worth it only if an IQ artifact ever has a quality
+case.
+
+## Footprint (route B) — depth-prune kill-experiment
+
+Owner-directed ("test all options"). Method: layer influence measured on
+the official kquant with the new `RUNNER_LAYER_SIM` diagnostic (residual
+input/output cosine over a real-text calibration prefill; block influence
+= 1 − cos), then `scripts/gguf-depth-slice.py` cuts the least-influential
+layers from the official Q4 GGUF directly — surviving layers keep their
+exact certified bytes, per-layer metadata arrays travel with their
+layers, no HF-side toolchain needed (mergekit has no muse_glimmer
+definitions). Scoring reproduced the ShortGPT shape exactly: early layers
+load-bearing (cos 0.61–0.71), deep-middle 22–31 and late 40–48 most
+redundant (cos ≥ 0.925).
+
+**A tooling defect was caught before any verdict:** the slicer's first
+version read every blob from garbage offsets (data_start computed before
+the tensor table) while producing a loadable, deterministic file that
+collapsed identically on BOTH engines — cross-engine agreement does not
+clear a tool that corrupts the input both engines read. Caught by an
+independent byte-integrity comparison, fixed in `4114f77`, and the
+fixture gate now compares surviving tensor bytes.
+
+With the fixed tool (greedy, "The capital of France is"):
+
+| variant | size | behavior |
+|---|---|---|
+| keep-50 (−2 layers) | 16.2 GB | coherent ("…is in Paris. Paris is known for its beautiful architecture…") |
+| keep-48 (−4) | 15.7 GB | fluent but evasive — dances around naming Paris |
+| keep-40 (−12) | 13.3 GB | word-salad collapse |
+| keep-38 (−14) | 12.7 GB | numeric garbage |
+
+**Verdict: KILL.** The smallest cut that reaches the 16 GB-Mac envelope
+(−12 layers) destroys the model; the cuts that preserve it (−2, −4) save
+at most 1.6 GB of 17. Un-healed depth-pruning of this dense distilled
+checkpoint behaves exactly as the literature warned, now measured rather
+than assumed. KLD rows for keep-50/keep-48 quantify the healthy edge of
+the frontier below.
 
 ## DFlash drafter
 
