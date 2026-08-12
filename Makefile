@@ -1086,6 +1086,7 @@ test-makefile-sane:
 	test -n "$$qline" || { echo "FAIL: quants.c is not a separate translation unit"; exit 1; }; \
 	echo "$$qline" | grep -q -- ' -fno-fast-math ' || { echo "FAIL: quants.c lacks -fno-fast-math"; exit 1; }; \
 	case "$$qline" in *" -ffast-math "*) echo "FAIL: quants.c still has -ffast-math"; exit 1;; esac; \
+	if grep -q 'system(' src/tray.c; then echo "FAIL: tray launches through a shell"; exit 1; fi; \
 	echo "makefile ok (no discarded recipes)"
 
 

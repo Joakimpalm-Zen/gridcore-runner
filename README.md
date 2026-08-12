@@ -655,6 +655,12 @@ Configuration, the instance registry, autostart, uninstall, and the headless
 validation seams are documented in
 [docs/tray-controller.md](docs/tray-controller.md).
 
+The macOS release is ad-hoc signed, not Apple-notarized. A browser download may
+therefore be blocked by Gatekeeper even when its published checksum matches.
+Verify the SHA-256 checksum first, then remove the quarantine attribute from
+the extracted binary with `xattr -d com.apple.quarantine runner`; obtaining a
+Developer ID and notarizing releases remains an owner action.
+
 ## Structured output
 
 Runner provides two sampler-level guarantees:
