@@ -192,6 +192,91 @@ static bool run_config(config *c, const char *path, const int32_t *toks,
     return true;
 }
 
+// ------------------------------------------------------- the free-running arm
+//
+// Added 2026-08-13 after the teacher-forced arm was PROVEN insufficient. The
+// TC_GEMM_32B bug (Q8_0/Q4_0 computing 16 of 64 token columns) reached this
+// gate and passed it: on Phi-4-mini-instruct-q4_0, the pre-fix binary reported
+// "logits BIT-IDENTICAL over 448 TC dispatches — EXACT" while the SAME binary
+// on the SAME model produced different greedy text at `-b 64` and identical
+// text at `-b 16`. gemma4-31B-q4_0 was promoted on exactly such a verdict.
+//
+// Why the teacher-forced arm can miss it: 63 of its 64 compared positions come
+// from single-token forwards, which never touch the prefill GEMM, and it runs
+// at a small context (n_tok + 8) rather than a production one. This arm closes
+// both gaps — a long prompt through a production-sized context and batch, then
+// free-running greedy decode where any prefill corruption compounds instead of
+// being teacher-forced back onto the reference path.
+//
+// The bar is token identity. The scalar and TC prefill paths have matched
+// exactly in every free-running check this project has recorded, so a
+// divergence here is a finding either way: a real kernel defect, or the first
+// legitimate near-tie flip, which deserves to stop a promotion and be looked at.
+enum { FR_CTX = 4096, FR_GEN = 32 };
+
+static int free_run(int tc, const char *path, const int32_t *toks, int n_tok,
+                    int32_t *out, int n_gen) {
+    gpu_tc_force(tc);
+    model_t m;
+    memset(&m, 0, sizeof(m));
+    model_params p;
+    memset(&p, 0, sizeof(p));
+    p.gpu_mode  = GPU_AUTO;
+    p.n_threads = 4;
+    p.n_ctx     = FR_CTX;
+    p.n_batch   = N_BATCH;
+    p.reserve_vram_pct = g_reserve_vram_pct;
+    p.vram_wait_secs = 300;
+    if (!model_load(&m, path, &p)) return -1;
+    if (!m.gpu || m.gpu_layers < m.n_layer) { model_free(&m); return -1; }
+
+    float *lg = NULL;
+    for (int off = 0; off < n_tok; off += N_BATCH) {
+        int n = n_tok - off < N_BATCH ? n_tok - off : N_BATCH;
+        lg = model_forward_batch(&m, toks + off, n, off, off + n == n_tok);
+        if (off + n == n_tok && !lg) { model_free(&m); return -1; }
+    }
+    if (!lg) { model_free(&m); return -1; }
+    int pos = n_tok;
+    for (int i = 0; i < n_gen; i++) {
+        int32_t t = (int32_t)argmax(lg, m.n_vocab);
+        out[i] = t;
+        if (i + 1 < n_gen) {
+            lg = model_forward(&m, t, pos++);
+            if (!lg) { model_free(&m); return -1; }
+        }
+    }
+    model_free(&m);
+    return n_gen;
+}
+
+// Runs on EVERY path that reaches a verdict, including the bit-identical one:
+// that is the path the pre-fix kernel took on phi3 and gemma4, so an arm that
+// skipped it would skip the case it exists for.
+static void free_running_arm(const char *path, const int32_t *toks, int n_tok) {
+    static int32_t fr_scalar[FR_GEN], fr_tc[FR_GEN];
+    int prompt_n = n_tok - STEPS;   // a long prefill at a production ctx
+    int a_ok = free_run(0, path, toks, prompt_n, fr_scalar, FR_GEN);
+    int b_ok = free_run(1, path, toks, prompt_n, fr_tc, FR_GEN);
+    gpu_tc_force(-1);
+    if (a_ok != FR_GEN || b_ok != FR_GEN) {
+        printf("  free-running   : skipped (model would not load at ctx %d)\n",
+               FR_CTX);
+        return;
+    }
+    int at = -1;
+    for (int i = 0; i < FR_GEN; i++)
+        if (fr_scalar[i] != fr_tc[i]) { at = i; break; }
+    printf("  free-running   : %d prompt tokens, %d greedy tokens at batch %d "
+           "/ ctx %d -> %s\n", prompt_n, FR_GEN, N_BATCH, FR_CTX,
+           at < 0 ? "token-identical" : "DIVERGED");
+    if (at >= 0)
+        printf("                   first divergence at token %d "
+               "(scalar %d, tc %d)\n", at, fr_scalar[at], fr_tc[at]);
+    ck(at < 0, "TC and scalar free-running greedy output agree at the "
+               "production batch and context");
+}
+
 static double mean_abs_diff(const config *a, const config *b, int n_vocab) {
     double sum = 0;
     size_t n = (size_t)STEPS * (size_t)n_vocab;
@@ -325,8 +410,10 @@ int main(int argc, char **argv) {
             return g_fail;
         }
         printf("  tc-b64 vs scalar-b64 : logits BIT-IDENTICAL over %lu TC "
-               "dispatches — EXACT, 0 top-1 flips by construction\n"
-               "tc-tol: ok (exact)\n", fired);
+               "dispatches — EXACT, 0 top-1 flips by construction\n", fired);
+        // Bit-identity here is NOT sufficient on its own — proven 2026-08-13.
+        free_running_arm(path, toks, n_tok);
+        printf(g_fail ? "tc-tol: FAILED\n" : "tc-tol: ok (exact)\n");
         return g_fail;
     }
 
@@ -357,6 +444,8 @@ int main(int argc, char **argv) {
        "TC and scalar pick the same token at nearly every position");
     ck(worst <= TIE_FRAC,
        "every TC/scalar token disagreement is a near-tie, not a decision");
+
+    free_running_arm(path, toks, n_tok);
 
     for (int i = 0; i < N_CFG; i++) { free(cfgs[i].logits); free(cfgs[i].top1); }
     printf(g_fail ? "tc-tol: FAILED\n" : "tc-tol: ok\n");
