@@ -115,10 +115,14 @@ practice, most first.
   a headline.
 
 The full compatibility method is in
-[docs/compatibility-program.md](docs/compatibility-program.md), performance
-measurements are in [docs/performance.md](docs/performance.md), and rejected
-MoE caching work is in
-[docs/negative-result-expert-cache.md](docs/negative-result-expert-cache.md).
+[docs/compatibility-program.md](docs/compatibility-program.md) and performance
+measurements are in [docs/performance.md](docs/performance.md). Work that was
+built, measured and rejected is kept too, so it is not attempted twice:
+[docs/negative-result-expert-cache.md](docs/negative-result-expert-cache.md)
+for MoE expert caching, and
+[docs/negative-result-metal-multirow-matvec.md](docs/negative-result-metal-multirow-matvec.md)
+for the multi-row Metal decode matvec — which also records what the
+CPU/GPU byte-identity contract costs in reachable GPU optimizations.
 
 ## Build and platforms
 
