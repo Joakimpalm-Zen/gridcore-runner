@@ -157,7 +157,7 @@ kernel void k_mv_f16(MV_PARAMS) {
     float s = 0;
     if ((a.n_in & 3) == 0) {
         device const packed_half4 *w4 = (device const packed_half4 *)rw;
-        device const float4 *x4 = (device const float4 *)x;
+        device const packed_float4 *x4 = (device const packed_float4 *)x;
         int n4 = a.n_in >> 2;
         float4 acc = 0;
         for (int i = tiisg; i < n4; i += 32) acc += float4(w4[i]) * x4[i];
@@ -304,7 +304,7 @@ kernel void k_mv_bf16(MV_PARAMS) {
     float s = 0;
     if ((a.n_in & 3) == 0) {
         device const packed_ushort4 *w4 = (device const packed_ushort4 *)rw;
-        device const float4 *x4 = (device const float4 *)x;
+        device const packed_float4 *x4 = (device const packed_float4 *)x;
         int n4 = a.n_in >> 2;
         float4 acc = 0;
         for (int i = tiisg; i < n4; i += 32) {
@@ -580,11 +580,15 @@ kernel void k_mv_q5_K(MV_PARAMS) {
         uchar u1 = (uchar)(1u << (2 * jj)), u2 = (uchar)(2u << (2 * jj));
         // packed_uchar4 for the same reason as q6_K: 176 is a multiple of 16,
         // but q sits at blk+48+jj*32 and qh at blk+16, so only packed types
-        // are safe without re-deriving alignment for every offset.
+        // are safe without re-deriving alignment for every offset. The
+        // activations are packed for a reason that had been missed: x is
+        // x_all + col * x_stride and x_stride is a model dimension or scratch
+        // pitch, so a plain float4 load off it asserted a 16-byte alignment
+        // the caller never promised.
         device const packed_uchar4 *q4  = (device const packed_uchar4 *)q;
         device const packed_uchar4 *qh4 = (device const packed_uchar4 *)qh;
-        device const float4 *xlo = (device const float4 *)xp;
-        device const float4 *xhi = (device const float4 *)(xp + 32);
+        device const packed_float4 *xlo = (device const packed_float4 *)xp;
+        device const packed_float4 *xhi = (device const packed_float4 *)(xp + 32);
         float4 a1v = 0, a2v = 0;
         for (int k = 0; k < 8; k++) {
             uchar4 qq = q4[k], hh = qh4[k];
@@ -632,10 +636,10 @@ kernel void k_mv_q6_K(MV_PARAMS) {
             device const packed_uchar4 *l4  = (device const packed_uchar4 *)(ql + is * 16);
             device const packed_uchar4 *l4b = (device const packed_uchar4 *)(ql + 32 + is * 16);
             device const packed_uchar4 *h4  = (device const packed_uchar4 *)(qh + is * 16);
-            device const float4 *x0 = (device const float4 *)(xp + is * 16);
-            device const float4 *x1 = (device const float4 *)(xp + 32 + is * 16);
-            device const float4 *x2 = (device const float4 *)(xp + 64 + is * 16);
-            device const float4 *x3 = (device const float4 *)(xp + 96 + is * 16);
+            device const packed_float4 *x0 = (device const packed_float4 *)(xp + is * 16);
+            device const packed_float4 *x1 = (device const packed_float4 *)(xp + 32 + is * 16);
+            device const packed_float4 *x2 = (device const packed_float4 *)(xp + 64 + is * 16);
+            device const packed_float4 *x3 = (device const packed_float4 *)(xp + 96 + is * 16);
             float4 a0 = 0, a1 = 0, a2 = 0, a3 = 0;
             for (int k = 0; k < 4; k++) {
                 uchar4 lo = l4[k], hi = l4b[k], h = h4[k];   // widen on load
@@ -1595,10 +1599,10 @@ kernel void k_moe_mv_q6_K(MOE_MV_PARAMS) {
             device const packed_uchar4 *l4  = (device const packed_uchar4 *)(ql + is * 16);
             device const packed_uchar4 *l4b = (device const packed_uchar4 *)(ql + 32 + is * 16);
             device const packed_uchar4 *h4  = (device const packed_uchar4 *)(qh + is * 16);
-            device const float4 *x0 = (device const float4 *)(xp + is * 16);
-            device const float4 *x1 = (device const float4 *)(xp + 32 + is * 16);
-            device const float4 *x2 = (device const float4 *)(xp + 64 + is * 16);
-            device const float4 *x3 = (device const float4 *)(xp + 96 + is * 16);
+            device const packed_float4 *x0 = (device const packed_float4 *)(xp + is * 16);
+            device const packed_float4 *x1 = (device const packed_float4 *)(xp + 32 + is * 16);
+            device const packed_float4 *x2 = (device const packed_float4 *)(xp + 64 + is * 16);
+            device const packed_float4 *x3 = (device const packed_float4 *)(xp + 96 + is * 16);
             float4 a0 = 0, a1 = 0, a2 = 0, a3 = 0;
             for (int k = 0; k < 4; k++) {
                 uchar4 lo = l4[k], hi = l4b[k], h = h4[k];
