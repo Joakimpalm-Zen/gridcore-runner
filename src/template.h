@@ -12,6 +12,10 @@
 enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_APERTUS, TMPL_ORNITH,
        TMPL_MUSE, TMPL_GRANITE,
+       // gpt-oss / OpenAI Harmony. Channel-structured: the assistant writes
+       // an `analysis` message before its `final` one, and both ride the
+       // same <|start|>role<|channel|>name<|message|> framing.
+       TMPL_HARMONY,
        TMPL_RAW,
        // ChatML whose own template declares <think>: Qwen3 and relatives.
        // Split from TMPL_CHATML only so the thinking control below has
@@ -222,6 +226,26 @@ typedef struct {
     char *buf;
     int   n, cap;
 } think_split;
+// Harmony's analysis channel as a splitter open/close pair — in DECODED form.
+// The splitter sees detokenized text, and Harmony's control tokens
+// (<|channel|>, <|message|>, <|end|>, <|start|>) all decode to nothing, so the
+// bytes that actually arrive around the channel handoff are the bare words:
+//
+//   <|channel|>analysis<|message|>            -> "analysis"
+//   <|end|><|start|>assistant<|channel|>final<|message|> -> "assistantfinal"
+//
+// Measured live on gpt-oss-20b at temp 0, whose raw stream reads
+// "analysisWe have a conversation...assistantfinal2 + 2 equals **4**."
+// This is the same trap muse hit: its markers are the decoded " to=self" /
+// "assistant to=user", not the control-token spellings (see
+// test_muse_plain_thinking_close_leaves_no_recipient_residue). Writing the
+// control-token forms here compiles, renders, and silently never matches.
+//
+// The close must span the WHOLE handoff. Narrowing it would leak "assistant"
+// or "final" into content, which is the residue bug muse recorded.
+#define HARMONY_THINK_OPEN  "analysis"
+#define HARMONY_THINK_CLOSE "assistantfinal"
+
 void think_init(think_split *t, const char *open, const char *close);
 void think_init_reasoning(think_split *t, const char *open, const char *close);
 int  think_feed(think_split *t, const char *bytes, int n, think_cb cb, void *ud);

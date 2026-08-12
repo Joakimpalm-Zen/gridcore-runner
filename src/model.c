@@ -5,6 +5,7 @@
 #include "gpu.h"
 #include "vramreg.h"
 #include "compat.h"
+#include "template.h"   // HARMONY_THINK_OPEN/CLOSE for the gpt-oss channel split
 
 #include <math.h>
 #include <float.h>
@@ -1217,6 +1218,11 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         //     runner's generic SWA path defaults that to 10k, which would be
         //     silently wrong, so it is pinned explicitly below.
         m->gptoss     = true;
+        // Harmony's analysis channel, split out of content by think_feed the
+        // same way muse's ` to=self` reasoning turn is. Suppressed from
+        // content by default and surfaced as reasoning_content.
+        m->think_open  = HARMONY_THINK_OPEN;
+        m->think_close = HARMONY_THINK_CLOSE;
         m->swa_rope_global = true;   // sliding layers rope like the global ones
         m->ffn_act    = ACT_SWIGLU_OAI;
         m->swa_window = (int)gguf_get_u32(g, AK("attention.sliding_window"), 0);

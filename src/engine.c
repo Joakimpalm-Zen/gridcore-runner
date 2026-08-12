@@ -47,13 +47,34 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
                                    // NOT a stop: it separates a reasoning
                                    // turn from the answer that follows it)
                                    "<|eot|>" };
+    // gpt-oss / Harmony inverts one of these. <|end|> terminates a NON-final
+    // Harmony message — the assistant writes its analysis, closes it with
+    // <|end|>, then opens the final channel — so treating <|end|> as a stop
+    // ends generation on the reasoning and never reaches the answer. It is in
+    // the list above for phi3, whose assistant turns really do end there.
+    // <|return|> is Harmony's own end-of-generation marker and takes its place;
+    // <|call|> joins it so an unrendered tool attempt stops instead of running
+    // away (Harmony tool calling is deliberately not rendered — see template.c).
+    bool harmony = strcmp(m->arch, "gpt-oss") == 0;
     for (size_t i = 0; i < sizeof(stops) / sizeof(*stops); i++) {
+        if (harmony && !strcmp(stops[i], "<|end|>")) continue;
         int id = tok_find(tok, stops[i]);
         if (id < 0 || e->n_stop >= (int)(sizeof(e->stop_ids) / sizeof(*e->stop_ids)))
             continue;
         bool dup = false;
         for (int j = 0; j < e->n_stop; j++) if (e->stop_ids[j] == id) dup = true;
         if (!dup) e->stop_ids[e->n_stop++] = id;
+    }
+    if (harmony) {
+        static const char *hstops[] = { "<|return|>", "<|call|>" };
+        for (size_t i = 0; i < sizeof(hstops) / sizeof(*hstops); i++) {
+            int id = tok_find(tok, hstops[i]);
+            if (id < 0 || e->n_stop >= (int)(sizeof(e->stop_ids) / sizeof(*e->stop_ids)))
+                continue;
+            bool dup = false;
+            for (int j = 0; j < e->n_stop; j++) if (e->stop_ids[j] == id) dup = true;
+            if (!dup) e->stop_ids[e->n_stop++] = id;
+        }
     }
     if (!strcmp(m->arch, "muse-glimmer"))
         e->think_end_id = tok_find(tok, "<|eom|>");

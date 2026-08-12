@@ -190,6 +190,113 @@ static void test_muse_plain_thinking_close_leaves_no_recipient_residue(void) {
     think_free(&split);
 }
 
+
+// ---------------------------------------------------------------- Harmony
+//
+// gpt-oss. Before 2026-08-14 this fell through template_detect's terminal
+// fallback to llama2 and was fed [INST]/<<SYS>> markup that appears nowhere
+// in its own GGUF; chat ran away and hallucinated [/INST]. These pin the
+// rendering, the detection, and the analysis-channel split.
+
+static void test_detect_harmony(tokenizer *t) {
+    // <|channel|> + <|return|> is the pair no other family has. muse claims
+    // <|start|> + <|eot|>, which Harmony lacks, so the branches cannot collide.
+    const char *harmony =
+        "{%- for m in messages %}<|start|>{{ m.role }}<|message|>{{ m.content }}"
+        "<|end|>{%- endfor %}<|start|>assistant<|channel|>analysis<|message|>"
+        "...<|return|>";
+    assert(template_detect(harmony, t) == TMPL_HARMONY);
+    // and the families it must not steal
+    const char *muse = "<|start|>assistant to=user<|message|>x<|eot|>";
+    assert(template_detect(muse, t) == TMPL_MUSE);
+    const char *l3 = "<|start_header_id|>user<|end_header_id|>";
+    assert(template_detect(l3, t) == TMPL_LLAMA3);
+    const char *granite = "<|start_of_role|>user<|end_of_role|>";
+    assert(template_detect(granite, t) == TMPL_GRANITE);
+}
+
+static void test_harmony_render_golden(void) {
+    const chat_msg msgs[] = {
+        { .role = "system",    .content = "Be terse." },
+        { .role = "user",      .content = "What is 2+2?" },
+        { .role = "assistant", .content = "4" },
+        { .role = "user",      .content = "And 3+3?" },
+    };
+    char out[4096];
+    render_messages(TMPL_HARMONY, msgs, 4, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out,
+        "<|start|>system<|message|>You are ChatGPT, a large language model "
+        "trained by OpenAI.\n\nReasoning: medium\n\n# Valid channels: "
+        "analysis, final. Channel must be included for every message.<|end|>"
+        "<|start|>developer<|message|># Instructions\n\nBe terse.<|end|>"
+        "<|start|>user<|message|>What is 2+2?<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>4<|end|>"
+        "<|start|>user<|message|>And 3+3?<|end|>"
+        "<|start|>assistant<|channel|>analysis<|message|>") == 0);
+}
+
+static void test_harmony_render_without_system(void) {
+    const chat_msg msgs[] = { { .role = "user", .content = "hi" } };
+    char out[2048];
+    render_messages(TMPL_HARMONY, msgs, 1, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    // no developer turn when the caller supplied no system message
+    assert(strstr(out, "<|start|>developer") == NULL);
+    assert(strstr(out, "<|start|>user<|message|>hi<|end|>") != NULL);
+    assert(strstr(out, "<|start|>assistant") != NULL);
+}
+
+// THINK_ON primes the analysis channel in the prompt, THINK_OFF primes final
+// — the same trick muse plays with ` to=self` / ` to=user`.
+static void test_harmony_thinking_controls_the_primed_channel(void) {
+    const chat_msg msgs[] = { { .role = "user", .content = "hi" } };
+    char on[2048], off[2048], def[2048];
+    render_messages(TMPL_HARMONY, msgs, 1, true, THINK_ON, on, sizeof(on));
+    render_messages(TMPL_HARMONY, msgs, 1, true, THINK_OFF, off, sizeof(off));
+    render_messages(TMPL_HARMONY, msgs, 1, true, THINK_DEFAULT, def, sizeof(def));
+    assert(strstr(on,  "<|start|>assistant<|channel|>analysis<|message|>"));
+    assert(strstr(off, "<|start|>assistant<|channel|>final<|message|>"));
+    // DEFAULT primes analysis too: the decoded open marker is the bare word
+    // "analysis", too common to hunt for in a free stream, so the splitter
+    // starts already inside reasoning instead of searching for it
+    assert(strstr(def, "<|start|>assistant<|channel|>analysis<|message|>"));
+    assert(strstr(def, "<|channel|>final<|message|>") == NULL);
+}
+
+// The analysis channel rides the existing splitter: everything from the
+// analysis header to the final header is reasoning, the rest is content.
+static void test_harmony_split_hides_analysis_from_content(void) {
+    think_split split;
+    split_capture got = {0};
+    think_init(&split, HARMONY_THINK_OPEN, HARMONY_THINK_CLOSE);
+    // the DECODED stream: Harmony's control tokens detokenize to nothing, so
+    // only the channel words survive (measured live on gpt-oss-20b)
+    const char *generated =
+        "analysisUser asks 2+2. Answer 4.assistantfinal4";
+    for (size_t i = 0; i < strlen(generated); i++)
+        think_feed(&split, generated + i, 1, capture_split, &got);
+    think_finish(&split, capture_split, &got);
+    assert(!strcmp(got.reason, "User asks 2+2. Answer 4."));
+    assert(!strcmp(got.content, "4"));
+    think_free(&split);
+}
+
+// With the prompt already inside the analysis channel (THINK_ON) the split
+// starts in reasoning, exactly as muse's forced-think path does.
+static void test_harmony_split_starts_inside_primed_analysis(void) {
+    think_split split;
+    split_capture got = {0};
+    think_init_reasoning(&split, HARMONY_THINK_OPEN, HARMONY_THINK_CLOSE);
+    const char *generated = "thinking out loudassistantfinaldone";
+    for (size_t i = 0; i < strlen(generated); i++)
+        think_feed(&split, generated + i, 1, capture_split, &got);
+    think_finish(&split, capture_split, &got);
+    assert(!strcmp(got.reason, "thinking out loud"));
+    assert(!strcmp(got.content, "done"));
+    think_free(&split);
+}
+
 static void test_ornith_groups_consecutive_tool_responses(void) {
     const chat_msg msgs[] = {
         { "user", "HI" },
@@ -451,6 +558,12 @@ int main(void) {
     test_muse_parallel_tool_history_has_native_turn_boundaries();
     test_muse_tool_history_skips_bad_calls_without_leading_boundary();
     test_muse_user_payload_strip_removes_only_recipient_header();
+    test_detect_harmony(&t);
+    test_harmony_render_golden();
+    test_harmony_render_without_system();
+    test_harmony_thinking_controls_the_primed_channel();
+    test_harmony_split_hides_analysis_from_content();
+    test_harmony_split_starts_inside_primed_analysis();
 
     tokenizer_free(&t);
     gguf_close(&g);

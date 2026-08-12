@@ -936,7 +936,15 @@ int main(int argc, char **argv) {
 
         jsonv_init(&e.jv); // fresh JSON constraint per turn
         chat_out co = { .in_think = false };
-        think_init(&co.ts, m.think_open, m.think_close);
+        // Harmony primes the analysis channel in the generation prompt, so the
+        // stream starts INSIDE reasoning; a content-first split would never
+        // see the open marker and would print the model's analysis (and the
+        // "assistantfinal" handoff) as the answer. Same seam the server uses
+        // for this template — see harmony_primed_think in completion.c.
+        if (tmpl == TMPL_HARMONY)
+            think_init_reasoning(&co.ts, m.think_open, m.think_close);
+        else
+            think_init(&co.ts, m.think_open, m.think_close);
         n_gen = engine_generate(&e, logits, n_predict, chat_cb, &co, &gtime);
         think_finish(&co.ts, chat_emit, &co);
         if (co.in_think) fputs("\n[/thinking]", stdout);

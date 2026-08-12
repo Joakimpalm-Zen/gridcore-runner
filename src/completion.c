@@ -1146,6 +1146,14 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     engine *e = &s->e;
     bool muse_forced_think = chat && s->tmpl == TMPL_MUSE &&
                              req_thinking_mode(req) == THINK_ON;
+    // Harmony primes the analysis channel in the prompt for every mode except
+    // THINK_OFF (see the generation-prompt comment in template.c), so the
+    // stream starts INSIDE reasoning and the splitter must too — the same
+    // reason ornith always does and muse does when forced. Getting this wrong
+    // is silent: the split simply never fires and the model's analysis is
+    // served as content, which is what the first live run did.
+    bool harmony_primed_think = chat && s->tmpl == TMPL_HARMONY &&
+                                req_thinking_mode(req) != THINK_OFF;
     // Major faults are page-ins that went to disk, so the delta across a
     // request IS the paging stall rather than an inference from wall-clock: a
     // slow request that took no major faults was slow for some other reason.
@@ -1548,7 +1556,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                           "context_length_exceeded");
         return;
     }
-    if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think)
+    if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think ||
+        harmony_primed_think)
         engine_think_started(e);
 
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
@@ -1557,7 +1566,8 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     tool_envelope muse_plain_env = {.muse_plain_payload = true};
     snprintf(g.id, sizeof(g.id), "%s", req_id);
     // split thinking channels out of chat responses; raw completions stay raw
-    if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think)
+    if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think ||
+        harmony_primed_think)
         think_init_reasoning(&g.ts, m->think_open, m->think_close);
     else
         think_init(&g.ts, chat ? m->think_open : NULL, m->think_close);

@@ -839,6 +839,15 @@ readable reason; absence from a run is never presented as a pass.
 - Canonical gpt-oss-20b passed an earlier 5-of-5, 16-token partial-offload test
   on an RTX 3070, but failed CPU/CUDA identity and chat/tokenizer gates on the
   later Blackwell full-offload matrix. Hardware and test-contract scope matter.
+  Its tokenizer differential is exact (0/721) and its **chat** gate now passes
+  too: gpt-oss renders through a real Harmony template as of 2026-08-14
+  (`<|channel|>`-structured turns, `<|return|>` as the stop), where it
+  previously fell through to llama2's `[INST]` markup and ran away. The
+  analysis channel is suppressed from `content` and surfaced as
+  `reasoning_content`; `enable_thinking: false` skips it. Harmony TOOL calling
+  is not rendered — unimplemented, not approximated. Measured transcripts:
+  [docs/gpt-oss-harmony-2026-08-14.md](docs/gpt-oss-harmony-2026-08-14.md).
+  The CPU/CUDA identity row is untouched by this and still stands as recorded.
 - Gemma-4-26B-A4B QAT's old 16-token CPU/CUDA result is not a substitute for
   the manifest's pending 128-token re-verification.
 - Numerically sensitive models may use a measured self-sensitivity floor

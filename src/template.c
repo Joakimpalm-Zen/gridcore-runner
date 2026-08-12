@@ -17,6 +17,12 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         if (strstr(meta_tmpl, "<function=example_function_name>") &&
             strstr(meta_tmpl, "<think>"))
             return TMPL_ORNITH;
+        // Harmony (gpt-oss): <|channel|> plus <|return|> is the pair no other
+        // family carries. Checked before muse because both use <|start|>role
+        // <|message|> framing; muse additionally requires <|eot|>, which
+        // Harmony does not have, so the two cannot claim each other.
+        if (strstr(meta_tmpl, "<|channel|>") && strstr(meta_tmpl, "<|return|>"))
+            return TMPL_HARMONY;
         // muse-glimmer: the atem tool-call syntax and the <|start|>role
         // <|message|> framing appear in no other family's template
         if (strstr(meta_tmpl, "atem:function_calls") ||
@@ -38,6 +44,8 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
             return strstr(meta_tmpl, "<<SYS>>") ? TMPL_LLAMA2 : TMPL_MISTRAL;
     }
     if (tok_find(tok, "<|assistant_start|>") >= 0) return TMPL_APERTUS;
+    if (tok_find(tok, "<|channel|>") >= 0 && tok_find(tok, "<|return|>") >= 0)
+        return TMPL_HARMONY;
     if (tok_find(tok, "<|eot|>") >= 0 && tok_find(tok, "<|message|>") >= 0)
         return TMPL_MUSE;
     if (tok_find(tok, "<|start_of_role|>") >= 0)   return TMPL_GRANITE;
@@ -87,6 +95,7 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "apertus")) return TMPL_APERTUS;
     if (!strcmp(name, "ornith")) return TMPL_ORNITH;
     if (!strcmp(name, "muse"))   return TMPL_MUSE;
+    if (!strcmp(name, "harmony")) return TMPL_HARMONY;
     if (!strcmp(name, "granite")) return TMPL_GRANITE;
     if (!strcmp(name, "raw"))    return TMPL_RAW;
     return -1;
@@ -104,6 +113,7 @@ const char *template_name(int t) {
         case TMPL_APERTUS: return "apertus";
         case TMPL_ORNITH: return "ornith";
         case TMPL_MUSE:   return "muse";
+        case TMPL_HARMONY: return "harmony";
         case TMPL_GRANITE: return "granite";
         default: return "raw";
     }
@@ -314,6 +324,77 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         }
         if (add_assistant)
             off = emit(out, cap, off, "<|assistant_start|>", NULL, NULL);
+        break;
+    }
+    case TMPL_HARMONY: {
+        // gpt-oss / OpenAI Harmony. Reference: the model's OWN
+        // tokenizer.chat_template in the official GGUF. Turn framing is
+        // <|start|>ROLE<|message|>CONTENT<|end|>; the assistant additionally
+        // names a channel, <|channel|>analysis for reasoning and
+        // <|channel|>final for the answer, and closes its final message with
+        // <|return|> when generating.
+        //
+        // The system turn is the format's own preamble (identity, reasoning
+        // effort, channel declaration) — NOT the caller's system message. A
+        // caller system message is a DEVELOPER turn in Harmony, which is the
+        // one structural thing that surprises people porting from ChatML.
+        // Tool/commentary channels are deliberately absent: Harmony tool
+        // calling is its own project and is not rendered here rather than
+        // being approximated (the granite-tool-calling precedent).
+        off = emit(out, cap, off,
+                   "<|start|>system<|message|>You are ChatGPT, a large "
+                   "language model trained by OpenAI.\n\nReasoning: medium"
+                   "\n\n# Valid channels: analysis, final. Channel must be "
+                   "included for every message.<|end|>", NULL, NULL);
+        bool wrote_dev = false;
+        for (int i = 0; i < n_msgs; i++) {
+            const chat_msg *mm = &msgs[i];
+            if (!strcmp(mm->role, "system")) {
+                // fold every system message into one developer turn, in order
+                off = emit(out, cap, off, wrote_dev
+                           ? "\n\n%s"
+                           : "<|start|>developer<|message|># Instructions\n\n%s",
+                           mm->content, NULL);
+                wrote_dev = true;
+                continue;
+            }
+            if (wrote_dev) {
+                off = emit(out, cap, off, "<|end|>", NULL, NULL);
+                wrote_dev = false;
+            }
+            if (!strcmp(mm->role, "assistant")) {
+                // history carries answers only: a past turn's analysis is not
+                // replayed, which is what the reference template does too
+                off = emit(out, cap, off,
+                           "<|start|>assistant<|channel|>final<|message|>",
+                           NULL, NULL);
+                off = emit(out, cap, off, "%s<|end|>", mm->content, NULL);
+            } else {
+                off = emit(out, cap, off, "<|start|>%s<|message|>",
+                           mm->role, NULL);
+                off = emit(out, cap, off, "%s<|end|>", mm->content, NULL);
+            }
+        }
+        if (wrote_dev) off = emit(out, cap, off, "<|end|>", NULL, NULL);
+        // Generation prompt. The bare header lets the model pick its own
+        // channel, which is what it is trained to do and what the splitter
+        // expects by default; THINK_ON/THINK_OFF prime a channel explicitly,
+        // the same lever muse pulls with ` to=self` / ` to=user`.
+        if (add_assistant) {
+            // Unlike muse, the DEFAULT primes the analysis channel rather
+            // than leaving the header bare. Two reasons, both practical: the
+            // model opens analysis on its own anyway (it is a reasoning
+            // model), and the decoded open marker is the bare word
+            // "analysis", which is far too common to hunt for in a free
+            // stream. Priming lets the splitter start already inside
+            // reasoning and never search for it. THINK_OFF primes final and
+            // gets no reasoning at all.
+            const char *head =
+                thinking == THINK_OFF
+                    ? "<|start|>assistant<|channel|>final<|message|>"
+                    : "<|start|>assistant<|channel|>analysis<|message|>";
+            off = emit(out, cap, off, "%s", head, NULL);
+        }
         break;
     }
     case TMPL_MUSE: {
