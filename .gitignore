@@ -98,6 +98,7 @@ test-split-guard-bin.exe
 # conformance harness run artifacts (report + recorded fixtures)
 tests/conformance/out/
 tests/torture/out/
+tests/quant-fidelity/out/
 __pycache__/
 *.pyc
 
