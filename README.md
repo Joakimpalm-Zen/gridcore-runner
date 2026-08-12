@@ -488,6 +488,17 @@ Chat supports buffered and SSE responses, part-array content, assistant
 and `keep_alive` in swap mode. Tool declarations are rendered into the model
 prompt and constrained back into well-formed `tool_calls`.
 
+`parallel_tool_calls:true` compiles the generic JSON tool envelope into a
+bounded `{"calls":[...]}` array (up to 8 entries) over the same discriminated
+union, instead of a single object; a direct answer is just a one-element
+array holding the `final` branch. Buffered and streaming requests map it the
+same way: each call gets its own `tool_calls[].index`, announced and closed
+before the next one opens, so a client reassembles a parallel SSE turn with
+the identical per-index accumulation it already uses for one call. A budget
+that truncates mid-call still closes to a legal, executable document —
+`sval_close` guarantees that — but `finish_reason` stays `"length"`, never
+`"tool_calls"`, when the closer rather than the model finished the entry.
+
 Muse's native atem format carries scalar parameter values as raw text rather
 than JSON strings. Consequently a scalar value cannot contain the literal
 `</atem:parameter>` sequence: atem itself uses that sentinel as the value
@@ -757,7 +768,8 @@ even when the architecture ID is listed.
 Not implemented: Vulkan; TLS/auth; remote bind; multi-part GGUF loading;
 Qwen2-MoE/DeepSeek/Kimi shared-expert or MLA layouts; Mamba/Jamba; Gemma-4 MTP
 draft heads; IQ2/IQ3 codebook quants; full GBNF; image/document inputs; hosted
-tools; response persistence; or parallel tool calls.
+tools; response persistence; or parallel tool calls on the Responses and
+Messages surfaces (Chat Completions supports it, buffered and streaming).
 
 ## Compatibility evidence
 

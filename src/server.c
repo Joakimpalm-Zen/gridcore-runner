@@ -103,26 +103,18 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 400, "parallel_tool_calls must be a boolean");
         return;
     }
-    bool want_stream = false;
-    if (!request_bool(req, "stream", false, &want_stream)) {
-        send_error(fd, 400, "stream must be a boolean");
-        return;
-    }
     bool atem_tool_calling = true;
     if (!request_bool(req, "atem_tool_calling", true, &atem_tool_calling)) {
         send_error(fd, 400, "atem_tool_calling must be a boolean");
         return;
     }
-    if (parallel && want_stream &&
-        (s->tmpl != TMPL_MUSE || !atem_tool_calling)) {
-        // The streaming demultiplexer tracks one call per turn; emitting
-        // several would need per-index delta state it does not have. Refuse
-        // rather than quietly downgrade to one call.
-        send_error(fd, 400,
-                   "parallel_tool_calls:true is not supported with stream:true; "
-                   "use a buffered request");
-        return;
-    }
+    // parallel_tool_calls:true + stream:true used to be refused here: the
+    // demultiplexer tracked one call per turn, and downgrading silently
+    // would leave the caller expecting calls it never got. tool_stream now
+    // loops the {"calls":[...]} array the same way ts_atem already looped
+    // native <atem:invoke> blocks -- announcing each call on its own index,
+    // closing it, and moving to the next -- so both modes stream several
+    // calls in one turn and the refusal is gone.
     char terr[224];
     int rc = tool_envelope_build_ex(tools, jv_get(req, "tool_choice"),
                                     request_schema(req), parallel, &env,
