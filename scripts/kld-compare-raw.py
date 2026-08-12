@@ -72,7 +72,51 @@ def query(endpoint, model_name, prompt, top_n=20):
     return top
 
 
-def kld_and_agreement(dist_a, dist_b):
+# ------------------------------------------------- quality bar v2: near-ties
+#
+# Plain top-1 agreement counts every argmax flip as a disagreement, including
+# flips between two tokens the REFERENCE itself could barely separate.
+# Measured 2026-08-13 on this box, that is exactly what the middle of the
+# quality ladder fails on: granite-4.1-3b Q6_K scored mean KLD 0.0155 (three
+# times inside the 0.05 bound) while missing 97% top-1 by four points, and
+# Phi-4-mini Q8_0 scored KLD 0.0082 with 94.75% top-1. Distributions that
+# close are not damaged; their argmaxes are coin-flipping.
+#
+# BAND DERIVATION, against the precedent this project already uses.
+# test_tc_tol forgives a top-1 flip whose top-two gap is within TIE_FRAC =
+# 0.02 of the logit range. Logprobs are shift-invariant softmax outputs, so a
+# top-two LOGPROB gap is numerically the same quantity as a top-two LOGIT gap.
+# The mean logit ranges tc-tol measures on real models here are ~25.5
+# (Llama-3.2-3B) to ~53.4 (Phi-4-mini), so its band is 0.51 to 1.07 nats. We
+# take 0.5 — the conservative end of that translation, forgiving strictly less
+# than tc-tol would on every model measured. In probability terms the runner-up
+# must hold at least exp(-0.5) = 61% of the leader's mass.
+#
+# The margin is read from the REFERENCE side, never the variant's. A variant
+# that is unsure where the reference was certain has lost something real; a
+# variant that picks differently where the reference had no opinion has not.
+DEFAULT_TIE_BAND = 0.5
+
+
+def top_two_margin(dist):
+    """Reference-side gap between the best and second-best logprob.
+
+    None when the distribution has fewer than two usable entries: there is no
+    gap to measure, and inventing one would forgive a flip on no evidence.
+    """
+    if len(dist) < 2:
+        return None
+    ordered = sorted(dist.values(), reverse=True)
+    return ordered[0] - ordered[1]
+
+
+def score_pair(dist_a, dist_b, tie_band=DEFAULT_TIE_BAND):
+    """(kld, plain_agree, margin_qualified_agree, top8_overlap).
+
+    dist_a is the variant under test, dist_b the reference. KLD direction and
+    the plain-agreement and overlap definitions are unchanged from v1, so every
+    published number keeps reproducing.
+    """
     union = set(dist_a) | set(dist_b)
     floor_a = min(dist_a.values()) - 1.0 if dist_a else -20.0
     floor_b = min(dist_b.values()) - 1.0 if dist_b else -20.0
@@ -86,11 +130,20 @@ def kld_and_agreement(dist_a, dist_b):
             kld += p * math.log(p / q)
     top1_a = max(dist_a, key=dist_a.get)
     top1_b = max(dist_b, key=dist_b.get)
+    agree = top1_a == top1_b
+    margin = top_two_margin(dist_b)
+    marg_agree = agree or (margin is not None and margin <= tie_band)
     top8_a = set(sorted(dist_a, key=lambda t: -dist_a[t])[:8])
     top8_b = set(sorted(dist_b, key=lambda t: -dist_b[t])[:8])
     denom = max(1, min(8, len(top8_a), len(top8_b)))
     overlap8 = len(top8_a & top8_b) / denom
-    return kld, top1_a == top1_b, overlap8
+    return kld, agree, marg_agree, overlap8
+
+
+def kld_and_agreement(dist_a, dist_b):
+    """v1 shape, kept so any caller predating the margin column still works."""
+    kld, agree, _marg, overlap8 = score_pair(dist_a, dist_b)
+    return kld, agree, overlap8
 
 
 def main(argv):
@@ -108,6 +161,10 @@ def main(argv):
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--port-a", type=int, default=58611)
     ap.add_argument("--port-b", type=int, default=58612)
+    ap.add_argument("--tie-band", type=float, default=DEFAULT_TIE_BAND,
+                    help="near-tie band in nats for margin-qualified top-1 "
+                         f"(default {DEFAULT_TIE_BAND}; see the derivation "
+                         "against test_tc_tol's 0.02-of-range in this script)")
     ap.add_argument("--out")
     args = ap.parse_args(argv)
 
@@ -141,7 +198,7 @@ def main(argv):
         words = open(args.corpus, encoding="utf-8").read().split()
         n_scored = 0
         n_failed = 0
-        klds, top1s, overlaps = [], [], []
+        klds, top1s, overlaps, margs, positions = [], [], [], [], []
         prefix = ""
         for i, w in enumerate(words):
             prefix = (prefix + " " + w).strip() if prefix else w
@@ -156,8 +213,17 @@ def main(argv):
                 n_failed += 1
                 print(f"position {i} failed: {e}", file=sys.stderr)
                 continue
-            kld, agree, overlap8 = kld_and_agreement(da, db)
+            kld, agree, marg, overlap8 = score_pair(da, db, args.tie_band)
             klds.append(kld); top1s.append(agree); overlaps.append(overlap8)
+            margs.append(marg)
+            # Per-position records so a bar change can be re-scored from the
+            # evidence instead of re-running every model. v1 stored summaries
+            # only, which is why the 2026-08-14 both-ways re-report had to
+            # re-run nine rows from scratch.
+            positions.append({"i": i, "kld": kld, "agree": agree,
+                              "margin_agree": marg,
+                              "ref_margin": top_two_margin(db),
+                              "top8": overlap8})
             n_scored += 1
     finally:
         for p in procs:
@@ -169,11 +235,19 @@ def main(argv):
                 p.kill()
 
     result = {
+        # v2 (2026-08-14) ADDS the margin-qualified column and per-position
+        # records. Every v1 field keeps its name and its meaning, so published
+        # v1 numbers stay comparable and reproducible.
+        "schema_version": "xyntetik.runner.kld-raw.v2",
+        "tie_band_nats": args.tie_band,
         "positions_scored": n_scored,
         "positions_failed": n_failed,
         "mean_kld": sum(klds) / len(klds) if klds else None,
         "top1_agreement_pct": 100.0 * sum(top1s) / len(top1s) if top1s else None,
+        "top1_margin_qualified_pct":
+            100.0 * sum(margs) / len(margs) if margs else None,
         "mean_top8_overlap": sum(overlaps) / len(overlaps) if overlaps else None,
+        "positions": positions,
     }
     print(json.dumps(result, indent=2))
     if args.out:
