@@ -108,6 +108,22 @@ def check(args):
         for stale in stale_release_strings(read(path), version, args.tag):
             ok &= fail(f"current document {path} contains stale release string {stale!r}")
 
+    # A compatibility ledger nobody publishes is a private spreadsheet. The
+    # reports have existed since 2026-08-13; this makes producing one part of
+    # cutting a release instead of part of remembering to. The gate only
+    # asks that a dated report for THIS version exists — what it contains is
+    # the manifest's business, and a report whose checks did not run says so
+    # itself (RNR-007).
+    if args.compat_reports and args.compat_reports.is_dir():
+        stem = f"{version}-"
+        if not any(p.name.startswith(stem) and p.suffix == ".json"
+                   for p in args.compat_reports.iterdir()):
+            ok &= fail(
+                f"no compat report for {version} in {args.compat_reports} "
+                f"(expected {stem}<date>.json — run scripts/compat_matrix.py "
+                f"on a box that has the pinned models and commit the report)"
+            )
+
     return ok
 
 
@@ -122,6 +138,11 @@ def main(argv=None):
                         default=ROOT / ".github/workflows/release.yml")
     parser.add_argument("--python-pyproject", type=Path,
                         default=ROOT / "python/pyproject.toml")
+    parser.add_argument("--compat-reports", type=Path,
+                        default=ROOT / "docs" / "compat-reports",
+                        help="directory of dated per-release compatibility "
+                             "reports; the release must ship one for its own "
+                             "version")
     parser.add_argument("--commit", required=True,
                         help="commit SHA expected in BUILD-INFO.txt")
     parser.add_argument(

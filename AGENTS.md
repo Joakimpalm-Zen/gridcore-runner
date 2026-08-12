@@ -71,6 +71,26 @@ Forbidden behavior:
 
 Working rule: red, green, refactor; one vertical behavior at a time.
 
+### Mutation testing: make the rebuild provable
+
+When proving a test can fail — breaking a source, running the gate, restoring
+it — the restore must land in a LATER whole second than the build that
+followed the mutation. `make` compares whole-second mtimes, so a restore in
+the same second leaves a stale object linked and the "restored" run reports
+the mutated binary's result. Observed twice (2026-08-09, 2026-08-10), both
+times as a gate that appeared to pass while testing the wrong binary.
+
+Required behavior:
+
+- After restoring a mutated source, `touch` it and confirm the rebuild
+  actually happened (a compile line in the output, or a changed binary
+  mtime/hash) before trusting the run.
+- Never conclude from a mutation run that a gate is sound without that
+  confirmation; a silently skipped rebuild produces exactly the reassuring
+  result the exercise exists to disprove.
+
+Working rule: a mutation test proves nothing until the rebuild is proven.
+
 ## 4. Grill Me Always
 
 Actively challenge unclear requirements until the work is understood.

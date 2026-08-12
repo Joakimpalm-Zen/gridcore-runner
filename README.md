@@ -860,8 +860,11 @@ files by SHA-256 and declares checks independently:
 Being present in the manifest does not mean every check passed. Read each
 entry's declared checks and notes. Current high-signal caveats include:
 
-Every release ships a schema-versioned report under `docs/compat-reports/`.
-Generate it against the pinned files available on the release box with:
+Every release ships a schema-versioned report under `docs/compat-reports/`,
+and `scripts/check-release.py` enforces it: a tag whose version has no
+`<version>-<date>.json` in that directory fails the release check rather
+than shipping with an unpublished ledger. Generate it against the pinned
+files available on the release box with:
 
 ```sh
 python3 scripts/compat_matrix.py --models-root /path/to/models \

@@ -41,7 +41,24 @@ def good_args(tmp_path):
         ),
         commit="abc123",
         current_docs=[],
+        compat_reports=report_dir(tmp_path, "0.1.3-alpha-2026-01-01.json"),
     )
+
+
+def report_dir(tmp_path, *names):
+    """A compat-report directory holding EXACTLY the named dated reports.
+
+    Cleared on entry: the helper is called twice per test (once by good_args,
+    once by the test itself), and a leftover report from the first call would
+    satisfy the gate the second call is trying to trip.
+    """
+    d = tmp_path / "compat-reports"
+    d.mkdir(exist_ok=True)
+    for stale in d.iterdir():
+        stale.unlink()
+    for name in names:
+        write(d / name, "{}\n")
+    return d
 
 
 def test_release_check_accepts_consistent_artifacts(monkeypatch, tmp_path):
@@ -94,3 +111,42 @@ def test_release_check_rejects_stale_current_document(monkeypatch, tmp_path, cap
     )
     assert not check_release.check(args)
     assert "current document" in capsys.readouterr().err
+
+
+# The ledger is only credible if every release ships one. The reports existed
+# from 2026-08-13 but nothing made producing them part of cutting a release,
+# so the habit depended on somebody remembering.
+
+def test_release_check_requires_a_compat_report_for_this_release(
+        monkeypatch, tmp_path, capsys):
+    args = good_args(tmp_path)
+    args.compat_reports = report_dir(tmp_path, "0.1.2-alpha-2026-01-01.json")
+    monkeypatch.setattr(
+        check_release, "binary_version", lambda _: "runner 0.1.3-alpha"
+    )
+    assert not check_release.check(args)
+    assert "compat report" in capsys.readouterr().err
+
+
+def test_release_check_accepts_any_dated_report_for_this_release(
+        monkeypatch, tmp_path):
+    args = good_args(tmp_path)
+    args.compat_reports = report_dir(
+        tmp_path, "0.1.2-alpha-2026-01-01.json", "0.1.3-alpha-2026-02-09.json"
+    )
+    monkeypatch.setattr(
+        check_release, "binary_version", lambda _: "runner 0.1.3-alpha"
+    )
+    assert check_release.check(args)
+
+
+def test_release_check_skips_the_report_gate_when_no_directory_is_given(
+        monkeypatch, tmp_path):
+    """An older checkout, or a caller that does not pass the flag, still
+    releases: the gate binds the process, it does not break the tool."""
+    args = good_args(tmp_path)
+    args.compat_reports = None
+    monkeypatch.setattr(
+        check_release, "binary_version", lambda _: "runner 0.1.3-alpha"
+    )
+    assert check_release.check(args)
