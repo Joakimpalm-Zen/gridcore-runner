@@ -255,6 +255,8 @@ flags into unrelated feature sections.
 | `--gpu-layers N` | Force the first `N` layers onto the GPU; `0` means no GPU. Omit for auto-fit. |
 | `--cpu-moe [N\|auto]` | CUDA hybrid placement: keep all, the deepest `N`, or an auto-fit set of expert FFNs in system RAM. |
 | `--wait-for-vram [S]` | Wait for another registered runner to release VRAM, default `300` seconds, instead of failing immediately. |
+| `--vram-priority N` | Advisory priority tag on this claim, default `0` (also `RUNNER_VRAM_PRIORITY`). See [VRAM registry: priority and cooperative yield](#vram-registry-priority-and-cooperative-yield). |
+| `--yield-on-request` | In `--serve`, release the resident model at the next idle point when another process has asked it to. See the same section. |
 | `--reserve P` | Limit this process to `P` percent of total RAM and VRAM. |
 | `--reserve-vram P` | Override only the VRAM budget. |
 | `--reserve-ram P` | Override only the RAM budget. |
@@ -368,6 +370,43 @@ before the 64-thread cap. Measure `-t 12` to `-t 16` as well as the default;
 the project recorded 17.0 tok/s at 12-16 threads versus 7.8 tok/s at 64 on one
 128-core gemma-4-26B-A4B run. This is workload evidence, not a universal
 thread-count rule.
+
+#### VRAM registry: priority and cooperative yield
+
+The VRAM registry (above) accounts for who holds what; these three primitives
+let cooperating processes negotiate around that accounting without turning
+runner into a scheduler. All of it is **advisory**: it only has any effect on
+processes that opt in by passing the flags below, and nothing in the engine
+can force, signal, or kill an uncooperative one. Fair-share, priority lanes,
+starvation prevention, and actual preemption are policy, and policy lives in
+whatever coordinates several runner instances, not in the engine — this is the
+raw material for that layer, not the layer itself.
+
+- **Priority tag.** `--vram-priority N` (default `0`, also `RUNNER_VRAM_PRIORITY`)
+  records a small-integer tag on the claim. It is printed in the refusal
+  listing next to pid, model, bytes, and uptime — `pid 4821 holding 5.2GB for
+  Qwen3-4B-Q4_K_M, up 4h39m, priority 3`. A ledger entry written by a runner
+  built before this field has exactly 7 tab-separated columns instead of 8 and
+  is read as priority `0`, the same as an explicit `--vram-priority 0`.
+- **Priority-ordered waiting.** Among several `--wait-for-vram` waiters queued
+  on the same GPU, a higher-priority one is admitted first once space frees —
+  but only among waiters whose own request currently fits that freed space; a
+  high-priority ask that does not fit yet never blocks a smaller low-priority
+  one out of room it does not need. This is ordering among cooperating
+  waiters, not a reservation: a process that never passes `--wait-for-vram`,
+  or that claims VRAM some other way, is invisible to it and can still take
+  memory out of turn.
+- **Cooperative yield.** `--serve --yield-on-request` opts a resident model
+  into releasing itself when asked. The ask is a REQUEST, checked only at the
+  one place `--serve` is ever idle between requests — never mid-generation,
+  never by a signal. An opted-in holder that sees one logs why and unloads
+  cleanly, the same path `--ttl` and `POST /unload` already use. An
+  unopted-in holder, or one that is busy, never notices. Nothing here is
+  preemption: there is no timeout after which a holder is forced out.
+
+None of the three needs a GPU to exercise — `tests/test_vram_registry.c`
+drives the whole surface, including priority ordering, through the same
+synthetic free-VRAM callback the rest of the registry's tests use.
 
 ## Serving and APIs
 

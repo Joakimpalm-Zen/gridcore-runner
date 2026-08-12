@@ -508,6 +508,12 @@ typedef struct {
     // --wait-for-vram: seconds to queue behind other registered runners rather
     // than refusing outright. 0 = refuse immediately (the default).
     int   vram_wait_secs;
+    // --vram-priority / RUNNER_VRAM_PRIORITY: advisory small-integer tag on
+    // this claim, default 0. Shown in the refusal listing; among several
+    // --wait-for-vram waiters on one GPU, decides who is admitted first once
+    // space frees (see vram_claim's header comment for the exact, bounded
+    // rule). No effect at all outside a --wait-for-vram queue.
+    int   vram_priority;
     // Load cancellation: when non-NULL and it becomes nonzero, a load queued in
     // the --wait-for-vram retry loop gives up promptly and the load fails. A
     // lock-free atomic, read across threads (RNR-008). The serving layer points
@@ -530,6 +536,12 @@ typedef struct {
     // load continues. Without it, weights are clean file-backed pages and are
     // the first thing a loaded machine evicts.
     bool  mlock;
+    // --yield-on-request: opt in to the cooperative VRAM yield primitive.
+    // --serve polls vram_yield_requested() for the resident model only while
+    // idle between requests (no --ttl/-m swap concept applies otherwise), and
+    // on a hit releases it cleanly and logs why. Off by default: nothing
+    // outside this process can make it give memory back except this flag.
+    bool  yield_on_request;
 } model_params;
 
 bool   model_load(model_t *m, const char *path, const model_params *p);

@@ -199,6 +199,16 @@ static void usage(const char *prog) {
         "                 GPU, queue for up to S seconds (default 300) instead\n"
         "                 of refusing. Without it a runner that does not fit\n"
         "                 fails immediately, naming who holds what.\n"
+        "  --vram-priority N  advisory small-integer priority (default 0,\n"
+        "                 also RUNNER_VRAM_PRIORITY). Shown in the refusal\n"
+        "                 listing; among several --wait-for-vram waiters on\n"
+        "                 one GPU, a higher N is admitted first once space\n"
+        "                 frees, but only among waiters that currently fit.\n"
+        "                 No effect without --wait-for-vram.\n"
+        "  --yield-on-request  in --serve, release the resident model at the\n"
+        "                 next idle point between requests when another\n"
+        "                 process has asked it to (vram_request_yield). A\n"
+        "                 request, never preemption: nothing forces this.\n"
         "  --reserve P    cap this runner at P%% of TOTAL VRAM and RAM. With\n"
         "                 -c 0 the context is auto-fit to whatever the\n"
         "                 reservation leaves after the weights\n"
@@ -278,6 +288,9 @@ int main(int argc, char **argv) {
     int thinking = THINK_DEFAULT;
     bool bench_json = false;
     model_params mp = {0};
+    // RUNNER_VRAM_PRIORITY sets the baseline; --vram-priority (parsed below)
+    // overrides it, same precedence as every other env/flag pair in runner.
+    mp.vram_priority = (int)env_i64("RUNNER_VRAM_PRIORITY", -1000, 1000, 0);
     // The four sampling knobs are filled in from the model's family preset
     // once the model is known; anything named on the command line is recorded
     // here and wins over the preset.
@@ -399,6 +412,9 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
                 mp.vram_wait_secs = (int)int_arg(a, argv[++i], 1, 86400);
         }
+        else if (!strcmp(a, "--vram-priority"))
+            mp.vram_priority = (int)int_arg(a, NEXT, -1000, 1000);
+        else if (!strcmp(a, "--yield-on-request")) mp.yield_on_request = true;
         else if (!strcmp(a, "--parent-pid")) parent_pid = (long)int_arg(a, NEXT, 1, LONG_MAX);
         else if (!strcmp(a, "--caps")) caps = true;
         else if (!strcmp(a, "--version")) { printf("runner %s\n", RUNNER_VERSION); return 0; }
