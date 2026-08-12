@@ -34,12 +34,47 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# The five short prompts are the historical set (5 to 15 tokens). The four
+# long ones were added 2026-08-15 for a specific reason: the TC prefill GEMM
+# published uninitialised shared memory for token columns 16 and above from
+# 2026-08-08 to 2026-08-13, and this gate ran in every certification through
+# that window without catching it, because its longest prompt was FIFTEEN
+# tokens. One more token and the bug would have been caught on day one.
+#
+# A CPU/CUDA identity gate whose prompts all fit in a single sub-tile silently
+# exempts every batched prefill path from the contract it claims to enforce.
+# These span roughly 24, 40, 64 and 96 tokens so the gate crosses the 16-column
+# boundary, the 32-column boundary and a full 64-column tile, and so a future
+# tile widening cannot hide behind short prompts either.
 PROMPTS = [
     "The capital of France is",
     "def fibonacci(n):",
     "1 2 3 4 5 6 7 8",
     "Once upon a time, in a land far away,",
     "Q: What is 17 * 23?\nA:",
+    # ~24 tokens: crosses the first tile boundary
+    "The lighthouse keeper recorded the weather every morning: wind "
+    "direction, cloud cover, and the hour the fog lifted.",
+    # ~40 tokens: crosses 32
+    "In 1929 the observatory published a revised catalogue listing 4218 "
+    "objects, of which roughly one in nine turned out on later inspection "
+    "to be a duplicate entry under a second designation. The correction",
+    # ~64 tokens: a full tile
+    "def parse_header(buf, size):\n"
+    "    if size < 8:\n"
+    "        raise ValueError('short header')\n"
+    "    magic, version = struct.unpack('<II', buf[:8])\n"
+    "    if magic != GGUF_MAGIC:\n"
+    "        raise ValueError('not a gguf file')\n"
+    "    return magic, version\n\n"
+    "# The loader above rejects a truncated header before unpacking it, which",
+    # ~96 tokens: past one tile, into a second
+    "The city of Lisbon sits on seven hills above the Tagus estuary, and its "
+    "oldest quarter survived the 1755 earthquake largely intact because the "
+    "bedrock there is firmer than the reclaimed ground downriver. Rebuilding "
+    "the lower town took decades, and the grid of streets laid out afterwards "
+    "was among the first in Europe designed with seismic loads in mind, which "
+    "is why the district still reads as unusually regular to a visitor who",
 ]
 
 

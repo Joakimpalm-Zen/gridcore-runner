@@ -18,7 +18,7 @@ def load_module():
 
 def test_model_manifest_covers_every_claimed_architecture():
     data = json.loads(MANIFEST.read_text())
-    assert data["schema_version"] == "xyntetik.runner.model-compat.v1"
+    assert data["schema_version"] == "xyntetik.runner.model-compat.v2"
     models = data["models"]
     assert {m["architecture"] for m in models} == {
         "llama", "qwen2", "qwen3", "qwen35", "phi3", "gemma3", "gemma4",
@@ -227,3 +227,78 @@ def test_unavailable_tokenizer_reference_is_skip_not_failure(tmp_path):
         ROOT / "tests/fixtures/tokenizer-corpus.txt", 10)
     assert result["status"] == "not_executed"
     assert result["reason"] == "tokenizer_reference_unavailable"
+
+
+# ------------------------------------------- executable check contracts (v2)
+#
+# cpu_cuda, chat and tool were declared in the manifest for months and landed as
+# not_executed with reason "check_class_not_executable": the ledger listed a
+# contract it could not run. v2 gives each of them structured parameters, so the
+# manifest states WHAT the check means for that model and the runner can execute
+# it. RNR-007 honesty is preserved: a check whose parameters are missing or whose
+# prerequisites are absent is still not_executed with a specific reason, never a
+# silent pass and never omitted.
+
+def _write_manifest_v2(tmp_path, checks, params=None, schema="xyntetik.runner.model-compat.v2"):
+    model_file = tmp_path / "m.gguf"
+    model_file.write_bytes(b"not a real model")
+    digest = hashlib.sha256(model_file.read_bytes()).hexdigest()
+    entry = {"id": "m", "architecture": "llama", "file": str(model_file),
+             "sha256": digest, "checks": checks}
+    if params is not None:
+        entry["check_params"] = params
+    manifest = {"schema_version": schema, "models": [entry]}
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(manifest))
+    return path
+
+
+def test_manifest_accepts_structured_check_parameters():
+    data = json.loads(MANIFEST.read_text())
+    assert data["schema_version"] == "xyntetik.runner.model-compat.v2"
+    # every model declaring one of the parameterised classes carries params for
+    # it: a declared contract with no definition is the thing v2 removes
+    for m in data["models"]:
+        for cls in ("cpu_cuda", "chat", "tool"):
+            if cls in m.get("checks", []):
+                assert cls in m.get("check_params", {}), (m["id"], cls)
+
+
+def test_cpu_cuda_params_declare_pins_and_a_minimum_prompt_length():
+    data = json.loads(MANIFEST.read_text())
+    seen = 0
+    for m in data["models"]:
+        p = m.get("check_params", {}).get("cpu_cuda")
+        if not p:
+            continue
+        seen += 1
+        assert isinstance(p.get("pins"), dict) and p["pins"], m["id"]
+        # the TC bug sat one token past the old 15-token maximum; a cpu_cuda
+        # contract that does not reach batch>16 prefill cannot catch that class
+        assert p.get("min_prompt_tokens", 0) >= 24, m["id"]
+    assert seen > 0, "no model declares cpu_cuda parameters"
+
+
+def test_missing_check_params_are_not_executed_with_a_specific_reason(tmp_path):
+    module = load_module()
+    manifest = _write_manifest_v2(tmp_path, ["cpu_cuda", "chat"], params={})
+    out = tmp_path / "report.json"
+    module.main(["--manifest", str(manifest), "--verify-files",
+                 "--execute-checks", "--out", str(out)])
+    report = json.loads(out.read_text())
+    checks = report["models"][0]["checks"]
+    for cls in ("cpu_cuda", "chat"):
+        assert checks[cls]["status"] == "not_executed"
+        assert checks[cls]["reason"] == f"{cls}_params_not_declared"
+
+
+def test_v1_manifests_still_load(tmp_path):
+    # the schema bump must not orphan an older manifest
+    module = load_module()
+    manifest = _write_manifest_v2(tmp_path, ["load"], params=None,
+                                  schema="xyntetik.runner.model-compat.v1")
+    out = tmp_path / "report.json"
+    rc = module.main(["--manifest", str(manifest), "--verify-files",
+                      "--out", str(out)])
+    assert rc == 0
+    assert json.loads(out.read_text())["models"][0]["file_status"] == "pass"

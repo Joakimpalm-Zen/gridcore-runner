@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -22,9 +23,112 @@ TOKENIZER_SCRIPT = ROOT / "scripts" / "difftok.py"
 GREEDY_SCRIPT = ROOT / "scripts" / "reference_compare.py"
 
 
+# v2 (2026-08-15) adds per-model `check_params` so the classes that were
+# declared-but-unrunnable (cpu_cuda, chat, tool) carry an executable definition.
+# v1 manifests still load: they simply declare no parameters, and any
+# parameterised class they list lands as not_executed with a specific reason.
+SCHEMA_VERSIONS = ("xyntetik.runner.model-compat.v1",
+                   "xyntetik.runner.model-compat.v2")
+
+
+
+# ---------------------------------------------- parameterised check runners
+#
+# Each returns the same shape as the older runners: status plus enough detail to
+# argue with. A missing parameter block is not_executed with a named reason, so
+# a manifest that declares a contract without defining it is visible rather than
+# quietly green.
+
+def run_cpu_cuda(runner, model, params, timeout):
+    """CPU vs CUDA byte identity under the pins the manifest names."""
+    script = ROOT / "scripts" / "cpu_cuda_check.py"
+    if not script.is_file():
+        return {"status": "not_executed", "reason": "cpu_cuda_script_not_found"}
+    env = dict(os.environ)
+    env.update({k: str(v) for k, v in (params.get("pins") or {}).items()})
+    cmd = [sys.executable, str(script), str(model),
+           "--tokens", str(params.get("tokens", 64))]
+    started = time.time()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout, env=env, cwd=str(ROOT))
+    except subprocess.TimeoutExpired:
+        return {"status": "not_executed", "reason": "cpu_cuda_timeout"}
+    out = (proc.stdout or "") + (proc.stderr or "")
+    # Capture WHICH prompts diverged, not just how many. The 2026-08-15 run
+    # recorded only a 400-character tail, which happened to hold the passing
+    # prompts, and three failures could not be attributed without re-running
+    # them by hand. The failing prompt is the whole diagnostic value here.
+    score = re.search(r"(\d+)/(\d+) identical", out)
+    failed_prompts = re.findall(r"^FAIL: (.+)$", out, re.M)
+    return {"status": "pass" if proc.returncode == 0 else "fail",
+            "returncode": proc.returncode,
+            "elapsed_ms": round((time.time() - started) * 1000, 2),
+            "pins": params.get("pins") or {},
+            "min_prompt_tokens": params.get("min_prompt_tokens"),
+            "identical": score.group(0) if score else None,
+            "failed_prompts": [p[:160] for p in failed_prompts],
+            "output_tail": out[-1200:]}
+
+
+def run_chat(runner, model, params, timeout):
+    """One-shot chat smoke: the model must answer, stop, and not leak markup."""
+    prompt = params.get("prompt", "What is 2+2?")
+    cmd = [str(runner), "-m", str(model), "-i", "--temp", "0",
+           "--gpu", params.get("gpu", "auto"), "-n",
+           str(params.get("max_tokens", 200)), "--wait-for-vram", "300"]
+    started = time.time()
+    try:
+        proc = subprocess.run(cmd, input=f"{prompt}\n/exit\n", capture_output=True,
+                              text=True, timeout=timeout, cwd=str(ROOT))
+    except subprocess.TimeoutExpired:
+        return {"status": "not_executed", "reason": "chat_timeout"}
+    out = proc.stdout or ""
+    reasons = []
+    if params.get("expect_nonempty_content", True) and not out.strip():
+        reasons.append("empty_output")
+    for bad in params.get("forbid_substrings") or []:
+        if bad in out:
+            reasons.append(f"leaked:{bad}")
+    for want in params.get("expect_substrings") or []:
+        if want not in out:
+            reasons.append(f"missing:{want}")
+    # a run that hit the token ceiling did not stop on its own
+    if params.get("expect_stop", True) and f"[{params.get('max_tokens', 200)} tok" in (proc.stderr or ""):
+        reasons.append("hit_token_ceiling")
+    return {"status": "pass" if not reasons and proc.returncode == 0 else "fail",
+            "returncode": proc.returncode,
+            "elapsed_ms": round((time.time() - started) * 1000, 2),
+            "prompt": prompt, "failure_reasons": reasons,
+            "output_tail": out[-300:]}
+
+
+def run_tool(runner, model, params, timeout):
+    """Tool/structured-output fidelity via the scenario matrix the manifest names."""
+    matrix = params.get("scenario_matrix", "agent-torture")
+    script = ROOT / "scripts" / ("agent-torture.py" if matrix == "agent-torture" else "")
+    if not script or not script.is_file():
+        return {"status": "not_executed",
+                "reason": f"tool_matrix_not_available:{matrix}"}
+    cmd = [sys.executable, str(script), "--model", str(model)]
+    if params.get("cases"):
+        cmd += ["--cases", str(params["cases"])]
+    started = time.time()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout, cwd=str(ROOT))
+    except subprocess.TimeoutExpired:
+        return {"status": "not_executed", "reason": "tool_timeout"}
+    return {"status": "pass" if proc.returncode == 0 else "fail",
+            "returncode": proc.returncode,
+            "elapsed_ms": round((time.time() - started) * 1000, 2),
+            "scenario_matrix": matrix,
+            "output_tail": ((proc.stdout or "") + (proc.stderr or ""))[-400:]}
+
+
 def load_manifest(path):
     data = json.loads(Path(path).read_text())
-    if data.get("schema_version") != "xyntetik.runner.model-compat.v1":
+    if data.get("schema_version") not in SCHEMA_VERSIONS:
         raise ValueError("unsupported model compatibility manifest")
     seen = set()
     for model in data.get("models", []):
@@ -221,6 +325,20 @@ def main(argv=None):
                         item["checks"]["tokenizer"] = run_tokenizer(
                             path, tok_ref, corpus, args.timeout)
                         failed |= item["checks"]["tokenizer"]["status"] != "pass"
+                for cls, fn in (("cpu_cuda", run_cpu_cuda),
+                                ("chat", run_chat),
+                                ("tool", run_tool)):
+                    if cls not in declared:
+                        continue
+                    cp = (entry.get("check_params") or {}).get(cls)
+                    if not cp:
+                        item["checks"][cls] = {
+                            "status": "not_executed",
+                            "reason": f"{cls}_params_not_declared"}
+                        continue
+                    item["checks"][cls] = fn(args.runner.resolve(), path.resolve(),
+                                             cp, args.timeout)
+                    failed |= item["checks"][cls]["status"] == "fail"
                 if "greedy_reference" in declared:
                     if not args.reference:
                         item["checks"]["greedy_reference"] = {

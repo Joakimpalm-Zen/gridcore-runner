@@ -1,5 +1,5 @@
 {
-  "schema_version": "xyntetik.runner.model-compat.v1",
+  "schema_version": "xyntetik.runner.model-compat.v2",
   "reference_revision": "llama.cpp b10076 (305ba519a)",
   "models": [
     {
@@ -21,7 +21,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "mistral-7b-instruct-v0.3-q4_k_m",
@@ -42,7 +67,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "qwen2.5-32b-instruct-q3_k_s",
@@ -63,7 +113,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "qwen3-4b-q4_k_m",
@@ -84,7 +159,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "ornith-1.0-9b-q4_k_m",
@@ -106,7 +206,32 @@
         "tool",
         "long_context"
       ],
-      "notes": "CPU + CUDA; 5/5 scalar-path CPU/CUDA identity over 128 tokens re-verified 2026-08-03"
+      "notes": "CPU + CUDA; 5/5 scalar-path CPU/CUDA identity over 128 tokens re-verified 2026-08-03",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "phi-3.5-mini-instruct-q4_k_m",
@@ -127,7 +252,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "gemma-3-4b-it-q4_k_m",
@@ -148,7 +298,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "gemma-4-12b-it-q4_k_m",
@@ -169,7 +344,33 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0",
+            "RUNNER_MOE_EAGER": "1"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "qwen3-30b-a3b-q4_k_m",
@@ -189,7 +390,33 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0",
+            "RUNNER_MOE_EAGER": "1"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "gemma-4-e4b-it-q4_k_m",
@@ -207,7 +434,29 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "Per-layer embeddings + shared-KV layers, CPU and CUDA. greedy_reference is not declared: agreement with llama.cpp is at the quantisation noise floor, not token identity - 11/16 prompts at 16 tokens, against llama.cpp's own cold-vs-warm-cache floor of 12/16 on the same model, so the remaining gap is roughly one prompt. cpu_cuda IS exact and is the gate that holds here: byte-identical CPU vs full 42/42 GPU offload over 4 prompts at 32 tokens and one at 128, plus every partial-offload split across the shared-KV boundary on the generated fixture. Measure with scripts/sensitivity_floor.py before reading any cross-engine number."
+      "notes": "Per-layer embeddings + shared-KV layers, CPU and CUDA. greedy_reference is not declared: agreement with llama.cpp is at the quantisation noise floor, not token identity - 11/16 prompts at 16 tokens, against llama.cpp's own cold-vs-warm-cache floor of 12/16 on the same model, so the remaining gap is roughly one prompt. cpu_cuda IS exact and is the gate that holds here: byte-identical CPU vs full 42/42 GPU offload over 4 prompts at 32 tokens and one at 128, plus every partial-offload split across the shared-KV boundary on the generated fixture. Measure with scripts/sensitivity_floor.py before reading any cross-engine number.",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0",
+            "RUNNER_MOE_EAGER": "1"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
     },
     {
       "id": "gemma-4-26b-a4b-it-q4_0",
@@ -225,7 +474,29 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "greedy_reference deliberately not declared: this model is numerically chaotic, so token-for-token agreement with any second implementation is unachievable rather than merely unmet. Measured 2026-08-01 at b10076 on this exact file - runner disagrees with ITSELF on 11 of 16 prompts when only the KV cache precision changes, against the 9 it disagrees with llama.cpp on, so a perturbation inside one build moves the output further than switching engines does. Cause is discrete top-8-of-128 expert routing over Q4_0 weights; at layer 2 the 6th and 7th selected experts sat 0.0002 apart in weight. Layer 0 activations and the pre-softmax router logits do match the reference (exactly, and to ~0.1-0.5%). Re-measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap on this model. Evidence: out/divergence-study-gemma4-moe-2026-08-01.json"
+      "notes": "greedy_reference deliberately not declared: this model is numerically chaotic, so token-for-token agreement with any second implementation is unachievable rather than merely unmet. Measured 2026-08-01 at b10076 on this exact file - runner disagrees with ITSELF on 11 of 16 prompts when only the KV cache precision changes, against the 9 it disagrees with llama.cpp on, so a perturbation inside one build moves the output further than switching engines does. Cause is discrete top-8-of-128 expert routing over Q4_0 weights; at layer 2 the 6th and 7th selected experts sat 0.0002 apart in weight. Layer 0 activations and the pre-softmax router logits do match the reference (exactly, and to ~0.1-0.5%). Re-measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap on this model. Evidence: out/divergence-study-gemma4-moe-2026-08-01.json",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0",
+            "RUNNER_MOE_EAGER": "1"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
     },
     {
       "id": "gemma-4-26b-a4b-it-qat-q4_0",
@@ -243,7 +514,29 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "Google's genuine QAT release (google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf), 14,439,363,584 bytes, sha verified against the HF LFS blob 2026-08-05. DISTINCT from gemma-4-26b-a4b-it-q4_0, which is ggml-org's non-QAT Q4_0 (sha d208665a) - two publishers, two artifacts, not a re-upload of one. Comparing their hashes as if they were the same file is what produced the retired 'QAT pin drift' plan item. This is the artifact behind the 16 GB recommendation, so it belongs under the automated gate rather than in prose alone. Expert tensors are uniformly Q4_0 across 60 tensors - the signature of QAT baked into the checkpoint, unlike repos that only inherit 'QAT' from the base model's lineage. greedy_reference deliberately not declared: top-8-of-128 expert routing over Q4_0 is numerically chaotic (layer 2's 6th/7th experts sat 0.0002 apart), so the runner disagrees with ITSELF under a KV-precision change more than it disagrees with llama.cpp. cpu_cuda PENDING re-verification at the 128-token contract - the 2026-08-05 CERTIFIED-WITH-CAVEAT pass was measured under the old 16-token default. Evidence: docs/cert-matrix-status.md item 4; out/divergence-study-gemma4-moe-2026-08-01.json"
+      "notes": "Google's genuine QAT release (google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf), 14,439,363,584 bytes, sha verified against the HF LFS blob 2026-08-05. DISTINCT from gemma-4-26b-a4b-it-q4_0, which is ggml-org's non-QAT Q4_0 (sha d208665a) - two publishers, two artifacts, not a re-upload of one. Comparing their hashes as if they were the same file is what produced the retired 'QAT pin drift' plan item. This is the artifact behind the 16 GB recommendation, so it belongs under the automated gate rather than in prose alone. Expert tensors are uniformly Q4_0 across 60 tensors - the signature of QAT baked into the checkpoint, unlike repos that only inherit 'QAT' from the base model's lineage. greedy_reference deliberately not declared: top-8-of-128 expert routing over Q4_0 is numerically chaotic (layer 2's 6th/7th experts sat 0.0002 apart), so the runner disagrees with ITSELF under a KV-precision change more than it disagrees with llama.cpp. cpu_cuda PENDING re-verification at the 128-token contract - the 2026-08-05 CERTIFIED-WITH-CAVEAT pass was measured under the old 16-token default. Evidence: docs/cert-matrix-status.md item 4; out/divergence-study-gemma4-moe-2026-08-01.json",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0",
+            "RUNNER_MOE_EAGER": "1"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
     },
     {
       "id": "gpt-oss-20b-mxfp4",
@@ -261,7 +554,31 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "Per-head attention sinks, clamped alpha-sigmoid GLU (swiglu_oai), router and per-expert biases, MXFP4 expert tensors, SWA layers roped in the GLOBAL regime. CUDA support landed 2026-08-01 with the MXFP4 matmul kernels and the sink-aware attention softmax; before that the backend refused the architecture at load. cpu_cuda measured the same day: 5/5 prompts byte-identical at 16 tokens, eager routing, RUNNER_CUDA_TC=0, on an 8 GB RTX 3070 at a 13/24 layer split - full offload is not reachable for a 12.1 GB model on that card, so the 11 host layers were identical by construction in both runs and the gate covers the device kernels for 13 layers. greedy_reference is NOT declared: after the SWA-rope fix the cross-engine residual is 9/16 prompts token-identical at 16 tokens with a worst-case logprob delta of 0.151, which is BELOW this model's own 0.272 sensitivity floor (runner vs itself under a KV-precision change) - i.e. at the noise floor rather than at token identity, the same standard applied to gemma-4-E4B. Measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap. Evidence: out/gpt-oss-cpu-cuda-2026-08-01.json, out/gpt-oss-swa-rope-fix-2026-08-01.json 2026-08-15 re-run on current main: tokenizer differential 0/721 (was 222/721), chat smoke PASSES through TMPL_HARMONY (answers and stops, analysis in reasoning_content), cpu_cuda 5/5 byte-identical at 64 tokens on 24/24 full offload with RUNNER_CUDA_TC=0 and RUNNER_MOE_EAGER=1. Greedy identity vs b10353 is 1/6 on the full six-prompt protocol and is now the row's only failing check; the architecture's own self-sensitivity floor has not been measured, so the 1/6 is not yet attributable between engine difference and model sensitivity."
+      "notes": "Per-head attention sinks, clamped alpha-sigmoid GLU (swiglu_oai), router and per-expert biases, MXFP4 expert tensors, SWA layers roped in the GLOBAL regime. CUDA support landed 2026-08-01 with the MXFP4 matmul kernels and the sink-aware attention softmax; before that the backend refused the architecture at load. cpu_cuda measured the same day: 5/5 prompts byte-identical at 16 tokens, eager routing, RUNNER_CUDA_TC=0, on an 8 GB RTX 3070 at a 13/24 layer split - full offload is not reachable for a 12.1 GB model on that card, so the 11 host layers were identical by construction in both runs and the gate covers the device kernels for 13 layers. greedy_reference is NOT declared: after the SWA-rope fix the cross-engine residual is 9/16 prompts token-identical at 16 tokens with a worst-case logprob delta of 0.151, which is BELOW this model's own 0.272 sensitivity floor (runner vs itself under a KV-precision change) - i.e. at the noise floor rather than at token identity, the same standard applied to gemma-4-E4B. Measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap. Evidence: out/gpt-oss-cpu-cuda-2026-08-01.json, out/gpt-oss-swa-rope-fix-2026-08-01.json 2026-08-15 re-run on current main: tokenizer differential 0/721 (was 222/721), chat smoke PASSES through TMPL_HARMONY (answers and stops, analysis in reasoning_content), cpu_cuda 5/5 byte-identical at 64 tokens on 24/24 full offload with RUNNER_CUDA_TC=0 and RUNNER_MOE_EAGER=1. Greedy identity vs b10353 is 1/6 on the full six-prompt protocol and is now the row's only failing check; the architecture's own self-sensitivity floor has not been measured, so the 1/6 is not yet attributable between engine difference and model sensitivity.",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0",
+            "RUNNER_MOE_EAGER": "1"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>",
+            "<|channel|>",
+            "assistantfinal"
+          ]
+        }
+      }
     },
     {
       "id": "apertus-8b-instruct-2509-q4_k_m",
@@ -280,7 +597,28 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "Source: bartowski/swiss-ai_Apertus-8B-Instruct-2509-GGUF at a5d1742307bf949e2cd95f253e8776539e19d1fc, published filename swiss-ai_Apertus-8B-Instruct-2509-Q4_K_M.gguf. CUDA support is full-graph: 32/32 layers plus output weight on the 8 GB RTX 3070, with 5/5 CPU/CUDA-identical prompts at 128 tokens and RUNNER_CUDA_TC=0. greedy_reference deliberately remains undeclared because the cross-engine delta is below the model's measured self-sensitivity floor. Evidence: out/apertus-cpu-cuda-2026-08-03.json, out/divergence-apertus-2026-08-03.json, out/sensitivity-apertus-2026-08-03.json"
+      "notes": "Source: bartowski/swiss-ai_Apertus-8B-Instruct-2509-GGUF at a5d1742307bf949e2cd95f253e8776539e19d1fc, published filename swiss-ai_Apertus-8B-Instruct-2509-Q4_K_M.gguf. CUDA support is full-graph: 32/32 layers plus output weight on the 8 GB RTX 3070, with 5/5 CPU/CUDA-identical prompts at 128 tokens and RUNNER_CUDA_TC=0. greedy_reference deliberately remains undeclared because the cross-engine delta is below the model's measured self-sensitivity floor. Evidence: out/apertus-cpu-cuda-2026-08-03.json, out/divergence-apertus-2026-08-03.json, out/sensitivity-apertus-2026-08-03.json",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
     },
     {
       "id": "eurollm-9b-instruct-q4_k_m",
@@ -301,7 +639,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "lucie-7b-instruct-q4_k_m",
@@ -322,7 +685,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "mistral-nemo-instruct-2407-q4_k_m",
@@ -343,7 +731,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "teuken-7b-instruct-commercial-v0.4-q4_k_m",
@@ -364,7 +777,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "salamandra-7b-instruct-q4_k_m",
@@ -385,7 +823,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "tildeopen-30b-q4_k_m",
@@ -406,7 +869,32 @@
         "chat",
         "tool",
         "long_context"
-      ]
+      ],
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        },
+        "tool": {
+          "scenario_matrix": "agent-torture",
+          "cases": 8
+        }
+      }
     },
     {
       "id": "trinity-nano-preview-q8_0",
@@ -424,7 +912,20 @@
         "tokenizer",
         "chat"
       ],
-      "notes": "Source: arcee-ai/Trinity-Nano-Preview-GGUF (Q4_K_M sha256 211127328238031b7aead5c71f488023710300da587703160e42fb981c8c335a also on record). CPU only: CUDA and Metal refuse loudly and fall back, so cpu_cuda is not declared. greedy_reference deliberately not declared: 1/6 byte-identical vs llama.cpp b10280, with the mechanism measured rather than presumed (afmoe re-normalizes every branch before the residual add, amplifying the engines' by-design quantized-matvec arithmetic difference; layer-0 verified to ~2e-4) - see docs/afmoe-divergence-triage-2026-08-05.md and docs/afmoe-sensitivity-floor-2026-08-05.md. Chat smoke and perf gates green on the M1 (13.25 tok/s decode, Q4_K_M resident, CPU). Evidence: out/divergence-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-reference-2026-08-05.json, out/bench-afmoe-m1-2026-08-05.json"
+      "notes": "Source: arcee-ai/Trinity-Nano-Preview-GGUF (Q4_K_M sha256 211127328238031b7aead5c71f488023710300da587703160e42fb981c8c335a also on record). CPU only: CUDA and Metal refuse loudly and fall back, so cpu_cuda is not declared. greedy_reference deliberately not declared: 1/6 byte-identical vs llama.cpp b10280, with the mechanism measured rather than presumed (afmoe re-normalizes every branch before the residual add, amplifying the engines' by-design quantized-matvec arithmetic difference; layer-0 verified to ~2e-4) - see docs/afmoe-divergence-triage-2026-08-05.md and docs/afmoe-sensitivity-floor-2026-08-05.md. Chat smoke and perf gates green on the M1 (13.25 tok/s decode, Q4_K_M resident, CPU). Evidence: out/divergence-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-reference-2026-08-05.json, out/bench-afmoe-m1-2026-08-05.json",
+      "check_params": {
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
     },
     {
       "id": "muse-glimmer-30b-kquant",
@@ -444,7 +945,29 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "Official meta-models GGUF (muse-glimmer-30B-kquant-17gb.gguf, 4-bit k-quant). Text path only: the separate vision encoder (mmproj) and atem tool syntax are out of scope. Evidence: docs/muse-glimmer-cert-2026-08-11.md."
+      "notes": "Official meta-models GGUF (muse-glimmer-30B-kquant-17gb.gguf, 4-bit k-quant). Text path only: the separate vision encoder (mmproj) and atem tool syntax are out of scope. Evidence: docs/muse-glimmer-cert-2026-08-11.md.",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0",
+            "RUNNER_MOE_EAGER": "1"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
     },
     {
       "id": "granite-4.1-8b-q4_0",
@@ -464,7 +987,28 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "Official IBM GGUF. CERTIFIED: greedy 6/6 vs b10353, tokenizer 0/721, cpu_cuda 11/12 with the single flip measured at the model's own floor. Evidence: docs/granite-cert-2026-08-11.md."
+      "notes": "Official IBM GGUF. CERTIFIED: greedy 6/6 vs b10353, tokenizer 0/721, cpu_cuda 11/12 with the single flip measured at the model's own floor. Evidence: docs/granite-cert-2026-08-11.md.",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
     },
     {
       "id": "granite-4.1-30b-q3_k_s",
@@ -483,7 +1027,28 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "Official IBM GGUF. Engine-correct (cpu_cuda 6/6, chat clean) but FAILS the 16GB-tier quality bar: KLD 71%/0.314 vs Q8_0. The Q8_0 sibling is CERTIFIED-WITH-CAVEAT (greedy 3/6, divergences <=0.19 nats). Evidence: docs/granite-cert-2026-08-11.md."
+      "notes": "Official IBM GGUF. Engine-correct (cpu_cuda 6/6, chat clean) but FAILS the 16GB-tier quality bar: KLD 71%/0.314 vs Q8_0. The Q8_0 sibling is CERTIFIED-WITH-CAVEAT (greedy 3/6, divergences <=0.19 nats). Evidence: docs/granite-cert-2026-08-11.md.",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 64
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
     }
   ]
 }
