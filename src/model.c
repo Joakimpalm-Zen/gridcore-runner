@@ -71,7 +71,16 @@ static void model_record_file_id(model_t *m, const char *path) {
     // has already been reported by the host-weights lookup.
     uint64_t size = 0, ino = 0;
     int64_t mtime = 0, fctime = 0;
-    if (model_file_identity(path, NULL, &size, &ino, &mtime, &fctime)) {
+    if (m->gf.n_maps > 1) {
+        // A stat tuple for one shard is not the identity of the set. Until a
+        // whole-set key exists, disable persistent-prefix identity rather than
+        // reusing state after an unselected shard changed on disk.
+        m->file_id_ok = false;
+        m->file_size = gguf_mapped_size(&m->gf);
+        m->file_ino = 0;
+        m->file_mtime_ns = 0;
+        m->file_ctime_ns = 0;
+    } else if (model_file_identity(path, NULL, &size, &ino, &mtime, &fctime)) {
         m->file_id_ok = true;
         m->file_size = size;
         m->file_ino = ino;
@@ -81,7 +90,7 @@ static void model_record_file_id(model_t *m, const char *path) {
         // Still include the mapped length in identities on platforms where
         // stat failed, rather than falling back to path alone.
         m->file_id_ok = false;
-        m->file_size = (uint64_t)m->gf.map_size;
+        m->file_size = gguf_mapped_size(&m->gf);
         m->file_ino = 0;
         m->file_mtime_ns = 0;
         m->file_ctime_ns = 0;
@@ -457,9 +466,10 @@ uint64_t model_hot_set_bytes(const model_t *m) {
     uint64_t routed = 0;
     for (int l = 0; l < m->n_layer; l++)
         routed += layer_routed_expert_bytes(&m->layers[l], m->n_expert);
-    if (!routed || routed > m->gf.map_size) return 0;   // nothing to discount
+    uint64_t mapped = gguf_mapped_size(&m->gf);
+    if (!routed || routed > mapped) return 0;   // nothing to discount
     uint64_t hot = routed * (uint64_t)m->n_expert_used / (uint64_t)m->n_expert;
-    return m->gf.map_size - routed + hot;
+    return mapped - routed + hot;
 }
 
 // Which residency warning to print, split out from the printing so both
@@ -525,7 +535,7 @@ void model_moe_place_host(model_t *m, int host_layers) {
 
 static uint64_t model_cuda_weight_estimate(const model_t *m,
                                            const model_params *p) {
-    if (!p->cpu_moe || m->n_expert <= 0) return (uint64_t)m->gf.map_size;
+    if (!p->cpu_moe || m->n_expert <= 0) return gguf_mapped_size(&m->gf);
     // An explicit partial split leaves some expert banks device-resident, so
     // the estimate cannot assume every expert stays on the host. AUTO fits
     // into whatever is free, so it estimates as the all-host lower bound.
@@ -672,6 +682,19 @@ typedef struct model_weights {
 static model_weights *g_weights;
 static pthread_mutex_t g_weights_mu = PTHREAD_MUTEX_INITIALIZER;
 
+static bool path_looks_like_split_part(const char *path) {
+    if (!path) return false;
+    size_t n = strlen(path);
+    if (n < 20 || strcmp(path + n - 5, ".gguf") != 0) return false;
+    const char *of = path + n - 13; // "of-00000.gguf"
+    if (memcmp(of, "of-", 3) != 0) return false;
+    for (int i = 3; i < 8; i++) if (of[i] < '0' || of[i] > '9') return false;
+    const char *part = of - 7;      // "-00000-of-00000.gguf"
+    if (part[0] != '-' || part[6] != '-') return false;
+    for (int i = 1; i < 6; i++) if (part[i] < '0' || part[i] > '9') return false;
+    return true;
+}
+
 // Losing the identity is not fatal — the model still loads — so this is the
 // only place it is ever reported. Keep it a warning on stderr rather than a
 // verbose-only line: it means this instance stopped sharing weights and now
@@ -801,8 +824,13 @@ static void model_free_weights(model_t *m) {
     // locked: with shared weights several model_t alias one map, and munlock
     // on a mapping we never locked is a silent no-op that would hide a failed
     // lock rather than report it.
-    if (m->weights_locked && m->gf.map && m->gf.map_size) {
-        plat_munlock(m->gf.map, m->gf.map_size);
+    if (m->weights_locked) {
+        uint32_t n = m->gf.n_maps ? m->gf.n_maps : 1;
+        for (uint32_t i = 0; i < n; i++) {
+            void *map = m->gf.n_maps ? m->gf.maps[i] : m->gf.map;
+            size_t size = m->gf.n_maps ? m->gf.map_sizes[i] : m->gf.map_size;
+            if (map && size) plat_munlock(map, size);
+        }
         m->weights_locked = false;
     }
     gguf_close(&m->gf);
@@ -827,6 +855,9 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
     int64_t  mtime = 0, ctime = 0;
     bool id_ok = model_file_identity(path, "host weights", &size, &ino,
                                      &mtime, &ctime);
+    // Standard split names are the only multi-part layout gguf_open accepts.
+    // One part's stat tuple cannot key buffers derived from every part.
+    if (path_looks_like_split_part(path)) id_ok = false;
 
     // The lock is held across the whole bind, so two slots racing on one file
     // cannot both pay for the parse — the same reason cuda.c holds its
@@ -867,8 +898,19 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
 }
 
 double model_resident_fraction(const model_t *m) {
-    if (!m || !m->gf.map || !m->gf.map_size) return -1.0;
-    return plat_resident_fraction(m->gf.map, m->gf.map_size);
+    if (!m || !gguf_mapped_size(&m->gf)) return -1.0;
+    uint32_t n = m->gf.n_maps ? m->gf.n_maps : 1;
+    double weighted = 0.0;
+    uint64_t measured = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        void *map = m->gf.n_maps ? m->gf.maps[i] : m->gf.map;
+        size_t size = m->gf.n_maps ? m->gf.map_sizes[i] : m->gf.map_size;
+        double fraction = plat_resident_fraction(map, size);
+        if (fraction < 0.0) return -1.0;
+        weighted += fraction * (double)size;
+        measured += size;
+    }
+    return measured ? weighted / (double)measured : -1.0;
 }
 
 // Say so at load time when the weights cannot fit in what the machine has
@@ -904,7 +946,7 @@ static bool moe_prefetch_default(const model_t *m, int flag) {
     const char *e = getenv("RUNNER_MOE_PREFETCH");
     if (e && *e) return strcmp(e, "0") && strcmp(e, "off");
 #if defined(__APPLE__) && defined(__aarch64__)
-    uint64_t need = m->gf.map_size, have = plat_ram_available_bytes();
+    uint64_t need = gguf_mapped_size(&m->gf), have = plat_ram_available_bytes();
     return need && have && need > have;
 #else
     // Windows gained a working prefetch primitive on 2026-08-07
@@ -920,7 +962,7 @@ static bool moe_prefetch_default(const model_t *m, int flag) {
 
 static void warn_if_it_will_not_stay_resident(const model_t *m, bool locked) {
     char msg[512];
-    if (model_residency_warning(m->gf.map_size, model_hot_set_bytes(m),
+    if (model_residency_warning(gguf_mapped_size(&m->gf), model_hot_set_bytes(m),
                                 plat_ram_available_bytes(), locked,
                                 msg, sizeof(msg)))
         fprintf(stderr, "%s\n", msg);
@@ -933,12 +975,25 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
         return false;
     }
     bool locked = false;
-    if (p && p->mlock && m->gf.map && m->gf.map_size) {
-        locked = plat_mlock(m->gf.map, m->gf.map_size);
+    if (p && p->mlock && gguf_mapped_size(&m->gf)) {
+        uint32_t n = m->gf.n_maps ? m->gf.n_maps : 1, done = 0;
+        locked = true;
+        for (; done < n; done++) {
+            void *map = m->gf.n_maps ? m->gf.maps[done] : m->gf.map;
+            size_t size = m->gf.n_maps ? m->gf.map_sizes[done] : m->gf.map_size;
+            if (!map || !size || !plat_mlock(map, size)) { locked = false; break; }
+        }
+        if (!locked)
+            while (done > 0) {
+                done--;
+                void *map = m->gf.n_maps ? m->gf.maps[done] : m->gf.map;
+                size_t size = m->gf.n_maps ? m->gf.map_sizes[done] : m->gf.map_size;
+                plat_munlock(map, size);
+            }
         if (locked) {
             m->weights_locked = true;
             fprintf(stderr, "mlock: %.1f GB of weights wired into RAM\n",
-                    (double)m->gf.map_size / 1e9);
+                    (double)gguf_mapped_size(&m->gf) / 1e9);
         } else {
             // Not fatal, and not silent. A refusal here usually means the
             // process cannot raise its locked-memory limit (RLIMIT_MEMLOCK),
@@ -946,7 +1001,7 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
             fprintf(stderr,
                     "warning: --mlock could not wire %.1f GB (%s); continuing"
                     " without it, so the weights can still be evicted\n",
-                    (double)m->gf.map_size / 1e9, strerror(errno));
+                    (double)gguf_mapped_size(&m->gf) / 1e9, strerror(errno));
         }
     }
     warn_if_it_will_not_stay_resident(m, locked);
@@ -968,57 +1023,9 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     return true;
 }
 
-// A shard of a split model, refused by name rather than by symptom.
-//
-// runner reads exactly one file's tensor table. Handed shard 1 of a 3-way
-// split it used to bind what that shard happened to hold and then print a wall
-// of "missing tensor blk.N..." — every line true, none of them the reason. The
-// count is sitting in metadata this function has already parsed.
-//
-// llama.cpp's layout, followed verbatim: `split.no` (0-based), `split.count`,
-// and filenames `<prefix>-%05d-of-%05d.gguf` 1-based.
-static bool refuse_split_model(gguf_file *g, const char *path) {
-    uint32_t count = gguf_get_u32(g, "split.count", 0);
-    if (count <= 1) return false;
-    uint32_t no = gguf_get_u32(g, "split.no", 0);
-    fprintf(stderr,
-            "error: %s is part %u of a %u-part split model, and runner reads a "
-            "single file — loading it alone would bind only the tensors this "
-            "part holds\n", path, no + 1, count);
-    // Name the whole set when the filename follows the convention, so the fix
-    // does not depend on the reader knowing what the parts are called.
-    const char *base = strrchr(path, '/');
-#ifdef _WIN32
-    const char *bs = strrchr(path, '\\');
-    if (bs && (!base || bs > base)) base = bs;
-#endif
-    base = base ? base + 1 : path;
-    char stem[512];
-    snprintf(stem, sizeof stem, "%s", base);
-    char *tail = strstr(stem, "-00001-of-");
-    if (!tail) {
-        char want[64];
-        snprintf(want, sizeof want, "-%05u-of-", no + 1);
-        tail = strstr(stem, want);
-    }
-    if (tail) {
-        *tail = 0;
-        fprintf(stderr, "  the complete set is");
-        for (uint32_t i = 1; i <= count && i <= 8; i++)
-            fprintf(stderr, " %s-%05u-of-%05u.gguf", stem, i, count);
-        if (count > 8) fprintf(stderr, " ... (%u parts)", count);
-        fprintf(stderr, "\n");
-    }
-    fprintf(stderr,
-            "  join them first: llama.cpp's `llama-gguf-split --merge "
-            "<first-part> <output.gguf>`\n");
-    return true;
-}
-
 static bool model_bind_weights(model_t *m, const char *path, const model_params *p) {
     if (!gguf_open(&m->gf, path)) return false;
     gguf_file *g = &m->gf;
-    if (refuse_split_model(g, path)) return false;
     // A profile is opt-in metadata: legacy/dense GGUFs remain admitted exactly
     // as before. Once any profile key is present, however, the contract is
     // atomic and fail-closed. Validate it before path/state/tensor allocation.
@@ -2222,7 +2229,7 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         if (p->reserve_ram_pct > 0) {
             // host budget covers the mmap'd weights plus the host KV copies
             size_t budget = plat_ram_bytes() / 100 * p->reserve_ram_pct;
-            best = model_autofit_tokens(budget, m->gf.map_size,
+            best = model_autofit_tokens(budget, gguf_mapped_size(&m->gf),
                                         MODEL_AUTOFIT_HEAD, kv_per_tok, n_seq);
         }
         if (p->reserve_vram_pct > 0 && p->gpu_mode == GPU_AUTO) {

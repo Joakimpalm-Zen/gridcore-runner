@@ -52,6 +52,8 @@ test-vram-rollback
 test-vram-rollback.exe
 test-gguf-getters
 test-gguf-getters.exe
+test-gguf-split-load
+test-gguf-split-load.exe
 test-parse
 test-parse.exe
 test-thread-default

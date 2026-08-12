@@ -144,9 +144,12 @@ shell, then run `make`.
 ## Models and conversion
 
 Runner accepts GGUF v2/v3. Safetensors checkpoints must be converted to GGUF
-first. Multi-part GGUF is not implemented; merge the parts with
-`llama-gguf-split --merge` before loading. The loader detects split metadata
-and names the required fix.
+first. Standard llama.cpp multi-part sets (`<prefix>-00001-of-000NN.gguf`) load
+natively from any part: every part must be present in the same directory, and
+its `split.no`, `split.count`, and `split.tensors.count` metadata must agree.
+Missing or inconsistent parts are refused before model binding. Nonstandard
+filenames and remote/streamed parts are not resolved automatically; merge or
+rename those sets to the standard layout first.
 
 Fetch the small test model with:
 
@@ -706,7 +709,7 @@ even when the architecture ID is listed.
 
 | Area | Current support |
 |---|---|
-| File format | GGUF v2/v3, mmap/file-mapped host weights, single-file models only. |
+| File format | GGUF v2/v3, mmap/file-mapped host weights, including standard local multi-part sets. |
 | Tokenizers | SPM and byte-level BPE with llama, qwen2, smollm, tekken, llama4/o200k, Gemma, and GPT-2-family pre-tokenization rules. |
 | Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1, IQ2 and IQ3 families are CPU-only with NEON/AVX2 dequant kernels; the CUDA and Metal backends refuse those files loudly instead of computing wrong. |
 | Transformer | RMSNorm, adjacent-pair and NeoX RoPE, grouped-query attention, SwiGLU/GELU/xIELU family paths, tied embeddings, dense and selected sparse MoE. |
@@ -715,7 +718,7 @@ even when the architecture ID is listed.
 | Serving | Chat Completions, Responses, legacy completions, embeddings, Anthropic Messages, SSE, parallel slots, model swap, prefix reuse. |
 | Desktop | macOS menu bar and Windows notification-area controller. |
 
-Not implemented: Vulkan; TLS/auth; remote bind; multi-part GGUF loading;
+Not implemented: Vulkan; TLS/auth; remote bind; remote/streamed GGUF parts;
 Qwen2-MoE/DeepSeek/Kimi shared-expert or MLA layouts; Mamba/Jamba; Gemma-4 MTP
 draft heads; IQ2/IQ3 codebook quants; full GBNF; image/document inputs; hosted
 tools; response persistence; or parallel tool calls.

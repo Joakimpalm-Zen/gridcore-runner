@@ -118,6 +118,7 @@ endif
 TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
 TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
+TEST_GGUF_SPLIT = $(TEST_BATCH:test-batch%=test-gguf-split-load%)
 TEST_PARSE = $(TEST_BATCH:test-batch%=test-parse%)
 TEST_METAL_OWNERSHIP = $(TEST_BATCH:test-batch%=test-metal-ownership%)
 TEST_METAL_SHADERS = $(TEST_BATCH:test-batch%=test-metal-shaders%)
@@ -170,6 +171,9 @@ TEST_TOK_MERGE_SRC = tests/test_tokenizer_merge.c src/gguf.c src/tokenizer.c \
                      src/compat.c src/quants.c
 $(TEST_TOK_MERGE): $(TEST_TOK_MERGE_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_MERGE_SRC) -o $@ -lm
+
+$(TEST_GGUF_SPLIT): tests/test_gguf_split_load.c src/gguf.c src/compat.c src/quants.c $(HDR)
+	$(CC) $(CFLAGS) -I src tests/test_gguf_split_load.c src/gguf.c src/compat.c src/quants.c -o $@ $(LDFLAGS)
 
 # difftok: tokenizer differential harness. Not part of `make test` -- it needs a
 # real multi-GB model GGUF, which models/ is gitignored for. scripts/difftok.py
@@ -824,7 +828,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
-      $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
+      $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_GGUF_SPLIT) $(TEST_PARSE) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) runner test.gguf
@@ -879,6 +883,10 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_QUANTIZE)
 	./$(TEST_VRAM_ROLLBACK)
 	./$(TEST_GGUF_GETTERS)
+	@mkdir -p test-gguf-split
+	$(PYTHON) scripts/make-test-model.py test-gguf-split/whole.gguf
+	$(PYTHON) scripts/gguf-split.py test-gguf-split/whole.gguf test-gguf-split/part 3
+	./$(TEST_GGUF_SPLIT) test-gguf-split/whole.gguf test-gguf-split/part-00001-of-00003.gguf
 	./$(TEST_PARSE)
 	./$(TEST_THREAD_DEFAULT)
 	./$(TEST_MODEL_LOAD_FAILURE)

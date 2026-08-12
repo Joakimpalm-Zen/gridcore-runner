@@ -1347,7 +1347,8 @@ fail_quiet:
 static gpu_weights *shared_acquire(model_t *m, size_t act_bytes, int max_hd) {
     uint64_t fsize = 0, fino = 0;
     int64_t  fmtime = 0;
-    bool have_id = file_id(m->path, &fsize, &fino, &fmtime);
+    bool have_id = m->gf.n_maps <= 1 &&
+                   file_id(m->path, &fsize, &fino, &fmtime);
     gpu_weights *w = NULL;
     pthread_mutex_lock(&g_shared_mu);
     if (have_id)
