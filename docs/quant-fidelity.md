@@ -162,3 +162,25 @@ needs, beyond what is already built:
   one report per quant plus a separate aggregation pass — the harness
   supports either (repeat `--variant`, or run it N times to N `--out`
   directories and diff `report.json` files).
+
+## First measured ladder — granite-4.1-3b, 2026-08-14
+
+Reference Q8_0, 16 agent-torture requests at temperature 0, zero-point
+self-check PASSED (two independent reference spawns agreed on every tool
+call at 0 KLD before anything was measured).
+
+| variant | schema conformance | tool selection | argument agreement | mean KLD |
+|---|---:|---:|---:|---:|
+| q8_0 (reference) | 100.0% | 100.0% | 100.0% | 0 |
+| q6_k | 100.0% | 100.0% | 64.3% | 0.0129 |
+| q5_k_m | 100.0% | 100.0% | 57.1% | 0.0327 |
+| q4_k_m | 100.0% | 100.0% | 57.1% | 0.1271 |
+| q4_0 | 100.0% | 100.0% | 50.0% | 0.1398 |
+
+The finding this table carries: **constrained decoding guarantees the
+shape of a tool call at any quantization, not its contents.** Schema
+conformance and tool selection hold at 100% down to Q4_0; argument
+agreement decays monotonically to 50%. For an agent loop that is the
+difference between a crash and a wrong action — an improvement, and not a
+substitute for bits. Raw report:
+`xyntetik-suite/docs/plans/decisions-evidence-2026-08-14/`.

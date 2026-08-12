@@ -239,6 +239,8 @@ def main(argv):
         # records. Every v1 field keeps its name and its meaning, so published
         # v1 numbers stay comparable and reproducible.
         "schema_version": "xyntetik.runner.kld-raw.v2",
+# ADOPTED 2026-08-14 (owner decision): margin-qualified top-1 is the
+# publication criterion; plain top-1 is reported beside it forever.
         "tie_band_nats": args.tie_band,
         "positions_scored": n_scored,
         "positions_failed": n_failed,

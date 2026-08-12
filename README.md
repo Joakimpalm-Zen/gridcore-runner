@@ -39,11 +39,22 @@ Release archives name the binary for their platform — `runner-macos-arm64`,
 `runner` or substitute that name in the commands below. A source build produces
 `runner` directly.
 
-If you have no GGUF handy, this one is 2.63 GB and runs on an 8 GB machine.
-Know what it is: measured against its own BF16 parent it agrees on 77.75%
-of tokens (mean KLD 0.286, 2026-08-12), so treat it as a smoke-test artifact
-that fits small machines, not a faithful gemma-4-E2B; its card carries the
-full numbers.
+If you have no GGUF handy, the measured recommendation at 8 GB is an
+8-bit small model, not a 4-bit larger one. granite-4.1-3b Q8_0 (3.6 GB,
+first-party IBM file) is the smallest model that passes this project's
+fidelity gate against its own BF16 parent (100% margin-qualified top-1 /
+0.0024 mean KLD, 2026-08-14; every 4- and 5-bit quant measured to date
+fails on distributional distance):
+
+```sh
+curl -L -o model.gguf \
+  https://huggingface.co/ibm-granite/granite-4.1-3b-GGUF/resolve/main/granite-4.1-3b-Q8_0.gguf
+```
+
+For the fastest possible smoke test on a small machine there is also a
+2.63 GB option — know what it is: measured against its own BF16 parent it
+agrees on 77.75% of tokens (mean KLD 0.286), a try-the-runner artifact,
+not a faithful gemma-4-E2B; its card carries the full numbers.
 
 ```sh
 curl -L -o model.gguf \
@@ -74,7 +85,13 @@ infrastructure: easy to deploy, bounded by the machine, and explicit about what
 it can prove. The list below is ordered by how much difference each one makes in
 practice, most first.
 
-- **Tool calls survive the token limit.** An agent that receives broken JSON
+- **Tool calls survive the token limit.** And their fidelity under
+  quantization is measured, not assumed: on a full quant ladder,
+  constrained decoding held schema conformance and tool selection at 100%
+  all the way down to Q4_0 while argument agreement decayed to 50% — so
+  constrained decoding guarantees the SHAPE of a tool call at any
+  quantization, not its contents (the per-quant table and method are in
+  [docs/quant-fidelity.md](docs/quant-fidelity.md)). An agent that receives broken JSON
   cannot proceed; it retries from scratch, burning tokens, time, and context
   window. The mechanism here is not ordinary JSON Schema support, it is
   forced-truncation recovery: once a document starts, Runner emits the smallest
