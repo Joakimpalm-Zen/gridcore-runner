@@ -2537,6 +2537,7 @@ typedef struct {
     float *y;
     int n_in, n_batch, x_stride, y_stride;
     size_t rsz;
+    const void *xq;   // int8-quantized activations, or NULL for the f32 route
 } mv_job;
 
 static void mv_rows(void *ctx, int i0, int i1) {
@@ -2545,6 +2546,13 @@ static void mv_rows(void *ctx, int i0, int i1) {
     int type = j->w->type, n_in = j->n_in;
 
     if (j->n_batch == 1) {
+        if (j->xq) {
+            for (int r = i0; r < i1; r++) {
+                float v = vec_dot_i8(type, base + (size_t)r * j->rsz, j->xq, n_in);
+                j->y[r] = j->bias ? v + j->bias[r] : v;
+            }
+            return;
+        }
         for (int r = i0; r < i1; r++) {
             float v = vec_dot(type, base + (size_t)r * j->rsz, j->x, n_in);
             j->y[r] = j->bias ? v + j->bias[r] : v;
@@ -2590,12 +2598,28 @@ static void mv_rows(void *ctx, int i0, int i1) {
 }
 
 // Y[b] = W X[b] (+ bias) for b in [0, n_batch)
+//
+// Single-column (decode) matvecs on a promoted quant type take the fused int8
+// route: the activation column is quantized ONCE here and every row dots
+// against it in int8 (quants.c "fused int8 dot"). The quantization is O(n_in)
+// against O(n_in*n_out) of matvec work, so it is only worth it once the output
+// is wide enough to amortize — a 1-row projection would pay for a whole
+// activation quant to save one dot.
+enum { I8_MIN_ROWS = 32 };
+
 static void matvec_b(tpool *tp, float *y, int y_stride, const gguf_tensor *w,
                      const float *x, int x_stride, int n_in, int n_out,
                      const float *bias, int n_batch) {
     mv_job j = { w, x, bias, y, n_in, n_batch, x_stride, y_stride,
-                 ggml_row_size(w->type, n_in) };
+                 ggml_row_size(w->type, n_in), NULL };
+    void *xq = NULL;
+    if (n_batch == 1 && n_out >= I8_MIN_ROWS && i8_dot_enabled() &&
+        i8_dot_ok(w->type, n_in) && (xq = malloc(i8_act_size(n_in)))) {
+        i8_quant_act(x, xq, n_in);
+        j.xq = xq;
+    }
     tpool_run(tp, mv_rows, &j, n_out);
+    free(xq);
 }
 
 // qwen3-style per-head RMSNorm on Q or K (weight is one head_dim vector)

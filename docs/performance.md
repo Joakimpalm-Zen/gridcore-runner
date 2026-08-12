@@ -73,19 +73,61 @@ back to CPU). **Kept at `compute_75`.**
 > on every promoted row. The spec carries the gate table and the promotion
 > record; `RUNNER_CUDA_TC=0` pins the scalar path.
 
+## 2026-08-13 — lever 1 built, gated, and NOT promoted
+
+Lever 1 below (the fused int8 dot) was built and measured on the
+Threadripper 9980X. It does what the lever promised to the kernel and
+almost nothing to tok/s, and it cannot hold its correctness bar.
+
+### The fused int8 dot: 2.4x on the kernel, ~6% end to end, NOT promoted
+
+`vec_dot_i8` keeps the whole dot in int8 with an int32 accumulator — the
+activation row is quantized once per matvec into 32-element q8 blocks carrying
+their quant sum, and `_mm512_dpbusd_epi32` (AVX-512 VNNI; AVX2 `maddubs`
+fallback, both gated by `test-quants-simd`) replaces the convert-to-f32-and-FMA
+chain for Q4_K, Q4_0 and Q8_0. In isolation it does what the lever promised:
+
+| format | scalar | fused int8 | speedup |
+|---|---:|---:|---:|
+| Q4_K | 6.9 GB/s | 17.1 GB/s | **2.48x** |
+| Q4_0 | 15.0 GB/s | 24.6 GB/s | 1.64x |
+| Q8_0 | 36.5 GB/s | 47.3 GB/s | 1.30x |
+
+*(single core, 3072x3072 weight tile, `scratchpad/mvbench.c`)*
+
+End to end it bought **~6%**, because the dot was only ~10% of decode wall
+time. And it does not clear its promotion bar: activation quantization flips
+near-tie tokens.
+
+| model | teacher-forced top-1 flips | mean\|dlogit\| / range | decode |
+|---|---:|---:|---:|
+| Llama-3.2-3B Q4_K_M | **2/64 — fail** | 0.00057 (limit 0.005) | +6% |
+| granite-4.1-8b Q4_0 | **2/64 — fail** | 0.00100 | +6% |
+| SmolLM2-135M Q8_0 | 0/64 — pass | 0.00389 | -4% |
+
+Both failing rows flip only near-ties (worst margin ~0.001 of the logit range)
+and both sit far inside the deviation bound — but the bar for a tolerance-gated
+fast route on this engine is 0/64, the same bar TC prefill had to clear, and it
+is not widened to fit a lever. **No combo promoted.** The route ships behind
+`RUNNER_CPU_I8=1`, `./test-i8-tol MODEL.gguf` is the gate, and the scalar route
+is unchanged and byte-identical to the pre-branch binary at every thread count.
+
 ## The levers that remain (bigger, and deliberately not rushed)
 
 Both are architectural changes with real correctness/token-identity risk. They
 are the honest next steps, scoped here rather than half-landed.
 
-1. **CPU: fused quantized dot products (the real llama.cpp gap).** Runner
-   dequantizes each Q4_K weight row to an f32 buffer and then does an f32 FMA
-   dot. llama.cpp keeps weights quantized and dots int8·int8 directly, reading
-   ~8x less memory per weight — decisive when the matvec is memory-bandwidth
-   bound. Fusing dequant into the dot (operate on Q4 blocks in-register, VNNI
-   `_mm512_dpbusd_epi32` for the int8 MAC) attacks that traffic directly and
-   would use the AVX-512 + VNNI silicon this box has and the current kernels
-   ignore. Large rewrite of the matvec path; must stay token-identical.
+1. **CPU: fused quantized dot products — BUILT 2026-08-13, not promoted.** The
+   premise recorded here was half wrong and the measurement says so. Decode
+   never dequantized to a scratch row: `vec_dot` already reads the weights in
+   their on-disk quantized form, so the memory traffic this lever was supposed
+   to cut was never being spent. What it did cost was the convert-to-f32 chain,
+   and removing it with VNNI is worth 2.4-2.5x **on the kernel** — but only
+   ~6% end to end, because the dot is ~10% of decode wall time. See the
+   2026-08-13 section above for the gate table and why nothing was promoted.
+   **PREFILL is where the original premise still holds:** the batched path
+   (`mv_rows`, `n_batch > 1`) does dequantize each weight row to an f32 buffer,
+   and it does not use the int8 kernels at all. That is the open remainder.
 
 2. **GPU: tensor-core matmul — LANDED (2026-07-28/29), kept here for the
    history.** Phase 1 (WMMA `k_gemm_q4_K_tc`) was correct but ~7× slower than

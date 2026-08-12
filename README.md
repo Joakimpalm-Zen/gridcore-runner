@@ -336,6 +336,15 @@ reassociate floating-point sums, so they are promoted by teacher-forced
 tolerance tests. `RUNNER_CUDA_TC=0` and `RUNNER_METAL_MM=0` pin the scalar
 matvec paths for identity investigations.
 
+**CPU:** the x86 dot kernels read weights in their on-disk quantized form and
+keep f32 activations, which is token-identical across builds and thread
+counts. `RUNNER_CPU_I8=1` opts into a fused int8 decode dot (AVX-512 VNNI,
+AVX2 fallback): 2.4-2.5x on the kernel in isolation, but it quantizes the
+activations, so it is **off by default** — no format cleared the 0/64
+teacher-forced flip bar with a decode gain worth taking on the measurement
+box. `./test-i8-tol MODEL.gguf` is the gate.
+See [docs/performance.md](docs/performance.md).
+
 Vulkan is not implemented; AMD and Intel GPUs use the CPU path.
 
 ### Long contexts
