@@ -5,6 +5,122 @@ is in **alpha**; the HTTP protocol and CLI may still change between alpha
 releases. Entries below the rename keep the names that were true when they
 were written.
 
+## Unreleased (since v0.1.15-alpha)
+
+Four days, three overnight measurement campaigns, and one external
+evaluation's worth of findings. Grouped by what a user notices first.
+
+### Correctness fixes, some of them shipped defects
+
+- **CUDA tensor-core prefill for Q8_0/Q4_0 computed 16 of its 64 token
+  columns** and published uninitialised shared memory as logits for the
+  rest, on the DEFAULT path, since the 2026-07-29 batch widening. Found by
+  measurement, fixed, and the gate that had passed the broken kernel was
+  itself fixed: `test-tc-tol` now carries a free-running arm at a
+  production context, verified to fail against the broken kernel. The
+  cpu/cuda identity corpus now crosses the 16/32/64-column tile
+  boundaries; its old longest prompt was one token short of ever seeing
+  the bug.
+- **Truncated tool calls reported `finish_reason:"tool_calls"`** on all
+  three API dialects, converting the loud failure this engine exists to
+  prevent into a silent one. A truncated call now keeps its truncation
+  signal on every surface (external evaluation finding A).
+- **`--quantize` copied `general.file_type` from the parent**, mislabeling
+  mixed-retention outputs. The declared type now derives from the output
+  histogram (finding B).
+- **An unrecognised chat template silently fell back to llama2 markup.**
+  gpt-oss chat was fed `[INST]`/`<<SYS>>` it had never seen and ran away
+  past every stop; the fallback now warns loudly — and gpt-oss no longer
+  needs it (see Harmony below).
+- The gpt-oss tokenizer differential went **222/721 divergent strings to
+  0/721** by mapping its `gpt-4o` pre-type onto the o200k splitter.
+- A sweep-and-review pass fixed a heap over-read in the atem parser
+  (ASan), bound-aware recovery for truncated numeric arguments,
+  closest-prefix recovery for truncated enums, thread-safety of quant
+  arithmetic under fast-math (now confined to a `-fno-fast-math`
+  translation unit), and `system()` calls in the tray (now `posix_spawn`).
+
+### New capabilities
+
+- **Muse native atem tool calling**, constrained by the schema compiler:
+  tool definitions rendered in the model's own format, generation
+  constrained from the recipient header, truncation-surviving closes,
+  multi-call turns, buffered and SSE parsing, and the model's own
+  protocol control tokens satisfying the automaton so generation stays
+  on-distribution. Certified on the real model, 120/120 torture matrix.
+- **TMPL_HARMONY**: gpt-oss chat renders its real format — channel-aware
+  turns, developer role, its own stop set — with the analysis channel
+  suppressed from content and surfaced as `reasoning_content`,
+  `enable_thinking` as the control. Before/after transcripts in
+  `docs/gpt-oss-harmony-2026-08-14.md`.
+- **Multi-part GGUF loads natively.** Standard numbered split sets map
+  through independent mappings; missing or inconsistent sets refuse
+  loudly; a real split model reproduces the whole file's output SHA.
+- **Streaming parallel tool calls** on the generic JSON envelope path;
+  the `parallel_tool_calls`+`stream` refusal is gone.
+- **VRAM registry priorities and cooperative yield**: advisory priority
+  tags on claims (`--vram-priority`), priority-ordered `--wait-for-vram`
+  acquisition, and `--yield-on-request` — a holder can be asked, never
+  forced, to release at an idle point.
+- **`--type-plan` per-tensor precision in the quantizer**, integrity-gated
+  (untouched tensors byte-identical to the source). This is the tool
+  behind the selective-precision artifact class: per-tensor-class
+  precision is the finest GGUF can express (experts are stacked), and it
+  is enough — see Artifacts.
+- **Quality bar v2**: gate tooling reports margin-qualified top-1
+  (0.5-nat reference-side tie band, derived from the tc-tol precedent)
+  beside plain top-1, both always printed. Adopted as the publication
+  criterion 2026-08-14.
+- **`scripts/quant-fidelity.py`**: the quant-vs-tool-call-fidelity
+  harness — per-quant schema conformance, tool selection, argument
+  agreement and KLD against a reference variant, self-validating
+  zero-point that refuses to measure on any disagreement.
+- **Machine-readable compatibility ledger**: `docs/compat-reports/`
+  carries dated per-release reports; the manifest schema now declares
+  executable contracts for cpu_cuda/chat/tool check classes, and checks
+  that did not run say so with reasons.
+
+### Performance, measured against llama.cpp on the same hardware
+
+- **CPU decode +32-34%, byte-identical**: the thread pool spent
+  65-138 us per matvec handoff (38-59% of every decode token);
+  spin-then-park wakeups fixed it. Dense CPU decode moved from 50-60% to
+  66-78% of llama.cpp.
+- **CUDA prefill up to 28.8x on previously uncovered combos**: Q4_0
+  promoted through the tolerance gate across four architectures, granite
+  admitted to the TC path, and Q4_0 gained its missing coalesced decode
+  GEMV (4.4-5.4x, token-identical). Honest same-slice table: decode
+  77-87%, prefill 6.1-9.8% of llama.cpp (`docs/benchmarks.md`).
+- **Metal prefill +23.6% at defaults on M1**: half threadgroup staging,
+  64x32 tiles, memory-aware batch default. The matvec multi-row rework
+  was measured NEGATIVE under the byte-identity contract and not shipped
+  (`docs/negative-result-metal-multirow-matvec.md`); a latent activation
+  alignment hazard was fixed on the way.
+- A fused int8 CPU dot ships gated OFF (`RUNNER_CPU_I8=1`): 2.4-2.5x in
+  kernel isolation, ~6% end to end, and it flips near-tie tokens, so it
+  did not meet the 0/64 promotion bar.
+
+### Artifacts and measured claims
+
+- **New flagship: Qwen3-30B-A3B selective precision** (attention Q8_0 /
+  experts Q4_0, 17.99 GB) — PASSES the adopted bar where the official
+  uniform Q4_K_M fails it, from a byte-verified first-party Q8_0 source.
+- **Qwen3-Coder-30B keep-120** passes both the original and the current
+  bar — the only published artifact to clear the original bar unaided.
+- **gpt-oss-20b keep-30's quality claim is withdrawn**: the published
+  97.5% does not reproduce at its own protocol on byte-identical files.
+  The file stays published as a measured near-miss; its card leads with
+  the current numbers.
+- **The 4-bit size threshold**: Q4_K_M passes the bar at 8B and 14B,
+  fails at 5B and below, on everything measured. Legacy Q4_0 is 6.7x
+  worse than Q4_K_M on the same 14B model. Ship k-quants, never Q4_0.
+- **The split story, measured on two families**: constrained decoding
+  holds schema conformance and tool selection at 100% down to Q4_0 while
+  argument agreement decays to 50%. The shape of a tool call is
+  quant-proof; its contents are not (`docs/quant-fidelity.md`).
+- Quickstart now recommends granite-4.1-3b Q8_0 (3.6 GB, the smallest
+  model passing the fidelity gate against its own BF16).
+
 ## v0.1.15-alpha — 2026-08-11
 
 - **New architecture: `muse-glimmer` (Meta Muse Glimmer 30B, text path),

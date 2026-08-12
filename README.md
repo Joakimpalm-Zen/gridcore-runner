@@ -220,11 +220,35 @@ Artifacts produced by this project are published only after their stated gate
 against the named parent. Read each repository's provenance before treating a
 derivative as equivalent to an original checkpoint.
 
+Every fidelity claim below is measured under the adopted dual-column bar
+(margin-qualified top-1 >= 97% AND mean KLD <= 0.05 vs the named parent,
+400 teacher-forced positions, zero point exact; plain top-1 always
+reported beside it).
+
+- [Qwen3-30B-A3B selective precision](https://huggingface.co/Joakimpalm-Zen/Qwen3-30B-A3B-selective-attnQ8_0-expQ4_0-GGUF)
+  (attention Q8_0 / experts Q4_0, 17.99 GB) **passes the bar** where the
+  official uniform Q4_K_M fails it, from a byte-verified first-party Q8_0
+  source. Built with `--type-plan`; the exact plan is on the card. The
+  artifact class this project now leads with.
+- [Qwen3-Coder-30B keep-120](https://huggingface.co/Joakimpalm-Zen/Qwen3-Coder-30B-A3B-Instruct-keep120-Q4_K_M-GGUF)
+  (expert-pruned, 17.5 GB) **passes both the original and the current
+  bar** — the only published artifact to clear the original bar unaided.
 - [gpt-oss-20b-keep30-MXFP4](https://huggingface.co/Joakimpalm-Zen/gpt-oss-20b-keep30-MXFP4-GGUF)
-  is an 11.5 GB, 32-to-30-expert derivative intended for a 16 GB envelope.
-- [gemma-4-E2B-it Q4_K_M/Q4_0 mix](https://huggingface.co/Joakimpalm-Zen/gemma-4-E2B-it-Q4_0-GGUF) — renamed 2026-08-11 to say what it is (mixed retention, not a straight Q4_0; bytes unchanged)
-  is a 2.63 GB requantization of a Q4_K_M parent. Its published quality gate
-  is against that parent, not the original bf16 checkpoint.
+  (11.5 GB, 32-to-30-expert derivative) **does not pass the current
+  bar**; its originally published number did not reproduce and the card
+  leads with the measured status. Kept published as a near-miss with its
+  numbers in the open.
+- [gemma-4-E2B-it Q4_K_M/Q4_0 mix](https://huggingface.co/Joakimpalm-Zen/gemma-4-E2B-it-Q4_0-GGUF)
+  (2.63 GB) is the smoke-test artifact from the quickstart: fails the
+  fidelity bar (the card carries the dual-column numbers) and remains the
+  fastest way to try the runner on an 8 GB machine.
+- Two measurement reports over third-party ladders, no weights
+  republished, every measured file bound by SHA:
+  [Hermes-4-14B quant fidelity](https://huggingface.co/Joakimpalm-Zen/Hermes-4-14B-quant-fidelity-report)
+  (the 4-bit size threshold and the split story) and the
+  [Qwen3 speculative pair](https://huggingface.co/Joakimpalm-Zen/Qwen3-speculative-pair-report)
+  (measured draft acceptance, and why the engine's printed tok/round must
+  not be tuned on).
 
 ## Command-line reference
 
@@ -790,7 +814,7 @@ selection remain the model's responsibility.
 | `gemma3` | Regular and QAT layouts, sliding-window attention, sandwich norms. |
 | `gemma4` | Heterogeneous attention, thinking channels, E-series, and supported dense/MoE layouts. |
 | `phi3` | Fused QKV and gate/up tensors, LongRoPE factors. |
-| `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. |
+| `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. Tokenizer exact (0/721 differential) and chat renders the real Harmony format (analysis channel as `reasoning_content`) as of 2026-08-14; cross-engine greedy identity remains inside the model's own measured KV-precision sensitivity envelope rather than certified. |
 | `apertus` | xIELU FFN; CPU and CUDA. |
 | `afmoe` | Arcee Trinity sparse MoE; CPU only, with CUDA/Metal refusal. |
 | `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md` and `docs/muse-atem-cert-2026-08-11.md`. No vision encoder. Native atem definitions/results, recipient-constrained generation, truncation recovery, multi-call mapping, and buffered/SSE parsing are implemented and selected automatically for tool requests. |
