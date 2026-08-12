@@ -131,6 +131,50 @@ whole line of attack is retired for the cost of one kernel.
 That experiment is the natural next step and is deliberately **not** bundled
 into this diagnosis.
 
+## The experiment, run
+
+`qknorm` and `headnorm` are now batched in `grid.y`. Each `(head, column)` pair
+was always an independent reduction, so this is **bit-identical**: only the
+encoding changes, and the CPU/GPU parity gates still pass byte for byte across
+six models including the E-series path that exercises both kernels.
+
+Census confirms the intended effect exactly — `qknorm` 50n → 50, `headnorm`
+15n → 15, so `total` falls from `240n + 587` to `175n + 587`. At batch 64 that
+is **15,947 → 11,852 dispatches, −25.7 %**.
+
+Round-robin A/B, two binaries built from the same tree, five interleaved
+iterations plus a discarded warmup, e2b-q40 (the model that *has* QK-norm):
+
+| | before | after | delta |
+|---|---:|---:|---:|
+| prefill tok/s | 73.74 | 75.29 | **+2.10 %** |
+| decode tok/s | 15.09 | 15.18 | +0.58 % |
+
+Every "after" reading (75.16–75.76) sits above every "before" reading
+(73.33–74.14), with no overlap across the five pairs — this is signal, not
+spread. Decode is unchanged as expected: at `n == 1` batching is a no-op.
+
+**So the attribution is settled: per-token dispatches do cost real time.**
+Removing 27 % of them (65n of 240n) bought +2.10 % of prefill.
+
+Extrapolating linearly in dispatch count — an assumption, stated as one —
+batching `elem` (175n, the remaining 73 %) is worth on the order of **+5–6 %**
+more prefill. That is now a quantified target rather than a plausible one, and
+it is the single largest remaining prefill lever on this backend.
+
+### Two methodology notes that cost time here
+
+- **SmolLM2-135M has no QK-norm at all** (`qknorm=0, headnorm=0`). The first
+  attempt at this measurement used it and read a meaningless ±9 % of noise on
+  a model where the patch is a no-op. Check the census says your change is
+  even *reachable* on the model you are about to measure.
+- **`git stash` + `make` does not rebuild.** Stash restores mtimes that make
+  considers current, so "before" and "after" came out byte-identical
+  (`shasum` caught it — same hash twice). This is the rebuild trap AGENTS.md
+  documents, in a new disguise: `touch` the sources after any checkout or
+  stash that is meant to change the binary, and verify the two binaries
+  actually differ before trusting a single number from them.
+
 ## Standing conclusions
 
 - The prefill batch dimension collapses in `elem`, `qknorm` and `headnorm` —
@@ -138,6 +182,8 @@ into this diagnosis.
   is one batched dispatch.
 - Decode at `n == 1` is 98.7 % GPU execution. Encode overhead is retired as an
   explanation for anything.
-- Dispatch *encoding* is free (0.7 % of prefill). Whether dispatch *execution*
-  is free is open, bounded at ≤ 1.4 µs each, and settled by the qknorm
-  experiment above.
+- Dispatch *encoding* is free (0.7 % of prefill). Dispatch *execution* is
+  **not**: batching `qknorm`/`headnorm` removed 27 % of per-token dispatches
+  and bought +2.10 % prefill, bit-identically. Batching `elem` (the remaining
+  73 %) is the largest prefill lever left on this backend, estimated at
+  +5–6 %.

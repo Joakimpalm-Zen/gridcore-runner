@@ -1242,24 +1242,34 @@ static void enc_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
              1, n_in, n_out);
 }
 
-static void enc_qknorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                       id<MTLBuffer> v, NSUInteger v_off, id<MTLBuffer> w,
-                       int n_heads, int hd) {
+// n_col columns in one dispatch (grid.y), stride elements apart. Each
+// (head, column) pair is an independent reduction, so this is bit-identical to
+// n_col separate enc_qknorm calls -- see the kernel comment. It exists because
+// the per-token encoding of this op was 50n of the 240n per-token dispatches
+// measured in docs/metal-dispatch-census-2026-08-13.md.
+static void enc_qknorm_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                         id<MTLBuffer> v, NSUInteger v_off, id<MTLBuffer> w,
+                         int n_heads, int hd, int n_col, int stride) {
     float eps = m->rms_eps;
     [e setComputePipelineState:g->p_qknorm];
     [e setBuffer:v offset:v_off atIndex:0];
     [e setBuffer:w offset:0 atIndex:1];
     [e setBytes:&hd length:4 atIndex:2];
     [e setBytes:&eps length:4 atIndex:3];
+    [e setBytes:&stride length:4 atIndex:4];
     g_disp.qknorm++;
-    [e dispatchThreadgroups:MTLSizeMake(n_heads, 1, 1)
+    [e dispatchThreadgroups:MTLSizeMake(n_heads, n_col, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 }
 
-static void enc_headnorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
-                         id<MTLBuffer> src, NSUInteger src_off,
-                         id<MTLBuffer> dst, NSUInteger dst_off,
-                         id<MTLBuffer> w, int n_heads, int hd) {
+
+// Batched twin of enc_qknorm_n, same bit-identity argument. src and dst share
+// one stride: the K and V staging buffers are both strided by kv_dim.
+static void enc_headnorm_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
+                           id<MTLBuffer> src, NSUInteger src_off,
+                           id<MTLBuffer> dst, NSUInteger dst_off,
+                           id<MTLBuffer> w, int n_heads, int hd,
+                           int n_col, int stride) {
     float eps = m->rms_eps;
     int has_weight = w != nil;
     [e setComputePipelineState:g->p_headnorm];
@@ -1269,10 +1279,12 @@ static void enc_headnorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     [e setBytes:&hd length:4 atIndex:3];
     [e setBytes:&eps length:4 atIndex:4];
     [e setBytes:&has_weight length:4 atIndex:5];
+    [e setBytes:&stride length:4 atIndex:6];
     g_disp.headnorm++;
-    [e dispatchThreadgroups:MTLSizeMake(n_heads, 1, 1)
+    [e dispatchThreadgroups:MTLSizeMake(n_heads, n_col, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 }
+
 
 static void enc_rope_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
                        id<MTLBuffer> v, NSUInteger v_off, int n_heads, int pos,
@@ -1693,16 +1705,18 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                          n_embd, kv_dim_l, g->bv[l], n, xdim, kv_dim);
         }
 
-        for (int b = 0; b < n; b++) {
-            NSUInteger qo = foff((size_t)b * q_dim);
-            NSUInteger kto = foff((size_t)b * kv_dim);
-            NSUInteger vto = foff((size_t)b * kv_dim);
-            if (g->qn[l]) enc_qknorm(g, e, m, g->q,  qo,  g->qn[l], m->n_head, hd);
-            if (!owns_kv) continue;
+        // Batched in grid.y rather than encoded once per token. Bit-identical:
+        // each (head, column) pair was always an independent reduction, so
+        // only the encoding changes. This was 65n of the 240n per-token
+        // dispatches the census measured; the elementwise ops are the rest.
+        if (g->qn[l])
+            enc_qknorm_n(g, e, m, g->q, 0, g->qn[l], m->n_head, hd, n, q_dim);
+        if (owns_kv) {
             if (m->v_rmsnorm)
-                enc_headnorm(g, e, m, ly->wv ? g->vt : g->kt, ly->wv ? vto : kto,
-                             g->vt, vto, nil, n_kv, hd);
-            if (g->kn[l]) enc_qknorm(g, e, m, g->kt, kto, g->kn[l], n_kv, hd);
+                enc_headnorm_n(g, e, m, ly->wv ? g->vt : g->kt, 0,
+                               g->vt, 0, nil, n_kv, hd, n, kv_dim);
+            if (g->kn[l])
+                enc_qknorm_n(g, e, m, g->kt, 0, g->kn[l], n_kv, hd, n, kv_dim);
         }
         {
             size_t row_b = model_kv_row_bytes(m, l);

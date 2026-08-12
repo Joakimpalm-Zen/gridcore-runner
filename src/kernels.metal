@@ -37,15 +37,23 @@ kernel void k_rmsnorm(device const float *x_all [[buffer(0)]],
 }
 
 // per-head RMSNorm (qwen3 Q/K norm): one threadgroup per head
+// grid.y is the prompt batch: threadgroup (h, col) normalizes head h of column
+// col. Each (head, column) pair was already an independent reduction when this
+// was encoded once per token, so taking the batch in grid.y is BIT-IDENTICAL,
+// not a tolerance trade -- the per-pair arithmetic is character for character
+// the same and only the encoding changes. `stride` is elements between columns
+// (q_dim for Q, kv_dim for K); at n_col == 1 it is never read.
 kernel void k_qknorm(device float       *v   [[buffer(0)]],
                      device const float *w   [[buffer(1)]],
                      constant int       &hd  [[buffer(2)]],
                      constant float     &eps [[buffer(3)]],
-                     uint h   [[threadgroup_position_in_grid]],
-                     uint tid [[thread_position_in_threadgroup]],
-                     uint tpg [[threads_per_threadgroup]]) {
+                     constant int       &stride [[buffer(4)]],
+                     uint2 tgpig [[threadgroup_position_in_grid]],
+                     uint2 tpitg [[thread_position_in_threadgroup]],
+                     uint2 ntg   [[threads_per_threadgroup]]) {
+    uint tid = tpitg.x, tpg = ntg.x;
     threadgroup float red[128];
-    device float *x = v + h * hd;
+    device float *x = v + (ulong)tgpig.y * stride + tgpig.x * hd;
     float s = 0;
     for (int i = tid; i < hd; i += tpg) s += x[i] * x[i];
     red[tid] = s;
@@ -64,12 +72,18 @@ kernel void k_head_rmsnorm(device const float *src [[buffer(0)]],
                            constant int       &hd  [[buffer(3)]],
                            constant float     &eps [[buffer(4)]],
                            constant int       &has_weight [[buffer(5)]],
-                           uint h   [[threadgroup_position_in_grid]],
-                           uint tid [[thread_position_in_threadgroup]],
-                           uint tpg [[threads_per_threadgroup]]) {
+                           constant int       &stride [[buffer(6)]],
+                           uint2 tgpig [[threadgroup_position_in_grid]],
+                           uint2 tpitg [[thread_position_in_threadgroup]],
+                           uint2 ntg   [[threads_per_threadgroup]]) {
+    uint tid = tpitg.x, tpg = ntg.x;
     threadgroup float red[128];
-    device const float *x = src + h * hd;
-    device float *y = dst + h * hd;
+    // Batched in grid.y for the same reason, and with the same bit-identity
+    // argument, as k_qknorm above. src and dst share a stride: both the K and V
+    // staging buffers are strided by kv_dim.
+    ulong col = (ulong)tgpig.y * stride;
+    device const float *x = src + col + tgpig.x * hd;
+    device float *y = dst + col + tgpig.x * hd;
     float s = 0;
     for (int i = tid; i < hd; i += tpg) s += x[i] * x[i];
     red[tid] = s;
