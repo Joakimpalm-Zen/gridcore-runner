@@ -952,7 +952,11 @@ static __device__ __forceinline__ void tc_stage_q4_0(__half *dst,
 // weight tile, staged through STAGE instead of the q4_K super-block decoder.
 //
 // FIXED 2026-08-13 — this macro was left at the original TC_N=16 shape when
-// TC_N was widened to 64 on 2026-07-29. It staged 16 activation columns,
+// TC_N was widened 16 -> 64 in 6cf8c70 (2026-08-08 — NOT 2026-07-29, which is
+// the Q4_K promotion date; the correction matters because it sets the exposure
+// window: 2026-08-08 to 2026-08-13, and only for a type promoted or forced in
+// it — Q8_0 from 2026-08-09, gemma4 Q4_0 from 2026-08-12). It staged 16
+// activation columns,
 // accumulated a single 16-wide fragment and stored one 16x16 tile, then the
 // epilogue wrote sh_c columns 16..batch-1 — never written, so UNINITIALISED
 // shared memory — into y. Q8_0 is promoted by default, so the default CUDA
@@ -960,9 +964,14 @@ static __device__ __forceinline__ void tc_stage_q4_0(__half *dst,
 // runner's own default is -b 64). It reproduced as: greedy output identical
 // to the scalar path at -b 16, divergent at -b 32 and -b 64.
 //
-// The tolerance gate did not catch it because the Q8_0 row was measured
-// BEFORE the widening (2026-08-09, sm_86), and Q4_0 was never promoted so it
-// was never gated at all. test_tc_tol at N_BATCH=64 catches it now.
+// The tolerance gate did not catch it, and "it was measured before the
+// widening" turned out to be the wrong explanation: re-run on 2026-08-13, the
+// pre-fix kernel PASSES the teacher-forced gate on phi3 and gemma4 q4_0
+// ("BIT-IDENTICAL over 448/820 dispatches") while the same binary diverges in
+// free-running greedy at -b 64. The gate ran at n_ctx = n_tok + 8; at a
+// production context the block inherits ZEROED shared memory and the
+// corruption surfaces. test_tc_tol now carries a free-running arm at ctx 4096
+// that fails against this kernel.
 #define TC_GEMM_32B(NAME, STAGE, BLKBYTES)                                     \
 extern "C" __global__ void NAME(MV_PARAMS) {                                   \
     using namespace nvcuda::wmma;                                              \

@@ -451,6 +451,31 @@ tok/s (54.4x the defective row and 7.4x CPU) while decode held at 3.23 tok/s.
 Evidence is under
 `tests/compatibility/out/gemma4-31b-f3-2026-08-13/`.
 
+**2026-08-13b correction — the promotion holds, both numbers above do not.**
+That gate ran against `TC_GEMM_32B` before it was found to be computing 16 of
+its 64 token columns and publishing uninitialised shared memory for the rest.
+Re-measured on the fixed kernel, same model, same 60/60 offload:
+
+| | recorded 2026-08-12 | re-measured 2026-08-13b |
+|---|---:|---:|
+| prefill (tok/s) | 114.09 | **76.78** |
+| decode (tok/s) | 3.23 | **17.52** |
+| tc-tol verdict | "BIT-IDENTICAL, 820 dispatches" | 0/64 flips, 6e-5 of range |
+
+Prefill was inflated ~1.5x by a kernel doing a quarter of its MMA work; it is
+still 36.6x the scalar path (2.10 tok/s, which reproduces exactly), so the
+`(Q4_0, gemma4)` promotion is amply justified on the honest number. Decode rose
+5.4x for an unrelated reason: Q4_0 gained its missing coalesced decode GEMV on
+2026-08-13.
+
+The "BIT-IDENTICAL over 820 dispatches" verdict is **withdrawn as evidence**.
+Rebuilt from the pre-fix commit, that same kernel still reports bit-identity on
+this model *and* on Phi-4-mini-q4_0 while the same binary produces different
+free-running greedy text at `-b 64` — a false pass, caused by the gate running
+at `n_ctx = n_tok + 8` where the block inherited usable shared memory. The gate
+now carries a free-running arm at a production context that fails against that
+kernel.
+
 ### Summary
 
 The identity gates are unambiguously the best of the session (5/6, both long runs exact) for what is also the largest dense model tested. The perf row is the interesting anti-correlated result: bigger and more correct here does not mean faster on this specific, VRAM-constrained GPU slice — a genuinely useful data point for anyone sizing which of these artifacts to run on a small GPU versus CPU.

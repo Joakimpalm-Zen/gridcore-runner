@@ -1844,12 +1844,23 @@ static bool tc_promoted(const model_t *m, int type) {
     // convert to fp16 without loss and the accumulation order matches the
     // scalar path; that is a property of the kernel, not of the model.
     //
-    // CAVEAT, and it is the reason this row is not yet in the TC spec table:
-    // measured on sm_86 (RTX 3070), while every other row was measured on the
-    // Blackwell MIG slice (sm_120). Bit-identity is a strong claim but it is a
-    // claim about one architecture's tensor cores. Confirm on sm_120 before the
-    // next release — if it is merely near-identical there, this row needs
-    // demoting to tolerance-gated like the others.
+    // RESOLVED 2026-08-13b, and the caveat's own instruction applies: the
+    // sm_120 confirmation was run and Q8_0 is NOT bit-identical there. It is
+    // merely near-identical, so this row is hereby DEMOTED from "exact" to
+    // tolerance-gated like every other row:
+    //
+    //   smollm  SmolLM2-135M-Q8_0        0/64 flips, 8e-5 of logit range
+    //   phi3    Phi-4-mini-Q8_0          0/64,        2e-5
+    //   granite granite-4.1-3b-Q8_0      0/64,        5e-5
+    //
+    // The old sm_86 bit-identity reading is also retired for a second reason:
+    // it was measured 2026-08-09, one day AFTER TC_N widened to 64, on the
+    // kernel that computed 16 of its 64 columns. That kernel reported
+    // bit-identity on phi3 and gemma4 while producing different free-running
+    // text at -b 64 — so "BIT-IDENTICAL" was not evidence of a correct kernel
+    // and cannot carry a promotion on its own. Promotion for the whole arch
+    // list now rests on three tolerance rows across three archs plus the
+    // free-running arm in test_tc_tol, not on an exactness argument.
     // Q4_0 joined 2026-08-13, and only because the bug above it was fixed
     // first. Its TC kernel shares TC_GEMM_32B with Q8_0, which until that day
     // computed 16 of its 64 token columns and published uninitialised shared
@@ -1878,11 +1889,12 @@ static bool tc_promoted(const model_t *m, int type) {
     //   Q4_0        granite-4.1-3b-q4_0            0/64, 5e-5 of range
     //   Q8_0        granite-4.1-3b-Q8_0            0/64, 5e-5
     //   Q4_K/Q6_K   granite-3.3-8b-instruct-Q4_K_M 0/64, 3e-5
-    // gemma4 additionally carries a same-day 31B QAT gate row (820 TC
-    // dispatches bit-identical, 0/64 flips) — measured against the PRE-fix
-    // kernel on whose shape the 16-column defect evidently did not manifest.
-    // Re-gate that combo against the fixed kernel next Blackwell session,
-    // alongside the sm_120 confirmation above.
+    // gemma4's 31B QAT Q4_0 row was RE-GATED against the fixed kernel on
+    // 2026-08-13b and holds: 0/64 flips, 6e-5 of range, 60/60 offload. The
+    // pre-fix "820 dispatches bit-identical" reading it was promoted on is
+    // withdrawn — reproduced from a rebuilt pre-fix binary, that verdict is a
+    // false pass (same binary, same model, free-running divergence at -b 64).
+    // The promotion survives; the evidence behind it did not.
     static const char *archs[] = { "llama", "phi3", "gemma4", "qwen3",
                                    "mistral", "gemma3", "smollm", "granite" };
     for (size_t i = 0; i < sizeof(archs) / sizeof(*archs); i++)

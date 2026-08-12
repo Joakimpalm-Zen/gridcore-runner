@@ -47,6 +47,30 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         return tok_find(tok, "<|end|>") >= 0 ? TMPL_PHI3 : TMPL_ZEPHYR;
     if (tok_find(tok, "<|turn>") >= 0)             return TMPL_GEMMA4;
     if (tok_find(tok, "<start_of_turn>") >= 0)     return TMPL_GEMMA;
+
+    // Nothing matched. The fallback still renders llama2 — changing what
+    // unrecognised models render is a behavioural decision, not a bug fix —
+    // but it must not be SILENT. Diagnosed 2026-08-13b on gpt-oss-20b, whose
+    // Harmony template (`<|start|>` / `<|channel|>` / `<|message|>` /
+    // `<|return|>`) has no branch here: chat mode reported
+    // "template: llama2" and fed the model `[INST]` / `<<SYS>>` markup that
+    // appears nowhere in its own template. The model then emitted its
+    // analysis-channel reasoning as visible output and ran past every stop
+    // condition, because llama2's stops are not Harmony's. That is the same
+    // class of error this project already refused for granite tool calling:
+    // unimplemented, not approximated. Say so.
+    if (meta_tmpl && *meta_tmpl) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr,
+                "warning: this model ships a chat template this build does "
+                "not recognise; falling back to llama2 markup, which the "
+                "model was not trained on. Expect wrong turn framing and "
+                "missed stops. Use --chat-template to name a supported one, "
+                "or `raw` for no framing at all.\n");
+        }
+    }
     return TMPL_LLAMA2;
 }
 

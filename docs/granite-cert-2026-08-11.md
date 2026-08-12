@@ -68,3 +68,37 @@ training compute — certify the 8B, skip 30B-at-3-bit.**
 - Granite tool calling (the Hermes-style `<tool_call>` JSON in the model's
   template) is not rendered — unimplemented, not approximated. The
   JSON-schema constrained tool path works as with every arch.
+
+## 2026-08-13b addendum — the 3/6 row re-run against the TC bug, and it holds
+
+On 2026-08-13 a shipped CUDA correctness bug was found: `TC_GEMM_32B`, the
+tensor-core prefill GEMM for Q8_0 and Q4_0, computed 16 of its 64 token columns
+and published uninitialised shared memory for the rest, from 2026-08-08 until
+the fix. The obvious question for this document was whether the
+granite-4.1-30b Q8_0 greedy identity row (3/6, read as depth amplification) was
+really measuring that bug.
+
+**It was not, and the row reproduces byte for byte.** Re-run 2026-08-13 on the
+fixed binary against the same llama.cpp b10353 reference and the same six
+prompts: **3/6 again**, and every one of the twelve SHA256s — runner side and
+reference side, on all six prompts including both 256-token runs — is
+*identical* to the value recorded on 2026-08-11. The two divergent prompts
+diverge at the same byte offsets (b at 166, d at 134).
+
+Two independent reasons the bug could not have reached this row, both
+established before the re-run rather than after it:
+
+1. `scripts/cert-greedy-identity.py` invokes the runner with **`--gpu off`**.
+   This gate is CPU-only on the runner side; no CUDA kernel participates.
+2. Even on the GPU it would not have: `tc_promoted()` at the cert commit
+   (`1ce9103`) admitted `llama, phi3, gemma4, qwen3, mistral, gemma3, smollm`,
+   and this model reports arch **`granite`**. The tensor-core path was not
+   enabled for it until 2026-08-13.
+
+**The CERTIFIED-WITH-CAVEAT verdict stands unchanged**, and the depth-
+amplification reading has now survived its strongest available challenge. The
+byte-for-byte reproduction across two days and a substantially changed binary
+(the spin-then-park thread pool landed in between) is also independent evidence
+for that change's byte-identity claim at 30B scale.
+
+Evidence: `granite-evidence/greedy-q8-recert-2026-08-13.json`.

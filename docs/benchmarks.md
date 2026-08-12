@@ -21,19 +21,41 @@ fraction of the card's SMs. Absolute tok/s will differ on other hardware; the
 with the compute/bandwidth balance (the same kernels measured different ratios
 on an RTX 3070).
 
-> **Stale as of 2026-08-13 — read [performance.md](performance.md) first.**
-> The runner side of every row below has moved and one row was measuring a
-> bug. The TC prefill GEMM for the 32-byte-block quants was publishing
-> uninitialised shared memory for token columns 16..63 (fixed 2026-08-13), so
-> the Q8_0 prefill path these numbers exercised was not computing what it
-> reported; Q4_0 and the granite arch have since been promoted through the
-> tolerance gate, taking `granite-4.1-8b-Q4_0` prefill from 8.0 to 230.6 tok/s
-> and Llama-3.2-3B prefill to 748 against the 438.1 below. Q4_0 decode also
-> gained its missing coalesced GEMV (4.4-5.4x, token-identical). The llama.cpp
-> denominators have NOT been re-measured on this box — a CUDA llama.cpp build
-> could not be produced there (toolkit mismatch, detailed in performance.md) —
-> so the ratios in this table should be treated as unverified until both sides
-> are re-run together.
+## Results — 2026-08-13, both sides re-measured on this box
+
+The 2026-07-29 table below is kept as history. It was taken before a CUDA
+prefill correctness bug was found (`TC_GEMM_32B` published uninitialised shared
+memory for token columns 16..63 — its Q8_0 prefill rows were therefore
+measuring a kernel that was not computing what it reported), and before Q4_0,
+the granite arch and the Q4_0 decode GEMV landed. This table replaces it: both
+engines re-run on the same slice, same files, same day, on the fixed kernel.
+
+| model | quant | decode tok/s: runner / llama.cpp | prefill tok/s: runner / llama.cpp |
+|---|---|---|---|
+| Llama-3.2-3B | Q4_K_M | 130.3 / 169.0 (**77%**) | 735.1 / 8440.6 (8.7%) |
+| Phi-4-mini | Q8_0 | 80.2 / 92.2 (**87%**) | 509.8 / 8397.0 (6.1%) |
+| granite-3.3-8b | Q4_K_M | 61.0 / 73.9 (**83%**) | 326.4 / 3335.8 (9.8%) |
+| granite-4.1-8b | Q4_0 | 64.4 / 75.9 (**85%**) | 230.4 / 3710.6 (6.2%) |
+
+Runner via `--bench-json -n 128 -b 64` (mean of 2, spread < 2.2%); llama.cpp
+b10353 built with `-DGGML_CUDA=ON` from the same source tree on this box, via
+`llama-bench -p 512 -n 128 -ngl 99 -r 2`.
+
+**The reference reproduces the published one.** llama.cpp measures 8440.6 /
+169.0 on Llama-3.2-3B against the 8373.6 / 169.0 recorded on 2026-07-29 with a
+different build — so the denominators in the old table were sound, and the
+movement in the ratios is runner's.
+
+**Decode: 77-87%, up from 73-79%.** The granite-4.1-8b Q4_0 row (85%) is new
+coverage rather than tuning: Q4_0 had no coalesced decode GEMV until
+2026-08-13 and ran at 11.9 tok/s, which was slower than the same model on the
+CPU.
+
+**Prefill: 6.1-9.8%, up from 4.3-5.6%,** and still the honest weak column.
+The gain came from admitting types and architectures to the tensor-core path
+(Q6_K 2026-08-08, Q4_0 + granite 2026-08-13), not from a faster kernel — the
+tile is still 64 columns wide where llama.cpp's stack is deeper. See
+[performance.md](performance.md) for what was measured and rejected.
 
 ## Results — default configuration, 2026-07-29
 
@@ -67,7 +89,7 @@ Runner's TC path covered Q4_K and Q8_0 when this table was taken, and lifted
 promoted dense models from ~3% to ~4–6% of llama.cpp. It now also covers Q6_K
 (2026-08-08) and Q4_0 (2026-08-13, with the granite arch), and the 32-byte-block
 kernel it shares was carrying a 48-of-64-columns bug until 2026-08-13 — see the
-note at the top of this file. Further coverage is tracked work, and the gap is
+re-measured table above. Further coverage is tracked work, and the gap is
 reported, not hidden.
 
 **Known-slow rows are kept in the table.** Q3_K decode (12%) uses a

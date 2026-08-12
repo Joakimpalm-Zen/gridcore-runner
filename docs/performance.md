@@ -178,17 +178,26 @@ half-landed.**
 ### What the tile lever found instead: 48 of 64 columns were garbage
 
 `TC_GEMM_32B`, the shared TC GEMM for the 32-byte-block quants (Q8_0, Q4_0),
-was left at the original `TC_N=16` shape when TC_N was widened to 64 on
-2026-07-29 — its q4_K twin was updated, this one was not. It staged 16
+was left at the original `TC_N=16` shape when TC_N was widened 16 -> 64 in
+`6cf8c70` (**2026-08-08** — not 2026-07-29 as first recorded here; that is the
+Q4_K promotion date, and the correction matters because it sets the exposure
+window). Its q4_K and q6_K twins were updated; this one was not. It staged 16
 activation columns, accumulated one 16-wide fragment, stored one 16x16 tile,
 and the epilogue then published `sh_c` columns 16..batch-1, which nothing had
 written, as logits. The dispatcher hands it 64-column tiles.
 
 Q8_0 is promoted by default, so this was the **default CUDA prefill path**:
 greedy output matched the scalar path at `-b 16` and diverged at `-b 32` and
-`-b 64`, and the runner's own default is `-b 64`. The gate missed it because
-the Q8_0 row was measured before the widening and Q4_0 was never promoted, so
-it was never gated at all. Fixed; `test_tc_tol` at N_BATCH=64 catches it now.
+`-b 64`, and the runner's own default is `-b 64`. Why the gate missed it — and the first answer here was wrong.
+"Measured before the widening" does not hold: Q8_0 was promoted 2026-08-09, one
+day *after* it. Re-run on 2026-08-13 against a rebuilt pre-fix binary, the
+broken kernel **passes** the teacher-forced gate on phi3 and gemma4 q4_0
+("BIT-IDENTICAL over 448 and 820 dispatches") while the same binary diverges in
+free-running greedy at `-b 64`. The gate ran at `n_ctx = n_tok + 8`; at a
+production context the block inherits zeroed shared memory and the corruption
+surfaces — the new arm reports "first divergence at token 0, tc 0", the argmax
+of an all-zero logit vector. `test_tc_tol` now carries a free-running arm at
+ctx 4096 that fails against that kernel and passes against the fixed one.
 
 Correctness is not free — the broken kernel was fast because it computed a
 quarter of the work:
@@ -260,18 +269,17 @@ both phases, for the same reason — nobody had written or admitted its kernels.
 The published CUDA table's weakest rows are worth re-reading as coverage gaps
 before they are read as kernel-quality gaps.
 
-### The llama.cpp CUDA denominator is missing, and that is a gap
+### The llama.cpp CUDA denominator — found 2026-08-13b
 
-Every CUDA ratio in `docs/benchmarks.md` still rests on the 2026-07-29 numbers.
-They should be re-measured: Llama-3.2-3B prefill on this box is now 748 tok/s
-against the 438 published. A same-box llama.cpp CUDA reference could not be
-built tonight — the conda `nvcc` is missing `fatbinary_section.h`, the system
-`/usr/local/cuda` ships runtime libraries only, and the complete toolkit inside
-the vllm venv has headers that its own `nvcc` rejects as version-mismatched
-(`cccl/cuda/std/__cccl/cuda_toolkit.h`: "CUDA compiler and CUDA toolkit headers
-are incompatible"). The CPU reference *was* built from the same b10353 tree and
-every CPU ratio above is honest; the CUDA ratios are not restated here because
-there is nothing trustworthy to divide by yet.
+The blocker was a PARTIAL conda package. `conda create -n cudatk -c nvidia
+cuda-toolkit=13.0` (the full metapackage, not the bare `cuda-nvcc` tried first)
+carries both missing pieces — `fatbinary_section.h` and `libcublas.so` — and
+builds llama.cpp b10353 with `-DGGML_CUDA=ON` without further argument. The
+same-slice table is in [benchmarks.md](benchmarks.md); the short version is
+that the llama.cpp side reproduces the 2026-07-29 published numbers almost
+exactly (8440.6 vs 8373.6 prefill, 169.0 vs 169.0 decode on Llama-3.2-3B), so
+the old denominators were sound and the movement in the ratios is runner's:
+decode 73-79% -> **77-87%**, prefill 4.3-5.6% -> **6.1-9.8%**.
 
 ## The levers that remain (bigger, and deliberately not rushed)
 
