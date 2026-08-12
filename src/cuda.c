@@ -1848,9 +1848,36 @@ static bool tc_promoted(const model_t *m, int type) {
     // claim about one architecture's tensor cores. Confirm on sm_120 before the
     // next release — if it is merely near-identical there, this row needs
     // demoting to tolerance-gated like the others.
-    if (type != T_Q4_K && type != T_Q6_K && type != T_Q8_0) return false;
+    // Q4_0 joined 2026-08-13, and only because the bug above it was fixed
+    // first. Its TC kernel shares TC_GEMM_32B with Q8_0, which until that day
+    // computed 16 of its 64 token columns and published uninitialised shared
+    // memory for the rest; Q4_0 forced on scored 28/64 to 59/64 top-1 flips.
+    // With the macro fixed, six models across four archs gate clean at
+    // N_BATCH=64 — 0/64 flips every row, mean|dlogit| 3e-5 to 8e-5 of range:
+    //
+    //   qwen3   Qwen3-0.6B-q4_0, Qwen3-1.7B-q4_0, dense-control-stage1-q4_0
+    //   phi3    Phi-4-mini-instruct-q4_0
+    //   smollm  SmolLM2-135M requantised to q4_0
+    //   llama   Llama-3.2-3B-Q4_K_M requantised to q4_0 (Q4_K + Q4_0 mix)
+    //
+    // This is the largest prefill row in the table because Q4_0 had no GEMM
+    // at all on the promoted path: pp512 goes 57.8 -> 977.8 tok/s on
+    // Qwen3-1.7B (16.9x) and 21.2 -> 445.4 on Phi-4-mini (21x). gemma4,
+    // mistral and gemma3 have no q4_0 gate row of their own and inherit the
+    // arch list below, as Q6_K and Q8_0 did; they are the rows to measure
+    // next, not rows this evidence covers.
+    if (type != T_Q4_K && type != T_Q6_K && type != T_Q8_0 && type != T_Q4_0)
+        return false;
+    // granite joined 2026-08-13 with a gate row for EVERY promoted type on
+    // its own weights — the only arch here that has one — because it was
+    // the arch that showed what the missing coverage costs: granite-4.1-8b
+    // Q4_0 ran prefill at 8.0 tok/s on a fully offloaded GPU, slower than
+    // the same model on CPU, purely because no TC combo admitted it.
+    //   Q4_0        granite-4.1-3b-q4_0            0/64, 5e-5 of range
+    //   Q8_0        granite-4.1-3b-Q8_0            0/64, 5e-5
+    //   Q4_K/Q6_K   granite-3.3-8b-instruct-Q4_K_M 0/64, 3e-5
     static const char *archs[] = { "llama", "phi3", "gemma4", "qwen3",
-                                   "mistral", "gemma3", "smollm" };
+                                   "mistral", "gemma3", "smollm", "granite" };
     for (size_t i = 0; i < sizeof(archs) / sizeof(*archs); i++)
         if (strcmp(m->arch, archs[i]) == 0) return true;
     return false;
