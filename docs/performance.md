@@ -73,11 +73,10 @@ back to CPU). **Kept at `compute_75`.**
 > on every promoted row. The spec carries the gate table and the promotion
 > record; `RUNNER_CUDA_TC=0` pins the scalar path.
 
-## 2026-08-13 — lever 1 built, gated, and NOT promoted
+## 2026-08-13 — lever 1 built and measured; the wall was somewhere else
 
-Lever 1 below (the fused int8 dot) was built and measured on the
-Threadripper 9980X. It does what the lever promised to the kernel and
-almost nothing to tok/s, and it cannot hold its correctness bar.
+Lever 1 below (the fused int8 dot) was built, gated and measured on the
+Threadripper 9980X. Two results, and the second is the one that moved tok/s.
 
 ### The fused int8 dot: 2.4x on the kernel, ~6% end to end, NOT promoted
 
@@ -111,6 +110,54 @@ fast route on this engine is 0/64, the same bar TC prefill had to clear, and it
 is not widened to fit a lever. **No combo promoted.** The route ships behind
 `RUNNER_CPU_I8=1`, `./test-i8-tol MODEL.gguf` is the gate, and the scalar route
 is unchanged and byte-identical to the pre-branch binary at every thread count.
+
+### The actual wall: the thread pool, at 65-138 us per matvec
+
+Decode issues ~200 `tpool_run` calls per token. The condvar-only pool cost two
+kernel round trips per worker per run:
+
+| threads | before | after | per-token handoff (200 runs) |
+|---|---:|---:|---|
+| 8 | 14.0 us | 2.6 us | 2.8 ms → 0.5 ms |
+| 16 | 23.1 us | 2.7 us | 4.6 ms → 0.5 ms |
+| 32 | 65.4 us | 4.5 us | **13.1 ms → 0.9 ms** |
+| 64 | 137.9 us | 7.1 us | **27.6 ms → 1.4 ms** |
+
+At 32 threads that was 38% of the token, and at 64 threads 59% — which is why
+runner decode got *slower* above 32 threads while llama.cpp kept scaling.
+Workers now spin on the generation counter for a bounded window (`~50 us`,
+`RUNNER_TPOOL_SPIN`, `0` restores the old pool) before parking, and the
+publisher skips the broadcast entirely while the pool is hot. `tp_slice` is
+untouched: this changes when threads wake, never which rows they compute, so
+**output is byte-identical** — verified against the pre-branch binary on three
+models at three thread counts.
+
+### Where that leaves CPU decode vs llama.cpp
+
+Best-of-thread-count, `--bench-json` pp512/tg128 vs `llama-bench` b10353 built
+from the same source tree on this box, all under the benchmark lock:
+
+| model | decode: before | +pool | +pool+int8 | llama.cpp |
+|---|---:|---:|---:|---:|
+| Llama-3.2-3B Q4_K_M | 27.0 (50%) | 35.7 (**66%**) | 41.2 (76%) | 54.5 |
+| granite-4.1-8b Q4_0 | 15.0 (60%) | 19.7 (**78%**) | 20.4 (81%) | 25.3 |
+| SmolLM2-135M Q8_0 | 134.5 (25%) | 179.7 (**34%**) | 180.4 (34%) | 528.3 |
+
+| model | prefill: before | +pool | llama.cpp |
+|---|---:|---:|---:|
+| Llama-3.2-3B Q4_K_M | 113.8 (8.7%) | 153.9 (11.8%) | 1306.8 |
+| granite-4.1-8b Q4_0 | 50.7 (7.9%) | 61.2 (9.6%) | 638.0 |
+| SmolLM2-135M Q8_0 | 578.0 (6.5%) | 765.0 (8.7%) | 8825.2 |
+
+Dense decode on the **default** path moved from 50-60% of llama.cpp to 66-78%,
+with every output byte unchanged. The remaining decode gap is real work, not
+mystery: measured aggregate DRAM read bandwidth on this box saturates at
+~135 GB/s, llama.cpp's 54.5 tok/s on the 3B is ~109 GB/s of that, and runner at
+35.7 is ~71 GB/s — so roughly half the remaining gap is still per-core dot
+throughput (which is what the int8 route addresses, if a route that holds 0/64
+can be found) and the rest is the non-matvec serial work between barriers.
+CPU prefill remains the larger, untouched gap: it still dequantizes each weight
+row to f32 and never uses the int8 path.
 
 ## The levers that remain (bigger, and deliberately not rushed)
 

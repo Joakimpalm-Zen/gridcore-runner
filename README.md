@@ -343,7 +343,10 @@ AVX2 fallback): 2.4-2.5x on the kernel in isolation, but it quantizes the
 activations, so it is **off by default** — no format cleared the 0/64
 teacher-forced flip bar with a decode gain worth taking on the measurement
 box. `./test-i8-tol MODEL.gguf` is the gate.
-See [docs/performance.md](docs/performance.md).
+`RUNNER_TPOOL_SPIN` sets how many relax iterations a pool worker spins before
+parking (default 3000, roughly 50 us); `0` restores a pure condvar pool. The
+spin window only changes when threads wake, never which rows they compute, so
+output is unaffected either way. See [docs/performance.md](docs/performance.md).
 
 Vulkan is not implemented; AMD and Intel GPUs use the CPU path.
 

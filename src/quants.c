@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 // ---------------------------------------------------------------- fp16 table
 
@@ -2262,6 +2263,16 @@ float vec_dot_i8(int type, const void *row, const void *xq, int n) {
 
 #define TP_MAX 64
 
+// Decode issues one tpool_run per matvec — around 200 per token on a 3B dense
+// model — so the pool's handoff cost is multiplied by 200 before it reaches
+// tok/s. A condvar-only pool pays two kernel round trips per worker per run;
+// measured on this 64-core Zen 5 box (tpbench, 2026-08-13) that was 65 us per
+// run at 32 threads and 138 us at 64, i.e. 13 ms and 28 ms of pure handoff per
+// token — the reason decode got SLOWER above 32 threads while llama.cpp kept
+// scaling. Workers now spin on the generation counter for a bounded window
+// before parking, so a busy pool never enters the kernel and an idle one still
+// sleeps. The partitioning (tp_slice) is untouched: this changes when threads
+// wake, never which rows they compute, so every output byte is unchanged.
 struct tpool {
     pthread_t th[TP_MAX];
     int n_threads;          // total workers incl. calling thread
@@ -2270,10 +2281,44 @@ struct tpool {
     tp_fn fn;
     void *ctx;
     int n_items;
-    uint64_t gen;
-    int n_done;
-    bool stop;
+    _Atomic uint64_t gen;
+    _Atomic int n_done;
+    _Atomic int n_sleeping;   // workers parked on cv_work
+    _Atomic int caller_parked;
+    _Atomic int stop;
+    int spin;                 // relax iterations before parking
 };
+
+// One spin iteration is a pause plus an atomic load: ~15 ns on this class of
+// core, so the default is roughly 50 us of spinning before a worker parks.
+// That covers the serial gaps inside a token (norms, rope, sampling setup)
+// without leaving a --serve pool spinning between requests.
+#define TP_SPIN_DEFAULT 3000
+
+// RUNNER_TPOOL_SPIN overrides the budget: 0 restores the pure condvar pool
+// (the pre-2026-08-13 behaviour, kept as an escape hatch for a box where
+// spinning threads are unwelcome). Parsed here rather than through compat.c's
+// env_i64 so quants.c keeps linking standalone into the kernel tests.
+static int tp_spin_budget(void) {
+    const char *e = getenv("RUNNER_TPOOL_SPIN");
+    if (!e || !*e) return TP_SPIN_DEFAULT;
+    char *end;
+    long v = strtol(e, &end, 10);
+    if (*end || v < 0 || v > 10000000) {
+        fprintf(stderr, "warning: RUNNER_TPOOL_SPIN='%s' is not an integer in "
+                        "[0, 10000000] — ignoring\n", e);
+        return TP_SPIN_DEFAULT;
+    }
+    return (int)v;
+}
+
+static inline void tp_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield" ::: "memory");
+#endif
+}
 
 typedef struct { tpool *tp; int idx; } tp_arg;
 
@@ -2292,21 +2337,43 @@ static void *tp_worker(void *argp) {
     free(a);
     uint64_t seen = 0;
     for (;;) {
-        pthread_mutex_lock(&tp->mu);
-        while (tp->gen == seen && !tp->stop) pthread_cond_wait(&tp->cv_work, &tp->mu);
-        if (tp->stop) { pthread_mutex_unlock(&tp->mu); return NULL; }
-        seen = tp->gen;
+        // Wait for work: spin on the generation counter, then park. The
+        // sleeping count is what lets tpool_run skip the broadcast entirely
+        // while the pool is hot.
+        uint64_t g;
+        for (int spins = 0;; spins++) {
+            g = atomic_load_explicit(&tp->gen, memory_order_acquire);
+            if (g != seen) break;
+            if (atomic_load_explicit(&tp->stop, memory_order_acquire)) return NULL;
+            if (spins < tp->spin) { tp_relax(); continue; }
+            pthread_mutex_lock(&tp->mu);
+            atomic_fetch_add(&tp->n_sleeping, 1);
+            // The increment is published BEFORE this re-read of gen, and
+            // tpool_run publishes gen before reading n_sleeping — so a
+            // publisher that misses the sleeper is one this thread has
+            // already seen. Nobody sleeps through a wakeup.
+            while ((g = atomic_load(&tp->gen)) == seen &&
+                   !atomic_load(&tp->stop))
+                pthread_cond_wait(&tp->cv_work, &tp->mu);
+            atomic_fetch_sub(&tp->n_sleeping, 1);
+            pthread_mutex_unlock(&tp->mu);
+            break;
+        }
+        if (atomic_load_explicit(&tp->stop, memory_order_acquire)) return NULL;
+        seen = g;
+        // published by the seq_cst gen store in tpool_run
         tp_fn fn = tp->fn; void *ctx = tp->ctx; int n = tp->n_items;
-        pthread_mutex_unlock(&tp->mu);
 
         int i0, i1;
         tp_slice(idx, tp->n_threads, n, &i0, &i1);
         if (i0 < i1) fn(ctx, i0, i1);
 
-        pthread_mutex_lock(&tp->mu);
-        tp->n_done++;
-        if (tp->n_done == tp->n_threads - 1) pthread_cond_signal(&tp->cv_done);
-        pthread_mutex_unlock(&tp->mu);
+        if (atomic_fetch_add(&tp->n_done, 1) + 1 == tp->n_threads - 1 &&
+            atomic_load(&tp->caller_parked)) {
+            pthread_mutex_lock(&tp->mu);
+            pthread_cond_broadcast(&tp->cv_done);
+            pthread_mutex_unlock(&tp->mu);
+        }
     }
 }
 
@@ -2331,6 +2398,7 @@ tpool *tpool_create(int n_threads) {
     tpool *tp = calloc(1, sizeof(tpool));
     if (!tp) return NULL;
     tp->n_threads = n_threads;
+    tp->spin = tp_spin_budget();
     if (pthread_mutex_init(&tp->mu, NULL) != 0) { free(tp); return NULL; }
     if (pthread_cond_init(&tp->cv_work, NULL) != 0) {
         pthread_mutex_destroy(&tp->mu);
@@ -2358,7 +2426,7 @@ tpool *tpool_create(int n_threads) {
 
 fail:
     pthread_mutex_lock(&tp->mu);
-    tp->stop = true;
+    atomic_store(&tp->stop, 1);
     pthread_cond_broadcast(&tp->cv_work);
     pthread_mutex_unlock(&tp->mu);
     for (int i = 1; i <= created; i++) pthread_join(tp->th[i], NULL);
@@ -2372,7 +2440,7 @@ fail:
 void tpool_destroy(tpool *tp) {
     if (!tp) return;
     pthread_mutex_lock(&tp->mu);
-    tp->stop = true;
+    atomic_store(&tp->stop, 1);
     pthread_cond_broadcast(&tp->cv_work);
     pthread_mutex_unlock(&tp->mu);
     for (int i = 1; i < tp->n_threads; i++) pthread_join(tp->th[i], NULL);
@@ -2388,18 +2456,36 @@ void tpool_run(tpool *tp, tp_fn fn, void *ctx, int n_items) {
         fn(ctx, 0, n_items);
         return;
     }
-    pthread_mutex_lock(&tp->mu);
     tp->fn = fn; tp->ctx = ctx; tp->n_items = n_items;
-    tp->n_done = 0;
-    tp->gen++;
-    pthread_cond_broadcast(&tp->cv_work);
-    pthread_mutex_unlock(&tp->mu);
+    atomic_store_explicit(&tp->n_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&tp->caller_parked, 0, memory_order_relaxed);
+    // seq_cst: publishes fn/ctx/n_items to the spinning workers AND orders
+    // against the n_sleeping read below
+    atomic_fetch_add(&tp->gen, 1);
+    if (atomic_load(&tp->n_sleeping) > 0) {
+        pthread_mutex_lock(&tp->mu);
+        pthread_cond_broadcast(&tp->cv_work);
+        pthread_mutex_unlock(&tp->mu);
+    }
 
     int i0, i1;
     tp_slice(0, tp->n_threads, n_items, &i0, &i1);
     if (i0 < i1) fn(ctx, i0, i1);
 
-    pthread_mutex_lock(&tp->mu);
-    while (tp->n_done < tp->n_threads - 1) pthread_cond_wait(&tp->cv_done, &tp->mu);
-    pthread_mutex_unlock(&tp->mu);
+    int target = tp->n_threads - 1;
+    for (int spins = 0;; spins++) {
+        if (atomic_load_explicit(&tp->n_done, memory_order_acquire) >= target)
+            return;
+        if (spins < tp->spin) { tp_relax(); continue; }
+        pthread_mutex_lock(&tp->mu);
+        atomic_store(&tp->caller_parked, 1);
+        // same handshake as the worker side, mirrored: the flag is published
+        // before this read of n_done, and a worker increments n_done before
+        // reading the flag
+        while (atomic_load(&tp->n_done) < target)
+            pthread_cond_wait(&tp->cv_done, &tp->mu);
+        atomic_store(&tp->caller_parked, 0);
+        pthread_mutex_unlock(&tp->mu);
+        return;
+    }
 }
