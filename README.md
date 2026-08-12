@@ -473,6 +473,12 @@ When native `tool_choice:"auto"` is combined with a JSON-schema
 schema; choosing not to call a tool therefore does not weaken structured
 output.
 
+Muse's own protocol tokens satisfy the constraint's spelled markers: when the
+model emits a control token such as `<|message|>` where the automaton expects
+that literal, the engine advances the automaton and the output stream with its
+spelling, so constrained generation follows the model's trained header format
+instead of forcing it to type protocol out as text.
+
 An explicit `enable_thinking:true` starts Muse's self-addressed reasoning turn
 before the recipient constraint. If generation is cut at the token limit,
 the atem automaton closes the current parameter/invoke/function-call tail;

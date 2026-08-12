@@ -925,6 +925,28 @@ static bool constraint_done(const engine *e, bool schema) {
            (schema ? e->sv.done : e->jv.done);
 }
 
+// A protocol token the model was trained on (Muse's <|message|>, <|start|>)
+// decodes to no bytes, so the byte machine can never observe it — yet the
+// atem automata SPELL those markers as literals. Without this, the model is
+// forced to type its own protocol out as text, which is off-distribution;
+// measured on the real model, greedy decoding then loops "<|message|>" to
+// the token limit on some tool_choice:"auto" prompts. Accept a decoded-empty
+// token in constrained output when feeding its raw vocab spelling would
+// advance the machine, and refuse it while the machine is consuming free
+// content (a raw scalar, a JSON string): a protocol marker mid-value is
+// corruption, not syntax. Stop tokens are excluded — they end the turn, and
+// the raw-tail rule in constraint_token_ok owns them.
+static bool constraint_spelling_ok(engine *e, int id, bool schema) {
+    if (!schema || e->constraint_phase != CP_OUTPUT) return false;
+    if (is_stop(e, id)) return false;
+    if (sval_ws_is_content(&e->sv)) return false;
+    const char *sp = tok_raw(e->tok, id);
+    if (!sp || !*sp) return false;
+    engine tmp = *e;
+    int visible;
+    return constraint_feed(&tmp, true, sp, (int)strlen(sp), &visible);
+}
+
 // validity filter for constrained mode. Before a declared thinking block
 // closes, ordinary tokens are allowed; stop/control tokens remain valid only
 // inside that prelude or after the constrained payload is complete.
@@ -951,11 +973,14 @@ static bool constraint_token_ok(engine *e, int id, bool schema) {
                // stops stay refused — a turn header mid-answer is corruption.
                (is_stop(e, id) && schema &&
                 e->constraint_phase == CP_OUTPUT &&
-                sval_at_raw_tail(&e->sv));
+                sval_at_raw_tail(&e->sv)) ||
+               constraint_spelling_ok(e, id, schema);
     char buf[512];
     int n = tok_decode(e->tok, id, buf, sizeof(buf));
     if (n == 0)
-        return e->constraint_phase == CP_THINK || constraint_done(e, schema);
+        return e->constraint_phase == CP_THINK ||
+               constraint_done(e, schema) ||
+               constraint_spelling_ok(e, id, schema);
     engine tmp = *e;
     int visible;
     return constraint_feed(&tmp, schema, buf, n, &visible);
@@ -1423,6 +1448,11 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             if (!rc && constrained)
                 rc = constraint_control_accept(e, tok, e->schema != NULL,
                                                cb, ud);
+            if (!rc && e->schema && n == 0 &&
+                constraint_spelling_ok(e, tok, true)) {
+                const char *sp = tok_raw(e->tok, tok);
+                rc = constraint_accept(e, true, sp, (int)strlen(sp), cb, ud);
+            }
             n_gen++;
             if (in_prelude && (e->constraint_phase == CP_PROBE ||
                                e->constraint_phase == CP_THINK) &&
@@ -1567,6 +1597,10 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
            : cb && n > 0 ? cb(ud, buf, n) : 0;
     if (!rc && (e->schema || e->json_mode))
         rc = constraint_control_accept(e, tok, e->schema != NULL, cb, ud);
+    if (!rc && e->schema && n == 0 && constraint_spelling_ok(e, tok, true)) {
+        const char *sp = tok_raw(e->tok, tok);
+        rc = constraint_accept(e, true, sp, (int)strlen(sp), cb, ud);
+    }
     if (rc != 0) { e->gen_count++; return ENGINE_STEP_DONE; } // client gone
     e->gen_count++;
     if (in_prelude && (e->constraint_phase == CP_PROBE ||

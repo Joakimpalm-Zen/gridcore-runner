@@ -76,3 +76,32 @@ hello" reproduces it; a substantive question does not). The loop is
 identical with and without these fixes. The natural-stop fix bounds the
 damage only when the model produces a real answer; the header-forcing
 design itself is the open item.
+
+## Addendum 2 — the header-forcing loop, fixed 2026-08-12
+
+The known issue above is closed. The engine now accepts a decoded-empty
+protocol token (Muse's `<|message|>`, `<|start|>`) in constrained output
+whenever feeding its raw vocab spelling would advance the automaton
+(`constraint_spelling_ok`), and feeds that spelling through the machine and
+the visible stream so downstream parsing is unchanged. The model emits its
+natural trained header instead of being forced to type the markers out as
+text. Guardrails: stop tokens are excluded (the raw-tail rule owns them),
+and the acceptance is refused while the machine is consuming free content
+(a raw scalar value, a JSON string), where a protocol marker is corruption.
+
+Measured on the real model at temperature 0 after the fix:
+
+- The loop reproducer ("Just say hello, do not call any tool",
+  `tool_choice:"auto"`): content `Hello!`, `finish_reason:"stop"`,
+  **5 completion tokens** — previously 200 tokens of `<|message|>` and
+  `"length"`. Identical over SSE.
+- A substantive auto-mode text answer now ends at the model's own stop
+  (74 tokens, `"stop"`), where pre-fix even clean answers burned the full
+  budget.
+- Full regression battery unchanged: plain thinking modes clean, required
+  and named calls, reasoning-then-call, streaming both ways.
+- Three-token forced truncation now reports `"length"` with the recovered
+  call attached, which matches the documented truncation contract (the
+  earlier `"tool_calls"` at 3 tokens predated the natural header path).
+- **The complete v3 torture matrix passed 120/120** against this model on
+  the same box (schema `xyntetik.agent-torture.v3`, 18.6 minutes).
