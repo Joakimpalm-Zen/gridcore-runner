@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 // ---------------------------------------------------------------- fp16 table
 
@@ -1953,10 +1954,325 @@ float vec_dot(int type, const void *row, const float *x, int n) {
     }
 }
 
+// --------------------------------------------------- fused int8 dot (lever 1)
+//
+// vec_dot above reads the weights quantized but converts every quant to f32
+// before the FMA: on this box that is ~14 vector ops per 32 weights, and the
+// conversion — not the memory — is what caps dense CPU decode. The fused route
+// quantizes the ACTIVATION row to int8 once per matvec and keeps the whole dot
+// in int8 with an int32 accumulator: `_mm512_dpbusd_epi32` (AVX-512 VNNI) does
+// 64 multiply-accumulates per instruction, ~3 ops per 32 weights all in.
+//
+// Every promoted format reduces to the same two numbers per 32-element block:
+//   dot   = sum(q_unsigned[j] * xq[j])   — one VNNI accumulate chain
+//   sumxq = sum(xq[j])                   — precomputed at activation-quant time
+// because each format's value is affine in an UNSIGNED quant code:
+//   Q8_0   w = (u - 128) * d          -> d*ax*(dot - 128*sumxq)
+//   Q4_0   w = (nib - 8) * d          -> d*ax*(dot -   8*sumxq)
+//   Q4_K   w = nib*d*sc - dmin*mn     -> d*sc*ax*dot - dmin*mn*ax*sumxq
+// so the whole family needs one int8 kernel shape and a per-block affine fix-up
+// that costs two scalar FMAs. Weights are read in their on-disk form; nothing
+// is dequantized and no scratch row is written.
+//
+// This route rounds the activations and therefore CANNOT be bit-identical to
+// vec_dot. It ships tolerance-gated with `RUNNER_CPU_I8=0` pinning the scalar
+// path, exactly as `RUNNER_CUDA_TC=0` pins the scalar CUDA prefill.
+
+#define I8A_QK 32
+typedef struct { float d; int32_t s; int8_t qs[I8A_QK]; } block_i8a;
+
+#if defined(__AVX512F__) && defined(__AVX512VNNI__) && defined(__AVX512VL__)
+#define RUNNER_I8_VNNI 1
+#endif
+
+size_t i8_act_size(int n) {
+    return (size_t)(n / I8A_QK) * sizeof(block_i8a);
+}
+
+bool i8_dot_ok(int type, int n) {
+#if RUNNER_AVX2
+    // Q4_K is the only promoted format whose block spans more than 32 weights;
+    // every kernel below indexes activation blocks by a fixed stride, so a row
+    // that does not divide into whole weight blocks is declined outright.
+    switch (type) {
+        case T_Q8_0:
+        case T_Q4_0: return n % I8A_QK == 0;
+        case T_Q4_K: return n % QK_K == 0;
+        default:     return false;
+    }
+#else
+    (void)type; (void)n;
+    return false;
+#endif
+}
+
+// RUNNER_CPU_I8: OFF by default — no combo was promoted. Measured 2026-08-13
+// on the Zen 5 / AVX-512 VNNI box:
+//
+//   model                   gate (0/64 flips)   decode gain
+//   Llama-3.2-3B  Q4_K_M    2/64  FAIL          +6%
+//   granite-4.1-8b Q4_0     2/64  FAIL          +6%
+//   SmolLM2-135M  Q8_0      0/64  pass          -4%
+//
+// The kernel itself is 2.4-2.5x the scalar dot in isolation (mvbench), but
+// the dot is only ~10% of decode wall time on this box — the thread-pool
+// barrier and DRAM are the wall — so the end-to-end prize was never large
+// enough to justify defaulting on a route that flips near-tie tokens. Both
+// failing rows flip only near-ties (worst margin ~0.001 of the logit range)
+// and both sit far inside the deviation bound, but the promotion bar for a
+// tolerance-gated fast route on this engine is 0/64 and it is not widened to
+// fit a lever. `RUNNER_CPU_I8=1` opts in; test-i8-tol is the gate.
+static int g_i8_env = -1;      // -1 unparsed, else the env verdict
+static int g_i8_force = -1;    // -1 follow env, else the forced verdict
+
+bool i8_dot_enabled(void) {
+    if (g_i8_force >= 0) return g_i8_force != 0;
+    if (g_i8_env < 0) {
+        const char *e = getenv("RUNNER_CPU_I8");
+        g_i8_env = e && *e && strcmp(e, "0") != 0 && strcmp(e, "off") != 0;
+    }
+    return g_i8_env != 0;
+}
+
+void i8_dot_force(int on) { g_i8_force = on < 0 ? -1 : (on != 0); }
+
+// Counted where the activations are quantized: once per matvec, on the
+// calling thread only, so no atomics in the per-row hot loop.
+static unsigned long g_i8_dispatches = 0;
+unsigned long i8_dot_dispatches(void) { return g_i8_dispatches; }
+
+// Quantize an activation row into 32-element int8 blocks, carrying each
+// block's quant sum. The rounding is defined as
+//     trunc(fma(x, 1/d, copysign(0.5, x)))
+// — round-half-away-from-zero, computed with a SINGLE rounding — so the
+// vectorized and scalar bodies below are byte-identical block for block
+// (test_quants_simd asserts it). The single-rounding form is what makes that
+// hold: `roundf(x * id)` rounds twice and a fused multiply-add cannot
+// reproduce it near a tie, and a route whose activation rounding shifted with
+// the build's vector width would not be reproducible.
+void i8_quant_act(const float *x, void *dst, int n) {
+    block_i8a *b = dst;
+    g_i8_dispatches++;
+#if RUNNER_AVX2
+    // trunc(v + copysign(0.5, v)) is round-half-away-from-zero — the exact
+    // semantics of the scalar roundf below, ties included, so the two paths
+    // produce identical blocks and the route is reproducible across builds.
+    const __m256 sign = _mm256_castsi256_ps(_mm256_set1_epi32(0x80000000));
+    const __m256 half = _mm256_set1_ps(0.5f);
+    for (int i = 0; i < n / I8A_QK; i++, b++, x += I8A_QK) {
+        __m256 v0 = _mm256_loadu_ps(x),      v1 = _mm256_loadu_ps(x + 8);
+        __m256 v2 = _mm256_loadu_ps(x + 16), v3 = _mm256_loadu_ps(x + 24);
+        __m256 mx = _mm256_max_ps(_mm256_andnot_ps(sign, v0),
+                                  _mm256_andnot_ps(sign, v1));
+        mx = _mm256_max_ps(mx, _mm256_andnot_ps(sign, v2));
+        mx = _mm256_max_ps(mx, _mm256_andnot_ps(sign, v3));
+        __m128 m4 = _mm_max_ps(_mm256_castps256_ps128(mx),
+                               _mm256_extractf128_ps(mx, 1));
+        m4 = _mm_max_ps(m4, _mm_movehl_ps(m4, m4));
+        m4 = _mm_max_ss(m4, _mm_shuffle_ps(m4, m4, 1));
+        float amax = _mm_cvtss_f32(m4);
+        float d = amax / 127.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        b->d = d;
+        __m256 sc = _mm256_set1_ps(id);
+        __m256i q0 = _mm256_cvttps_epi32(_mm256_fmadd_ps(v0, sc,
+                        _mm256_or_ps(_mm256_and_ps(v0, sign), half)));
+        __m256i q1 = _mm256_cvttps_epi32(_mm256_fmadd_ps(v1, sc,
+                        _mm256_or_ps(_mm256_and_ps(v1, sign), half)));
+        __m256i q2 = _mm256_cvttps_epi32(_mm256_fmadd_ps(v2, sc,
+                        _mm256_or_ps(_mm256_and_ps(v2, sign), half)));
+        __m256i q3 = _mm256_cvttps_epi32(_mm256_fmadd_ps(v3, sc,
+                        _mm256_or_ps(_mm256_and_ps(v3, sign), half)));
+        // sum before the narrowing packs: int32 lanes are already the quants
+        __m256i sv = _mm256_add_epi32(_mm256_add_epi32(q0, q1),
+                                      _mm256_add_epi32(q2, q3));
+        __m128i s4 = _mm_add_epi32(_mm256_castsi256_si128(sv),
+                                   _mm256_extracti128_si256(sv, 1));
+        s4 = _mm_add_epi32(s4, _mm_shuffle_epi32(s4, 0x4E));
+        s4 = _mm_add_epi32(s4, _mm_shuffle_epi32(s4, 0xB1));
+        b->s = _mm_cvtsi128_si32(s4);
+        // packs are lane-wise on 256-bit registers: pack 0/1 and 2/3 to i16
+        // (lane order 0-3,8-11,4-7,12-15), then to i8, then permute back
+        __m256i p01 = _mm256_packs_epi32(q0, q1);
+        __m256i p23 = _mm256_packs_epi32(q2, q3);
+        __m256i p8  = _mm256_packs_epi16(p01, p23);
+        p8 = _mm256_permutevar8x32_epi32(p8,
+                 _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
+        _mm256_storeu_si256((__m256i *)b->qs, p8);
+    }
+#else
+    for (int i = 0; i < n / I8A_QK; i++, b++, x += I8A_QK) {
+        float amax = 0;
+        for (int j = 0; j < I8A_QK; j++) {
+            float a = fabsf(x[j]);
+            if (a > amax) amax = a;
+        }
+        float d = amax / 127.0f;
+        float id = d > 0 ? 1.0f / d : 0.0f;
+        b->d = d;
+        int32_t s = 0;
+        for (int j = 0; j < I8A_QK; j++) {
+            int8_t q = (int8_t)fmaf(x[j], id, copysignf(0.5f, x[j]));
+            b->qs[j] = q;
+            s += q;
+        }
+        b->s = s;
+    }
+#endif
+}
+
+#if RUNNER_AVX2
+// 32 unsigned weight codes x 32 int8 activations -> 8 int32 partial sums.
+// VNNI does it in one instruction; the AVX2 fallback goes through maddubs,
+// which saturates its int16 intermediate — safe only while
+// max(code) * 127 * 2 <= 32767, i.e. codes up to 128. Q8_0 (codes to 255)
+// therefore does NOT use this helper; see dot_q8_0_i8_avx2 below.
+static inline __m256i i8_mac32(__m256i acc, __m256i wu, __m256i xq) {
+#if RUNNER_I8_VNNI
+    return _mm256_dpbusd_epi32(acc, wu, xq);
+#else
+    __m256i p16 = _mm256_maddubs_epi16(wu, xq);
+    return _mm256_add_epi32(acc, _mm256_madd_epi16(p16, _mm256_set1_epi16(1)));
+#endif
+}
+
+static inline __m256i i8a_load(const block_i8a *b) {
+    return _mm256_loadu_si256((const __m256i *)b->qs);
+}
+
+static float dot_q8_0_i8(const block_q8_0 *b, const block_i8a *xq, int n) {
+    // (w + 128) is unsigned: w^0x80 for two's complement. dot(w+128, xq)
+    // = dot(w, xq) + 128*sumxq, so the offset comes straight back out.
+    const __m256i flip = _mm256_set1_epi8((char)0x80);
+    __m256 facc = _mm256_setzero_ps();
+    float mins = 0;
+    for (int i = 0; i < n / I8A_QK; i++) {
+        __m256i wu = _mm256_xor_si256(
+            _mm256_loadu_si256((const __m256i *)b[i].qs), flip);
+        __m256i acc;
+#if RUNNER_I8_VNNI
+        acc = _mm256_dpbusd_epi32(_mm256_setzero_si256(), wu, i8a_load(&xq[i]));
+#else
+        // codes reach 255 here, so maddubs would saturate: split the weight
+        // into magnitude (<=128, safe as the unsigned operand) and sign
+        __m256i w = _mm256_loadu_si256((const __m256i *)b[i].qs);
+        __m256i mag = _mm256_abs_epi8(w);
+        __m256i sx  = _mm256_sign_epi8(i8a_load(&xq[i]), w);
+        __m256i p16 = _mm256_maddubs_epi16(mag, sx);
+        acc = _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
+        (void)wu;
+#endif
+        float ax = xq[i].d, dw = f16_to_f32(b[i].d);
+        facc = _mm256_fmadd_ps(_mm256_set1_ps(dw * ax),
+                               _mm256_cvtepi32_ps(acc), facc);
+#if RUNNER_I8_VNNI
+        mins -= dw * ax * 128.0f * (float)xq[i].s;
+#endif
+    }
+    return hsum8(facc) + mins;
+}
+
+static float dot_q4_0_i8(const block_q4_0 *b, const block_i8a *xq, int n) {
+    // q4_0 packs elements 0..15 in the low nibbles and 16..31 in the high
+    // nibbles of the same 16 bytes, so the codes in element order are
+    // [lo(16) | hi(16)] — one 128-bit load, two masks, one 256-bit insert.
+    const __m128i mF = _mm_set1_epi8(0xF);
+    __m256 facc = _mm256_setzero_ps();
+    float mins = 0;
+    for (int i = 0; i < n / I8A_QK; i++) {
+        __m128i q  = _mm_loadu_si128((const __m128i *)b[i].qs);
+        __m128i lo = _mm_and_si128(q, mF);
+        __m128i hi = _mm_and_si128(_mm_srli_epi16(q, 4), mF);
+        __m256i wu = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
+        __m256i acc = i8_mac32(_mm256_setzero_si256(), wu, i8a_load(&xq[i]));
+        float ax = xq[i].d, dw = f16_to_f32(b[i].d);
+        facc = _mm256_fmadd_ps(_mm256_set1_ps(dw * ax),
+                               _mm256_cvtepi32_ps(acc), facc);
+        mins -= dw * ax * 8.0f * (float)xq[i].s;
+    }
+    return hsum8(facc) + mins;
+}
+
+static float dot_q4_K_i8(const block_q4_K *b, const block_i8a *xq, int n) {
+    // One 32-byte nibble load covers two 32-element sub-blocks: the low
+    // nibbles are elements j..j+31 (scale/min pair `is`), the high nibbles are
+    // j+32..j+63 (pair `is+1`) — the same split dot_q4_K_avx2 uses.
+    const __m256i mF = _mm256_set1_epi8(0xF);
+    __m256 facc = _mm256_setzero_ps();
+    float mins = 0;
+    int blk = 0;
+    for (int i = 0; i < n / QK_K; i++, b++) {
+        float d = f16_to_f32(b->d), dmin = f16_to_f32(b->dmin);
+        const uint8_t *q = b->qs;
+        int is = 0;
+        for (int j = 0; j < QK_K; j += 64) {
+            uint8_t sc, mn;
+            get_scale_min_k4(is + 0, b->scales, &sc, &mn);
+            float d1 = d * sc, m1 = dmin * mn;
+            get_scale_min_k4(is + 1, b->scales, &sc, &mn);
+            float d2 = d * sc, m2 = dmin * mn;
+            __m256i qv = _mm256_loadu_si256((const __m256i *)q);
+            __m256i lo = _mm256_and_si256(qv, mF);
+            __m256i hi = _mm256_and_si256(_mm256_srli_epi16(qv, 4), mF);
+            __m256i a1 = i8_mac32(_mm256_setzero_si256(), lo, i8a_load(&xq[blk]));
+            __m256i a2 = i8_mac32(_mm256_setzero_si256(), hi, i8a_load(&xq[blk + 1]));
+            float ax1 = xq[blk].d, ax2 = xq[blk + 1].d;
+            facc = _mm256_fmadd_ps(_mm256_set1_ps(d1 * ax1),
+                                   _mm256_cvtepi32_ps(a1), facc);
+            facc = _mm256_fmadd_ps(_mm256_set1_ps(d2 * ax2),
+                                   _mm256_cvtepi32_ps(a2), facc);
+            mins -= m1 * ax1 * (float)xq[blk].s + m2 * ax2 * (float)xq[blk + 1].s;
+            q += 32; is += 2; blk += 2;
+        }
+    }
+    return hsum8(facc) + mins;
+}
+#endif // RUNNER_AVX2
+
+float vec_dot_i8(int type, const void *row, const void *xq, int n) {
+#if RUNNER_AVX2
+    switch (type) {
+        case T_Q8_0: return dot_q8_0_i8(row, xq, n);
+        case T_Q4_0: return dot_q4_0_i8(row, xq, n);
+        case T_Q4_K: return dot_q4_K_i8(row, xq, n);
+        default: break;
+    }
+#endif
+    // No fused kernel: dequantize the activations back and use the scalar
+    // route, so a caller that asked without checking i8_dot_ok still gets the
+    // right answer rather than a wrong one.
+    {
+        const block_i8a *b = xq;
+        float buf[QK_K > I8A_QK ? QK_K : I8A_QK];
+        int bs = ggml_block_size(type);
+        size_t ts = ggml_type_size(type);
+        const uint8_t *p = row;
+        float s = 0;
+        for (int i = 0; i < n; i += bs, p += ts) {
+            for (int j = 0; j < bs; j++) {
+                const block_i8a *ab = &b[(i + j) / I8A_QK];
+                buf[j] = ab->d * ab->qs[(i + j) % I8A_QK];
+            }
+            s += vec_dot(type, p, buf, bs);
+        }
+        return s;
+    }
+}
+
 // ---------------------------------------------------------------- threadpool
 
 #define TP_MAX 64
 
+// Decode issues one tpool_run per matvec — around 200 per token on a 3B dense
+// model — so the pool's handoff cost is multiplied by 200 before it reaches
+// tok/s. A condvar-only pool pays two kernel round trips per worker per run;
+// measured on this 64-core Zen 5 box (tpbench, 2026-08-13) that was 65 us per
+// run at 32 threads and 138 us at 64, i.e. 13 ms and 28 ms of pure handoff per
+// token — the reason decode got SLOWER above 32 threads while llama.cpp kept
+// scaling. Workers now spin on the generation counter for a bounded window
+// before parking, so a busy pool never enters the kernel and an idle one still
+// sleeps. The partitioning (tp_slice) is untouched: this changes when threads
+// wake, never which rows they compute, so every output byte is unchanged.
 struct tpool {
     pthread_t th[TP_MAX];
     int n_threads;          // total workers incl. calling thread
@@ -1965,10 +2281,44 @@ struct tpool {
     tp_fn fn;
     void *ctx;
     int n_items;
-    uint64_t gen;
-    int n_done;
-    bool stop;
+    _Atomic uint64_t gen;
+    _Atomic int n_done;
+    _Atomic int n_sleeping;   // workers parked on cv_work
+    _Atomic int caller_parked;
+    _Atomic int stop;
+    int spin;                 // relax iterations before parking
 };
+
+// One spin iteration is a pause plus an atomic load: ~15 ns on this class of
+// core, so the default is roughly 50 us of spinning before a worker parks.
+// That covers the serial gaps inside a token (norms, rope, sampling setup)
+// without leaving a --serve pool spinning between requests.
+#define TP_SPIN_DEFAULT 3000
+
+// RUNNER_TPOOL_SPIN overrides the budget: 0 restores the pure condvar pool
+// (the pre-2026-08-13 behaviour, kept as an escape hatch for a box where
+// spinning threads are unwelcome). Parsed here rather than through compat.c's
+// env_i64 so quants.c keeps linking standalone into the kernel tests.
+static int tp_spin_budget(void) {
+    const char *e = getenv("RUNNER_TPOOL_SPIN");
+    if (!e || !*e) return TP_SPIN_DEFAULT;
+    char *end;
+    long v = strtol(e, &end, 10);
+    if (*end || v < 0 || v > 10000000) {
+        fprintf(stderr, "warning: RUNNER_TPOOL_SPIN='%s' is not an integer in "
+                        "[0, 10000000] — ignoring\n", e);
+        return TP_SPIN_DEFAULT;
+    }
+    return (int)v;
+}
+
+static inline void tp_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield" ::: "memory");
+#endif
+}
 
 typedef struct { tpool *tp; int idx; } tp_arg;
 
@@ -1987,21 +2337,43 @@ static void *tp_worker(void *argp) {
     free(a);
     uint64_t seen = 0;
     for (;;) {
-        pthread_mutex_lock(&tp->mu);
-        while (tp->gen == seen && !tp->stop) pthread_cond_wait(&tp->cv_work, &tp->mu);
-        if (tp->stop) { pthread_mutex_unlock(&tp->mu); return NULL; }
-        seen = tp->gen;
+        // Wait for work: spin on the generation counter, then park. The
+        // sleeping count is what lets tpool_run skip the broadcast entirely
+        // while the pool is hot.
+        uint64_t g;
+        for (int spins = 0;; spins++) {
+            g = atomic_load_explicit(&tp->gen, memory_order_acquire);
+            if (g != seen) break;
+            if (atomic_load_explicit(&tp->stop, memory_order_acquire)) return NULL;
+            if (spins < tp->spin) { tp_relax(); continue; }
+            pthread_mutex_lock(&tp->mu);
+            atomic_fetch_add(&tp->n_sleeping, 1);
+            // The increment is published BEFORE this re-read of gen, and
+            // tpool_run publishes gen before reading n_sleeping — so a
+            // publisher that misses the sleeper is one this thread has
+            // already seen. Nobody sleeps through a wakeup.
+            while ((g = atomic_load(&tp->gen)) == seen &&
+                   !atomic_load(&tp->stop))
+                pthread_cond_wait(&tp->cv_work, &tp->mu);
+            atomic_fetch_sub(&tp->n_sleeping, 1);
+            pthread_mutex_unlock(&tp->mu);
+            break;
+        }
+        if (atomic_load_explicit(&tp->stop, memory_order_acquire)) return NULL;
+        seen = g;
+        // published by the seq_cst gen store in tpool_run
         tp_fn fn = tp->fn; void *ctx = tp->ctx; int n = tp->n_items;
-        pthread_mutex_unlock(&tp->mu);
 
         int i0, i1;
         tp_slice(idx, tp->n_threads, n, &i0, &i1);
         if (i0 < i1) fn(ctx, i0, i1);
 
-        pthread_mutex_lock(&tp->mu);
-        tp->n_done++;
-        if (tp->n_done == tp->n_threads - 1) pthread_cond_signal(&tp->cv_done);
-        pthread_mutex_unlock(&tp->mu);
+        if (atomic_fetch_add(&tp->n_done, 1) + 1 == tp->n_threads - 1 &&
+            atomic_load(&tp->caller_parked)) {
+            pthread_mutex_lock(&tp->mu);
+            pthread_cond_broadcast(&tp->cv_done);
+            pthread_mutex_unlock(&tp->mu);
+        }
     }
 }
 
@@ -2026,6 +2398,7 @@ tpool *tpool_create(int n_threads) {
     tpool *tp = calloc(1, sizeof(tpool));
     if (!tp) return NULL;
     tp->n_threads = n_threads;
+    tp->spin = tp_spin_budget();
     if (pthread_mutex_init(&tp->mu, NULL) != 0) { free(tp); return NULL; }
     if (pthread_cond_init(&tp->cv_work, NULL) != 0) {
         pthread_mutex_destroy(&tp->mu);
@@ -2053,7 +2426,7 @@ tpool *tpool_create(int n_threads) {
 
 fail:
     pthread_mutex_lock(&tp->mu);
-    tp->stop = true;
+    atomic_store(&tp->stop, 1);
     pthread_cond_broadcast(&tp->cv_work);
     pthread_mutex_unlock(&tp->mu);
     for (int i = 1; i <= created; i++) pthread_join(tp->th[i], NULL);
@@ -2067,7 +2440,7 @@ fail:
 void tpool_destroy(tpool *tp) {
     if (!tp) return;
     pthread_mutex_lock(&tp->mu);
-    tp->stop = true;
+    atomic_store(&tp->stop, 1);
     pthread_cond_broadcast(&tp->cv_work);
     pthread_mutex_unlock(&tp->mu);
     for (int i = 1; i < tp->n_threads; i++) pthread_join(tp->th[i], NULL);
@@ -2083,18 +2456,36 @@ void tpool_run(tpool *tp, tp_fn fn, void *ctx, int n_items) {
         fn(ctx, 0, n_items);
         return;
     }
-    pthread_mutex_lock(&tp->mu);
     tp->fn = fn; tp->ctx = ctx; tp->n_items = n_items;
-    tp->n_done = 0;
-    tp->gen++;
-    pthread_cond_broadcast(&tp->cv_work);
-    pthread_mutex_unlock(&tp->mu);
+    atomic_store_explicit(&tp->n_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&tp->caller_parked, 0, memory_order_relaxed);
+    // seq_cst: publishes fn/ctx/n_items to the spinning workers AND orders
+    // against the n_sleeping read below
+    atomic_fetch_add(&tp->gen, 1);
+    if (atomic_load(&tp->n_sleeping) > 0) {
+        pthread_mutex_lock(&tp->mu);
+        pthread_cond_broadcast(&tp->cv_work);
+        pthread_mutex_unlock(&tp->mu);
+    }
 
     int i0, i1;
     tp_slice(0, tp->n_threads, n_items, &i0, &i1);
     if (i0 < i1) fn(ctx, i0, i1);
 
-    pthread_mutex_lock(&tp->mu);
-    while (tp->n_done < tp->n_threads - 1) pthread_cond_wait(&tp->cv_done, &tp->mu);
-    pthread_mutex_unlock(&tp->mu);
+    int target = tp->n_threads - 1;
+    for (int spins = 0;; spins++) {
+        if (atomic_load_explicit(&tp->n_done, memory_order_acquire) >= target)
+            return;
+        if (spins < tp->spin) { tp_relax(); continue; }
+        pthread_mutex_lock(&tp->mu);
+        atomic_store(&tp->caller_parked, 1);
+        // same handshake as the worker side, mirrored: the flag is published
+        // before this read of n_done, and a worker increments n_done before
+        // reading the flag
+        while (atomic_load(&tp->n_done) < target)
+            pthread_cond_wait(&tp->cv_done, &tp->mu);
+        atomic_store(&tp->caller_parked, 0);
+        pthread_mutex_unlock(&tp->mu);
+        return;
+    }
 }

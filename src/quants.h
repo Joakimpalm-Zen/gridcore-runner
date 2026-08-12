@@ -50,4 +50,32 @@ void  vec_dot_f32_multi(const float *w, const float *x, int x_stride,
 void  q8_quant_row(const float *x, void *dst, int n); // n % 32 == 0
 void  q8_accum_row(const void *src, float a, float *out, int n);
 
+// ------------------------------------------------ fused int8 dot (CPU lever 1)
+//
+// The scalar/SIMD vec_dot above keeps f32 activations and converts each weight
+// quant to f32 before the FMA. The fused route instead quantizes the ACTIVATION
+// row to int8 once per matvec and does the whole dot in int8 with an int32
+// accumulator (AVX-512 VNNI `_mm512_dpbusd_epi32`, AVX2 `maddubs` fallback).
+// Quantizing the activations means it can never be bit-identical to vec_dot;
+// it is a tolerance-gated fast route in the same sense as the CUDA tensor-core
+// prefill path. It is OFF by default — measured 2026-08-13, no (format, model)
+// combo cleared the 0/64 teacher-forced flip bar with a decode gain worth
+// taking; `RUNNER_CPU_I8=1` opts in. The promotion record is in quants.c and
+// the gate is test-i8-tol.
+//
+//   if (i8_dot_ok(type, n)) { i8_quant_act(x, buf, n);        // once per matvec
+//                             for each row: vec_dot_i8(type, row, buf, n); }
+//
+bool   i8_dot_enabled(void);              // RUNNER_CPU_I8 pin, cached
+bool   i8_dot_ok(int type, int n);        // fused kernel exists for (type, n)
+size_t i8_act_size(int n);                // scratch bytes for n activations
+void   i8_quant_act(const float *x, void *dst, int n);
+float  vec_dot_i8(int type, const void *row, const void *xq, int n);
+// Force the route on (1) or off (0) regardless of RUNNER_CPU_I8; -1 returns
+// to the env default. Mirrors gpu_tc_force so one harness can drive both.
+void   i8_dot_force(int on);
+// Matvecs that took the fused route since process start. A tolerance gate
+// that sees zero is comparing the scalar path with itself.
+unsigned long i8_dot_dispatches(void);
+
 #endif // RUNNER_QUANTS_H

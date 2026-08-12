@@ -45,6 +45,8 @@ test-quants-simd
 test-quants-simd.exe
 test-tc-tol
 test-tc-tol.exe
+test-i8-tol
+test-i8-tol.exe
 test-vram-registry
 test-vram-registry.exe
 test-quantize
