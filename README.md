@@ -336,8 +336,10 @@ only for that development step.
 Scalar-path CPU/GPU identity is an evidence result, not a property inferred
 from a backend name. CUDA tensor-core and Metal tiled prefill kernels
 reassociate floating-point sums, so they are promoted by teacher-forced
-tolerance tests. `RUNNER_CUDA_TC=0` and `RUNNER_METAL_MM=0` pin the scalar
-matvec paths for identity investigations.
+tolerance tests. CUDA currently promotes Q4_K/Q6_K/Q8_0 on the gated dense
+families and Q4_0 on Gemma 4; the latter was bit-identical over 820 tensor-core
+dispatches on the real 31B QAT artifact. `RUNNER_CUDA_TC=0` and
+`RUNNER_METAL_MM=0` pin the scalar matvec paths for identity investigations.
 
 Vulkan is not implemented; AMD and Intel GPUs use the CPU path.
 

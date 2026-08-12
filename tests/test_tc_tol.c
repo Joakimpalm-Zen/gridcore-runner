@@ -134,6 +134,10 @@ static bool run_config(config *c, const char *path, const int32_t *toks,
     p.n_ctx     = n_tok + 8;
     p.n_batch   = c->n_batch;
     p.reserve_vram_pct = g_reserve_vram_pct;
+    // Real-model tolerance runs share the certification GPU with other jobs.
+    // Queue through the same registry contract as `--wait-for-vram 300`
+    // instead of turning transient contention into a misleading skip.
+    p.vram_wait_secs = 300;
 
     if (!model_load(&m, path, &p)) {
         fprintf(stderr, "  %-12s load failed\n", c->name);

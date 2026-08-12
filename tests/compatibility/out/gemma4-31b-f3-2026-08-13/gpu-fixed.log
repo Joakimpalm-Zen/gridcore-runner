@@ -1,0 +1,7 @@
+gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files
+rope: using model frequency factors (rope_freqs.weight)
+gpu-split: budget=25.13GB fixed=1.76GB G=60/60 full=1 used=21.92GB
+gpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (17.7 GB weights in VRAM)
+gpu: VRAM 3.68 GB free of 25.37 GB after init (kv 3.69 GB + scratch 0.07 GB this instance)
+loaded /home/lab/workspace/models/gemma-4-31B_q4_0-it/gemma-4-31B_q4_0-it.gguf | gemma4 | 60 layers | ctx 4096 | 64 threads | 1.31s
+sampling: gemma3 (temp 1.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)
