@@ -68,6 +68,7 @@ import argparse
 import importlib.util
 import json
 import subprocess
+import urllib.request
 import sys
 import time
 from pathlib import Path
@@ -391,6 +392,11 @@ def collect_distributions(endpoint, model_name, words, max_positions, stride,
             continue
         if scored >= max_positions:
             break
+        if len(failures) >= max_positions:
+            # a dead lane fails FAST and bounded: without this, a wrong
+            # model name or downed server walked the entire corpus (5052
+            # attempts for a --kld-positions 8 run) before reporting
+            break
         try:
             dist = KLD_RAW.query(endpoint, model_name, prefix, top_n=top_n)
         except Exception as exc:  # noqa: BLE001
@@ -439,11 +445,14 @@ def zero_point_verdict(gold_comparisons, gold_kld_failures, var_kld_failures,
         reasons.append(f"{len(mismatches)} case(s) disagreed between two greedy "
                        "runs of the same reference weights")
     if not_executed:
+        why = "; ".join(sorted({str(c.get("issue_reason")) for c in not_executed}))
         reasons.append(f"{len(not_executed)} case(s) did not execute or could "
-                       "not be compared on one of the two runs")
+                       f"not be compared on one of the two runs ({why})")
     if gold_kld_failures or var_kld_failures:
+        first = (gold_kld_failures + var_kld_failures)[0]["reason"]
         reasons.append(f"{len(gold_kld_failures) + len(var_kld_failures)} KLD "
-                       "position(s) failed on one of the two runs")
+                       f"position(s) failed on one of the two runs; "
+                       f"first: {first}")
     mean_kld = kld_summary.get("mean_kld")
     if mean_kld is None or mean_kld > kld_epsilon:
         reasons.append(f"mean_kld={mean_kld!r} exceeds epsilon={kld_epsilon}")
@@ -494,6 +503,18 @@ def wait_for_idle_runner(poll_seconds=15, out=sys.stderr, sleep=time.sleep,
 
 
 # -------------------------------------------------------------- server glue
+def served_model_name(base_url):
+    """The name the server actually registered — /v1/models is ground
+    truth. Passing anything else (a ladder label, say) 404s every request
+    while the transport still looks healthy: the exact trap the 2026-08-11
+    kld-compare-raw note documented, rebuilt here on day one by passing the
+    variant LABEL as the model name. Never guess the name; ask the server."""
+    req = urllib.request.Request(f"{base_url}/v1/models")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+    return data["data"][0]["id"]
+
+
 def spawn(exe, model, ctx, out_dir, tag):
     return RunnerServer(str(exe), str(model), ctx=ctx, parallel=1,
                         extra_args=["--gpu", "off"],
@@ -501,7 +522,8 @@ def spawn(exe, model, ctx, out_dir, tag):
 
 
 def measure_pass(exe, model_path, model_label, cases, ctx, corpus_words,
-                 kld_positions, kld_stride, out_dir, tag, idle_wait=True):
+                 kld_positions, kld_stride, out_dir, tag, idle_wait=True,
+                 request_timeout=120.0):
     """One full pass over ``model_path``: spawn, run the tool matrix, run
     the KLD corpus, stop. Returns (judged_by_id, kld_positions, kld_failures,
     elapsed_ms) or raises TransportError if the server never came up (the
@@ -511,10 +533,11 @@ def measure_pass(exe, model_path, model_label, cases, ctx, corpus_words,
     started = time.monotonic()
     server = spawn(exe, model_path, ctx, out_dir, tag)
     with server as srv:
-        client = Client(srv, _NullReport())
+        client = Client(srv, _NullReport(), timeout=request_timeout)
         judged_by_id = run_matrix(client, cases)
         positions, failures = collect_distributions(
-            srv.base_url, model_label, corpus_words, kld_positions, kld_stride)
+            srv.base_url, served_model_name(srv.base_url), corpus_words,
+            kld_positions, kld_stride)
     elapsed_ms = round((time.monotonic() - started) * 1000, 2)
     return judged_by_id, positions, failures, elapsed_ms
 
@@ -611,6 +634,12 @@ def main(argv=None):
     parser.add_argument("--kld-positions", type=int, default=20)
     parser.add_argument("--kld-stride", type=int, default=1)
     parser.add_argument("--ctx", type=int, default=4096)
+    parser.add_argument("--request-timeout", type=float, default=120.0,
+                        help="per-request client timeout in seconds. A 5 GB "
+                             "model generating tool responses on a loaded "
+                             "8 GB CPU box needs minutes, not the default; "
+                             "a timeout surfaces as a transport failure in "
+                             "the report, never a hang")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--force", action="store_true",
                         help="overwrite an existing --out report (default: refuse)")
@@ -638,15 +667,13 @@ def main(argv=None):
 
     try:
         print(f"quant-fidelity: zero-point pass 1/2 (reference={args.reference['label']})")
-        gold_by_id, gold_kld, gold_kld_fail, gold_ms = measure_pass(
-            exe, args.reference["path"], args.reference["label"], cases, args.ctx,
+        gold_by_id, gold_kld, gold_kld_fail, gold_ms = measure_pass(exe, args.reference["path"], args.reference["label"], cases, args.ctx,
             corpus_words, args.kld_positions, args.kld_stride, args.out, "gold",
-            idle_wait=idle_wait)
+            idle_wait=idle_wait, request_timeout=args.request_timeout)
         print(f"quant-fidelity: zero-point pass 2/2 (reference={args.reference['label']})")
-        check_by_id, check_kld, check_kld_fail, check_ms = measure_pass(
-            exe, args.reference["path"], args.reference["label"], cases, args.ctx,
+        check_by_id, check_kld, check_kld_fail, check_ms = measure_pass(exe, args.reference["path"], args.reference["label"], cases, args.ctx,
             corpus_words, args.kld_positions, args.kld_stride, args.out, "check",
-            idle_wait=idle_wait)
+            idle_wait=idle_wait, request_timeout=args.request_timeout)
     except TransportError as exc:
         # the reference itself never came up: there is no basis for a
         # zero-point pass at all, let alone a ladder. Fail loudly and
@@ -707,10 +734,10 @@ def main(argv=None):
         else:
             print(f"quant-fidelity: measuring variant {label!r}")
             try:
-                var_by_id, var_kld, var_kld_fail, elapsed_ms = measure_pass(
-                    exe, path, label, cases, args.ctx, corpus_words,
+                var_by_id, var_kld, var_kld_fail, elapsed_ms = measure_pass(exe, path, label, cases, args.ctx, corpus_words,
                     args.kld_positions, args.kld_stride, args.out,
-                    label.replace("/", "_"), idle_wait=idle_wait)
+                    label.replace("/", "_"), idle_wait=idle_wait,
+                    request_timeout=args.request_timeout)
             except TransportError as exc:
                 variant_rows.append({
                     "label": label, "path": str(path), "is_reference": False,
