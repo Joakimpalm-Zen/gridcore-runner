@@ -369,10 +369,15 @@ static void test_gemma4_generation_prompt(void) {
     assert(strcmp(out, base) == 0);
     render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_OFF, out, sizeof(out));
     assert(strcmp(out, base) == 0);
-    // THINK_ON does not pre-seed either: the template injects <|think|> into
-    // the first SYSTEM turn instead, which this engine does not implement
+    // THINK_ON injects <|think|> at the top of the first SYSTEM turn, which
+    // is where the model's own template puts it (read from the GGUF's
+    // tokenizer.chat_template on gemma-4-E2B, 2026-08-12, not from a summary
+    // of it). With no system message the template still opens a system turn:
+    // its condition is `enable_thinking or tools or messages[0] is system`.
+    // There is still no pre-seeded thought block at the generation prompt.
     render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_ON, out, sizeof(out));
-    assert(strcmp(out, base) == 0);
+    assert(strcmp(out, "<|turn>system\n<|think|>\n<turn|>\n"
+                       "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
     assert(strstr(out, "channel>thought") == NULL);
 
     // after a tool response the template emits NO generation prompt at all
@@ -388,6 +393,17 @@ static void test_gemma4_generation_prompt(void) {
 
     render_messages(TMPL_GEMMA4, msgs, 1, false, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "<|turn>user\nHI<turn|>\n") == 0);
+
+    // A system message already opens that turn: the marker goes INSIDE it,
+    // above the system text, rather than creating a second system turn.
+    const chat_msg with_sys[] = { { "system", "BE BRIEF" }, { "user", "HI" } };
+    render_messages(TMPL_GEMMA4, with_sys, 2, true, THINK_ON, out, sizeof(out));
+    assert(strcmp(out, "<|turn>system\n<|think|>\nBE BRIEF<turn|>\n"
+                       "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
+    // ...and thinking off renders the same system turn without the marker
+    render_messages(TMPL_GEMMA4, with_sys, 2, true, THINK_OFF, out, sizeof(out));
+    assert(strcmp(out, "<|turn>system\nBE BRIEF<turn|>\n"
+                       "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
 }
 
 static void test_chatml_think_shape(void) {

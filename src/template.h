@@ -59,10 +59,10 @@ const char *template_name(int tmpl);
 //     The generation prompt is '<|turn>model\n' and nothing else, in EITHER
 //     mode -- there is no pre-seeded thought block. After a tool response it
 //     emits nothing at all, or an OPEN '<|channel>thought\n' when thinking.
-//     Selecting thinking for this family happens elsewhere: the template sets
-//     enable_thinking | default(false) and, when true, injects '<|think|>\n'
-//     into the FIRST SYSTEM TURN. That is not implemented here, so THINK_ON is
-//     accepted and ignored rather than approximated.
+//     Thinking for this family is selected in the FIRST SYSTEM TURN, not at
+//     the generation prompt: THINK_ON injects '<|think|>\n' at the top of it,
+//     opening that turn even when the caller sent no system message, exactly
+//     as the template's own condition does.
 //
 // THINK_DEFAULT means "render what this family's own template renders", which
 // is not the same answer for both -- hence tri-state rather than a bool.

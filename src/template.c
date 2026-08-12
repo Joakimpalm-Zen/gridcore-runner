@@ -500,7 +500,28 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         // gemma4 (reference: llama.cpp models/templates/google-gemma-4-31B-it
         // .jinja): <|turn>role\n CONTENT <turn|>\n per turn, a native system
         // role (unlike gemma1-3), assistant role named "model"
-        for (int i = 0; i < n_msgs; i++) {
+        // Thinking is selected in the FIRST SYSTEM TURN, not at the
+        // generation prompt: the model's own template (read from
+        // tokenizer.chat_template on gemma-4-E2B, 2026-08-12) opens that turn
+        // when `enable_thinking or tools or messages[0] is system/developer`
+        // and injects `<|think|>` at the very top of it, above any system
+        // text. `<|think|>` is a real token in that vocabulary. With no
+        // system message the turn is created anyway, carrying only the
+        // marker — which is why this cannot be folded into the loop below.
+        // (A `developer` first message is rendered as its own turn here, as
+        // it always has been; the template folds it into the system turn.
+        // That divergence predates this path and is untouched by it.)
+        int g4_first = 0;
+        if (thinking == THINK_ON) {
+            off = emit(out, cap, off, "<|turn>system\n<|think|>\n", NULL, NULL);
+            if (n_msgs > 0 && !strcmp(msgs[0].role, "system")) {
+                off = emit(out, cap, off, "%s<turn|>\n", msgs[0].content, NULL);
+                g4_first = 1;
+            } else {
+                off = emit(out, cap, off, "<turn|>\n", NULL, NULL);
+            }
+        }
+        for (int i = g4_first; i < n_msgs; i++) {
             const char *role = !strcmp(msgs[i].role, "assistant") ? "model"
                                                                   : msgs[i].role;
             off = emit(out, cap, off, "<|turn>%s\n", role, NULL);
@@ -531,12 +552,8 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         // 0.575 -> 0.300 and it emitted raw reasoning prose as its visible
         // answer. The original unconditional `<|turn>model\n` was right.
         //
-        // Thinking is NOT selected here for this family. The template sets
-        // `enable_thinking | default(false)` and, when true, injects
-        // `<|think|>\n` at the top of the FIRST SYSTEM TURN — a different
-        // place entirely. That path is not implemented, so THINK_ON is
-        // accepted and ignored rather than approximated; see the note in
-        // template.h.
+        // Thinking is not selected HERE for this family — it was selected in
+        // the first system turn above, which is where the template puts it.
         if (add_assistant) {
             bool after_tool = n_msgs > 0 &&
                               !strcmp(msgs[n_msgs - 1].role, "tool");
