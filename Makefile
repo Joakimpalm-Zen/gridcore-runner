@@ -416,8 +416,16 @@ $(TEST_KV_TOL): $(TEST_KV_TOL_SRC) $(HDR)
 # SIMD (AVX2/NEON) dot and dequant kernels vs an independent double-precision
 # reference; also pins q8_quant_row byte-identical to its scalar definition
 TEST_QUANTS_SIMD_SRC = tests/test_quants_simd.c $(QUANTS_OBJ)
+# QUANTS_CFLAGS, not CFLAGS: this test carries inline scalar REFERENCE
+# implementations of the quant kernels, and a reference compiled under
+# -ffast-math is checking the confined -fno-fast-math engine against a
+# differently-rounded definition of itself. Caught on ARM the day the
+# int8 activation quantizer (built on x86) met the fast-math confinement
+# (built the same night): identical scalar source, two float regimes,
+# constructed half-way ties diverged. The verifier must share the
+# engine's float semantics or it verifies nothing.
 $(TEST_QUANTS_SIMD): $(TEST_QUANTS_SIMD_SRC) $(HDR)
-	$(CC) $(CFLAGS) -I src $(TEST_QUANTS_SIMD_SRC) -o $@ -lm -lpthread
+	$(CC) $(QUANTS_CFLAGS) -I src $(TEST_QUANTS_SIMD_SRC) -o $@ -lm -lpthread
 
 # discovery registry: pure-C, runs against a private HOME/APPDATA
 TEST_INSTANCES_SRC = tests/test_instances.c src/instances.c src/json.c
