@@ -1115,6 +1115,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_gemm[T_Q6_K], "k_gemm_q6_K" },
             // decode coalesced GEMV variants (batch==1 fast path for these formats)
             { &w->f_gemv[T_Q8_0], "k_gemv_q8_0" },
+            { &w->f_gemv[T_Q4_0], "k_gemv_q4_0" },
             { &w->f_gemv[T_Q4_K], "k_gemv_q4_K" },
             { &w->f_gemv[T_Q5_K], "k_gemv_q5_K" },
             { &w->f_gemv[T_Q6_K], "k_gemv_q6_K" },

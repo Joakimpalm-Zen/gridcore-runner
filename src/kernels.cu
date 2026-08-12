@@ -300,6 +300,56 @@ extern "C" __global__ void k_gemv_q8_0(MV_PARAMS) {
     MV_TAIL;
 }
 
+// Q4_0 decode GEMV — the twin k_gemv_q8_0 never got (2026-08-13). Without it
+// Q4_0 decode fell through to k_mv_q4_0, where one lane walks a whole 32-element
+// block with a serial 16-iteration scalar loop: measured ~55 GB/s of implied
+// weight bandwidth against 250-330 GB/s for every Q4_K/Q8_0 model on the same
+// slice, a 5x gap that was pure kernel coverage, not arithmetic.
+//
+// Same shape as k_gemv_q8_0: four blocks in flight across the warp, eight lanes
+// per block. A q4_0 block packs element j in the low nibble of byte j and
+// element j+16 in the high nibble, so a lane taking two adjacent quant bytes
+// owns four elements — two contiguous at boff and two contiguous at boff+16 —
+// which is two aligned float2 activation loads and one 2-aligned ushort weight
+// load (the 18-byte block stride never gives more than 2-alignment).
+//
+// The reduction is reordered relative to k_mv_q4_0, exactly as k_gemv_q4_K is
+// relative to k_mv_q4_K, so identity is an empirical gate (kernel-verify +
+// cpu_cuda_check), not an accumulation-order argument.
+extern "C" __global__ void k_gemv_q4_0(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 32;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 18;
+    int bsub = (int)(lane >> 3);          // which of the 4 blocks this lane works
+    int boff = ((int)lane & 7) * 2;       // this lane's 2 quant bytes
+    float s = 0;
+    int b4 = nb & ~3;
+    for (int b0 = 0; b0 < b4; b0 += 4) {
+        const uchar *blk = rw + (ulong64)(b0 + bsub) * 18;
+        float d = f16f(blk);
+        ushort16 u = *(const ushort16 *)(blk + 2 + boff);
+        int q0 = (int)( u        & 0xF) - 8;   // byte boff  low  -> elem boff
+        int q1 = (int)((u >>  4) & 0xF) - 8;   // byte boff  high -> elem boff+16
+        int q2 = (int)((u >>  8) & 0xF) - 8;   // byte boff+1 low  -> elem boff+1
+        int q3 = (int)((u >> 12) & 0xF) - 8;   // byte boff+1 high -> elem boff+17
+        const float *xp = x + (ulong64)(b0 + bsub) * 32 + boff;
+        float2 xlo = *(const float2 *)xp;
+        float2 xhi = *(const float2 *)(xp + 16);
+        s += d * ((float)q0 * xlo.x + (float)q2 * xlo.y +
+                  (float)q1 * xhi.x + (float)q3 * xhi.y);
+    }
+    // tail blocks (nb not a multiple of 4): one element per lane
+    for (int b = b4; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 18;
+        float d = f16f(blk);
+        const uchar *q = blk + 2;
+        int j = (int)lane & 15, hi = (int)lane >> 4;
+        int qv = hi ? (q[j] >> 4) : (q[j] & 0xF);
+        s += d * (float)(qv - 8) * x[(ulong64)b * 32 + lane];
+    }
+    MV_TAIL;
+}
+
 extern "C" __global__ void k_mv_q4_0(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 32;
