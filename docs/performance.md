@@ -217,6 +217,49 @@ granite-4.1-8b Q4_0 is the row worth staring at: 8.0 tok/s of prefill on a
 because neither its quant type nor its architecture was admitted to the TC
 path. That is the shape of the published "Q4_0 prefill 0.6% of llama.cpp" row.
 
+## 2026-08-13 — CUDA decode: the same story, one layer down
+
+Phase 3 of the plan was "squeeze decode from 73-79% toward 90% with
+multi-row-per-warp and vectorized loads". Measuring first killed the premise
+and found a bigger prize. Implied weight bandwidth during decode (file size x
+tok/s) on the same MIG slice:
+
+| model | decode | implied |
+|---|---:|---:|
+| Llama-3.2-3B Q4_K_M | 129.1 | 260.8 GB/s |
+| granite-3.3-8b Q4_K_M | 61.1 | 301.8 GB/s |
+| Phi-4-mini Q8_0 | 80.4 | 328.2 GB/s |
+| Qwen3-4B Q4_K_M | 99.9 | 249.4 GB/s |
+| **granite-4.1-8b Q4_0** | **11.9** | **60.0 GB/s** |
+
+Everything with a coalesced GEMV sits in a 250-330 GB/s band — that is the
+slice's wall, and no amount of multi-row-per-warp moves a kernel already
+standing on it. **Phase 3 as written had no headroom.** The outlier was not a
+tuning gap: Q4_K, Q5_K, Q6_K and Q8_0 each have a lane-per-element decode GEMV
+and **Q4_0 never got one**, so it fell through to `k_mv_q4_0`, where a single
+lane walks an entire 32-element block through a serial 16-iteration scalar loop.
+
+`k_gemv_q4_0` (2026-08-13) mirrors `k_gemv_q8_0`: four blocks in flight across
+the warp, eight lanes each, one 2-aligned `ushort` weight load and two aligned
+`float2` activation loads per lane.
+
+| model | before | after | |
+|---|---:|---:|---:|
+| granite-4.1-8b Q4_0 | 11.9 | 64.3 (325 GB/s) | **5.4x** |
+| Phi-4-mini q4_0 | 24.5 | 125.8 (273 GB/s) | 5.1x |
+| Qwen3-1.7B q4_0 | 50.8 | 224.1 (258 GB/s) | 4.4x |
+
+All three land in the healthy band. Identity is empirical, as it is for the
+other GEMVs: kernel-verify token-identical on 5 prompts x 3 models,
+`cpu_cuda_check` 5/5 CPU-vs-GPU on two of them, and granite-4.1-8b
+byte-identical over a 256-token greedy generation against the pre-branch binary.
+
+Note what this row and the Q4_0 prefill row have in common: `granite-4.1-8b
+Q4_0` was, before today, **slower on a fully offloaded GPU than on the CPU**, in
+both phases, for the same reason — nobody had written or admitted its kernels.
+The published CUDA table's weakest rows are worth re-reading as coverage gaps
+before they are read as kernel-quality gaps.
+
 ### The llama.cpp CUDA denominator is missing, and that is a gap
 
 Every CUDA ratio in `docs/benchmarks.md` still rests on the 2026-07-29 numbers.

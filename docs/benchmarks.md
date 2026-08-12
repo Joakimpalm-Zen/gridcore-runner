@@ -28,7 +28,8 @@ on an RTX 3070).
 > the Q8_0 prefill path these numbers exercised was not computing what it
 > reported; Q4_0 and the granite arch have since been promoted through the
 > tolerance gate, taking `granite-4.1-8b-Q4_0` prefill from 8.0 to 230.6 tok/s
-> and Llama-3.2-3B prefill to 748 against the 438.1 below. The llama.cpp
+> and Llama-3.2-3B prefill to 748 against the 438.1 below. Q4_0 decode also
+> gained its missing coalesced GEMV (4.4-5.4x, token-identical). The llama.cpp
 > denominators have NOT been re-measured on this box — a CUDA llama.cpp build
 > could not be produced there (toolkit mismatch, detailed in performance.md) —
 > so the ratios in this table should be treated as unverified until both sides
