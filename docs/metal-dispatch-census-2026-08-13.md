@@ -162,6 +162,41 @@ batching `elem` (175n, the remaining 73 %) is worth on the order of **+5–6 %**
 more prefill. That is now a quantified target rather than a plausible one, and
 it is the single largest remaining prefill lever on this backend.
 
+## The rest of it: elem batched too, and the extrapolation was wrong
+
+`elem` (residual adds, activation multiplies, post-norm scales, and the
+E-series PLE gate) is now batched the same way, by the same bit-identical
+argument. With that, **the batch dimension no longer collapses anywhere**: the
+census reads `total=827` at n=8 and `total=827` at n=64 — flat, not `240n+587`.
+At batch 64 that is **15,947 → 827 dispatches, a 19.3× reduction.**
+
+Round-robin A/B against the previous commit, same protocol:
+
+| | before | after | delta |
+|---|---:|---:|---:|
+| prefill tok/s | 74.96 | 76.36 | **+1.87 %** |
+| decode tok/s | 15.07 | 15.11 | +0.25 % |
+
+No overlap between arms again (after 75.95–76.95, before 74.50–75.50).
+Cumulative across both commits: **prefill 73.74 → 76.36, +3.55 %**, decode
+unchanged, every step byte-identical on the CPU/GPU parity gates.
+
+**The +5–6 % extrapolation above was wrong, and instructively so.** It assumed
+prefill gain is linear in dispatch count. It is not:
+
+| batched | dispatches removed | prefill gain | gain per 100n removed |
+|---|---:|---:|---:|
+| qknorm + headnorm | 65n | +2.10 % | 3.2 % |
+| elem (incl. PLE) | 175n | +1.87 % | 1.1 % |
+
+Removing 2.7× more dispatches bought *less* throughput. The reason is that a
+dispatch is not a unit of cost: `qknorm`/`headnorm` are threadgroup reductions
+with barriers and a 64-thread group, while the `elem` kernels are flat
+one-operation maps over 256 threads. **Per-dispatch overhead scales with what
+the kernel has to set up, not with the fact that it was dispatched.** Any
+future estimate of the form "we removed N dispatches so expect X %" should be
+weighted by kernel shape, or simply not made.
+
 ### Two methodology notes that cost time here
 
 - **SmolLM2-135M has no QK-norm at all** (`qknorm=0, headnorm=0`). The first
@@ -183,7 +218,12 @@ it is the single largest remaining prefill lever on this backend.
 - Decode at `n == 1` is 98.7 % GPU execution. Encode overhead is retired as an
   explanation for anything.
 - Dispatch *encoding* is free (0.7 % of prefill). Dispatch *execution* is
-  **not**: batching `qknorm`/`headnorm` removed 27 % of per-token dispatches
-  and bought +2.10 % prefill, bit-identically. Batching `elem` (the remaining
-  73 %) is the largest prefill lever left on this backend, estimated at
-  +5–6 %.
+  **not**: batching every collapsed kind took the census from `240n + 587` to
+  a flat **827** (19.3× fewer dispatches at batch 64) and bought **+3.55 %**
+  prefill, bit-identically, with decode unchanged.
+- Dispatch cost is **not uniform**. Reduction kernels with barriers cost ~3×
+  more per dispatch than flat elementwise maps, which is why removing 175n of
+  `elem` was worth less than removing 65n of `qknorm`/`headnorm`.
+- With the batch dimension no longer collapsing anywhere, the next prefill
+  lever is not dispatch shape at all — it is the tiled GEMM and the memory
+  traffic beneath it.

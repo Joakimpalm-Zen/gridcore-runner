@@ -1500,13 +1500,24 @@ kernel void k_attn_combine(device const float *acc_all [[buffer(0)]],
 
 // ---------------------------------------------------------------- elementwise
 
+// The elementwise family takes the prompt batch in grid.y: thread (i, col)
+// touches element i of column col, at gs/us elements per column. Each element
+// was always independent, so this is BIT-IDENTICAL -- only the encoding
+// changes. It exists because these ops were 175n of the 240n per-token
+// dispatches measured in docs/metal-dispatch-census-2026-08-13.md, and
+// batching the 65n of qknorm/headnorm was already worth +2.1% prefill.
+// At n_col == 1 the strides are never read.
 kernel void k_silu_mul(device float       *g [[buffer(0)]],
                        device const float *u [[buffer(1)]],
                        constant int       &n [[buffer(2)]],
-                       uint i [[thread_position_in_grid]]) {
-    if ((int)i < n) {
-        float x = g[i];
-        g[i] = (x / (1.0f + exp(-x))) * u[i];
+                       constant int       &gs [[buffer(3)]],
+                       constant int       &us [[buffer(4)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if ((int)gid.x < n) {
+        device float *gp = g + (ulong)gid.y * gs;
+        device const float *up = u + (ulong)gid.y * us;
+        float x = gp[gid.x];
+        gp[gid.x] = (x / (1.0f + exp(-x))) * up[gid.x];
     }
 }
 
@@ -1517,16 +1528,26 @@ kernel void k_silu_mul(device float       *g [[buffer(0)]],
 kernel void k_sigmoid_mul(device float       *x [[buffer(0)]],
                           device const float *g [[buffer(1)]],
                           constant int       &n [[buffer(2)]],
-                          uint i [[thread_position_in_grid]]) {
-    if ((int)i < n) x[i] *= 1.0f / (1.0f + exp(-g[i]));
+                          constant int       &xs [[buffer(3)]],
+                          constant int       &gs [[buffer(4)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if ((int)gid.x < n) {
+        device float *xp = x + (ulong)gid.y * xs;
+        device const float *gp = g + (ulong)gid.y * gs;
+        xp[gid.x] *= 1.0f / (1.0f + exp(-gp[gid.x]));
+    }
 }
 
 kernel void k_gelu_mul(device float       *g [[buffer(0)]],
                        device const float *u [[buffer(1)]],
                        constant int       &n [[buffer(2)]],
-                       uint i [[thread_position_in_grid]]) {
-    if ((int)i < n) {
-        float x = g[i];
+                       constant int       &gs [[buffer(3)]],
+                       constant int       &us [[buffer(4)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if ((int)gid.x < n) {
+        device float *gp = g + (ulong)gid.y * gs;
+        device const float *up = u + (ulong)gid.y * us;
+        float x = gp[gid.x];
         // Metal compiles with fast math, where tanh() is evaluated through
         // exp(2a): for large |a| that overflows to inf and inf/inf yields NaN,
         // while the CPU oracle's libm tanhf saturates. Gemma-class models
@@ -1537,22 +1558,26 @@ kernel void k_gelu_mul(device float       *g [[buffer(0)]],
         // hazard, same fix as the `g < -80` early-out in the CPU silu path.
         float a = 0.7978845608f * (x + 0.044715f * x * x * x);
         float t = tanh(clamp(a, -16.0f, 16.0f));
-        g[i] = 0.5f * x * (1.0f + t) * u[i];
+        gp[gid.x] = 0.5f * x * (1.0f + t) * up[gid.x];
     }
 }
 
 kernel void k_add(device float       *x [[buffer(0)]],
                   device const float *d [[buffer(1)]],
                   constant int       &n [[buffer(2)]],
-                  uint i [[thread_position_in_grid]]) {
-    if ((int)i < n) x[i] += d[i];
+                  constant int       &xs [[buffer(3)]],
+                  constant int       &ds [[buffer(4)]],
+                  uint2 gid [[thread_position_in_grid]]) {
+    if ((int)gid.x < n)
+        x[(ulong)gid.y * xs + gid.x] += d[(ulong)gid.y * ds + gid.x];
 }
 
 kernel void k_scale(device float       *x [[buffer(0)]],
                     constant float     &s [[buffer(1)]],
                     constant int       &n [[buffer(2)]],
-                    uint i [[thread_position_in_grid]]) {
-    if ((int)i < n) x[i] *= s;
+                    constant int       &xs [[buffer(3)]],
+                    uint2 gid [[thread_position_in_grid]]) {
+    if ((int)gid.x < n) x[(ulong)gid.y * xs + gid.x] *= s;
 }
 
 kernel void k_head_transform(device float     *logits [[buffer(0)]],

@@ -1305,29 +1305,52 @@ static void enc_rope_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
 }
 
 
-static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
-                     id<MTLComputePipelineState> p,
-                     id<MTLBuffer> a, NSUInteger a_off,
-                     id<MTLBuffer> b, NSUInteger b_off, int n) {
+// n_col columns in one dispatch (grid.y), a_stride/b_stride elements apart.
+// Bit-identical to n_col separate calls -- every element was already
+// independent, so only the encoding changes. See the kernel-family comment in
+// kernels.metal for why this exists.
+static void enc_elem_n(gpu_t *g, id<MTLComputeCommandEncoder> e,
+                       id<MTLComputePipelineState> p,
+                       id<MTLBuffer> a, NSUInteger a_off,
+                       id<MTLBuffer> b, NSUInteger b_off, int n,
+                       int n_col, int a_stride, int b_stride) {
     [e setComputePipelineState:p];
     [e setBuffer:a offset:a_off atIndex:0];
     [e setBuffer:b offset:b_off atIndex:1];
     [e setBytes:&n length:4 atIndex:2];
+    [e setBytes:&a_stride length:4 atIndex:3];
+    [e setBytes:&b_stride length:4 atIndex:4];
     g_disp.elem++;
-    [e dispatchThreads:MTLSizeMake(n, 1, 1)
+    [e dispatchThreads:MTLSizeMake(n, n_col, 1)
+      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+}
+
+// Single column. Still used by the MoE FFN, which stays per-token because
+// routing picks different experts per token.
+static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
+                     id<MTLComputePipelineState> p,
+                     id<MTLBuffer> a, NSUInteger a_off,
+                     id<MTLBuffer> b, NSUInteger b_off, int n) {
+    enc_elem_n(g, e, p, a, a_off, b, b_off, n, 1, 0, 0);
+}
+
+static void enc_scale_n(gpu_t *g, id<MTLComputeCommandEncoder> e,
+                        id<MTLBuffer> x, NSUInteger x_off,
+                        int n, float scale, int n_col, int stride) {
+    [e setComputePipelineState:g->p_scale];
+    [e setBuffer:x offset:x_off atIndex:0];
+    [e setBytes:&scale length:4 atIndex:1];
+    [e setBytes:&n length:4 atIndex:2];
+    [e setBytes:&stride length:4 atIndex:3];
+    g_disp.elem++;
+    [e dispatchThreads:MTLSizeMake(n, n_col, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
 
 static void enc_scale(gpu_t *g, id<MTLComputeCommandEncoder> e,
                       id<MTLBuffer> x, NSUInteger x_off,
                       int n, float scale) {
-    [e setComputePipelineState:g->p_scale];
-    [e setBuffer:x offset:x_off atIndex:0];
-    [e setBytes:&scale length:4 atIndex:1];
-    [e setBytes:&n length:4 atIndex:2];
-    g_disp.elem++;
-    [e dispatchThreads:MTLSizeMake(n, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    enc_scale_n(g, e, x, x_off, n, scale, 1, 0);
 }
 
 // Head transforms (logit softcap / suppressed tokens) deliberately do NOT
@@ -1588,16 +1611,15 @@ static void enc_ple(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
              n_embd, P, nil, n, n_embd, P);
     // gate *= gelu-gated slice: p_gelu computes g[i] = gelu(g[i]) * u[i],
     // which is exactly gated_act(ACT_GELU, gate, slice)
-    for (int b = 0; b < n; b++)
-        enc_elem(g, e, g->p_gelu, g->ple_tmp, foff((size_t)b * P),
-                 g->ple, foff(((size_t)b * m->n_layer + l) * P), P);
+    // ple is [token][layer][P], so this layer's slice starts at l*P and the
+    // per-column stride is the whole layer row.
+    enc_elem_n(g, e, g->p_gelu, g->ple_tmp, 0,
+               g->ple, foff((size_t)l * P), P, n, P, m->n_layer * P);
     enc_mv_n(g, e, m, ly->ple_proj, g->ple_tmp, 0, g->xb, 0,
              P, n_embd, nil, n, P, xdim);
     enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->ppn[l],
                   n_embd, m->rms_eps, n, xdim, xdim);
-    for (int b = 0; b < n; b++)
-        enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
-                 g->xb, foff((size_t)b * xdim), n_embd);
+    enc_elem_n(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd, n, n_embd, xdim);
 }
 
 // RUNNER_METAL_NAN_TRACE=1: submit after every layer and report the first one
@@ -1841,21 +1863,16 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         }
 
         if (m->attn_out_gate && ly->wq_gate)
-            for (int b = 0; b < n; b++)
-                enc_elem(g, e, g->p_sigmul, g->xb2, foff((size_t)b * xdim),
-                         g->agate, foff((size_t)b * q_dim), q_dim_l);
+            enc_elem_n(g, e, g->p_sigmul, g->xb2, 0, g->agate, 0,
+                       q_dim_l, n, xdim, q_dim);
         enc_mv_n(g, e, m, ly->wo, g->xb2, 0, g->xb, 0,
                  q_dim_l, n_embd, g->bo[l], n, xdim, xdim);
         if (g->pan[l])
             enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pan[l],
                           n_embd, m->post_norm_eps, n, xdim, xdim);
         if (m->resid_scale != 1.0f)  // granite muP branch scale
-            for (int b = 0; b < n; b++)
-                enc_scale(g, e, g->xb, foff((size_t)b * xdim), n_embd,
-                          m->resid_scale);
-        for (int b = 0; b < n; b++)
-            enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
-                     g->xb, foff((size_t)b * xdim), n_embd);
+            enc_scale_n(g, e, g->xb, 0, n_embd, m->resid_scale, n, xdim);
+        enc_elem_n(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd, n, n_embd, xdim);
 
         if (ly->moe_gemma || ly->is_moe) {
             // The MoE FFN itself stays per-token — routing picks different
@@ -1894,19 +1911,13 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             enc_rmsnorm_n(g, e, g->xb, 0, g->xb, 0, g->pfn[l],
                           n_embd, m->post_norm_eps, n, xdim, xdim);
         if (m->resid_scale != 1.0f)
-            for (int b = 0; b < n; b++)
-                enc_scale(g, e, g->xb, foff((size_t)b * xdim), n_embd,
-                          m->resid_scale);
-        for (int b = 0; b < n; b++)
-            enc_elem(g, e, g->p_add, g->x, foff((size_t)b * n_embd),
-                     g->xb, foff((size_t)b * xdim), n_embd);
+            enc_scale_n(g, e, g->xb, 0, n_embd, m->resid_scale, n, xdim);
+        enc_elem_n(g, e, g->p_add, g->x, 0, g->xb, 0, n_embd, n, n_embd, xdim);
         // Order matters: the E-series branch reads the post-FFN residual of
         // EVERY token, so it has to run before any token's output scale.
         if (ly->ple_gate) enc_ple(g, e, m, ly, l, n, xdim);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
-            for (int b = 0; b < n; b++)
-                enc_scale(g, e, g->x, foff((size_t)b * n_embd), n_embd,
-                          ly->out_scale);
+            enc_scale_n(g, e, g->x, 0, n_embd, ly->out_scale, n, n_embd);
         if (nantrace) {
             [e endEncoding];
             [cb commit];
