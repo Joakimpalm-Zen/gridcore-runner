@@ -439,7 +439,17 @@ CPU: {"gpu_layers":0,"layers":60,"prompt_tok_s":15.819,"gen_tok_s":4.829,"prompt
 GPU: {"gpu_layers":60,"layers":60,"prompt_tok_s":2.096,"gen_tok_s":3.250,"prompt_s":244.227,"gen_s":78.778}
 ```
 
-**GPU is slower than CPU on every axis** — prompt throughput drops nearly 8x (15.8 -> 2.1 tok/s). This model's 17.7 GB of weights leaves only ~7.6 GB of this box's 24 GB MIG slice for KV cache and scratch; the load log showed `kv 3.69 GB` against `3.75 GB free` after init — the device is nearly full. This reads as VRAM-pressure-induced slowdown (some combination of reduced batching/parallelism headroom or spillover) specific to this box's small MIG slice, not a correctness defect — cpu_cuda byte-identity above confirms the GPU path computes the *same* answer, just much more slowly under this constraint. Recorded as measured; not investigated further (out of scope for a perf-row record, and doing so would risk turning into engine debugging under the STOP rule).
+**2026-08-13 follow-up:** the slowdown persisted with full 60/60 offload and
+3.68 GB free, so VRAM pressure was not the cause. Q4_0 had a compiled
+tensor-core GEMM but was absent from the promotion allowlist, leaving 86.9% of
+profiled prefill GPU time in scalar matrix projections. Forcing the existing
+kernel raised prefill from 2.10 to 55.39 tok/s even in a worse 59/60 profiled
+split. The real 31B teacher-forced gate then produced bit-identical logits over
+820 tensor-core dispatches and zero top-1 flips, so `(Q4_0, gemma4)` is now
+promoted by default. A clean 60/60 production rerun reached 114.09 prefill
+tok/s (54.4x the defective row and 7.4x CPU) while decode held at 3.23 tok/s.
+Evidence is under
+`tests/compatibility/out/gemma4-31b-f3-2026-08-13/`.
 
 ### Summary
 

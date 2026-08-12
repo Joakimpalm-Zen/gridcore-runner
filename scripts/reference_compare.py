@@ -49,6 +49,12 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def port_pair(base):
+    if base < 9300 or base > 9398:
+        raise ValueError("port base must leave two ports inside 9300-9399")
+    return base, base + 1
+
+
 def request_json(url, body=None, timeout=10):
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(url, data=data,
@@ -137,10 +143,19 @@ def main(argv=None):
     parser.add_argument("--ctx", type=int, default=2048)
     parser.add_argument("--startup-timeout", type=int, default=300)
     parser.add_argument("--request-timeout", type=int, default=300)
+    parser.add_argument("--port-base", type=int,
+                        help="use this port and the next instead of ephemeral ports")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
 
-    port = free_port()
+    if args.port_base is not None:
+        try:
+            runner_port, reference_port = port_pair(args.port_base)
+        except ValueError as exc:
+            parser.error(str(exc))
+    else:
+        runner_port, reference_port = free_port(), free_port()
+    port = runner_port
     work = args.out.parent if args.out else ROOT / "tests/compatibility/out"
     work.mkdir(parents=True, exist_ok=True)
     runner_command = [str(args.runner.resolve()), "-m", str(args.model.resolve()),
@@ -150,7 +165,7 @@ def main(argv=None):
                              PROMPTS, args.tokens, args.startup_timeout,
                              args.request_timeout)
 
-    port = free_port()
+    port = reference_port
     reference_command = [str(args.reference.resolve()), "-m", str(args.model.resolve()),
                          "--host", "127.0.0.1", "--port", str(port),
                          "-c", str(args.ctx), "-ngl", "0"]
@@ -167,7 +182,7 @@ def main(argv=None):
     report = {
         "schema_version": "xyntetik.runner.greedy-reference.v1",
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "runner": command_version(args.runner),
+        "runner": command_version(args.runner.resolve()),
         "reference": command_version(args.reference),
         "model": str(args.model), "tokens": args.tokens,
         "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",

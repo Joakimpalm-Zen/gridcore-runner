@@ -118,6 +118,7 @@ endif
 TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
 TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
+TEST_GGUF_SPLIT = $(TEST_BATCH:test-batch%=test-gguf-split-load%)
 TEST_PARSE = $(TEST_BATCH:test-batch%=test-parse%)
 TEST_METAL_OWNERSHIP = $(TEST_BATCH:test-batch%=test-metal-ownership%)
 TEST_METAL_SHADERS = $(TEST_BATCH:test-batch%=test-metal-shaders%)
@@ -130,7 +131,21 @@ TEST_THREAD_DEFAULT = $(TEST_BATCH:test-batch%=test-thread-default%)
 # what `make` considers a dependency.
 HDR = $(wildcard src/*.h)
 
-SRC = src/gguf.c src/compat.c src/quants.c src/instances.c src/tokenizer.c src/model.c src/sample.c \
+# Quant arithmetic is the numerical identity boundary.  Keep it in a separate
+# translation unit with fast-math explicitly disabled; the rest of the engine
+# retains -ffast-math.  The final -fno-fast-math also defeats a hostile or
+# distro-supplied CFLAGS that enabled it before our filtered flags.
+QUANTS_OBJ = .build/quants.o
+QUANTS_CFLAGS = $(filter-out -ffast-math,$(CFLAGS)) -fno-fast-math
+
+# Rebuild on every invocation: the requested CC/CFLAGS are not encoded in the
+# object name, and reusing a native developer object in a portable release or
+# cross build would be a correctness bug.
+$(QUANTS_OBJ): FORCE src/quants.c $(HDR)
+	mkdir -p $(dir $@)
+	$(CC) $(QUANTS_CFLAGS) -I src -c src/quants.c -o $@
+
+SRC = src/gguf.c src/compat.c $(QUANTS_OBJ) src/instances.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
       src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/http.c src/registry.c src/scheduler.c src/completion.c src/api_responses.c src/api_anthropic.c src/server.c \
       src/main.c $(GPU_SRC) $(TRAY_SRC)
@@ -150,7 +165,8 @@ runner-sigpipe-default: $(SRC) $(HDR) src/kernels_ptx.h
 	$(CC) $(CFLAGS) -DRUNNER_TEST_SIGPIPE_DEFAULT $(SRC) -o $@ $(LDFLAGS)
 
 debug: $(SRC) $(HDR)
-	$(CC) -O0 -g -fsanitize=address,undefined -std=gnu11 -Wall $(SRC) -o runner-debug $(LDFLAGS)
+	$(CC) -O0 -g -fsanitize=address,undefined -fno-fast-math -std=gnu11 -Wall \
+		$(filter-out $(QUANTS_OBJ),$(SRC)) src/quants.c -o runner-debug $(LDFLAGS)
 
 # $(CFLAGS), not a hand-rolled flag list: schema bounds compile in the same
 # -ffast-math configuration as the shipped binary. Building this test without
@@ -160,33 +176,36 @@ $(TEST_JSON_SCHEMA): tests/test_json_schema.c src/json.c src/jsonmode.c src/sche
 
 # quants.c is needed for the ggml_type_* helpers gguf.c links against; CFLAGS
 # (not the plainer flags above) so the AVX2 paths match a real build
-TEST_TOK_SRC = tests/test_tokenizer.c src/gguf.c src/tokenizer.c src/compat.c src/quants.c
+TEST_TOK_SRC = tests/test_tokenizer.c src/gguf.c src/tokenizer.c src/compat.c $(QUANTS_OBJ)
 $(TEST_TOKENIZER): $(TEST_TOK_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_SRC) -o $@ -lm
 
 # the two merge implementations must agree on every input; see the test's header
 TEST_TOK_MERGE = $(TEST_BATCH:test-batch%=test-tokenizer-merge%)
 TEST_TOK_MERGE_SRC = tests/test_tokenizer_merge.c src/gguf.c src/tokenizer.c \
-                     src/compat.c src/quants.c
+                     src/compat.c $(QUANTS_OBJ)
 $(TEST_TOK_MERGE): $(TEST_TOK_MERGE_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_MERGE_SRC) -o $@ -lm
+
+$(TEST_GGUF_SPLIT): tests/test_gguf_split_load.c src/gguf.c src/compat.c $(QUANTS_OBJ) $(HDR)
+	$(CC) $(CFLAGS) -I src tests/test_gguf_split_load.c src/gguf.c src/compat.c $(QUANTS_OBJ) -o $@ $(LDFLAGS)
 
 # difftok: tokenizer differential harness. Not part of `make test` -- it needs a
 # real multi-GB model GGUF, which models/ is gitignored for. scripts/difftok.py
 # builds it on demand and compares against the HuggingFace reference.
-DIFFTOK_SRC = tests/difftok.c src/gguf.c src/tokenizer.c src/compat.c src/quants.c
+DIFFTOK_SRC = tests/difftok.c src/gguf.c src/tokenizer.c src/compat.c $(QUANTS_OBJ)
 $(DIFFTOK): $(DIFFTOK_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(DIFFTOK_SRC) -o $@ -lm
 
 TEST_TMPL_SRC = tests/test_template.c src/gguf.c src/tokenizer.c src/template.c \
-                src/json.c src/compat.c src/quants.c
+                src/json.c src/compat.c $(QUANTS_OBJ)
 $(TEST_TEMPLATE): $(TEST_TMPL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TMPL_SRC) -o $@ -lm
 
 # the strict tool envelope is only meaningful if the schema engine enforces
 # it, so schema.c/jsonmode.c compile in and the tests drive the real validator
 TEST_TOOLS_SRC = tests/test_tools.c src/gguf.c src/tokenizer.c src/template.c \
-                 src/schema.c src/jsonmode.c src/json.c src/compat.c src/quants.c
+                 src/schema.c src/jsonmode.c src/json.c src/compat.c $(QUANTS_OBJ)
 $(TEST_TOOLS): $(TEST_TOOLS_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOOLS_SRC) -o $@ -lm
 
@@ -201,7 +220,7 @@ $(TEST_JSON_OOM): tests/test_json_oom.c src/json.c src/json.h
 
 # compiles src/tokenizer.c into the test with instrumented allocators; gguf.c
 # and friends link normally so their allocations stay outside the failure window
-TEST_TOK_OOM_SRC = tests/test_tokenizer_oom.c src/gguf.c src/compat.c src/quants.c
+TEST_TOK_OOM_SRC = tests/test_tokenizer_oom.c src/gguf.c src/compat.c $(QUANTS_OBJ)
 $(TEST_TOKENIZER_OOM): $(TEST_TOK_OOM_SRC) src/tokenizer.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_OOM_SRC) -o $@ -lm
 
@@ -213,7 +232,7 @@ $(TEST_SCHEMA_OOM): tests/test_schema_oom.c src/schema.c src/json.c src/jsonmode
 # shared model weights: needs the real model + backend, so it links the same
 # sources the runner does minus the CLI/server front end
 TEST_SHARED_SRC = tests/test_shared_weights.c src/gguf.c src/compat.c \
-                  src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
+                  $(QUANTS_OBJ) src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_SHARED): $(TEST_SHARED_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_SHARED_SRC) -o $@ $(LDFLAGS)
 
@@ -271,7 +290,7 @@ test-shared-noid: $(TEST_SHARED) fixture-scale-note
 # (the fixture-scale gates can never see the >2 GB stat() cliff that did it)
 TEST_FILE_ID = $(TEST_BATCH:test-batch%=test-file-identity%)
 TEST_FILE_ID_SRC = tests/test_file_identity.c src/gguf.c src/compat.c \
-                   src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
+                   $(QUANTS_OBJ) src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_FILE_ID): $(TEST_FILE_ID_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_FILE_ID_SRC) -o $@ $(LDFLAGS)
 
@@ -326,7 +345,7 @@ test-bare-invocation: runner
 # Windows was unaffected only because `test-batch.exe` yields a distinct name.
 TEST_SPLIT_GUARD = $(TEST_BATCH:test-batch%=test-split-guard-bin%)
 TEST_SPLIT_GUARD_SRC = tests/test_split_guard.c src/gguf.c src/compat.c \
-                       src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
+                       $(QUANTS_OBJ) src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_SPLIT_GUARD): $(TEST_SPLIT_GUARD_SRC) $(HDR)
 	$(CC) $(CFLAGS) $(GPU_BACKEND_DEF) -I src $(TEST_SPLIT_GUARD_SRC) -o $@ $(LDFLAGS)
 
@@ -346,7 +365,7 @@ test-split-guard: $(TEST_SPLIT_GUARD) test.gguf
 # batched decode: same sources as the shared-weights test (real model +
 # backend), because the property under test is a backend property
 TEST_BATCH_SRC = tests/test_batch.c src/gguf.c src/compat.c \
-                 src/quants.c src/model.c src/vramreg.c $(GPU_SRC)
+                 $(QUANTS_OBJ) src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_BATCH): $(TEST_BATCH_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_BATCH_SRC) -o $@ $(LDFLAGS)
 
@@ -364,7 +383,7 @@ $(TEST_HOST_HEADER): tests/test_host_header.c src/http.c src/json.c src/compat.c
 # forkable KV prefixes: needs the real model, the real tokenizer and the real
 # engine, because the property under test is that a forked cache produces the
 # same logits the model would have produced by prefilling
-TEST_PREFIX_SRC = tests/test_prefix.c src/gguf.c src/compat.c src/quants.c \
+TEST_PREFIX_SRC = tests/test_prefix.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/sample.c src/jsonmode.c \
                   src/schema.c src/json.c src/engine.c src/vramreg.c $(GPU_SRC)
 $(TEST_PREFIX): $(TEST_PREFIX_SRC) $(HDR)
@@ -373,7 +392,7 @@ $(TEST_PREFIX): $(TEST_PREFIX_SRC) $(HDR)
 # grammar fast-forward: same full-engine link as the prefix test — the gate
 # is byte identity of a real constrained generation with the walk on and off
 TEST_GRAMMAR_FF_SRC = tests/test_grammar_ff.c src/gguf.c src/compat.c \
-                  src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                  $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
                   src/vramreg.c $(GPU_SRC)
 $(TEST_GRAMMAR_FF): $(TEST_GRAMMAR_FF_SRC) $(HDR)
@@ -388,14 +407,14 @@ $(TEST_VRAMREG): tests/test_vram_registry.c src/vramreg.c src/compat.c $(HDR)
 
 # q8 KV tolerance gate: needs the tokenizer too, because it teacher-forces a
 # fixed piece of real text rather than synthetic token ids
-TEST_KV_TOL_SRC = tests/test_kv_tol.c src/gguf.c src/compat.c src/quants.c \
+TEST_KV_TOL_SRC = tests/test_kv_tol.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_KV_TOL): $(TEST_KV_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_KV_TOL_SRC) -o $@ $(LDFLAGS)
 
 # SIMD (AVX2/NEON) dot and dequant kernels vs an independent double-precision
 # reference; also pins q8_quant_row byte-identical to its scalar definition
-TEST_QUANTS_SIMD_SRC = tests/test_quants_simd.c src/quants.c
+TEST_QUANTS_SIMD_SRC = tests/test_quants_simd.c $(QUANTS_OBJ)
 $(TEST_QUANTS_SIMD): $(TEST_QUANTS_SIMD_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_QUANTS_SIMD_SRC) -o $@ -lm -lpthread
 
@@ -419,7 +438,7 @@ $(TEST_TRAY_CORE): $(TEST_TRAY_CORE_SRC) $(HDR)
 
 # TC tolerance gate: same shape as the q8-KV gate — teacher-forced logits,
 # top-1 + bounded-deviation criteria, per (type, arch) via the model argument
-TEST_TC_TOL_SRC = tests/test_tc_tol.c src/gguf.c src/compat.c src/quants.c \
+TEST_TC_TOL_SRC = tests/test_tc_tol.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_TC_TOL): $(TEST_TC_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TC_TOL_SRC) -o $@ $(LDFLAGS)
@@ -427,26 +446,26 @@ $(TEST_TC_TOL): $(TEST_TC_TOL_SRC) $(HDR)
 # fused-vs-eager MoE routing tolerance: same full-engine link as tc-tol, and
 # the same self-skipping shape (no GPU / not MoE / no full offload / the fused
 # router never engaged all skip rather than pass)
-TEST_MOE_TOL_SRC = tests/test_moe_tol.c src/gguf.c src/compat.c src/quants.c \
+TEST_MOE_TOL_SRC = tests/test_moe_tol.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_MOE_TOL): $(TEST_MOE_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MOE_TOL_SRC) -o $@ $(LDFLAGS)
 
-TEST_MOE_ROUTER_SRC = tests/test_moe_router.c src/gguf.c src/compat.c src/quants.c \
+TEST_MOE_ROUTER_SRC = tests/test_moe_router.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_MOE_ROUTER): $(TEST_MOE_ROUTER_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MOE_ROUTER_SRC) -o $@ $(LDFLAGS)
 
 # residency-warning wording: needs the loader (the hot-set estimate has to
 # agree with the actual tensor set), so it takes the same link as the two above
-TEST_PAGING_WARN_SRC = tests/test_paging_warn.c src/gguf.c src/compat.c src/quants.c \
+TEST_PAGING_WARN_SRC = tests/test_paging_warn.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_PAGING_WARN): $(TEST_PAGING_WARN_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_PAGING_WARN_SRC) -o $@ $(LDFLAGS)
 # reservation auto-fit arithmetic: no model file, no GPU, no fixture -- the
 # regime it covers is unreachable on a dev machine, so it is fed real 7B/24 GB
 # numbers directly. See the header of tests/test_autofit.c.
-TEST_AUTOFIT_SRC = tests/test_autofit.c src/gguf.c src/compat.c src/quants.c \
+TEST_AUTOFIT_SRC = tests/test_autofit.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_AUTOFIT): $(TEST_AUTOFIT_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_AUTOFIT_SRC) -o $@ $(LDFLAGS)
@@ -455,7 +474,7 @@ $(TEST_AUTOFIT): $(TEST_AUTOFIT_SRC) $(HDR)
 # around it — the runner's object set minus main.c, server.c and the file the
 # test itself includes.
 TEST_RESP_SM_SRC = tests/test_responses_sm.c src/gguf.c src/compat.c \
-                  src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                  $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
                   src/template.c src/vramreg.c src/http.c src/registry.c src/scheduler.c $(GPU_SRC)
 $(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/completion.c $(HDR)
@@ -465,7 +484,7 @@ $(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/completion.c $(HDR)
 # hide forever, because nothing ever asks the state to come back.
 TEST_RESTART = $(TEST_BATCH:test-batch%=test-server-restart%)
 TEST_RESTART_SRC = tests/test_server_restart.c src/gguf.c src/compat.c \
-                   src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                   $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                    src/jsonmode.c src/schema.c src/json.c src/engine.c \
                    src/template.c src/vramreg.c src/http.c src/registry.c \
                    src/scheduler.c src/completion.c src/api_responses.c \
@@ -483,7 +502,7 @@ $(TEST_RESIDENCY): tests/test_residency.c src/compat.c $(HDR)
 # test (the turnstile is static) so it is NOT linked here.
 TEST_SCHED_TURN = $(TEST_BATCH:test-batch%=test-sched-turn%)
 TEST_SCHED_TURN_SRC = tests/test_sched_turn.c src/gguf.c src/compat.c \
-                      src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                      $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                       src/jsonmode.c src/schema.c src/json.c src/engine.c \
                       src/template.c src/vramreg.c src/http.c src/registry.c $(GPU_SRC)
 $(TEST_SCHED_TURN): $(TEST_SCHED_TURN_SRC) src/scheduler.c $(HDR)
@@ -492,14 +511,14 @@ $(TEST_SCHED_TURN): $(TEST_SCHED_TURN_SRC) src/scheduler.c $(HDR)
 # snapshot persistence: the round trip, and the refusals that matter more
 TEST_PFX_PERSIST = $(TEST_BATCH:test-batch%=test-prefix-persist%)
 TEST_PFX_PERSIST_SRC = tests/test_prefix_persist.c src/gguf.c src/compat.c \
-                       src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                       $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                        src/jsonmode.c src/schema.c src/json.c src/engine.c \
                        src/vramreg.c $(GPU_SRC)
 $(TEST_PFX_PERSIST): $(TEST_PFX_PERSIST_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_PFX_PERSIST_SRC) -o $@ $(LDFLAGS)
 
 TEST_QUANTIZE_SRC = tests/test_quantize.c src/quantize.c src/gguf.c \
-                    src/compat.c src/quants.c src/json.c
+                    src/compat.c $(QUANTS_OBJ) src/json.c
 $(TEST_QUANTIZE): $(TEST_QUANTIZE_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_QUANTIZE_SRC) -o $@ $(LDFLAGS)
 
@@ -507,19 +526,19 @@ $(TEST_QUANTIZE): $(TEST_QUANTIZE_SRC) $(HDR)
 $(TEST_VRAM_ROLLBACK): tests/test_vram_rollback.c src/compat.c $(HDR)
 	$(CC) $(CFLAGS) -I src tests/test_vram_rollback.c src/compat.c -o $@ $(LDFLAGS)
 
-$(TEST_GGUF_GETTERS): tests/test_gguf_getters.c src/gguf.c src/compat.c src/quants.c $(HDR)
-	$(CC) $(CFLAGS) -I src tests/test_gguf_getters.c src/gguf.c src/compat.c src/quants.c -o $@ $(LDFLAGS)
+$(TEST_GGUF_GETTERS): tests/test_gguf_getters.c src/gguf.c src/compat.c $(QUANTS_OBJ) $(HDR)
+	$(CC) $(CFLAGS) -I src tests/test_gguf_getters.c src/gguf.c src/compat.c $(QUANTS_OBJ) -o $@ $(LDFLAGS)
 
 $(TEST_PARSE): tests/test_parse.c src/compat.c src/compat.h
 	$(CC) $(CFLAGS) -I src tests/test_parse.c src/compat.c -o $@ $(LDFLAGS)
 
 # quants.c joins for tpool_create/tpool_destroy: the test now also pins that an
 # over-large -t is clamped to TP_MAX rather than silently discarded.
-$(TEST_THREAD_DEFAULT): tests/test_thread_default.c src/compat.c src/compat.h src/quants.c
-	$(CC) $(CFLAGS) -I src tests/test_thread_default.c src/compat.c src/quants.c -o $@ $(LDFLAGS)
+$(TEST_THREAD_DEFAULT): tests/test_thread_default.c src/compat.c src/compat.h $(QUANTS_OBJ)
+	$(CC) $(CFLAGS) -I src tests/test_thread_default.c src/compat.c $(QUANTS_OBJ) -o $@ $(LDFLAGS)
 
 TEST_MODEL_LOAD_FAILURE_SRC = tests/test_model_load_failure.c src/gguf.c \
-                              src/compat.c src/quants.c src/model.c \
+                              src/compat.c $(QUANTS_OBJ) src/model.c \
                               src/vramreg.c $(GPU_SRC)
 $(TEST_MODEL_LOAD_FAILURE): $(TEST_MODEL_LOAD_FAILURE_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MODEL_LOAD_FAILURE_SRC) -o $@ $(LDFLAGS)
@@ -549,9 +568,9 @@ $(TEST_METAL_SHADERS): tests/test_metal_shaders.m src/kernels_metal.h
 	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
 	    tests/test_metal_shaders.m -o $@ -framework Metal -framework Foundation
 
-$(TEST_METAL_KQUANTS): tests/test_metal_kquants.m src/kernels_metal.h src/quants.c $(HDR)
+$(TEST_METAL_KQUANTS): tests/test_metal_kquants.m src/kernels_metal.h $(QUANTS_OBJ) $(HDR)
 	$(CC) -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
-	    tests/test_metal_kquants.m src/quants.c -o $@ -lm -lpthread \
+	    tests/test_metal_kquants.m $(QUANTS_OBJ) -o $@ -lm -lpthread \
 	    -framework Metal -framework Foundation
 
 # compat.c joins the link because the partial-offload residency guard in
@@ -824,7 +843,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
-      $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_PARSE) \
+      $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_GGUF_SPLIT) $(TEST_PARSE) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) runner test.gguf
@@ -879,6 +898,10 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_QUANTIZE)
 	./$(TEST_VRAM_ROLLBACK)
 	./$(TEST_GGUF_GETTERS)
+	@mkdir -p test-gguf-split
+	$(PYTHON) scripts/make-test-model.py test-gguf-split/whole.gguf
+	$(PYTHON) scripts/gguf-split.py test-gguf-split/whole.gguf test-gguf-split/part 3
+	./$(TEST_GGUF_SPLIT) test-gguf-split/whole.gguf test-gguf-split/part-00001-of-00003.gguf
 	./$(TEST_PARSE)
 	./$(TEST_THREAD_DEFAULT)
 	./$(TEST_MODEL_LOAD_FAILURE)
@@ -1014,6 +1037,7 @@ clean:
 	      $(TEST_FILE_ID) test-file-identity.tmp \
 	      $(TEST_SPLIT_GUARD) split-guard.out
 	rm -rf test-attn
+	rm -rf .build
 	rm -f shared-noid.out
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
 	rm -f metal-init-fallback.out metal-init-fallback.err
@@ -1047,6 +1071,9 @@ ptx: src/kernels.cu
 makefile-noop:
 	@:
 
+FORCE:
+	@:
+
 test-makefile-sane:
 	@out=$$($(MAKE) -n --no-print-directory makefile-noop 2>&1); \
 	case "$$out" in \
@@ -1055,7 +1082,12 @@ test-makefile-sane:
 	    echo "$$out" | grep -E "overriding commands|ignoring old commands"; \
 	    exit 1;; \
 	esac; \
+	qline=$$($(MAKE) -Bn --no-print-directory runner | grep -- ' -c src/quants.c '); \
+	test -n "$$qline" || { echo "FAIL: quants.c is not a separate translation unit"; exit 1; }; \
+	echo "$$qline" | grep -q -- ' -fno-fast-math ' || { echo "FAIL: quants.c lacks -fno-fast-math"; exit 1; }; \
+	case "$$qline" in *" -ffast-math "*) echo "FAIL: quants.c still has -ffast-math"; exit 1;; esac; \
+	if grep -q 'system(' src/tray.c; then echo "FAIL: tray launches through a shell"; exit 1; fi; \
 	echo "makefile ok (no discarded recipes)"
 
 
-.PHONY: makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard

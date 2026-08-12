@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 
@@ -84,6 +85,10 @@ def test_reference_comparator_normalizes_openai_completion_text():
     else:
         raise AssertionError("malformed completion response was accepted")
 
+    assert module.port_pair(9300) == (9300, 9301)
+    with __import__("pytest").raises(ValueError):
+        module.port_pair(9399)
+
 
 # --- RNR-007: the gate refuses to mark unexecuted checks complete ----------
 
@@ -144,3 +149,81 @@ def test_reports_are_append_only(tmp_path):
     # ...unless explicitly forced
     assert module.main(["--manifest", str(manifest), "--verify-files",
                         "--out", str(out), "--force"]) == 0
+
+
+def _executable(path, body):
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+    return path
+
+
+def test_resolves_pinned_basename_recursively_and_executes_supported_checks(tmp_path):
+    module = load_module()
+    model = tmp_path / "models" / "publisher" / "model.gguf"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"fixture model")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": "xyntetik.runner.model-compat.v1",
+        "models": [{
+            "id": "m", "architecture": "llama", "file": "models/model.gguf",
+            "sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+            "tokenizer_reference": "local/tokenizer",
+            "checks": ["load", "tokenizer", "greedy_reference"],
+        }],
+    }))
+    runner = _executable(tmp_path / "runner", "exit 0\n")
+    reference = _executable(tmp_path / "llama-server", "exit 0\n")
+    tokenizer = tmp_path / "difftok.py"
+    tokenizer.write_text("print('0/721 strings differ')\n")
+    greedy = tmp_path / "reference-compare.py"
+    greedy.write_text("print('{\"totals\":{\"passed\":5,\"failed\":0}}')\n")
+    module.TOKENIZER_SCRIPT = tokenizer
+    module.GREEDY_SCRIPT = greedy
+    out = tmp_path / "report.json"
+    assert module.main([
+        "--manifest", str(manifest), "--models-root", str(tmp_path / "models"),
+        "--runner", str(runner), "--reference", str(reference),
+        "--verify-files", "--execute-checks", "--out", str(out),
+    ]) == 0
+    item = json.loads(out.read_text())["models"][0]
+    assert item["resolved_file"] == str(model)
+    assert {name: check["status"] for name, check in item["checks"].items()} == {
+        "load": "pass", "tokenizer": "pass", "greedy_reference": "pass",
+    }
+    assert item["complete"] is True
+    report = json.loads(out.read_text())
+    assert report["summary"] == {
+        "models": 1,
+        "files": {"pass": 1},
+        "checks": {
+            "load": {"pass": 1},
+            "tokenizer": {"pass": 1},
+            "greedy_reference": {"pass": 1},
+        },
+    }
+
+
+def test_unavailable_executable_check_records_specific_reason(tmp_path):
+    module = load_module()
+    manifest = _write_manifest(tmp_path, ["greedy_reference"])
+    out = tmp_path / "report.json"
+    assert module.main([
+        "--manifest", str(manifest), "--models-root", str(tmp_path),
+        "--verify-files", "--execute-checks", "--out", str(out),
+    ]) == 0
+    check = json.loads(out.read_text())["models"][0]["checks"]["greedy_reference"]
+    assert check == {"status": "not_executed", "reason": "reference_binary_not_provided"}
+
+
+def test_unavailable_tokenizer_reference_is_skip_not_failure(tmp_path):
+    module = load_module()
+    script = tmp_path / "difftok.py"
+    script.write_text(
+        "import sys\nprint('Access to model is restricted', file=sys.stderr)\nsys.exit(1)\n")
+    module.TOKENIZER_SCRIPT = script
+    result = module.run_tokenizer(
+        tmp_path / "model.gguf", "gated/model",
+        ROOT / "tests/fixtures/tokenizer-corpus.txt", 10)
+    assert result["status"] == "not_executed"
+    assert result["reason"] == "tokenizer_reference_unavailable"

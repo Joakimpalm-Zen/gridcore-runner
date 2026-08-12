@@ -42,6 +42,10 @@ typedef struct {
 typedef struct {
     void       *map;
     size_t      map_size;
+    void      **maps;       // split GGUF ownership; NULL for a single file
+    size_t     *map_sizes;
+    uint32_t    n_maps;
+    uint64_t    mapped_size; // sum of every mapped part
     uint32_t    version;
     uint64_t    n_tensors, n_kv;
     gguf_kv    *kv;
@@ -58,5 +62,6 @@ float        gguf_get_f32 (gguf_file *g, const char *key, float dflt);
 bool         gguf_get_bool(gguf_file *g, const char *key, bool dflt);
 const char  *gguf_get_str (gguf_file *g, const char *key, const char *dflt);
 gguf_tensor *gguf_find_tensor(gguf_file *g, const char *name);
+uint64_t     gguf_mapped_size(const gguf_file *g);
 
 #endif // RUNNER_GGUF_H

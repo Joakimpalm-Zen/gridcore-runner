@@ -106,7 +106,7 @@ static const char *first_duplicate_inplace(const char **s, uint64_t n) {
     return NULL;
 }
 
-bool gguf_open(gguf_file *g, const char *path) {
+static bool gguf_open_one(gguf_file *g, const char *path) {
     memset(g, 0, sizeof(*g));
     g->map = plat_mmap_ro(path, &g->map_size);
     if (!g->map || g->map_size < 24) {
@@ -247,6 +247,7 @@ bool gguf_open(gguf_file *g, const char *path) {
         }
         t->data = (uint8_t *)g->map + (size_t)data_start + (size_t)off;
     }
+    g->mapped_size = g->map_size;
     return true;
 
 invalid:
@@ -254,6 +255,129 @@ invalid:
 fail:
     gguf_close(g);
     return false;
+}
+
+static bool split_part_path(char *out, size_t cap, const char *path,
+                            uint32_t current, uint32_t count, uint32_t wanted) {
+    char suffix[64];
+    snprintf(suffix, sizeof suffix, "-%05u-of-%05u.gguf", current + 1, count);
+    size_t n = strlen(path), sn = strlen(suffix);
+    if (n < sn || strcmp(path + n - sn, suffix) != 0) return false;
+    int wrote = snprintf(out, cap, "%.*s-%05u-of-%05u.gguf",
+                         (int)(n - sn), path, wanted + 1, count);
+    return wrote > 0 && (size_t)wrote < cap;
+}
+
+bool gguf_open(gguf_file *g, const char *path) {
+    memset(g, 0, sizeof(*g));
+    gguf_file probe;
+    if (!gguf_open_one(&probe, path)) return false;
+    uint32_t count = gguf_get_u32(&probe, "split.count", 0);
+    if (count <= 1) { *g = probe; return true; }
+    uint32_t current = gguf_get_u32(&probe, "split.no", UINT32_MAX);
+    uint32_t expected = gguf_get_u32(&probe, "split.tensors.count", UINT32_MAX);
+    if (current >= count || expected == UINT32_MAX || expected > 100000 ||
+        count > expected || count > 10000) {
+        fprintf(stderr, "error: invalid split GGUF metadata in %s\n", path);
+        gguf_close(&probe);
+        return false;
+    }
+
+    char first[4096];
+    if (!split_part_path(first, sizeof first, path, current, count, 0)) {
+        fprintf(stderr, "error: split GGUF filename does not follow "
+                "<prefix>-00001-of-%05u.gguf: %s\n", count, path);
+        gguf_close(&probe);
+        return false;
+    }
+    gguf_close(&probe);
+
+    gguf_file *parts = calloc(count, sizeof(*parts));
+    if (!parts) return false;
+    uint64_t total = 0, mapped = 0;
+    bool ok = true;
+    for (uint32_t i = 0; i < count; i++) {
+        char part_path[4096] = {0};
+        if (!split_part_path(part_path, sizeof part_path, first, 0, count, i) ||
+            !gguf_open_one(&parts[i], part_path)) {
+            fprintf(stderr, "error: missing or unreadable split GGUF part %u/%u: %s\n",
+                    i + 1, count, part_path);
+            ok = false; break;
+        }
+        uint32_t no = gguf_get_u32(&parts[i], "split.no", UINT32_MAX);
+        uint32_t nc = gguf_get_u32(&parts[i], "split.count", 0);
+        uint32_t nt = gguf_get_u32(&parts[i], "split.tensors.count", UINT32_MAX);
+        const char *arch0 = gguf_get_str(&parts[0], "general.architecture", NULL);
+        const char *archi = gguf_get_str(&parts[i], "general.architecture", NULL);
+        uint32_t align0 = gguf_get_u32(&parts[0], "general.alignment", 32);
+        uint32_t aligni = gguf_get_u32(&parts[i], "general.alignment", 32);
+        if (parts[i].version != parts[0].version ||
+            !arch0 || !archi || strcmp(arch0, archi) != 0 || align0 != aligni ||
+            no != i || nc != count || nt != expected ||
+            parts[i].n_tensors > expected ||
+            total > (uint64_t)expected - parts[i].n_tensors ||
+            mapped > UINT64_MAX - parts[i].map_size) {
+            fprintf(stderr, "error: inconsistent split GGUF metadata in %s\n",
+                    part_path);
+            ok = false; break;
+        }
+        total += parts[i].n_tensors;
+        mapped += parts[i].map_size;
+    }
+    if (ok && total != expected) {
+        fprintf(stderr, "error: split GGUF declares %u tensors but parts contain %llu\n",
+                expected, (unsigned long long)total);
+        ok = false;
+    }
+    if (!ok) {
+        for (uint32_t i = 0; i < count; i++) gguf_close(&parts[i]);
+        free(parts);
+        return false;
+    }
+
+    gguf_tensor *merged = calloc((size_t)total, sizeof(*merged));
+    void **maps = calloc(count, sizeof(*maps));
+    size_t *sizes = calloc(count, sizeof(*sizes));
+    if ((total && !merged) || !maps || !sizes) {
+        free(merged); free(maps); free(sizes);
+        for (uint32_t i = 0; i < count; i++) gguf_close(&parts[i]);
+        free(parts);
+        return false;
+    }
+    uint64_t at = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        memcpy(merged + at, parts[i].tensors,
+               (size_t)parts[i].n_tensors * sizeof(*merged));
+        at += parts[i].n_tensors;
+        maps[i] = parts[i].map;
+        sizes[i] = parts[i].map_size;
+        parts[i].map = NULL;
+        parts[i].map_size = 0;
+    }
+
+    *g = parts[0];
+    free(g->tensors);
+    g->tensors = merged;
+    g->n_tensors = total;
+    g->maps = maps;
+    g->map_sizes = sizes;
+    g->n_maps = count;
+    g->mapped_size = mapped;
+    g->map = maps[0];
+    g->map_size = sizes[0];
+    for (uint32_t i = 1; i < count; i++) gguf_close(&parts[i]);
+    free(parts);
+
+    if (g->n_tensors > 1) {
+        const char **names = malloc((size_t)g->n_tensors * sizeof(*names));
+        if (!names) { gguf_close(g); return false; }
+        for (uint64_t i = 0; i < g->n_tensors; i++) names[i] = g->tensors[i].name;
+        const char *d = first_duplicate_inplace(names, g->n_tensors);
+        if (d) fprintf(stderr, "error: duplicate tensor name across split GGUF parts: '%s'\n", d);
+        free(names);
+        if (d) { gguf_close(g); return false; }
+    }
+    return true;
 }
 
 void gguf_close(gguf_file *g) {
@@ -268,8 +392,19 @@ void gguf_close(gguf_file *g) {
     }
     free(g->kv);
     free(g->tensors);
-    plat_munmap(g->map, g->map_size);
+    if (g->maps) {
+        for (uint32_t i = 0; i < g->n_maps; i++)
+            plat_munmap(g->maps[i], g->map_sizes[i]);
+        free(g->maps);
+        free(g->map_sizes);
+    } else {
+        plat_munmap(g->map, g->map_size);
+    }
     memset(g, 0, sizeof(*g));
+}
+
+uint64_t gguf_mapped_size(const gguf_file *g) {
+    return g ? g->mapped_size : 0;
 }
 
 gguf_kv *gguf_get(gguf_file *g, const char *key) {

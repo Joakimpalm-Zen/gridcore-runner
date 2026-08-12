@@ -183,7 +183,8 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     else if (strcmp(pre, "smollm") == 0) t->pre = TOK_PRE_SMOLLM;
     else if (strcmp(pre, "afmoe") == 0)  t->pre = TOK_PRE_AFMOE;
     else if (strcmp(pre, "tekken") == 0) t->pre = TOK_PRE_TEKKEN;
-    else if (strcmp(pre, "llama4") == 0) t->pre = TOK_PRE_LLAMA4;
+    else if (strcmp(pre, "llama4") == 0 ||
+             strcmp(pre, "gpt-4o") == 0) t->pre = TOK_PRE_LLAMA4;
     else                                 t->pre = TOK_PRE_GPT2;
 
     gguf_kv *toks = gguf_get(g, "tokenizer.ggml.tokens");

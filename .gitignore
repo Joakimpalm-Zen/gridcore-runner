@@ -4,6 +4,7 @@ runner-no-write-timeout
 runner-sigpipe-default
 runner-debug
 runner-debug.exe
+.build/
 test-json-schema
 test-json-schema.exe
 test-tokenizer
@@ -52,6 +53,8 @@ test-vram-rollback
 test-vram-rollback.exe
 test-gguf-getters
 test-gguf-getters.exe
+test-gguf-split-load
+test-gguf-split-load.exe
 test-parse
 test-parse.exe
 test-thread-default

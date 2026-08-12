@@ -1,0 +1,4 @@
+gemma4: dense variant verified against llama.cpp (token-identical greedy output on the official ggml-org GGUF); unofficial dequant conversions may still produce garbage — prefer official files
+rope: using model frequency factors (rope_freqs.weight)
+loaded /home/lab/workspace/models/gemma-4-31B_q4_0-it/gemma-4-31B_q4_0-it.gguf | gemma4 | 60 layers | ctx 4096 | 64 threads | 0.04s
+sampling: gemma3 (temp 1.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)

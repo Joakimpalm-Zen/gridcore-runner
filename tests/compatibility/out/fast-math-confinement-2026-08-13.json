@@ -1,0 +1,40 @@
+{
+  "schema_version": "xyntetik.runner.performance-comparison.v1",
+  "date": "2026-08-13",
+  "finding": "H: fast-math confinement",
+  "boundary": "src/quants.c is a separate translation unit compiled with -fno-fast-math; the remaining runner sources retain -ffast-math",
+  "model": {
+    "path": "/home/lab/workspace/models/SmolLM2-135M-Instruct-Q8_0/SmolLM2-135M-Instruct-Q8_0.gguf",
+    "arch": "llama",
+    "quant": "Q8_0"
+  },
+  "command": "./runner -m MODEL --bench-json --gpu off",
+  "before": {
+    "prompt_tokens": 512,
+    "generated_tokens": 256,
+    "prompt_tok_s": 194.052,
+    "gen_tok_s": 25.139,
+    "prompt_s": 2.638,
+    "gen_s": 10.183
+  },
+  "after": {
+    "prompt_tokens": 512,
+    "generated_tokens": 256,
+    "prompt_tok_s": 200.846,
+    "gen_tok_s": 25.401,
+    "prompt_s": 2.549,
+    "gen_s": 10.078
+  },
+  "change_percent": {
+    "prompt_tok_s": 3.501,
+    "gen_tok_s": 1.042
+  },
+  "identity_check": {
+    "prompt": "The capital of France is",
+    "generated_tokens": 64,
+    "cuda_tensor_cores": false,
+    "cpu_gpu_output_sha256": "af4a524ebbbb96b3f43cd03c83f30410aa4593583ae397584cccf336c00c6daa",
+    "byte_identical": true
+  },
+  "acceptance": "pass: decode did not regress; measured change is within the 2% cost ceiling"
+}

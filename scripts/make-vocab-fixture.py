@@ -134,9 +134,9 @@ def make_bpe_fixtures():
     strings should split into, each built by its own left-to-right merges.
     An id per expected pre-token makes a wrong split immediately visible.
 
-    The files differ only in tokenizer.ggml.pre, which decides whether digits
-    group in threes (llama-bpe) or stay single (qwen2, smollm), and whether a
-    newline run is one pre-token (llama-bpe) or several (smollm's GPT-2 rules).
+    The files differ only in tokenizer.ggml.pre, which selects llama3/GPT-4o
+    three-digit grouping or qwen2/smollm single digits, and whether a newline
+    run is one pre-token or several (smollm's GPT-2 rules).
     """
     tokens = bpe_alphabet()
     merges = []
@@ -161,6 +161,7 @@ def make_bpe_fixtures():
         kv_bool("tokenizer.ggml.add_bos_token", False),
     ]
     for name, pre in [("vocab-bpe-llama3.gguf", "llama-bpe"),
+                      ("vocab-bpe-gpt4o.gguf", "gpt-4o"),
                       ("vocab-bpe-qwen2.gguf", "qwen2"),
                       ("vocab-bpe-qwen35.gguf", "qwen35"),
                       ("vocab-bpe-smollm.gguf", "smollm")]:

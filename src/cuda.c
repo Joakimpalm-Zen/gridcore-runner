@@ -1347,7 +1347,8 @@ fail_quiet:
 static gpu_weights *shared_acquire(model_t *m, size_t act_bytes, int max_hd) {
     uint64_t fsize = 0, fino = 0;
     int64_t  fmtime = 0;
-    bool have_id = file_id(m->path, &fsize, &fino, &fmtime);
+    bool have_id = m->gf.n_maps <= 1 &&
+                   file_id(m->path, &fsize, &fino, &fmtime);
     gpu_weights *w = NULL;
     pthread_mutex_lock(&g_shared_mu);
     if (have_id)
@@ -1848,6 +1849,13 @@ static bool tc_promoted(const model_t *m, int type) {
     // claim about one architecture's tensor cores. Confirm on sm_120 before the
     // next release — if it is merely near-identical there, this row needs
     // demoting to tolerance-gated like the others.
+    // Gemma 4 Q4_0 joined 2026-08-13 after the flagship dense 31B gate:
+    // 820 TC dispatches were bit-identical to scalar over 64 teacher-forced
+    // positions. Its 512-token prefill improved 2.10 -> 55.39 tok/s on the
+    // Blackwell MIG slice even with one layer spilled during the profiled run.
+    // Keep this type architecture-specific: no other Q4_0 family has passed
+    // the real-weight promotion gate yet.
+    if (type == T_Q4_0) return strcmp(m->arch, "gemma4") == 0;
     if (type != T_Q4_K && type != T_Q6_K && type != T_Q8_0) return false;
     static const char *archs[] = { "llama", "phi3", "gemma4", "qwen3",
                                    "mistral", "gemma3", "smollm" };

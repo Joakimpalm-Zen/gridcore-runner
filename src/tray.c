@@ -206,10 +206,11 @@ static void log_path(char *out, size_t cap) {
 }
 
 static void open_log(void) {
-    char lp[1200], cmd[1400];
+    char lp[1200];
     log_path(lp, sizeof lp);
     if (!lp[0]) return;
 #ifdef _WIN32
+    char cmd[1400];
     snprintf(cmd, sizeof cmd, "notepad.exe \"%s\"", lp);
     STARTUPINFOA si = { .cb = sizeof si };
     PROCESS_INFORMATION pi;
@@ -217,12 +218,23 @@ static void open_log(void) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
     }
-#elif defined(__APPLE__)
-    snprintf(cmd, sizeof cmd, "open \"%s\"", lp);
-    system(cmd);
 #else
-    snprintf(cmd, sizeof cmd, "xdg-open \"%s\" >/dev/null 2>&1 &", lp);
-    system(cmd);
+    // Pass the path as an argv element, never shell text. Besides avoiding
+    // injection, this handles quotes, dollars and spaces without an escaping
+    // language between the tray and the platform opener.
+#ifdef __APPLE__
+    char *argv[] = { (char *)"open", lp, NULL };
+#else
+    char *argv[] = { (char *)"xdg-open", lp, NULL };
+#endif
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, 1, 2);
+    pid_t pid;
+    posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
 #endif
 }
 

@@ -1,0 +1,1 @@
+{"model":"/home/lab/workspace/models/gemma-4-31B_q4_0-it/gemma-4-31B_q4_0-it.gguf","arch":"gemma4","context":4096,"gpu_layers":60,"layers":60,"prompt_tokens":512,"generated_tokens":256,"prompt_tok_s":114.089,"gen_tok_s":3.226,"prompt_s":4.488,"gen_s":79.365}

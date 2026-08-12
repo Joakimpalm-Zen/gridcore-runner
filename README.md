@@ -144,9 +144,12 @@ shell, then run `make`.
 ## Models and conversion
 
 Runner accepts GGUF v2/v3. Safetensors checkpoints must be converted to GGUF
-first. Multi-part GGUF is not implemented; merge the parts with
-`llama-gguf-split --merge` before loading. The loader detects split metadata
-and names the required fix.
+first. Standard llama.cpp multi-part sets (`<prefix>-00001-of-000NN.gguf`) load
+natively from any part: every part must be present in the same directory, and
+its `split.no`, `split.count`, and `split.tensors.count` metadata must agree.
+Missing or inconsistent parts are refused before model binding. Nonstandard
+filenames and remote/streamed parts are not resolved automatically; merge or
+rename those sets to the standard layout first.
 
 Fetch the small test model with:
 
@@ -335,8 +338,12 @@ only for that development step.
 Scalar-path CPU/GPU identity is an evidence result, not a property inferred
 from a backend name. CUDA tensor-core and Metal tiled prefill kernels
 reassociate floating-point sums, so they are promoted by teacher-forced
-tolerance tests. `RUNNER_CUDA_TC=0` and `RUNNER_METAL_MM=0` pin the scalar
-matvec paths for identity investigations.
+tolerance tests. CUDA currently promotes Q4_K/Q6_K/Q8_0 on the gated dense
+families and Q4_0 on Gemma 4; the latter was bit-identical over 820 tensor-core
+dispatches on the real 31B QAT artifact. `RUNNER_CUDA_TC=0` and
+`RUNNER_METAL_MM=0` pin the scalar matvec paths for identity investigations.
+The CPU quant dot/dequant module is a separate translation unit compiled with
+`-fno-fast-math`; fast math remains enabled for the rest of the engine.
 
 Vulkan is not implemented; AMD and Intel GPUs use the CPU path.
 
@@ -698,6 +705,12 @@ Configuration, the instance registry, autostart, uninstall, and the headless
 validation seams are documented in
 [docs/tray-controller.md](docs/tray-controller.md).
 
+The macOS release is ad-hoc signed, not Apple-notarized. A browser download may
+therefore be blocked by Gatekeeper even when its published checksum matches.
+Verify the SHA-256 checksum first, then remove the quarantine attribute from
+the extracted binary with `xattr -d com.apple.quarantine runner`; obtaining a
+Developer ID and notarizing releases remains an owner action.
+
 ## Structured output
 
 Runner provides two sampler-level guarantees:
@@ -756,7 +769,7 @@ even when the architecture ID is listed.
 
 | Area | Current support |
 |---|---|
-| File format | GGUF v2/v3, mmap/file-mapped host weights, single-file models only. |
+| File format | GGUF v2/v3, mmap/file-mapped host weights, including standard local multi-part sets. |
 | Tokenizers | SPM and byte-level BPE with llama, qwen2, smollm, tekken, llama4/o200k, Gemma, and GPT-2-family pre-tokenization rules. |
 | Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1, IQ2 and IQ3 families are CPU-only with NEON/AVX2 dequant kernels; the CUDA and Metal backends refuse those files loudly instead of computing wrong. |
 | Transformer | RMSNorm, adjacent-pair and NeoX RoPE, grouped-query attention, SwiGLU/GELU/xIELU family paths, tied embeddings, dense and selected sparse MoE. |
@@ -765,7 +778,7 @@ even when the architecture ID is listed.
 | Serving | Chat Completions, Responses, legacy completions, embeddings, Anthropic Messages, SSE, parallel slots, model swap, prefix reuse. |
 | Desktop | macOS menu bar and Windows notification-area controller. |
 
-Not implemented: Vulkan; TLS/auth; remote bind; multi-part GGUF loading;
+Not implemented: Vulkan; TLS/auth; remote bind; remote/streamed GGUF parts;
 Qwen2-MoE/DeepSeek/Kimi shared-expert or MLA layouts; Mamba/Jamba; Gemma-4 MTP
 draft heads; IQ2/IQ3 codebook quants; full GBNF; image/document inputs; hosted
 tools; response persistence; or parallel tool calls on the Responses and
@@ -789,6 +802,21 @@ files by SHA-256 and declares checks independently:
 
 Being present in the manifest does not mean every check passed. Read each
 entry's declared checks and notes. Current high-signal caveats include:
+
+Every release ships a schema-versioned report under `docs/compat-reports/`.
+Generate it against the pinned files available on the release box with:
+
+```sh
+python3 scripts/compat_matrix.py --models-root /path/to/models \
+  --runner ./runner --reference /path/to/llama-server \
+  --verify-files --execute-checks --out docs/compat-reports/<release>-<date>.json
+```
+
+The executable classes are SHA/load, tokenizer differential when the manifest
+declares a reference and the corpus exists, and greedy reference when both
+binaries and the pinned model are present. Every other declared check, and any
+check missing a prerequisite, is retained as `not_executed` with a machine-
+readable reason; absence from a run is never presented as a pass.
 
 - Qwen3-4B's 2026-08-03 scalar CPU/CUDA recheck passed 4 of 5 prompts at 128
   tokens, so there is no blanket identity claim for that file.

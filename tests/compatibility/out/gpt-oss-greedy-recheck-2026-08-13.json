@@ -1,0 +1,45 @@
+{
+  "schema_version": "xyntetik.runner.greedy-reference.v1",
+  "generated_utc": "2026-08-12T07:28:49Z",
+  "runner": "runner 0.1.15-alpha",
+  "reference": "version: 1 (f8def7f)",
+  "model": "/home/lab/workspace/models/gpt-oss-20b-MXFP4/gpt-oss-20b-MXFP4.gguf",
+  "tokens": 16,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris.\"\n\nSure! Here's a simple example of a Python program that uses the",
+      "reference": " Paris.\"\n    # Test with a non-existent article\n    article = fetch_article",
+      "status": "fail"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": "\\n    if n <= 0:\\n        return 0\\n   ",
+      "reference": "\\n    if n==0: return 0\\n    if n==",
+      "status": "fail"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10 11 12 13 14 15 16",
+      "reference": " 9 10 11 12 13 14 15 16",
+      "status": "pass"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " there was a young boy named Jack. Jack was a curious and adventurous boy,",
+      "reference": " there was a young boy named Jack. Jack was a curious and adventurous boy,",
+      "status": "pass"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John\", \"age\": 30, \"city\": \"New York\"}\n\n",
+      "reference": " \"John\", \"age\": 30, \"city\": \"New York\"}\n\n",
+      "status": "pass"
+    }
+  ],
+  "totals": {
+    "passed": 3,
+    "failed": 2
+  }
+}

@@ -135,6 +135,7 @@ int main(int argc, char **argv) {
         "tests/fixtures/vocab-spm.gguf",
         "tests/fixtures/vocab-spm-zeroscores.gguf",
         "tests/fixtures/vocab-bpe-llama3.gguf",
+        "tests/fixtures/vocab-bpe-gpt4o.gguf",
         "tests/fixtures/vocab-bpe-qwen2.gguf",
         "tests/fixtures/vocab-bpe-qwen35.gguf",
         "tests/fixtures/vocab-bpe-smollm.gguf",
