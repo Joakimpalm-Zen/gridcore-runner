@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -32,6 +33,23 @@ SCHEMA_VERSIONS = ("xyntetik.runner.model-compat.v1",
 
 
 
+def _kill_group(exc):
+    """Kill the timed-out child's whole process group, servers included."""
+    pid = getattr(getattr(exc, "process", None), "pid", None)
+    if pid is None:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        time.sleep(2)
+        try:
+            os.killpg(os.getpgid(pid), 0)
+        except OSError:
+            return
+
+
 # ---------------------------------------------- parameterised check runners
 #
 # Each returns the same shape as the older runners: status plus enough detail to
@@ -49,10 +67,17 @@ def run_cpu_cuda(runner, model, params, timeout):
     cmd = [sys.executable, str(script), str(model),
            "--tokens", str(params.get("tokens", 64))]
     started = time.time()
+    # Own process group, and kill the GROUP on timeout. cpu_cuda_check.py
+    # spawns runner servers of its own; subprocess.run's timeout only kills the
+    # direct child, so the 2026-08-15 ledger run left a 32B and a 30B server
+    # resident after two cpu_cuda timeouts. A ledger that leaks a server per
+    # timeout eventually eats the box it is measuring.
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, env=env, cwd=str(ROOT))
-    except subprocess.TimeoutExpired:
+                              timeout=timeout, env=env, cwd=str(ROOT),
+                              start_new_session=True)
+    except subprocess.TimeoutExpired as e:
+        _kill_group(e)
         return {"status": "not_executed", "reason": "cpu_cuda_timeout"}
     out = (proc.stdout or "") + (proc.stderr or "")
     # Capture WHICH prompts diverged, not just how many. The 2026-08-15 run
@@ -80,8 +105,10 @@ def run_chat(runner, model, params, timeout):
     started = time.time()
     try:
         proc = subprocess.run(cmd, input=f"{prompt}\n/exit\n", capture_output=True,
-                              text=True, timeout=timeout, cwd=str(ROOT))
-    except subprocess.TimeoutExpired:
+                              text=True, timeout=timeout, cwd=str(ROOT),
+                              start_new_session=True)
+    except subprocess.TimeoutExpired as e:
+        _kill_group(e)
         return {"status": "not_executed", "reason": "chat_timeout"}
     out = proc.stdout or ""
     reasons = []
@@ -116,8 +143,10 @@ def run_tool(runner, model, params, timeout):
     started = time.time()
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, cwd=str(ROOT))
-    except subprocess.TimeoutExpired:
+                              timeout=timeout, cwd=str(ROOT),
+                              start_new_session=True)
+    except subprocess.TimeoutExpired as e:
+        _kill_group(e)
         return {"status": "not_executed", "reason": "tool_timeout"}
     return {"status": "pass" if proc.returncode == 0 else "fail",
             "returncode": proc.returncode,

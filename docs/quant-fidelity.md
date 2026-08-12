@@ -184,3 +184,53 @@ agreement decays monotonically to 50%. For an agent loop that is the
 difference between a crash and a wrong action — an improvement, and not a
 substitute for bits. Raw report:
 `xyntetik-suite/docs/plans/decisions-evidence-2026-08-14/`.
+
+## 2026-08-15: reproduced on a second family, and a size threshold appears
+
+Hermes-4-14B (bartowski's ladder, all hashes verified against the source repo),
+same harness, zero point PASSED:
+
+| variant | schema conformance | tool selection | argument agreement | mean KLD |
+|---|---|---|---|---|
+| q8_0 (reference) | 100.0% | 100.0% | 100.0% | 0 |
+| q6_k | **100.0%** | **100.0%** | 78.6% | 0.0155 |
+| q5_k_m | **100.0%** | **100.0%** | 78.6% | 0.0131 |
+| q4_k_m | **100.0%** | **100.0%** | 64.3% | 0.0205 |
+| q4_0 | **100.0%** | **100.0%** | 50.0% | 0.2775 |
+
+The split holds on a second model family and gets sharper at 14B: shape and
+function choice survive every rung including legacy Q4_0, argument content
+decays to half. The strongest single row is Hermes q4_0, whose whole-model
+fidelity fails hard (mean KLD 0.1881 over 400 positions) while every tool call
+it emits is still schema-valid and still routed to the right function.
+
+### Whole-model fidelity has a size threshold, and it is not where "4-bit is
+### unshippable" suggested
+
+Same bar (margin-qualified top-1 >= 97% AND mean KLD <= 0.05), same protocol,
+400 positions, each variant against its own Q8_0:
+
+| model at Q4_K_M | params | mean KLD | verdict |
+|---|---|---|---|
+| gemma-4-E2B | ~5B (MoE, 2B active) | 0.3624 | FAIL |
+| granite-4.1-3b | 3B | 0.1376 | FAIL |
+| Phi-4-mini | 3.8B | 0.1258 | FAIL |
+| **Qwen3-8B** | **8B** | **0.0419** | **PASS** |
+| **Hermes-4-14B** | **14B** | **0.0279** | **PASS** |
+
+Monotone in parameter count, with the crossover between roughly 4B and 8B. The
+usable rule is therefore not "never ship 4-bit" but **4-bit k-quants are viable
+from about 8B upward and are not viable below it** on everything measured here.
+The legacy-Q4_0 rule is unchanged and gets sharper: on the same 14B model, Q4_0
+scores 0.1881 against Q4_K_M's 0.0279, a 6.7x worse divergence to save 0.46 GB.
+
+### A harness result worth keeping
+
+Qwen3-8B could not be measured by this harness at all: its **zero point failed
+twice**, on a loaded box and again on an idle one with a 600 s timeout, with two
+greedy runs of the identical reference weights disagreeing on 10 of 16 cases.
+The harness refused to measure any variant rather than publish numbers derived
+from a nondeterministic reference. A plain tool call at temp 0 reproduces fine
+across three runs; the disagreement is confined to the stress categories
+(forced truncation, stream normalization, large enums, reasoning-then-tool).
+Cause undetermined, recorded as open.
