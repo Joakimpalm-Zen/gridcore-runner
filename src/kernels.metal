@@ -157,7 +157,7 @@ kernel void k_mv_f16(MV_PARAMS) {
     float s = 0;
     if ((a.n_in & 3) == 0) {
         device const packed_half4 *w4 = (device const packed_half4 *)rw;
-        device const float4 *x4 = (device const float4 *)x;
+        device const packed_float4 *x4 = (device const packed_float4 *)x;
         int n4 = a.n_in >> 2;
         float4 acc = 0;
         for (int i = tiisg; i < n4; i += 32) acc += float4(w4[i]) * x4[i];
@@ -168,6 +168,34 @@ kernel void k_mv_f16(MV_PARAMS) {
     MV_TAIL;
 }
 
+// Widened loads, unchanged arithmetic.
+//
+// The scalar forms below issued one memory instruction per BYTE of quant and
+// one per float of activation: 48 loads to consume an 18-byte q4_0 block, 64
+// for a 34-byte q8_0 one. Reading the same bytes as uchar4/float4 cuts that
+// roughly fourfold and is the only bandwidth lever this route has — the lane
+// that owns a block is pinned by the identity contract (see MV_HEAD), so the
+// work cannot be redistributed.
+//
+// The rule that makes it safe: an accumulating EXPRESSION is copied character
+// for character from the scalar form, and only the way its operands are LOADED
+// changes. `t += A * xp[j] + B * xp[j + 16]` keeps that exact shape with xp[j]
+// spelled as a component of an already-loaded float4, because the Metal
+// compiler contracts multiply-add by expression shape. Resurfacing the same
+// products through a float4 accumulator and a horizontal sum rounds
+// differently — that is what the 2026-08-07 q4_K attempt did, and it was both
+// slower and off-contract.
+//
+// What it is worth, so nobody re-derives it: on an 8-core M1 this is NEUTRAL.
+// Five interleaved rounds against e2b-q40 — 2.6 GB of q4_0, the one local
+// model actually bandwidth-bound at ~40 of the M1's ~68 GB/s — read 15.14
+// tok/s against 15.11 for the byte-at-a-time form, +0.2%, well inside the
+// run-to-run spread. SmolLM2-135M-Q8_0 cannot see it at all (107.13 vs 106.68,
+// +0.4%): 145 MB at ~107 tok/s is 19 GB/s, i.e. dispatch-bound, not
+// bandwidth-bound. It is kept because it is a strict reduction in issued loads
+// at identical arithmetic, not because it was measured faster here.
+// See docs/negative-result-metal-multirow-matvec.md for the rest of the sweep,
+// including the multi-row arrangement that measured WORSE and is not here.
 kernel void k_mv_q8_0(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 32;
@@ -176,10 +204,19 @@ kernel void k_mv_q8_0(MV_PARAMS) {
     for (int b = tiisg; b < nb; b += 32) {
         device const uchar *blk = rw + (ulong)b * 34;
         float d = (float)*(device const half *)blk;
-        device const char *q = (device const char *)(blk + 2);
-        device const float *xp = x + b * 32;
+        // packed_char4: the quants start two bytes into a 34-byte block, so
+        // nothing about their address is 4-byte aligned.
+        device const packed_char4 *q = (device const packed_char4 *)(blk + 2);
+        device const packed_float4 *xp = (device const packed_float4 *)(x + b * 32);
         float t = 0;
-        for (int j = 0; j < 32; j++) t += (float)q[j] * xp[j];
+        for (int k = 0; k < 8; k++) {
+            char4 qq = q[k];
+            float4 xv = xp[k];
+            t += (float)qq.x * xv.x;
+            t += (float)qq.y * xv.y;
+            t += (float)qq.z * xv.z;
+            t += (float)qq.w * xv.w;
+        }
         s += d * t;
     }
     MV_TAIL;
@@ -193,11 +230,17 @@ kernel void k_mv_q4_0(MV_PARAMS) {
     for (int b = tiisg; b < nb; b += 32) {
         device const uchar *blk = rw + (ulong)b * 18;
         float d = (float)*(device const half *)blk;
-        device const uchar *q = blk + 2;
-        device const float *xp = x + b * 32;
+        device const packed_uchar4 *q = (device const packed_uchar4 *)(blk + 2);
+        device const packed_float4 *xp = (device const packed_float4 *)(x + b * 32);
         float t = 0;
-        for (int j = 0; j < 16; j++)
-            t += ((int)(q[j] & 0xF) - 8) * xp[j] + ((int)(q[j] >> 4) - 8) * xp[j + 16];
+        for (int k = 0; k < 4; k++) {
+            uchar4 qq = q[k];
+            float4 xl = xp[k], xh = xp[k + 4];
+            t += ((int)(qq.x & 0xF) - 8) * xl.x + ((int)(qq.x >> 4) - 8) * xh.x;
+            t += ((int)(qq.y & 0xF) - 8) * xl.y + ((int)(qq.y >> 4) - 8) * xh.y;
+            t += ((int)(qq.z & 0xF) - 8) * xl.z + ((int)(qq.z >> 4) - 8) * xh.z;
+            t += ((int)(qq.w & 0xF) - 8) * xl.w + ((int)(qq.w >> 4) - 8) * xh.w;
+        }
         s += d * t;
     }
     MV_TAIL;
@@ -304,7 +347,7 @@ kernel void k_mv_bf16(MV_PARAMS) {
     float s = 0;
     if ((a.n_in & 3) == 0) {
         device const packed_ushort4 *w4 = (device const packed_ushort4 *)rw;
-        device const float4 *x4 = (device const float4 *)x;
+        device const packed_float4 *x4 = (device const packed_float4 *)x;
         int n4 = a.n_in >> 2;
         float4 acc = 0;
         for (int i = tiisg; i < n4; i += 32) {
@@ -527,23 +570,34 @@ kernel void k_mv_q4_K(MV_PARAMS) {
         float d    = (float)*(device const half *)blk;
         float dmin = (float)*(device const half *)(blk + 2);
         device const uchar *sc = blk + 4;
-        device const uchar *q  = blk + 16 + jj * 32;
-        device const float *xp = x + b * 256 + jj * 64;
+        device const packed_uchar4 *q4 =
+            (device const packed_uchar4 *)(blk + 16 + jj * 32);
+        device const packed_float4 *xp4 =
+            (device const packed_float4 *)(x + b * 256 + jj * 64);
         uchar s1, m1, s2, m2;
         get_scale_min_k4(jj * 2 + 0, sc, &s1, &m1);
         get_scale_min_k4(jj * 2 + 1, sc, &s2, &m2);
         float d1 = d * s1, mm1 = dmin * m1;
         float d2 = d * s2, mm2 = dmin * m2;
-        // Hand-vectorising this loop with uchar4/float4 was tried on
-        // 2026-08-07 and is SLOWER: 6.58 -> 6.43 tok/s, consistent over three
-        // runs. The scalar form lets the compiler pick its own vectorisation,
-        // and the explicit version pays for uchar4->float4 conversions and
-        // four horizontal sums that the scalar accumulators never need. Left
-        // scalar deliberately; do not "optimise" it again without measuring.
+        // Hand-vectorising this loop was tried on 2026-08-07 and measured
+        // SLOWER (6.58 -> 6.43 tok/s) — but that attempt moved the SUM into
+        // float4 accumulators and paid for four horizontal reductions the
+        // scalar form never needs. This one widens only the LOADS: the four
+        // accumulators stay scalar and every `+=` keeps its original
+        // expression, so the arithmetic is untouched and what disappears is 96
+        // of the 128 load instructions per quarter-superblock.
         float t1 = 0, t2 = 0, sx1 = 0, sx2 = 0;
-        for (int l = 0; l < 32; l++) {
-            t1 += (float)(q[l] & 0xF) * xp[l];      sx1 += xp[l];
-            t2 += (float)(q[l] >> 4)  * xp[l + 32]; sx2 += xp[l + 32];
+        for (int k = 0; k < 8; k++) {
+            uchar4 qq = q4[k];
+            float4 xl = xp4[k], xh = xp4[k + 8];
+            t1 += (float)(qq.x & 0xF) * xl.x;  sx1 += xl.x;
+            t2 += (float)(qq.x >> 4)  * xh.x;  sx2 += xh.x;
+            t1 += (float)(qq.y & 0xF) * xl.y;  sx1 += xl.y;
+            t2 += (float)(qq.y >> 4)  * xh.y;  sx2 += xh.y;
+            t1 += (float)(qq.z & 0xF) * xl.z;  sx1 += xl.z;
+            t2 += (float)(qq.z >> 4)  * xh.z;  sx2 += xh.z;
+            t1 += (float)(qq.w & 0xF) * xl.w;  sx1 += xl.w;
+            t2 += (float)(qq.w >> 4)  * xh.w;  sx2 += xh.w;
         }
         s += d1 * t1 - mm1 * sx1 + d2 * t2 - mm2 * sx2;
     }
@@ -580,11 +634,15 @@ kernel void k_mv_q5_K(MV_PARAMS) {
         uchar u1 = (uchar)(1u << (2 * jj)), u2 = (uchar)(2u << (2 * jj));
         // packed_uchar4 for the same reason as q6_K: 176 is a multiple of 16,
         // but q sits at blk+48+jj*32 and qh at blk+16, so only packed types
-        // are safe without re-deriving alignment for every offset.
+        // are safe without re-deriving alignment for every offset. The
+        // activations are packed too, and for a reason that had been missed:
+        // x is x_all + col * x_stride and x_stride is a model dimension, so a
+        // plain float4 load off it was asserting a 16-byte alignment the
+        // caller never promised.
         device const packed_uchar4 *q4  = (device const packed_uchar4 *)q;
         device const packed_uchar4 *qh4 = (device const packed_uchar4 *)qh;
-        device const float4 *xlo = (device const float4 *)xp;
-        device const float4 *xhi = (device const float4 *)(xp + 32);
+        device const packed_float4 *xlo = (device const packed_float4 *)xp;
+        device const packed_float4 *xhi = (device const packed_float4 *)(xp + 32);
         float4 a1v = 0, a2v = 0;
         for (int k = 0; k < 8; k++) {
             uchar4 qq = q4[k], hh = qh4[k];
@@ -632,10 +690,10 @@ kernel void k_mv_q6_K(MV_PARAMS) {
             device const packed_uchar4 *l4  = (device const packed_uchar4 *)(ql + is * 16);
             device const packed_uchar4 *l4b = (device const packed_uchar4 *)(ql + 32 + is * 16);
             device const packed_uchar4 *h4  = (device const packed_uchar4 *)(qh + is * 16);
-            device const float4 *x0 = (device const float4 *)(xp + is * 16);
-            device const float4 *x1 = (device const float4 *)(xp + 32 + is * 16);
-            device const float4 *x2 = (device const float4 *)(xp + 64 + is * 16);
-            device const float4 *x3 = (device const float4 *)(xp + 96 + is * 16);
+            device const packed_float4 *x0 = (device const packed_float4 *)(xp + is * 16);
+            device const packed_float4 *x1 = (device const packed_float4 *)(xp + 32 + is * 16);
+            device const packed_float4 *x2 = (device const packed_float4 *)(xp + 64 + is * 16);
+            device const packed_float4 *x3 = (device const packed_float4 *)(xp + 96 + is * 16);
             float4 a0 = 0, a1 = 0, a2 = 0, a3 = 0;
             for (int k = 0; k < 4; k++) {
                 uchar4 lo = l4[k], hi = l4b[k], h = h4[k];   // widen on load
@@ -1628,10 +1686,10 @@ kernel void k_moe_mv_q6_K(MOE_MV_PARAMS) {
             device const packed_uchar4 *l4  = (device const packed_uchar4 *)(ql + is * 16);
             device const packed_uchar4 *l4b = (device const packed_uchar4 *)(ql + 32 + is * 16);
             device const packed_uchar4 *h4  = (device const packed_uchar4 *)(qh + is * 16);
-            device const float4 *x0 = (device const float4 *)(xp + is * 16);
-            device const float4 *x1 = (device const float4 *)(xp + 32 + is * 16);
-            device const float4 *x2 = (device const float4 *)(xp + 64 + is * 16);
-            device const float4 *x3 = (device const float4 *)(xp + 96 + is * 16);
+            device const packed_float4 *x0 = (device const packed_float4 *)(xp + is * 16);
+            device const packed_float4 *x1 = (device const packed_float4 *)(xp + 32 + is * 16);
+            device const packed_float4 *x2 = (device const packed_float4 *)(xp + 64 + is * 16);
+            device const packed_float4 *x3 = (device const packed_float4 *)(xp + 96 + is * 16);
             float4 a0 = 0, a1 = 0, a2 = 0, a3 = 0;
             for (int k = 0; k < 4; k++) {
                 uchar4 lo = l4[k], hi = l4b[k], h = h4[k];
