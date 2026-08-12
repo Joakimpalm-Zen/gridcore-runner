@@ -1,6 +1,5 @@
 {
   "schema_version": "xyntetik.runner.model-compat.v2",
-  "reference_revision": "llama.cpp b10076 (305ba519a)",
   "models": [
     {
       "id": "llama-3.2-3b-instruct-q4_k_m",

@@ -19,6 +19,12 @@ def load_module():
 def test_model_manifest_covers_every_claimed_architecture():
     data = json.loads(MANIFEST.read_text())
     assert data["schema_version"] == "xyntetik.runner.model-compat.v2"
+    # No manifest-wide reference revision. Rows carry their own (asserted
+    # below, and every harness reads it there); a single header claim went
+    # stale the moment muse and granite pinned b10353 and trinity pinned
+    # b10280 while the header still said b10076 for all 24 rows. A field
+    # nothing reads and nothing can keep true is a lie with a schema.
+    assert "reference_revision" not in data
     models = data["models"]
     assert {m["architecture"] for m in models} == {
         "llama", "qwen2", "qwen3", "qwen35", "phi3", "gemma3", "gemma4",
