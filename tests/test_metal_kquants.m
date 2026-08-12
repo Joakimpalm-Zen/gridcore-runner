@@ -234,7 +234,16 @@ static void run_case(id<MTLDevice> dev, id<MTLCommandQueue> queue,
                     mag += fabs(term);
                 }
                 double actual = got[(size_t)col * y_stride + row];
-                double tol = 5e-5 * mag + 2e-5;
+                // Two bars, because the two paths make two promises. The
+                // matvec is the byte-identity route: f32 end to end, so the
+                // tight bar holds. The tiled GEMM stages through threadgroup
+                // HALF (the 2026-08-12 prefill rework) and is tolerance-gated
+                // at model level by test-tc-tol; against an f64 reference its
+                // per-value error is ~1e-3 of magnitude by construction. The
+                // wider bar still fails loudly on the defect class this sweep
+                // exists for — host/shader row disagreement is orders of
+                // magnitude, not fractions of a percent.
+                double tol = mm ? 2e-3 * mag + 2e-4 : 5e-5 * mag + 2e-5;
                 if (!isfinite(actual) || fabs(actual - ref) > tol) {
                     CHECK(false,
                           "%s %s n_in=%d n_out=%d n_col=%d row=%d col=%d: "
