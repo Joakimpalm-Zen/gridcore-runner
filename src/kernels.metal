@@ -187,14 +187,15 @@ kernel void k_mv_f16(MV_PARAMS) {
 // slower and off-contract.
 //
 // What it is worth, so nobody re-derives it: on an 8-core M1 this is NEUTRAL.
-// Six interleaved rounds against e2b-q40 (2.6 GB of q4_0, the one local model
-// that is actually bandwidth-bound at ~40 of the M1's ~68 GB/s) put it at
-// 15.47 tok/s against 15.41 for the byte-at-a-time form — +0.4% median, inside
-// the run-to-run spread, with a +5.8% best case. It is kept because it is a
-// strict reduction in issued loads at identical arithmetic, not because it was
-// measured faster here. SmolLM2-135M cannot see it at all: 145 MB at 130 tok/s
-// is 19 GB/s, i.e. dispatch-bound, and every variant landed within 2% there.
-// See docs/negative-result-metal-multirow-matvec.md for the rest of the sweep.
+// Five interleaved rounds against e2b-q40 — 2.6 GB of q4_0, the one local
+// model actually bandwidth-bound at ~40 of the M1's ~68 GB/s — read 15.14
+// tok/s against 15.11 for the byte-at-a-time form, +0.2%, well inside the
+// run-to-run spread. SmolLM2-135M-Q8_0 cannot see it at all (107.13 vs 106.68,
+// +0.4%): 145 MB at ~107 tok/s is 19 GB/s, i.e. dispatch-bound, not
+// bandwidth-bound. It is kept because it is a strict reduction in issued loads
+// at identical arithmetic, not because it was measured faster here.
+// See docs/negative-result-metal-multirow-matvec.md for the rest of the sweep,
+// including the multi-row arrangement that measured WORSE and is not here.
 kernel void k_mv_q8_0(MV_PARAMS) {
     MV_HEAD;
     int nb = a.n_in / 32;

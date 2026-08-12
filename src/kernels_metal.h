@@ -189,14 +189,15 @@ static const char *k_metal_src =
     "// slower and off-contract.\n"
     "//\n"
     "// What it is worth, so nobody re-derives it: on an 8-core M1 this is NEUTRAL.\n"
-    "// Six interleaved rounds against e2b-q40 (2.6 GB of q4_0, the one local model\n"
-    "// that is actually bandwidth-bound at ~40 of the M1's ~68 GB/s) put it at\n"
-    "// 15.47 tok/s against 15.41 for the byte-at-a-time form — +0.4% median, inside\n"
-    "// the run-to-run spread, with a +5.8% best case. It is kept because it is a\n"
-    "// strict reduction in issued loads at identical arithmetic, not because it was\n"
-    "// measured faster here. SmolLM2-135M cannot see it at all: 145 MB at 130 tok/s\n"
-    "// is 19 GB/s, i.e. dispatch-bound, and every variant landed within 2% there.\n"
-    "// See docs/negative-result-metal-multirow-matvec.md for the rest of the sweep.\n"
+    "// Five interleaved rounds against e2b-q40 — 2.6 GB of q4_0, the one local\n"
+    "// model actually bandwidth-bound at ~40 of the M1's ~68 GB/s — read 15.14\n"
+    "// tok/s against 15.11 for the byte-at-a-time form, +0.2%, well inside the\n"
+    "// run-to-run spread. SmolLM2-135M-Q8_0 cannot see it at all (107.13 vs 106.68,\n"
+    "// +0.4%): 145 MB at ~107 tok/s is 19 GB/s, i.e. dispatch-bound, not\n"
+    "// bandwidth-bound. It is kept because it is a strict reduction in issued loads\n"
+    "// at identical arithmetic, not because it was measured faster here.\n"
+    "// See docs/negative-result-metal-multirow-matvec.md for the rest of the sweep,\n"
+    "// including the multi-row arrangement that measured WORSE and is not here.\n"
     "kernel void k_mv_q8_0(MV_PARAMS) {\n"
     "    MV_HEAD;\n"
     "    int nb = a.n_in / 32;\n"
@@ -1745,4 +1746,4 @@ static const char *k_metal_src =
     "\n"
 ;
 // SHA-256 of kernels.metal as embedded above.
-static const char *k_metal_sha = "39d73d177298e4f054c4d5be2a0715565395c62be43c28f9e66f5d420cad05b0";
+static const char *k_metal_sha = "530db84f24b759c822cccf0453aff17e4aaec1bef785740f5c038fe1f240bbcb";

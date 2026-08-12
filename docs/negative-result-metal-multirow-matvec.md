@@ -62,6 +62,35 @@ within 2 % of each other there. It cannot answer this question.
 \* MV_NR 8 and 16 were measured on SmolLM2-Q8_0 (109.7 tok/s base) — the
 collapse there is so large it needed no bandwidth-bound confirmation.
 
+The committed code (wider loads, one row per simdgroup) was re-measured on its
+own, five interleaved rounds, against the branch point:
+
+| model | before | after | delta |
+|---|---:|---:|---:|
+| e2b-q40, bandwidth-bound | 15.11 | 15.14 | +0.2 % |
+| SmolLM2-135M-Q8_0, dispatch-bound | 106.68 | 107.13 | +0.4 % |
+
+Both are inside the run-to-run spread. The honest summary is **no measurable
+change on this machine**, in either direction.
+
+### The box these numbers come from
+
+An 8 GB M1 shared with other agents. Two methodology notes that cost real time
+and are worth inheriting:
+
+- **Interleave the arms.** A blocked A/B (all of A, then all of B) put the two
+  arms in different minutes of the load curve and read +14 % on one pass and
+  0 % on the next, with a 132 tok/s outlier inside a 105–108 block. Every
+  number above is round-robin.
+- **Discard the first run per (build, model).** The first touch of a
+  multi-gigabyte mapped file measures page-cache misses: the opening A/B
+  recorded 2.30 and 0.68 tok/s against a settled 15–16.
+
+granite-4.1-8b-Q4_0 cannot be measured here at all, and says so: whole-model
+Metal is refused because 5.1 GB of weights do not fit beside 2.6–3.8 GB of free
+RAM, and `--gpu auto` silently falls back to CPU. Its byte-identity check uses
+`--gpu-layers 8` to force the split the refusal message points at.
+
 ## Why multi-row is rejected
 
 Under the identity contract, simdgroups × rows-per-simdgroup is fixed at
