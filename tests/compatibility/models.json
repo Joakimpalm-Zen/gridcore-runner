@@ -1,489 +1,489 @@
 {
- "schema_version": "xyntetik.runner.model-compat.v1",
- "reference_revision": "llama.cpp b10076 (305ba519a)",
- "models": [
-  {
-   "id": "llama-3.2-3b-instruct-q4_k_m",
-   "architecture": "llama",
-   "family": "Llama 3",
-   "file": "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-   "sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
-   "tokenizer_reference": "meta-llama/Llama-3.2-3B-Instruct",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "mistral-7b-instruct-v0.3-q4_k_m",
-   "architecture": "llama",
-   "family": "Mistral",
-   "file": "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
-   "sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
-   "tokenizer_reference": "mistralai/Mistral-7B-Instruct-v0.3",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "qwen2.5-32b-instruct-q3_k_s",
-   "architecture": "qwen2",
-   "family": "Qwen 2.5",
-   "file": "models/Qwen2.5-32B-Instruct-Q3_K_S.gguf",
-   "sha256": "a1aefda97dc4641598db576edf61b7b5f70f40abab33fbea39fb84fcaa9be44e",
-   "tokenizer_reference": "Qwen/Qwen2.5-32B-Instruct",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "qwen3-4b-q4_k_m",
-   "architecture": "qwen3",
-   "family": "Qwen 3",
-   "file": "models/Qwen3-4B-Q4_K_M.gguf",
-   "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
-   "tokenizer_reference": "Qwen/Qwen3-4B",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "ornith-1.0-9b-q4_k_m",
-   "architecture": "qwen35",
-   "family": "Qwen 3.5 / Ornith",
-   "file": "models/ornith-1.0-9b-Q4_K_M.gguf",
-   "sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
-   "tokenizer_reference": "deepreinforce-ai/Ornith-1.0-9B",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ],
-   "notes": "CPU + CUDA; 5/5 scalar-path CPU/CUDA identity over 128 tokens re-verified 2026-08-03"
-  },
-  {
-   "id": "phi-3.5-mini-instruct-q4_k_m",
-   "architecture": "phi3",
-   "family": "Phi 3",
-   "file": "models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
-   "sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
-   "tokenizer_reference": "microsoft/Phi-3.5-mini-instruct",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "gemma-3-4b-it-q4_k_m",
-   "architecture": "gemma3",
-   "family": "Gemma 3",
-   "file": "models/google_gemma-3-4b-it-Q4_K_M.gguf",
-   "sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
-   "tokenizer_reference": "google/gemma-3-4b-it",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "gemma-4-12b-it-q4_k_m",
-   "architecture": "gemma4",
-   "family": "Gemma 4",
-   "file": "models/gemma-4-12B-it-Q4_K_M.gguf",
-   "sha256": "e4db6f8c1e48f7297069fa23ca3ff34e0b0155f8de5485498ed9a0e59944bc8c",
-   "tokenizer_reference": "google/gemma-4-12b-it",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "qwen3-30b-a3b-q4_k_m",
-   "architecture": "qwen3moe",
-   "family": "Qwen 3 MoE",
-   "file": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
-   "sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
-   "tokenizer_reference": "Qwen/Qwen3-30B-A3B",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "gemma-4-e4b-it-q4_k_m",
-   "architecture": "gemma4",
-   "family": "Gemma 4 E-series",
-   "file": "models/gemma-4-E4B-it-Q4_K_M.gguf",
-   "sha256": "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87",
-   "tokenizer_reference": "google/gemma-4-E4B-it",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "cpu_cuda",
-    "chat"
-   ],
-   "notes": "Per-layer embeddings + shared-KV layers, CPU and CUDA. greedy_reference is not declared: agreement with llama.cpp is at the quantisation noise floor, not token identity - 11/16 prompts at 16 tokens, against llama.cpp's own cold-vs-warm-cache floor of 12/16 on the same model, so the remaining gap is roughly one prompt. cpu_cuda IS exact and is the gate that holds here: byte-identical CPU vs full 42/42 GPU offload over 4 prompts at 32 tokens and one at 128, plus every partial-offload split across the shared-KV boundary on the generated fixture. Measure with scripts/sensitivity_floor.py before reading any cross-engine number."
-  },
-  {
-   "id": "gemma-4-26b-a4b-it-q4_0",
-   "architecture": "gemma4-moe",
-   "family": "Gemma 4 MoE",
-   "file": "models/gemma-4-26B-A4B-it-Q4_0.gguf",
-   "sha256": "d208665ab1cd3a69f7a9a4bc59430e8448c8093d9b06334f566ac59d6d504a03",
-   "tokenizer_reference": "google/gemma-4-26b-a4b-it",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "cpu_cuda",
-    "chat"
-   ],
-   "notes": "greedy_reference deliberately not declared: this model is numerically chaotic, so token-for-token agreement with any second implementation is unachievable rather than merely unmet. Measured 2026-08-01 at b10076 on this exact file - runner disagrees with ITSELF on 11 of 16 prompts when only the KV cache precision changes, against the 9 it disagrees with llama.cpp on, so a perturbation inside one build moves the output further than switching engines does. Cause is discrete top-8-of-128 expert routing over Q4_0 weights; at layer 2 the 6th and 7th selected experts sat 0.0002 apart in weight. Layer 0 activations and the pre-softmax router logits do match the reference (exactly, and to ~0.1-0.5%). Re-measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap on this model. Evidence: out/divergence-study-gemma4-moe-2026-08-01.json"
-  },
-  {
-   "id": "gemma-4-26b-a4b-it-qat-q4_0",
-   "architecture": "gemma4-moe",
-   "family": "Gemma 4 MoE",
-   "file": "models/gemma-4-26B_q4_0-it.gguf",
-   "sha256": "3eca3b8f6d7baf218a7dd6bba5fb59a56ee25fe2d567b6f5f589b4f697eca51d",
-   "tokenizer_reference": "google/gemma-4-26b-a4b-it",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "cpu_cuda",
-    "chat"
-   ],
-   "notes": "Google's genuine QAT release (google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf), 14,439,363,584 bytes, sha verified against the HF LFS blob 2026-08-05. DISTINCT from gemma-4-26b-a4b-it-q4_0, which is ggml-org's non-QAT Q4_0 (sha d208665a) - two publishers, two artifacts, not a re-upload of one. Comparing their hashes as if they were the same file is what produced the retired 'QAT pin drift' plan item. This is the artifact behind the 16 GB recommendation, so it belongs under the automated gate rather than in prose alone. Expert tensors are uniformly Q4_0 across 60 tensors - the signature of QAT baked into the checkpoint, unlike repos that only inherit 'QAT' from the base model's lineage. greedy_reference deliberately not declared: top-8-of-128 expert routing over Q4_0 is numerically chaotic (layer 2's 6th/7th experts sat 0.0002 apart), so the runner disagrees with ITSELF under a KV-precision change more than it disagrees with llama.cpp. cpu_cuda PENDING re-verification at the 128-token contract - the 2026-08-05 CERTIFIED-WITH-CAVEAT pass was measured under the old 16-token default. Evidence: docs/cert-matrix-status.md item 4; out/divergence-study-gemma4-moe-2026-08-01.json"
-  },
-  {
-   "id": "gpt-oss-20b-mxfp4",
-   "architecture": "gpt-oss",
-   "family": "OpenAI gpt-oss",
-   "file": "models/gpt-oss-20b-MXFP4.gguf",
-   "sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901",
-   "tokenizer_reference": "openai/gpt-oss-20b",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "cpu_cuda",
-    "chat"
-   ],
-   "notes": "Per-head attention sinks, clamped alpha-sigmoid GLU (swiglu_oai), router and per-expert biases, MXFP4 expert tensors, SWA layers roped in the GLOBAL regime. CUDA support landed 2026-08-01 with the MXFP4 matmul kernels and the sink-aware attention softmax; before that the backend refused the architecture at load. cpu_cuda measured the same day: 5/5 prompts byte-identical at 16 tokens, eager routing, RUNNER_CUDA_TC=0, on an 8 GB RTX 3070 at a 13/24 layer split - full offload is not reachable for a 12.1 GB model on that card, so the 11 host layers were identical by construction in both runs and the gate covers the device kernels for 13 layers. greedy_reference is NOT declared: after the SWA-rope fix the cross-engine residual is 9/16 prompts token-identical at 16 tokens with a worst-case logprob delta of 0.151, which is BELOW this model's own 0.272 sensitivity floor (runner vs itself under a KV-precision change) - i.e. at the noise floor rather than at token identity, the same standard applied to gemma-4-E4B. Measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap. Evidence: out/gpt-oss-cpu-cuda-2026-08-01.json, out/gpt-oss-swa-rope-fix-2026-08-01.json"
-  },
-  {
-   "id": "apertus-8b-instruct-2509-q4_k_m",
-   "architecture": "apertus",
-   "family": "Apertus (Swiss AI)",
-   "file": "models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
-   "sha256": "5901007f15aec9aabeea401cbe65559671166fc851bbdf8c26f56c2b61e9cd1d",
-   "tokenizer_reference": "swiss-ai/Apertus-8B-Instruct-2509",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "cpu_cuda",
-    "chat"
-   ],
-   "notes": "Source: bartowski/swiss-ai_Apertus-8B-Instruct-2509-GGUF at a5d1742307bf949e2cd95f253e8776539e19d1fc, published filename swiss-ai_Apertus-8B-Instruct-2509-Q4_K_M.gguf. CUDA support is full-graph: 32/32 layers plus output weight on the 8 GB RTX 3070, with 5/5 CPU/CUDA-identical prompts at 128 tokens and RUNNER_CUDA_TC=0. greedy_reference deliberately remains undeclared because the cross-engine delta is below the model's measured self-sensitivity floor. Evidence: out/apertus-cpu-cuda-2026-08-03.json, out/divergence-apertus-2026-08-03.json, out/sensitivity-apertus-2026-08-03.json"
-  },
-  {
-   "id": "eurollm-9b-instruct-q4_k_m",
-   "architecture": "llama",
-   "family": "EuroLLM (EU consortium)",
-   "file": "models/EuroLLM-9B-Instruct-Q4_K_M.gguf",
-   "sha256": "785a3b2883532381704ef74f866f822f179a931801d1ed1cf12e6deeb838806b",
-   "tokenizer_reference": "utter-project/EuroLLM-9B-Instruct",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "lucie-7b-instruct-q4_k_m",
-   "architecture": "llama",
-   "family": "Lucie (OpenLLM-France)",
-   "file": "models/Lucie-7B-Instruct-Q4_K_M.gguf",
-   "sha256": "0d889e0c126eb0424e478029dd9198af2afdffce29b0d98a86455c3c5b506db3",
-   "tokenizer_reference": "OpenLLM-France/Lucie-7B-Instruct-v1.1",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "mistral-nemo-instruct-2407-q4_k_m",
-   "architecture": "llama",
-   "family": "Mistral Nemo",
-   "file": "models/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
-   "sha256": "5964f3e6d9c17b99e3d2174022048f3ec58b12ee8fefa987888e0562d070d52e",
-   "tokenizer_reference": "mistralai/Mistral-Nemo-Instruct-2407",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "teuken-7b-instruct-commercial-v0.4-q4_k_m",
-   "architecture": "llama",
-   "family": "Teuken (OpenGPT-X)",
-   "file": "models/Teuken-7B-instruct-commercial-v0.4-Q4_K_M.gguf",
-   "sha256": "03fd13daafb6f20c1c5f4b908d163841cdd96803a6f5a7c0c39dd236a2b1630b",
-   "tokenizer_reference": "openGPT-X/Teuken-7B-instruct-commercial-v0.4",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "salamandra-7b-instruct-q4_k_m",
-   "architecture": "llama",
-   "family": "Salamandra (BSC)",
-   "file": "models/salamandra-7b-instruct-Q4_K_M-f32.gguf",
-   "sha256": "bac8e8c1d1d9d53cbdb148b8ff9ad378ddb392429207099e85b5aae3a43bff3d",
-   "tokenizer_reference": "BSC-LT/salamandra-7b-instruct",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "tildeopen-30b-q4_k_m",
-   "architecture": "llama",
-   "family": "TildeOpen (Tilde, Latvia)",
-   "file": "models/TildeOpen-30b-Q4_K_M.gguf",
-   "sha256": "b051f04a87a74184b70c79ea7e514d7605817eebb5d7b8cc8f610406a52f82d5",
-   "tokenizer_reference": "TildeAI/TildeOpen-30b",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10076"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat",
-    "tool",
-    "long_context"
-   ]
-  },
-  {
-   "id": "trinity-nano-preview-q8_0",
-   "architecture": "afmoe",
-   "family": "Arcee Trinity MoE",
-   "file": "models/Trinity-Nano-Preview-Q8_0.gguf",
-   "sha256": "5fcc2428c325e8b2035d280ff28c4c659ea240ce317a9536f230acfc352b79d1",
-   "tokenizer_reference": "arcee-ai/Trinity-Nano-Preview",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10280"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "chat"
-   ],
-   "notes": "Source: arcee-ai/Trinity-Nano-Preview-GGUF (Q4_K_M sha256 211127328238031b7aead5c71f488023710300da587703160e42fb981c8c335a also on record). CPU only: CUDA and Metal refuse loudly and fall back, so cpu_cuda is not declared. greedy_reference deliberately not declared: 1/6 byte-identical vs llama.cpp b10280, with the mechanism measured rather than presumed (afmoe re-normalizes every branch before the residual add, amplifying the engines' by-design quantized-matvec arithmetic difference; layer-0 verified to ~2e-4) - see docs/afmoe-divergence-triage-2026-08-05.md and docs/afmoe-sensitivity-floor-2026-08-05.md. Chat smoke and perf gates green on the M1 (13.25 tok/s decode, Q4_K_M resident, CPU). Evidence: out/divergence-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-reference-2026-08-05.json, out/bench-afmoe-m1-2026-08-05.json"
-  },
-  {
-   "id": "muse-glimmer-30b-kquant",
-   "architecture": "muse-glimmer",
-   "family": "Meta Muse Glimmer",
-   "file": "models/muse-glimmer-30B-kquant-17gb.gguf",
-   "sha256": "7e9b74b7c8875e9e265695df9613bf6290f2392e479ce740495a129019c488d8",
-   "tokenizer_reference": "meta-models/Muse-Glimmer-30B",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10353"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat"
-   ],
-   "notes": "Official meta-models GGUF (muse-glimmer-30B-kquant-17gb.gguf, 4-bit k-quant). Text path only: the separate vision encoder (mmproj) and atem tool syntax are out of scope. Evidence: docs/muse-glimmer-cert-2026-08-11.md."
-  },
-  {
-   "id": "granite-4.1-8b-q4_0",
-   "architecture": "granite",
-   "family": "IBM Granite 4.1",
-   "file": "models/granite-4.1-8b-Q4_0.gguf",
-   "sha256": "5adf9b6b78921093bd4a805e1060f85d7f744c3eafc14d1ca449364d1e721a1a",
-   "tokenizer_reference": "ibm-granite/granite-4.1-8b",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10353"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "greedy_reference",
-    "cpu_cuda",
-    "chat"
-   ],
-   "notes": "Official IBM GGUF. CERTIFIED: greedy 6/6 vs b10353, tokenizer 0/721, cpu_cuda 11/12 with the single flip measured at the model's own floor. Evidence: docs/granite-cert-2026-08-11.md."
-  },
-  {
-   "id": "granite-4.1-30b-q3_k_s",
-   "architecture": "granite",
-   "family": "IBM Granite 4.1",
-   "file": "models/granite-4.1-30b-Q3_K_S.gguf",
-   "sha256": "a807f6ea95a69a2e159978299fcbb310c14307cbaaa2a64cbb18b7fc7a087df3",
-   "tokenizer_reference": "ibm-granite/granite-4.1-30b",
-   "reference": {
-    "implementation": "llama.cpp",
-    "revision": "b10353"
-   },
-   "checks": [
-    "load",
-    "tokenizer",
-    "cpu_cuda",
-    "chat"
-   ],
-   "notes": "Official IBM GGUF. Engine-correct (cpu_cuda 6/6, chat clean) but FAILS the 16GB-tier quality bar: KLD 71%/0.314 vs Q8_0. The Q8_0 sibling is CERTIFIED-WITH-CAVEAT (greedy 3/6, divergences <=0.19 nats). Evidence: docs/granite-cert-2026-08-11.md."
-  }
- ]
+  "schema_version": "xyntetik.runner.model-compat.v1",
+  "reference_revision": "llama.cpp b10076 (305ba519a)",
+  "models": [
+    {
+      "id": "llama-3.2-3b-instruct-q4_k_m",
+      "architecture": "llama",
+      "family": "Llama 3",
+      "file": "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "tokenizer_reference": "meta-llama/Llama-3.2-3B-Instruct",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "mistral-7b-instruct-v0.3-q4_k_m",
+      "architecture": "llama",
+      "family": "Mistral",
+      "file": "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+      "tokenizer_reference": "mistralai/Mistral-7B-Instruct-v0.3",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "qwen2.5-32b-instruct-q3_k_s",
+      "architecture": "qwen2",
+      "family": "Qwen 2.5",
+      "file": "models/Qwen2.5-32B-Instruct-Q3_K_S.gguf",
+      "sha256": "a1aefda97dc4641598db576edf61b7b5f70f40abab33fbea39fb84fcaa9be44e",
+      "tokenizer_reference": "Qwen/Qwen2.5-32B-Instruct",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "qwen3-4b-q4_k_m",
+      "architecture": "qwen3",
+      "family": "Qwen 3",
+      "file": "models/Qwen3-4B-Q4_K_M.gguf",
+      "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "tokenizer_reference": "Qwen/Qwen3-4B",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "ornith-1.0-9b-q4_k_m",
+      "architecture": "qwen35",
+      "family": "Qwen 3.5 / Ornith",
+      "file": "models/ornith-1.0-9b-Q4_K_M.gguf",
+      "sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
+      "tokenizer_reference": "deepreinforce-ai/Ornith-1.0-9B",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ],
+      "notes": "CPU + CUDA; 5/5 scalar-path CPU/CUDA identity over 128 tokens re-verified 2026-08-03"
+    },
+    {
+      "id": "phi-3.5-mini-instruct-q4_k_m",
+      "architecture": "phi3",
+      "family": "Phi 3",
+      "file": "models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
+      "sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
+      "tokenizer_reference": "microsoft/Phi-3.5-mini-instruct",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "gemma-3-4b-it-q4_k_m",
+      "architecture": "gemma3",
+      "family": "Gemma 3",
+      "file": "models/google_gemma-3-4b-it-Q4_K_M.gguf",
+      "sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+      "tokenizer_reference": "google/gemma-3-4b-it",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "gemma-4-12b-it-q4_k_m",
+      "architecture": "gemma4",
+      "family": "Gemma 4",
+      "file": "models/gemma-4-12B-it-Q4_K_M.gguf",
+      "sha256": "e4db6f8c1e48f7297069fa23ca3ff34e0b0155f8de5485498ed9a0e59944bc8c",
+      "tokenizer_reference": "google/gemma-4-12b-it",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "qwen3-30b-a3b-q4_k_m",
+      "architecture": "qwen3moe",
+      "family": "Qwen 3 MoE",
+      "file": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+      "tokenizer_reference": "Qwen/Qwen3-30B-A3B",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "gemma-4-e4b-it-q4_k_m",
+      "architecture": "gemma4",
+      "family": "Gemma 4 E-series",
+      "file": "models/gemma-4-E4B-it-Q4_K_M.gguf",
+      "sha256": "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87",
+      "tokenizer_reference": "google/gemma-4-E4B-it",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "Per-layer embeddings + shared-KV layers, CPU and CUDA. greedy_reference is not declared: agreement with llama.cpp is at the quantisation noise floor, not token identity - 11/16 prompts at 16 tokens, against llama.cpp's own cold-vs-warm-cache floor of 12/16 on the same model, so the remaining gap is roughly one prompt. cpu_cuda IS exact and is the gate that holds here: byte-identical CPU vs full 42/42 GPU offload over 4 prompts at 32 tokens and one at 128, plus every partial-offload split across the shared-KV boundary on the generated fixture. Measure with scripts/sensitivity_floor.py before reading any cross-engine number."
+    },
+    {
+      "id": "gemma-4-26b-a4b-it-q4_0",
+      "architecture": "gemma4-moe",
+      "family": "Gemma 4 MoE",
+      "file": "models/gemma-4-26B-A4B-it-Q4_0.gguf",
+      "sha256": "d208665ab1cd3a69f7a9a4bc59430e8448c8093d9b06334f566ac59d6d504a03",
+      "tokenizer_reference": "google/gemma-4-26b-a4b-it",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "greedy_reference deliberately not declared: this model is numerically chaotic, so token-for-token agreement with any second implementation is unachievable rather than merely unmet. Measured 2026-08-01 at b10076 on this exact file - runner disagrees with ITSELF on 11 of 16 prompts when only the KV cache precision changes, against the 9 it disagrees with llama.cpp on, so a perturbation inside one build moves the output further than switching engines does. Cause is discrete top-8-of-128 expert routing over Q4_0 weights; at layer 2 the 6th and 7th selected experts sat 0.0002 apart in weight. Layer 0 activations and the pre-softmax router logits do match the reference (exactly, and to ~0.1-0.5%). Re-measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap on this model. Evidence: out/divergence-study-gemma4-moe-2026-08-01.json"
+    },
+    {
+      "id": "gemma-4-26b-a4b-it-qat-q4_0",
+      "architecture": "gemma4-moe",
+      "family": "Gemma 4 MoE",
+      "file": "models/gemma-4-26B_q4_0-it.gguf",
+      "sha256": "3eca3b8f6d7baf218a7dd6bba5fb59a56ee25fe2d567b6f5f589b4f697eca51d",
+      "tokenizer_reference": "google/gemma-4-26b-a4b-it",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "Google's genuine QAT release (google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf), 14,439,363,584 bytes, sha verified against the HF LFS blob 2026-08-05. DISTINCT from gemma-4-26b-a4b-it-q4_0, which is ggml-org's non-QAT Q4_0 (sha d208665a) - two publishers, two artifacts, not a re-upload of one. Comparing their hashes as if they were the same file is what produced the retired 'QAT pin drift' plan item. This is the artifact behind the 16 GB recommendation, so it belongs under the automated gate rather than in prose alone. Expert tensors are uniformly Q4_0 across 60 tensors - the signature of QAT baked into the checkpoint, unlike repos that only inherit 'QAT' from the base model's lineage. greedy_reference deliberately not declared: top-8-of-128 expert routing over Q4_0 is numerically chaotic (layer 2's 6th/7th experts sat 0.0002 apart), so the runner disagrees with ITSELF under a KV-precision change more than it disagrees with llama.cpp. cpu_cuda PENDING re-verification at the 128-token contract - the 2026-08-05 CERTIFIED-WITH-CAVEAT pass was measured under the old 16-token default. Evidence: docs/cert-matrix-status.md item 4; out/divergence-study-gemma4-moe-2026-08-01.json"
+    },
+    {
+      "id": "gpt-oss-20b-mxfp4",
+      "architecture": "gpt-oss",
+      "family": "OpenAI gpt-oss",
+      "file": "models/gpt-oss-20b-MXFP4.gguf",
+      "sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901",
+      "tokenizer_reference": "openai/gpt-oss-20b",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "Per-head attention sinks, clamped alpha-sigmoid GLU (swiglu_oai), router and per-expert biases, MXFP4 expert tensors, SWA layers roped in the GLOBAL regime. CUDA support landed 2026-08-01 with the MXFP4 matmul kernels and the sink-aware attention softmax; before that the backend refused the architecture at load. cpu_cuda measured the same day: 5/5 prompts byte-identical at 16 tokens, eager routing, RUNNER_CUDA_TC=0, on an 8 GB RTX 3070 at a 13/24 layer split - full offload is not reachable for a 12.1 GB model on that card, so the 11 host layers were identical by construction in both runs and the gate covers the device kernels for 13 layers. greedy_reference is NOT declared: after the SWA-rope fix the cross-engine residual is 9/16 prompts token-identical at 16 tokens with a worst-case logprob delta of 0.151, which is BELOW this model's own 0.272 sensitivity floor (runner vs itself under a KV-precision change) - i.e. at the noise floor rather than at token identity, the same standard applied to gemma-4-E4B. Measure the floor with scripts/sensitivity_floor.py before reading any cross-engine gap. Evidence: out/gpt-oss-cpu-cuda-2026-08-01.json, out/gpt-oss-swa-rope-fix-2026-08-01.json 2026-08-15 re-run on current main: tokenizer differential 0/721 (was 222/721), chat smoke PASSES through TMPL_HARMONY (answers and stops, analysis in reasoning_content), cpu_cuda 5/5 byte-identical at 64 tokens on 24/24 full offload with RUNNER_CUDA_TC=0 and RUNNER_MOE_EAGER=1. Greedy identity vs b10353 is 1/6 on the full six-prompt protocol and is now the row's only failing check; the architecture's own self-sensitivity floor has not been measured, so the 1/6 is not yet attributable between engine difference and model sensitivity."
+    },
+    {
+      "id": "apertus-8b-instruct-2509-q4_k_m",
+      "architecture": "apertus",
+      "family": "Apertus (Swiss AI)",
+      "file": "models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+      "sha256": "5901007f15aec9aabeea401cbe65559671166fc851bbdf8c26f56c2b61e9cd1d",
+      "tokenizer_reference": "swiss-ai/Apertus-8B-Instruct-2509",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "Source: bartowski/swiss-ai_Apertus-8B-Instruct-2509-GGUF at a5d1742307bf949e2cd95f253e8776539e19d1fc, published filename swiss-ai_Apertus-8B-Instruct-2509-Q4_K_M.gguf. CUDA support is full-graph: 32/32 layers plus output weight on the 8 GB RTX 3070, with 5/5 CPU/CUDA-identical prompts at 128 tokens and RUNNER_CUDA_TC=0. greedy_reference deliberately remains undeclared because the cross-engine delta is below the model's measured self-sensitivity floor. Evidence: out/apertus-cpu-cuda-2026-08-03.json, out/divergence-apertus-2026-08-03.json, out/sensitivity-apertus-2026-08-03.json"
+    },
+    {
+      "id": "eurollm-9b-instruct-q4_k_m",
+      "architecture": "llama",
+      "family": "EuroLLM (EU consortium)",
+      "file": "models/EuroLLM-9B-Instruct-Q4_K_M.gguf",
+      "sha256": "785a3b2883532381704ef74f866f822f179a931801d1ed1cf12e6deeb838806b",
+      "tokenizer_reference": "utter-project/EuroLLM-9B-Instruct",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "lucie-7b-instruct-q4_k_m",
+      "architecture": "llama",
+      "family": "Lucie (OpenLLM-France)",
+      "file": "models/Lucie-7B-Instruct-Q4_K_M.gguf",
+      "sha256": "0d889e0c126eb0424e478029dd9198af2afdffce29b0d98a86455c3c5b506db3",
+      "tokenizer_reference": "OpenLLM-France/Lucie-7B-Instruct-v1.1",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "mistral-nemo-instruct-2407-q4_k_m",
+      "architecture": "llama",
+      "family": "Mistral Nemo",
+      "file": "models/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+      "sha256": "5964f3e6d9c17b99e3d2174022048f3ec58b12ee8fefa987888e0562d070d52e",
+      "tokenizer_reference": "mistralai/Mistral-Nemo-Instruct-2407",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "teuken-7b-instruct-commercial-v0.4-q4_k_m",
+      "architecture": "llama",
+      "family": "Teuken (OpenGPT-X)",
+      "file": "models/Teuken-7B-instruct-commercial-v0.4-Q4_K_M.gguf",
+      "sha256": "03fd13daafb6f20c1c5f4b908d163841cdd96803a6f5a7c0c39dd236a2b1630b",
+      "tokenizer_reference": "openGPT-X/Teuken-7B-instruct-commercial-v0.4",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "salamandra-7b-instruct-q4_k_m",
+      "architecture": "llama",
+      "family": "Salamandra (BSC)",
+      "file": "models/salamandra-7b-instruct-Q4_K_M-f32.gguf",
+      "sha256": "bac8e8c1d1d9d53cbdb148b8ff9ad378ddb392429207099e85b5aae3a43bff3d",
+      "tokenizer_reference": "BSC-LT/salamandra-7b-instruct",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "tildeopen-30b-q4_k_m",
+      "architecture": "llama",
+      "family": "TildeOpen (Tilde, Latvia)",
+      "file": "models/TildeOpen-30b-Q4_K_M.gguf",
+      "sha256": "b051f04a87a74184b70c79ea7e514d7605817eebb5d7b8cc8f610406a52f82d5",
+      "tokenizer_reference": "TildeAI/TildeOpen-30b",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10076"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat",
+        "tool",
+        "long_context"
+      ]
+    },
+    {
+      "id": "trinity-nano-preview-q8_0",
+      "architecture": "afmoe",
+      "family": "Arcee Trinity MoE",
+      "file": "models/Trinity-Nano-Preview-Q8_0.gguf",
+      "sha256": "5fcc2428c325e8b2035d280ff28c4c659ea240ce317a9536f230acfc352b79d1",
+      "tokenizer_reference": "arcee-ai/Trinity-Nano-Preview",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10280"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "chat"
+      ],
+      "notes": "Source: arcee-ai/Trinity-Nano-Preview-GGUF (Q4_K_M sha256 211127328238031b7aead5c71f488023710300da587703160e42fb981c8c335a also on record). CPU only: CUDA and Metal refuse loudly and fall back, so cpu_cuda is not declared. greedy_reference deliberately not declared: 1/6 byte-identical vs llama.cpp b10280, with the mechanism measured rather than presumed (afmoe re-normalizes every branch before the residual add, amplifying the engines' by-design quantized-matvec arithmetic difference; layer-0 verified to ~2e-4) - see docs/afmoe-divergence-triage-2026-08-05.md and docs/afmoe-sensitivity-floor-2026-08-05.md. Chat smoke and perf gates green on the M1 (13.25 tok/s decode, Q4_K_M resident, CPU). Evidence: out/divergence-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-2026-08-05.json, out/sensitivity-afmoe-trinity-reference-2026-08-05.json, out/bench-afmoe-m1-2026-08-05.json"
+    },
+    {
+      "id": "muse-glimmer-30b-kquant",
+      "architecture": "muse-glimmer",
+      "family": "Meta Muse Glimmer",
+      "file": "models/muse-glimmer-30B-kquant-17gb.gguf",
+      "sha256": "7e9b74b7c8875e9e265695df9613bf6290f2392e479ce740495a129019c488d8",
+      "tokenizer_reference": "meta-models/Muse-Glimmer-30B",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10353"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "Official meta-models GGUF (muse-glimmer-30B-kquant-17gb.gguf, 4-bit k-quant). Text path only: the separate vision encoder (mmproj) and atem tool syntax are out of scope. Evidence: docs/muse-glimmer-cert-2026-08-11.md."
+    },
+    {
+      "id": "granite-4.1-8b-q4_0",
+      "architecture": "granite",
+      "family": "IBM Granite 4.1",
+      "file": "models/granite-4.1-8b-Q4_0.gguf",
+      "sha256": "5adf9b6b78921093bd4a805e1060f85d7f744c3eafc14d1ca449364d1e721a1a",
+      "tokenizer_reference": "ibm-granite/granite-4.1-8b",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10353"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "greedy_reference",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "Official IBM GGUF. CERTIFIED: greedy 6/6 vs b10353, tokenizer 0/721, cpu_cuda 11/12 with the single flip measured at the model's own floor. Evidence: docs/granite-cert-2026-08-11.md."
+    },
+    {
+      "id": "granite-4.1-30b-q3_k_s",
+      "architecture": "granite",
+      "family": "IBM Granite 4.1",
+      "file": "models/granite-4.1-30b-Q3_K_S.gguf",
+      "sha256": "a807f6ea95a69a2e159978299fcbb310c14307cbaaa2a64cbb18b7fc7a087df3",
+      "tokenizer_reference": "ibm-granite/granite-4.1-30b",
+      "reference": {
+        "implementation": "llama.cpp",
+        "revision": "b10353"
+      },
+      "checks": [
+        "load",
+        "tokenizer",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "Official IBM GGUF. Engine-correct (cpu_cuda 6/6, chat clean) but FAILS the 16GB-tier quality bar: KLD 71%/0.314 vs Q8_0. The Q8_0 sibling is CERTIFIED-WITH-CAVEAT (greedy 3/6, divergences <=0.19 nats). Evidence: docs/granite-cert-2026-08-11.md."
+    }
+  ]
 }

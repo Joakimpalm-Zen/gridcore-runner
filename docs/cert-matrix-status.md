@@ -11,7 +11,7 @@ Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKI
 
 | # | artifact | resolved repo/file | verdict | note |
 |---|---|---|---|---|
-| 1 | ggml-org gpt-oss-20b MXFP4 | `ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf` (sha `27cd6c43...`) | **FAILED** | tokenizer 222/721 diverge, cpu_cuda not byte-identical on this GPU, chat smoke runs away non-coherent; KLD (raw-completions, chat endpoint unusable for gpt-oss cross-engine) 83% top1/0.128 KLD misses 97%/0.05 bar but matches an already-diagnosed MXFP4 vec_dot_type gap |
+| 1 | ggml-org gpt-oss-20b MXFP4 | `ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf` (sha `27cd6c43...`) | **FAILED** (2026-08-05); three of its four checks now PASS, see the 2026-08-15 re-run below | tokenizer 222/721 diverge, cpu_cuda not byte-identical on this GPU, chat smoke runs away non-coherent; KLD (raw-completions, chat endpoint unusable for gpt-oss cross-engine) 83% top1/0.128 KLD misses 97%/0.05 bar but matches an already-diagnosed MXFP4 vec_dot_type gap |
 | 2 | Bartowski gpt-oss-20b Q6_K_L | `bartowski/openai_gpt-oss-20b-GGUF/openai_gpt-oss-20b-Q6_K_L.gguf` (sha `e729b05f...`) | **FAILED** | mixed-tensor trap confirmed: experts stay MXFP4_MOE (72/72 unchanged), only 24 non-expert tensors move Q8_0->Q6_K; tokenizer/cpu_cuda/chat-smoke fail identically to item 1 (same root causes); KLD 84%/0.116, consistent with item 1 |
 | 3 | Unsloth gpt-oss-20b Q4_K_M-class | `unsloth/gpt-oss-20b-GGUF/gpt-oss-20b-Q4_K_M.gguf` (sha `c2753664...`) | **FAILED** | mixed-tensor trap confirmed again (experts untouched MXFP4); tokenizer/cpu_cuda fail same as items 1/2; chat smoke fails DIFFERENTLY — stops cleanly (Unsloth patched the chat template) but still leaks analysis-channel meta-commentary instead of a direct answer; KLD 78%/0.137 |
 | 4 | Gemma-4-26B-A4B-it QAT Q4_0 | `google/gemma-4-26B-A4B-it-qat-q4_0-gguf/gemma-4-26B_q4_0-it.gguf` (sha `3eca3b8f...`) | **CERTIFIED-WITH-CAVEAT** | tokenizer 0/721 clean, cpu_cuda byte-identical, chat smoke clean "4"/stop — all PASS; only KLD misses 97%/0.05 (80.5%/0.126), matching an already-documented numerically-chaotic floor for this exact file (top-8-of-128 routing ties) |
@@ -72,3 +72,40 @@ methodology, and the QAT-vs-PTQ pruning-tolerance experiment in
 | GPT-OSS Nano 9B (item 9), unpruned | fits trivially (6.36GB) | none | n/a (not pruned) | n/a | 12.23 / 12.11 | fits, usable, doesn't beat keep-30 |
 | GPT-OSS Nano 9B, keep-10/8/6 (further pruned) | n/a (didn't need pruning) | 12→10/8/6 experts | 79.5% / 72.0% / 59.25% | 0.099 / 0.180 / 0.344 | not live-tested (failed KLD gate) | **FAIL all 3 points** — already-pruned base has no headroom left |
 | GPT-OSS 120B REAP 58B (item 10) | does not fit | none rescues it (39GB min quant, 2.4x budget) | n/a | n/a | not tested | **does not fit**, arithmetic only |
+
+## 2026-08-15 re-run of row 1 on current main
+
+Row 1's verdict dates from 2026-08-05. Three of the four failures it records
+have since been fixed and were re-measured on this box against current main
+(`526ea43`), same file, sha `27cd6c43...` verified. The row does not become
+CERTIFIED, because the fourth check got worse rather than better, and the
+verdict follows the measurements.
+
+| check | 2026-08-05 | 2026-08-15 | |
+|---|---|---|---|
+| tokenizer differential | 222/721 diverge | **0/721** | PASS (o200k_harmony mapping landed) |
+| chat smoke | runs away, non-coherent | answers `2 + 2 equals **4**.`, stops itself at 66 tok, analysis split into `reasoning_content` | PASS (TMPL_HARMONY, 2026-08-14) |
+| cpu_cuda (scalar pins, eager routing) | not byte-identical, 13/24 split on an 8 GB 3070 | **5/5 byte-identical at 64 tokens**, 24/24 full offload | PASS |
+| greedy identity vs llama.cpp b10353 | 3/5 (earlier partial recheck) | **1/6** on the full protocol | FAIL, and worse |
+
+**The greedy row is the honest negative of this phase.** On the full six-prompt
+protocol only `d` is byte-identical; `a` diverges at byte 9, `b`/`b-long` at
+140, `c`/`c-long` at 180. Both sides stay fluent and both continuations are
+plausible (on `c` the runner's `123,456,789 people` is arguably the better read
+of the prompt than the reference's `123,456,7 people`), so this is
+numerical-sensitivity divergence at depth, not broken math: the same class the
+README already describes for MXFP4 MoE, and the reason it says numerically
+sensitive models may be held to a measured self-sensitivity floor instead of
+cross-engine token identity.
+
+Two caveats that keep this from being over-read in either direction. The 3/5
+figure came from a shorter recheck on different hardware, so 3/5 to 1/6 is not a
+clean regression measurement. And Phase 1 of the same session established that
+this architecture class carries prefix-cache-state-dependent variability in its
+own outputs (mean KLD moved in the fourth decimal across repeats of an identical
+command where dense models reproduce to the digit), so the self-floor for gpt-oss
+is plausibly below 6/6 and has never been measured. Measuring it is the honest
+next step for this row and is NOT done here.
+
+Verdict: row 1 stays **FAILED**, with tokenizer, chat and cpu_cuda now passing
+and the failure narrowed to cross-engine greedy identity alone.
