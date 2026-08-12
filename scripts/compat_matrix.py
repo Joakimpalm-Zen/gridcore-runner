@@ -12,11 +12,14 @@ import os
 from pathlib import Path
 import platform
 import subprocess
+import sys
 import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests" / "compatibility" / "models.json"
+TOKENIZER_SCRIPT = ROOT / "scripts" / "difftok.py"
+GREEDY_SCRIPT = ROOT / "scripts" / "reference_compare.py"
 
 
 def load_manifest(path):
@@ -56,7 +59,8 @@ def run_load(runner, model, gpu, timeout):
     started = time.monotonic()
     proc = subprocess.run(
         [str(runner), "-m", str(model), "-p", "Compatibility probe:",
-         "-n", "1", "--temp", "0", "--gpu", gpu],
+         "-n", "1", "--temp", "0", "--gpu", gpu] +
+        (["--wait-for-vram", "300"] if gpu == "auto" else []),
         text=True, capture_output=True, timeout=timeout,
         # certification evidence is scalar-path (TC promotion is
         # tolerance-gated separately; see docs/compatibility-program.md)
@@ -69,17 +73,86 @@ def run_load(runner, model, gpu, timeout):
     }
 
 
+def resolve_model(entry, models_root):
+    declared = Path(entry["file"])
+    if declared.is_absolute() and declared.is_file():
+        return declared.resolve(), None
+    local = ROOT / declared
+    if local.is_file():
+        return local.resolve(), None
+    matches = sorted(models_root.rglob(declared.name)) if models_root.is_dir() else []
+    matches = [path.resolve() for path in matches if path.is_file()]
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        return None, "model_file_not_found"
+    return None, "model_basename_ambiguous"
+
+
+def run_command(command, timeout):
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(command, text=True, capture_output=True,
+                              timeout=timeout)
+    except OSError as exc:
+        return {
+            "status": "fail", "reason": "process_start_failed",
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "error": str(exc),
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "fail", "reason": "timeout",
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "stdout_tail": (exc.stdout or "")[-2000:],
+            "stderr_tail": (exc.stderr or "")[-2000:],
+        }
+    return {
+        "status": "pass" if proc.returncode == 0 else "fail",
+        "returncode": proc.returncode,
+        "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+        "stdout_tail": proc.stdout[-2000:], "stderr_tail": proc.stderr[-2000:],
+    }
+
+
+def run_tokenizer(model, reference, corpus, timeout):
+    result = run_command([
+        sys.executable, str(TOKENIZER_SCRIPT), "--gguf", str(model), "--ref", reference,
+        "--corpus", str(corpus), "--expect", "0",
+    ], timeout)
+    if result["status"] == "fail" and "strings differ" not in result.get("stdout_tail", ""):
+        detail = (result.get("stdout_tail", "") + result.get("stderr_tail", "")).lower()
+        if any(marker in detail for marker in (
+                "access to model", "restricted", "entry not found",
+                "tokenizer.json", "repository not found")):
+            result["status"] = "not_executed"
+            result["reason"] = "tokenizer_reference_unavailable"
+    return result
+
+
+def run_greedy(runner, reference, model, timeout):
+    return run_command([
+        sys.executable, str(GREEDY_SCRIPT), "--runner", str(runner),
+        "--reference", str(reference), "--model", str(model),
+        "--tokens", "8", "--port-base", "9300",
+        "--startup-timeout", str(timeout), "--request-timeout", str(timeout),
+    ], timeout * 2 + 30)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--runner", type=Path, default=ROOT / "runner")
     parser.add_argument("--reference", type=Path)
+    parser.add_argument("--models-root", type=Path, default=ROOT / "models")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--model", action="append", default=[])
     parser.add_argument("--gpu", choices=("auto", "off"), default="auto")
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--verify-files", action="store_true")
     parser.add_argument("--load", action="store_true")
+    parser.add_argument("--execute-checks", action="store_true",
+                        help="run supported declared checks, recording skips with reasons")
     # RNR-007: a report may only be called complete if every declared check
     # actually ran and passed. --require-complete makes an incomplete report a
     # gate failure; without it the report is still honest (unrun checks are
@@ -114,22 +187,52 @@ def main(argv=None):
     }
     failed = False
     for entry in selected:
-        path = ROOT / entry["file"]
+        path, path_reason = resolve_model(entry, args.models_root)
         item = {"id": entry["id"], "architecture": entry["architecture"],
                 "file": entry["file"], "expected_sha256": entry["sha256"],
                 "checks": {}}
-        if not path.is_file():
+        if path is None:
             item["file_status"] = "missing"
+            item["file_reason"] = path_reason
             failed = True
-        elif args.verify_files or args.load:
+        elif args.verify_files or args.load or args.execute_checks:
+            item["resolved_file"] = str(path)
             actual = sha256(path)
             item["actual_sha256"] = actual
             item["file_status"] = "pass" if actual == entry["sha256"] else "fail"
             failed |= actual != entry["sha256"]
-            if args.load and actual == entry["sha256"]:
+            if (args.load or args.execute_checks) and actual == entry["sha256"] and \
+                    "load" in entry.get("checks", []):
                 item["checks"]["load"] = run_load(
                     args.runner.resolve(), path.resolve(), args.gpu, args.timeout)
                 failed |= item["checks"]["load"]["status"] != "pass"
+            if args.execute_checks and actual == entry["sha256"]:
+                declared = entry.get("checks", [])
+                if "tokenizer" in declared:
+                    tok_ref = entry.get("tokenizer_reference")
+                    corpus = ROOT / "tests/fixtures/tokenizer-corpus.txt"
+                    if not tok_ref:
+                        item["checks"]["tokenizer"] = {
+                            "status": "not_executed", "reason": "tokenizer_reference_not_declared"}
+                    elif not corpus.is_file():
+                        item["checks"]["tokenizer"] = {
+                            "status": "not_executed", "reason": "tokenizer_corpus_not_found"}
+                    else:
+                        item["checks"]["tokenizer"] = run_tokenizer(
+                            path, tok_ref, corpus, args.timeout)
+                        failed |= item["checks"]["tokenizer"]["status"] != "pass"
+                if "greedy_reference" in declared:
+                    if not args.reference:
+                        item["checks"]["greedy_reference"] = {
+                            "status": "not_executed", "reason": "reference_binary_not_provided"}
+                    elif not args.reference.is_file():
+                        item["checks"]["greedy_reference"] = {
+                            "status": "not_executed", "reason": "reference_binary_not_found"}
+                    else:
+                        item["checks"]["greedy_reference"] = run_greedy(
+                            args.runner.resolve(), args.reference.resolve(), path,
+                            args.timeout)
+                        failed |= item["checks"]["greedy_reference"]["status"] != "pass"
         else:
             item["file_status"] = "not_run"
 
@@ -139,13 +242,31 @@ def main(argv=None):
         # the model is "complete" only when all of them ran and passed.
         declared = entry.get("checks", [])
         for name in declared:
-            item["checks"].setdefault(name, {"status": "not_executed"})
+            reason = (path_reason if path is None else
+                      "sha256_mismatch" if item.get("file_status") == "fail" else
+                      "check_class_not_executable" if args.execute_checks else
+                      "check_not_requested")
+            item["checks"].setdefault(
+                name, {"status": "not_executed", "reason": reason})
         item["complete"] = bool(declared) and all(
             item["checks"][name].get("status") == "pass" for name in declared)
         report["models"].append(item)
 
     report["complete"] = bool(report["models"]) and all(
         m.get("complete") for m in report["models"])
+    report["summary"] = {
+        "models": len(report["models"]),
+        "files": {},
+        "checks": {},
+    }
+    for item in report["models"]:
+        status = item["file_status"]
+        report["summary"]["files"][status] = \
+            report["summary"]["files"].get(status, 0) + 1
+        for name, check in item["checks"].items():
+            statuses = report["summary"]["checks"].setdefault(name, {})
+            status = check["status"]
+            statuses[status] = statuses.get(status, 0) + 1
 
     rendered = json.dumps(report, indent=2) + "\n"
     if args.out:

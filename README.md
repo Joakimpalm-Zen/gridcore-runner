@@ -739,6 +739,21 @@ files by SHA-256 and declares checks independently:
 Being present in the manifest does not mean every check passed. Read each
 entry's declared checks and notes. Current high-signal caveats include:
 
+Every release ships a schema-versioned report under `docs/compat-reports/`.
+Generate it against the pinned files available on the release box with:
+
+```sh
+python3 scripts/compat_matrix.py --models-root /path/to/models \
+  --runner ./runner --reference /path/to/llama-server \
+  --verify-files --execute-checks --out docs/compat-reports/<release>-<date>.json
+```
+
+The executable classes are SHA/load, tokenizer differential when the manifest
+declares a reference and the corpus exists, and greedy reference when both
+binaries and the pinned model are present. Every other declared check, and any
+check missing a prerequisite, is retained as `not_executed` with a machine-
+readable reason; absence from a run is never presented as a pass.
+
 - Qwen3-4B's 2026-08-03 scalar CPU/CUDA recheck passed 4 of 5 prompts at 128
   tokens, so there is no blanket identity claim for that file.
 - Canonical gpt-oss-20b passed an earlier 5-of-5, 16-token partial-offload test
