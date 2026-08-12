@@ -65,7 +65,10 @@ def run_cpu_cuda(runner, model, params, timeout):
     env = dict(os.environ)
     env.update({k: str(v) for k, v in (params.get("pins") or {}).items()})
     cmd = [sys.executable, str(script), str(model),
-           "--tokens", str(params.get("tokens", 64))]
+           # 128, not 64: the decided certification length (owner 2026-08-08)
+           # and cpu_cuda_check.py's own default. A row that declares nothing
+           # must not silently certify at half the contract.
+           "--tokens", str(params.get("tokens", 128))]
     started = time.time()
     # Own process group, and kill the GROUP on timeout. cpu_cuda_check.py
     # spawns runner servers of its own; subprocess.run's timeout only kills the

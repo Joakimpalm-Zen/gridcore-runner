@@ -25,6 +25,14 @@ def test_model_manifest_covers_every_claimed_architecture():
     # b10280 while the header still said b10076 for all 24 rows. A field
     # nothing reads and nothing can keep true is a lie with a schema.
     assert "reference_revision" not in data
+    # cpu_cuda certifies at 128 generated tokens (owner decision 2026-08-08),
+    # which is also cpu_cuda_check.py's own default. The ledger's params were
+    # authored later and declared 64, silently re-weakening the gate every
+    # time it ran; pin the decided number so a param cannot walk it back.
+    for model in data["models"]:
+        params = model.get("check_params", {}).get("cpu_cuda")
+        if params:
+            assert params.get("tokens") == 128, model["id"]
     models = data["models"]
     assert {m["architecture"] for m in models} == {
         "llama", "qwen2", "qwen3", "qwen35", "phi3", "gemma3", "gemma4",
