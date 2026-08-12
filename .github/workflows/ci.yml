@@ -135,7 +135,9 @@ jobs:
       - name: smoke test (server)
         run: |
           ./runner -m test.gguf --serve --port 8123 --parallel 2 &
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8123/health && break; sleep 0.5; done
           curl -sf http://127.0.0.1:8123/health
           curl -sf http://127.0.0.1:8123/v1/models
           curl -sf http://127.0.0.1:8123/v1/capabilities | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['features']['json_schema'] and d['models'][0]['id']; print('capabilities ok')"
@@ -168,7 +170,9 @@ jobs:
         # still answer from the accept loop (xyntetik watchdog regression)
         run: |
           ./runner -m test.gguf --serve --port 8126 --parallel 1 &
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8126/health && break; sleep 0.5; done
           python3 -c "import socket,time; s=socket.create_connection(('127.0.0.1',8126)); s.sendall(b'POST /v1/chat/completions HTTP/1.1\r\n'); time.sleep(20)" &
           sleep 1
           curl -sf -m 3 http://127.0.0.1:8126/health
@@ -181,7 +185,9 @@ jobs:
         # the slot within the 10s read deadline instead of pinning it forever
         run: |
           ./runner -m test.gguf --serve --port 8129 --parallel 1 &
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8129/health && break; sleep 0.5; done
           python3 - <<'PYEOF'
           import socket, sys
           s = socket.create_connection(("127.0.0.1", 8129))
@@ -206,7 +212,9 @@ jobs:
         # a partial match that never completes must flush, malformed -> 400
         run: |
           ./runner -m test.gguf --serve --port 8130 --parallel 1 &
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8130/health && break; sleep 0.5; done
           python3 - <<'PYEOF'
           import json, urllib.request, urllib.error, sys
           def post(body, path="/v1/chat/completions"):
@@ -260,7 +268,9 @@ jobs:
         # role:"tool" results, stream_options usage, extra fields
         run: |
           ./runner -m test.gguf -c 1024 --serve --port 8131 --parallel 1 &
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8131/health && break; sleep 0.5; done
           python3 - <<'PYEOF'
           import json, urllib.request
           URL = "http://127.0.0.1:8131/v1/chat/completions"
@@ -364,7 +374,9 @@ jobs:
           printf 'not a gguf' > bad.gguf
           ./runner -m "a=test.gguf,b=test-q8.gguf" --serve --port 8124 --ttl 0 &
           SWAP_PID=$!
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8124/health && break; sleep 0.5; done
           curl -sf -d '{"model":"a","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
           curl -sf -d '{"model":"b","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null
           curl -sf http://127.0.0.1:8124/v1/models | python3 -c "import json,sys; assert len(json.load(sys.stdin)['data']) == 2; print('swap ok')"
@@ -373,7 +385,9 @@ jobs:
           wait "$SWAP_PID" 2>/dev/null || true
           ./runner -m "good=test.gguf,bad=bad.gguf" --serve --port 8124 --ttl 0 &
           BAD_SWAP_PID=$!
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8124/health && break; sleep 0.5; done
           if curl -sf -d '{"model":"bad","messages":[{"role":"user","content":"x"}],"max_tokens":3}' http://127.0.0.1:8124/v1/chat/completions > /dev/null; then
             echo "bad swap unexpectedly loaded"; exit 1
           fi
@@ -388,11 +402,15 @@ jobs:
         run: |
           REQ='{"messages":[{"role":"user","content":"hi"}],"max_tokens":12,"temperature":0}'
           ./runner -m test.gguf --serve --port 8128 --gpu off &
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8128/health && break; sleep 0.5; done
           P=$(curl -sf -d "$REQ" http://127.0.0.1:8128/v1/chat/completions | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
           kill %1; wait %1 2>/dev/null || true
           ./runner -m test.gguf --draft test.gguf --serve --port 8128 --gpu off &
-          sleep 2
+          # readiness poll, not a fixed sleep: the paravirtual macOS
+          # runner lost a 2s race by 250ms twice on 2026-08-12
+          for i in $(seq 60); do curl -sf -o /dev/null http://127.0.0.1:8128/health && break; sleep 0.5; done
           S=$(curl -sf -d "$REQ" http://127.0.0.1:8128/v1/chat/completions | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])")
           [ -n "$P" ] || exit 1
           [ "$P" = "$S" ] || { echo "spec output diverged: '$P' vs '$S'"; exit 1; }
