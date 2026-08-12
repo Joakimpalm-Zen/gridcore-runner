@@ -700,9 +700,19 @@ kernel void k_mv_mxfp4(MV_PARAMS) {
 // is laid out (column c at offset c*y_stride), so the store is contiguous.
 // W is loaded transposed straight out of threadgroup memory.
 
-#define MM_TM 32    // output rows per threadgroup
-#define MM_TN 16    // output columns (prompt tokens) per threadgroup
+// MM_TM/MM_TN must stay in step with the dispatch grid in metal.m
+// (enc_mv_n's dispatchThreadgroups) and with tests/test_metal_kquants.m's
+// `submit()` helper -- none of the three can see the other two, so a change
+// here that is not mirrored there is a silent correctness bug, not a build
+// error (the grid would just cover the wrong number of output tiles).
+#define MM_TM 64    // output rows per threadgroup: multiple of 32 (4 simdgroups x 8)
+#define MM_TN 32    // output columns (prompt tokens) per threadgroup: multiple of 8
 #define MM_TK 32    // k-step: one q8_0/q4_0/mxfp4 block, and a q4_K sub-block
+// Row-groups per simdgroup and column-groups per tile; every simdgroup owns a
+// distinct MM_RPS-tall slice of the weight tile and all four cover the same
+// MM_CG activation column-groups, for MM_RPS*MM_CG accumulators per thread.
+#define MM_RPS (MM_TM / 32)
+#define MM_CG  (MM_TN / 8)
 
 struct mm_args {
     int   n_in, n_out, n_col;
@@ -722,46 +732,69 @@ struct mm_args {
 
 // Shared prologue/epilogue; DEQ_CHUNK fills tg_w[r][0..MM_TK) for this
 // thread's row/sub-range from the type's own block layout.
+//
+// tg_w/tg_x stage in HALF, not float: the simdgroup A/B operands are loaded
+// as simdgroup_half8x8 and multiply-accumulated into a simdgroup_float8x8
+// accumulator (MSL's mixed-precision simdgroup_multiply_accumulate, the same
+// pattern llama.cpp's Metal mul_mm uses). That halves the threadgroup-memory
+// traffic per tile and doubles the matrix-unit throughput on hardware that
+// runs half-operand GEMM faster than float-operand GEMM, at the cost of a
+// half-precision rounding step on every staged weight/activation value. That
+// is exactly the trade this kernel family already answers to
+// tests/test_tc_tol.c for (see the file comment above): not bit-identical to
+// the scalar path, gated on teacher-forced logit deviation instead. The
+// output accumulator (tg_c) and the final store stay float32 — only the
+// per-tile operands round to half, not the reduction.
 #define MM_BODY(...) \
-    threadgroup float tg_w[MM_TM * MM_TK]; \
-    threadgroup float tg_x[MM_TN * MM_TK]; \
+    threadgroup half  tg_w[MM_TM * MM_TK]; \
+    threadgroup half  tg_x[MM_TN * MM_TK]; \
     threadgroup float tg_c[MM_TN * MM_TM]; \
     const int row0 = (int)tgpig.x * MM_TM; \
     const int col0 = (int)tgpig.y * MM_TN; \
     const int tid  = (int)tpitg.x; \
-    simdgroup_float8x8 acc0 = simdgroup_float8x8(0.0f); \
-    simdgroup_float8x8 acc1 = simdgroup_float8x8(0.0f); \
+    simdgroup_float8x8 acc[MM_RPS][MM_CG]; \
+    for (int rg = 0; rg < MM_RPS; rg++) \
+        for (int cg = 0; cg < MM_CG; cg++) acc[rg][cg] = simdgroup_float8x8(0.0f); \
     for (int k0 = 0; k0 < a.n_in; k0 += MM_TK) { \
-        /* 128 threads x 8 values = the 32x32 weight tile */ \
-        { \
-            int r = tid >> 2, sub = (tid & 3) * 8; \
+        /* 128 threads x 8 values/pass = one 32-row x MM_TK weight slab;
+           MM_RPS passes cover the full MM_TM-row tile */ \
+        for (int p = 0; p < MM_RPS; p++) { \
+            int r = p * 32 + (tid >> 2), sub = (tid & 3) * 8; \
             int row = row0 + r; \
-            threadgroup float *dst = tg_w + r * MM_TK + sub; \
+            threadgroup half *dst = tg_w + r * MM_TK + sub; \
             if (row < a.n_out) { __VA_ARGS__; } \
-            else { for (int j = 0; j < 8; j++) dst[j] = 0.0f; } \
+            else { for (int j = 0; j < 8; j++) dst[j] = 0.0h; } \
         } \
-        /* 128 threads x 4 values = the 16x32 activation tile */ \
+        /* 128 threads x 4 values/pass = the MM_TN x MM_TK activation tile */ \
         for (int i = tid * 4; i < MM_TN * MM_TK; i += 128 * 4) { \
             for (int j = 0; j < 4; j++) { \
                 int idx = i + j, cc = idx / MM_TK, kk = idx % MM_TK; \
-                tg_x[idx] = (col0 + cc < a.n_col) \
-                    ? x[(ulong)(col0 + cc) * a.x_stride + k0 + kk] : 0.0f; \
+                tg_x[idx] = (half)((col0 + cc < a.n_col) \
+                    ? x[(ulong)(col0 + cc) * a.x_stride + k0 + kk] : 0.0f); \
             } \
         } \
         threadgroup_barrier(mem_flags::mem_threadgroup); \
         for (int kk = 0; kk < MM_TK / 8; kk++) { \
-            simdgroup_float8x8 A0, A1, B; \
-            simdgroup_load(A0, tg_x + kk * 8, MM_TK); \
-            simdgroup_load(A1, tg_x + 8 * MM_TK + kk * 8, MM_TK); \
-            simdgroup_load(B, tg_w + (int)sgitg * 8 * MM_TK + kk * 8, MM_TK, \
-                           ulong2(0, 0), true); \
-            simdgroup_multiply_accumulate(acc0, A0, B, acc0); \
-            simdgroup_multiply_accumulate(acc1, A1, B, acc1); \
+            simdgroup_half8x8 acols[MM_CG]; \
+            for (int cg = 0; cg < MM_CG; cg++) \
+                simdgroup_load(acols[cg], tg_x + cg * 8 * MM_TK + kk * 8, MM_TK); \
+            for (int rg = 0; rg < MM_RPS; rg++) { \
+                simdgroup_half8x8 B; \
+                int wrg = (int)sgitg * MM_RPS + rg; \
+                simdgroup_load(B, tg_w + wrg * 8 * MM_TK + kk * 8, MM_TK, \
+                               ulong2(0, 0), true); \
+                for (int cg = 0; cg < MM_CG; cg++) \
+                    simdgroup_multiply_accumulate(acc[rg][cg], acols[cg], B, \
+                                                  acc[rg][cg]); \
+            } \
         } \
         threadgroup_barrier(mem_flags::mem_threadgroup); \
     } \
-    simdgroup_store(acc0, tg_c + (int)sgitg * 8, MM_TM); \
-    simdgroup_store(acc1, tg_c + 8 * MM_TM + (int)sgitg * 8, MM_TM); \
+    for (int rg = 0; rg < MM_RPS; rg++) { \
+        int wrg = (int)sgitg * MM_RPS + rg; \
+        for (int cg = 0; cg < MM_CG; cg++) \
+            simdgroup_store(acc[rg][cg], tg_c + cg * 8 * MM_TM + wrg * 8, MM_TM); \
+    } \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
     for (int idx = tid; idx < MM_TN * MM_TM; idx += 128) { \
         int cc = idx / MM_TM, rr = idx % MM_TM; \

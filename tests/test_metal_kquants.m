@@ -99,8 +99,12 @@ static bool submit(id<MTLCommandQueue> queue,
     [enc setBuffer:y offset:0 atIndex:2];
     [enc setBytes:args length:args_size atIndex:3];
     [enc setBuffer:bias offset:0 atIndex:4];
+    // MM_TILE_M/MM_TILE_N mirror MM_TM/MM_TN in kernels.metal -- see the
+    // matching comment in src/metal.m's enc_mv_n.
+    enum { MM_TILE_M = 64, MM_TILE_N = 32 };
     MTLSize grid = mm
-        ? MTLSizeMake((n_out + 31) / 32, (n_col + 15) / 16, 1)
+        ? MTLSizeMake((n_out + MM_TILE_M - 1) / MM_TILE_M,
+                      (n_col + MM_TILE_N - 1) / MM_TILE_N, 1)
         : MTLSizeMake((n_out + 3) / 4, (n_col + col_tile - 1) / col_tile, 1);
     [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     [enc endEncoding];

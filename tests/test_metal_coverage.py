@@ -32,6 +32,7 @@ Two more coverage notes, since neither is obvious from the file:
 * the split expert layout and the shared always-on expert are both refused by
   Metal today. Untested, that refusal could silently become a wrong answer.
 """
+import os
 import pathlib
 import subprocess
 import sys
@@ -90,10 +91,22 @@ def moe_fixtures(tmp_path_factory):
 
 
 def _run(runner_bin, model, mode):
+    # RUNNER_METAL_MM=0 pins the matvec path, which IS byte-identical to the
+    # CPU by contract. Every Makefile smoke that does this same CPU-vs-"auto"
+    # byte comparison (test-metal-moe, test-metal-swa, test-metal-eseries, ...)
+    # already sets this; this file did not, and that gap is exactly what let a
+    # 2026-08-12 MM staging change (float -> half in the tiled prefill GEMM,
+    # legal under its own tolerance gate, tests/test_tc_tol.c) turn the
+    # `eseries` case here red. The tiled GEMM is documented in kernels.metal as
+    # deliberately NOT bit-identical to the scalar path -- this file's job is
+    # geometry/dispatch coverage (does Metal have a working kernel for this
+    # shape), not the MM kernel's numeric behavior, which has its own gate.
+    env = dict(os.environ, RUNNER_METAL_MM="0")
     return subprocess.run(
         [runner_bin, "-m", str(model), "-p", PROMPT, "-n", "12", "--temp", "0",
          "--gpu", mode],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300,
+        env=env)
 
 
 def _both(runner_bin, model):
