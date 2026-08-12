@@ -50,6 +50,13 @@ typedef struct {
     uint64_t    n_tensors, n_kv;
     gguf_kv    *kv;
     gguf_tensor *tensors;
+    // Header-only parse (gguf_open_header): the data section was never
+    // required to be present, every tensor's `data` is NULL, and `data_bytes`
+    // is what the header SAYS the data section spans. Nothing may read tensor
+    // contents through such a handle -- the NULL is deliberate, so a mistake
+    // faults instead of reading whatever the mapping happens to hold.
+    bool        header_only;
+    uint64_t    data_bytes;
 } gguf_file;
 
 bool         gguf_open(gguf_file *g, const char *path);
@@ -63,5 +70,16 @@ bool         gguf_get_bool(gguf_file *g, const char *key, bool dflt);
 const char  *gguf_get_str (gguf_file *g, const char *key, const char *dflt);
 gguf_tensor *gguf_find_tensor(gguf_file *g, const char *name);
 uint64_t     gguf_mapped_size(const gguf_file *g);
+// Parse metadata and tensor DESCRIPTORS from a file whose data section may be
+// absent or short -- a header-only download, or the first few megabytes of a
+// remote file. This is a separate read path on purpose: gguf_open() refuses a
+// file whose data section does not cover the tensors it declares, and that
+// refusal is a safety property (it is what stops a truncated or crafted file
+// from pointing a tensor at memory outside the mapping). Nothing here weakens
+// it. This path instead answers a different question -- "what would this file
+// need if I downloaded it" -- and marks the handle so tensor data cannot be
+// read through it. Split-GGUF continuation is deliberately not followed:
+// callers get this part's header and the split metadata to reason with.
+bool         gguf_open_header(gguf_file *g, const char *path);
 
 #endif // RUNNER_GGUF_H

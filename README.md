@@ -113,7 +113,9 @@ practice, most first.
   GPU limits, CPU and GPU quant lists, admitted architectures, placement modes,
   and model-count limits. A supervisor, tray controller, or CI job can reject an
   incompatible placement before dispatch, which removes a whole class of
-  load-wait-fail-retry loops.
+  load-wait-fail-retry loops. For a specific file, `--fit` answers the same
+  question from the model's GGUF header — the first few megabytes — so a ranged
+  read decides whether the rest of the download is worth starting.
 - **Constrained decisions come with a confidence signal.** `choice_logprobs`
   records each JSON-schema branch as legal alternatives, a posterior
   renormalized over them, and the probed probability mass — how confident the
@@ -324,9 +326,48 @@ flags into unrelated feature sections.
 | `--prune-experts FILE` | Apply a per-layer MoE expert keep-list while rewriting. |
 | `--bench-json` | Run the built-in prompt/decode benchmark and print JSON metrics. |
 | `--caps` | Print machine, backend, quant, architecture, placement, and sampling capabilities as JSON. |
+| `--fit PATH` | Estimate whether a GGUF fits this machine and exit. Reads only the header, so a partial download answers the question. |
 | `--version` | Print the version and exit. |
 | `--parent-pid N` | Exit when process `N` dies; intended for supervisor cleanup. |
 | `-v` | Print verbose model and memory information. |
+
+#### Deciding before you download
+
+`--fit` answers "will this run here" from a model's GGUF **header**, which is
+the first few megabytes of the file:
+
+```console
+$ runner --fit Trinity-Nano-Preview-Q4_K_M.gguf
+fit: Trinity-Nano-Preview-Q4_K_M.gguf
+  model         afmoe, 56 layers, MoE 128 experts, 8 used
+  weights       3.53 GiB
+  hot set       0.66 GiB  (only the routed experts a token actually uses)
+  kv cache      0.22 GiB at ctx 4096, f16   |  0.12 GiB with --kv q8
+  available RAM 3.25 GiB right now
+  verdict       FITS — 2.37 GiB to spare at ctx 4096
+```
+
+The verdict is `FITS`, `FITS WITH --kv q8`, or `PAGES`, always with the
+arithmetic that produced it. `-c N` sizes the KV estimate for the context you
+actually intend to run. For a sparse MoE the verdict uses the **hot set**, not
+the file size, because only the routed experts a token selects are touched —
+which is why a 3.53 GiB file can be a comfortable fit in 3.25 GiB.
+
+The runner does not download anything, and `--fit` is not a reason to teach it
+HTTP. Fetch a header yourself with a ranged read — 16 MiB covers a large
+vocabulary; smaller models need far less:
+
+```sh
+curl -r 0-16777215 -L -o head.gguf \
+  https://huggingface.co/ORG/REPO/resolve/main/MODEL.gguf
+runner --fit head.gguf
+```
+
+The sizes reported from a truncated header are the **whole** model's, because
+they come from the tensor descriptors rather than from how many bytes arrived.
+Loading such a file still fails, as it should: the normal loader refuses a GGUF
+whose data section does not cover the tensors it declares, and `--fit` reads
+through a separate path rather than relaxing that check.
 
 ### Usage behavior
 

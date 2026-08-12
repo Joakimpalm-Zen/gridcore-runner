@@ -106,8 +106,9 @@ static const char *first_duplicate_inplace(const char **s, uint64_t n) {
     return NULL;
 }
 
-static bool gguf_open_one(gguf_file *g, const char *path) {
+static bool gguf_open_one_x(gguf_file *g, const char *path, bool header_only) {
     memset(g, 0, sizeof(*g));
+    g->header_only = header_only;
     g->map = plat_mmap_ro(path, &g->map_size);
     if (!g->map || g->map_size < 24) {
         // "cannot open X as a GGUF file" reads as "this file is corrupt", but
@@ -217,7 +218,11 @@ static bool gguf_open_one(gguf_file *g, const char *path) {
     uint64_t aligned_end;
     if (!checked_u64_add(header_end, align - 1, &aligned_end)) goto invalid;
     uint64_t data_start = aligned_end & ~(align - 1);
-    if (data_start > g->map_size) goto invalid;
+    // The header itself must still be entirely present, in BOTH modes: a
+    // header-only parse that read past its own mapping would be reading
+    // garbage, not being tolerant.
+    if (data_start > g->map_size && !header_only) goto invalid;
+    if (data_start > g->map_size && header_only) goto invalid;
 
     for (uint64_t i = 0; i < g->n_tensors; i++) {
         gguf_tensor *t = &g->tensors[i];
@@ -240,12 +245,32 @@ static bool gguf_open_one(gguf_file *g, const char *path) {
             goto fail;
         }
         uint64_t off = (uint64_t)(uintptr_t)t->data;
+        if (header_only) {
+            // The point of this mode: the bytes need not be here. Record what
+            // the header claims the data section spans, and leave `data` NULL
+            // so nothing can read through it by accident. Still reject
+            // arithmetic that cannot describe a real file.
+            uint64_t end;
+            if (!checked_u64_add(off, t->nbytes, &end)) {
+                fprintf(stderr, "error: invalid tensor metadata for %s\n", t->name);
+                goto fail;
+            }
+            if (end > g->data_bytes) g->data_bytes = end;
+            t->data = NULL;
+            continue;
+        }
         if (off > g->map_size - data_start ||
             t->nbytes > g->map_size - data_start - off) {
             fprintf(stderr, "error: invalid tensor metadata for %s\n", t->name);
             goto fail;
         }
         t->data = (uint8_t *)g->map + (size_t)data_start + (size_t)off;
+    }
+    if (header_only) {
+        uint64_t total;
+        if (!checked_u64_add(data_start, g->data_bytes, &total)) goto invalid;
+        g->mapped_size = total;      // what the WHOLE file would be
+        return true;
     }
     g->mapped_size = g->map_size;
     return true;
@@ -255,6 +280,14 @@ invalid:
 fail:
     gguf_close(g);
     return false;
+}
+
+static bool gguf_open_one(gguf_file *g, const char *path) {
+    return gguf_open_one_x(g, path, false);
+}
+
+bool gguf_open_header(gguf_file *g, const char *path) {
+    return gguf_open_one_x(g, path, true);
 }
 
 static bool split_part_path(char *out, size_t cap, const char *path,

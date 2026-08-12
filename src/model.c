@@ -461,6 +461,96 @@ uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert) {
     return wb;
 }
 
+// ------------------------------------------------- pre-download fit check
+//
+// "Will this model run on this machine?" answered from a GGUF HEADER, before
+// the weights exist locally. The arithmetic below deliberately re-derives what
+// model_hot_set_bytes() and model_kv_row_bytes() compute, because those take a
+// BOUND model_t -- they need the layer table, which needs the tensors, which
+// is exactly what a header-only file does not have.
+//
+// Deliberately NOT in this file's job: fetching anything. The runner does not
+// speak HTTP, and a fit check is not a reason to teach it. `--fit` reads a
+// local path; the README documents the one-line ranged read that produces a
+// header-only file from a URL.
+static uint64_t fit_routed_expert_bytes(const gguf_file *g) {
+    // Header-only, so this matches on NAME rather than the layer table. The
+    // stacked expert banks are the `..._exps.weight` tensors; the router
+    // (ffn_gate_inp) and any shared expert are excluded for the same reason
+    // layer_routed_expert_bytes() excludes them -- every token touches those.
+    uint64_t wb = 0;
+    for (uint64_t i = 0; i < g->n_tensors; i++) {
+        const char *n = g->tensors[i].name;
+        size_t len = strlen(n);
+        const char *suffix = "_exps.weight";
+        size_t sl = strlen(suffix);
+        if (len >= sl && strcmp(n + len - sl, suffix) == 0)
+            wb += g->tensors[i].nbytes;
+    }
+    return wb;
+}
+
+bool model_fit_report(const gguf_file *g, int n_ctx_want, model_fit *out) {
+    memset(out, 0, sizeof(*out));
+    char key[128];
+    const char *arch = gguf_get_str(g, "general.architecture", "");
+    if (!arch || !*arch) return false;
+    #define FK(fmt) (snprintf(key, sizeof(key), "%s." fmt, arch), key)
+
+    out->arch      = arch;
+    out->n_layer   = (int)gguf_get_u32(g, FK("block_count"), 0);
+    int n_embd     = (int)gguf_get_u32(g, FK("embedding_length"), 0);
+    int n_head     = (int)gguf_get_u32(g, FK("attention.head_count"), 0);
+    int n_head_kv  = (int)gguf_get_u32(g, FK("attention.head_count_kv"), n_head);
+    int head_dim   = (int)gguf_get_u32(g, FK("attention.key_length"),
+                                       n_head > 0 ? n_embd / n_head : 0);
+    int train_ctx  = (int)gguf_get_u32(g, FK("context_length"), 0);
+    out->n_expert      = (int)gguf_get_u32(g, FK("expert_count"), 0);
+    out->n_expert_used = (int)gguf_get_u32(g, FK("expert_used_count"), 0);
+    out->train_ctx     = train_ctx;
+
+    if (out->n_layer <= 0 || head_dim <= 0 || n_head_kv <= 0) return false;
+
+    // Context: what the caller asked for, else the loader's own default.
+    out->n_ctx = n_ctx_want > 0 ? n_ctx_want
+               : (train_ctx > 0 && train_ctx < 4096 ? train_ctx : 4096);
+
+    out->weights = gguf_mapped_size(g);
+
+    uint64_t routed = fit_routed_expert_bytes(g);
+    if (out->n_expert > 0 && out->n_expert_used > 0 &&
+        out->n_expert_used < out->n_expert && routed && routed <= out->weights) {
+        out->hot = out->weights - routed +
+                   routed * (uint64_t)out->n_expert_used / (uint64_t)out->n_expert;
+        out->sparse = true;
+    } else {
+        out->hot = out->weights;
+    }
+
+    // Same shape as model_kv_row_bytes: K and V, per layer, per token. A model
+    // with per-layer KV geometry (gemma-4 shared KV, MLA) will differ from
+    // this; it is stated as an upper-bound estimate rather than quietly
+    // presented as exact.
+    uint64_t kv_dim = (uint64_t)n_head_kv * (uint64_t)head_dim;
+    out->kv_f16_per_tok = 2ull * (uint64_t)out->n_layer * kv_dim * 2ull;
+    out->kv_q8_per_tok  = kv_dim % 32 == 0
+        ? 2ull * (uint64_t)out->n_layer * (kv_dim / 32) * 34ull
+        : 0;                                   // q8 KV needs head_dim % 32 == 0
+    out->kv_f16 = out->kv_f16_per_tok * (uint64_t)out->n_ctx;
+    out->kv_q8  = out->kv_q8_per_tok  * (uint64_t)out->n_ctx;
+
+    out->available = plat_ram_available_bytes();
+    #undef FK
+    return true;
+}
+
+const char *model_fit_verdict(const model_fit *f) {
+    if (!f->available) return "UNKNOWN";
+    if (f->hot + f->kv_f16 <= f->available) return "FITS";
+    if (f->kv_q8 && f->hot + f->kv_q8 <= f->available) return "FITS WITH --kv q8";
+    return "PAGES";
+}
+
 uint64_t model_hot_set_bytes(const model_t *m) {
     if (m->n_expert <= 0 || m->n_expert_used <= 0 ||
         m->n_expert_used >= m->n_expert) return 0;      // dense, or not sparse

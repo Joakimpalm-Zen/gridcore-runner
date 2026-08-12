@@ -239,6 +239,8 @@ static void usage(const char *prog) {
         "  --draft-k N    draft tokens per round (default 4)\n"
         "  --bench-json   run a small decode benchmark and print JSON metrics\n"
         "  --caps         print machine capabilities as JSON and exit\n"
+        "  --fit PATH     estimate whether a GGUF fits this machine and exit;\n"
+        "                 reads only the header, so a partial download works\n"
         "  --version      print the runner version and exit\n"
         "  --parent-pid N exit when process N dies (supervisor cleanup)\n"
         "  -v             verbose model info\n",
@@ -278,6 +280,87 @@ static int chat_cb(void *ud, const char *bytes, int n) {
     return think_feed(&c->ts, bytes, n, chat_emit, c);
 }
 
+// --fit: what a GGUF would cost on this machine, from its HEADER alone.
+//
+// The point is to answer "should I download this" before spending the
+// bandwidth, so it reads through gguf_open_header() and works on a file that
+// is only a few megabytes of header. It does NOT fetch anything: the runner
+// does not speak HTTP and a fit check is not a reason to teach it. The README
+// documents the ranged-read one-liner that turns a URL into a header file.
+static void fit_gib(char *buf, size_t n, uint64_t bytes) {
+    snprintf(buf, n, "%.2f GiB", (double)bytes / (double)(1ull << 30));
+}
+
+static int run_fit_check(const char *path, int n_ctx_want) {
+    gguf_file g;
+    if (!gguf_open_header(&g, path)) return 1;   // already reported why
+
+    model_fit f;
+    if (!model_fit_report(&g, n_ctx_want, &f)) {
+        fprintf(stderr, "error: %s does not carry the geometry a fit check "
+                        "needs (architecture, block_count, head counts)\n", path);
+        gguf_close(&g);
+        return 1;
+    }
+
+    char w[32], h[32], kf[32], kq[32], av[32];
+    fit_gib(w, sizeof w, f.weights);
+    fit_gib(h, sizeof h, f.hot);
+    fit_gib(kf, sizeof kf, f.kv_f16);
+    fit_gib(kq, sizeof kq, f.kv_q8);
+    fit_gib(av, sizeof av, f.available);
+
+    uint32_t split = gguf_get_u32(&g, "split.count", 0);
+    printf("fit: %s\n", path);
+    printf("  model         %s, %d layers", f.arch, f.n_layer);
+    if (f.sparse) printf(", MoE %d experts, %d used", f.n_expert, f.n_expert_used);
+    printf("\n");
+    if (split > 1)
+        printf("  NOTE          this is part 1 of a %u-part split; the sizes "
+               "below are THIS PART only\n", split);
+    printf("  weights       %s\n", w);
+    if (f.sparse)
+        printf("  hot set       %s  (only the routed experts a token actually "
+               "uses)\n", h);
+    printf("  kv cache      %s at ctx %d, f16", kf, f.n_ctx);
+    if (f.kv_q8) printf("   |  %s with --kv q8", kq);
+    else         printf("   |  --kv q8 unavailable (head_dim is not a multiple of 32)");
+    printf("\n");
+    if (f.available) printf("  available RAM %s right now\n", av);
+    else             printf("  available RAM unknown on this platform\n");
+
+    const char *v = model_fit_verdict(&f);
+    printf("  verdict       %s", v);
+    if (!f.available) {
+        printf("\n                available RAM could not be read, so this is "
+               "sizes only\n");
+    } else if (!strcmp(v, "FITS")) {
+        char slack[32];
+        fit_gib(slack, sizeof slack, f.available - f.hot - f.kv_f16);
+        printf(" — %s to spare at ctx %d\n", slack, f.n_ctx);
+    } else if (!strcmp(v, "FITS WITH --kv q8")) {
+        char over[32];
+        fit_gib(over, sizeof over, f.hot + f.kv_f16 - f.available);
+        printf(" — an f16 cache is %s over; q8 halves it\n", over);
+    } else {
+        char over[32];
+        fit_gib(over, sizeof over, f.hot + (f.kv_q8 ? f.kv_q8 : f.kv_f16)
+                                   - f.available);
+        printf(" — %s over even with the smallest cache. Every token would "
+               "page from disk.\n", over);
+        printf("                fixes: a smaller quantization, a shorter -c, "
+               "or --gpu-layers to split it\n");
+    }
+    if (f.sparse)
+        printf("  note          the verdict uses the hot set; a sparse MoE runs "
+               "usefully while the file exceeds RAM\n");
+    printf("  note          KV is an upper bound: models with per-layer KV "
+           "geometry (shared KV, MLA) use less\n");
+
+    gguf_close(&g);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *model_path = NULL, *prompt = NULL, *system_prompt = NULL;
     char *owned_prompt = NULL;
@@ -291,6 +374,7 @@ int main(int argc, char **argv) {
     int draft_k = 4;
     bool interactive = false, verbose = false, no_bos = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
+    const char *fit_path = NULL;
     bool no_tray = false;
     int thinking = THINK_DEFAULT;
     bool bench_json = false;
@@ -425,6 +509,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--yield-on-request")) mp.yield_on_request = true;
         else if (!strcmp(a, "--parent-pid")) parent_pid = (long)int_arg(a, NEXT, 1, LONG_MAX);
         else if (!strcmp(a, "--caps")) caps = true;
+        else if (!strcmp(a, "--fit")) fit_path = NEXT;
         else if (!strcmp(a, "--version")) { printf("runner %s\n", RUNNER_VERSION); return 0; }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unknown option %s\n", a); usage(argv[0]); return 1; }
@@ -434,6 +519,8 @@ int main(int argc, char **argv) {
         n_threads = plat_cpu_count() * reserve_cpu_pct / 100;
         if (n_threads < 1) n_threads = 1;
     }
+    if (fit_path) return run_fit_check(fit_path, mp.n_ctx);
+
     if (caps) {
         char gname[128];
         bool has_gpu = gpu_available(gname, sizeof(gname));

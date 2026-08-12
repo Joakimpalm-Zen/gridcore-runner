@@ -593,6 +593,25 @@ uint64_t model_layer_expert_bytes(const layer_t *ly, int n_expert);
 // (returned as 0 — the caller already has the file size), or everything except
 // the unrouted expert banks for a sparse MoE
 uint64_t model_hot_set_bytes(const model_t *m);
+
+// ---------------------------------------------------- pre-download fit check
+// What a GGUF would cost on this machine, computed from its HEADER alone so
+// the question can be answered before the weights are downloaded. Pair with
+// gguf_open_header(); see model_fit_report()'s comment for what is estimated
+// rather than exact.
+typedef struct {
+    const char *arch;
+    int      n_layer, n_ctx, train_ctx, n_expert, n_expert_used;
+    bool     sparse;             // routed-MoE: hot set is smaller than weights
+    uint64_t weights;            // whole file, per the header
+    uint64_t hot;                // touched per token (== weights when dense)
+    uint64_t kv_f16_per_tok, kv_q8_per_tok;
+    uint64_t kv_f16, kv_q8;      // at n_ctx; kv_q8 == 0 when q8 KV is illegal
+    uint64_t available;          // RAM available now, 0 = could not tell
+} model_fit;
+
+bool        model_fit_report(const gguf_file *g, int n_ctx_want, model_fit *out);
+const char *model_fit_verdict(const model_fit *f);
 // residency warning text; false when no warning is warranted (see model.c)
 bool     model_residency_warning(uint64_t need, uint64_t hot, uint64_t have,
                                  bool locked, char *buf, size_t n);
