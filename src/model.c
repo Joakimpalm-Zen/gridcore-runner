@@ -2182,6 +2182,32 @@ int model_autofit_clamp(long long best, int n_ctx_train) {
     return n;
 }
 
+// Default prompt batch when no `-b` is given. The Metal tiled prefill GEMM
+// (kernels.metal k_mm_*, MM_TN columns per threadgroup) gets more reuse out
+// of every staged weight tile the more columns are in flight per dispatch, so
+// a bigger batch is a real prefill win on the GPU path: measured on an M1
+// (e2b-q40, -c 1024, pre-MM_TN-widening kernel), `-b 512` gave +9%
+// prompt_tok_s over the old flat default of 64. CPU-only decode has no tiled
+// kernel to feed, so a bigger default there would only cost scratch memory
+// for nothing -- it stays at 64.
+//
+// That scratch is real, though: every B-scaled buffer below (x/xb/xb2/q/
+// k_tmp/v_tmp/hb/hb2, and for MoE the grouped-prefill buffers) grows linearly
+// with the batch, and measured peak process footprint on e2b-q40 went
+// 250 MB (b=64) -> 524 MB (b=256) -> 897 MB (b=512). On the shared 8 GB M1
+// this was measured on, free RAM alone swung from ~2.4 GB to ~470 MB just
+// from other desktop activity between two `vm_stat` calls minutes apart, so
+// unconditionally defaulting to 512 would be a real eviction risk exactly on
+// the machine this lever targets. Scale the default down instead of ignoring
+// the box's actual headroom.
+static int model_gpu_batch_default(void) {
+    uint64_t avail = plat_ram_available_bytes();
+    if (!avail) return 512;                       // unmeasurable: assume fine
+    if (avail < (uint64_t)1536 << 20) return 64;   // < 1.5 GB free: no change
+    if (avail < (uint64_t)4096 << 20) return 256;  // tight: half the win
+    return 512;
+}
+
 static bool model_alloc_runtime(model_t *m, const model_params *p) {
     // The gguf handle and the architecture name come off the model rather than
     // out of the bind function's locals, because on a shared-weights hit the
@@ -2257,7 +2283,8 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
     }
     if (n_ctx <= 0) n_ctx = m->n_ctx_train < 4096 ? m->n_ctx_train : 4096;
     m->n_ctx = n_ctx;
-    m->n_batch = p->n_batch > 0 ? p->n_batch : 64;
+    int batch_default = p->gpu_mode == GPU_AUTO ? model_gpu_batch_default() : 64;
+    m->n_batch = p->n_batch > 0 ? p->n_batch : batch_default;
     if (m->n_batch > n_ctx) m->n_batch = n_ctx;
     int q_dim = 0, kv_dim = 0;
     for (int l = 0; l < m->n_layer; l++) {

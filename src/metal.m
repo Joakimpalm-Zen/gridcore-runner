@@ -1137,8 +1137,14 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
         [e setBuffer:y offset:y_off atIndex:2];
         [e setBytes:&ma length:sizeof(ma) atIndex:3];
         [e setBuffer:bias ? bias : g->dummy offset:0 atIndex:4];
-        [e dispatchThreadgroups:MTLSizeMake((n_out + 31) / 32,
-                                            (n_col + 15) / 16, 1)
+        // MM_TILE_M/MM_TILE_N mirror MM_TM/MM_TN in kernels.metal -- this file
+        // cannot see that #define (the shader is compiled from an embedded
+        // source string at runtime, not by clang alongside this file), so the
+        // two are kept in step by hand, the same way mv_args/mm_args already
+        // are (see the struct comment above).
+        enum { MM_TILE_M = 64, MM_TILE_N = 32 };
+        [e dispatchThreadgroups:MTLSizeMake((n_out + MM_TILE_M - 1) / MM_TILE_M,
+                                            (n_col + MM_TILE_N - 1) / MM_TILE_N, 1)
           threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         return;
     }
