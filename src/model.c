@@ -490,7 +490,7 @@ static uint64_t fit_routed_expert_bytes(const gguf_file *g) {
     return wb;
 }
 
-bool model_fit_report(const gguf_file *g, int n_ctx_want, model_fit *out) {
+bool model_fit_report(gguf_file *g, int n_ctx_want, model_fit *out) {
     memset(out, 0, sizeof(*out));
     char key[128];
     const char *arch = gguf_get_str(g, "general.architecture", "");

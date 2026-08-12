@@ -621,6 +621,30 @@ typedef struct {
     jv         *req;         // echoed request fields
 } resp_doc;
 
+// Cumulative work counters (declared in server_int.h). Microseconds rather
+// than a double because there is no portable atomic double, and this only
+// needs summing and one division at read time.
+static atomic_ullong g_total_prompt_tokens;
+static atomic_ullong g_total_gen_tokens;
+static atomic_ullong g_total_gen_micros;
+
+void server_record_work(int n_prompt, int n_gen, double gen_seconds) {
+    if (n_prompt > 0)
+        atomic_fetch_add(&g_total_prompt_tokens, (unsigned long long)n_prompt);
+    if (n_gen > 0)
+        atomic_fetch_add(&g_total_gen_tokens, (unsigned long long)n_gen);
+    if (gen_seconds > 0)
+        atomic_fetch_add(&g_total_gen_micros,
+                         (unsigned long long)(gen_seconds * 1e6));
+}
+
+void server_work_totals(unsigned long long *prompt_tokens,
+                        unsigned long long *gen_tokens, double *gen_seconds) {
+    *prompt_tokens = atomic_load(&g_total_prompt_tokens);
+    *gen_tokens    = atomic_load(&g_total_gen_tokens);
+    *gen_seconds   = (double)atomic_load(&g_total_gen_micros) / 1e6;
+}
+
 // One rendering of runner_telemetry for every surface that carries it — chat,
 // completions, responses (streamed and buffered) and messages. They report the
 // same facts, so they share the one place those facts are spelled rather than
@@ -1628,6 +1652,9 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     double gtime;
     int n_gen = sched_generate(s, logits, max_tokens, gen_collect, &g, &gtime,
                                req_deadline);
+    // The one place every surface's generation passes through, so /health's
+    // cumulative counters see chat, completions, responses and messages alike.
+    server_record_work(n_prompt, n_gen, gtime);
     think_finish(&g.ts, gen_emit, &g);
     // generation ended without a stop match: the withheld partial-match
     // tail was ordinary output after all

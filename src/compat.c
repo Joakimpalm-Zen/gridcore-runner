@@ -155,6 +155,18 @@ uint64_t plat_major_faults(void) {
     return (uint64_t)pmc.PageFaultCount;
 }
 
+uint64_t plat_proc_rss_bytes(void) {
+    PROCESS_MEMORY_COUNTERS pmc = { .cb = sizeof(pmc) };
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0;
+    return (uint64_t)pmc.WorkingSetSize;
+}
+
+uint64_t plat_proc_peak_rss_bytes(void) {
+    PROCESS_MEMORY_COUNTERS pmc = { .cb = sizeof(pmc) };
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) return 0;
+    return (uint64_t)pmc.PeakWorkingSetSize;
+}
+
 uint64_t plat_ram_available_bytes(void) {
     MEMORYSTATUSEX ms = { .dwLength = sizeof(ms) };
     if (!GlobalMemoryStatusEx(&ms)) return 0;
@@ -437,6 +449,44 @@ uint64_t plat_major_faults(void) {
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
     return (uint64_t)ru.ru_majflt;
+}
+
+// getrusage gives the PEAK on both, and disagrees about units: ru_maxrss is
+// kilobytes on Linux and bytes on the BSDs including macOS. Getting that wrong
+// is a factor of 1024 in a number an operator sizes machines with, so the two
+// are spelled out rather than assumed.
+uint64_t plat_proc_peak_rss_bytes(void) {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+#ifdef __linux__
+    return (uint64_t)ru.ru_maxrss * 1024ull;
+#else
+    return (uint64_t)ru.ru_maxrss;
+#endif
+}
+
+// CURRENT resident set, which getrusage does not carry at all.
+uint64_t plat_proc_rss_bytes(void) {
+#ifdef __APPLE__
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS) return 0;
+    return (uint64_t)info.resident_size;
+#elif defined(__linux__)
+    // statm field 2 is resident pages. /proc is the only portable-enough
+    // source; a kernel without it reports 0 rather than a guess.
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    unsigned long long total = 0, resident = 0;
+    int got = fscanf(f, "%llu %llu", &total, &resident);
+    fclose(f);
+    if (got != 2) return 0;
+    long psz = sysconf(_SC_PAGESIZE);
+    return psz > 0 ? (uint64_t)resident * (uint64_t)psz : 0;
+#else
+    return plat_proc_peak_rss_bytes();   // best available; peak >= current
+#endif
 }
 
 uint64_t plat_ram_available_bytes(void) {

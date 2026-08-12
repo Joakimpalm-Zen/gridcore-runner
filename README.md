@@ -550,7 +550,7 @@ non-loopback authorities.
 | `GET /v1/capabilities` | Active model, sampling preset, and optional Xyntetik agent profile. |
 | `GET /v1/runner/prefix-cache` | Prefix-cache size, limits, and counters. |
 | `POST /v1/runner/prefix-cache/clear` | Release cached prefixes without unloading the model. |
-| `GET /health` | Server and resident-model health. |
+| `GET /health` | Server and resident-model health, plus this process's `rss_bytes`/`peak_rss_bytes` and cumulative `tokens_prompt`, `tokens_generated` and `generate_seconds`. |
 | `POST /unload` | Release resident model and draft memory; the next request reloads on demand. |
 
 `GET /unload` is deliberately refused with `405`; unloading is a state change.
@@ -800,6 +800,20 @@ image, so it follows light and dark menu bars.
 
 The ring is segmented rather than closed because a menu-bar template image
 cannot animate: four gaps read as motion where a circle reads as a badge.
+
+`/health` also carries what a supervisor needs to budget several runners on
+one machine. `rss_bytes` is this **process's** resident set — weights, KV
+cache, activations and allocator overhead together — which is the number a
+machine is sized against and which no per-mapping measure accounts for;
+`peak_rss_bytes` is its high-water mark. `tokens_prompt`, `tokens_generated`
+and `generate_seconds` are cumulative monotonic totals across every API
+surface.
+
+Those are deliberately raw counters rather than a tokens-per-second field: a
+rate needs an averaging window, and the runner has no business choosing one for
+a consumer whose window differs. Difference them over your own interval. The
+endpoint does not count its own requests, so polling it on a timer does not
+show up as work.
 
 "Loaded" and "running" are told apart by `active_requests` from `/health`,
 polled on the same 5-second timer that refreshes the icon — so a request

@@ -357,7 +357,7 @@ static void handle_embeddings(slot_t *s, sock_t fd, jv *req) {
 // /health and /v1/models read only startup-immutable strings plus an atomic
 // resident snapshot, so they are safe to answer from the accept thread with no lock
 static void send_health(sock_t fd) {
-    char b[384];
+    char b[640];
     int n, res = resident_load();
     // Inference requests in flight. "A model is loaded" and "the model is
     // working" look identical from outside the process, and the tray needs to
@@ -367,18 +367,35 @@ static void send_health(sock_t fd) {
     // counted (the increment at dispatch covers the inference routes only), so
     // a poller never sees its own request here.
     int active = atomic_load(&SV.active_requests);
+    // Process cost and cumulative work, for a supervisor budgeting several
+    // runners. RSS is the process total -- weights, KV cache, activations and
+    // allocator overhead -- which is the number a machine is sized against and
+    // which no mapping-level measure accounts for. The token and second totals
+    // are monotonic so a dashboard can difference them over its own window.
+    unsigned long long wp, wg; double ws;
+    server_work_totals(&wp, &wg, &ws);
+    char m[256];
+    snprintf(m, sizeof(m),
+             ",\"rss_bytes\":%llu,\"peak_rss_bytes\":%llu,"
+             "\"tokens_prompt\":%llu,\"tokens_generated\":%llu,"
+             "\"generate_seconds\":%.6f",
+             (unsigned long long)plat_proc_rss_bytes(),
+             (unsigned long long)plat_proc_peak_rss_bytes(),
+             wp, wg, ws);
+
     if (SV.n_reg > 0 && res >= 0) {
         char esc[192];
         json_escape(SV.reg[res].name, strlen(SV.reg[res].name), esc, sizeof(esc));
         n = snprintf(b, sizeof(b),
                      "{\"status\":\"ok\",\"resident\":\"%s\","
-                     "\"active_requests\":%d}", esc, active);
+                     "\"active_requests\":%d%s}", esc, active, m);
     } else if (SV.n_reg > 0) {
         n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"resident\":null,"
-                                   "\"active_requests\":%d}", active);
+                                   "\"active_requests\":%d%s}", active, m);
     } else {
-        n = snprintf(b, sizeof(b), "{\"status\":\"ok\",\"active_requests\":%d}",
-                     active);
+        n = snprintf(b, sizeof(b),
+                     "{\"status\":\"ok\",\"active_requests\":%d%s}",
+                     active, m);
     }
     send_response(fd, 200, "application/json", b, n);
 }

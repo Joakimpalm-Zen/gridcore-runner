@@ -59,6 +59,13 @@ void        plat_munlock(void *p, size_t size);
 // platform will not say. This is the direct answer to "is the model resident",
 // which model *file size* cannot give: residency is a property of the moment.
 double      plat_resident_fraction(const void *p, size_t size);
+// Resident set of THIS process, in bytes, and the high-water mark; 0 when the
+// platform will not say. Distinct from plat_resident_fraction, which asks how
+// much of one MAPPING is in memory: a supervisor budgeting RAM across several
+// runners needs the process total, including the KV cache, activations and
+// allocator overhead that no mapping accounts for.
+uint64_t    plat_proc_rss_bytes(void);
+uint64_t    plat_proc_peak_rss_bytes(void);
 
 // Major faults this process has taken — page-ins that went to disk. The delta
 // across a request is the exact mechanism behind a paging stall, which beats

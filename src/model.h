@@ -610,7 +610,7 @@ typedef struct {
     uint64_t available;          // RAM available now, 0 = could not tell
 } model_fit;
 
-bool        model_fit_report(const gguf_file *g, int n_ctx_want, model_fit *out);
+bool        model_fit_report(gguf_file *g, int n_ctx_want, model_fit *out);
 const char *model_fit_verdict(const model_fit *f);
 // residency warning text; false when no warning is warranted (see model.c)
 bool     model_residency_warning(uint64_t need, uint64_t hot, uint64_t have,

@@ -90,6 +90,19 @@ typedef struct {
 
 extern server_state SV;
 
+// Cumulative work done by this process, for a capacity dashboard. The state
+// lives in completion.c, beside the single place every surface's generation
+// passes through -- not in server_state, because the tools that link the
+// completion path without the server (test-responses-sm) must still resolve
+// the recording call.
+//
+// Raw monotonic totals on purpose: a tok/s field would bake in an averaging
+// window the runner has no business choosing, and would be wrong for every
+// consumer whose window differs. The engine measures; the suite presents.
+void server_record_work(int n_prompt, int n_gen, double gen_seconds);
+void server_work_totals(unsigned long long *prompt_tokens,
+                        unsigned long long *gen_tokens, double *gen_seconds);
+
 // swap_to results below 0: the name matched no registry entry (a caller
 // typo -- 400) vs the entry exists but its model failed to load (a broken
 // model -- 5xx) vs the load was discarded because /unload or shutdown arrived
