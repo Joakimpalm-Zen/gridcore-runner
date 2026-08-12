@@ -5,7 +5,7 @@ is in **alpha**; the HTTP protocol and CLI may still change between alpha
 releases. Entries below the rename keep the names that were true when they
 were written.
 
-## Unreleased (since v0.1.15-alpha)
+## v0.1.16-alpha — 2026-08-12
 
 Four days, three overnight measurement campaigns, and one external
 evaluation's worth of findings. Grouped by what a user notices first.
