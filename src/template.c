@@ -1047,16 +1047,20 @@ static void atem_number_recovery(sbuf *out, jv *schema, bool integer) {
     if (bound && bound->type == J_NUM && value < bound->num)
         value = integer ? ceil(bound->num) : bound->num;
     bound = jv_get(schema, "exclusiveMinimum");
+    // HUGE_VAL, not the INFINITY macro: the build carries
+    // -Werror=nan-infinity-disabled under -ffast-math (Apple Clang enforces
+    // it; GCC has no such warning, which is how this slipped through the
+    // Linux-only night gates).
     if (bound && bound->type == J_NUM && value <= bound->num)
         value = integer ? floor(bound->num) + 1.0
-                        : nextafter(bound->num, INFINITY);
+                        : nextafter(bound->num, HUGE_VAL);
     bound = jv_get(schema, "maximum");
     if (bound && bound->type == J_NUM && value > bound->num)
         value = integer ? floor(bound->num) : bound->num;
     bound = jv_get(schema, "exclusiveMaximum");
     if (bound && bound->type == J_NUM && value >= bound->num)
         value = integer ? ceil(bound->num) - 1.0
-                        : nextafter(bound->num, -INFINITY);
+                        : nextafter(bound->num, -HUGE_VAL);
     sb_fmt(out, integer ? "%.0f" : "%.17g", value);
 }
 
