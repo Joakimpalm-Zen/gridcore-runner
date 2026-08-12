@@ -142,6 +142,12 @@ QUANTS_CFLAGS = $(filter-out -ffast-math,$(CFLAGS)) -fno-fast-math
 # Rebuild on every invocation: the requested CC/CFLAGS are not encoded in the
 # object name, and reusing a native developer object in a portable release or
 # cross build would be a correctness bug.
+#
+# .DEFAULT_GOAL, because this rule sits ABOVE `runner` and a rule is make's
+# default goal by position: without the pin, bare `make` built ONE object
+# file and exited 0. Local flows always name a target, so only CI's bare
+# `make` jobs (windows smoke, consumer-compatibility) caught it.
+.DEFAULT_GOAL := runner
 $(QUANTS_OBJ): FORCE src/quants.c $(HDR)
 	mkdir -p $(dir $@)
 	$(CC) $(QUANTS_CFLAGS) -I src -c src/quants.c -o $@
