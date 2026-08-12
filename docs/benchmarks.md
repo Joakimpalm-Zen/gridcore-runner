@@ -21,6 +21,19 @@ fraction of the card's SMs. Absolute tok/s will differ on other hardware; the
 with the compute/bandwidth balance (the same kernels measured different ratios
 on an RTX 3070).
 
+> **Stale as of 2026-08-13 — read [performance.md](performance.md) first.**
+> The runner side of every row below has moved and one row was measuring a
+> bug. The TC prefill GEMM for the 32-byte-block quants was publishing
+> uninitialised shared memory for token columns 16..63 (fixed 2026-08-13), so
+> the Q8_0 prefill path these numbers exercised was not computing what it
+> reported; Q4_0 and the granite arch have since been promoted through the
+> tolerance gate, taking `granite-4.1-8b-Q4_0` prefill from 8.0 to 230.6 tok/s
+> and Llama-3.2-3B prefill to 748 against the 438.1 below. The llama.cpp
+> denominators have NOT been re-measured on this box — a CUDA llama.cpp build
+> could not be produced there (toolkit mismatch, detailed in performance.md) —
+> so the ratios in this table should be treated as unverified until both sides
+> are re-run together.
+
 ## Results — default configuration, 2026-07-29
 
 "Default" means what each engine does out of the box on these files. For Runner
@@ -49,10 +62,12 @@ dependency-free.
 
 **Prefill is llama.cpp's win, and we publish it as such.** llama.cpp's prefill
 throughput comes from a mature tensor-core GEMM stack across every quant.
-Runner's TC path covers Q4_K, Q8_0 and Q4_0 (the latter two twins landed
-2026-08-01) and lifts promoted dense models from
-~3% to ~4–6% of llama.cpp; further coverage is tracked
-work, and the gap is reported, not hidden.
+Runner's TC path covered Q4_K and Q8_0 when this table was taken, and lifted
+promoted dense models from ~3% to ~4–6% of llama.cpp. It now also covers Q6_K
+(2026-08-08) and Q4_0 (2026-08-13, with the granite arch), and the 32-byte-block
+kernel it shares was carrying a 48-of-64-columns bug until 2026-08-13 — see the
+note at the top of this file. Further coverage is tracked work, and the gap is
+reported, not hidden.
 
 **Known-slow rows are kept in the table.** Q3_K decode (12%) uses a
 token-identical but naive kernel — its rewrite is a tracked item, including the

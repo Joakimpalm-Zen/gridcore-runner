@@ -159,6 +159,77 @@ can be found) and the rest is the non-matvec serial work between barriers.
 CPU prefill remains the larger, untouched gap: it still dequantizes each weight
 row to f32 and never uses the int8 path.
 
+## 2026-08-13 — CUDA prefill: the depth lever found a correctness bug first
+
+The plan for this pass was "widen the batch, deepen the MMQ tile, promote more
+types". The measurements redirected all three.
+
+### Widening the batch: already done, and measured as a no-op
+
+`MVB` and `TC_N` are both 64 already. pp512 on Llama-3.2-3B rises steeply with
+`-b` (119 → 229 → 428 → 748 tok/s at 8/16/32/64) and then stops dead: 744.4,
+749.4, 749.9 at `-b` 64, 128, 256. That curve is not headroom, it is the fixed
+64-column tile filling up. Going wider requires deepening `TC_N`, which needs
+the shared-memory budget reworked (`sh_c` alone is 16 KB at TC_N=64 and the
+three arrays already total 48 KB) and risks the accumulator spill this codebase
+already documents for the widened Q3_K tile. **Not attempted; scoped, not
+half-landed.**
+
+### What the tile lever found instead: 48 of 64 columns were garbage
+
+`TC_GEMM_32B`, the shared TC GEMM for the 32-byte-block quants (Q8_0, Q4_0),
+was left at the original `TC_N=16` shape when TC_N was widened to 64 on
+2026-07-29 — its q4_K twin was updated, this one was not. It staged 16
+activation columns, accumulated one 16-wide fragment, stored one 16x16 tile,
+and the epilogue then published `sh_c` columns 16..batch-1, which nothing had
+written, as logits. The dispatcher hands it 64-column tiles.
+
+Q8_0 is promoted by default, so this was the **default CUDA prefill path**:
+greedy output matched the scalar path at `-b 16` and diverged at `-b 32` and
+`-b 64`, and the runner's own default is `-b 64`. The gate missed it because
+the Q8_0 row was measured before the widening and Q4_0 was never promoted, so
+it was never gated at all. Fixed; `test_tc_tol` at N_BATCH=64 catches it now.
+
+Correctness is not free — the broken kernel was fast because it computed a
+quarter of the work:
+
+| model | before (wrong) | after (correct) | scalar |
+|---|---:|---:|---:|
+| SmolLM2-135M Q8_0 | 5206 | 4001 | 2214 |
+| Phi-4-mini Q8_0 | 742 | 489 | 165 |
+
+### Promotions the fix unlocked
+
+With the macro correct, Q4_0 gates clean on six models across four archs, and
+granite — which had no admitted combo at all — gates clean on every promoted
+type. All rows 0/64 flips, 3e-5 to 8e-5 of logit range, decode unchanged.
+
+| model | prefill before | after | |
+|---|---:|---:|---:|
+| granite-4.1-8b Q4_0 | 8.0 | 230.6 | **28.8x** |
+| granite-4.1-3b q4_0 | 23.3 | 521.7 | 22.4x |
+| Phi-4-mini q4_0 | 21.2 | 446.5 | 21.1x |
+| Qwen3-1.7B q4_0 | 57.8 | 976.0 | 16.9x |
+| granite-3.3-8b Q4_K_M | 108.3 | 326.6 | 3.0x |
+
+granite-4.1-8b Q4_0 is the row worth staring at: 8.0 tok/s of prefill on a
+**fully GPU-offloaded** model, slower than the same model on the CPU, purely
+because neither its quant type nor its architecture was admitted to the TC
+path. That is the shape of the published "Q4_0 prefill 0.6% of llama.cpp" row.
+
+### The llama.cpp CUDA denominator is missing, and that is a gap
+
+Every CUDA ratio in `docs/benchmarks.md` still rests on the 2026-07-29 numbers.
+They should be re-measured: Llama-3.2-3B prefill on this box is now 748 tok/s
+against the 438 published. A same-box llama.cpp CUDA reference could not be
+built tonight — the conda `nvcc` is missing `fatbinary_section.h`, the system
+`/usr/local/cuda` ships runtime libraries only, and the complete toolkit inside
+the vllm venv has headers that its own `nvcc` rejects as version-mismatched
+(`cccl/cuda/std/__cccl/cuda_toolkit.h`: "CUDA compiler and CUDA toolkit headers
+are incompatible"). The CPU reference *was* built from the same b10353 tree and
+every CPU ratio above is honest; the CUDA ratios are not restated here because
+there is nothing trustworthy to divide by yet.
+
 ## The levers that remain (bigger, and deliberately not rushed)
 
 Both are architectural changes with real correctness/token-identity risk. They
