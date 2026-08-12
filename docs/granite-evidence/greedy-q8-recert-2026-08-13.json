@@ -1,0 +1,66 @@
+{
+  "n_pass": 3,
+  "n_total": 6,
+  "results": [
+    {
+      "tag": "a",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "5bc681658c843fcb9cdf0cbfb60a8253c8eb7dee90fdec78f60e089fb025bd23",
+      "runner_sha256": "5bc681658c843fcb9cdf0cbfb60a8253c8eb7dee90fdec78f60e089fb025bd23",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "b",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 166,
+      "ref_sha256": "fdc0aecffe16e02e1533e0ad6f139b3f9c9a2692d89425b53796e36b9ab18055",
+      "runner_sha256": "855e93fceb51abd898d60e94531ab3e659ce65a272ef24a9c14b61d321620709",
+      "ref_tail": "ist order.\n\nHere is the code to solve this problem: \n```pyth",
+      "runner_tail": "ist order. The function should return the values of the link"
+    },
+    {
+      "tag": "c",
+      "n": 64,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "ed380c683a781047d959f8f79bf4d946d62461e5daeab71a2039f2c818e64ca9",
+      "runner_sha256": "ed380c683a781047d959f8f79bf4d946d62461e5daeab71a2039f2c818e64ca9",
+      "ref_tail": "",
+      "runner_tail": ""
+    },
+    {
+      "tag": "d",
+      "n": 64,
+      "identical": false,
+      "first_divergent_byte": 134,
+      "ref_sha256": "4476efde45167bee9740e92b87880c04ee04a5ed5848488a4f00418a792ea5cd",
+      "runner_sha256": "063c52f020089efe988a2994a743b7047975839628216265ab11e0351bc715f0",
+      "ref_tail": "vicksilver. När temperaturen stiger expanderar kvicksilvret ",
+      "runner_tail": "vicksilver och i den andra en utvidgning där kvicksilvret ka"
+    },
+    {
+      "tag": "b-long",
+      "n": 256,
+      "identical": false,
+      "first_divergent_byte": 166,
+      "ref_sha256": "fdc0aecffe16e02e1533e0ad6f139b3f9c9a2692d89425b53796e36b9ab18055",
+      "runner_sha256": "de8becdc02e50338999e562895a14e2927728d907ce78e884b2e88584bc7c05e",
+      "ref_tail": "ist order.\n\nHere is the code to solve this problem: \n```pyth",
+      "runner_tail": "ist order. The function should return the values of the link"
+    },
+    {
+      "tag": "c-long",
+      "n": 256,
+      "identical": true,
+      "first_divergent_byte": -1,
+      "ref_sha256": "9978be156d3eba6335b3e6eca1520e373d9e4626c05b1c56e9dfdac750336c6e",
+      "runner_sha256": "9978be156d3eba6335b3e6eca1520e373d9e4626c05b1c56e9dfdac750336c6e",
+      "ref_tail": "",
+      "runner_tail": ""
+    }
+  ]
+}
