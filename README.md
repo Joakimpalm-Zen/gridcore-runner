@@ -340,6 +340,8 @@ tolerance tests. CUDA currently promotes Q4_K/Q6_K/Q8_0 on the gated dense
 families and Q4_0 on Gemma 4; the latter was bit-identical over 820 tensor-core
 dispatches on the real 31B QAT artifact. `RUNNER_CUDA_TC=0` and
 `RUNNER_METAL_MM=0` pin the scalar matvec paths for identity investigations.
+The CPU quant dot/dequant module is a separate translation unit compiled with
+`-fno-fast-math`; fast math remains enabled for the rest of the engine.
 
 Vulkan is not implemented; AMD and Intel GPUs use the CPU path.
 
