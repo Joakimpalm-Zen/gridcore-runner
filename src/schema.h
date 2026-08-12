@@ -9,6 +9,16 @@
 enum sn_kind { SN_ANY, SN_NULL, SN_BOOL, SN_NUM, SN_INT, SN_STR, SN_ENUM,
                SN_OBJ, SN_ARR, SN_UNION, SN_COND, SN_SEQ, SN_RAW };
 
+// One segment of a compiled `pattern`: a literal run, then `min_tail` to
+// `max_tail` bytes of `ascii` when `has_class`. max_tail is -1 for the
+// unbounded forms (`+`, `{n,}`), which only the final segment may use.
+typedef struct {
+    char *prefix; int prefix_len;
+    bool  has_class;
+    int   min_tail, max_tail;
+    bool  ascii[128];
+} pat_seg;
+
 typedef struct snode snode;
 struct snode {
     int     kind;
@@ -22,11 +32,16 @@ struct snode {
     bool    has_num_min, has_num_max;
     double  real_min, real_max;                     // enforced number interval
     bool    has_real_min, has_real_max;
-    // pattern_max_tail is -1 for the unbounded forms (`+`, `{n,}`) and the
-    // upper bound for the bounded ones (`{n}`, `{n,m}`)
-    char   *pattern_prefix; int pattern_prefix_len, pattern_min_tail;
-    int     pattern_max_tail;
-    bool    pattern_ascii[128];
+    // A compiled `pattern` is a sequence of segments, each a literal run
+    // followed by an optional repeated ASCII class. One segment is the
+    // common case (`^wf_[a-z0-9-]{6,}$`); several express shapes like
+    // `^[A-Z]{3}[0-9]{4}$`. Every segment but the last is FIXED-length, so
+    // the segment holding byte `p` follows from `p` alone and the enforced
+    // language is still exactly the declared one -- see compile_pattern.
+    pat_seg *pat; int n_pat;
+    // SN_RAW's terminator. Its own field: this used to borrow the pattern
+    // prefix, which tied two unrelated features to one pointer.
+    char   *sentinel; int sentinel_len;
 };
 
 struct jv;

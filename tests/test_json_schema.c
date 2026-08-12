@@ -454,6 +454,72 @@ static void test_schema_bounded_repetition(void) {
     schema_free(schema); jv_free(j);
 }
 
+// A pattern with more than one repeated class was refused outright, so
+// `^[A-Z]{3}[0-9]{4}$` -- an ordinary ticket/serial shape -- could not be
+// enforced at all. Multiple segments are accepted when every segment before
+// the last is FIXED-length: the position of each class is then determined by
+// the byte offset alone, so the enforced language is still exactly the
+// declared one. A variable-length segment in the middle stays refused,
+// because two different segment splits could explain the same prefix and
+// this compiler does not guess.
+static void test_schema_multi_segment_pattern(void) {
+    struct { const char *pat; const char *ok; const char *bad1;
+             const char *bad2; } cases[] = {
+        // two adjacent classes, the motivating case
+        { "^[A-Z]{3}[0-9]{4}$", "\"ABC1234\"", "\"ABCD234\"", "\"ABC12345\"" },
+        // a literal separator between them
+        { "^[A-Z]{2}-[0-9]{3}$", "\"AB-123\"", "\"AB:123\"", "\"AB-12\"" },
+        // shorthand classes, twice
+        { "^\\\\d{3}-\\\\d{2}$", "\"123-45\"", "\"12a-45\"", "\"123-4\"" },
+        // a trailing literal after the last class
+        { "^[0-9]{2}X$", "\"12X\"", "\"12Y\"", "\"123X\"" },
+        // only the LAST segment may be variable
+        { "^[A-Z]{2}[0-9]{2,4}$", "\"AB1234\"", "\"AB1\"", "\"AB12345\"" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        char src[160];
+        snprintf(src, sizeof(src), "{\"type\":\"string\",\"pattern\":\"%s\"}",
+                 cases[i].pat);
+        jv *j = json_parse(src, strlen(src));
+        char err[128];
+        snode *schema = schema_compile(j, err, sizeof(err));
+        assert(schema != NULL);
+
+        sval v; sval_init(&v, schema);
+        assert(sval_feed(&v, cases[i].ok, (int)strlen(cases[i].ok)) && v.done);
+
+        sval a; sval_init(&a, schema);
+        assert(!sval_feed(&a, cases[i].bad1, (int)strlen(cases[i].bad1)));
+        sval b; sval_init(&b, schema);
+        assert(!sval_feed(&b, cases[i].bad2, (int)strlen(cases[i].bad2)));
+
+        // a forced close mid-string must still produce a legal document
+        sval p2; sval_init(&p2, schema);
+        assert(sval_feed(&p2, "\"", 1));
+        char suffix[80];
+        int nfix = sval_close(&p2, suffix, sizeof(suffix));
+        assert(nfix > 0);
+        char full[160]; snprintf(full, sizeof(full), "\"%s", suffix);
+        sval chk; sval_init(&chk, schema);
+        assert(sval_feed(&chk, full, (int)strlen(full)) && chk.done);
+
+        schema_free(schema); jv_free(j);
+    }
+
+    // a variable-length segment before the last one is ambiguous: refused
+    const char *ambiguous[] = {
+        "{\"type\":\"string\",\"pattern\":\"^[A-Z]{1,3}[0-9]{2}$\"}",
+        "{\"type\":\"string\",\"pattern\":\"^[A-Z]+[0-9]{2}$\"}",
+    };
+    for (size_t i = 0; i < sizeof(ambiguous) / sizeof(*ambiguous); i++) {
+        jv *j = json_parse(ambiguous[i], strlen(ambiguous[i]));
+        char err[128];
+        assert(schema_compile(j, err, sizeof(err)) == NULL);
+        assert(strstr(err, "pattern") != NULL);
+        jv_free(j);
+    }
+}
+
 static void test_schema_agent_id_pattern_is_enforced(void) {
     const char *src =
         "{\"type\":\"string\",\"pattern\":\"^wf_[a-z0-9-]{6,}$\"}";
@@ -1303,6 +1369,7 @@ int main(void) {
     test_schema_rejects_escaped_keys();
     test_schema_rejects_unenforceable_keywords();
     test_schema_bounded_repetition();
+    test_schema_multi_segment_pattern();
     test_schema_agent_id_pattern_is_enforced();
     test_schema_pattern_shorthand_classes();
     test_schema_pattern_regex_syntax_is_rejected_not_reinterpreted();

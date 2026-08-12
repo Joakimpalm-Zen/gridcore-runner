@@ -23,7 +23,6 @@ static snode *sn_new(int kind) {
     if (!n) return NULL;
     n->kind = kind;
     n->max_items = -1;
-    n->pattern_max_tail = -1;   // unbounded until a {n} or {n,m} says otherwise
     return n;
 }
 
@@ -41,7 +40,9 @@ void schema_free(snode *n) {
     if (!n) return;
     for (int i = 0; i < n->n_lits; i++) free(n->lits[i]);
     free(n->lits);
-    free(n->pattern_prefix);
+    for (int i = 0; i < n->n_pat; i++) free(n->pat[i].prefix);
+    free(n->pat);
+    free(n->sentinel);
     for (int i = 0; i < n->n_props; i++) {
         if (n->keys) free(n->keys[i]);
         schema_free(n->props[i]);
@@ -226,90 +227,182 @@ static bool pattern_shorthand_class(char c, bool *ascii) {
     }
 }
 
+/* What the compiled pattern allows at byte offset `pos`. The validator and
+   the truncation closer both ask this rather than re-deriving segment
+   boundaries, so they cannot disagree about where a class begins. */
+typedef enum { PAT_LIT, PAT_CLASS, PAT_END } pat_what;
+typedef struct { pat_what what; unsigned char lit; const bool *ascii; } pat_at;
+
+static pat_at pat_at_pos(const snode *n, int pos) {
+    for (int i = 0; i < n->n_pat; i++) {
+        const pat_seg *g = &n->pat[i];
+        if (pos < g->prefix_len)
+            return (pat_at){ PAT_LIT, (unsigned char)g->prefix[pos], NULL };
+        pos -= g->prefix_len;
+        if (!g->has_class) continue;
+        /* every segment but the last is fixed-length, so its span is exactly
+           min_tail; the last may run to max_tail, or forever when unbounded */
+        int span = (i + 1 < n->n_pat) ? g->min_tail : g->max_tail;
+        if (span < 0 || pos < span)
+            return (pat_at){ PAT_CLASS, 0, g->ascii };
+        pos -= span;
+    }
+    return (pat_at){ PAT_END, 0, NULL };
+}
+
+/* The byte a forced completion writes at offset `pos`: the literal the
+   pattern requires there, or the lowest member of the class it allows. One
+   function so the closer cannot drift from the validator. */
+static unsigned char pat_fill_byte(const snode *n, int pos) {
+    pat_at at = pat_at_pos(n, pos);
+    if (at.what == PAT_LIT) return at.lit;
+    if (at.what == PAT_CLASS) {
+        for (unsigned c = 0; c < 128; c++) if (at.ascii[c]) return (unsigned char)c;
+    }
+    return ' ';   /* unreachable for a compiled pattern: every class is non-empty */
+}
+
+/* Shortest and longest strings the pattern admits; -1 max means unbounded.
+   These are what minLength/maxLength are checked against, and what the
+   closer must reach before it may emit the closing quote. */
+static int pat_min_len(const snode *n) {
+    int total = 0;
+    for (int i = 0; i < n->n_pat; i++)
+        total += n->pat[i].prefix_len + (n->pat[i].has_class ? n->pat[i].min_tail : 0);
+    return total;
+}
+
+static int pat_max_len(const snode *n) {
+    int total = 0;
+    for (int i = 0; i < n->n_pat; i++) {
+        total += n->pat[i].prefix_len;
+        if (!n->pat[i].has_class) continue;
+        if (n->pat[i].max_tail < 0) return -1;
+        total += n->pat[i].max_tail;
+    }
+    return total;
+}
+
+/* Parse one `{n}` / `{n,}` / `{n,m}` / `+` quantifier at `q`. Returns the
+   first byte after it, or NULL if this is not a quantifier this compiler can
+   enforce exactly. */
+static const char *parse_quantifier(const char *q, long *min, long *max) {
+    if (*q == '+') { *min = 1; *max = -1; return q + 1; }
+    if (*q != '{') return NULL;
+    char *end = NULL;
+    *min = strtol(q + 1, &end, 10);
+    if (*min < 0 || *min > INT_MAX || !end || end == q + 1) return NULL;
+    if (*end == '}') { *max = *min; return end + 1; }            /* {n}   */
+    if (*end != ',') return NULL;
+    if (end[1] == '}') { *max = -1; return end + 2; }            /* {n,}  */
+    char *end2 = NULL;                                           /* {n,m} */
+    *max = strtol(end + 1, &end2, 10);
+    if (*max < 0 || *max > INT_MAX || !end2 || end2 == end + 1 || *end2 != '}')
+        return NULL;
+    /* an empty language is a schema the caller cannot ever satisfy, and
+       silently accepting it would deadlock decoding rather than fail */
+    if (*max < *min) return NULL;
+    return end2 + 1;
+}
+
+/* Compile `^ ( literal class{q} )* literal? $` into segments.
+
+   Several segments are accepted only while every one before the last is
+   fixed-length. With `^[A-Z]{3}[0-9]{4}$` the class holding byte 4 follows
+   from the offset alone; with `^[A-Z]{1,3}[0-9]{2}$` it does not, and a
+   compiler that guessed would enforce a language the caller did not
+   declare -- the exact failure this file exists to prevent. */
 static bool compile_ascii_pattern(jv *s, snode *n, char *err, int errcap) {
     jv *pv = jv_get(s, "pattern");
     if (!pv) return true;
+    /* declared before the first failure exit: the unwind path frees the
+       prefixes owned so far, so the count has to be live from the start */
+    pat_seg segs[8];
+    int n_segs = 0;
     if (pv->type != J_STR) goto bad;
     const char *p = pv->str;
     if (*p++ != '^') goto bad;
-    // The repeated class is either a bracket set or a shorthand escape;
-    // whichever appears first is the class, and everything before it is the
-    // literal prefix (which can contain neither — pattern_prefix_char_ok bars
-    // both `[` via the class scan and `\` outright).
-    const char *lb  = strchr(p, '[');
-    const char *esc = strchr(p, '\\');
-    bool shorthand = esc && (!lb || esc < lb);
-    // Reject an unsupported shorthand here, before anything is allocated, so
-    // the failure path stays a plain goto with nothing to unwind.
-    if (shorthand && !(esc[1] == 'd' || esc[1] == 'w')) goto bad;
-    const char *cls = shorthand ? esc : lb;   // first byte of the class token
-    const char *rb  = NULL;                   // ']', bracket form only
-    const char *quant;                        // first byte after the class
-    if (shorthand) {
-        quant = esc + 2;
-    } else {
-        if (!lb) goto bad;
-        rb = strchr(lb + 1, ']');
-        if (!rb) goto bad;
-        quant = rb + 1;
-    }
-    long min, max = -1;   // max -1: unbounded
-    if (!strcmp(quant, "+$")) {
-        min = 1;
-    } else {
-        // {n}  exact, {n,}  at least n, {n,m}  between n and m. Anything else
-        // is still an explicit error: this compiler only ever accepts forms it
-        // can enforce exactly.
-        if (quant[0] != '{') goto bad;
-        char *end = NULL;
-        min = strtol(quant + 1, &end, 10);
-        if (min < 0 || min > INT_MAX || !end || end == quant + 1) goto bad;
-        if (!strcmp(end, "}$")) {
-            max = min;                      // {n}
-        } else if (!strcmp(end, ",}$")) {
-            max = -1;                       // {n,}
-        } else if (*end == ',') {
-            char *end2 = NULL;              // {n,m}
-            max = strtol(end + 1, &end2, 10);
-            if (max < 0 || max > INT_MAX || !end2 || end2 == end + 1 ||
-                strcmp(end2, "}$")) goto bad;
-            // an empty language is a schema the caller cannot ever satisfy, and
-            // silently accepting it would deadlock decoding rather than fail
-            if (max < min) goto bad;
+
+    while (*p && strcmp(p, "$") != 0) {
+        if (n_segs == (int)(sizeof(segs) / sizeof(*segs))) goto bad;
+        pat_seg *g = &segs[n_segs];
+        memset(g, 0, sizeof(*g));
+
+        /* literal run: up to the next class token, or to the closing `$` */
+        const char *lb  = strchr(p, '[');
+        const char *esc = strchr(p, '\\');
+        bool shorthand  = esc && (!lb || esc < lb);
+        const char *cls = shorthand ? esc : lb;
+        for (const char *q = p; q < (cls ? cls : p + strlen(p) - 1); q++)
+            if (!pattern_prefix_char_ok((unsigned char)*q)) goto bad;
+        int plen = (int)((cls ? cls : p + strlen(p) - 1) - p);
+        g->prefix_len = plen;
+        g->prefix = strndup(p, (size_t)plen);
+        if (!g->prefix) goto oom;
+        n_segs++;                       /* owned from here: unwind on failure */
+
+        if (!cls) { p += plen; break; } /* trailing literal, then `$` */
+        p += plen;
+
+        const char *quant;
+        if (shorthand) {
+            if (!(esc[1] == 'd' || esc[1] == 'w')) goto bad;
+            pattern_shorthand_class(esc[1], g->ascii);
+            quant = esc + 2;
         } else {
-            goto bad;
-        }
-    }
-    for (const char *q = p; q < cls; q++)
-        if (!pattern_prefix_char_ok((unsigned char)*q)) goto bad;
-    if (!shorthand && lb[1] == '^') goto bad;  // negated: not literally matchable
-    n->pattern_prefix_len = (int)(cls - p);
-    n->pattern_prefix = strndup(p, (size_t)n->pattern_prefix_len);
-    if (!n->pattern_prefix) return false;
-    n->pattern_min_tail = (int)min;
-    n->pattern_max_tail = (int)max;
-    if (shorthand) {
-        // validated above, so this cannot fail with the prefix already owned
-        pattern_shorthand_class(esc[1], n->pattern_ascii);
-    } else {
-        for (const char *q = lb + 1; q < rb; q++) {
-            if (*q == '\\') goto bad;  // escapes inside [] are still regex syntax
-            unsigned char lo = (unsigned char)*q, hi = lo;
-            if (q + 2 < rb && q[1] == '-') {
-                if (q[2] == '\\') goto bad;
-                hi = (unsigned char)q[2];
-                q += 2;
+            const char *rb = strchr(lb + 1, ']');
+            if (!rb) goto bad;
+            if (lb[1] == '^') goto bad;   /* negated: not literally matchable */
+            for (const char *q = lb + 1; q < rb; q++) {
+                if (*q == '\\') goto bad; /* escapes inside [] are regex syntax */
+                unsigned char lo = (unsigned char)*q, hi = lo;
+                if (q + 2 < rb && q[1] == '-') {
+                    if (q[2] == '\\') goto bad;
+                    hi = (unsigned char)q[2];
+                    q += 2;
+                }
+                if (lo >= 128 || hi >= 128 || hi < lo) goto bad;
+                for (unsigned c = lo; c <= hi; c++) g->ascii[c] = true;
             }
-            if (lo >= 128 || hi >= 128 || lo > hi) goto bad;
-            for (unsigned c = lo; c <= hi; c++) n->pattern_ascii[c] = true;
+            quant = rb + 1;
         }
+        long min = 0, max = -1;
+        const char *after = parse_quantifier(quant, &min, &max);
+        if (!after) goto bad;
+        g->has_class = true;
+        g->min_tail  = (int)min;
+        g->max_tail  = (int)max;
+        p = after;
     }
+    if (strcmp(p, "$") != 0) goto bad;
+    if (!n_segs) goto bad;
+    /* At least one repeated class. A pattern that is only a literal (`^x$`)
+       is exactly enforceable, but it has always been refused here and both
+       the tool-envelope test and the conformance matrix pin that: widening
+       what this compiler accepts is a contract change, not a side effect of
+       teaching it a second class. */
+    bool any_class = false;
+    for (int i = 0; i < n_segs; i++) any_class |= segs[i].has_class;
+    if (!any_class) goto bad;
+    /* only the last segment may be variable-length: see the note above */
+    for (int i = 0; i + 1 < n_segs; i++)
+        if (segs[i].has_class && segs[i].max_tail != segs[i].min_tail) goto bad;
+
+    n->pat = calloc((size_t)n_segs, sizeof(*n->pat));
+    if (!n->pat) goto oom;
+    memcpy(n->pat, segs, (size_t)n_segs * sizeof(*n->pat));
+    n->n_pat = n_segs;
     return true;
+oom:
+    for (int i = 0; i < n_segs; i++) free(segs[i].prefix);
+    return false;
 bad:
+    for (int i = 0; i < n_segs; i++) free(segs[i].prefix);
     snprintf(err, errcap,
-             "pattern only supports an anchored prefix plus one repeated ASCII "
-             "class ([...], \\d or \\w) (got %.48s)",
-             pv && pv->type == J_STR ? pv->str : "non-string");
+             "pattern only supports an anchored sequence of literal runs and "
+             "repeated ASCII classes ([...], \\d or \\w), where every class "
+             "before the last has a fixed count (got %s)",
+             pv->type == J_STR ? pv->str : "a non-string");
     return false;
 }
 
@@ -580,8 +673,8 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
             schema_free(n);
             return NULL;
         }
-        if (n->pattern_prefix && n->pattern_max_tail >= 0 &&
-            n->min_items > n->pattern_prefix_len + n->pattern_max_tail) {
+        if (n->n_pat && pat_max_len(n) >= 0 &&
+            n->min_items > pat_max_len(n)) {
             // a bounded pattern that can never be long enough for minLength is
             // an empty language: refuse it at compile time rather than let a
             // request wedge with no admissible byte
@@ -589,8 +682,8 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
             schema_free(n);
             return NULL;
         }
-        if (n->pattern_prefix && n->max_items >= 0 &&
-            n->pattern_prefix_len + n->pattern_min_tail > n->max_items) {
+        if (n->n_pat && n->max_items >= 0 &&
+            pat_min_len(n) > n->max_items) {
             snprintf(err, errcap, "pattern cannot satisfy maxLength");
             schema_free(n);
             return NULL;
@@ -932,9 +1025,9 @@ static snode *atem_lit(const char *s) {
 static snode *atem_raw(const char *sentinel) {
     snode *n = sn_new(SN_RAW);
     if (!n) return NULL;
-    n->pattern_prefix = strdup(sentinel);
-    if (!n->pattern_prefix) { schema_free(n); return NULL; }
-    n->pattern_prefix_len = (int)strlen(sentinel);
+    n->sentinel = strdup(sentinel);
+    if (!n->sentinel) { schema_free(n); return NULL; }
+    n->sentinel_len = (int)strlen(sentinel);
     return n;
 }
 
@@ -1578,16 +1671,15 @@ static int feed_byte(sval *v, uint8_t c) {
         }
 
     case P_STR: {
-        if (n->pattern_prefix && f->sub == 0 && c != '"') {
+        if (n->n_pat && f->sub == 0 && c != '"') {
             if (c == '\\' || c >= 128) return -1;
-            if (f->lit_pos < n->pattern_prefix_len) {
-                if (c != (uint8_t)n->pattern_prefix[f->lit_pos]) return -1;
-            } else if (!n->pattern_ascii[c]) {
-                return -1;
-            } else if (n->pattern_max_tail >= 0 &&
-                       f->lit_pos - n->pattern_prefix_len >=
-                           n->pattern_max_tail) {
-                return -1;   // bounded tail is full: only the close quote now
+            pat_at at = pat_at_pos(n, f->lit_pos);
+            if (at.what == PAT_LIT) {
+                if (c != at.lit) return -1;
+            } else if (at.what == PAT_CLASS) {
+                if (!at.ascii[c]) return -1;
+            } else {
+                return -1;   // the pattern is complete: only the close quote
             }
         }
         // a full string at maxLength admits only the closing quote — reject an
@@ -1599,8 +1691,7 @@ static int feed_byte(sval *v, uint8_t c) {
         if (r < 0) return -1;
         if (r == 1) {
             if (f->lit_pos < n->min_items ||
-                (n->pattern_prefix &&
-                 f->lit_pos < n->pattern_prefix_len + n->pattern_min_tail) ||
+                (n->n_pat && f->lit_pos < pat_min_len(n)) ||
                 (n->max_items >= 0 && f->lit_pos > n->max_items))
                 return -1;
             frame_done(v);
@@ -1757,10 +1848,10 @@ static int feed_byte(sval *v, uint8_t c) {
         return push_value(v, n->props[f->idx++]) ? feed_byte(v, c) : -1;
 
     case P_RAW: {
-        const char *sentinel = n->pattern_prefix;
+        const char *sentinel = n->sentinel;
         int pos = f->lit_pos;
         if (c == (uint8_t)sentinel[pos]) {
-            if (++pos == n->pattern_prefix_len) {
+            if (++pos == n->sentinel_len) {
                 frame_done(v);
                 return 0;
             }
@@ -1930,14 +2021,11 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
         case SN_INT: emit_integer(q, integer_minimal_value(n)); break;
         case SN_STR:
             eq_putc(q, '"');
-            if (n->pattern_prefix) {
-                eq_put(q, n->pattern_prefix);
-                int need = n->pattern_min_tail;
-                if (n->min_items > n->pattern_prefix_len + need)
-                    need = n->min_items - n->pattern_prefix_len;
-                unsigned char fill = 0;
-                while (fill < 128 && !n->pattern_ascii[fill]) fill++;
-                for (int i = 0; i < need && !eq_full(q); i++) eq_putc(q, fill);
+            if (n->n_pat) {
+                int need = pat_min_len(n);
+                if (n->min_items > need) need = n->min_items;
+                for (int i = 0; i < need && !eq_full(q); i++)
+                    eq_putc(q, pat_fill_byte(n, i));
             } else {
                 for (int i = 0; i < n->min_items && !eq_full(q); i++) eq_putc(q, ' ');
             }
@@ -1978,7 +2066,7 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
                 emit_min_choice(q, n->props[i], depth + 1, choice);
             break;
         case SN_RAW:
-            eq_put(q, n->pattern_prefix);
+            eq_put(q, n->sentinel);
             break;
         case SN_COND:
             break;
@@ -2045,22 +2133,11 @@ int sval_close(sval *v, char *out, int cap) {
             if (f->sub == 1) eq_putc(&q, 'n');           // dangling backslash
             while (f->sub >= 2) { eq_putc(&q, '0');       // partial \uXXXX
                                   f->sub = f->sub == 5 ? 0 : f->sub + 1; }
-            while (n->pattern_prefix &&
-                   f->lit_pos < n->pattern_prefix_len && !eq_full(&q)) {
-                eq_putc(&q, n->pattern_prefix[f->lit_pos]);
-                f->lit_pos++;
-            }
             int string_min = n->min_items;
-            if (n->pattern_prefix &&
-                string_min < n->pattern_prefix_len + n->pattern_min_tail)
-                string_min = n->pattern_prefix_len + n->pattern_min_tail;
+            if (n->n_pat && string_min < pat_min_len(n))
+                string_min = pat_min_len(n);
             while (f->lit_pos < string_min && !eq_full(&q)) {
-                unsigned char fill = ' ';
-                if (n->pattern_prefix) {
-                    fill = 0;
-                    while (fill < 128 && !n->pattern_ascii[fill]) fill++;
-                }
-                eq_putc(&q, fill);
+                eq_putc(&q, n->n_pat ? pat_fill_byte(n, f->lit_pos) : ' ');
                 f->lit_pos++;
             }
             eq_putc(&q, '"');
@@ -2150,7 +2227,7 @@ int sval_close(sval *v, char *out, int cap) {
             // Bytes already matching the sentinel are part of the generated
             // prefix; append only the unmatched suffix, then the enclosing
             // sequence contributes its fixed newline/invoke/calls closes.
-            eq_put(&q, n->pattern_prefix + f->lit_pos);
+            eq_put(&q, n->sentinel + f->lit_pos);
             break;
         }
         v->depth--;

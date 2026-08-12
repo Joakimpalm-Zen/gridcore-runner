@@ -785,6 +785,14 @@ agent clients. Required properties are present, unknown properties are blocked
 for closed objects, and tool arguments are generated against the selected
 tool's schema.
 
+Anchored `pattern`s compile as a sequence of literal runs and repeated ASCII
+classes (`[...]`, `\d`, `\w`): `^wf_[a-z0-9-]{6,}$` and `^[A-Z]{3}[0-9]{4}$`
+both enforce, and a forced close mid-string completes to a string the pattern
+still accepts. Every class before the last carries a fixed count, so which
+class a byte belongs to follows from its offset; a variable-length class in
+the middle is refused rather than guessed, as are `\s`, negated classes, and
+escapes inside `[...]`.
+
 Unsupported or ambiguous constraints fail at compile/request time. In
 particular, general overlapping `oneOf` branches are not tracked in parallel;
 branches must diverge at a supported discriminator. This is a subset of JSON
