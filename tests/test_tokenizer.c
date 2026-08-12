@@ -326,6 +326,8 @@ int main(void) {
 
     run_bpe_fixture("tests/fixtures/vocab-bpe-llama3.gguf",
                     TOK_PRE_LLAMA3, test_bpe_digit_grouping_llama3);
+    run_bpe_fixture("tests/fixtures/vocab-bpe-gpt4o.gguf",
+                    TOK_PRE_LLAMA4, test_bpe_digit_grouping_llama3);
     run_bpe_fixture("tests/fixtures/vocab-bpe-qwen2.gguf",
                     TOK_PRE_QWEN2, test_bpe_digit_grouping_qwen2);
     run_bpe_fixture("tests/fixtures/vocab-bpe-qwen35.gguf",
