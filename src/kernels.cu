@@ -898,6 +898,21 @@ static __device__ __forceinline__ void tc_stage_q4_0(__half *dst,
     (void)nb;
 }
 
+// 32-byte-block twin of k_gemm_q4_K_tc (Q8_0, Q4_0): same 64-row x TC_K fp16
+// weight tile, staged through STAGE instead of the q4_K super-block decoder.
+//
+// FIXED 2026-08-13 — this macro was left at the original TC_N=16 shape when
+// TC_N was widened to 64 on 2026-07-29. It staged 16 activation columns,
+// accumulated a single 16-wide fragment and stored one 16x16 tile, then the
+// epilogue wrote sh_c columns 16..batch-1 — never written, so UNINITIALISED
+// shared memory — into y. Q8_0 is promoted by default, so the default CUDA
+// prefill path produced corrupt logits for every prompt batch above 16 (the
+// runner's own default is -b 64). It reproduced as: greedy output identical
+// to the scalar path at -b 16, divergent at -b 32 and -b 64.
+//
+// The tolerance gate did not catch it because the Q8_0 row was measured
+// BEFORE the widening (2026-08-09, sm_86), and Q4_0 was never promoted so it
+// was never gated at all. test_tc_tol at N_BATCH=64 catches it now.
 #define TC_GEMM_32B(NAME, STAGE, BLKBYTES)                                     \
 extern "C" __global__ void NAME(MV_PARAMS) {                                   \
     using namespace nvcuda::wmma;                                              \
@@ -909,8 +924,9 @@ extern "C" __global__ void NAME(MV_PARAMS) {                                   \
     __shared__ float  sh_c[TC_ROWS * TC_N];                                    \
     fragment<matrix_a, 16, 16, 16, __half, row_major> fa;                      \
     fragment<matrix_b, 16, 16, 16, __half, col_major> fb;                      \
-    fragment<accumulator, 16, 16, 16, float> fc[1];                            \
-    fill_fragment(fc[0], 0.0f);                                                \
+    fragment<accumulator, 16, 16, 16, float> fc[TC_N / 16];                    \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < TC_N / 16; n++) fill_fragment(fc[n], 0.0f);            \
     int nb = a.n_in / 32;                                                      \
     int srow = tid >> 1, sseg = tid & 1;                                       \
     for (int ks = 0; ks < a.n_in; ks += TC_K) {                                \
@@ -927,24 +943,30 @@ extern "C" __global__ void NAME(MV_PARAMS) {                                   \
             }                                                                  \
         }                                                                      \
         {                                                                      \
-            int col = tid >> 3, part = tid & 7;                                \
-            __half *dst = sh_x + col * TC_K + part * 16;                       \
-            int e0 = ks + part * 16;                                           \
-            if (col < a.batch && e0 < a.n_in) {                                \
-                /* 16 elements per part; n_in is a 32-multiple (quant     */   \
-                /* blocks), so a part is either fully inside or fully out */   \
-                const float *xg = x + (ulong64)col * a.xs + e0;                \
-                _Pragma("unroll")                                              \
-                for (int v = 0; v < 4; v++) {                                  \
-                    float4 xv = *(const float4 *)(xg + v * 4);                 \
-                    dst[v * 4 + 0] = __float2half(xv.x);                       \
-                    dst[v * 4 + 1] = __float2half(xv.y);                       \
-                    dst[v * 4 + 2] = __float2half(xv.z);                       \
-                    dst[v * 4 + 3] = __float2half(xv.w);                       \
+            /* TC_N columns x TC_K elements with 128 threads: two 64-element */\
+            /* halves per thread, guarded at 32-element granularity because  */\
+            /* n_in is a 32-multiple (quant blocks) but need not be a        */\
+            /* 64-multiple — a 64-wide part can straddle the end of the row. */\
+            int col = tid >> 1, part = tid & 1;                                \
+            __half *dst = sh_x + col * TC_K + part * 64;                       \
+            _Pragma("unroll")                                                  \
+            for (int h = 0; h < 2; h++) {                                      \
+                __half *d2 = dst + h * 32;                                     \
+                int e0 = ks + part * 64 + h * 32;                              \
+                if (col < a.batch && e0 < a.n_in) {                            \
+                    const float *xg = x + (ulong64)col * a.xs + e0;            \
+                    _Pragma("unroll")                                          \
+                    for (int v = 0; v < 8; v++) {                              \
+                        float4 xv = *(const float4 *)(xg + v * 4);             \
+                        d2[v * 4 + 0] = __float2half(xv.x);                    \
+                        d2[v * 4 + 1] = __float2half(xv.y);                    \
+                        d2[v * 4 + 2] = __float2half(xv.z);                    \
+                        d2[v * 4 + 3] = __float2half(xv.w);                    \
+                    }                                                          \
+                } else {                                                       \
+                    _Pragma("unroll")                                          \
+                    for (int e = 0; e < 32; e++) d2[e] = __float2half(0.0f);   \
                 }                                                              \
-            } else {                                                           \
-                _Pragma("unroll")                                              \
-                for (int e = 0; e < 16; e++) dst[e] = __float2half(0.0f);      \
             }                                                                  \
         }                                                                      \
         __syncthreads();                                                       \
@@ -952,12 +974,18 @@ extern "C" __global__ void NAME(MV_PARAMS) {                                   \
         _Pragma("unroll")                                                      \
         for (int k = 0; k < TC_K; k += 16) {                                   \
             load_matrix_sync(fa, wt + k, TC_K);                                \
-            load_matrix_sync(fb, sh_x + k, TC_K);                              \
-            mma_sync(fc[0], fa, fb, fc[0]);                                    \
+            _Pragma("unroll")                                                  \
+            for (int n = 0; n < TC_N / 16; n++) {                              \
+                load_matrix_sync(fb, sh_x + n * 16 * TC_K + k, TC_K);          \
+                mma_sync(fc[n], fa, fb, fc[n]);                                \
+            }                                                                  \
         }                                                                      \
         __syncthreads();                                                       \
     }                                                                          \
-    store_matrix_sync(sh_c + warp * 16 * TC_N, fc[0], TC_N, mem_row_major);    \
+    _Pragma("unroll")                                                          \
+    for (int n = 0; n < TC_N / 16; n++)                                        \
+        store_matrix_sync(sh_c + warp * 16 * TC_N + n * 16, fc[n], TC_N,       \
+                          mem_row_major);                                      \
     __syncthreads();                                                           \
     for (int idx = tid; idx < TC_ROWS * TC_N; idx += blockDim.x) {             \
         int rr = idx / TC_N, tt = idx % TC_N;                                  \
