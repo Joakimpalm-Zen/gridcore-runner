@@ -1115,6 +1115,22 @@ unsupported:
 
 // ---------------------------------------------------------------- encoding
 
+// ------------------------------------------------------- dispatch census
+// "Where does the batch dimension collapse?" is not answerable from
+// throughput: a kernel that takes the batch in grid.y and a kernel encoded n
+// times cost the same to WRITE and look identical from outside. This counts
+// dispatches by kind, so a prefill census at two batch sizes shows directly
+// which kinds scale with n (collapsed) and which do not (batched).
+//
+// Off unless RUNNER_METAL_STATS is set... except that the counters themselves
+// are unconditional. They are non-atomic increments of a static struct on the
+// encoding thread, which is the same thread for a whole command buffer, and
+// the alternative — a branch per dispatch — costs more than the increment.
+static struct {
+    unsigned long mm, mv, mvf, rmsnorm, qknorm, headnorm, rope, store,
+                  attn, attn_chunk, elem, moe, ple;
+} g_disp;
+
 static void enc_rmsnorm_n(gpu_t *g, id<MTLComputeCommandEncoder> e,
                           id<MTLBuffer> x, NSUInteger x_off,
                           id<MTLBuffer> y, NSUInteger y_off, id<MTLBuffer> w,
@@ -1126,6 +1142,7 @@ static void enc_rmsnorm_n(gpu_t *g, id<MTLComputeCommandEncoder> e,
     [e setBuffer:y offset:y_off atIndex:1];
     [e setBuffer:w offset:0 atIndex:2];
     [e setBytes:&a length:sizeof(a) atIndex:3];
+    g_disp.rmsnorm++;
     [e dispatchThreadgroups:MTLSizeMake(n_col, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
@@ -1180,6 +1197,7 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
         // two are kept in step by hand, the same way mv_args/mm_args already
         // are (see the struct comment above).
         enum { MM_TILE_M = 64, MM_TILE_N = 32 };
+        g_disp.mm++;
         [e dispatchThreadgroups:MTLSizeMake((n_out + MM_TILE_M - 1) / MM_TILE_M,
                                             (n_col + MM_TILE_N - 1) / MM_TILE_N, 1)
           threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -1200,6 +1218,9 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     if (n_col == 1 && metal_mv_fast_on() && g->p_mvf[w->type]) {
         mv = g->p_mvf[w->type];
         g_mv_dispatches++;
+        g_disp.mvf++;
+    } else {
+        g_disp.mv++;
     }
     [e setComputePipelineState:mv];
     [e setBuffer:g->weights offset:0 atIndex:0];
@@ -1230,6 +1251,7 @@ static void enc_qknorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     [e setBuffer:w offset:0 atIndex:1];
     [e setBytes:&hd length:4 atIndex:2];
     [e setBytes:&eps length:4 atIndex:3];
+    g_disp.qknorm++;
     [e dispatchThreadgroups:MTLSizeMake(n_heads, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 }
@@ -1247,6 +1269,7 @@ static void enc_headnorm(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     [e setBytes:&hd length:4 atIndex:3];
     [e setBytes:&eps length:4 atIndex:4];
     [e setBytes:&has_weight length:4 atIndex:5];
+    g_disp.headnorm++;
     [e dispatchThreadgroups:MTLSizeMake(n_heads, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
 }
@@ -1264,6 +1287,7 @@ static void enc_rope_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     [e setBuffer:(local && g->inv_freq_local) ? g->inv_freq_local : g->inv_freq
           offset:0 atIndex:1];
     [e setBytes:&a length:sizeof(a) atIndex:2];
+    g_disp.rope++;
     [e dispatchThreads:MTLSizeMake(a.half_dim, n_heads, n_col)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 }
@@ -1277,6 +1301,7 @@ static void enc_elem(gpu_t *g, id<MTLComputeCommandEncoder> e,
     [e setBuffer:a offset:a_off atIndex:0];
     [e setBuffer:b offset:b_off atIndex:1];
     [e setBytes:&n length:4 atIndex:2];
+    g_disp.elem++;
     [e dispatchThreads:MTLSizeMake(n, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
@@ -1288,6 +1313,7 @@ static void enc_scale(gpu_t *g, id<MTLComputeCommandEncoder> e,
     [e setBuffer:x offset:x_off atIndex:0];
     [e setBytes:&scale length:4 atIndex:1];
     [e setBytes:&n length:4 atIndex:2];
+    g_disp.elem++;
     [e dispatchThreads:MTLSizeMake(n, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
@@ -1307,6 +1333,7 @@ static void enc_moe_route(gpu_t *g, id<MTLComputeCommandEncoder> e,
     [e setBytes:&used length:4 atIndex:4];
     [e setBytes:&tokens length:4 atIndex:5];
     [e setBytes:&ls length:4 atIndex:6];
+    g_disp.moe++;
     [e dispatchThreads:MTLSizeMake(1, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 }
@@ -1327,6 +1354,7 @@ static void enc_moe_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     [e setBytes:&a length:sizeof(a) atIndex:3];
     [e setBuffer:g->moe_sel offset:0 atIndex:4];
     [e setBuffer:bias ? bias : g->dummy offset:0 atIndex:5];
+    g_disp.moe++;
     [e dispatchThreadgroups:MTLSizeMake((n_out + 3) / 4, nslots, 1)
       threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 }
@@ -1340,6 +1368,7 @@ static void enc_moe_actmul(gpu_t *g, id<MTLComputeCommandEncoder> e,
     [e setBuffer:gbuf offset:goff atIndex:0];
     [e setBuffer:ubuf offset:uoff atIndex:1];
     [e setBytes:args length:sizeof(args) atIndex:2];
+    g_disp.moe++;
     [e dispatchThreads:MTLSizeMake(nff, nslots, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
@@ -1358,6 +1387,7 @@ static void enc_moe_sum(gpu_t *g, id<MTLComputeCommandEncoder> e,
     [e setBytes:&nslots length:4 atIndex:6];
     [e setBytes:&es length:4 atIndex:7];
     [e setBytes:&has_dscale length:4 atIndex:8];
+    g_disp.moe++;
     [e dispatchThreads:MTLSizeMake(n, 1, 1)
       threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 }
@@ -1698,6 +1728,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                 [e setBuffer:g->kc offset:0 atIndex:2];
                 [e setBuffer:g->vc offset:0 atIndex:3];
                 [e setBytes:&sa length:sizeof(sa) atIndex:4];
+                g_disp.store++;
                 [e dispatchThreads:MTLSizeMake(kv_units, n, 1)
                   threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             }
@@ -1741,6 +1772,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                 [e setBuffer:g->att_acc offset:0 atIndex:4];
                 [e setBuffer:g->att_ms  offset:0 atIndex:5];
                 [e setBytes:&ca length:sizeof(ca) atIndex:6];
+                g_disp.attn_chunk++;
                 [e dispatchThreadgroups:MTLSizeMake(m->n_head, a_nch, 1)
                   threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
@@ -1752,6 +1784,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                 [e setBuffer:g->xb2     offset:0 atIndex:2];
                 [e setBytes:&cb length:sizeof(cb) atIndex:3];
                 [e setBuffer:g->sinks[l] ? g->sinks[l] : g->dummy offset:0 atIndex:4];
+                g_disp.attn_chunk++;
                 [e dispatchThreadgroups:MTLSizeMake(m->n_head, 1, 1)
                   threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
                 goto attn_done;
@@ -1787,6 +1820,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                             (unsigned long long)g->p_attn.maxTotalThreadsPerThreadgroup);
                 }
             }
+            g_disp.attn++;
             [e dispatchThreadgroups:MTLSizeMake(m->n_head, n, 1)
               threadsPerThreadgroup:MTLSizeMake(atpg, 1, 1)];
             attn_done: ;
@@ -1899,8 +1933,23 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         fprintf(stderr, "gpu: command buffer failed — falling back to CPU\n");
         return NULL;
     }
-    if (metal_env_on("RUNNER_METAL_STATS"))
+    if (metal_env_on("RUNNER_METAL_STATS")) {
+        unsigned long tot = g_disp.mm + g_disp.mv + g_disp.mvf +
+                            g_disp.rmsnorm + g_disp.qknorm + g_disp.headnorm +
+                            g_disp.rope + g_disp.store + g_disp.attn +
+                            g_disp.attn_chunk + g_disp.elem + g_disp.moe;
         fprintf(stderr, "metal: native prompt batch n=%d command_buffers=1\n", n);
+        // Per-kind census for this forward, so "which kinds scale with n"
+        // can be read straight off two runs at different batch sizes rather
+        // than inferred from throughput. Counters are cumulative over the
+        // process; take differences across forwards.
+        fprintf(stderr, "metal-census n=%d total=%lu | mm=%lu mv=%lu mvf=%lu "
+                "rmsnorm=%lu qknorm=%lu headnorm=%lu rope=%lu store=%lu "
+                "attn=%lu attn_chunk=%lu elem=%lu moe=%lu\n",
+                n, tot, g_disp.mm, g_disp.mv, g_disp.mvf, g_disp.rmsnorm,
+                g_disp.qknorm, g_disp.headnorm, g_disp.rope, g_disp.store,
+                g_disp.attn, g_disp.attn_chunk, g_disp.elem, g_disp.moe);
+    }
     return (float *)g->logits.contents + (size_t)(n - 1) * m->n_vocab;
 }
 
