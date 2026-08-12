@@ -1248,7 +1248,14 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
 // forwarded, it is already known to be assistant text or tool arguments.
 
 enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_ATEM,
-       TS_MUSE_HEADER, TS_MUSE_CONTENT, TS_DONE };
+       TS_MUSE_HEADER, TS_MUSE_CONTENT,
+       // parallel_tool_calls: between two entries of {"calls":[...]}. A
+       // value ending inside TS_VALUE/TS_FINAL_STR leaves the entry's own
+       // closing '}' unread (they only consume the value itself), so this
+       // state looks for it, then for the ',' that starts another entry or
+       // the ']' that ends the array.
+       TS_ENTRY_SEP,
+       TS_DONE };
 
 static void head_put(tool_stream *s, const char *b, size_t n) {
     if (s->head_n + n + 1 > s->head_cap) {
@@ -1295,6 +1302,35 @@ static long head_str_end(const tool_stream *s, size_t i) {
     return -1;
 }
 
+// An entry's value (a tool's args, or the final branch's content) just
+// finished. For the plain single-call envelope that is the whole document:
+// TS_DONE swallows whatever trails it, exactly as before this function
+// existed. For the parallel {"calls":[...]} document it is only ONE array
+// element: emit call_end for a tool branch, reset the per-entry parsing
+// state, and hand off whatever of the input chunk is left over. That
+// leftover may already hold the entry's closing '}' and the next entry
+// besides — a real token stream, and especially the truncation closer, can
+// deliver all of that in one piece.
+static int ts_entry_close(tool_stream *s, const char *rest, int rest_n, int rc) {
+    if (rc) { s->state = TS_DONE; return rc; }
+    if (!(s->env && s->env->parallel)) { s->state = TS_DONE; return 0; }
+    bool was_called = s->called;
+    free(s->name);
+    s->name = NULL;
+    s->called = false;
+    s->depth = 0;
+    s->started = false;
+    s->in_str = false;
+    s->esc = false;
+    s->n_pend = 0;
+    s->state = TS_ENTRY_SEP;
+    if (was_called && s->sink.call_end) {
+        rc = s->sink.call_end(s->sink.ud);
+        if (rc) { s->state = TS_DONE; return rc; }
+    }
+    return rest_n > 0 ? tool_stream_feed(s, rest, rest_n) : 0;
+}
+
 // forward raw JSON text of the selected value, dropping insignificant
 // whitespace so the concatenated deltas are the same document the buffered
 // path re-serializes
@@ -1318,8 +1354,7 @@ static int ts_value(tool_stream *s, const char *b, int n) {
                 if (s->depth == 0) { // a bare string value ends here
                     if (run < 0) run = i;
                     TS_FLUSH(i + 1);
-                    s->state = TS_DONE;
-                    return rc;
+                    return ts_entry_close(s, b + i + 1, n - (i + 1), rc);
                 }
             }
             if (run < 0) run = i;
@@ -1327,11 +1362,12 @@ static int ts_value(tool_stream *s, const char *b, int n) {
         }
         if (ts_ws(c)) { TS_FLUSH(i); continue; }
         if (s->depth == 0 && s->started) {
-            // a scalar value has begun and this byte closes our parent
+            // a scalar value has begun and this byte closes our parent; it
+            // is not consumed here (a bare scalar has no delimiter of its
+            // own), so it is still the first byte of what is left over
             if (c == ',' || c == '}' || c == ']') {
                 TS_FLUSH(i);
-                s->state = TS_DONE;
-                return rc;
+                return ts_entry_close(s, b + i, n - i, rc);
             }
         }
         s->started = true;
@@ -1341,8 +1377,7 @@ static int ts_value(tool_stream *s, const char *b, int n) {
             if (--s->depth <= 0) {
                 if (run < 0) run = i;
                 TS_FLUSH(i + 1);
-                s->state = TS_DONE;
-                return rc;
+                return ts_entry_close(s, b + i + 1, n - (i + 1), rc);
             }
         }
         if (run < 0) run = i;
@@ -1380,7 +1415,7 @@ static int ts_final_str(tool_stream *s, const char *b, int n) {
             }
             continue;
         }
-        if (c == '"') { s->state = TS_DONE; return rc; }
+        if (c == '"') return ts_entry_close(s, b + i + 1, n - (i + 1), rc);
         if (c == '\\') { s->pend[0] = c; s->n_pend = 1; continue; }
         int run = i;
         while (i < n && b[i] != '"' && b[i] != '\\') i++;
@@ -1410,6 +1445,7 @@ static int ts_resolve(tool_stream *s) {
             memcpy(s->name, s->head + i + 1, len);
             s->name[len] = 0;
             s->called = strcmp(s->name, FINAL_BRANCH) != 0;
+            if (s->called) s->any_called = true;
             head_drop(s, (size_t)e);
             s->state = TS_ARGS;
             // announce the call the moment the discriminator resolves: that
@@ -1448,6 +1484,31 @@ static int ts_resolve(tool_stream *s) {
             if (s->head[i] != '"') { s->state = TS_DONE; return 0; }
             head_drop(s, i + 1);
             s->state = TS_FINAL_STR;
+            break;
+        }
+        case TS_ENTRY_SEP: {
+            // the value just forwarded leaves its entry's own closing '}'
+            // unread; find it, then a ',' before another entry or the ']'
+            // that ends the calls array. Peek only -- nothing is dropped
+            // until the outcome is known, so a split chunk just waits for
+            // more bytes and re-scans the same prefix next time.
+            if (!s->head) return 0;
+            size_t i = 0;
+            while (i < s->head_n && ts_ws(s->head[i])) i++;
+            if (i >= s->head_n) return 0;
+            if (s->head[i] != '}') { s->state = TS_DONE; return 0; }
+            i++;
+            while (i < s->head_n && ts_ws(s->head[i])) i++;
+            if (i >= s->head_n) return 0;
+            if (s->head[i] == ']') {
+                head_drop(s, i + 1);
+                s->state = TS_DONE;
+                return 0;
+            }
+            if (s->head[i] != ',') { s->state = TS_DONE; return 0; }
+            i++;
+            head_drop(s, i);
+            s->state = TS_TOOL;
             break;
         }
         default: {
@@ -1511,6 +1572,7 @@ static int ts_atem(tool_stream *s, const char *bytes, int n) {
             if (!name || !args) rc = 0;
             else {
                 s->called = true;
+                s->any_called = true;
                 if (s->sink.call_begin) rc = s->sink.call_begin(s->sink.ud, name);
                 if (!rc && s->sink.call_args)
                     rc = s->sink.call_args(s->sink.ud, args, (int)strlen(args));
@@ -1550,7 +1612,7 @@ int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
     }
 }
 
-bool tool_stream_called(const tool_stream *s) { return s->called; }
+bool tool_stream_called(const tool_stream *s) { return s->any_called; }
 
 void tool_stream_free(tool_stream *s) {
     if (!s) return;

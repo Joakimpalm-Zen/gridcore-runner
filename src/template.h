@@ -180,7 +180,8 @@ typedef struct {
     int (*content)(void *ud, const char *bytes, int n);
     int (*call_begin)(void *ud, const char *name);
     int (*call_args)(void *ud, const char *bytes, int n);
-    int (*call_end)(void *ud); // native protocols may carry another call
+    int (*call_end)(void *ud); // a native turn or a parallel JSON document
+                               // may carry another call after this one
 } tool_stream_sink;
 
 typedef struct {
@@ -190,7 +191,11 @@ typedef struct {
     char  *head;          // undecided prefix, held back from the client
     size_t head_n, head_cap;
     char *name;           // selected branch, once known (owned)
-    bool  called;         // a tool branch, rather than `final`, was selected
+    bool  called;         // the CURRENT entry selected a tool branch, not
+                          // `final` -- reset between entries of a parallel
+                          // document, unlike any_called below
+    bool  any_called;     // a tool branch was selected by ANY entry so far;
+                          // this is what finish_reason "tool_calls" reads
     int   depth;          // nesting inside the value being forwarded
     bool  started;        // the forwarded value has produced its first byte
     bool  in_str, esc;    // JSON string state within that value

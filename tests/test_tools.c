@@ -670,9 +670,10 @@ static void test_map_produces_openai_tool_call_items(void) {
 // decision made on a boundary the parser happened to like.
 
 typedef struct {
-    sbuf content, args;
-    char name[64];
-    int  begins;
+    sbuf content, args, names; // names: every call_begin, space-separated
+    char name[64];             // the LAST call_begin, for single-call tests
+    int  begins, ends;
+    bool called;                // tool_stream_called() once feeding is done
 } demux_log;
 
 static int log_content(void *ud, const char *b, int n) {
@@ -682,11 +683,17 @@ static int log_content(void *ud, const char *b, int n) {
 static int log_begin(void *ud, const char *name) {
     demux_log *l = ud;
     snprintf(l->name, sizeof(l->name), "%s", name);
+    if (l->names.n) sb_lit(&l->names, " ");
+    sb_put(&l->names, name, strlen(name));
     l->begins++;
     return 0;
 }
 static int log_args(void *ud, const char *b, int n) {
     sb_put(&((demux_log *)ud)->args, b, n);
+    return 0;
+}
+static int log_end(void *ud) {
+    ((demux_log *)ud)->ends++;
     return 0;
 }
 
@@ -695,7 +702,7 @@ static int log_args(void *ud, const char *b, int n) {
 static void demux_step(const tool_envelope *e, const char *doc, size_t step,
                        demux_log *l) {
     memset(l, 0, sizeof(*l));
-    tool_stream_sink sink = { l, log_content, log_begin, log_args, NULL };
+    tool_stream_sink sink = { l, log_content, log_begin, log_args, log_end };
     tool_stream s;
     tool_stream_init(&s, e, &sink);
     size_t len = strlen(doc);
@@ -705,6 +712,7 @@ static void demux_step(const tool_envelope *e, const char *doc, size_t step,
         assert(tool_stream_feed(&s, doc + i, (int)k) == 0);
     }
     if (tool_stream_called(&s)) assert(l->begins >= 1);
+    l->called = tool_stream_called(&s);
     tool_stream_free(&s);
 }
 
@@ -712,7 +720,11 @@ static void demux(const tool_envelope *e, const char *doc, demux_log *l) {
     demux_step(e, doc, 1, l);
 }
 
-static void log_free(demux_log *l) { free(l->content.s); free(l->args.s); }
+static void log_free(demux_log *l) {
+    free(l->content.s);
+    free(l->args.s);
+    free(l->names.s);
+}
 
 // the same property the SSE boundary matrix asserts one level up: what the
 // client sees may not depend on where the token boundaries happened to fall
@@ -723,7 +735,11 @@ static void demux_every_split(const tool_envelope *e, const char *doc) {
         demux_log got;
         demux_step(e, doc, step, &got);
         assert(got.begins == ref.begins);
+        assert(got.ends == ref.ends);
+        assert(got.called == ref.called);
         assert(!strcmp(got.name, ref.name));
+        assert(got.names.n == ref.names.n);
+        assert(!got.names.n || !memcmp(got.names.s, ref.names.s, ref.names.n));
         assert(got.content.n == ref.content.n);
         assert(got.args.n == ref.args.n);
         assert(!got.content.n || !memcmp(got.content.s, ref.content.s, ref.content.n));
@@ -1025,6 +1041,151 @@ static void test_parallel_envelope_maps_several_calls(void) {
     jv_free(tools);
 }
 
+// ------------------------------------------- parallel streaming demux
+//
+// The single-call TS_TOOL/TS_ARGS/TS_VALUE/TS_FINAL_STR chain already knows
+// how to find a "tool"/"args" (or "content") key and forward the value that
+// follows -- it does not care what wraps it, since every key is located by
+// scanning forward from wherever the last entry left off. The parallel
+// document only adds one new decision: what happens when a value ends. For
+// the plain envelope that is the whole document. Inside {"calls":[...]} it
+// is one array element, and TS_ENTRY_SEP looks for the entry's own closing
+// '}' and then a ',' (another entry) or ']' (done) in whatever of the input
+// is left over -- which may already be sitting in the very same feed() call.
+
+static void test_parallel_stream_demux_emits_each_call(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build_ex(tools, NULL, NULL, true, &e,
+                                  err, sizeof(err)) == 1);
+
+    demux_log l;
+    demux(&e, "{\"calls\":[{\"tool\":\"get_weather\","
+              "\"args\":{\"city\":\"Oslo\",\"units\":\"c\"}},"
+              "{\"tool\":\"add\",\"args\":{\"a\":1,\"b\":2}}]}", &l);
+    assert(l.begins == 2 && l.ends == 2);
+    assert(l.called);
+    assert(!strcmp(l.names.s, "get_weather add"));
+    assert(l.content.n == 0);          // no content alongside calls
+    // the concatenated argument deltas are exactly the two argument
+    // documents, back to back, with no separator or envelope syntax
+    assert(l.args.s && !strcmp(l.args.s,
+        "{\"city\":\"Oslo\",\"units\":\"c\"}{\"a\":1,\"b\":2}"));
+    log_free(&l);
+
+    // a single-entry array holding the final branch is an ordinary answer:
+    // the wrapper is present, but nothing was called
+    demux(&e, "{\"calls\":[{\"tool\":\"final\",\"args\":{\"content\":\"hi\"}}]}",
+         &l);
+    assert(l.begins == 0 && l.ends == 0);
+    assert(!l.called);
+    assert(l.content.s && !strcmp(l.content.s, "hi"));
+    log_free(&l);
+
+    // mixed document (the system prompt discourages this, but the schema
+    // does not forbid it): a call followed by a final entry must still
+    // report the call, and "called" must survive past the later non-call
+    // entry rather than being reset by it
+    demux(&e, "{\"calls\":[{\"tool\":\"add\",\"args\":{\"a\":1,\"b\":2}},"
+              "{\"tool\":\"final\",\"args\":{\"content\":\"done\"}}]}", &l);
+    assert(l.begins == 1 && l.ends == 1);
+    assert(l.called);
+    assert(!strcmp(l.names.s, "add"));
+    assert(l.args.s && !strcmp(l.args.s, "{\"a\":1,\"b\":2}"));
+    assert(l.content.s && !strcmp(l.content.s, "done"));
+    log_free(&l);
+
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
+// A demux that decides differently depending on how the tokenizer happened
+// to split the array would leak the envelope, or misattribute an index, on
+// some requests and not others -- exactly the failure mode the single-call
+// version of this test guards against, extended across entries.
+static void test_parallel_stream_demux_is_boundary_independent(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build_ex(tools, NULL, NULL, true, &e,
+                                  err, sizeof(err)) == 1);
+
+    demux_every_split(&e, "{\"calls\":[{\"tool\":\"get_weather\","
+                          "\"args\":{\"city\":\"Oslo\",\"units\":\"c\"}},"
+                          "{\"tool\":\"add\",\"args\":{\"a\":1,\"b\":-2}}]}");
+    // whitespace around the entry separator is exactly as free as within one
+    // entry, and must not leak either
+    demux_every_split(&e, "{ \"calls\" : [ { \"tool\" : \"add\" , \"args\" : "
+                          "{ \"a\" : 1 , \"b\" : 2 } } , { \"tool\" : \"add\" "
+                          ", \"args\" : { \"a\" : 3 , \"b\" : 4 } } ] }");
+    // three entries: the between-entries loop, not just the two-call case
+    demux_every_split(&e,
+        "{\"calls\":[{\"tool\":\"add\",\"args\":{\"a\":1,\"b\":2}},"
+        "{\"tool\":\"add\",\"args\":{\"a\":3,\"b\":4}},"
+        "{\"tool\":\"get_weather\",\"args\":"
+        "{\"city\":\"Bergen\",\"units\":\"f\"}}]}");
+
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
+// max_tokens can cut a parallel document mid-call exactly as it can the
+// single-call envelope. sval_close completes the array to its declared
+// minItems, so the closer's tail may finish a call the model itself never
+// finished typing -- and that tail reaches the demux through the very same
+// feed() pipeline ordinary tokens do. Every call that was ever announced
+// must still be announced, closed, and carry parseable arguments.
+static void test_parallel_stream_demux_survives_truncation(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build_ex(tools, NULL, NULL, true, &e,
+                                  err, sizeof(err)) == 1);
+    snode *root = compile(&e);
+    assert(root != NULL);
+
+    const char *prefix =
+        "{\"calls\":[{\"tool\":\"get_weather\","
+        "\"args\":{\"city\":\"Oslo\",\"units\":\"c\"}},"
+        "{\"tool\":\"add\",\"args\":{\"a\":1,\"b\":";
+    sval partial;
+    sval_init(&partial, root);
+    assert(sval_feed(&partial, prefix, (int)strlen(prefix)));
+    char tail[512];
+    int tail_n = sval_close(&partial, tail, sizeof(tail));
+    assert(tail_n > 0);
+    char full[1024];
+    snprintf(full, sizeof(full), "%s%s", prefix, tail);
+    assert(accepts(root, full));
+
+    demux_log l;
+    demux(&e, full, &l);
+    // both entries were announced and closed, including the one the closer
+    // finished on the model's behalf -- a client waiting on call_end for
+    // that index must not be left hanging just because the budget ran out
+    assert(l.begins == 2 && l.ends == 2);
+    assert(l.called);
+    assert(!strcmp(l.names.s, "get_weather add"));
+    static const char *const first_args = "{\"city\":\"Oslo\",\"units\":\"c\"}";
+    assert(l.args.s && !strncmp(l.args.s, first_args, strlen(first_args)));
+    // the second call's arguments are whatever the closer completed them to
+    // -- still valid JSON, still executable, just not the model's own text
+    const char *second = l.args.s + strlen(first_args);
+    jv *parsed = json_parse(second, strlen(second));
+    assert(parsed && parsed->type == J_OBJ);
+    jv_free(parsed);
+    log_free(&l);
+
+    // the closer's tail lands in one lump sum after however many bytes were
+    // fed before it; the call sequence must not depend on where that was
+    demux_every_split(&e, full);
+
+    schema_free(root);
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
 // The default build is unchanged by the new parameter: same single-object
 // document, same mapping. A regression here would break every existing client.
 static void test_default_envelope_is_unchanged(void) {
@@ -1094,6 +1255,9 @@ int main(void) {
     test_malformed_tool_choice_is_rejected();
     test_parameterless_tool();
     test_parallel_envelope_maps_several_calls();
+    test_parallel_stream_demux_emits_each_call();
+    test_parallel_stream_demux_is_boundary_independent();
+    test_parallel_stream_demux_survives_truncation();
     test_default_envelope_is_unchanged();
     test_system_turn_teaches_the_envelope();
     puts("tool envelope tests ok");
