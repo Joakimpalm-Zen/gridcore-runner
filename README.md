@@ -39,7 +39,11 @@ Release archives name the binary for their platform — `runner-macos-arm64`,
 `runner` or substitute that name in the commands below. A source build produces
 `runner` directly.
 
-If you have no GGUF handy, this one is 2.63 GB and runs on an 8 GB machine:
+If you have no GGUF handy, this one is 2.63 GB and runs on an 8 GB machine.
+Know what it is: measured against its own BF16 parent it agrees on 77.75%
+of tokens (mean KLD 0.286, 2026-08-12), so treat it as a smoke-test artifact
+that fits small machines, not a faithful gemma-4-E2B; its card carries the
+full numbers.
 
 ```sh
 curl -L -o model.gguf \
