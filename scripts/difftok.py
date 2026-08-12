@@ -18,6 +18,7 @@ Exit status is 0 if the divergence count matches --expect (default 0).
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -57,6 +58,15 @@ def runner_ids(exe, gguf, corpus_path, n):
     return [[int(x) for x in ln.split()] for ln in lines]
 
 
+def corpus_digest(corpus):
+    """Identity of the exact strings a capture was taken against."""
+    h = hashlib.sha256()
+    for s in corpus:
+        h.update(s.encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def reference_tokenizer(ref):
     from tokenizers import Tokenizer
 
@@ -70,9 +80,21 @@ def reference_tokenizer(ref):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gguf", required=True)
-    ap.add_argument("--ref", required=True,
+    ap.add_argument("--ref",
                     help="HF repo id, a directory containing tokenizer.json, "
-                         "or a path to tokenizer.json")
+                         "or a path to tokenizer.json. Not needed with "
+                         "--ref-ids.")
+    # Offline reference. Loading --ref by repo id needs the network and, for a
+    # gated repo, credentials -- which is what keeps this check out of CI and
+    # off contributors' machines. The reference tokenization of a fixed corpus
+    # is a constant, though, so capture it ONCE from an authenticated run and
+    # every later run is offline and reproducible.
+    ap.add_argument("--capture", metavar="PATH",
+                    help="write the reference ids for this corpus to PATH "
+                         "(use during an authenticated run)")
+    ap.add_argument("--ref-ids", metavar="PATH",
+                    help="read reference ids from a --capture file instead of "
+                         "loading a tokenizer; no network, no credentials")
     ap.add_argument("--corpus", default="tests/fixtures/tokenizer-corpus.txt")
     ap.add_argument("--expect", type=int, default=0,
                     help="expected number of diverging strings")
@@ -89,8 +111,36 @@ def main():
     corpus = load_corpus(args.corpus)
     mine = runner_ids(exe, args.gguf, args.corpus, len(corpus))
 
-    tok = reference_tokenizer(args.ref)
-    theirs = [tok.encode(s, add_special_tokens=False).ids for s in corpus]
+    if args.ref_ids:
+        with open(args.ref_ids, encoding="utf-8") as f:
+            cap = json.load(f)
+        # The ids mean nothing without the corpus they were captured against,
+        # so refuse a mismatch loudly rather than comparing against the wrong
+        # strings and reporting confident nonsense.
+        want = corpus_digest(corpus)
+        if cap.get("corpus_sha256") != want:
+            raise SystemExit(
+                "--ref-ids was captured against a different corpus "
+                f"({cap.get('corpus_sha256', '?')[:12]} != {want[:12]}); "
+                "recapture it")
+        theirs = [list(x) for x in cap["ids"]]
+        if len(theirs) != len(corpus):
+            raise SystemExit("--ref-ids has %d rows, corpus has %d"
+                             % (len(theirs), len(corpus)))
+        tok = None
+    else:
+        if not args.ref:
+            raise SystemExit("one of --ref or --ref-ids is required")
+        tok = reference_tokenizer(args.ref)
+        theirs = [tok.encode(s, add_special_tokens=False).ids for s in corpus]
+        if args.capture:
+            with open(args.capture, "w", encoding="utf-8") as f:
+                json.dump({"ref": args.ref,
+                           "corpus": os.path.basename(args.corpus),
+                           "corpus_sha256": corpus_digest(corpus),
+                           "ids": theirs}, f)
+            print(f"captured {len(theirs)} reference tokenizations to "
+                  f"{args.capture}")
 
     bad = [i for i in range(len(corpus)) if mine[i] != theirs[i]]
 
@@ -98,9 +148,11 @@ def main():
         s = corpus[i]
         print(f"--- line {i + 1}: {json.dumps(s, ensure_ascii=False)}")
         print(f"    runner: {mine[i]}")
-        print(f"            {[tok.decode([t]) if t < tok.get_vocab_size() else '?' for t in mine[i]]}")
+        if tok is not None:
+            print(f"            {[tok.decode([t]) if t < tok.get_vocab_size() else '?' for t in mine[i]]}")
         print(f"    ref   : {theirs[i]}")
-        print(f"            {[tok.decode([t]) for t in theirs[i]]}")
+        if tok is not None:
+            print(f"            {[tok.decode([t]) for t in theirs[i]]}")
     if len(bad) > args.show:
         print(f"... and {len(bad) - args.show} more")
 

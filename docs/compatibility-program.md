@@ -90,6 +90,24 @@ the committed 721-string corpus. Install
 `tests/compatibility/tokenizer-requirements.txt`, then run `scripts/difftok.py`
 with the GGUF and immutable reference revision from the published report.
 
+That run needs the network, and for a gated repo it needs credentials — which
+is what has kept this check off contributors' machines and out of CI. The
+reference tokenization of a fixed corpus is a constant, so it only has to be
+fetched once: add `--capture PATH` to an authenticated run to write the
+reference ids out, then every later run replays them with `--ref-ids PATH` and
+touches no network at all. A capture records the SHA-256 of the exact corpus it
+was taken against and refuses to be replayed against a different one, because
+ids compared to the wrong strings would report confident nonsense.
+
+Note that a capture cannot be reconstructed from the published compat reports.
+Their `stdout_tail` records the diverging cases in full — string, runner ids
+and reference ids — but it is a *tail*: of the four models diverging as of
+2026-08-15, only phi-3.5-mini (2/721) has every case present. mistral-7b-v0.3
+(44/721), salamandra-7b (16/721) and lucie-7b (259/721) are truncated to 14, 10
+and 11 cases. The tail is enough to reproduce and debug a known divergence; it
+is not enough to certify the other ~700 strings still agree, which is what the
+check is for.
+
 `scripts/reference_compare.py` gives Runner and llama.cpp equivalent raw
 `/v1/completions` requests and compares exact generated UTF-8 at temperature
 zero. This avoids CLI banners, prompt echo, ANSI output and chat-template
