@@ -343,12 +343,19 @@ def test_tool_choice_without_tools_is_rejected(client):
                           contains="tools")
 
 
-def test_parallel_tool_calls_is_accepted_buffered_and_refused_streaming(client):
-    """parallel_tool_calls:true is honoured on buffered requests with tools —
-    the envelope becomes a bounded {"calls":[...]} array over the same
-    discriminated union. Streaming still refuses it, with a reason: the
-    demultiplexer tracks one call per turn, and quietly downgrading to a
-    single call would leave the caller expecting calls it never gets."""
+def test_parallel_tool_calls_is_accepted_buffered_and_streaming(client):
+    """parallel_tool_calls:true is honoured on both surfaces — the envelope
+    becomes a bounded {"calls":[...]} array over the same discriminated
+    union, and the streaming demultiplexer loops it the same way it already
+    looped the native atem protocol's <atem:invoke> blocks: each call gets
+    its own index, closed before the next one opens.
+
+    The fixture model has random weights, so under "required" it may emit
+    anywhere from one call up to the 8-entry cap; a small budget can then be
+    a genuine truncation rather than a clean turn, exactly as it can for the
+    single-call envelope (test_required_always_produces_a_conforming_call
+    tolerates the same thing). Both finish reasons are accepted here; only
+    "length" gets its own pinned assertion, below."""
     ok = client.chat(dict(BASE, tools=TOOLS, tool_choice="required",
                           parallel_tool_calls=True, max_tokens=64),
                      name="parallel-buffered")
@@ -362,9 +369,69 @@ def test_parallel_tool_calls_is_accepted_buffered_and_refused_streaming(client):
         assert c["function"]["name"] in {t["function"]["name"] for t in TOOLS}
         json.loads(c["function"]["arguments"])   # always parseable
 
-    client.expect_400(dict(BASE, tools=TOOLS, parallel_tool_calls=True,
-                           stream=True), "parallel-streaming",
-                      contains="stream")
+    st = client.chat_stream(dict(BASE, tools=TOOLS, tool_choice="required",
+                                 parallel_tool_calls=True, max_tokens=64),
+                            name="parallel-streaming")
+    st.expect_sse()
+    if st.finish_reason not in ("tool_calls", "length"):
+        raise ProtocolError("a required parallel turn must finish with "
+                            "\"tool_calls\" or \"length\"",
+                            got=st.finish_reason)
+    streamed = collect_tool_calls(st)
+    assert streamed, "a required parallel turn must still produce a call"
+    sids = [c["id"] for c in streamed]
+    assert len(set(sids)) == len(sids)
+    for c in streamed:
+        assert c["name"] in {t["function"]["name"] for t in TOOLS}
+        json.loads(c["arguments"])
+    if st.text:
+        raise ProtocolError("content was streamed alongside parallel calls",
+                            got=st.text[:200])
+
+
+def test_parallel_tool_calls_streaming_reports_two_distinct_indexes(client):
+    """The headline streaming contract for Phase 3: whatever number of calls
+    the (random-weight) fixture model decides to emit under "required", each
+    one streams on its own index. A generous budget makes a clean finish the
+    common case; test_parallel_tool_calls_streaming_truncated_reports_length
+    below pins the budget-exhausted case on its own."""
+    st = client.chat_stream(
+        dict(BASE, tools=TOOLS, tool_choice="required",
+             parallel_tool_calls=True, max_tokens=256),
+        name="parallel-streaming-indexes").expect_sse()
+    if st.finish_reason not in ("tool_calls", "length"):
+        raise ProtocolError("expected finish_reason \"tool_calls\" or "
+                            "\"length\"", got=st.finish_reason)
+    calls = collect_tool_calls(st)
+    if len(calls) < 1:
+        raise ProtocolError("streamed parallel turn produced no calls",
+                            body=st.raw[:300])
+    # collect_tool_calls already enforces: identity (id, type, name) arrives
+    # once per index, on the FIRST delta for that index, and every later
+    # delta for the same index carries argument text only. What remains to
+    # check here is that each call is independently a legal, executable one.
+    for c in calls:
+        _assert_conforms(st, c["name"], c["arguments"])
+
+
+def test_parallel_tool_calls_streaming_truncated_reports_length(client):
+    """finding A applies to the parallel document exactly as it does to the
+    single-call one: a budget that cuts generation mid-call must not claim
+    "tool_calls" for a document the closer, not the model, finished."""
+    st = client.chat_stream(
+        dict(BASE, tools=TOOLS, tool_choice="required",
+             parallel_tool_calls=True, max_tokens=4),
+        name="parallel-streaming-truncated").expect_sse()
+    if st.finish_reason != "length":
+        raise ProtocolError("a budget-truncated parallel call must report "
+                            "finish_reason \"length\"", got=st.finish_reason)
+    # the call that was announced is still a legal, parseable one -- the
+    # closer completes a legal document, it does not corrupt it
+    calls = collect_tool_calls(st)
+    for c in calls:
+        assert c["name"] in {t["function"]["name"] for t in TOOLS}
+        json.loads(c["arguments"])
+
 
 def test_tools_are_still_advisory_when_absent(client):
     """The flags stay tolerated on a request with no tools — rejecting them
