@@ -739,6 +739,89 @@ kernel void k_mv_mxfp4(MV_PARAMS) {
 }
 
 
+// ------------------------------------------- fast (reassociating) decode matvec
+// The k_mv_* family above IS the CPU<->GPU byte-identity contract, and that
+// contract is what caps it. Each output row accumulates over
+// `for (i = tiisg; i < n; i += 32)` into one scalar and finishes with one
+// simd_sum, so which lane owns which block decides which partial sums enter
+// the reduction tree. The 2026-08-12 sweep
+// (docs/negative-result-metal-multirow-matvec.md) measured the two levers that
+// survive that pin — wider loads (neutral) and rows-per-simdgroup (zero-sum,
+// because simdgroups x rows is fixed at n_out) — and concluded that the
+// roofline gap needs the transformations identity forbids, on a SECOND kernel
+// promoted by teacher-forced tolerance the way the tiled GEMM below already is.
+//
+// This is that kernel family. It answers to tests/test_mv_tol.c through
+// gpu_mv_force(); the identity family stays reachable and byte-for-byte
+// unchanged behind RUNNER_METAL_MV=0.
+//
+// What it does that identity forbids:
+//
+//   * float4 accumulation. The identity form must spell each product as its
+//     own scalar `+=` in the original expression order; here four lanes of a
+//     float4 accumulate independently and are summed horizontally at the end.
+//     That is a different reduction tree, and it is the point: it turns the
+//     per-element scalar FMA chain into one vector FMA per four elements.
+//   * the q4_0 zero-point factored out of the inner loop. sum (q-8)*y*d
+//     becomes d*(sum q*y) - 8d*(sum y), so the per-element integer subtract
+//     disappears and the nibble goes straight to float.
+//
+// The hypothesis being tested, stated so a later reader can check it rather
+// than re-derive it: at 36% of roofline this route is ISSUE-bound, not
+// traffic-bound — weight bytes are irreducible (every byte is read exactly
+// once either way), so the only thing left to cut is issued instructions per
+// byte consumed. If that hypothesis is wrong the gate still passes and the
+// bench simply shows nothing, which is a result worth recording either way.
+//
+// Decode only: enc_mv_n selects this at n_col == 1. Prefill already has the
+// tiled GEMM, which is a strictly better answer for a real batch.
+
+kernel void k_mvf_q4_0(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 32;
+    device const uchar *rw = wb + a.w_off + (ulong)row * nb * 18;
+    float4 acc = 0;      // sum over blocks of d * (q . y)
+    float  corr = 0;     // sum over blocks of d * (sum y), the -8 zero-point
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 18;
+        float d = (float)*(device const half *)blk;
+        device const packed_uchar4 *q = (device const packed_uchar4 *)(blk + 2);
+        device const packed_float4 *xp = (device const packed_float4 *)(x + b * 32);
+        float4 t = 0, sy = 0;
+        for (int k = 0; k < 4; k++) {
+            uchar4 qq = q[k];
+            float4 xl = xp[k], xh = xp[k + 4];
+            t  += float4(qq & 0xF) * xl;
+            t  += float4(qq >> 4)  * xh;
+            sy += xl + xh;
+        }
+        acc  += d * t;
+        corr += d * (sy.x + sy.y + sy.z + sy.w);
+    }
+    float s = (acc.x + acc.y + acc.z + acc.w) - 8.0f * corr;
+    MV_TAIL;
+}
+
+// q8_0 has no zero-point to factor, so this is the float4-accumulator half of
+// the change alone: 8 vector FMAs per block against 32 scalar ones.
+kernel void k_mvf_q8_0(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 32;
+    device const uchar *rw = wb + a.w_off + (ulong)row * nb * 34;
+    float4 acc = 0;
+    for (int b = tiisg; b < nb; b += 32) {
+        device const uchar *blk = rw + (ulong)b * 34;
+        float d = (float)*(device const half *)blk;
+        device const packed_char4 *q = (device const packed_char4 *)(blk + 2);
+        device const packed_float4 *xp = (device const packed_float4 *)(x + b * 32);
+        float4 t = 0;
+        for (int k = 0; k < 8; k++) t += float4(q[k]) * xp[k];
+        acc += d * t;
+    }
+    float s = acc.x + acc.y + acc.z + acc.w;
+    MV_TAIL;
+}
+
 // ------------------------------------------------------- tiled prefill GEMM
 // The matvec kernels above give one output element per simdgroup: 32 lanes
 // each do one FMA and then a log-depth reduction, so almost none of the work

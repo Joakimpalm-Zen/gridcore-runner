@@ -387,6 +387,14 @@ tolerance tests. CUDA currently promotes Q4_K/Q6_K/Q8_0 on the gated dense
 families and Q4_0 on Gemma 4; the latter was bit-identical over 820 tensor-core
 dispatches on the real 31B QAT artifact. `RUNNER_CUDA_TC=0` and
 `RUNNER_METAL_MM=0` pin the scalar matvec paths for identity investigations.
+`RUNNER_METAL_MV=1` opts into a reassociating Metal *decode* matvec (q4_0/q8_0,
+float4 accumulation and the q4_0 zero-point factored out of the inner loop).
+It clears the 0/64 teacher-forced flip bar on both formats but measured
+neutral on an 8-core M1 — −0.16 % bandwidth-bound, −0.01 % dispatch-bound — so
+it is **off by default**, leaving the byte-identical kernel on the default
+path. `./test-mv-tol MODEL.gguf` is the gate; see
+`docs/negative-result-metal-multirow-matvec.md` for why decode on that machine
+is bound by bytes rather than instructions.
 The CPU quant dot/dequant module is a separate translation unit compiled with
 `-fno-fast-math`; fast math remains enabled for the rest of the engine.
 

@@ -1812,6 +1812,13 @@ void gpu_tc_force(int on) {
 static unsigned long g_tc_dispatches = 0;
 unsigned long gpu_tc_dispatches(void) { return g_tc_dispatches; }
 
+// The fast decode matvec is a Metal lever: CUDA decode reaches its throughput
+// through the batched/TC paths instead, and the CUDA matvec is not under the
+// same byte-identity pin that forced Metal to grow a second kernel. Present so
+// the mv gate links and can say "never dispatched here".
+void gpu_mv_force(int on) { (void)on; }
+unsigned long gpu_mv_dispatches(void) { return 0; }
+
 // Same hook for the MoE routing path: the fused-vs-eager tolerance gate has to
 // run both inside one process, which an env var read at first launch cannot
 // express. -1 restores the env default (RUNNER_MOE_EAGER).

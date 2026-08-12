@@ -24,6 +24,7 @@ typedef struct {
     id<MTLComputePipelineState> p_moe_route, p_moe_actmul, p_moe_sum;
     id<MTLComputePipelineState> p_mv[METAL_TYPE_SLOTS];       // indexed by ggml type
     id<MTLComputePipelineState> p_mm[METAL_TYPE_SLOTS];       // tiled prefill GEMM
+    id<MTLComputePipelineState> p_mvf[METAL_TYPE_SLOTS];      // fast decode matvec
     id<MTLComputePipelineState> p_moe_mv[METAL_TYPE_SLOTS];   // indexed by ggml type
     id<MTLBuffer> weights;                      // wraps the model mmap (zero copy)
     bool          weights_copied;
@@ -167,6 +168,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++) [bufs[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mv[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mm[i] release];
+    for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_mvf[i] release];
     for (int i = 0; i < METAL_TYPE_SLOTS; i++) [g->p_moe_mv[i] release];
     [g->p_rmsnorm release]; [g->p_qknorm release]; [g->p_headnorm release];
     [g->p_rope release]; [g->p_store release]; [g->p_attn release];
@@ -520,6 +522,34 @@ static bool metal_mm_on(void) {
     if (g_mm_state >= 0) return g_mm_state != 0;
     return true;   // promoted: every type with a k_mm_* kernel, prefill only
 }
+// Fast decode matvec (k_mvf_*): the reassociating twin of the identity matvec,
+// selected at n_col == 1 only. See the kernel-family comment in kernels.metal
+// for what it does that identity forbids, and tests/test_mv_tol.c for the gate.
+//
+// Default: OFF. It ships opt-in until a measurement promotes it, exactly as
+// the fused CPU int8 dot does — a lever that has not cleared its bar on a
+// machine is not a default anywhere. `RUNNER_METAL_MV=1` opts in; -1 through
+// gpu_mv_force restores the env default.
+enum { MV_ENV_UNSET = -2 };
+static int g_mv_state = MV_ENV_UNSET;
+
+void gpu_mv_force(int on) {
+    g_mv_state = on < 0 ? MV_ENV_UNSET : (on != 0);
+}
+
+static unsigned long g_mv_dispatches = 0;
+unsigned long gpu_mv_dispatches(void) { return g_mv_dispatches; }
+
+static bool metal_mv_fast_on(void) {
+    // Cache the env read: this sits in the per-matvec dispatch path, and
+    // gpu_mv_force(-1) resets to UNSET so the next call re-reads it.
+    if (g_mv_state == MV_ENV_UNSET) {
+        const char *e = getenv("RUNNER_METAL_MV");
+        g_mv_state = e && *e && strcmp(e, "0") && strcmp(e, "off");
+    }
+    return g_mv_state > 0;
+}
+
 void gpu_moe_eager_force(int on) { (void)on; }
 
 bool gpu_moe_ok(void) {
@@ -738,6 +768,13 @@ bool gpu_init(model_t *m) {
     g->p_mv[T_Q5_K]   = mk_pipeline(dev, lib, @"k_mv_q5_K");
     g->p_mv[T_Q6_K]   = mk_pipeline(dev, lib, @"k_mv_q6_K");
     g->p_mv[T_MXFP4]  = mk_pipeline(dev, lib, @"k_mv_mxfp4");
+
+    // Fast (reassociating) decode matvec, gated by RUNNER_METAL_MV. Only the
+    // two types that carry real decode traffic on the models this was measured
+    // against; a type with no entry here simply keeps the identity kernel, so
+    // the coverage can grow one measured format at a time.
+    g->p_mvf[T_Q4_0]  = mk_pipeline(dev, lib, @"k_mvf_q4_0");
+    g->p_mvf[T_Q8_0]  = mk_pipeline(dev, lib, @"k_mvf_q8_0");
     g->p_moe_mv[T_F32]  = mk_pipeline(dev, lib, @"k_moe_mv_f32");
     g->p_moe_mv[T_F16]  = mk_pipeline(dev, lib, @"k_moe_mv_f16");
     g->p_moe_mv[T_Q8_0] = mk_pipeline(dev, lib, @"k_moe_mv_q8_0");
@@ -1153,7 +1190,18 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     mv_args a = { n_in, n_out,
                   (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
                   bias != nil, n_col, x_stride, y_stride, col_tile };
-    [e setComputePipelineState:g->p_mv[w->type]];
+    // Fast decode matvec: single column only. At n_col > 1 either the tiled
+    // GEMM above already took the work, or this type has no mm kernel and the
+    // identity matvec is what the batch falls back to — in both cases the
+    // fast kernel would be answering a question nobody asked, and it would put
+    // a non-identity result on the PREFILL path, where the tolerance gate
+    // (decode-only by construction) has never looked.
+    id<MTLComputePipelineState> mv = g->p_mv[w->type];
+    if (n_col == 1 && metal_mv_fast_on() && g->p_mvf[w->type]) {
+        mv = g->p_mvf[w->type];
+        g_mv_dispatches++;
+    }
+    [e setComputePipelineState:mv];
     [e setBuffer:g->weights offset:0 atIndex:0];
     [e setBuffer:x offset:x_off atIndex:1];
     [e setBuffer:y offset:y_off atIndex:2];

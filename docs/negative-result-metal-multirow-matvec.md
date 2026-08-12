@@ -121,3 +121,70 @@ An earlier note in `k_mv_q4_K` recorded that "hand-vectorising this loop is
 SLOWER (6.58 → 6.43 tok/s)". This work explains it: that attempt moved the sum
 into float4 accumulators and paid for four horizontal reductions. Widening only
 the loads, with every `+=` keeping its original expression, does not.
+
+## Follow-up, 2026-08-13: the reassociating kernel was built, and is also neutral
+
+The section above ends by saying the roofline gap needs the transformations
+identity forbids, on a second kernel promoted by teacher-forced tolerance. That
+kernel now exists — `k_mvf_q4_0` / `k_mvf_q8_0`, selected at `n_col == 1`
+behind `RUNNER_METAL_MV=1`, gated by `tests/test_mv_tol.c`. It ships **off**.
+
+It takes both levers identity forbids: float4 accumulation instead of a scalar
+`+=` chain, and the q4_0 zero-point factored out of the inner loop
+(`Σ(q−8)·y·d` → `d·Σq·y − 8d·Σy`), which deletes a per-element integer
+subtract. Together those cut issued ALU instructions per consumed weight byte
+roughly fourfold.
+
+The hypothesis was that at 36 % of roofline the route is **issue**-bound rather
+than traffic-bound — weight bytes are irreducible, every byte is read exactly
+once either way, so instructions per byte is the only thing left to cut. Same
+machine, same round-robin protocol, same first-run discard; both arms are one
+binary switched by env, so no build difference confounds it.
+
+| model | bound by | scalar | fast | delta |
+|---|---|---:|---:|---:|
+| e2b-q40, 2.6 GB q4_0 | bandwidth (~40 of ~68 GB/s) | 15.54 | 15.51 | **−0.16 %** |
+| SmolLM2-135M-Q8_0, 145 MB | dispatch (~19 GB/s) | 111.87 | 111.86 | **−0.01 %** |
+
+Both are inside the run-to-run spread, at both ends of the bound spectrum. **The
+hypothesis is refuted on this silicon.** Cutting ALU issue fourfold changes
+nothing, which is what a genuinely memory-bound kernel looks like: the M1's
+decode matvec is waiting on bytes, not on instructions, and no arithmetic
+rearrangement will move it.
+
+The tolerance side passed cleanly, on both formats:
+
+| model | fast matvecs | mean\|dlogit\| | as fraction of range | top-1 flips |
+|---|---:|---:|---:|---:|
+| e2b-q40 | 5,798 | 0.000767 | 0.00002 | **0/64** |
+| SmolLM2-135M-Q8_0 | 13,295 | 0.000664 | 0.00002 | **0/64** |
+
+against a 0.005 deviation limit and a zero-flip promotion bar. The determinism
+control — the reference re-run — read exactly 0.000000000 and 0/64 both times,
+which also pins something no other gate states: Metal decode is run-to-run
+reproducible, so a difference this harness reports is the kernel and not the
+GPU.
+
+So the artifact is correct, promotable on the numbers, and **not promoted**,
+because it buys nothing here and costs the byte-identity contract. That is the
+same disposition as the fused CPU int8 dot (`RUNNER_CPU_I8`), and for a
+stronger reason: that one at least failed on flips, this one passes and simply
+does not pay.
+
+### What this DOES settle, and what it does not
+
+Settled on M1: the decode matvec has now been attacked from three independent
+directions — load width, row assignment, and arithmetic reassociation — and all
+three measured neutral or worse. The remaining levers are not in the kernel's
+arithmetic at all. They are **traffic** (fewer bytes moved: smaller weights, or
+a KV/activation layout that reads less) and **dispatch** (fewer, larger command
+encodings). That is a genuinely useful narrowing: it retires a whole family of
+proposals.
+
+Not settled: the M5 Max 36 %-of-roofline measurement that started this. That
+silicon has several times the bandwidth and core count, so the balance between
+resident simdgroups and per-lane fetch depth — and therefore whether it is
+issue-bound where the M1 is bandwidth-bound — is exactly what differs. The
+difference now is that the experiment no longer needs writing: the kernel, the
+env switch and the gate are all in the tree, so answering it on M5-class
+hardware is `RUNNER_METAL_MV=1`, one bench and one `./test-mv-tol`.

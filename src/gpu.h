@@ -58,6 +58,22 @@ void   gpu_tc_force(int on);
 // cannot tell an unused kernel apart from an exactly-matching one — and Q8_0
 // turns out to be the second case. Counting the dispatch removes the guess.
 unsigned long gpu_tc_dispatches(void);
+// test hook for the fast-matvec tolerance gate: force the reassociating decode
+// matvec on (1) or off (0) regardless of RUNNER_METAL_MV; -1 returns to the
+// env default. A no-op on backends without one (CUDA, CPU-only builds).
+//
+// Why a second kernel rather than a faster first one: the shipped matvec is
+// the CPU<->GPU byte-identity contract, which pins which lane owns which
+// block and therefore forbids every reassociating transformation worth having
+// (see docs/negative-result-metal-multirow-matvec.md). The fast route answers
+// to tests/test_mv_tol.c the way the tiled prefill GEMM answers to
+// test_tc_tol.c, and the identity route stays reachable and unchanged.
+void   gpu_mv_force(int on);
+// How many times the fast matvec has actually been dispatched. Same reason the
+// TC path counts: "the logits differ" cannot tell an unused kernel apart from
+// an exactly-matching one, and a gate that cannot see its own subject passes
+// vacuously.
+unsigned long gpu_mv_dispatches(void);
 // test hook: force (1) or forbid (0) the eager MoE routing path; -1 = env
 void   gpu_moe_eager_force(int on);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU

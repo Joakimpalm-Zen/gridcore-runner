@@ -47,6 +47,8 @@ test-tc-tol
 test-tc-tol.exe
 test-i8-tol
 test-i8-tol.exe
+test-mv-tol
+test-mv-tol.exe
 test-vram-registry
 test-vram-registry.exe
 test-quantize

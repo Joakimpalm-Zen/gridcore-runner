@@ -101,6 +101,7 @@ TEST_INSTANCES = $(TEST_BATCH:test-batch%=test-instances%)
 TEST_TRAY_CORE = $(TEST_BATCH:test-batch%=test-tray-core%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_I8_TOL = $(TEST_BATCH:test-batch%=test-i8-tol%)
+TEST_MV_TOL = $(TEST_BATCH:test-batch%=test-mv-tol%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_MOE_ROUTER = $(TEST_BATCH:test-batch%=test-moe-router%)
 TEST_PAGING_WARN = $(TEST_BATCH:test-batch%=test-paging-warn%)
@@ -465,6 +466,14 @@ TEST_I8_TOL_SRC = tests/test_i8_tol.c src/gguf.c src/compat.c src/quants.c \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_I8_TOL): $(TEST_I8_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_I8_TOL_SRC) -o $@ $(LDFLAGS)
+
+# tolerance-gated Metal decode matvec: the GPU twin of the i8 gate — teacher-
+# forced logits, 0/64 top-1 flips + bounded deviation, per (type, model) via
+# the model argument. Self-skips on backends with no fast matvec kernel.
+TEST_MV_TOL_SRC = tests/test_mv_tol.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
+                  src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
+$(TEST_MV_TOL): $(TEST_MV_TOL_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_MV_TOL_SRC) -o $@ $(LDFLAGS)
 
 # fused-vs-eager MoE routing tolerance: same full-engine link as tc-tol, and
 # the same self-skipping shape (no GPU / not MoE / no full offload / the fused
@@ -863,7 +872,7 @@ endif
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
-      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
+      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_GGUF_SPLIT) $(TEST_PARSE) \
@@ -895,6 +904,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
 	./$(TEST_I8_TOL)
+	./$(TEST_MV_TOL)
 	./$(TEST_QUANTS_SIMD)
 	./$(TEST_INSTANCES)
 	./$(TEST_TRAY_CORE)
@@ -1054,7 +1064,7 @@ clean:
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
-	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
+	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) $(TEST_MODEL_LOAD_FAILURE) \
