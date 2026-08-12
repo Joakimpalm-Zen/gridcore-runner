@@ -157,6 +157,12 @@ static void usage(const char *prog) {
         "  --quantize OUT rewrite the model to OUT.gguf (see --quant) and exit\n"
         "  --quant T      quantize target: q8_0 | q4_0 | f16 (default q4_0,\n"
         "                 or unchanged per-tensor if --prune-experts alone)\n"
+        "  --type-plan PLAN.json  per-tensor precision while rewriting:\n"
+        "                 {\"default\":\"keep\",\"rules\":[{\"match\":\"_exps.weight\",\n"
+        "                 \"type\":\"q4_0\"}]}. First matching rule wins; types are\n"
+        "                 keep|q8_0|q4_0|f16. Per-tensor is the finest GGUF can\n"
+        "                 express: experts are stored stacked, one tensor per\n"
+        "                 layer, so per-EXPERT precision is not representable\n"
         "  --prune-experts LIST.json  drop MoE experts per layer while\n"
         "                 rewriting: {\"layer_N\":[kept expert ids...]};\n"
         "                 a layer absent from the file keeps every expert.\n"
@@ -277,6 +283,7 @@ int main(int argc, char **argv) {
     char *owned_prompt = NULL;
     const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
     const char *quant_out = NULL, *quant_type = NULL, *prune_experts = NULL;
+    const char *type_plan = NULL;
     int n_predict = 256, n_threads = 0, tmpl = -1, reserve_cpu_pct = 0;
     int port = 8080, parallel = 1, ttl = -1; // -1: 300 for swap mode, never for single
     long parent_pid = 0;
@@ -341,6 +348,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--quantize")) quant_out = NEXT;
         else if (!strcmp(a, "--quant")) quant_type = NEXT;
         else if (!strcmp(a, "--prune-experts")) prune_experts = NEXT;
+        else if (!strcmp(a, "--type-plan")) type_plan = NEXT;
         else if (!strcmp(a, "--temp")) { ov.temp = (float)float_arg(a, NEXT, 0, FLT_MAX); ov.has_temp = true; }
         else if (!strcmp(a, "--top-k")) { ov.top_k = (int)int_arg(a, NEXT, 0, INT_MAX); ov.has_top_k = true; }
         else if (!strcmp(a, "--top-p")) { ov.top_p = (float)float_arg(a, NEXT, 0, 1); ov.has_top_p = true; }
@@ -664,7 +672,8 @@ int main(int argc, char **argv) {
             // this is plain --quantize, whose long-standing default is q4_0.
             tt = prune_experts ? T_KEEP : T_Q4_0;
         }
-        return quantize_gguf(model_path, quant_out, tt, prune_experts);
+        return quantize_gguf_plan(model_path, quant_out, tt, prune_experts,
+                                  type_plan);
     }
     if (prune_experts) {
         fprintf(stderr, "error: --prune-experts requires --quantize OUT\n");

@@ -42,6 +42,14 @@ void  dequant_row(int type, const void *src, float *dst, int n);
 // untouched. Declared here so tests can drive it without main.c.
 int   quantize_gguf(const char *in_path, const char *out_path, int target,
                     const char *prune_path);
+// As above plus a --type-plan: a JSON per-TENSOR type override, which is the
+// finest granularity GGUF can express (experts are stored stacked, one 3-D
+// tensor per layer with a single type, so per-expert precision is not
+// representable without splitting tensors no loader expects).
+//   {"default":"keep","rules":[{"match":"_exps.weight","type":"q4_0"}]}
+// First matching rule wins. Passing NULL is exactly quantize_gguf.
+int   quantize_gguf_plan(const char *in_path, const char *out_path, int target,
+                         const char *prune_path, const char *type_plan_path);
 // dot(row, x) over n elements
 float vec_dot(int type, const void *row, const float *x, int n);
 // out[b] = dot(w, x + b*x_stride) for nb columns sharing one weight row

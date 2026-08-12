@@ -191,6 +191,119 @@ static void prune_plan_free(prune_plan_t *p) {
 // malformed plan must error out, not silently prune nothing or prune the
 // wrong experts. Per-layer id bounds are re-checked later against each
 // tensor's own declared expert count (not known until it's read).
+
+// ------------------------------------------------------- selective precision
+//
+// A --type-plan is a per-TENSOR type override. Per-tensor is the finest
+// granularity GGUF can express, and that limit is the whole story of the
+// hot/cold expert experiment this was written for: MoE experts are stored
+// STACKED, one 3-D tensor per layer holding every expert
+// (blk.N.ffn_down_exps.weight is (768, 2048, 128) on Qwen3-30B-A3B), and a
+// tensor carries exactly one type. Giving hot and cold experts different
+// precisions would mean splitting that tensor into 128, which no loader
+// expects and which would stop the file being a GGUF anyone can run. So
+// per-expert precision is not a thing this format does, and the lever that IS
+// available is per tensor class: keep attention and embeddings high, move the
+// expert bulk down.
+//
+//   {"default": "keep",
+//    "rules": [{"match": "_exps.weight", "type": "q4_0"}]}
+//
+// Rules are tried in order and the first substring match wins; "default"
+// applies to everything unmatched. Types are the ones this quantizer can
+// actually write (q8_0, q4_0, f16, keep) — naming one it cannot is an error at
+// load, not a silent fallback.
+typedef struct { char *match; int type; } type_rule_t;
+typedef struct { type_rule_t *rules; int n; int dflt; } type_plan_t;
+
+static int type_from_name(const char *s) {
+    if (!s) return -2;
+    if (!strcmp(s, "keep")) return T_KEEP;
+    if (!strcmp(s, "q8_0")) return T_Q8_0;
+    if (!strcmp(s, "q4_0")) return T_Q4_0;
+    if (!strcmp(s, "f16"))  return T_F16;
+    return -2;
+}
+
+static void type_plan_free(type_plan_t *p) {
+    for (int i = 0; i < p->n; i++) free(p->rules[i].match);
+    free(p->rules);
+    memset(p, 0, sizeof(*p));
+}
+
+static bool type_plan_load(const char *path, type_plan_t *plan) {
+    memset(plan, 0, sizeof(*plan));
+    plan->dflt = T_KEEP;
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "error: cannot open --type-plan file %s\n", path); return false; }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
+    long sz = ftell(f);
+    if (sz < 0 || sz > 8 * 1024 * 1024 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        fprintf(stderr, "error: %s is not a readable type plan\n", path);
+        return false;
+    }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return false; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = 0;
+    jv *root = json_parse(buf, rd);
+    free(buf);
+    if (!root || root->type != J_OBJ) {
+        fprintf(stderr, "error: %s is not a JSON object\n", path);
+        if (root) jv_free(root);
+        return false;
+    }
+    bool ok = true;
+    jv *d = jv_get(root, "default");
+    if (d && d->type == J_STR) {
+        plan->dflt = type_from_name(jv_str(d, NULL));
+        if (plan->dflt == -2) {
+            fprintf(stderr, "error: type-plan default \"%s\" is not one of "
+                    "keep|q8_0|q4_0|f16\n", jv_str(d, "?"));
+            ok = false;
+        }
+    }
+    jv *rules = jv_get(root, "rules");
+    if (ok && rules && rules->type == J_ARR && rules->n > 0) {
+        plan->rules = calloc((size_t)rules->n, sizeof(type_rule_t));
+        if (!plan->rules) { jv_free(root); return false; }
+        for (int i = 0; ok && i < rules->n; i++) {
+            jv *r = rules->items[i];
+            jv *m = r && r->type == J_OBJ ? jv_get(r, "match") : NULL;
+            jv *t = r && r->type == J_OBJ ? jv_get(r, "type") : NULL;
+            if (!m || m->type != J_STR || !t || t->type != J_STR) {
+                fprintf(stderr, "error: type-plan rule %d needs string "
+                        "\"match\" and \"type\"\n", i);
+                ok = false;
+                break;
+            }
+            int ty = type_from_name(jv_str(t, NULL));
+            if (ty == -2) {
+                fprintf(stderr, "error: type-plan rule %d type \"%s\" is not "
+                        "one of keep|q8_0|q4_0|f16\n", i, jv_str(t, "?"));
+                ok = false;
+                break;
+            }
+            plan->rules[plan->n].match = strdup(jv_str(m, ""));
+            if (!plan->rules[plan->n].match) { ok = false; break; }
+            plan->rules[plan->n].type = ty;
+            plan->n++;
+        }
+    }
+    jv_free(root);
+    if (!ok) type_plan_free(plan);
+    return ok;
+}
+
+// first matching rule wins; T_KEEP means "leave this tensor exactly as it is"
+static int type_plan_pick(const type_plan_t *plan, const char *name) {
+    for (int i = 0; i < plan->n; i++)
+        if (strstr(name, plan->rules[i].match)) return plan->rules[i].type;
+    return plan->dflt;
+}
+
 static bool prune_plan_load(const char *path, prune_plan_t *plan) {
     memset(plan, 0, sizeof(*plan));
     FILE *f = fopen(path, "rb");
@@ -353,12 +466,24 @@ static const prune_layer_t *resolve_prune(const gguf_tensor *t, const prune_plan
 
 int quantize_gguf(const char *in_path, const char *out_path, int target,
                   const char *prune_path) {
+    return quantize_gguf_plan(in_path, out_path, target, prune_path, NULL);
+}
+
+int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
+                       const char *prune_path, const char *type_plan_path) {
     if (target != T_KEEP && target != T_Q8_0 && target != T_Q4_0 && target != T_F16) {
         fprintf(stderr, "error: quantize target must be q8_0, q4_0, or f16\n");
         return 1;
     }
     prune_plan_t plan = {0};
     if (prune_path && !prune_plan_load(prune_path, &plan)) return 1;
+    type_plan_t tplan;
+    memset(&tplan, 0, sizeof(tplan));
+    if (type_plan_path && !type_plan_load(type_plan_path, &tplan)) {
+        prune_plan_free(&plan);
+    type_plan_free(&tplan);
+        return 1;
+    }
 
     gguf_file g;
     if (!gguf_open(&g, in_path)) { prune_plan_free(&plan); return 1; }
@@ -368,6 +493,7 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
                     g.tensors[i].name, ggml_type_name(g.tensors[i].type));
             gguf_close(&g);
             prune_plan_free(&plan);
+    type_plan_free(&tplan);
             return 1;
         }
     }
@@ -441,6 +567,7 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
                 (unsigned long long)align);
         gguf_close(&g);
         prune_plan_free(&plan);
+    type_plan_free(&tplan);
         return 1;
     }
     uint64_t amask = align - 1;
@@ -460,6 +587,7 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
         free(tmp_path);
         gguf_close(&g);
         prune_plan_free(&plan);
+    type_plan_free(&tplan);
         return 1;
     }
     writer w = { f, true };
@@ -497,7 +625,22 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
     if (g.n_tensors > 0 && !out_type) w.ok = false;
     for (uint64_t i = 0; w.ok && i < g.n_tensors; i++) {
         gguf_tensor *t = &g.tensors[i];
-        if (target == T_KEEP) {
+        if (type_plan_path) {
+            // The plan decides per tensor. T_KEEP leaves the tensor byte for
+            // byte; anything else goes through the same should_quantize and
+            // never-grow guards as a whole-file target, so a plan cannot make
+            // a tensor bigger or quantize something that must stay f32.
+            int want = type_plan_pick(&tplan, t->name);
+            if (want == T_KEEP || !should_quantize(t)) {
+                out_type[i] = should_quantize(t) ? t->type
+                            : (t->type == T_F16 ? T_F16 : T_F32);
+            } else if (ggml_row_size(t->type, t->ne[0]) <=
+                       ggml_row_size(want, t->ne[0])) {
+                out_type[i] = t->type;   // never grow
+            } else {
+                out_type[i] = want;
+            }
+        } else if (target == T_KEEP) {
             out_type[i] = t->type;
         } else {
             const char *only = getenv("RUNNER_REQUANT_ONLY");
@@ -695,6 +838,7 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
     free(rowf); free(rowq); free(out_type); free(out_off); free(eff_ne);
     gguf_close(&g);
     prune_plan_free(&plan);
+    type_plan_free(&tplan);
 
     if (!write_ok) {
         remove(tmp_path);
