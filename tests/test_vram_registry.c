@@ -28,6 +28,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -128,7 +129,7 @@ static void test_second_runner_refuses_naming_the_holder(void) {
     uint64_t free_before = 24 * GB;
     vram_lease *first = vram_claim(gpu, "/models/Qwen3-4B-Q4_K_M.gguf",
                                    5200000000ull /* 5.2GB */,
-                                   fixed_free, &free_before, 0, NULL, NULL, NULL, 0);
+                                   0, fixed_free, &free_before, 0, NULL, NULL, NULL, 0);
     assert(first && "the first runner on an idle GPU must be admitted");
     vram_commit(first, 5200000000ull);
 
@@ -136,7 +137,7 @@ static void test_second_runner_refuses_naming_the_holder(void) {
     uint64_t free_now = 24 * GB - 5200000000ull;   // what the driver now reports
     char err[1024] = {0};
     vram_lease *second = vram_claim(gpu, "/models/gemma-4-12B-it-Q4_K_M.gguf",
-                                    20 * GB, fixed_free, &free_now, 0, NULL,
+                                    20 * GB, 0, fixed_free, &free_now, 0, NULL,
                                     NULL, err, sizeof(err));
     assert(!second && "a request that does not fit must be refused, not queued");
 
@@ -147,6 +148,65 @@ static void test_second_runner_refuses_naming_the_holder(void) {
     assert(strstr(err, "Qwen3-4B-Q4_K_M") && "refusal must name the held model");
     assert(strstr(err, "5.2GB") && "refusal must state the held bytes");
     assert(strstr(err, "up ") && "refusal must state how long it has been held");
+
+    vram_release(first);
+}
+
+// The priority tag is advisory metadata (multi-tenant scheduler arc, ENGINE
+// half): recorded on the claim, round-tripped through the on-disk ledger, and
+// printed in the refusal listing next to the fields the previous test locks.
+static void test_priority_tag_is_recorded_in_refusal(void) {
+    scratch_dir();
+    const char *gpu = "MIG-priority-tag-test";
+
+    uint64_t free_before = 24 * GB;
+    vram_lease *first = vram_claim(gpu, "/models/holder.gguf", 5 * GB,
+                                   3 /* priority */, fixed_free, &free_before,
+                                   0, NULL, NULL, NULL, 0);
+    assert(first && "an idle GPU must admit the first claim");
+
+    uint64_t free_now = 24 * GB - 5 * GB;
+    char err[1024] = {0};
+    vram_lease *second = vram_claim(gpu, "/models/too-big.gguf", 22 * GB, 0,
+                                    fixed_free, &free_now, 0, NULL, NULL,
+                                    err, sizeof(err));
+    assert(!second);
+    assert(strstr(err, "priority 3") &&
+           "refusal listing must show the holder's priority");
+
+    vram_release(first);
+}
+
+// Rule: no behavior change for a caller that passes no new flags. A
+// default-priority (0) claim must produce EXACTLY the fields the original
+// refusal test asserts — pid, model, bytes, uptime — plus the one new field.
+static void test_default_priority_matches_legacy_fields_plus_new_field(void) {
+    scratch_dir();
+    const char *gpu = "MIG-default-priority-test";
+
+    uint64_t free_before = 24 * GB;
+    vram_lease *first = vram_claim(gpu, "/models/Qwen3-4B-Q4_K_M.gguf",
+                                   5200000000ull, 0 /* default priority */,
+                                   fixed_free, &free_before, 0, NULL, NULL,
+                                   NULL, 0);
+    assert(first);
+    vram_commit(first, 5200000000ull);
+
+    uint64_t free_now = 24 * GB - 5200000000ull;
+    char err[1024] = {0};
+    vram_lease *second = vram_claim(gpu, "/models/gemma-4-12B-it-Q4_K_M.gguf",
+                                    20 * GB, 0, fixed_free, &free_now, 0, NULL,
+                                    NULL, err, sizeof(err));
+    assert(!second);
+
+    char pidstr[32];
+    snprintf(pidstr, sizeof(pidstr), "pid %ld", (long)getpid());
+    assert(strstr(err, pidstr) && "refusal must still name the holding pid");
+    assert(strstr(err, "Qwen3-4B-Q4_K_M") && "refusal must still name the held model");
+    assert(strstr(err, "5.2GB") && "refusal must still state the held bytes");
+    assert(strstr(err, "up ") && "refusal must still state how long it has been held");
+    assert(strstr(err, "priority 0") &&
+           "the only addition for a default-priority claim is the new field");
 
     vram_release(first);
 }
@@ -172,7 +232,7 @@ static void test_unreadable_registry_is_not_truncated(void) {
 
     uint64_t free_all = 24 * GB;
     vram_lease *l = vram_claim("bigfile-test", "/models/mine.gguf", 1 * GB,
-                               fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+                               0, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(l && "an unreadable registry must not stop a runner (best-effort)");
     assert(file_size(path) == before &&
            "a claim that could not read the registry must not truncate it");
@@ -181,6 +241,101 @@ static void test_unreadable_registry_is_not_truncated(void) {
     assert(file_size(path) == before &&
            "a release that could not read the registry must not truncate it");
     remove(path);
+}
+
+// Backward compatibility, decided and locked here: a ledger line written by a
+// binary that predates the priority field has exactly 7 tab-separated fields
+// (no trailing priority). It must still parse, and it must be read as
+// priority 0 — not dropped, not misparsed, not treated as corrupt.
+static void test_legacy_record_without_priority_reads_as_zero(void) {
+    const char *dir = scratch_dir();
+    char path[600];
+    reg_file(dir, "legacy-format-test", path, sizeof(path));
+    uint64_t now = (uint64_t)time(NULL);
+
+    FILE *f = fopen(path, "w");
+    assert(f);
+    // exactly 7 fields, no priority column — the pre-existing on-disk format.
+    // 'P' (pending), not 'C', because this fixed-free-VRAM test drives the fit
+    // arithmetic directly: a 'C' entry is already inside the driver's free
+    // figure and would not subtract, so it would never produce a refusal here.
+    fprintf(f, "%ld\t1\t0\t%llu\tP\t5000000000\t/models/old-binary-holder.gguf\n",
+            (long)getpid(), (unsigned long long)now);
+    fclose(f);
+
+    uint64_t free_all = 24 * GB;
+    char err[1024] = {0};
+    assert(!vram_claim("legacy-format-test", "/models/mine.gguf", 22 * GB, 0,
+                       fixed_free, &free_all, 0, NULL, NULL, err, sizeof(err)));
+    assert(strstr(err, "old-binary-holder") &&
+           "a legacy 7-field line must still be read as a live holder");
+    assert(strstr(err, "priority 0") &&
+           "a legacy record with no priority column must read as priority 0");
+}
+
+// Exact refusal-line format, priority included. Built by hand (like the
+// stale-guardless test above) so the holder's uptime is a fixed number
+// instead of racing the wall clock — this pins the literal string, not just
+// its pieces.
+static void test_refusal_line_priority_format_is_exact(void) {
+    const char *dir = scratch_dir();
+    char path[600];
+    reg_file(dir, "priority-format-test", path, sizeof(path));
+    uint64_t now = (uint64_t)time(NULL);
+
+    FILE *f = fopen(path, "w");
+    assert(f);
+    // 'P' (pending) so the fixed free-VRAM reading below actually gets
+    // subtracted — see the comment in the legacy-record test above.
+    fprintf(f, "%ld\t1\t0\t%llu\tP\t5000000000\t/models/format-holder.gguf\t7\n",
+            (long)getpid(), (unsigned long long)(now - 90));
+    fclose(f);
+
+    uint64_t free_all = 24 * GB;
+    char err[1024] = {0};
+    assert(!vram_claim("priority-format-test", "/models/mine.gguf", 22 * GB, 0,
+                       fixed_free, &free_all, 0, NULL, NULL, err, sizeof(err)));
+
+    char want[160];
+    snprintf(want, sizeof(want),
+             "pid %ld holding 5.0GB for format-holder, up 1m, priority 7 (loading)",
+             (long)getpid());
+    assert(strstr(err, want) && "refusal line format must match exactly");
+}
+
+// The yield sentinel's lifecycle, end to end through the public API: unset
+// until requested, set once vram_request_yield names this (gpu, pid), and
+// clear again after vram_yield_clear. Also: a request aimed at a DIFFERENT
+// pid must never be visible to our own lease — the primitive is scoped, not
+// a broadcast "everyone on this GPU yield".
+static void test_yield_flag_lifecycle(void) {
+    scratch_dir();
+    const char *gpu = "MIG-yield-lifecycle-test";
+    uint64_t free_all = 24 * GB;
+
+    vram_lease *l = vram_claim(gpu, "/models/holder.gguf", 1 * GB, 0,
+                               fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+    assert(l);
+
+    assert(!vram_yield_requested(l) &&
+           "nothing has asked this holder to yield yet");
+
+    long other_pid = (long)getpid() + 1; // never actually this process
+    assert(vram_request_yield(gpu, other_pid));
+    assert(!vram_yield_requested(l) &&
+           "a yield request for a different pid must not affect this lease");
+
+    assert(vram_request_yield(gpu, (long)getpid()));
+    assert(vram_yield_requested(l) &&
+           "vram_request_yield for our own pid must be visible to our lease");
+    // idempotent: checking again does not consume or clear it
+    assert(vram_yield_requested(l));
+
+    vram_yield_clear(l);
+    assert(!vram_yield_requested(l) &&
+           "vram_yield_clear must clear the request");
+
+    vram_release(l);
 }
 
 #ifndef _WIN32
@@ -202,7 +357,7 @@ static void test_symlinked_registry_is_refused(void) {
 
     uint64_t free_all = 24 * GB;
     vram_lease *l = vram_claim("symlink-test", "/models/mine.gguf", 1 * GB,
-                               fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+                               0, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(l && "a hijacked registry path must not stop a runner (best-effort)");
     vram_release(l);
 
@@ -227,7 +382,7 @@ static void *seq_claimer(void *arg) {
     uint64_t free_all = 24 * GB;
     for (int i = 0; i < SEQ_CLAIMS; i++)
         seq_leases[t][i] = vram_claim("seq-test", "/models/tiny.gguf",
-                                      1024 * 1024, fixed_free, &free_all, 0, NULL,
+                                      1024 * 1024, 0, fixed_free, &free_all, 0, NULL,
                                       NULL, NULL, 0);
     return NULL;
 }
@@ -289,13 +444,13 @@ static void test_stale_guardless_pending_is_reaped(void) {
     uint64_t free_all = 24 * GB;
     char err[1024] = {0};
     assert(!vram_claim("stale-pending-test", "/models/mine.gguf", 22 * GB,
-                       fixed_free, &free_all, 0, NULL, NULL, err, sizeof(err)));
+                       0, fixed_free, &free_all, 0, NULL, NULL, err, sizeof(err)));
     assert(strstr(err, "fresh-loader") && "a fresh guardless entry must survive");
     assert(!strstr(err, "stale-loader") && "the stale guardless entry must be gone");
 
     // with the stale 20GB dropped, a 20GB ask fits
     vram_lease *l = vram_claim("stale-pending-test", "/models/mine.gguf",
-                               20 * GB, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+                               20 * GB, 0, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(l && "a stale guardless pending entry must not pin phantom bytes");
     vram_release(l);
 }
@@ -317,7 +472,7 @@ static void test_dead_pid_reservation_is_reclaimed(void) {
     if (child == 0) {
         close(ready[0]);
         vram_lease *l = vram_claim(gpu, "/models/orphan-Q4_K_M.gguf", 20 * GB,
-                                   fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+                                   0, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
         char ok = l ? 'y' : 'n';
         ssize_t w = write(ready[1], &ok, 1);
         (void)w;
@@ -331,7 +486,7 @@ static void test_dead_pid_reservation_is_reclaimed(void) {
     // While it lives, its 20GB is in flight and a second 20GB does not fit —
     // and the refusal names it.
     char err[1024] = {0};
-    assert(!vram_claim(gpu, "/models/mine.gguf", 20 * GB, fixed_free, &free_all,
+    assert(!vram_claim(gpu, "/models/mine.gguf", 20 * GB, 0, fixed_free, &free_all,
                        0, NULL, NULL, err, sizeof(err)));
     char pidstr[32];
     snprintf(pidstr, sizeof(pidstr), "pid %ld", (long)child);
@@ -345,7 +500,7 @@ static void test_dead_pid_reservation_is_reclaimed(void) {
     // sweeper, no timeout and no reboot: the next claim reaps it.
     err[0] = 0;
     vram_lease *mine = vram_claim(gpu, "/models/mine.gguf", 20 * GB,
-                                  fixed_free, &free_all, 0, NULL, NULL, err, sizeof(err));
+                                  0, fixed_free, &free_all, 0, NULL, NULL, err, sizeof(err));
     assert(mine && "a dead process's reservation must not poison the GPU");
     vram_release(mine);
 }
@@ -364,7 +519,7 @@ static void test_reaping_keeps_live_neighbours(void) {
     assert(child >= 0);
     if (child == 0) {
         close(ready[0]);
-        vram_claim(gpu, "/models/doomed.gguf", 1 * GB, fixed_free, &free_all,
+        vram_claim(gpu, "/models/doomed.gguf", 1 * GB, 0, fixed_free, &free_all,
                    0, NULL, NULL, NULL, 0);
         char c = 'y';
         ssize_t w = write(ready[1], &c, 1);
@@ -377,7 +532,7 @@ static void test_reaping_keeps_live_neighbours(void) {
     close(ready[0]);
 
     vram_lease *survivor = vram_claim(gpu, "/models/survivor.gguf", 2 * GB,
-                                      fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+                                      0, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(survivor);
     vram_commit(survivor, 2 * GB);
     free_all -= 2 * GB;   // the allocation really happened: the driver sees it
@@ -390,7 +545,7 @@ static void test_reaping_keeps_live_neighbours(void) {
     // ask fails — and the message must name the survivor and NOT the reaped
     // child.
     char err[1024] = {0};
-    assert(!vram_claim(gpu, "/models/huge.gguf", 23 * GB, fixed_free, &free_all,
+    assert(!vram_claim(gpu, "/models/huge.gguf", 23 * GB, 0, fixed_free, &free_all,
                        0, NULL, NULL, err, sizeof(err)));
     assert(strstr(err, "survivor") && "the live holder must survive reaping");
     assert(!strstr(err, "doomed") && "the dead holder must be gone");
@@ -413,7 +568,7 @@ static void test_wait_for_vram_queues_then_proceeds(void) {
     if (child == 0) {
         close(ready[0]);
         vram_lease *l = vram_claim(gpu, "/models/holder.gguf", 20 * GB,
-                                   fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+                                   0, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
         char c = l ? 'y' : 'n';
         ssize_t w = write(ready[1], &c, 1);
         (void)w;
@@ -427,13 +582,13 @@ static void test_wait_for_vram_queues_then_proceeds(void) {
     close(ready[0]);
 
     // without waiting this is an immediate refusal
-    assert(!vram_claim(gpu, "/models/queued.gguf", 20 * GB, fixed_free,
+    assert(!vram_claim(gpu, "/models/queued.gguf", 20 * GB, 0, fixed_free,
                        &free_all, 0, NULL, NULL, NULL, 0));
 
     // with waiting it blocks until the holder releases, then proceeds
     double t0 = plat_now();
     vram_lease *queued = vram_claim(gpu, "/models/queued.gguf", 20 * GB,
-                                    fixed_free, &free_all, 30, NULL, NULL, NULL, 0);
+                                    0, fixed_free, &free_all, 30, NULL, NULL, NULL, 0);
     double waited = plat_now() - t0;
     assert(queued && "--wait-for-vram must queue, not fail");
     assert(waited >= 1.0 && "it must actually have waited for the holder");
@@ -462,7 +617,7 @@ static void test_cancelled_wait_gives_up_promptly(void) {
     uint64_t free_all = 24 * GB;
 
     vram_lease *hog = vram_claim(gpu, "/models/holder.gguf", 20 * GB,
-                                 fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+                                 0, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(hog);
 
     atomic_store(&cancel_flag, 0);
@@ -471,7 +626,7 @@ static void test_cancelled_wait_gives_up_promptly(void) {
     double t0 = plat_now();
     char err[1024] = {0};
     vram_lease *queued = vram_claim(gpu, "/models/queued.gguf", 20 * GB,
-                                    fixed_free, &free_all, 30, &cancel_flag,
+                                    0, fixed_free, &free_all, 30, &cancel_flag,
                                     NULL, err, sizeof(err));
     double waited = plat_now() - t0;
     pthread_join(th, NULL);
@@ -490,21 +645,134 @@ static void test_wait_timeout_still_names_the_holder(void) {
     uint64_t free_all = 24 * GB;
 
     vram_lease *hog = vram_claim(gpu, "/models/stubborn-Q4_K_M.gguf", 20 * GB,
-                                 fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+                                 0, fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
     assert(hog);
 
     char err[1024] = {0};
-    assert(!vram_claim(gpu, "/models/queued.gguf", 20 * GB, fixed_free,
+    assert(!vram_claim(gpu, "/models/queued.gguf", 20 * GB, 0, fixed_free,
                        &free_all, 1, NULL, NULL, err, sizeof(err)));
     assert(strstr(err, "stubborn-Q4_K_M") && "a timed-out wait must still name the holder");
 
     vram_release(hog);
 }
+
+// A timed-out --wait-for-vram queue must not leave a phantom 'W' waiter
+// marker behind: registry_rollback runs on both the cancel and the deadline
+// exit, same as it always has for a post-admission allocation failure
+// (RNR-013) — otherwise the ledger would keep naming a waiter that gave up.
+static void test_wait_timeout_leaves_no_phantom_waiter(void) {
+    const char *dir = scratch_dir();
+    const char *gpu = "wait-timeout-phantom-test";
+    char path[600];
+    reg_file(dir, gpu, path, sizeof(path));
+    uint64_t free_all = 24 * GB;
+
+    vram_lease *hog = vram_claim(gpu, "/models/stubborn.gguf", 20 * GB, 0,
+                                 fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+    assert(hog);
+    assert(!vram_claim(gpu, "/models/queued.gguf", 20 * GB, 5, fixed_free,
+                       &free_all, 1, NULL, NULL, NULL, 0));
+
+    vram_release(hog);
+    assert(file_size(path) == 0 &&
+           "a timed-out wait must not leave a phantom 'W' marker in the ledger");
+}
+
+// Advisory ordering among --wait-for-vram waiters: when two processes are
+// both queued for the same space, the higher-priority one is admitted first
+// once it frees. Not a hard guarantee — see vram_claim's header comment — but
+// deterministic in this exact shape: both waiters ask for the full 20GB the
+// holder frees, so only one can be admitted per round, and it must be the
+// higher-priority one, not whichever happened to poll first.
+static void test_higher_priority_waiter_acquires_first(void) {
+    scratch_dir();
+    const char *gpu = "MIG-priority-order-test";
+    uint64_t free_all = 24 * GB;
+
+    // holder takes 20 of 24GB, leaving 4GB — not enough for either waiter
+    vram_lease *holder = vram_claim(gpu, "/models/holder.gguf", 20 * GB, 0,
+                                    fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+    assert(holder);
+
+    int hi_ready[2], lo_ready[2], hi_done[2], lo_done[2];
+    assert(pipe(hi_ready) == 0 && pipe(lo_ready) == 0);
+    assert(pipe(hi_done) == 0 && pipe(lo_done) == 0);
+
+    pid_t hi = fork();
+    assert(hi >= 0);
+    if (hi == 0) {
+        close(hi_ready[0]); close(lo_ready[0]); close(lo_ready[1]);
+        close(hi_done[0]); close(lo_done[0]); close(lo_done[1]);
+        char rb = 'r';
+        ssize_t w = write(hi_ready[1], &rb, 1); (void)w;
+        vram_lease *l = vram_claim(gpu, "/models/hi.gguf", 20 * GB, 9 /* high */,
+                                   fixed_free, &free_all, 10, NULL, NULL, NULL, 0);
+        char c = l ? 'y' : 'n';
+        w = write(hi_done[1], &c, 1); (void)w;
+        if (l) { sleep(2); vram_release(l); }
+        _exit(0);
+    }
+    close(hi_ready[1]);
+
+    pid_t lo = fork();
+    assert(lo >= 0);
+    if (lo == 0) {
+        close(lo_ready[0]); close(hi_ready[0]); close(hi_ready[1]);
+        close(hi_done[0]); close(hi_done[1]); close(lo_done[0]);
+        char rb = 'r';
+        ssize_t w = write(lo_ready[1], &rb, 1); (void)w;
+        vram_lease *l = vram_claim(gpu, "/models/lo.gguf", 20 * GB, 1 /* low */,
+                                   fixed_free, &free_all, 10, NULL, NULL, NULL, 0);
+        char c = l ? 'y' : 'n';
+        w = write(lo_done[1], &c, 1); (void)w;
+        if (l) vram_release(l);
+        _exit(0);
+    }
+    close(lo_ready[1]);
+
+    char rb;
+    assert(read(hi_ready[0], &rb, 1) == 1);
+    assert(read(lo_ready[0], &rb, 1) == 1);
+    close(hi_ready[0]); close(lo_ready[0]);
+
+    // give both children several poll cycles to register as 'W' waiters
+    // before space frees
+    plat_sleep_ms(1500);
+    vram_release(holder);
+
+    char hi_c = 0;
+    assert(read(hi_done[0], &hi_c, 1) == 1);
+    assert(hi_c == 'y' &&
+           "the higher-priority waiter must acquire once space frees");
+    close(hi_done[0]);
+
+    // right after hi's win, lo must NOT have won too — hi took the only space
+    // that freed, so lo's own poll around the same moment must still be
+    // blocked (it has up to 10s left to eventually succeed once hi releases,
+    // but that is not what this assertion is about)
+    fd_set rs;
+    struct timeval tv = {0, 0};
+    FD_ZERO(&rs);
+    FD_SET(lo_done[0], &rs);
+    int has_data = select(lo_done[0] + 1, &rs, NULL, NULL, &tv);
+    assert(has_data == 0 &&
+           "the lower-priority waiter must not acquire ahead of the higher one");
+    close(lo_done[0]);
+
+    int st = 0;
+    waitpid(hi, &st, 0);
+    waitpid(lo, &st, 0);
+}
 #endif
 
 int main(void) {
     test_second_runner_refuses_naming_the_holder();
+    test_priority_tag_is_recorded_in_refusal();
+    test_default_priority_matches_legacy_fields_plus_new_field();
     test_unreadable_registry_is_not_truncated();
+    test_legacy_record_without_priority_reads_as_zero();
+    test_refusal_line_priority_format_is_exact();
+    test_yield_flag_lifecycle();
 #ifndef _WIN32
     test_symlinked_registry_is_refused();
     test_concurrent_claims_mint_distinct_seqs();
@@ -514,6 +782,8 @@ int main(void) {
     test_wait_for_vram_queues_then_proceeds();
     test_cancelled_wait_gives_up_promptly();
     test_wait_timeout_still_names_the_holder();
+    test_wait_timeout_leaves_no_phantom_waiter();
+    test_higher_priority_waiter_acquires_first();
 #else
     puts("vram registry: cross-process reaping tests need fork(); skipped on Windows");
 #endif

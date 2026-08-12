@@ -61,7 +61,7 @@ int main(void) {
 
     // baseline: a normal claim leaves exactly one entry, release clears it
     vram_lease *a = vram_claim(gpu, "/models/m.gguf", 1 * GB,
-                               fixed_free, &free_amt, 0, NULL, NULL, NULL, 0);
+                               0, fixed_free, &free_amt, 0, NULL, NULL, NULL, 0);
     assert(a && "an idle GPU must admit the first claim");
     assert(count_entries(path) == 1);
     vram_release(a);
@@ -71,7 +71,7 @@ int main(void) {
     g_fail_calloc = 1;
     char err[256] = {0};
     vram_lease *b = vram_claim(gpu, "/models/m.gguf", 1 * GB,
-                               fixed_free, &free_amt, 0, NULL, NULL, err, sizeof(err));
+                               0, fixed_free, &free_amt, 0, NULL, NULL, err, sizeof(err));
     g_fail_calloc = 0;
     assert(!b && "a lease-allocation failure must return NULL");
     if (count_entries(path) != 0) {
@@ -82,7 +82,7 @@ int main(void) {
 
     // the registry is still fully usable afterward
     vram_lease *c2 = vram_claim(gpu, "/models/m.gguf", 1 * GB,
-                                fixed_free, &free_amt, 0, NULL, NULL, NULL, 0);
+                                0, fixed_free, &free_amt, 0, NULL, NULL, NULL, 0);
     assert(c2 && "registry must remain usable after a rolled-back claim");
     assert(count_entries(path) == 1);
     vram_release(c2);

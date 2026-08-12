@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 //
 // A cross-process ledger of who is holding GPU memory, keyed by GPU device
@@ -34,13 +35,30 @@ typedef struct {
 // Claim `need_bytes` on the GPU named by `gpu_id` (a UUID where the backend can
 // supply one — a MIG slice must not share a ledger with its parent card).
 //
+// `priority` is an advisory small-integer tag (0 = default/unset). It does two
+// things, both scoped to cooperating runner processes and neither a guarantee:
+//   - it is recorded on the claim and printed in the refusal listing.
+//   - when wait_secs > 0, it orders acquisition among several waiters queued
+//     on the same GPU: once space frees, a higher-priority waiter is admitted
+//     ahead of a lower-priority one, but ONLY among waiters whose own request
+//     currently fits — a large high-priority ask that does not fit never
+//     blocks a smaller lower-priority one out of space it does not need.
+//     Ties and everything else are first-fit, same as before this existed.
+//   This is fair-share/lanes/preemption's raw material, not fair-share itself:
+//   there is no lane concept, no aging, no starvation prevention beyond the
+//   "must currently fit" rule above. That belongs to a policy layer above the
+//   engine, driven by whatever priority values it chooses to hand in here.
+//
 // Returns a lease, or NULL when the request does not fit, in which case `err`
-// holds a message naming every live holder: pid, model, bytes, uptime.
-// wait_secs > 0 queues and retries until the deadline instead of refusing.
+// holds a message naming every live holder: pid, model, bytes, uptime, priority.
+// wait_secs > 0 queues and retries until the deadline instead of refusing; a
+// queued wait is itself visible to other waiters (advisory ordering above) but
+// invisible to the fit arithmetic — a waiter reserves nothing.
 // `cancel` (nullable) aborts the queue wait early when *cancel goes nonzero.
 // `st` (nullable) reports the ledger state behind the decision.
 vram_lease *vram_claim(const char *gpu_id, const char *model_path,
-                       uint64_t need_bytes, vram_free_fn free_fn, void *free_ud,
+                       uint64_t need_bytes, int priority,
+                       vram_free_fn free_fn, void *free_ud,
                        int wait_secs, const _Atomic int *cancel,
                        vram_status *st, char *err, size_t err_cap);
 
@@ -49,5 +67,29 @@ vram_lease *vram_claim(const char *gpu_id, const char *model_path,
 void        vram_commit(vram_lease *l, uint64_t actual_bytes);
 // Clean exit. Unclean exits are covered by dead-pid reaping instead.
 void        vram_release(vram_lease *l);
+
+// ---------------------------------------------------------------- cooperative yield
+//
+// A REQUEST, never preemption: nothing here can force, signal, or kill a
+// holder. It only has any effect on a holder that opted itself in (runner
+// --serve --yield-on-request) and that reaches its own safe point to check —
+// currently that means idle, between requests. An uncooperative or busy
+// holder simply never notices, same as if nothing had been requested.
+//
+// The requester is a different process from the holder and has no lease
+// handle for it — only what a refusal listing or /v1/models already prints:
+// the gpu id and the holder's pid. So this is a sentinel file next to the
+// registry ($registry_path.yield.<pid>), not a registry field: existence is
+// the entire signal, content is never read.
+
+// Ask whatever `pid` holds on `gpu_id` to release at its next safe point.
+// Returns true if the sentinel was written; that confirms nothing about
+// whether `pid` holds anything or ever checks.
+bool        vram_request_yield(const char *gpu_id, long pid);
+// Polled by the holder itself, at a safe point, against its own lease. True
+// exactly when vram_request_yield was called for this lease's (gpu, pid).
+bool        vram_yield_requested(const vram_lease *l);
+// Clear the request after acting on it (or to cancel a stale one).
+void        vram_yield_clear(const vram_lease *l);
 
 #endif // RUNNER_VRAMREG_H

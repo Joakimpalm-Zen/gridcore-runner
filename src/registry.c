@@ -222,6 +222,13 @@ bool validate_single_model_request(sock_t fd, jv *req) {
     return false;
 }
 
+// The one place --serve is ever idle between requests: this is the "safe
+// point" the cooperative-yield primitive means when it says a holder polls
+// "at a safe boundary". Nothing here forces anything — it is a plain read of
+// a sentinel file, opt-in via --yield-on-request, and it takes exactly the
+// same path this loop already uses for --ttl: unload_resident() cleanly
+// releases the vram_lease (model_free -> vram_release), same as an idle
+// timeout or a POST /unload would.
 static void *ttl_reaper(void *arg) {
     (void)arg;
     while (!atomic_load(&SV.shutdown)) {
@@ -229,10 +236,26 @@ static void *ttl_reaper(void *arg) {
         nanosleep(&ts, NULL);
         if (resident_load() < 0 || atomic_load(&SV.active_requests)) continue;
         if (pthread_mutex_trylock(&SV.swap_mu) != 0) continue;
+        int idx = resident_load();
         int ttl = SV.ttl;
-        if (ttl > 0 && resident_load() >= 0 && !atomic_load(&SV.active_requests) &&
-            now_s() - SV.last_used > ttl)
+        if (ttl > 0 && idx >= 0 && !atomic_load(&SV.active_requests) &&
+            now_s() - SV.last_used > ttl) {
             unload_resident();
+        } else if (SV.mp.yield_on_request && idx >= 0 &&
+                   !atomic_load(&SV.active_requests)) {
+            slot_t *s = &SV.slots[0];
+            if (s->m && s->m->vram && vram_yield_requested(s->m->vram)) {
+                fprintf(stderr,
+                        "swap: releasing %s at idle — VRAM yield requested\n",
+                        SV.reg[idx].name);
+                // Clear before unload_resident() frees the lease: after that
+                // the (gpu, pid) pair could be reused by whatever this
+                // process loads next, and a stale sentinel would yield it
+                // right back out again on the very next idle poll.
+                vram_yield_clear(s->m->vram);
+                unload_resident();
+            }
+        }
         pthread_mutex_unlock(&SV.swap_mu);
     }
     return NULL;
