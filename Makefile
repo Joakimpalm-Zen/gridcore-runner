@@ -102,6 +102,7 @@ TEST_TRAY_CORE = $(TEST_BATCH:test-batch%=test-tray-core%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_I8_TOL = $(TEST_BATCH:test-batch%=test-i8-tol%)
 TEST_MV_TOL = $(TEST_BATCH:test-batch%=test-mv-tol%)
+TEST_GPU_ID = $(TEST_BATCH:test-batch%=test-gpu-identity%)
 TEST_MOE_TOL = $(TEST_BATCH:test-batch%=test-moe-tol%)
 TEST_MOE_ROUTER = $(TEST_BATCH:test-batch%=test-moe-router%)
 TEST_PAGING_WARN = $(TEST_BATCH:test-batch%=test-paging-warn%)
@@ -474,6 +475,16 @@ TEST_MV_TOL_SRC = tests/test_mv_tol.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_MV_TOL): $(TEST_MV_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MV_TOL_SRC) -o $@ $(LDFLAGS)
+
+# CPU/GPU byte identity at LOGIT precision. The text-comparison gates
+# (test-metal-kquant and friends) are sound on real models and blind on toy
+# fixtures, where greedy argmax absorbs large numeric differences -- so a
+# fixture-scale backend feature could be wrong and pass everything. This
+# compares the logit vectors themselves.
+TEST_GPU_ID_SRC = tests/test_gpu_identity.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
+                  src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
+$(TEST_GPU_ID): $(TEST_GPU_ID_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_GPU_ID_SRC) -o $@ $(LDFLAGS)
 
 # fused-vs-eager MoE routing tolerance: same full-engine link as tc-tol, and
 # the same self-skipping shape (no GPU / not MoE / no full offload / the fused
@@ -872,7 +883,7 @@ endif
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
-      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
+      $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_GPU_ID) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_GGUF_SPLIT) $(TEST_PARSE) \
@@ -905,6 +916,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TC_TOL)
 	./$(TEST_I8_TOL)
 	./$(TEST_MV_TOL)
+	./$(TEST_GPU_ID)
 	./$(TEST_QUANTS_SIMD)
 	./$(TEST_INSTANCES)
 	./$(TEST_TRAY_CORE)
@@ -928,7 +940,17 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(PYTHON) scripts/make-test-model.py --attn-knobs 1,0.0 test-attn/k_nope.gguf
 	$(PYTHON) scripts/make-test-model.py --attn-knobs 2,0.0 test-attn/k_half.gguf
 	$(PYTHON) scripts/make-test-model.py --attn-knobs 1,0.1 test-attn/k_temp.gguf
+	@# floor_scale 4 instead of llama-4's 8192: at 8192 the temperature is
+	@# exactly 1.0 for every position a test prompt reaches, so the knob's
+	@# arithmetic is never actually exercised. This fixture makes it live.
+	$(PYTHON) scripts/make-test-model.py --attn-knobs 1,5.0,4 test-attn/k_temp_live.gguf
 	$(PYTHON) -m pytest -q tests/test_attn_knobs.py
+	@# CPU/GPU agreement at logit precision on each knob. Token identity (the
+	@# text gates) is blind at fixture scale -- see the test's header.
+	./$(TEST_GPU_ID) test-attn/k_off.gguf
+	./$(TEST_GPU_ID) test-attn/k_nope.gguf
+	./$(TEST_GPU_ID) test-attn/k_half.gguf
+	./$(TEST_GPU_ID) test-attn/k_temp_live.gguf
 	./$(TEST_QUANTIZE)
 	./$(TEST_VRAM_ROLLBACK)
 	./$(TEST_GGUF_GETTERS)
@@ -1064,7 +1086,7 @@ clean:
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
-	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
+	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_GPU_ID) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
 	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_TRAY_CORE) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) $(TEST_MODEL_LOAD_FAILURE) \

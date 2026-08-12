@@ -23,6 +23,11 @@ MTP_LAYERS = 0   # extra trailing blocks declared as NextN/MTP predictor heads
 APERTUS = None
 ATTN_NOPE_STEP = 0
 ATTN_TEMP_SCALE = 0.0
+# Llama-4's own floor_scale. At 8192 the temperature is exactly 1.0 for every
+# position below 8191, which is correct and makes the knob untestable on a
+# short prompt -- so it is overridable, and a small value gives a fixture where
+# the temperature is actually live at position 0.
+ATTN_TEMP_FLOOR = 8192
 SWA_WINDOW = 0
 SWA_PATTERN = 0
 ESERIES_SHARED_KV = 0
@@ -62,11 +67,17 @@ while i < len(args):
         APERTUS = args[i]
         ARCH = "apertus"
     elif a == "--attn-knobs":
-        # "STEP,TEMPSCALE" — NoPE every STEP-th layer, and the Llama-4
-        # attention temperature on those layers (0 disables the temperature).
+        # "STEP,TEMPSCALE[,FLOOR]" — NoPE every STEP-th layer, and the
+        # Llama-4 attention temperature on those layers (0 disables the
+        # temperature). FLOOR defaults to llama-4's 8192, which makes the
+        # temperature a no-op below position 8191; pass a small FLOOR for a
+        # fixture where it is live immediately.
         i += 1
-        _st, _ts = args[i].split(",")
+        _parts = args[i].split(",")
+        _st, _ts = _parts[0], _parts[1]
         ATTN_NOPE_STEP, ATTN_TEMP_SCALE = int(_st), float(_ts)
+        if len(_parts) > 2:
+            ATTN_TEMP_FLOOR = int(_parts[2])
     elif a == "--swa":
         # "WINDOW,PATTERN" — every PATTERN-th layer is full attention, the
         # others slide. This is intentionally arch-neutral so small Qwen-style
@@ -400,7 +411,7 @@ if APERTUS:
 if ATTN_NOPE_STEP:
     meta_kvs += [
         kv_u32(f"{ARCH}.attention.no_rope_layer_step", ATTN_NOPE_STEP),
-        kv_u32(f"{ARCH}.attention.attn_temp_floor_scale", 8192),
+        kv_u32(f"{ARCH}.attention.attn_temp_floor_scale", ATTN_TEMP_FLOOR),
         kv_f32(f"{ARCH}.attention.attn_temp_scale", ATTN_TEMP_SCALE),
         kv_f32(f"{ARCH}.attention.attn_temp_offset", 1.0),
     ]

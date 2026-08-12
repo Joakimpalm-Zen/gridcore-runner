@@ -672,14 +672,6 @@ bool gpu_init(model_t *m) {
                 m->arch);
         return false;
     }
-    if (m->attn_temp_scale != 0.0f) {
-        // NoPE layers just skip the rope dispatch (model_layer_ropes), but the
-        // llama-4 attention temperature scales Q per token position and has no
-        // kernel here yet
-        fprintf(stderr, "gpu: '%s' attention-temperature knob is not on the metal backend yet — using CPU\n",
-                m->arch);
-        return false;
-    }
     // every weight matmul must have a kernel for its quant type
     if (!gpu_type_ok(m->output->type)) goto unsupported;
     for (int l = 0; l < m->n_layer; l++) {
@@ -1749,8 +1741,22 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             // kernels derive their column's position from pos + col, so every
             // token still rotates at, writes to, and attends over exactly the
             // range a per-token submit gave it.
-            if (model_layer_ropes(m, l))
+            if (model_layer_ropes(m, l)) {
                 enc_rope_n(g, e, m, g->q,  0, m->n_head, pos, l, n, q_dim);
+            } else if (m->attn_temp_scale != 0.0f) {
+                // NoPE layer: no rotation, and THIS is where the llama-4
+                // attention temperature applies -- on the layers that skipped
+                // rope, not on every layer (matching the CPU path and
+                // llama.cpp). The factor is per POSITION, so unlike everything
+                // else here it cannot be one batched dispatch; it is one scale
+                // per column, the same shape the CUDA backend uses.
+                for (int b = 0; b < n; b++) {
+                    float ts = model_attn_temp(m, pos + b);
+                    if (ts != 1.0f)
+                        enc_scale(g, e, g->q, foff((size_t)b * q_dim),
+                                  q_dim_l, ts);
+                }
+            }
             if (owns_kv) {
                 if (model_layer_ropes(m, l))
                     enc_rope_n(g, e, m, g->kt, 0, n_kv, pos, l, n, kv_dim);

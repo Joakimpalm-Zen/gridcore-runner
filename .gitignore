@@ -150,3 +150,5 @@ test-metal-kquants
 test-metal-kquants.exe
 test-autofit
 test-autofit.exe
+test-gpu-identity
+test-gpu-identity.exe

@@ -80,3 +80,62 @@ def test_temperature_is_a_noop_below_the_floor(runner_bin):
     match the reference.
     """
     assert _q_rows(runner_bin, "k_temp") == _q_rows(runner_bin, "k_nope")
+
+
+def test_live_floor_temperature_actually_scales_q(runner_bin):
+    """The knob's arithmetic, finally checked against something.
+
+    Every other test here can pass with the temperature never applied: at
+    llama-4's floor_scale of 8192 it is exactly 1.0 for every position a test
+    prompt reaches, which is why the assertion above is a *no-op* check. The
+    k_temp_live fixture sets floor_scale to 4 so the temperature is live at low
+    positions, and then NoPE-plus-temperature must differ from NoPE alone.
+    Without this, a backend could implement the temperature as `ts = 1.0` and
+    every gate in this file would still be green.
+    """
+    live, nope = _q_rows(runner_bin, "k_temp_live"), _q_rows(runner_bin, "k_nope")
+    assert live.keys() == nope.keys()
+    assert all(live[l] != nope[l] for l in live), \
+        "the live-floor temperature left Q unchanged — the knob is not applied"
+
+
+def _gen(runner_bin, name, gpu):
+    model = FIXTURES / f"{name}.gguf"
+    if not model.exists():
+        pytest.skip(f"fixture {model} not generated (see the test target)")
+    proc = subprocess.run(
+        [runner_bin, "-m", str(model), "-p", "hello world", "-n", "16",
+         "--temp", "0", "--gpu", gpu],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+    return proc.stdout, proc.stderr.decode(errors="replace")
+
+
+@pytest.fixture(scope="module")
+def has_metal(runner_bin):
+    """Whether this MACHINE has a Metal backend, independent of any model."""
+    proc = subprocess.run([runner_bin, "--caps"], cwd=ROOT,
+                          stdout=subprocess.PIPE, timeout=120)
+    import json
+    caps = json.loads(proc.stdout.decode())
+    return ((caps.get("gpu") or {}).get("backend")) == "metal"
+
+
+@pytest.mark.parametrize("name", ["k_nope", "k_half", "k_temp_live"])
+def test_metal_matches_cpu_on_attn_knobs(runner_bin, has_metal, name):
+    """CPU/GPU identity on the attention knobs, and proof the GPU ran.
+
+    The engagement assertion is the whole point. Both knobs used to be a loud
+    CPU fallback on Metal, and a fallback makes this compare the CPU against
+    itself and pass for the wrong reason — the same trap `test-metal-kquant`
+    guards against.
+    """
+    if not has_metal:
+        pytest.skip("no Metal backend on this machine")
+    cpu_out, _ = _gen(runner_bin, name, "off")
+    gpu_out, gpu_err = _gen(runner_bin, name, "auto")
+    # Ask the machine, not this run, whether Metal exists. Reading engagement
+    # off THIS run's stderr would turn a refusal into a skip, which is exactly
+    # the failure being guarded against.
+    assert "Metal backend" in gpu_err, \
+        f"{name} did not engage Metal: {gpu_err.strip().splitlines()[-3:]}"
+    assert cpu_out == gpu_out, f"{name}: Metal output differs from CPU"
