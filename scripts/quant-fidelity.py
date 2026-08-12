@@ -336,11 +336,31 @@ def compare_case(ref_judged, var_judged):
         return out
     out["comparable"] = True
     if kind in ("tool", "tool_stream"):
-        correct = (var_judged.get("tool_name") is not None and
-                  var_judged.get("tool_name") == ref_judged.get("tool_name"))
-        out["tool_selection_correct"] = correct
-        out["argument_exact_match"] = (
-            correct and var_judged.get("arguments") == ref_judged.get("arguments"))
+        ref_name = ref_judged.get("tool_name")
+        var_name = var_judged.get("tool_name")
+        if ref_name is None:
+            # The REFERENCE answered without calling a tool. There is no
+            # selection to be correct about, so scoring one penalises the
+            # variant for the reference's behaviour. Agreement here means the
+            # variant also declined and said the same thing.
+            #
+            # Getting this wrong broke a whole model: Qwen3-8B's zero point
+            # failed twice with "10 case(s) disagreed between two greedy runs
+            # of the same reference weights" while the two runs were in fact
+            # byte-identical, because both declined to call a tool in five
+            # categories and "both declined" was recorded as disagreement. A
+            # tool-tuned model calls a tool everywhere and never trips it; a
+            # thinking model that sometimes answers directly trips it in every
+            # such case, and the harness then refuses to measure it at all.
+            out["tool_selection_correct"] = None
+            out["argument_exact_match"] = (
+                var_name is None and
+                var_judged.get("content") == ref_judged.get("content"))
+        else:
+            correct = var_name == ref_name
+            out["tool_selection_correct"] = correct
+            out["argument_exact_match"] = (
+                correct and var_judged.get("arguments") == ref_judged.get("arguments"))
     elif kind == "final":
         out["argument_exact_match"] = (
             var_judged.get("content") == ref_judged.get("content"))

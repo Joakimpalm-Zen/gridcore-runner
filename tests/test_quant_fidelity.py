@@ -636,3 +636,68 @@ def test_collect_distributions_records_position_failures_without_dropping_them(m
         "http://127.0.0.1:1", "m", ["a", "b", "c", "d"], max_positions=3, stride=1)
     assert len(positions) == 3  # kept retrying past the one failure
     assert failures == [{"index": 1, "reason": "simulated timeout"}]
+
+
+# --------------------------------------------------- zero point vs "no tool call"
+#
+# Found 2026-08-15 on Qwen3-8B: its zero point failed twice, reporting "10
+# case(s) disagreed between two greedy runs of the same reference weights",
+# while running the same matrix twice by hand produced byte-identical responses
+# and the two servers' logs matched case for case on prompt and generated token
+# counts. The disagreement was in the comparator, not the model.
+#
+# compare_case scored a tool case as `correct` only when the VARIANT produced a
+# tool_name. If the model answers in prose instead of calling a tool, both runs
+# agree perfectly and both get tool_name None, and the old code returned
+# argument_exact_match=False for that: agreement recorded as disagreement. A
+# tool-tuned model like Hermes calls a tool in every case and never trips it; a
+# thinking model that sometimes answers directly trips it in every such case,
+# and the harness then refuses to measure the model at all.
+
+def load_module():
+    return MOD
+
+
+def _judged(**kw):
+    base = {"executed": True, "schema_valid": True, "category": "tool_selection",
+            "id": "runner-001-tool_selection", "tool_name": None,
+            "arguments": None, "content": None}
+    base.update(kw)
+    return base
+
+
+def test_two_runs_that_both_declined_to_call_a_tool_agree():
+    module = load_module()
+    ref = _judged(tool_name=None, content="I can answer that directly: 4.")
+    var = _judged(tool_name=None, content="I can answer that directly: 4.")
+    out = module.compare_case(ref, var)
+    assert out["argument_exact_match"] is True, \
+        "identical no-tool responses must count as agreement"
+    # there is no selection to be correct about when the reference made none
+    assert out["tool_selection_correct"] is None
+
+
+def test_declining_where_the_reference_called_a_tool_is_still_a_miss():
+    module = load_module()
+    ref = _judged(tool_name="get_weather", arguments={"city": "Paris"})
+    var = _judged(tool_name=None, content="It is sunny in Paris.")
+    out = module.compare_case(ref, var)
+    assert out["tool_selection_correct"] is False
+    assert out["argument_exact_match"] is False
+
+
+def test_differing_no_tool_content_is_a_disagreement():
+    module = load_module()
+    ref = _judged(tool_name=None, content="four")
+    var = _judged(tool_name=None, content="4")
+    out = module.compare_case(ref, var)
+    assert out["argument_exact_match"] is False
+
+
+def test_matching_tool_call_still_agrees():
+    module = load_module()
+    ref = _judged(tool_name="get_weather", arguments={"city": "Paris"})
+    var = _judged(tool_name="get_weather", arguments={"city": "Paris"})
+    out = module.compare_case(ref, var)
+    assert out["tool_selection_correct"] is True
+    assert out["argument_exact_match"] is True
