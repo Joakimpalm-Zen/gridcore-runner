@@ -1,6 +1,13 @@
-// Direct q2_K/q3_K Metal kernel parity against the CPU dequantizer.
+// Direct Metal matvec/GEMM parity against the CPU dequantizer.
 // Identity columns reconstruct every weight, so an index error cannot hide in
 // a dot-product sum. Additional shapes cover grid tails and superblock strides.
+//
+// The sweep covers q4_0, q8_0, q4_K, q6_K, f16 and f32 as well as q2_K/q3_K.
+// Only the last two had a direct parity test; the rest were covered solely by
+// end-to-end CPU-vs-GPU runs, which cannot say WHICH kernel drifted and cannot
+// reach a shape a shipped model does not happen to have. Every n_out below is
+// deliberately not a multiple of the rows one threadgroup covers, so each case
+// lands on a partial last threadgroup.
 #import <Metal/Metal.h>
 
 #include "../src/fp16.h"
@@ -28,6 +35,14 @@ typedef struct {
 _Static_assert(sizeof(mv_args_host) == 40, "mv_args host/Metal layout drift");
 _Static_assert(sizeof(mm_args_host) == 40, "mm_args host/Metal layout drift");
 
+// The matvec dispatch geometry src/metal.m uses, restated here because a
+// Metal source embedded as a C string shares no header with its callers: one
+// output row per simdgroup, 128 threads = 4 simdgroups per threadgroup. Get
+// this wrong and the last threadgroup stops short of n_out, the tail rows are
+// never written, and they keep the sentinel this test fills the output with.
+#define MV_TG 128
+#define MV_ROWS_PER_TG (MV_TG / 32)
+
 static int failures;
 static uint32_t rng_state = 0x9e3779b9u;
 
@@ -47,22 +62,45 @@ static float rnd_float(void) {
     return (float)(int32_t)rnd32() / 2147483648.0f;
 }
 
+// Random payload bytes, then real scales written back over them: a random f16
+// scale is as likely to be inf or NaN as anything else, and the reference sum
+// would then agree with the kernel on garbage.
 static void make_weights(int type, uint8_t *weights, int n_in, int n_out) {
     size_t row_size = ggml_row_size(type, n_in);
     size_t block_size = ggml_type_size(type);
-    int n_block = n_in / 256;
+    int per_block = (type == T_Q4_0 || type == T_Q8_0) ? 32 : 256;
+    int n_block = n_in / per_block;
     for (int row = 0; row < n_out; row++) {
         uint8_t *row_data = weights + (size_t)row * row_size;
+        if (type == T_F32) {
+            float *f = (float *)row_data;
+            for (int i = 0; i < n_in; i++) f[i] = rnd_float();
+            continue;
+        }
+        if (type == T_F16) {
+            f16_t *h = (f16_t *)row_data;
+            for (int i = 0; i < n_in; i++) h[i] = f32_to_f16(rnd_float());
+            continue;
+        }
         for (size_t i = 0; i < row_size; i++) row_data[i] = (uint8_t)rnd32();
         for (int block = 0; block < n_block; block++) {
             uint8_t *b = row_data + (size_t)block * block_size;
             f16_t d = f32_to_f16(0.015625f * (1 + (row + block) % 4));
-            if (type == T_Q2_K) {
-                f16_t dmin = f32_to_f16(0.0078125f * (1 + (row + 2 * block) % 4));
+            f16_t dmin = f32_to_f16(0.0078125f * (1 + (row + 2 * block) % 4));
+            switch (type) {
+            case T_Q2_K:
                 memcpy(b + 80, &d, sizeof d);
                 memcpy(b + 82, &dmin, sizeof dmin);
-            } else {
-                memcpy(b + 108, &d, sizeof d);
+                break;
+            case T_Q3_K: memcpy(b + 108, &d, sizeof d); break;
+            case T_Q6_K: memcpy(b + 208, &d, sizeof d); break;
+            case T_Q4_K:
+                memcpy(b + 0, &d, sizeof d);
+                memcpy(b + 2, &dmin, sizeof dmin);
+                break;
+            case T_Q4_0:
+            case T_Q8_0: memcpy(b + 0, &d, sizeof d); break;
+            default: break;
             }
         }
     }
@@ -101,8 +139,10 @@ static bool submit(id<MTLCommandQueue> queue,
     [enc setBuffer:bias offset:0 atIndex:4];
     MTLSize grid = mm
         ? MTLSizeMake((n_out + 31) / 32, (n_col + 15) / 16, 1)
-        : MTLSizeMake((n_out + 3) / 4, (n_col + col_tile - 1) / col_tile, 1);
-    [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        : MTLSizeMake((n_out + MV_ROWS_PER_TG - 1) / MV_ROWS_PER_TG,
+                      (n_col + col_tile - 1) / col_tile, 1);
+    [enc dispatchThreadgroups:grid
+        threadsPerThreadgroup:MTLSizeMake(mm ? 128 : MV_TG, 1, 1)];
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
@@ -226,13 +266,19 @@ int main(void) {
             return 1;
         }
         id<MTLCommandQueue> queue = [dev newCommandQueue];
-        const int types[] = { T_Q2_K, T_Q3_K };
-        const char *suffixes[] = { "q2_K", "q3_K" };
-        for (size_t i = 0; i < sizeof types / sizeof *types; i++) {
-            int type = types[i];
+        // n_in granularity: superblock types index 256 weights at a time, the
+        // 32-block types 32, and the raw float types nothing.
+        const struct { int type; const char *suffix; int step; } kinds[] = {
+            { T_Q2_K, "q2_K", 256 }, { T_Q3_K, "q3_K", 256 },
+            { T_Q4_K, "q4_K", 256 }, { T_Q6_K, "q6_K", 256 },
+            { T_Q4_0, "q4_0",  32 }, { T_Q8_0, "q8_0",  32 },
+            { T_F16,  "f16",    1 }, { T_F32,  "f32",    1 },
+        };
+        for (size_t i = 0; i < sizeof kinds / sizeof *kinds; i++) {
+            int type = kinds[i].type, step = kinds[i].step;
             char mv_name[32], mm_name[32];
-            snprintf(mv_name, sizeof mv_name, "k_mv_%s", suffixes[i]);
-            snprintf(mm_name, sizeof mm_name, "k_mm_%s", suffixes[i]);
+            snprintf(mv_name, sizeof mv_name, "k_mv_%s", kinds[i].suffix);
+            snprintf(mm_name, sizeof mm_name, "k_mm_%s", kinds[i].suffix);
             id<MTLComputePipelineState> mv = make_pipeline(dev, lib, mv_name);
             id<MTLComputePipelineState> mm = make_pipeline(dev, lib, mm_name);
             if (mv && mm) {
@@ -240,10 +286,15 @@ int main(void) {
                 run_case(dev, queue, mm, type, true, 512, 3, 512, true);
                 const int shapes[][3] = {
                     { 256, 1, 2 }, { 512, 33, 7 }, { 768, 35, 17 },
+                    { 288, 13, 3 },   // n_in not a whole number of superblocks
+                    { 258, 21, 5 },   // and not even a whole float4
                 };
                 for (size_t s = 0; s < sizeof shapes / sizeof *shapes; s++) {
+                    if (shapes[s][0] % step) continue;
                     run_case(dev, queue, mv, type, false,
                              shapes[s][0], shapes[s][1], shapes[s][2], false);
+                    // The GEMM kernels index whole k-steps of 32.
+                    if (shapes[s][0] % 32) continue;
                     run_case(dev, queue, mm, type, true,
                              shapes[s][0], shapes[s][1], shapes[s][2], false);
                 }
@@ -258,6 +309,7 @@ int main(void) {
         fprintf(stderr, "metal kquant kernels: %d failures\n", failures);
         return 1;
     }
-    printf("metal kquant kernels: q2_K/q3_K mv+mm shape sweep ok\n");
+    printf("metal kernels: q2_K/q3_K/q4_K/q6_K/q4_0/q8_0/f16/f32 "
+           "mv+mm shape sweep ok\n");
     return 0;
 }
