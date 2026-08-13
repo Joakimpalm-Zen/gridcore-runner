@@ -1329,6 +1329,13 @@ unsupported:
 static struct {
     unsigned long mm, mv, mvf, rmsnorm, qknorm, headnorm, rope, store,
                   attn, attn_chunk, elem, moe, ple;
+    // KV bytes an attention dispatch will read, accumulated for DECODE only
+    // (n == 1), split by whether the layer slides. Decode-only because at
+    // n > 1 each column attends over its own growing range and a single
+    // `pos` does not describe the read; counting prefill here would produce
+    // an underestimate that looks authoritative.
+    unsigned long long kv_global, kv_swa;
+    unsigned long      kv_layers_global, kv_layers_swa;
 } g_disp;
 
 static void enc_rmsnorm_n(gpu_t *g, id<MTLComputeCommandEncoder> e,
@@ -1993,6 +2000,13 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             // batch and is the validated fast path.
             int a_t0 = (window > 0 && pos - window + 1 > 0) ? pos - window + 1 : 0;
             int a_span = pos - a_t0 + 1;
+            if (n == 1) {
+                // K and V, both read across the span this layer attends over.
+                unsigned long long b = 2ull * (unsigned long long)a_span
+                                     * (unsigned long long)model_kv_row_bytes(m, l);
+                if (window > 0) { g_disp.kv_swa += b; g_disp.kv_layers_swa++; }
+                else            { g_disp.kv_global += b; g_disp.kv_layers_global++; }
+            }
             int a_ov = metal_attn_chunk_override();
             int a_chunk, a_nch;
             if (a_ov == 0) { a_chunk = 0; a_nch = 0; }        // path disabled
@@ -2185,6 +2199,14 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         // can be read straight off two runs at different batch sizes rather
         // than inferred from throughput. Counters are cumulative over the
         // process; take differences across forwards.
+        if (g_disp.kv_global || g_disp.kv_swa)
+            fprintf(stderr, "metal-kv decode-cumulative: global %llu B over %lu "
+                    "layer-dispatches | sliding %llu B over %lu | sliding share "
+                    "%.1f%%\n",
+                    g_disp.kv_global, g_disp.kv_layers_global,
+                    g_disp.kv_swa, g_disp.kv_layers_swa,
+                    100.0 * (double)g_disp.kv_swa
+                        / (double)(g_disp.kv_swa + g_disp.kv_global));
         fprintf(stderr, "metal-census n=%d total=%lu | mm=%lu mv=%lu mvf=%lu "
                 "rmsnorm=%lu qknorm=%lu headnorm=%lu rope=%lu store=%lu "
                 "attn=%lu attn_chunk=%lu elem=%lu moe=%lu\n",
