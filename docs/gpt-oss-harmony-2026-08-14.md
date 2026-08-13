@@ -114,11 +114,63 @@ marker and prints the analysis as the answer. That had to be fixed in two
 places — `completion.c` (`harmony_primed_think`) and `main.c`'s interactive
 loop. A single-surface fix looks correct through the API and wrong at the CLI.
 
-## Out of scope, not attempted
+## Native tool calling — completed 2026-08-13
 
-- **Harmony tool calling.** Its `commentary` channel and `<|call|>` recipient
-  syntax are their own project. Not rendered rather than approximated — the
-  granite-tool-calling precedent. `<|call|>` is in the stop set so an
-  unrendered attempt stops instead of running away.
+Runner now renders the official Harmony `# Tools` TypeScript namespace and
+constrains the actual channel-first generation form:
+
+```
+<|channel|>commentary to=functions.get_weather<|constrain|>json
+<|message|>{"city":"Oslo","units":"celsius"}<|call|>
+```
+
+History is intentionally different: the reference renderer canonicalizes a
+past call with the recipient before the channel. The native parser accepts
+both orders. Runner therefore constrains the model's trained channel-first
+form during generation and replays the reference recipient-first form in
+history; treating those as one layout trapped the model in commentary and was
+caught by the first live run.
+
+The parameter document is compiled through the same strict JSON-schema engine
+as other tool paths. `auto`, `required`, named, and `none` choices; structured
+final answers; visible commentary; analysis; tool results; multiple prior
+calls; and buffered/SSE demultiplexing share that compiler and mapper. A
+pre-call analysis/commentary message is bounded to 192 UTF-8 bytes so a
+required choice cannot spend the entire request repeating that it intends to
+call; the handoff is then the only legal continuation and the model still
+generates the arguments.
+
+Blackwell evidence used the canonical `gpt-oss-20b-MXFP4.gguf`, full CUDA
+offload (24/24 layers) on the 24 GB MIG slice, temperature 0:
+
+| surface / turn | result |
+|---|---|
+| Chat, required + reasoning | `finish_reason:"tool_calls"`; 192-byte reasoning; `get_weather({"city":"Oslo","units":"celsius"})` |
+| Chat SSE, required | identical call reconstructed from deltas; no protocol text leaked |
+| Chat tool-result continuation, prose result | final content `4 °C`, `finish_reason:"stop"`, no second call |
+| Chat tool-result continuation, JSON result | one redundant repeat call, then the final answer on the next round — see below |
+| Responses, required | completed `function_call` with the same name and arguments |
+| Anthropic Messages, `tool_choice:any` | `stop_reason:"tool_use"`; object input with the same city and units |
+
+Every row above was re-measured on 2026-08-14 against the tree that carries
+this change.
+
+The continuation rows differ by the *shape* of the tool result, and the
+difference is a known cost rather than an open question. A prose result
+(`4 °C`) fits inside the 192-byte analysis bound and the model answers. A JSON
+result (`{"temperature": 4, "units": "celsius"}`) does not: the analysis is cut
+mid-quotation, the forced handoff lands on the call branch, and the model
+repeats the call it was just answered before replying on the following round.
+Lifting the bound on this branch was implemented and measured — it produces an
+unbounded loop with corrupted arguments, strictly worse — and reverted:
+[docs/negative-result-harmony-analysis-bound.md](negative-result-harmony-analysis-bound.md).
+
+Focused native grammar, official-render golden, buffered mapper, and every
+stream chunk-boundary test pass. The full repository gate is green on all three
+supported platforms as of 2026-08-14: macOS/ARM (Apple M1, Metal), Linux/x86_64
+(Blackwell MIG slice, CUDA) and Windows x86_64 (MinGW-w64 UCRT64).
+
+## Remaining out of scope
+
 - **Re-certifying gpt-oss's greedy / cpu_cuda rows.** Chat rendering does not
   touch them; they stand as recorded.

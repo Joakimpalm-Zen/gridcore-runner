@@ -68,6 +68,16 @@ snode *schema_compile_atem_parallel(struct jv *tools, const char *only_tool,
 // branch starts after a reasoning close has already consumed ` to=`.
 snode *schema_compile_muse_user_payload(struct jv *schema,
                                         char *err, int errcap);
+// Compile one native Harmony assistant turn. The engine feeds decoded-empty
+// control tokens to this automaton by their raw spellings, so it constrains
+// the trained channel-first call header and the declared JSON arguments.
+// Auto mode also admits commentary-before-call and final-answer branches;
+// named/required modes do not admit a final answer.
+snode *schema_compile_harmony_turn(struct jv *tools, bool allow_final,
+                                   const char *only_tool,
+                                   struct jv *final_schema,
+                                   bool allow_reasoning,
+                                   char *err, int errcap);
 void   schema_free(snode *n);
 
 // streaming validator state (memcpy-copyable for token lookahead)

@@ -34,6 +34,16 @@ static void turn_add_borrowed(turnbuf *t, const char *role, const char *text) {
     t->total += strlen(role) + strlen(text) + 64;
 }
 
+static void turn_add_native(turnbuf *t, const char *role, char *text,
+                            const char *name, const char *channel) {
+    if (!text) { t->failed = true; return; }
+    if (t->n >= t->cap) { free(text); t->failed = true; return; }
+    t->owned[t->n_own++] = text;
+    t->cm[t->n++] = (chat_msg){ .role = role, .content = text,
+                               .name = name, .channel = channel };
+    t->total += strlen(role) + strlen(text) + (name ? strlen(name) : 0) + 96;
+}
+
 // takes ownership of `text` on every path, including failure
 static void turn_add(turnbuf *t, const char *role, char *text) {
     if (!text) { t->failed = true; return; }
@@ -74,7 +84,24 @@ static char *anth_tool_result_text(jv *b) {
 // carries something this runtime cannot render: dropping an image would answer
 // a question about content the model never saw, which is exactly the silent
 // success this project refuses.
-static bool anth_blocks(jv *msg, const char *role, turnbuf *t,
+static const char *anth_call_name(jv *messages, int before, const char *id) {
+    if (!id) return NULL;
+    for (int i = 0; i < before; i++) {
+        jv *blocks = jv_get(messages->items[i], "content");
+        if (!blocks || blocks->type != J_ARR) continue;
+        for (int k = 0; k < blocks->n; k++) {
+            jv *b = blocks->items[k];
+            if (strcmp(jv_str(jv_get(b, "type"), ""), "tool_use")) continue;
+            const char *candidate = jv_str(jv_get(b, "id"), NULL);
+            if (candidate && !strcmp(candidate, id))
+                return jv_str(jv_get(b, "name"), NULL);
+        }
+    }
+    return NULL;
+}
+
+static bool anth_blocks(jv *messages, int message_index, jv *msg,
+                        const char *role, bool harmony, turnbuf *t,
                         char *err, int errcap) {
     jv *content = jv_get(msg, "content");
     if (content && content->type == J_STR) {
@@ -115,6 +142,17 @@ static bool anth_blocks(jv *msg, const char *role, turnbuf *t,
                 return false;
             }
             jv *input = jv_get(b, "input");
+            if (harmony) {
+                if (body.n) {
+                    turn_add_native(t, role, body.s, NULL, "commentary");
+                    body = (sbuf){0};
+                }
+                sbuf args = {0};
+                if (input && input->type != J_NULL) jv_dump(input, &args);
+                else sb_lit(&args, "{}");
+                turn_add_native(t, "assistant", args.s, name, NULL);
+                continue;
+            }
             sb_fmt(&body, "<|tool_call>call:%s", name);
             if (input && input->type != J_NULL) jv_dump(input, &body);
             else                                sb_lit(&body, "{}");
@@ -123,7 +161,13 @@ static bool anth_blocks(jv *msg, const char *role, turnbuf *t,
             // the tool loop closing: a result is its own turn in the chat
             // vocabulary, so it is emitted ahead of whatever text accompanies
             // it in the same Anthropic message
-            turn_add(t, "tool", anth_tool_result_text(b));
+            char *result = anth_tool_result_text(b);
+            if (harmony) {
+                const char *name = anth_call_name(
+                    messages, message_index,
+                    jv_str(jv_get(b, "tool_use_id"), NULL));
+                turn_add_native(t, "tool", result, name, NULL);
+            } else turn_add(t, "tool", result);
         } else if (!strcmp(bt, "thinking") || !strcmp(bt, "redacted_thinking")) {
             // Replayed reasoning. Anthropic wants it back so *it* can verify a
             // signature; there is nothing to verify locally, and it is the
@@ -376,10 +420,17 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
         return NULL;
     }
     *strict = rc == 1;
+    if (*strict && s->tmpl == TMPL_HARMONY) {
+        env->harmony = true;
+        env->tools = tools;
+        env->owns_tools = true;
+    }
 
     sbuf ts = {0};
-    if (*strict) sb_put(&ts, env->system_turn, strlen(env->system_turn));
-    else         tools_render(tools, &ts);
+    if (*strict && !env->harmony)
+        sb_put(&ts, env->system_turn, strlen(env->system_turn));
+    else if (!env->harmony)
+        tools_render(tools, &ts);
 
     // upper bound on turns: the tool system turn, the system turn, and for
     // each message its own turn plus one per tool_result block it carries
@@ -401,8 +452,8 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
         if (terr[0]) {
             turnbuf_free(&t);
             free(ts.s);
+            if (!env->owns_tools) jv_free(tools);
             tool_envelope_free(env);
-            jv_free(tools);
             jv_free(choice);
             send_error(fd, 400, terr);
             return NULL;
@@ -422,7 +473,8 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
             ok = false;
             break;
         }
-        ok = anth_blocks(msg, role, &t, terr, sizeof(terr));
+        ok = anth_blocks(msgs, i, msg, role, env->harmony,
+                         &t, terr, sizeof(terr));
     }
     if (ok && t.failed) {
         snprintf(terr, sizeof(terr), "out of memory building the prompt");
@@ -435,14 +487,14 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
     char *prompt = NULL;
     if (ok) {
         prompt = malloc(t.total + 256);
-        if (prompt) render_messages(s->tmpl, t.cm, t.n, true,
-                                    req_thinking_mode(req), prompt,
-                                    t.total + 256);
+        if (prompt) render_messages_with_tools(
+            s->tmpl, t.cm, t.n, true, req_thinking_mode(req),
+            env->harmony ? env->tools : NULL, prompt, t.total + 256);
         else ok = false;
     }
     turnbuf_free(&t);
     free(ts.s);
-    jv_free(tools);
+    if (!env->owns_tools) jv_free(tools);
     jv_free(choice);
     if (!ok) {
         tool_envelope_free(env);

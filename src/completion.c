@@ -184,6 +184,7 @@ static void append_text_logprobs(sbuf *r, slot_t *s, engine *e) {
 static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
     e->schema = NULL;
     e->emit_think_prelude = false;
+    e->constraint_includes_prelude = false;
     schema_free(schema);
     if (g) {
         tool_stream_free(&g->tsx);
@@ -303,6 +304,12 @@ static int send_text_delta_raw(gen_ctx *g, int reasoning, const char *bytes, int
 
 static int sink_content(void *ud, const char *b, int n) {
     return send_text_delta(ud, 0, b, n);
+}
+
+static int sink_reasoning(void *ud, const char *b, int n) {
+    gen_ctx *g = ud;
+    sb_put(&g->reason, b, (size_t)n);
+    return send_text_delta(g, 1, b, n);
 }
 
 // the opening event of a call carries everything that identifies it; the
@@ -1177,6 +1184,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     // is silent: the split simply never fires and the model's analysis is
     // served as content, which is what the first live run did.
     bool harmony_primed_think = chat && s->tmpl == TMPL_HARMONY &&
+                                !(env && env->harmony) &&
                                 req_thinking_mode(req) != THINK_OFF;
     // Major faults are page-ins that went to disk, so the delta across a
     // request IS the paging stall rather than an inference from wall-clock: a
@@ -1397,7 +1405,13 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     jv *sch = env ? NULL : request_schema(req);
     if (env) {
         char serr[128] = "envelope did not parse";
-        if (env->atem) {
+        if (env->harmony) {
+            const char *only = env->kind == TCH_NAMED ? env->named : NULL;
+            schema = schema_compile_harmony_turn(
+                env->tools, env->kind == TCH_AUTO, only,
+                env->kind == TCH_AUTO ? request_schema(req) : NULL,
+                req_thinking_mode(req) != THINK_OFF, serr, sizeof(serr));
+        } else if (env->atem) {
             const char *only = env->kind == TCH_NAMED ? env->named : NULL;
             jv *final = env->kind == TCH_AUTO ? request_schema(req) : NULL;
             schema = final
@@ -1443,10 +1457,12 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         }
     }
     e->schema = schema;
+    e->constraint_includes_prelude = env && env->harmony;
     // chat responses split a thinking prelude into the reasoning channel;
     // constrained generation forwards it only when asked (raw completions
     // keep the payload-only contract)
-    e->emit_think_prelude = chat && m->think_open != NULL;
+    e->emit_think_prelude = chat && m->think_open != NULL &&
+                            !(env && env->harmony);
 
     size_t cap = strlen(prompt) + 16;
     int32_t *toks = malloc(sizeof(int32_t) * cap);
@@ -1590,7 +1606,9 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     tool_envelope muse_plain_env = {.muse_plain_payload = true};
     snprintf(g.id, sizeof(g.id), "%s", req_id);
     // split thinking channels out of chat responses; raw completions stay raw
-    if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think ||
+    if (env && env->harmony)
+        think_init(&g.ts, NULL, NULL);
+    else if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think ||
         harmony_primed_think)
         think_init_reasoning(&g.ts, m->think_open, m->think_close);
     else
@@ -1599,7 +1617,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         : stream && chat && s->tmpl == TMPL_MUSE && schema
         ? &muse_plain_env : NULL;
     if (stream && stream_env) {
-        tool_stream_sink sink = { &g, sink_content, sink_call_begin,
+        tool_stream_sink sink = { &g, sink_reasoning, sink_content, sink_call_begin,
                                   sink_call_args, sink_call_end };
         tool_stream_init(&g.tsx, stream_env, &sink);
         g.tsx_on = true;
@@ -1662,6 +1680,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         emit_channel(&g, 0, g.hold.s, (int)g.hold.n);
         g.hold.n = 0;
     }
+    if (g.tsx_on && tool_stream_finish(&g.tsx) != 0) g.dead = true;
     // Anything still held for a multi-byte character the model never finished
     // goes out now rather than disappearing. It is genuinely truncated, so it
     // renders as U+FFFD — but silently dropping bytes would make the streamed
@@ -1810,13 +1829,28 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             // knows the arguments are minimal closures, not the model's
             // intent (finding A, 2026-08-11 evaluation).
             sbuf mapped = {0};
-            int rc = tool_envelope_map(env, g.out.s ? g.out.s : "", g.out.n,
-                                       &mapped, &tc);
+            sbuf mapped_reason = {0};
+            int rc = tool_envelope_map_channels(
+                env, g.out.s ? g.out.s : "", g.out.n,
+                &mapped_reason, &mapped, &tc);
+            if (rc >= 0 && mapped_reason.n) {
+                free(g.reason.s);
+                g.reason = mapped_reason;
+            } else free(mapped_reason.s);
             if (rc >= 1) {
                 n_tc = rc;              // parallel turns map several at once
                 if (!strcmp(finish, "stop")) finish = "tool_calls";
-                g.out.n = 0;
-                free(mapped.s);
+                if (env->harmony && mapped.n) {
+                    // Harmony's commentary message is intentionally visible
+                    // before its recipient-bearing call. OpenAI-shaped
+                    // responses permit content and tool_calls together, and
+                    // the streaming demux already emits both in that order.
+                    free(g.out.s);
+                    g.out = mapped;
+                } else {
+                    g.out.n = 0;
+                    free(mapped.s);
+                }
             } else if (rc == 0) {
                 free(g.out.s);
                 g.out = mapped;      // the final branch's payload is the reply

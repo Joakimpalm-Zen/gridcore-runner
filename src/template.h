@@ -41,6 +41,9 @@ typedef struct {
     // Native templates whose tool-result turn names the invoked function use
     // this optional field. Ordinary messages leave it NULL.
     const char *name;
+    // Harmony history may carry separate analysis/commentary assistant
+    // messages before a final answer or recipient-bearing call.
+    const char *channel;
 } chat_msg;
 int         template_detect(const char *meta_tmpl, tokenizer *tok);
 int         template_from_name(const char *name); // -1 if unknown
@@ -131,9 +134,11 @@ typedef struct {
     bool  parallel;
     int   max_calls;
     bool  atem;           // Muse native recipient + <atem:invoke> protocol
+    bool  harmony;        // gpt-oss native channels + functions recipient
     bool  muse_user_header; // generic JSON override follows to=user header
     bool  muse_plain_payload; // stream a schema payload after to=user header
     struct jv *tools;     // borrowed request declarations for native compiler
+    bool  owns_tools;     // Anthropic translation survives prompt construction
     char *named;          // owned named-tool choice, when kind == TCH_NAMED
 } tool_envelope;
 
@@ -160,6 +165,9 @@ void tool_envelope_free(tool_envelope *e);
 // branches contribute content, any tool branches contribute calls.
 int  tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                        struct sbuf *content, struct sbuf *tc);
+int  tool_envelope_map_channels(const tool_envelope *e, const char *doc,
+                                size_t n, struct sbuf *reasoning,
+                                struct sbuf *content, struct sbuf *tc);
 bool muse_user_payload_strip(struct sbuf *payload);
 
 // Streaming counterpart of tool_envelope_map.
@@ -181,6 +189,7 @@ bool muse_user_payload_strip(struct sbuf *payload);
 // that result propagates out of tool_stream_feed unchanged.
 typedef struct {
     void *ud;
+    int (*reasoning)(void *ud, const char *bytes, int n);
     int (*content)(void *ud, const char *bytes, int n);
     int (*call_begin)(void *ud, const char *name);
     int (*call_args)(void *ud, const char *bytes, int n);
@@ -210,6 +219,7 @@ typedef struct {
 void tool_stream_init(tool_stream *s, const tool_envelope *e,
                       const tool_stream_sink *sink);
 int  tool_stream_feed(tool_stream *s, const char *bytes, int n);
+int  tool_stream_finish(tool_stream *s);
 // true once a tool branch was selected, i.e. finish_reason is "tool_calls"
 bool tool_stream_called(const tool_stream *s);
 void tool_stream_free(tool_stream *s);

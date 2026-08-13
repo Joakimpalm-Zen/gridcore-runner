@@ -247,6 +247,92 @@ static void test_harmony_render_without_system(void) {
     assert(strstr(out, "<|start|>assistant") != NULL);
 }
 
+// Tool requests use OpenAI's native Harmony system-tool section and leave the
+// assistant header bare so the model can choose analysis, commentary, or
+// final. This golden was rendered with openai-harmony abd677f7 (the pinned
+// protocol oracle), with date and knowledge-cutoff fields deliberately unset
+// just like Runner's existing date-stable Harmony chat prompt.
+static void test_harmony_tool_definitions_golden(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"city\":{\"type\":\"string\"}},"
+        "\"required\":[\"city\"]}}}]";
+    jv *tools = json_parse(src, strlen(src));
+    assert(tools != NULL);
+    const chat_msg msgs[] = {
+        { .role = "system", .content = "Be terse." },
+        { .role = "user", .content = "Weather in Oslo?" },
+    };
+    char out[4096];
+    render_messages_with_tools(TMPL_HARMONY, msgs, 2, true, THINK_DEFAULT,
+                               tools, out, sizeof(out));
+    assert(strcmp(out,
+        "<|start|>system<|message|>You are ChatGPT, a large language model "
+        "trained by OpenAI.\n\nReasoning: medium\n\n# Tools\n\n## functions\n\n"
+        "namespace functions {\n\n// Get weather\n"
+        "type get_weather = (_: {\ncity: string,\n}) => any;\n\n"
+        "} // namespace functions\n\n# Valid channels: analysis, commentary, "
+        "final. Channel must be included for every message."
+        "<|end|><|start|>developer<|message|># Instructions\n\nBe terse."
+        "<|end|><|start|>user<|message|>Weather in Oslo?<|end|>"
+        "<|start|>assistant") == 0);
+    jv_free(tools);
+}
+
+// A continued tool conversation must replay the native recipient-bearing
+// assistant call and the named tool result. Generic <|tool_call> wrappers or a
+// role:"tool" message are both off-protocol for Harmony.
+static void test_harmony_tool_history_golden(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"city\":{\"type\":\"string\"}},"
+        "\"required\":[\"city\"]}}}]";
+    jv *tools = json_parse(src, strlen(src));
+    assert(tools != NULL);
+    const chat_msg msgs[] = {
+        { .role = "user", .content = "Weather?" },
+        { .role = "assistant", .content = "{\"city\":\"Oslo\"}",
+          .name = "get_weather" },
+        { .role = "tool", .content = "{\"temp\":4}",
+          .name = "get_weather" },
+    };
+    char out[4096];
+    render_messages_with_tools(TMPL_HARMONY, msgs, 3, true, THINK_DEFAULT,
+                               tools, out, sizeof(out));
+    assert(strstr(out,
+        "<|start|>user<|message|>Weather?<|end|>"
+        "<|start|>assistant to=functions.get_weather<|channel|>commentary "
+        "<|constrain|>json<|message|>{\"city\":\"Oslo\"}<|call|>"
+        "<|start|>functions.get_weather<|channel|>commentary<|message|>"
+        "{\"temp\":4}<|end|><|start|>assistant") != NULL);
+    jv_free(tools);
+}
+
+static void test_harmony_reasoning_preamble_and_parallel_history(void) {
+    const chat_msg msgs[] = {
+        { .role = "user", .content = "Check both." },
+        { .role = "assistant", .content = "Need both records.",
+          .channel = "analysis" },
+        { .role = "assistant", .content = "I’ll check both sources.",
+          .channel = "commentary" },
+        { .role = "assistant", .content = "{\"id\":1}", .name = "lookup" },
+        { .role = "assistant", .content = "{\"id\":2}", .name = "lookup" },
+    };
+    char out[4096];
+    render_messages(TMPL_HARMONY, msgs, 5, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strstr(out,
+        "<|start|>assistant<|channel|>analysis<|message|>Need both records."
+        "<|end|><|start|>assistant<|channel|>commentary<|message|>"
+        "I’ll check both sources.<|end|>"
+        "<|start|>assistant to=functions.lookup<|channel|>commentary "
+        "<|constrain|>json<|message|>{\"id\":1}<|call|>"
+        "<|start|>assistant to=functions.lookup<|channel|>commentary "
+        "<|constrain|>json<|message|>{\"id\":2}<|call|>") != NULL);
+}
+
 // THINK_ON primes the analysis channel in the prompt, THINK_OFF primes final
 // — the same trick muse plays with ` to=self` / ` to=user`.
 static void test_harmony_thinking_controls_the_primed_channel(void) {
@@ -577,6 +663,9 @@ int main(void) {
     test_detect_harmony(&t);
     test_harmony_render_golden();
     test_harmony_render_without_system();
+    test_harmony_tool_definitions_golden();
+    test_harmony_tool_history_golden();
+    test_harmony_reasoning_preamble_and_parallel_history();
     test_harmony_thinking_controls_the_primed_channel();
     test_harmony_split_hides_analysis_from_content();
     test_harmony_split_starts_inside_primed_analysis();

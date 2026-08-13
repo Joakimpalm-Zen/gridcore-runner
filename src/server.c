@@ -128,15 +128,21 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         env.muse_user_header = !atem_tool_calling;
         env.tools = tools;
     }
+    if (strict && s->tmpl == TMPL_HARMONY) {
+        env.harmony = true;
+        env.tools = tools;
+    }
     // When the strict envelope does not apply — no tools declared, or the
     // ornith template's native protocol — the flag is vacuous and stays
     // TOLERATED, exactly as before: ordinary OpenAI-shaped traffic sends
     // parallel_tool_calls alongside requests that will never call anything,
     // and rejecting those would break it.
     sbuf ts = {0};
-    if (strict && (s->tmpl != TMPL_MUSE || !env.atem))
+    if (strict && s->tmpl != TMPL_HARMONY &&
+        (s->tmpl != TMPL_MUSE || !env.atem))
         sb_put(&ts, env.system_turn, strlen(env.system_turn));
-    else if (s->tmpl != TMPL_MUSE) tools_render_for(s->tmpl, tools, &ts);
+    else if (s->tmpl != TMPL_MUSE && s->tmpl != TMPL_HARMONY)
+        tools_render_for(s->tmpl, tools, &ts);
     bool ornith_merged_system = false;
     if (s->tmpl == TMPL_ORNITH && ts.n && msgs->n > 0 &&
         !strcmp(jv_str(jv_get(msgs->items[0], "role"), ""), "system")) {
@@ -148,7 +154,16 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         free(system);
         ornith_merged_system = true;
     }
-    chat_msg *cm = malloc(sizeof(chat_msg) * (msgs->n + 1));
+    size_t cm_cap = (size_t)msgs->n + 1;
+    if (s->tmpl == TMPL_HARMONY) {
+        for (int i = 0; i < msgs->n; i++) {
+            jv *calls = jv_get(msgs->items[i], "tool_calls");
+            if (calls && calls->type == J_ARR) cm_cap += (size_t)calls->n;
+            if (jv_str(jv_get(msgs->items[i], "reasoning_content"), NULL))
+                cm_cap++;
+        }
+    }
+    chat_msg *cm = malloc(sizeof(chat_msg) * cm_cap);
     char **owned = malloc(sizeof(char *) * msgs->n);
     // client-controlled size (a 32MB body of tiny messages): a NULL here would
     // be indexed below. Fail the request cleanly instead of crashing.
@@ -166,7 +181,8 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         if (i == 0 && ornith_merged_system) continue;
         const char *role = jv_str(jv_get(msgs->items[i], "role"), "user");
         const char *turn_name = NULL;
-        if (s->tmpl == TMPL_MUSE && !strcmp(role, "tool"))
+        if ((s->tmpl == TMPL_MUSE || s->tmpl == TMPL_HARMONY) &&
+            !strcmp(role, "tool"))
             turn_name = tool_result_name(msgs, i);
         if (s->tmpl == TMPL_MUSE && !strcmp(role, "assistant")) {
             jv *calls = jv_get(msgs->items[i], "tool_calls");
@@ -174,6 +190,37 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
                 jv *fn = jv_get(calls->items[0], "function");
                 turn_name = jv_str(jv_get(fn, "name"), NULL);
             }
+        }
+        if (s->tmpl == TMPL_HARMONY && !strcmp(role, "assistant")) {
+            const char *reason = jv_str(
+                jv_get(msgs->items[i], "reasoning_content"), NULL);
+            if (reason && reason[0])
+                cm[n_cm++] = (chat_msg){ .role = "assistant",
+                                        .content = reason,
+                                        .channel = "analysis" };
+            char *visible = message_text(msgs->items[i], s->tmpl);
+            jv *calls = jv_get(msgs->items[i], "tool_calls");
+            bool have_calls = calls && calls->type == J_ARR && calls->n;
+            if (visible && visible[0]) {
+                owned[n_own++] = visible;
+                cm[n_cm++] = (chat_msg){ .role = "assistant",
+                                        .content = visible,
+                                        .channel = have_calls
+                                                   ? "commentary" : NULL };
+                total += strlen(visible) + 64;
+            } else {
+                free(visible);
+            }
+            if (have_calls) for (int k = 0; k < calls->n; k++) {
+                jv *fn = jv_get(calls->items[k], "function");
+                const char *name = jv_str(jv_get(fn, "name"), NULL);
+                const char *args = jv_str(jv_get(fn, "arguments"), "{}");
+                if (!name) continue;
+                cm[n_cm++] = (chat_msg){ .role = "assistant",
+                                        .content = args, .name = name };
+                total += strlen(name) + strlen(args) + 96;
+            }
+            continue;
         }
         char *content = message_text(msgs->items[i], s->tmpl);
         if (!content) continue;
@@ -206,7 +253,9 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     }
     render_messages_with_tools(s->tmpl, cm, n_cm, true,
                                req_thinking_mode(req),
-                               s->tmpl == TMPL_MUSE && env.atem ? tools : NULL,
+                               (s->tmpl == TMPL_MUSE && env.atem) ||
+                               (s->tmpl == TMPL_HARMONY && env.harmony)
+                                   ? tools : NULL,
                                prompt, total + 256);
     run_completion(s, fd, prompt, API_CHAT, req, strict ? &env : NULL);
     free(prompt);

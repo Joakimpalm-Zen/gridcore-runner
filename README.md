@@ -655,6 +655,47 @@ that truncates mid-call still closes to a legal, executable document —
 `sval_close` guarantees that — but `finish_reason` stays `"length"`, never
 `"tool_calls"`, when the closer rather than the model finished the entry.
 
+gpt-oss uses its trained Harmony tool protocol instead of that generic
+envelope. Runner renders the official TypeScript `# Tools` namespace in the
+Harmony system turn, constrains the generated recipient to `functions.NAME`,
+constrains the JSON after `<|constrain|>` against that function's declared
+parameters, and maps the native `commentary`/`<|call|>` turn back to ordinary
+OpenAI `tool_calls`. `tool_choice` (`auto`, `required`, named, and `none`),
+JSON-schema `response_format` on the auto/final branch, buffered replies, SSE,
+reasoning, visible commentary before a call, tool-result replay, and histories
+containing several prior calls all use the same native path. Harmony ends one
+sampled turn at its first `<|call|>`; therefore `parallel_tool_calls:true`
+permits a call but does not fabricate several calls inside one Harmony turn.
+Multiple calls are replayed as consecutive native turns when the client sends
+them in history. Strict Harmony tool turns bound a pre-call analysis or visible
+commentary message to 192 UTF-8 bytes; at that boundary the trained assistant
+handoff is forced, preserving enough output budget for model-generated
+arguments instead of letting a turn narrate its intent forever. The bound is
+what ends that narration whenever a call is legal — not only under
+`tool_choice:"required"` — and it is not free: a tool result the model wants to
+quote back, typically a JSON document, can be cut mid-quotation, and gpt-oss
+then repeats the call it was just answered before replying on the next round. A
+prose tool result fits inside the bound and answers directly. Lifting the bound
+is measured and worse, not untried:
+[docs/negative-result-harmony-analysis-bound.md](docs/negative-result-harmony-analysis-bound.md).
+
+For example, the usual OpenAI request needs no Runner-specific switch:
+
+```json
+{
+  "model": "gpt-oss-20b",
+  "messages": [{"role": "user", "content": "What is the weather in Oslo?"}],
+  "tools": [{"type": "function", "function": {
+    "name": "get_weather",
+    "description": "Get the current weather",
+    "parameters": {"type": "object", "properties": {
+      "city": {"type": "string"}
+    }, "required": ["city"]}
+  }}],
+  "tool_choice": "required"
+}
+```
+
 Muse's native atem format carries scalar parameter values as raw text rather
 than JSON strings. Consequently a scalar value cannot contain the literal
 `</atem:parameter>` sequence: atem itself uses that sentinel as the value
@@ -1016,8 +1057,9 @@ during an authenticated evidence run.
   (`<|channel|>`-structured turns, `<|return|>` as the stop), where it
   previously fell through to llama2's `[INST]` markup and ran away. The
   analysis channel is suppressed from `content` and surfaced as
-  `reasoning_content`; `enable_thinking: false` skips it. Harmony TOOL calling
-  is not rendered — unimplemented, not approximated. Measured transcripts:
+  `reasoning_content`; `enable_thinking: false` skips it. Harmony tool calling
+  uses the model's native commentary/recipient protocol and strict declared-
+  argument constraints. Measured transcripts:
   [docs/gpt-oss-harmony-2026-08-14.md](docs/gpt-oss-harmony-2026-08-14.md).
   The CPU/CUDA identity row is untouched by this and still stands as recorded.
 - Gemma-4-26B-A4B QAT's old 16-token CPU/CUDA result is not a substitute for

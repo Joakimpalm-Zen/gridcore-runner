@@ -211,6 +211,143 @@ static void muse_render_tool_defs(const jv *tools, sbuf *b) {
         "</atem:invoke>\n</atem:function_calls>");
 }
 
+// OpenAI Harmony's native function declaration syntax. The reference
+// renderer converts the OpenAI JSON Schema parameter object to a compact
+// TypeScript type inside a `functions` namespace; reproducing that shape is
+// part of the prompt contract, not presentation sugar.
+static bool harmony_required(jv *schema, const char *name) {
+    jv *req = jv_get(schema, "required");
+    if (!req || req->type != J_ARR) return false;
+    for (int i = 0; i < req->n; i++)
+        if (req->items[i]->type == J_STR && !strcmp(req->items[i]->str, name))
+            return true;
+    return false;
+}
+
+static void harmony_comment_lines(sbuf *out, const char *indent,
+                                  const char *text) {
+    if (!text || !*text) return;
+    const char *p = text;
+    for (;;) {
+        const char *nl = strchr(p, '\n');
+        sb_fmt(out, "%s// ", indent);
+        sb_put(out, p, nl ? (size_t)(nl - p) : strlen(p));
+        sb_lit(out, "\n");
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
+
+static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out) {
+    if (!schema || schema->type != J_OBJ) { sb_lit(out, "any"); return; }
+    jv *one = jv_get(schema, "oneOf");
+    if (one && one->type == J_ARR && one->n) {
+        for (int i = 0; i < one->n; i++) {
+            sb_fmt(out, "%s\n%s | ", i ? "" : "", indent);
+            harmony_schema_ts(one->items[i], indent, out);
+        }
+        return;
+    }
+    jv *tv = jv_get(schema, "type");
+    if (tv && tv->type == J_ARR) {
+        for (int i = 0; i < tv->n; i++) {
+            if (i) sb_lit(out, " | ");
+            const char *t = jv_str(tv->items[i], "any");
+            sb_lit(out, !strcmp(t, "integer") ? "number" : t);
+        }
+        return;
+    }
+    const char *type = jv_str(tv, "any");
+    if (!strcmp(type, "object")) {
+        const char *desc = jv_str(jv_get(schema, "description"), NULL);
+        if (desc) harmony_comment_lines(out, indent, desc);
+        sb_lit(out, "{\n");
+        jv *props = jv_get(schema, "properties");
+        if (props && props->type == J_OBJ) {
+            size_t il = strlen(indent);
+            char *child = malloc(il + 5);
+            if (!child) { sb_lit(out, "}"); return; }
+            memcpy(child, indent, il);
+            memcpy(child + il, "    ", 5);
+            for (int i = 0; i < props->n; i++) {
+                jv *p = props->items[i];
+                const char *title = jv_str(jv_get(p, "title"), NULL);
+                if (title) {
+                    harmony_comment_lines(out, indent, title);
+                    sb_fmt(out, "%s//\n", indent);
+                }
+                const char *pd = jv_str(jv_get(p, "description"), NULL);
+                if (pd && !jv_get(p, "oneOf"))
+                    harmony_comment_lines(out, indent, pd);
+                jv *examples = jv_get(p, "examples");
+                if (examples && examples->type == J_ARR && examples->n) {
+                    sb_fmt(out, "%s// Examples:\n", indent);
+                    for (int k = 0; k < examples->n; k++) {
+                        sb_fmt(out, "%s// - ", indent);
+                        jv_dump(examples->items[k], out);
+                        sb_lit(out, "\n");
+                    }
+                }
+                sb_fmt(out, "%s%s%s: ", indent, props->keys[i],
+                       harmony_required(schema, props->keys[i]) ? "" : "?");
+                harmony_schema_ts(p, child, out);
+                if (jv_bool(jv_get(p, "nullable"), false)) sb_lit(out, " | null");
+                sb_lit(out, ",");
+                jv *dflt = jv_get(p, "default");
+                if (dflt) {
+                    sb_lit(out, " // default: ");
+                    jv_dump(dflt, out);
+                }
+                sb_lit(out, "\n");
+            }
+            free(child);
+        }
+        sb_fmt(out, "%s}", indent);
+    } else if (!strcmp(type, "string")) {
+        jv *vals = jv_get(schema, "enum");
+        if (vals && vals->type == J_ARR && vals->n) {
+            for (int i = 0; i < vals->n; i++) {
+                if (i) sb_lit(out, " | ");
+                jv_dump(vals->items[i], out);
+            }
+        } else sb_lit(out, "string");
+    } else if (!strcmp(type, "integer") || !strcmp(type, "number")) {
+        sb_lit(out, "number");
+    } else if (!strcmp(type, "boolean")) {
+        sb_lit(out, "boolean");
+    } else if (!strcmp(type, "array")) {
+        jv *items = jv_get(schema, "items");
+        if (items) { harmony_schema_ts(items, indent, out); sb_lit(out, "[]"); }
+        else sb_lit(out, "Array<any>");
+    } else if (!strcmp(type, "null")) {
+        sb_lit(out, "null");
+    } else {
+        sb_lit(out, "any");
+    }
+}
+
+static void harmony_render_tool_defs(const jv *tools, sbuf *out) {
+    if (!tools || tools->type != J_ARR || tools->n == 0) return;
+    sb_lit(out, "# Tools\n\n## functions\n\nnamespace functions {\n");
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        const char *name = jv_str(jv_get(fn, "name"), "");
+        const char *desc = jv_str(jv_get(fn, "description"), "");
+        sb_lit(out, "\n");
+        harmony_comment_lines(out, "", desc);
+        sb_fmt(out, "type %s = ", name);
+        jv *params = jv_get(fn, "parameters");
+        if (params) {
+            sb_lit(out, "(_: ");
+            harmony_schema_ts(params, "", out);
+            sb_lit(out, ") => any;\n");
+        } else {
+            sb_lit(out, "() => any;\n");
+        }
+    }
+    sb_lit(out, "\n} // namespace functions");
+}
+
 size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
                                   bool add_assistant, int thinking,
                                   const jv *tools,
@@ -338,14 +475,20 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         // effort, channel declaration) — NOT the caller's system message. A
         // caller system message is a DEVELOPER turn in Harmony, which is the
         // one structural thing that surprises people porting from ChatML.
-        // Tool/commentary channels are deliberately absent: Harmony tool
-        // calling is its own project and is not rendered here rather than
-        // being approximated (the granite-tool-calling precedent).
-        off = emit(out, cap, off,
-                   "<|start|>system<|message|>You are ChatGPT, a large "
-                   "language model trained by OpenAI.\n\nReasoning: medium"
-                   "\n\n# Valid channels: analysis, final. Channel must be "
-                   "included for every message.<|end|>", NULL, NULL);
+        bool have_tools = tools && tools->type == J_ARR && tools->n;
+        sbuf system = {0};
+        sb_lit(&system, "<|start|>system<|message|>You are ChatGPT, a large "
+                        "language model trained by OpenAI.\n\nReasoning: medium");
+        if (have_tools) {
+            sb_lit(&system, "\n\n");
+            harmony_render_tool_defs(tools, &system);
+        }
+        sb_fmt(&system, "\n\n# Valid channels: analysis, %sfinal. Channel must "
+                        "be included for every message.",
+               have_tools ? "commentary, " : "");
+        sb_lit(&system, "<|end|>");
+        off = emit(out, cap, off, "%s", system.s, NULL);
+        free(system.s);
         bool wrote_dev = false;
         for (int i = 0; i < n_msgs; i++) {
             const chat_msg *mm = &msgs[i];
@@ -362,7 +505,29 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
                 off = emit(out, cap, off, "<|end|>", NULL, NULL);
                 wrote_dev = false;
             }
-            if (!strcmp(mm->role, "assistant")) {
+            if (!strcmp(mm->role, "assistant") && mm->name && mm->name[0]) {
+                const char *prefix = !strncmp(mm->name, "functions.", 10)
+                                   ? "" : "functions.";
+                off = emit(out, cap, off, "<|start|>assistant to=%s%s",
+                           prefix, mm->name);
+                off = emit(out, cap, off,
+                           "<|channel|>commentary <|constrain|>json<|message|>%s"
+                           "<|call|>", mm->content, NULL);
+            } else if (!strcmp(mm->role, "tool") && mm->name && mm->name[0]) {
+                const char *prefix = !strncmp(mm->name, "functions.", 10)
+                                   ? "" : "functions.";
+                off = emit(out, cap, off, "<|start|>%s%s<|channel|>commentary",
+                           prefix, mm->name);
+                off = emit(out, cap, off, "<|message|>%s<|end|>",
+                           mm->content, NULL);
+            } else if (!strcmp(mm->role, "assistant") && mm->channel &&
+                       (!strcmp(mm->channel, "analysis") ||
+                        !strcmp(mm->channel, "commentary"))) {
+                off = emit(out, cap, off,
+                           "<|start|>assistant<|channel|>%s<|message|>",
+                           mm->channel, NULL);
+                off = emit(out, cap, off, "%s<|end|>", mm->content, NULL);
+            } else if (!strcmp(mm->role, "assistant")) {
                 // history carries answers only: a past turn's analysis is not
                 // replayed, which is what the reference template does too
                 off = emit(out, cap, off,
@@ -389,8 +554,9 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             // stream. Priming lets the splitter start already inside
             // reasoning and never search for it. THINK_OFF primes final and
             // gets no reasoning at all.
-            const char *head =
-                thinking == THINK_OFF
+            const char *head = have_tools
+                    ? "<|start|>assistant"
+                : thinking == THINK_OFF
                     ? "<|start|>assistant<|channel|>final<|message|>"
                     : "<|start|>assistant<|channel|>analysis<|message|>";
             off = emit(out, cap, off, "%s", head, NULL);
@@ -785,6 +951,10 @@ const char *tool_result_name(const jv *messages, int message_index) {
 
 void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
     if (!calls || calls->type != J_ARR) return;
+    // Harmony history is one native recipient turn per call. The server
+    // expands those turns before rendering; concatenating the generic marker
+    // into assistant content would teach a second, conflicting protocol.
+    if (tmpl == TMPL_HARMONY) return;
     int muse_calls = 0;
     for (int i = 0; i < calls->n; i++) {
         jv *fn = jv_get(calls->items[i], "function");
@@ -1068,6 +1238,9 @@ void tool_envelope_free(tool_envelope *e) {
     free(e->schema_src);
     free(e->system_turn);
     free(e->named);
+    if (e->owns_tools) jv_free(e->tools);
+    e->tools = NULL;
+    e->owns_tools = false;
     e->schema_src = e->system_turn = e->named = NULL;
 }
 
@@ -1298,9 +1471,103 @@ bool muse_user_payload_strip(sbuf *payload) {
     return true;
 }
 
+static bool harmony_declares(const tool_envelope *e, const char *name,
+                             size_t name_n) {
+    if (!e->tools || e->tools->type != J_ARR) return false;
+    for (int i = 0; i < e->tools->n; i++) {
+        jv *fn = jv_get(e->tools->items[i], "function");
+        const char *declared = jv_str(jv_get(fn, "name"), NULL);
+        if (declared && strlen(declared) == name_n &&
+            !memcmp(declared, name, name_n)) return true;
+    }
+    return false;
+}
+
+static int harmony_map(const tool_envelope *e, const char *doc, size_t n,
+                       sbuf *reasoning, sbuf *content, sbuf *tc) {
+    const char *p = doc, *end = doc + n;
+    static const char analysis[] = "<|channel|>analysis<|message|>";
+    static const char commentary[] = "<|channel|>commentary<|message|>";
+    static const char final[] = "<|channel|>final<|message|>";
+    static const char handoff_text[] = "<|end|><|start|>assistant";
+    static const char call_prefix[] =
+        "<|channel|>commentary to=functions.";
+    static const char call_header[] = "<|constrain|>json<|message|>";
+    if ((size_t)(end - p) >= sizeof(analysis) - 1 &&
+        !memcmp(p, analysis, sizeof(analysis) - 1)) {
+        p += sizeof(analysis) - 1;
+        const char *handoff = atem_find(p, end, handoff_text);
+        if (!handoff) return -1;
+        if (reasoning) sb_put(reasoning, p, (size_t)(handoff - p));
+        p = handoff + sizeof(handoff_text) - 1;
+    }
+    if ((size_t)(end - p) >= sizeof(final) - 1 &&
+        !memcmp(p, final, sizeof(final) - 1)) {
+        p += sizeof(final) - 1;
+        const char *body_end = end;
+        static const char ret[] = "<|return|>";
+        if ((size_t)(body_end - p) >= sizeof(ret) - 1 &&
+            !memcmp(body_end - (sizeof(ret) - 1), ret, sizeof(ret) - 1))
+            body_end -= sizeof(ret) - 1;
+        if (e->final_is_text) {
+            sb_put(content, p, (size_t)(body_end - p));
+        } else {
+            jv *answer = json_parse(p, (size_t)(body_end - p));
+            if (!answer) return -1;
+            jv_dump(answer, content);
+            jv_free(answer);
+        }
+        return content->failed ? -1 : 0;
+    }
+    if ((size_t)(end - p) >= sizeof(call_prefix) - 1 &&
+        !memcmp(p, call_prefix, sizeof(call_prefix) - 1)) {
+        p += sizeof(call_prefix) - 1;
+    } else {
+        if ((size_t)(end - p) < sizeof(commentary) - 1 ||
+            memcmp(p, commentary, sizeof(commentary) - 1)) return -1;
+        p += sizeof(commentary) - 1;
+        const char *handoff = atem_find(p, end, handoff_text);
+        if (!handoff) return -1;
+        sb_put(content, p, (size_t)(handoff - p));
+        p = handoff + sizeof(handoff_text) - 1;
+        if ((size_t)(end - p) < sizeof(call_prefix) - 1 ||
+            memcmp(p, call_prefix, sizeof(call_prefix) - 1)) return -1;
+        p += sizeof(call_prefix) - 1;
+    }
+    const char *header = atem_find(p, end, call_header);
+    if (!header || header == p ||
+        !harmony_declares(e, p, (size_t)(header - p)))
+        return -1;
+    const char *args_text = header + sizeof(call_header) - 1;
+    jv *args = json_parse(args_text, (size_t)(end - args_text));
+    if (!args) return -1;
+    sbuf canonical = {0};
+    jv_dump(args, &canonical);
+    jv_free(args);
+    sb_lit(tc, "{\"id\":\"call_0\",\"type\":\"function\","
+               "\"function\":{\"name\":\"");
+    sb_esc(tc, p, (size_t)(header - p));
+    sb_lit(tc, "\",\"arguments\":\"");
+    sb_esc(tc, canonical.s ? canonical.s : "{}",
+           canonical.s ? canonical.n : 2);
+    sb_lit(tc, "\"}}");
+    bool failed = canonical.failed || tc->failed;
+    free(canonical.s);
+    return failed ? -1 : 1;
+}
+
+int tool_envelope_map_channels(const tool_envelope *e, const char *doc,
+                               size_t n, sbuf *reasoning, sbuf *content,
+                               sbuf *tc) {
+    if (!e || !doc || !content || !tc) return -1;
+    if (e->harmony) return harmony_map(e, doc, n, reasoning, content, tc);
+    return tool_envelope_map(e, doc, n, content, tc);
+}
+
 int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
     if (!e || !doc || !content || !tc) return -1;
+    if (e->harmony) return harmony_map(e, doc, n, NULL, content, tc);
     if (e->atem) return atem_map(e, doc, n, content, tc);
     if (e->muse_user_header) {
         const char *end = doc + n;
@@ -1373,6 +1640,7 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
 // forwarded, it is already known to be assistant text or tool arguments.
 
 enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_ATEM,
+       TS_HARMONY,
        TS_MUSE_HEADER, TS_MUSE_CONTENT,
        // parallel_tool_calls: between two entries of {"calls":[...]}. A
        // value ending inside TS_VALUE/TS_FINAL_STR leaves the entry's own
@@ -1656,7 +1924,8 @@ void tool_stream_init(tool_stream *s, const tool_envelope *e,
     memset(s, 0, sizeof(*s));
     s->env = e;
     if (sink) s->sink = *sink;
-    s->state = e && e->atem ? TS_ATEM
+    s->state = e && e->harmony ? TS_HARMONY
+             : e && e->atem ? TS_ATEM
              : e && e->muse_plain_payload ? TS_MUSE_HEADER : TS_TOOL;
 }
 
@@ -1725,6 +1994,9 @@ int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
     if (n <= 0) return 0;
     switch (s->state) {
     case TS_DONE:      return 0;   // trailing envelope syntax: not the client's
+    case TS_HARMONY:
+        head_put(s, bytes, (size_t)n);
+        return 0;
     case TS_ATEM:      return ts_atem(s, bytes, n);
     case TS_MUSE_HEADER:return ts_muse_header(s, bytes, n);
     case TS_MUSE_CONTENT:
@@ -1735,6 +2007,41 @@ int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
         head_put(s, bytes, (size_t)n);
         return ts_resolve(s);
     }
+}
+
+int tool_stream_finish(tool_stream *s) {
+    if (!s || s->state != TS_HARMONY) return 0;
+    sbuf reasoning = {0}, content = {0}, tc = {0}, wrapped = {0};
+    int mapped = tool_envelope_map_channels(
+        s->env, s->head ? s->head : "", s->head_n,
+        &reasoning, &content, &tc);
+    int rc = 0;
+    if (mapped < 0) { rc = -1; goto done; }
+    if (reasoning.n && s->sink.reasoning)
+        rc = s->sink.reasoning(s->sink.ud, reasoning.s, (int)reasoning.n);
+    if (!rc && content.n && s->sink.content)
+        rc = s->sink.content(s->sink.ud, content.s, (int)content.n);
+    if (!rc && mapped == 1) {
+        sb_lit(&wrapped, "["); sb_put(&wrapped, tc.s, tc.n); sb_lit(&wrapped, "]");
+        jv *arr = json_parse(wrapped.s, wrapped.n);
+        jv *fn = arr && arr->type == J_ARR && arr->n == 1
+                   ? jv_get(arr->items[0], "function") : NULL;
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        const char *args = jv_str(jv_get(fn, "arguments"), NULL);
+        if (!name || !args) rc = -1;
+        else {
+            s->called = s->any_called = true;
+            if (s->sink.call_begin) rc = s->sink.call_begin(s->sink.ud, name);
+            if (!rc && s->sink.call_args)
+                rc = s->sink.call_args(s->sink.ud, args, (int)strlen(args));
+            if (!rc && s->sink.call_end) rc = s->sink.call_end(s->sink.ud);
+        }
+        jv_free(arr);
+    }
+done:
+    free(reasoning.s); free(content.s); free(tc.s); free(wrapped.s);
+    s->state = TS_DONE;
+    return rc;
 }
 
 bool tool_stream_called(const tool_stream *s) { return s->any_called; }

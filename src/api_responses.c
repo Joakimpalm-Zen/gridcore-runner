@@ -210,6 +210,18 @@ static char *responses_item_text(jv *item, const char **role) {
     return b.s;
 }
 
+static const char *responses_call_name(jv *items, int before, const char *id) {
+    if (!items || items->type != J_ARR || !id) return NULL;
+    for (int i = 0; i < before; i++) {
+        jv *item = items->items[i];
+        if (strcmp(jv_str(jv_get(item, "type"), ""), "function_call")) continue;
+        const char *call_id = jv_str(jv_get(item, "call_id"), NULL);
+        if (call_id && !strcmp(call_id, id))
+            return jv_str(jv_get(item, "name"), NULL);
+    }
+    return NULL;
+}
+
 // Stateful Responses features this runtime has no store behind. Refusing them
 // is the project invariant: a client that asked the server to remember a turn
 // and got a 200 would believe it did.
@@ -325,6 +337,10 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
         return;
     }
     bool strict = rc == 1;
+    if (strict && s->tmpl == TMPL_HARMONY) {
+        env.harmony = true;
+        env.tools = tools;
+    }
     if (strict) {
         bool parallel = false;
         if (!request_bool(req, "parallel_tool_calls", false, &parallel)) {
@@ -349,8 +365,10 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
     // message, then the input items in order
     int n_items = input->type == J_ARR ? input->n : 1;
     sbuf ts = {0};
-    if (strict) sb_put(&ts, env.system_turn, strlen(env.system_turn));
-    else        tools_render(tools, &ts);
+    if (strict && !env.harmony)
+        sb_put(&ts, env.system_turn, strlen(env.system_turn));
+    else if (!env.harmony)
+        tools_render(tools, &ts);
     chat_msg *cm = malloc(sizeof(chat_msg) * (size_t)(n_items + 2));
     char **owned = malloc(sizeof(char *) * (size_t)n_items);
     // client-controlled size: a NULL here would be indexed below. Fail cleanly.
@@ -379,10 +397,23 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
     } else {
         for (int i = 0; i < input->n; i++) {
             const char *role = "user";
+            const char *type = jv_str(jv_get(input->items[i], "type"), "");
             char *text = responses_item_text(input->items[i], &role);
             if (!text) continue;
+            if (env.harmony && !strcmp(type, "function_call")) {
+                free(text);
+                text = strdup(jv_str(jv_get(input->items[i], "arguments"), "{}"));
+                if (!text) continue;
+            }
             owned[n_own++] = text;
-            cm[n_cm++] = (chat_msg){ .role = role, .content = text };
+            const char *name = NULL;
+            if (env.harmony && !strcmp(type, "function_call"))
+                name = jv_str(jv_get(input->items[i], "name"), NULL);
+            else if (env.harmony && !strcmp(type, "function_call_output"))
+                name = responses_call_name(
+                    input, i, jv_str(jv_get(input->items[i], "call_id"), NULL));
+            cm[n_cm++] = (chat_msg){ .role = role, .content = text,
+                                    .name = name };
             total += strlen(role) + strlen(text) + 64;
         }
     }
@@ -404,8 +435,10 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 500, "out of memory building responses prompt");
         return;
     }
-    render_messages(s->tmpl, cm, n_cm, true, req_thinking_mode(req),
-                    prompt, total + 256);
+    render_messages_with_tools(s->tmpl, cm, n_cm, true,
+                               req_thinking_mode(req),
+                               env.harmony ? tools : NULL,
+                               prompt, total + 256);
     run_completion(s, fd, prompt, API_RESPONSES, req, strict ? &env : NULL);
     free(prompt);
     for (int i = 0; i < n_own; i++) free(owned[i]);

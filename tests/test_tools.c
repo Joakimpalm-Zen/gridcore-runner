@@ -40,18 +40,20 @@ static bool accepts(const snode *root, const char *doc) {
         if (!sval_feed(&v, doc + i, 1)) {
             if (getenv("RUNNER_SCHEMA_TRACE"))
                 fprintf(stderr, "schema rejected byte %d (%#x), depth=%d "
-                        "kind=%d phase=%d idx=%d lit=%s in %s\n",
+                        "kind=%d phase=%d idx=%d pos=%d alive=%llu lit=%s in %s\n",
                         i, (unsigned char)doc[i], v.depth,
                         v.stack[v.depth - 1].node->kind,
                         v.stack[v.depth - 1].phase,
                         v.stack[v.depth - 1].idx,
+                        v.stack[v.depth - 1].lit_pos,
+                        (unsigned long long)v.stack[v.depth - 1].alive,
                         v.stack[v.depth - 1].node->n_lits
                             ? v.stack[v.depth - 1].node->lits[0] : "-",
                         doc);
             return false;
         }
     }
-    return v.done;
+    return v.done || sval_at_raw_tail(&v);
 }
 
 static void test_atem_structured_tool_automaton(void) {
@@ -689,7 +691,7 @@ static void test_map_produces_openai_tool_call_items(void) {
 // decision made on a boundary the parser happened to like.
 
 typedef struct {
-    sbuf content, args, names; // names: every call_begin, space-separated
+    sbuf reasoning, content, args, names; // names: calls, space-separated
     char name[64];             // the LAST call_begin, for single-call tests
     int  begins, ends;
     bool called;                // tool_stream_called() once feeding is done
@@ -697,6 +699,10 @@ typedef struct {
 
 static int log_content(void *ud, const char *b, int n) {
     sb_put(&((demux_log *)ud)->content, b, n);
+    return 0;
+}
+static int log_reasoning(void *ud, const char *b, int n) {
+    sb_put(&((demux_log *)ud)->reasoning, b, n);
     return 0;
 }
 static int log_begin(void *ud, const char *name) {
@@ -721,7 +727,8 @@ static int log_end(void *ud) {
 static void demux_step(const tool_envelope *e, const char *doc, size_t step,
                        demux_log *l) {
     memset(l, 0, sizeof(*l));
-    tool_stream_sink sink = { l, log_content, log_begin, log_args, log_end };
+    tool_stream_sink sink = { l, log_reasoning, log_content,
+                              log_begin, log_args, log_end };
     tool_stream s;
     tool_stream_init(&s, e, &sink);
     size_t len = strlen(doc);
@@ -730,6 +737,7 @@ static void demux_step(const tool_envelope *e, const char *doc, size_t step,
         size_t k = len - i < step ? len - i : step;
         assert(tool_stream_feed(&s, doc + i, (int)k) == 0);
     }
+    assert(tool_stream_finish(&s) == 0);
     if (tool_stream_called(&s)) assert(l->begins >= 1);
     l->called = tool_stream_called(&s);
     tool_stream_free(&s);
@@ -740,6 +748,7 @@ static void demux(const tool_envelope *e, const char *doc, demux_log *l) {
 }
 
 static void log_free(demux_log *l) {
+    free(l->reasoning.s);
     free(l->content.s);
     free(l->args.s);
     free(l->names.s);
@@ -1243,6 +1252,131 @@ static void test_system_turn_teaches_the_envelope(void) {
     jv_free(tools);
 }
 
+static void test_harmony_native_turn_constrains_channels_recipients_and_args(void) {
+    jv *tools = parse(TOOLS);
+    char err[192];
+    snode *root = schema_compile_harmony_turn(
+        tools, true, NULL, NULL, true, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root,
+        "<|channel|>commentary to=functions.add<|constrain|>json"
+        "<|message|>{\"a\":1,\"b\":2}"));
+    assert(accepts(root,
+        "<|channel|>analysis<|message|>Need arithmetic."
+        "<|end|><|start|>assistant<|channel|>commentary to=functions.add"
+        "<|constrain|>json<|message|>{\"a\":1,\"b\":2}"));
+    assert(accepts(root,
+        "<|channel|>commentary<|message|>I’ll calculate that."
+        "<|end|><|start|>assistant<|channel|>commentary to=functions.add"
+        "<|constrain|>json<|message|>{\"a\":1,\"b\":2}"));
+    assert(accepts(root, "<|channel|>final<|message|>No tool needed."));
+    assert(accepts(root,
+        "<|channel|>analysis<|message|>No tool needed."
+        "<|end|><|start|>assistant<|channel|>final<|message|>The answer is 3."));
+    assert(!accepts(root,
+        "<|channel|>commentary to=functions.unknown<|constrain|>json<|message|>{}"));
+    assert(!accepts(root,
+        "<|channel|>commentary to=functions.add<|constrain|>json"
+        "<|message|>{\"a\":\"1\",\"b\":2}"));
+    // The analysis bound applies on the auto branch too. Lifting it there was
+    // tried and refuted live (see the note in harmony_after_reasoning): the
+    // model deliberates past the token budget instead of answering.
+    char bounded[1024];
+    const char *open = "<|channel|>analysis<|message|>";
+    const char *close = "<|end|><|start|>assistant<|channel|>commentary "
+                        "to=functions.add<|constrain|>json<|message|>"
+                        "{\"a\":1,\"b\":2}";
+    size_t at = 0;
+    memcpy(bounded + at, open, strlen(open)); at += strlen(open);
+    memset(bounded + at, 'x', 192); at += 192;
+    memcpy(bounded + at, close, strlen(close) + 1);
+    assert(accepts(root, bounded));
+    bounded[strlen(open) + 192] = 'x';
+    memcpy(bounded + strlen(open) + 193, close, strlen(close) + 1);
+    assert(!accepts(root, bounded));
+    schema_free(root);
+
+    root = schema_compile_harmony_turn(
+        tools, false, "add", NULL, false, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root,
+        "<|channel|>commentary to=functions.add<|constrain|>json"
+        "<|message|>{\"a\":1,\"b\":2}"));
+    assert(!accepts(root,
+        "<|channel|>commentary to=functions.get_weather<|constrain|>json"
+        "<|message|>{\"city\":\"Oslo\",\"units\":\"c\"}"));
+    assert(!accepts(root, "<|channel|>final<|message|>No call."));
+    assert(!accepts(root,
+        "<|channel|>analysis<|message|>Need call."
+        "<|end|><|start|>assistant<|channel|>commentary to=functions.add"
+        "<|constrain|>json<|message|>{\"a\":1,\"b\":2}"));
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_harmony_native_mapping_and_stream_boundaries(void) {
+    jv *tools = parse(TOOLS);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+    e.harmony = true;
+    e.tools = tools;
+
+    sbuf reason = {0}, content = {0}, calls = {0};
+    const char *doc = "<|channel|>analysis<|message|>Need arithmetic."
+                      "<|end|><|start|>assistant<|channel|>commentary "
+                      "to=functions.add<|constrain|>json"
+                      "<|message|>{\"a\":1,\"b\":2}";
+    assert(tool_envelope_map_channels(&e, doc, strlen(doc), &reason,
+                                      &content, &calls) == 1);
+    assert(!strcmp(reason.s, "Need arithmetic."));
+    assert(content.n == 0);
+    assert(strstr(calls.s, "\"name\":\"add\""));
+    assert(strstr(calls.s, "{\\\"a\\\":1,\\\"b\\\":2}"));
+    free(reason.s); free(content.s); free(calls.s);
+
+    reason = (sbuf){0}; content = (sbuf){0}; calls = (sbuf){0};
+    doc = "<|channel|>commentary<|message|>I’ll calculate that."
+          "<|end|><|start|>assistant<|channel|>commentary "
+          "to=functions.add<|constrain|>json"
+          "<|message|>{\"a\":1,\"b\":2}";
+    assert(tool_envelope_map_channels(&e, doc, strlen(doc), &reason,
+                                      &content, &calls) == 1);
+    assert(!strcmp(content.s, "I’ll calculate that."));
+    free(reason.s); free(content.s); free(calls.s);
+
+    reason = (sbuf){0}; content = (sbuf){0}; calls = (sbuf){0};
+    doc = "<|channel|>analysis<|message|>Briefly."
+          "<|end|><|start|>assistant<|channel|>final<|message|>"
+          "The answer is 3.<|return|>";
+    assert(tool_envelope_map_channels(&e, doc, strlen(doc), &reason,
+                                      &content, &calls) == 0);
+    assert(!strcmp(reason.s, "Briefly."));
+    assert(!strcmp(content.s, "The answer is 3."));
+    free(reason.s); free(content.s); free(calls.s);
+
+    for (size_t step = 1; step <= strlen(doc); step++) {
+        demux_log log;
+        demux_step(&e, doc, step, &log);
+        assert(!strcmp(log.reasoning.s, "Briefly."));
+        assert(!strcmp(log.content.s, "The answer is 3."));
+        assert(!log.called);
+        log_free(&log);
+    }
+    doc = "<|channel|>commentary to=functions.add<|constrain|>json"
+          "<|message|>{\"a\":1,\"b\":2}";
+    for (size_t step = 1; step <= strlen(doc); step++) {
+        demux_log log;
+        demux_step(&e, doc, step, &log);
+        assert(log.called && log.begins == 1 && log.ends == 1);
+        assert(!strcmp(log.name, "add"));
+        assert(!strcmp(log.args.s, "{\"a\":1,\"b\":2}"));
+        log_free(&log);
+    }
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
 static void test_buffered_mapper_rejects_invalid_arguments(void) {
     tool_envelope e = {0};
     sbuf content = {0}, calls = {0};
@@ -1291,6 +1425,8 @@ int main(void) {
     test_parallel_stream_demux_survives_truncation();
     test_default_envelope_is_unchanged();
     test_system_turn_teaches_the_envelope();
+    test_harmony_native_turn_constrains_channels_recipients_and_args();
+    test_harmony_native_mapping_and_stream_boundaries();
     puts("tool envelope tests ok");
     return 0;
 }

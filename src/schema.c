@@ -1045,6 +1045,12 @@ static snode *atem_raw(const char *sentinel) {
     return n;
 }
 
+static snode *atem_raw_bounded(const char *sentinel, int max_bytes) {
+    snode *n = atem_raw(sentinel);
+    if (n) n->max_items = max_bytes;
+    return n;
+}
+
 static bool atem_seq_add(snode *seq, snode *child) {
     if (!child) return false;
     seq->props[seq->n_props++] = child;
@@ -1166,6 +1172,7 @@ static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
     if (!names->lits || !choice->alts) goto oom;
     names->min_items = 1;
     names->whitespace_significant = true;
+    choice->whitespace_significant = true;
     if (prefix[0] && !atem_seq_add(root, atem_lit(prefix))) goto oom;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function");
@@ -1296,6 +1303,230 @@ fail:
     schema_free(p1); schema_free(p2);
     schema_free(direct); schema_free(after); schema_free(root);
     if (!err[0]) snprintf(err, errcap, "out of memory compiling Muse user payload");
+    return NULL;
+}
+
+static snode *harmony_call_select(jv *tools, const char *only_tool,
+                                  const char *prefix,
+                                  char *err, int errcap) {
+    int selected = 0;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (name && (!only_tool || !strcmp(name, only_tool))) selected++;
+    }
+    if (!selected) {
+        snprintf(err, errcap, only_tool
+                 ? "named Harmony tool is not declared"
+                 : "Harmony tools have no function names");
+        return NULL;
+    }
+    snode *root = atem_seq(prefix ? 3 : 2);
+    snode *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
+    if (!root || !names || !choice) goto oom;
+    names->lits = calloc((size_t)selected, sizeof(*names->lits));
+    choice->alts = calloc((size_t)selected, sizeof(*choice->alts));
+    if (!names->lits || !choice->alts) goto oom;
+    names->min_items = 1;
+    names->whitespace_significant = true;
+    choice->whitespace_significant = true;
+    if (prefix && !atem_seq_add(root, atem_lit(prefix))) goto oom;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!name || (only_tool && strcmp(name, only_tool))) continue;
+        names->lits[names->n_lits] = strdup(name);
+        if (!names->lits[names->n_lits]) goto oom;
+        names->n_lits++;
+        snode *tail = atem_seq(2);
+        jv *params = jv_get(fn, "parameters");
+        snode *args = params ? compile_node(params, err, errcap, 0)
+                             : atem_lit("{}");
+        if (!tail || !args ||
+            !atem_seq_add(tail,
+                          atem_lit("<|constrain|>json<|message|>")) ||
+            !atem_seq_add(tail, args)) {
+            schema_free(args); schema_free(tail);
+            if (err[0]) goto fail;
+            goto oom;
+        }
+        tail->whitespace_significant = true;
+        choice->alts[choice->n_alts++] = tail;
+    }
+    if (!atem_seq_add(root, names)) goto oom;
+    names = NULL;
+    if (!atem_seq_add(root, choice)) goto oom;
+    choice = NULL;
+    root->whitespace_significant = true;
+    return root;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling Harmony call");
+fail:
+    schema_free(names); schema_free(choice); schema_free(root);
+    return NULL;
+}
+
+static snode *harmony_after_reasoning(jv *tools, const char *only_tool,
+                                     bool allow_final, jv *final_schema,
+                                     char *err, int errcap) {
+    int count = allow_final ? 2 : 1;
+    snode *root = atem_seq(4), *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
+    if (!root || !names || !choice) goto fail;
+    names->lits = calloc((size_t)count, sizeof(*names->lits));
+    choice->alts = calloc((size_t)count, sizeof(*choice->alts));
+    if (!names->lits || !choice->alts) goto fail;
+    names->min_items = 1;
+    names->whitespace_significant = choice->whitespace_significant = true;
+    names->lits[names->n_lits++] = strdup("commentary");
+    choice->alts[choice->n_alts++] = harmony_call_select(
+        tools, only_tool, " to=functions.", err, errcap);
+    if (!names->lits[0] || !choice->alts[0]) goto fail;
+    if (allow_final) {
+        names->lits[names->n_lits++] = strdup("final");
+        choice->alts[choice->n_alts++] = atem_seq(2);
+        snode *branch = choice->alts[1];
+        snode *body = final_schema ? compile_node(final_schema, err, errcap, 0)
+                                   : atem_raw("<|return|>");
+        if (!names->lits[1] || !branch || !body ||
+            !atem_seq_add(branch, atem_lit("<|message|>")) ||
+            !atem_seq_add(branch, body)) {
+            schema_free(body); goto fail;
+        }
+        branch->whitespace_significant = true;
+    }
+    if (!atem_seq_add(root, atem_lit("<|message|>")) ||
+        // gpt-oss can narrate the intended call indefinitely when a required
+        // turn masks its final-answer branch. Keep enough native analysis for
+        // an ordinary plan, then make the trained handoff the only legal next
+        // token so the request budget still reaches the model-generated args.
+        // The bound is load-bearing on the auto branch too, not only when the
+        // final answer is masked. Lifting it there was tried and measured on
+        // gpt-oss-20b (2026-08-14): a JSON tool result made the model deliberate
+        // past 1.7 kB about the call it had already answered, exhaust the token
+        // budget, and emit `{"city":"","units":"celsius"}` with
+        // finish_reason "length" — over six rounds it never terminated. Bounded,
+        // the same history costs one redundant call and then answers.
+        !atem_seq_add(root, atem_raw_bounded(
+            "<|end|><|start|>assistant<|channel|>", 192)) ||
+        !atem_seq_add(root, names) || !atem_seq_add(root, choice)) goto fail;
+    names = choice = NULL;
+    root->whitespace_significant = true;
+    return root;
+fail:
+    schema_free(names); schema_free(choice); schema_free(root);
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling Harmony reasoning");
+    return NULL;
+}
+
+static snode *harmony_full_call(jv *tools, const char *only_tool,
+                                char *err, int errcap) {
+    snode *root = atem_seq(2);
+    snode *call = harmony_call_select(
+        tools, only_tool, " to=functions.", err, errcap);
+    if (!root || !call ||
+        !atem_seq_add(root, atem_lit("<|channel|>commentary")) ||
+        !atem_seq_add(root, call)) {
+        schema_free(call); schema_free(root);
+        return NULL;
+    }
+    root->whitespace_significant = true;
+    return root;
+}
+
+static snode *harmony_commentary_tail(jv *tools, const char *only_tool,
+                                      bool allow_preamble,
+                                      char *err, int errcap) {
+    snode *direct = harmony_call_select(
+        tools, only_tool, " to=functions.", err, errcap);
+    if (!allow_preamble) return direct;
+    snode *root = sn_new(SN_UNION), *preamble = atem_seq(3);
+    snode *call = harmony_full_call(tools, only_tool, err, errcap);
+    if (!root || !preamble || !direct || !call) goto fail;
+    root->alts = calloc(2, sizeof(*root->alts));
+    if (!root->alts ||
+        !atem_seq_add(preamble, atem_lit("<|message|>")) ||
+        !atem_seq_add(preamble, atem_raw_bounded(
+            "<|end|><|start|>assistant", 192)) ||
+        !atem_seq_add(preamble, call)) goto fail;
+    call = NULL;
+    preamble->whitespace_significant = root->whitespace_significant = true;
+    root->alts[root->n_alts++] = direct; direct = NULL;
+    root->alts[root->n_alts++] = preamble; preamble = NULL;
+    return root;
+fail:
+    schema_free(direct); schema_free(call); schema_free(preamble); schema_free(root);
+    {
+        if (!err[0]) snprintf(err, errcap, "out of memory compiling Harmony commentary");
+        return NULL;
+    }
+}
+
+static snode *harmony_channel_select(jv *tools, const char *only_tool,
+                                     bool allow_final, jv *final_schema,
+                                     bool allow_reasoning,
+                                     char *err, int errcap) {
+    int count = 1 + (allow_reasoning ? 1 : 0) + (allow_final ? 1 : 0);
+    snode *root = atem_seq(3), *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
+    if (!root || !names || !choice) goto fail;
+    names->lits = calloc((size_t)count, sizeof(*names->lits));
+    choice->alts = calloc((size_t)count, sizeof(*choice->alts));
+    if (!names->lits || !choice->alts) goto fail;
+    names->min_items = 1;
+    names->whitespace_significant = choice->whitespace_significant = true;
+#define HARMONY_CHANNEL(NAME, NODE) do {                                      \
+        choice->alts[choice->n_alts++] = (NODE);                              \
+        names->lits[names->n_lits++] = strdup(NAME);                          \
+        if (!choice->alts[choice->n_alts - 1] ||                              \
+            !names->lits[names->n_lits - 1]) goto fail;                       \
+    } while (0)
+    if (allow_reasoning) {
+        snode *branch = harmony_after_reasoning(
+            tools, only_tool, allow_final, final_schema, err, errcap);
+        HARMONY_CHANNEL("analysis", branch);
+    }
+    {
+        snode *branch = harmony_commentary_tail(
+            tools, only_tool, allow_final, err, errcap);
+        HARMONY_CHANNEL("commentary", branch);
+    }
+    if (allow_final) {
+        snode *branch = atem_seq(2);
+        snode *body = final_schema ? compile_node(final_schema, err, errcap, 0)
+                                   : atem_raw("<|return|>");
+        if (!branch || !body || !atem_seq_add(branch, atem_lit("<|message|>")) ||
+            !atem_seq_add(branch, body)) {
+            schema_free(body); schema_free(branch); goto fail;
+        }
+        branch->whitespace_significant = true;
+        HARMONY_CHANNEL("final", branch);
+    }
+#undef HARMONY_CHANNEL
+    if (!atem_seq_add(root, atem_lit("<|channel|>")) ||
+        !atem_seq_add(root, names) || !atem_seq_add(root, choice)) goto fail;
+    names = choice = NULL;
+    root->whitespace_significant = true;
+    return root;
+fail:
+    schema_free(names); schema_free(choice); schema_free(root);
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling Harmony channels");
+    return NULL;
+}
+
+snode *schema_compile_harmony_turn(jv *tools, bool allow_final,
+                                   const char *only_tool, jv *final_schema,
+                                   bool allow_reasoning,
+                                   char *err, int errcap) {
+    err[0] = 0;
+    if (!tools || tools->type != J_ARR || tools->n <= 0 || tools->n > 60) {
+        snprintf(err, errcap,
+                 "Harmony tools must be a non-empty array of at most 60 tools");
+        return NULL;
+    }
+    snode *root = harmony_channel_select(
+        tools, only_tool, allow_final, final_schema, allow_reasoning,
+        err, errcap);
+    if (root) return root;
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling Harmony turn");
     return NULL;
 }
 
@@ -1887,6 +2118,9 @@ static int feed_byte(sval *v, uint8_t c) {
             f->lit_pos = pos;
             return 0;
         }
+        int added = pos + (c == (uint8_t)sentinel[0] ? 0 : 1);
+        if (n->max_items >= 0 && f->idx + added > n->max_items) return -1;
+        f->idx += added;
         f->lit_pos = c == (uint8_t)sentinel[0] ? 1 : 0;
         return 0;
     }

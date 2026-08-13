@@ -7,6 +7,17 @@ were written.
 
 ## Unreleased
 
+- gpt-oss tool requests now use native OpenAI Harmony: official TypeScript
+  tool declarations, channel-first commentary recipients, schema-constrained
+  arguments, named/required/auto/none choices, response-format finals, native
+  call/result history, and matching buffered/SSE mapping across Chat,
+  Responses, and Anthropic Messages. A Blackwell gpt-oss-20b run produced the
+  same `get_weather({"city":"Oslo","units":"celsius"})` action on all three
+  surfaces and completed the returned-result turn without a second call for a
+  prose tool result. A JSON tool result costs one redundant repeat call first,
+  because the 192-byte analysis bound cuts the model mid-quotation; lifting
+  that bound was measured as an unbounded loop and reverted
+  (docs/negative-result-harmony-analysis-bound.md).
 - Tokenizer differentials can now replay revision-bound Hugging Face reference
   ID captures without network access or credentials. The four outstanding
   divergent rows (Mistral-7B-v0.3, Phi-3.5-mini, Lucie-7B and Salamandra-7B)

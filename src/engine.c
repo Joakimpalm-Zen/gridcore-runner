@@ -20,7 +20,8 @@ enum { CP_PROBE, CP_THINK, CP_AFTER_THINK, CP_OUTPUT };
 static uint64_t model_identity(const model_t *m, const tokenizer *tok);
 
 static void constraint_reset(engine *e) {
-    e->constraint_phase = e->m && e->m->think_open && e->m->think_close
+    e->constraint_phase = !e->constraint_includes_prelude &&
+                          e->m && e->m->think_open && e->m->think_close
                             ? CP_PROBE : CP_OUTPUT;
     e->constraint_tag_possible = e->constraint_phase == CP_PROBE;
     e->constraint_tag_match = 0;
