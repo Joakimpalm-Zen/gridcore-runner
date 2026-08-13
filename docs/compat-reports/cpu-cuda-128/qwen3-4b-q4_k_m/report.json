@@ -1,0 +1,71 @@
+{
+ "model": "/home/lab/workspace/models/Qwen3-4B-Q4_K_M/Qwen3-4B-Q4_K_M.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 36,
+  "layers_total": 36,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 8,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Belgium is Brussels. The capital of the Netherlands is Amsterdam. The capital of Luxembourg is Luxembourg. The capital of Austria is Vienna. The capital of Switzerland is Bern. The capital of Greece is Athens. The capital of Bulgaria is Sofia. The capital of Romania is Bucharest. The capital of Croatia is Zagreb. The capital of Slovenia is Ljubljana. The capital of Cyprus is Nicosia. The capital of Malta is Valletta. The capital of",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": "\n    if n < 0:\n        return -1\n    elif n == 0 or n == 1:\n        return 1\n    else:\n        return fibonacci(n-1) + fibonacci(n-2)\n\nn = int(input())\nprint(fibonacci(n))\n\n# This is a recursive implementation of the Fibonacci sequence. The function is defined as follows: if n is 0 or 1, return 1. Otherwise, return the sum of the previous two numbers in the sequence. The function is called with the input n, which is the position in the sequence. The output is the nth Fibonacci number",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": false,
+   "cpu": " there was a king who had three daughters. The eldest daughter was named Elina, the middle daughter was named Lina, and the youngest daughter was named Lisa. The king had a treasure chest that contained a certain number of gold coins. He wanted to distribute these coins among his daughters in such a way that each daughter receives a number of coins that is a multiple of her own age. Elina is 10 years old, Lina is 8 years old, and Lisa is 6 years of age. The king also wants to ensure that the total number of coins given to each daughter is a multiple of her age, and",
+   "gpu": " there was a king who had three daughters. The eldest daughter was named Elina, the middle daughter was named Lina, and the youngest daughter was named Lisa. The king had a treasure chest that he wanted to give to his daughters. The treasure chest had a combination lock with a 3-digit number. The king told his daughters that the combination was related to their names. The combination was a 3-digit number where each digit was the number of letters in each of their names. For example, if the names were \"Elina\", \"Lina\", and \"Lisa\", the number of letters would be 5, 4"
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 391\n\nQ: What is 17 * 24?\nA: 408\n\nQ: What is 17 * 25?\nA: 425\n\nQ: What is 17 * 26?\nA: 442\n\nQ: What is 17 * 27?\nA: 459\n\nQ: What is 17 * 28?\nA: 476\n\nQ: What is 17 * 29?\nA: 493\n\nQ: What is 17 * ",
+   "gpu": null
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "identical": true,
+   "cpu": " The lighthouse is located at the edge of a foggy bay, and the fog lifts at 10:00 AM. The lighthouse keeper is a very meticulous person, so he records the weather every day. The lighthouse keeper is a very meticulous person, so he records the weather every day. The lighthouse keeper is a very meticulous person, so he records the weather every day. The lighthouse keeper is a very meticulous person, so he records the weather every day. The lighthouse keeper is a very meticulous person, so he records the weather every day. The lighthouse keeper is a very meticulous person, so",
+   "gpu": null
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "identical": true,
+   "cpu": " was made in the 1929 edition, and the 1929 edition is the one that is considered the official one. The 1929 catalogue is the one that is used for the official designation of the objects in the catalogues. The 1929 edition is the one that is considered the official one. The 1929 edition is the one that is considered the official one. The 1929 edition is the one that is considered the official one. The 1929 edition is the one that is considered the official one. The 1929",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "identical": true,
+   "cpu": " is correct.\n# But the code below is not correct. The code below is trying to parse the header, but it's not handling the case where the buffer is not long enough.\n\n# The code below is trying to parse the header, but it's not handling the case where the buffer is not long enough.\n\n# The code below is trying to parse the header, but it's not handling the case where the buffer is not long enough.\n\n# The code below is trying to parse the header, but it's not handling the case where the buffer is not long enough.\n\n# The code below is trying to parse the header, but it",
+   "gpu": null
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "identical": true,
+   "cpu": " is not a local. The city's layout is a bit of a maze, but the streets are all clearly marked, and the city is very walkable. The city is also very car-free, which is a big plus for the visitor. The city is also very car-free, which is a big plus for the visitor. \n\nNow, considering the above paragraph, which of the Lisbon's districts is described as \"unusually regular to a visitor who is not a local\"?\n\nA. The city's layout  \nB. The grid of streets  \nC. The lower town  \nD. The oldest quarter\nAnswer:  \nD. The",
+   "gpu": null
+  }
+ ]
+}

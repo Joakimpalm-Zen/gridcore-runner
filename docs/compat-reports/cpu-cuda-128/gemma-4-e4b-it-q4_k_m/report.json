@@ -1,0 +1,71 @@
+{
+ "model": "/home/lab/workspace/models/gemma-4-E4B-it-Q4_K_M/gemma-4-E4B-it-Q4_K_M.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 42,
+  "layers_total": 42,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 8,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris.\n\n**Question:** What is the capital of France?",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": "\n    if n <= 1:\n        return n\n    else:\n        return fibonacci(n-1) + fibonacci(n-2)\n\n# Test cases\nprint(f\"Fibonacci(0) = {fibonacci(0)}\")\nprint(f\"Fibonacci(1) = {fibonacci(1)}\")\nprint(f\"Fibonacci(2) = {fibonacci(2)}\")\nprint(f\"Fibonacci(6) = {fibonacci(6)}\")\nprint(f\"Fibonacci(10) = {fibonacci(10)}\")\n```\n\n",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": "\n1 A B C D E F G H\n2 I J K L M N O P\n3 Q R S T U V W X\n4 Y Z A B C D E F\n5 G H I J K L M N\n6 O P Q R S T U V\n7 W X Y Z A B C D\n8 E F G H I J K L\n\nThis is a substitution cipher grid. To decode, you find the coordinates of the letter in the ciphertext and use the row and column numbers as the plaintext.\n\n**Ciphertext:** H G F E D C B A\n\n**Decode",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " lived a young woman named Elara. She possessed a spirit as bright as the morning sun and a heart as kind as the summer rain. Elara lived in a small, cozy cottage nestled beside a whispering forest. Her days were filled with the gentle rhythm of nature\u2014gathering wildflowers, tending to her small garden, and listening to the secrets the wind carried.\n\nOne day, while wandering deeper into the woods than usual, Elara stumbled upon a clearing she had never seen before. In the center of this clearing stood an ancient, gnarled oak tree, its branches reaching out like the arms of a sleeping giant. Beneath the oak",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 391",
+   "gpu": null
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "identical": true,
+   "cpu": "\n\nThe keeper noted:\n1. The wind was from the North, cloud cover was 75%, and fog lifted at 3 AM.\n2. The wind was from the East, cloud cover was 50%, and fog lifted at 1 AM.\n3. The wind was from the South, cloud cover was 90%, and fog lifted at 5 AM.\n4. The wind was from the West, cloud cover was 60%, and fog lifted at 2 AM.\n5. The wind was from the North, cloud cover was 75%, and fog lifted at 3",
+   "gpu": null
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "identical": true,
+   "cpu": " reduced the catalogue size by about 470 entries.\n\n**Question:** What percentage of the original catalogue entries were duplicates?\n\n**Answer:** 1. What percentage of the original catalogue entries were duplicates?\n\n**Calculation:**\n1. **Find the number of duplicates:** The correction reduced the catalogue size by 470 entries.\n2. **Identify the original catalogue size:** The original catalogue size was 4218 entries.\n3. **Calculate the percentage:** (Number of duplicates / Original catalogue size) * 100\n\n**Execution:**\n1. Number of duplicates = 47",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "identical": false,
+   "cpu": " is good.\n# However, the current implementation relies on the caller to provide the correct 'size'\n# for the header, which might be ambiguous or incorrect if the caller doesn't know the exact\n# boundary of the header.\n\n# We need a robust way to parse the header without relying on external size information.\n# In GGUF, the header is fixed size (8 bytes for magic/version) followed by a metadata section.\n# The metadata section is usually terminated by a null byte or a specific structure,\n# but for the initial parsing, we only need the fixed part.\n\n# Let",
+   "gpu": " is good.\n# However, the current implementation relies on the caller to provide the correct 'size'\n# for the header, which might be ambiguous or incorrect if the caller doesn't know the exact\n# boundary of the header.\n\n# We need a robust way to parse the header without relying on external size information.\n# In GGUF, the header is fixed size (8 bytes for magic/version) followed by the metadata section.\n# The metadata section starts immediately after the fixed header.\n\n# Let's assume the structure is:\n# 8 bytes: Magic (4 bytes) + Version"
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "identical": true,
+   "cpu": " expects the organic sprawl of older European cities.\n\nThe city of Lisbon, however, is not a monolith. The upper hills, with their winding, narrow streets, retain the older, more organic character, while the lower town exhibits the planned regularity.\n\n***\n\n**Question:** Based on the provided text, what is the primary reason for the difference in street layout between the upper and lower parts of Lisbon?\n\n**A)** The upper hills retained their older character because they were not affected by the 1755 earthquake.\n**B)** The lower town was rebuilt after the 1755 earthquake, leading to a",
+   "gpu": null
+  }
+ ]
+}

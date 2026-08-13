@@ -1,0 +1,71 @@
+{
+ "model": "/home/lab/workspace/models/google_gemma-3-4b-it-Q4_K_M/google_gemma-3-4b-it-Q4_K_M.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 34,
+  "layers_total": 34,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 9,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris.\n\nParis is located in the north-central part of France.\n\nParis is a global center for art, fashion, gastronomy and culture.\n\nHere are some of the most popular attractions in Paris:\n\n*   Eiffel Tower\n*   Louvre Museum\n*   Arc de Triomphe\n*   Notre-Dame Cathedral\n*   Champs-\u00c9lys\u00e9es\n*   Montmartre\n*   Seine River\n\nDo you want to know more about Paris? For example, would you like to know:\n\n*   Its history?\n*   Its geography?\n*   Its culture?\n*",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": "\n    \"\"\"\n    Calculates the nth Fibonacci number.\n\n    Args:\n        n: The index of the desired Fibonacci number (starting from 0).\n\n    Returns:\n        The nth Fibonacci number.\n    \"\"\"\n    if n <= 1:\n        return n\n    else:\n        a, b = 0, 1\n        for _ in range(2, n + 1):\n            a, b = b, a + b\n        return b\n\n# Example usage:\nprint(fibonacci(0))  # Output: 0\nprint(fibonacci(",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " there lived a young woman named Elara. Elara was known throughout the kingdom of Silverwood for her extraordinary skill in weaving. Her tapestries were renowned for their vibrant colors, intricate designs, and the way they seemed to capture the very essence of the forest.\n\nOne day, a royal decree arrived, announcing a competition to create a tapestry for the King\u2019s grand hall. The prize was a magnificent ruby, said to hold a spark of the sun itself. Elara, though hesitant, felt compelled to enter. She spent weeks meticulously planning her design, pouring her heart and soul into every thread.\n\nShe decided to weave a",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 391\n\n17 * 23 = 17 * (20 + 3) = 17 * 20 + 17 * 3 = 340 + 51 = 391\n",
+   "gpu": null
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "identical": true,
+   "cpu": "\n\nHere is the data:\n\n| Day | Wind Direction | Cloud Cover | Fog Lift Time (Hours) |\n|---|---|---|---|\n| 1 | East | Clear | 6 |\n| 2 | West | Overcast | 8 |\n| 3 | North | Partly Cloudy | 7 |\n| 4 | South | Clear | 9 |\n| 5 | East | Overcast | 6 |\n| 6 | West | Partly Cloudy | 8 |\n| 7 | North | Clear | 7 |\n| 8 | South | Overcast | ",
+   "gpu": null
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "identical": true,
+   "cpu": " of these duplicates resulted in a total of 637 objects.\n\nThe revised catalogue was published in 1932, and it was the first to include a detailed description of the objects, including their position, magnitude, and spectral type. It also included a system for classifying the objects based on their shape and color.\n\nThe revised catalogue was a major contribution to the field of astronomy, and it helped to advance our understanding of the nature of nebulae.\n\n**Key aspects of the revised catalogue:**\n\n*   **Initial Count:** 4218 objects\n*   **Duplicate Correction:** 637",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "identical": true,
+   "cpu": " is\n# a good thing.\n# The following code is used to parse the header and extract the\n# necessary information.\ndef parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n```\n\n**Explanation and Improvements:**\n\n1. **Error Handling:** The code now includes a `ValueError` if the header is shorter than 8 bytes",
+   "gpu": null
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "identical": true,
+   "cpu": " has spent time in other European cities.\n\nThe city's history is long and complex, with influences from the Phoenicians, Romans, Visigoths, Moors, and Crusaders, and the result is a fascinating blend of architectural styles. The Alfama district, the oldest part of Lisbon, is a maze of narrow, winding streets, whitewashed houses, and tiny squares, and it's a place where you can still hear the echoes of the past.\n\nLisbon is a city of contrasts, with its grand palaces and opulent churches alongside its humble, working-class neighborhoods. It's a city of vibrant colors, delicious",
+   "gpu": null
+  }
+ ]
+}

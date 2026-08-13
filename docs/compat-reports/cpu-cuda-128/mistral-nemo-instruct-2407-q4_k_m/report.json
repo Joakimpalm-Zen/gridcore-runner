@@ -1,0 +1,71 @@
+{
+ "model": "/home/lab/workspace/models/Mistral-Nemo-Instruct-2407-Q4_K_M/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 40,
+  "layers_total": 40,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 9,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris. The city is located on the Seine River in the northern part of the country. Paris is known for its art, culture, cuisine, and fashion. It is home to many famous landmarks, including the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral. The city is also a major hub for international business and politics.",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": " # function to generate fibonacci series\n#   if n<=0:\n#       print(\"Incorrect input\")\n#   elif n==1:\n#       return 0\n#   elif n==2:\n#       return 1\n#   else:\n#       a, b = 0, 1\n#       for i in range(2, n):\n#           a, b = b, a + b\n#       return b\n\n# print(fibonacci(9))\n\ndef fibonacci(n):\n    if n <= 0:\n        return \"Incorrect input\"\n    elif n == 1:\n        return ",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 0 7 6 5 4 3 2 1\n\n**Library of Congress Cataloging-in-Publication Data**\n\nNames: McCullough, David, 1961- author.\n\nTitle: The great task remaining before us : reconstructing the meaning of the Civil War / David McCullough.\n\nDescription: New York : Simon and Schuster, 2019. | Includes bibliographical references and index.\n\nSubjects: LCSH: United States--History--Civil War, 1861-1865--Causes--Sources. | United",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " there was a kingdom called the Kingdom of the Sun. The kingdom was ruled by a wise and just king, who was loved by all his subjects. The king had a beautiful daughter named Princess Solara, who was known for her kindness, intelligence, and beauty.\n\nOne day, a terrible drought struck the kingdom. The sun scorched the earth, and the crops withered away. The people suffered, and the king was at a loss. He called upon the wisest sages and the most powerful sorcerers, but none could find a solution to the drought.\n\nThe king then decided to hold a grand contest. He announced that whoever",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 391",
+   "gpu": null
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "identical": true,
+   "cpu": " The lighthouse keeper was a meticulous record keeper, but he was also a bit of a poet. He would often write a short poem to accompany his weather report. Here is one of his entries:\n\n```\nWind from the north,\nClouds like a shroud,\nFog lifts at seven,\nA day shrouded in doubt.\n```\n\nThe lighthouse keeper's weather report is a string of text that follows this format:\n\n```\nWind from the <direction>,\nClouds like a <adjective> shroud,\nFog lifts at <hour>:<minute>,\n<A short poem>.\n```\n\nGiven a weather report, you must determine if",
+   "gpu": null
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "identical": true,
+   "cpu": " of this error was not made until 1960, when the NGC was revised to its current 7840 objects. The NGC is the most widely used catalog of deep-sky objects, and is often used in conjunction with the New General Catalogue of Nebulae and Clusters of Stars (NGC) and the Index Catalogue (IC).",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "identical": true,
+   "cpu": " is\n# not what we want.  We want to unpack the header and then check the magic\n# number.  This is because the header is a fixed size, and we want to\n# unpack it even if the file is truncated.  We also want to unpack the\n# header even if the file is empty, because the header is a fixed size.\n# So we need to unpack the header first, and then check the magic number.\n# If the magic number is not correct, we raise an error.  If the magic\n# number is correct, we return the version number.\ndef parse_header(buf, size",
+   "gpu": null
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "identical": true,
+   "cpu": " has just arrived from the labyrinthine Alfama. The Baixa is also the only part of Lisbon where the streets are named after the trades that were once practiced there, and the names are still used today, even though the shops have long since moved out. The streets are narrow, and the buildings are tall, with the upper floors often rented out to students and young professionals. The ground floors are mostly occupied by restaurants, bars, and shops, and the streets are always busy, especially at night, when the restaurants are full and the bars are open late. The Baixa is also the only part of Lisbon where the streets are",
+   "gpu": null
+  }
+ ]
+}

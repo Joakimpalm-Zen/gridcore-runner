@@ -1,0 +1,71 @@
+{
+ "model": "/home/lab/workspace/models/granite-4.1-8b-Q4_0/granite-4.1-8b-Q4_0.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 40,
+  "layers_total": 40,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 8,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Portugal is Lisbon. The capital of Greece is Athens. The capital of Poland is Warsaw. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Japan is Tokyo. The capital of Canada is Ottawa. The capital of Australia is Canberra. The capital of New Zealand is Wellington. The capital of South Africa is Pretoria. The capital of Nigeria is Abuja. The capital of India is New Delhi. The capital of China is Beijing. The capital",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": " return n if n <= 1 else fibonacci(n-1) + fibonacci(n-2)\n```\n\n**Sample Output:**\n```python\ndef fibonacci(n):\n    return n if n <= 1 else fibonacci(n-1) + fibonacci(n-2)\n```\n\n```python\ndef format_code(code: str) -> str:\n    \"\"\"\n    Formats a given Python code snippet by adding proper indentation and line breaks.\n\n    :param code: A string representing a Python code snippet.\n    :return: A formatted string with proper indentation and line breaks.\n    \"\"\"\n    import ast\n    import io\n\n    tree = ast.parse(code",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": false,
+   "cpu": " there lived a young girl named Lily. Lily was known throughout her village for her kind heart and her love for animals. She spent her days exploring the lush forests surrounding her home, befriending every creature she encountered.\n\nOne day, as Lily ventured deeper into the woods than ever before, she stumbled upon a hidden glade. In the center of the glade stood an ancient, gnarled tree with shimmering leaves of gold. As Lily approached, the tree began to whisper to her, revealing a secret long forgotten by the world.\n\nThe tree told Lily of a powerful amulet hidden within its roots, an amulet that could",
+   "gpu": " there lived a young girl named Lily. Lily was known throughout her village for her kind heart and her love for animals. She spent her days exploring the lush forests surrounding her home, befriending every creature she encountered.\n\nOne day, as Lily ventured deeper into the woods than ever before, she stumbled upon a hidden glade. In the center of the glade stood an ancient, gnarled tree with shimmering leaves of gold. As Lily approached, the tree began to whisper to her, revealing a secret long forgotten by the world.\n\nThe tree told Lily of a powerful amulet hidden within its roots, an amulet said to"
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 391\n\nQ: What is 17 * 24?\nA: 408\n\nQ: What is 17 * 25?\nA: 425\n\nQ: What is 17 * 26?\nA: 442\n\nQ: What is 17 * 27?\nA: 459\n\nQ: What is 17 * 28?\nA: 476\n\nQ: What is 17 * 29?\nA: 493\n\nQ: What is 17 * 30?\nA: 510\n\nQ: What is 17 * 31?\nA: 527\n\nQ: What is ",
+   "gpu": null
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "identical": true,
+   "cpu": " The data is stored in a CSV file named `lighthouse_data.csv` with the following columns: `date`, `wind_direction`, `cloud_cover`, `fog_lift_time`. Your task is to write a Python script that reads this CSV file, processes the data, and outputs a summary report. The report should include:\n- The total number of records.\n- The average cloud cover percentage.\n- The earliest date in the dataset.\n- The latest date in the dataset.\n- The most common wind direction.\n\n**Input:**\n- A CSV file named `lighthouse_data.csv` with the following sample data:\n```\ndate",
+   "gpu": null
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "identical": true,
+   "cpu": " was made in the 1953 revision of the catalogue, which listed 4,104 objects. The 1953 revision was the last major revision of the catalogue; it was not until 1991 that the first substantial addition was made, when the NGC/IC Project added 1,571 objects that had been omitted from the original catalogue. The NGC/IC Project is a volunteer effort to catalogue all objects described in the New General Catalogue and the Index Catalogues, and to provide finder charts and other information for each object. The project is ongoing, and as of 2015 the project had added 1,",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "identical": true,
+   "cpu": " is\n# good.  But it doesn't reject a truncated body, which is bad.  So we need to\n# check the size of the body separately.\n\ndef parse_body(buf, size):\n    if size < 8:\n        raise ValueError('short body')\n    magic, version = struct.unpack('<II', buf[8:16])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\ndef load_gguf(filename):\n    with open(filename, 'rb') as f:\n        header = f.read(8)\n        header_magic, header_version =",
+   "gpu": null
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "identical": true,
+   "cpu": " has spent time in older Italian or Spanish cities. The earthquake also gave rise to the city's most famous architectural style, the ornate, pastel-colored \"white houses\" of Bairro Alto, which were built on the ruins of the old Alfama quarter. The houses are not white, but a muted cream, and their pastel facades are the product of centuries of soot and grime. The earthquake also gave rise to the city's most famous architectural style, the ornate, pastel-colored \"white houses\" of Bairro Alto, which were built on the ruins of the old Alfama quarter. The houses are",
+   "gpu": null
+  }
+ ]
+}

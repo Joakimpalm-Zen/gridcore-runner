@@ -1,0 +1,71 @@
+{
+ "model": "/home/lab/workspace/models/Teuken-7B-instruct-commercial-v0.4-Q4_K_M/Teuken-7B-instruct-commercial-v0.4-Q4_K_M.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 32,
+  "layers_total": 32,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 9,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris.",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": " if n < 2: return 1 else: return fibonacci(n-1) + fibonacci(n-2) # 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " there lived a young girl named Rosalind. She was a bright and curious child, always eager to learn and explore the world around her. One day, while wandering through the woods, she stumbled upon a mysterious object: a small, intricately carved stone that seemed to hold within it the secrets of the universe. Intrigued, Rosalind spent many days studying the stone, trying to decipher its hidden meanings and messages. She soon discovered that the stone was a powerful talisman, capable of granting its wielder great wisdom and knowledge. With this newfound power, Rosalind set",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 17 * 23 = 383",
+   "gpu": null
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "identical": true,
+   "cpu": " The weather was recorded for 100 years. The data was used to study the long term changes in the climate.",
+   "gpu": null
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "identical": true,
+   "cpu": "s were made in the 1940s and 1950s, and the final version of the NGC catalogue was published in 1973. The NGC is now considered to be a reliable source of information on the physical properties of the objects it lists, but it is not considered to be a complete or definitive list of all such objects. The NGC is also not considered to be a complete or definitive list of all such objects. The NGC is also not considered to be a complete or definitive list of all such objects. The NGC is also not considered to be a complete or",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "identical": true,
+   "cpu": " is\n# a bit of a problem.  Here's a modified version that doesn't do that:\n# it just skips the first 8 bytes if they're not the magic number.  This\n# should work for both the original and the truncated header.\ndef parse_header(buf, size):\n   if size < 8:\n      return None\n   magic, version = struct.unpack('<II', buf[:8])\n   if magic != GGUF_MAGIC:\n      return None\n   return magic, version\n\n# The above code is a bit of a hack, but",
+   "gpu": null
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "identical": true,
+   "cpu": "'s come from a city that's been rebuilt after a major disaster. \u21a9\n- 1755 Lisbon earthquake Wikipedia page. \u21a9\n- 1755 Lisbon earthquake. \u21a9\n- Lisbon earthquake of 1755. \u21a9\n- Lisbon earthquake of 1755. \u21a9\n- Lisbon earthquake of 1755. \u21a9\n- Lisbon earthquake of 1755. \u21a9\n- Lisbon e",
+   "gpu": null
+  }
+ ]
+}

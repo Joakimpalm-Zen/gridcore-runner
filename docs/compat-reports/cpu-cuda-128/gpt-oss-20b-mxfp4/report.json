@@ -1,0 +1,71 @@
+{
+ "model": "/home/lab/workspace/models/gpt-oss-20b-MXFP4/gpt-oss-20b-MXFP4.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 24,
+  "layers_total": 24,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 7,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": true,
+   "cpu": " Paris.\"\n\nSure! Here's a simple example of a Python program that uses the `requests` library to fetch a webpage and then uses `BeautifulSoup` from the `bs4` library to parse the HTML and extract the text \"The capital of France is Paris.\" from the page. This example assumes that the text is present in a paragraph tag (`<p>`). If the text is located elsewhere, you might need to adjust the parsing logic accordingly.\n\nFirst, you'll need to install the required libraries if you haven't already:\n\n```bash\npip install requests beautifulsoup4\n```\n\nNow, here's the Python script:\n\n```python",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": "\\n    if n <= 0:\\n        return 0\\n    elif n == 1:\\n        return 1\\n    else:\\n        return fibonacci(n-1) + fibonacci(n-2)\\n\\nprint(fibonacci(10))\\nPY\"]}",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " there was a young boy named Jack. Jack was a curious and adventurous boy, and he loved nothing more than exploring the world around him.\n\nOne day, Jack decided to go on a journey to find the legendary treasure of the ancient kingdom. He packed his bag with food, water, and a map, and set off into the unknown.\n\nAs he journeyed through the forest, Jack encountered many obstacles and challenges. He had to cross a raging river, climb a steep mountain, and outsmart a cunning fox. But Jack was determined to find the treasure, and he never gave up.\n\nFinally, after many days of traveling, Jack reached",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": false,
+   "cpu": " 391\n\nQ: What is 18 * 23?\nA: 414\n\nQ: What is 19 * 23?\nA: 437\n\nQ: What is 20 * 23?\nA: 460\n\nQ: What is 21 * 23?\nA: 483\n\nQ: What is 22 * 23?\nA: 506\n\nQ: What is 23 * 23?\nA: 529\n\nQ: What is 24 * 23?\nA: 552\n\nQ: What is 25 * 23?\n\nA: 575\n\nQ: What is",
+   "gpu": " 391\n\nQ: What is 18 * 23?\nA: 414\n\nQ: What is 19 * 23?\nA: 437\n\nQ: What is 20 * 23?\nA: 460\n\nQ: What is 21 * 23?\nA: 483\n\nQ: What is 22 * 23?\nA: 506\n\nQ: What is 23 * 23?\nA: 529\n\nQ: What is 24 * 23?\n\nA: 552\n\nQ: What is 25 * 23?\nA: 575\n\nQ: What is"
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "identical": true,
+   "cpu": " The data are as follows:\"\n\nBut we don't have the data. But we can guess that the data might be something like:\n\nWind direction: N, S, E, W, etc. Cloud cover: maybe categories like \"clear\", \"few clouds\", \"scattered\", \"broken\", \"overcast\". Fog lift hour: maybe times like 6:00, 7:00, etc.\n\nWe need to find the most likely cause of the fog. The cause of fog can be due to temperature inversion, moisture, etc. The question likely expects that the fog is due to a temperature inversion at the coast, or due",
+   "gpu": null
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "identical": true,
+   "cpu": " of the catalogue was a major undertaking, and the final version was published in 1935. The catalogue was used as a reference for the identification of the stars in the 1930s and 1940s, and it was also used as a reference for the identification of the stars in the 1930s and 1940s. The catalogue was used as a reference for the identification of the stars in the 1930s and 1940\n\nThe text you provided appears to be a historical overview of the development and use of star catalogues, particularly focusing on the work of the Royal Observatory in Greenwich and the contributions",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "identical": true,
+   "cpu": "\n# is fine.  The tests only check that a valid header is parsed, so the\n# implementation is intentionally minimal.\n```\n\n### **Result**\nAll tests now pass:\n\n```\n$ pytest -q\n..                                                                       [100%]\n2 passed in 0.07s\n```\n\nThe module is now functional and ready for further development.",
+   "gpu": null
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "identical": false,
+   "cpu": " has never seen a medieval city plan.\n\nThe 19th\u2011century railway line that ran from the capital to the port of Set\u00fabal was built on a viaduct that was later widened to accommodate the new high\u2011speed line. The old line was abandoned in 2004, and the viaduct was repurposed as a pedestrian and bicycle path that now connects the two districts of Bel\u00e9m and Alc\u00e2ntara. The path is a popular spot for locals to watch the sunset over the river, and it is also the only place in Lisbon where you can see the original 1900s ironwork of the railway",
+   "gpu": " has never seen a medieval city plan.\n\nThe 19th\u2011century railway line that ran from the capital to the port of Set\u00fabal was built on a viaduct that was later widened to accommodate the new high\u2011speed line. The old line was abandoned in 2004, and the viaduct was repurposed as a pedestrian and bicycle path that now connects the two most visited parks in the city. The path is a favourite spot for locals who enjoy a quiet walk while watching the sunset over the river.\n\nThe city\u2019s most famous monument, the 16th\u2011century Jer\u00f3nimos Monastery, was"
+  }
+ ]
+}

@@ -1,0 +1,71 @@
+{
+ "model": "/home/lab/workspace/models/gemma-4-26B-A4B-it-Q4_0/gemma-4-26B-A4B-it-Q4_0.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 30,
+  "layers_total": 30,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "identical": 7,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "identical": false,
+   "cpu": " Paris.\n<|channel>3/2/2025 3:25:30 PM\n3/2/2025 3:25:30 PM\n3/2/2025 3:25:30 PM\n3/2/2025 3:25:30 PM\n3/2/2025 3:25:30 PM\n3/2/2025 3:25:30 PM\n3/2/2025 3:25:30",
+   "gpu": " Paris.\n<|channel>3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/2025 3/2/202"
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "identical": true,
+   "cpu": "\n    \"\"\"\n    \u0412\u044b\u0447\u0438\u0441\u043b\u044f\u0435\u0442 n-\u0435 \u0447\u0438\u0441\u043b\u043e \u0424\u0438\u0431\u043e\u043d\u0430\u0447\u0447\u0438.\n    \"\"\"\n    if n <= 0:\n, n <= 1:\n        return 0\n    if n <= 1:\n        return 1\n    \n    # \u0420\u0435\u043a\u0443\u0440\u0441\u0438\u0432\u043d\u044b\u0439 \u0432\u044b\u0437\u043e\u0432 (\u043d\u0435\u044d\u0444\u0444\u0435\u043a\u0442\u0438\u0432\u0435\u043d \u0434\u043b\u044f \u0431\u043e\u043b\u044c\u0448\u0438\u0445 n)\n    # \u0420\u0435\u043a\u0443\u0440\u0441\u0438\u0432\u043d\u044b\u0439 \u0432\u044b\u0437\u043e\u0432 (\u0420\u0435\u043a\u0443\u0440\u0441\u0438\u0432\u043d\u044b\u0439 \u0432\u044b\u0437\u043e\u0432 (\u0420\u0435\u043a\u0443\u0440\u0441\u0438\u0432\u043d\u044b\u0439 \u0432\u044b\u0437\u043e\u0432 (\u0627\u0644\u0631\u0642\u0645_\u0627\u0644\u0631\u0642\u0645_\u0627\u0644\u0631\u0642\u0645_\u0627\u0644\u0631\u0642\u0645_\u0627\u0644\u0631\u0642\u0645_\u0627\u0644\u0631\u0631_\u0627\u0644\u0631\u0642\u0645_\u0627\u0644\u0631",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "identical": true,
+   "cpu": " 9 10 11 1 2 3 4 5 6 7 8 9 10 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "identical": true,
+   "cpu": " in a land of mountains-high and own-low, own-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low, mountains-high and mountains-low,",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "identical": true,
+   "cpu": " 401? No, 401 is not the correct answer. 401 is not the correct answer. 401 is not the<|channel> correct answer. 401 is not the correct answer. 400 is not a correct answer. 400 is not a correct answer. 400 is not a correct answer. 400 is not a correct answer. 400 is not a correct answer. 400 is not a correct answer. 400 is not a correct answer. 400 is not a correct answer.",
+   "gpu": null
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "identical": true,
+   "cpu": "ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.ly.",
+   "gpu": null
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "identical": true,
+   "cpu": "-up to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-to-date-up-",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "identical": false,
+   "cpu": "-buf\n-\n-\n-\n-\n-\n-\n-\n-\nthought\n<channel|>The loader above rejects a truncated header before unpacking it, which-buf **is the first 8 bytes of the input buffer.**\n\nIn the provided code, the `size` parameter represents the total length of the buffer. The `if size < 8:` check ensures that the buffer contains enough data to satisfy the `struct.unpack('<II', buf[:8])` call. If the buffer is smaller than 8 bytes, it raises a `ValueError` to prevent an error during the unpacking process.",
+   "gpu": "-buf\n-\n-\n-\n-\n-\n-\n-\n-\nthought\n<channel|>The loader above rejects a truncated header before unpacking it, which-buf **is the input buffer containing the raw bytes of the file.**\n\nIn the context of the `parse_header` function:\n1. **`buf`** is the source buffer (the byte array).\n2. **`size`** is the length of that buffer.\n3. The function checks if `size < 8`. If it is, it raises a `ValueError` because it cannot safely perform `struct.unpack` on"
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "identical": true,
+   "cpu": " unifies-ekos,<|channel>thought\n<channel|>It appears your text cut off mid-sentence. Based on the context of your passage about Lisbon's urban planning and seismic history, here are a few ways that sentence might be completed, depending on the specific point you wish to make:\n\n**Option 1: Focusing on the visual layout (The most likely intended meaning)**\n> \"...which is why the district still reads as unusually regular to a visitor who **unifies the visual patterns of the streets with the city's historical recovery.**\"\n\n**Option 2: Focusing on the contrast between old and new**\n>",
+   "gpu": null
+  }
+ ]
+}
