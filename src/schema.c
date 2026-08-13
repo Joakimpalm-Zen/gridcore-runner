@@ -140,12 +140,13 @@ static bool check_object_rules(jv *s, char *err, int errcap) {
     jv *props = jv_get(s, "properties");
     bool has_props = props && props->type == J_OBJ && props->n > 0;
     jv *ap = jv_get(s, "additionalProperties");
-    bool empty_closed = props && props->type == J_OBJ && props->n == 0;
+    bool closed_schema = ap && ap->type == J_BOOL && !ap->b &&
+                         (!props || props->type == J_OBJ);
     bool open_schema = !has_props &&
                        ((ap && ap->type == J_BOOL && ap->b) ||
                         (ap && ap->type == J_OBJ && ap->n == 0));
     if (ap && !open_schema &&
-        !(ap->type == J_BOOL && !ap->b && (has_props || empty_closed))) {
+        !closed_schema) {
         snprintf(err, errcap,
                  "additionalProperties is only supported as false alongside "
                  "declared properties, or as an open schema without them");
@@ -729,7 +730,7 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
         if (!check_object_rules(s, err, errcap)) return NULL;
         jv *props = jv_get(s, "properties");
         jv *apv = jv_get(s, "additionalProperties");
-        bool closed_empty = props && props->type == J_OBJ && props->n == 0 &&
+        bool closed_empty = (!props || (props->type == J_OBJ && props->n == 0)) &&
                             apv && apv->type == J_BOOL && !apv->b;
         if (closed_empty) {
             // {"properties":{},"additionalProperties":false} declares an object

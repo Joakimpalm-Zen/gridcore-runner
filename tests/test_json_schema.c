@@ -835,9 +835,6 @@ static void test_schema_additional_properties(void) {
             "\"additionalProperties\":true}",
         "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
             "\"additionalProperties\":{\"type\":\"string\"}}",
-        // no properties map at all: nothing says the set is meant to be
-        // closed, so the generic any-object machine cannot be the answer
-        "{\"type\":\"object\",\"additionalProperties\":false}",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
         jv *schema_json = json_parse(bad[i], strlen(bad[i]));
@@ -857,35 +854,42 @@ static void test_schema_additional_properties(void) {
 // rejected instead. Real agent clients (the Codex CLI's zero-argument tools)
 // send it, and it is exactly expressible, so it compiles.
 static void test_schema_empty_closed_object(void) {
-    const char *src = "{\"type\":\"object\",\"properties\":{},"
-                      "\"additionalProperties\":false}";
-    jv *schema_json = json_parse(src, strlen(src));
-    assert(schema_json != NULL);
-    char err[128];
-    snode *schema = schema_compile(schema_json, err, sizeof(err));
-    assert(schema != NULL);
+    const char *srcs[] = {
+        "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+        // Omitting `properties` says the same thing: no declared keys, and no
+        // additional ones. Claude and other clients use both spellings.
+        "{\"type\":\"object\",\"additionalProperties\":false}",
+    };
+    for (size_t i = 0; i < sizeof(srcs) / sizeof(*srcs); i++) {
+        const char *src = srcs[i];
+        jv *schema_json = json_parse(src, strlen(src));
+        assert(schema_json != NULL);
+        char err[128];
+        snode *schema = schema_compile(schema_json, err, sizeof(err));
+        assert(schema != NULL);
 
-    // the empty object is accepted and closes with nothing outstanding
-    sval v;
-    sval_init(&v, schema);
-    assert(sval_feed(&v, "{", 1));
-    assert(sval_feed(&v, "}", 1));
-    char out[64];
-    assert(sval_close(&v, out, sizeof(out)) == 0);
+        // the empty object is accepted and closes with nothing outstanding
+        sval v;
+        sval_init(&v, schema);
+        assert(sval_feed(&v, "{", 1));
+        assert(sval_feed(&v, "}", 1));
+        char out[64];
+        assert(sval_close(&v, out, sizeof(out)) == 0);
 
-    // any key at all is refused: the set really is closed
-    sval_init(&v, schema);
-    assert(sval_feed(&v, "{", 1));
-    assert(!sval_feed(&v, "\"", 1));
+        // any key at all is refused: the set really is closed
+        sval_init(&v, schema);
+        assert(sval_feed(&v, "{", 1));
+        assert(!sval_feed(&v, "\"", 1));
 
-    // and a truncation mid-document still closes to a legal `{}`
-    sval_init(&v, schema);
-    assert(sval_feed(&v, "{", 1));
-    int n = sval_close(&v, out, sizeof(out));
-    assert(n == 1 && out[0] == '}');
+        // and a truncation mid-document still closes to a legal `{}`
+        sval_init(&v, schema);
+        assert(sval_feed(&v, "{", 1));
+        int n = sval_close(&v, out, sizeof(out));
+        assert(n == 1 && out[0] == '}');
 
-    schema_free(schema);
-    jv_free(schema_json);
+        schema_free(schema);
+        jv_free(schema_json);
+    }
 }
 
 // `required` with no `properties` compiled to the open any-object machine,
