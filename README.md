@@ -891,6 +891,13 @@ agent clients. Required properties are present, unknown properties are blocked
 for closed objects, and tool arguments are generated against the selected
 tool's schema.
 
+Object schemas may be closed fixed-property records, unconstrained open
+objects, or homogeneous maps: with no declared properties (or an empty
+`properties` object), a schema-valued `additionalProperties` is enforced for
+every arbitrary-key value. Mixed fixed properties plus open or schema-valued
+additional properties remain unsupported and are rejected rather than
+silently weakened.
+
 Anchored `pattern`s compile as a sequence of literal runs and repeated ASCII
 classes (`[...]`, `\d`, `\w`): `^wf_[a-z0-9-]{6,}$` and `^[A-Z]{3}[0-9]{4}$`
 both enforce, and a forced close mid-string completes to a string the pattern

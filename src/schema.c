@@ -133,18 +133,20 @@ static bool check_keywords(jv *s, char *err, int errcap) {
 
 // `additionalProperties` and a `required` list are the two object keywords
 // whose absence changes what the compiled machine accepts, so they get rules
-// beyond the name check. The compiled object always enforces a CLOSED
-// property set, which is what `additionalProperties:false` asks for and the
-// opposite of what `true` asks for.
+// beyond the name check. Fixed-property objects are closed; objects with no
+// declared properties may instead be open/unconstrained or homogeneous maps.
+// A mixed fixed/open object cannot be represented by the streaming machine
+// and must be rejected rather than silently narrowed or weakened.
 static bool check_object_rules(jv *s, char *err, int errcap) {
     jv *props = jv_get(s, "properties");
     bool has_props = props && props->type == J_OBJ && props->n > 0;
+    bool no_declared = !props || (props->type == J_OBJ && props->n == 0);
     jv *ap = jv_get(s, "additionalProperties");
     bool closed_schema = ap && ap->type == J_BOOL && !ap->b &&
                          (!props || props->type == J_OBJ);
-    bool open_schema = !has_props &&
+    bool open_schema = no_declared &&
                        ((ap && ap->type == J_BOOL && ap->b) ||
-                        (ap && ap->type == J_OBJ && ap->n == 0));
+                        (ap && ap->type == J_OBJ));
     if (ap && !open_schema &&
         !closed_schema) {
         snprintf(err, errcap,
@@ -741,6 +743,17 @@ static snode *compile_typed(jv *s, const char *type, char *err, int errcap, int 
             if (!n) return NULL;
             return n;
         }
+        bool no_declared = !props || (props->type == J_OBJ && props->n == 0);
+        if (no_declared && apv && apv->type == J_OBJ && apv->n > 0) {
+            // A schema-valued additionalProperties with no named properties
+            // is a homogeneous string-keyed map. Keep its value schema exact;
+            // compiling this as SN_ANY would silently discard the constraint.
+            snode *n = sn_new(SN_MAP);
+            if (!n) return NULL;
+            n->items = compile_node(apv, err, errcap, depth + 1);
+            if (!n->items) { schema_free(n); return NULL; }
+            return n;
+        }
         if (!props || props->type != J_OBJ || props->n == 0) {
             // open object: any JSON object (generic machine, '{' enforced)
             snode *n = sn_new(SN_ANY);
@@ -802,7 +815,7 @@ static bool union_start_bytes(const snode *a, bool set[256]) {
             for (int i = 0; i < a->n_lits; i++)
                 set[(uint8_t)a->lits[i][0]] = true;
             return true;
-        case SN_OBJ: set['{'] = true; return true;
+        case SN_OBJ: case SN_MAP: set['{'] = true; return true;
         case SN_ARR: set['['] = true; return true;
         case SN_BOOL: set['t'] = true; set['f'] = true; return true;
         case SN_NULL: set['n'] = true; return true;
@@ -1353,7 +1366,7 @@ static void frame_done(sval *v) {
     v->depth--;
     if (v->depth == 0) { v->done = true; return; }
     sframe *f = &v->stack[v->depth - 1];
-    if (f->node->kind == SN_OBJ) {
+    if (f->node->kind == SN_OBJ || f->node->kind == SN_MAP) {
         if (f->sub < f->node->n_props && v->last_enum >= 0 &&
             !strcmp(f->node->keys[f->sub], "tool"))
             f->disc = (uint16_t)(v->last_enum + 1);
@@ -1386,7 +1399,7 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
                 for (int j = 0; j < a->n_lits; j++)
                     if (c == a->lits[j][0]) return a;
                 break;
-            case SN_OBJ:  if (c == '{') return a; break;
+            case SN_OBJ: case SN_MAP: if (c == '{') return a; break;
             case SN_ARR:  if (c == '[') return a; break;
             case SN_SEQ:
                 if (a->n_props > 0) {
@@ -1650,6 +1663,7 @@ static int feed_byte(sval *v, uint8_t c) {
             if (num_byte(c, &f->sub, false) != 0 || !number_put(f, c)) return -1;
             return 0;
         case SN_OBJ:
+        case SN_MAP:
             if (c != '{') return -1;
             f->phase = P_OBJ_KEY1; f->idx = 0;
             return 0;
@@ -1763,11 +1777,17 @@ static int feed_byte(sval *v, uint8_t c) {
     case P_OBJ_KEY:
         if (is_ws(c)) return 0;
         if (c == '}' && f->phase == P_OBJ_KEY1) {
-            if (!close_allowed(n, f->idx)) return -1;
+            if (n->kind == SN_OBJ && !close_allowed(n, f->idx)) return -1;
             frame_done(v);
             return 0;
         }
         if (c != '"') return -1;
+        if (n->kind == SN_MAP) {
+            f->sub = 0;
+            f->lit_pos = 0;
+            f->phase = P_OBJ_INKEY;
+            return 0;
+        }
         f->alive = key_candidates(n, f->idx);
         if (!f->alive) return -1;
         f->phase = P_OBJ_INKEY;
@@ -1775,6 +1795,13 @@ static int feed_byte(sval *v, uint8_t c) {
         return 0;
 
     case P_OBJ_INKEY: {
+        if (n->kind == SN_MAP) {
+            int r = str_byte(c, &f->sub);
+            if (r < 0) return -1;
+            if (r == 1) f->phase = P_OBJ_COLON;
+            else if (f->sub == 0) f->lit_pos++;
+            return 0;
+        }
         if (c == '"') {
             // exactly one candidate must match to full length
             for (int i = 0; i < n->n_props; i++) {
@@ -1802,17 +1829,18 @@ static int feed_byte(sval *v, uint8_t c) {
         if (is_ws(c)) return 0;
         if (c != ':') return -1;
         f->phase = P_OBJ_NEXT; // resumed here after the child completes
-        return push_value(v, n->props[f->sub]) ? 0 : -1;
+        return push_value(v, n->kind == SN_MAP ? n->items : n->props[f->sub]) ? 0 : -1;
 
     case P_OBJ_NEXT:
         if (is_ws(c)) return 0;
         if (c == ',') {
-            if (f->idx >= n->n_props || !key_candidates(n, f->idx)) return -1;
+            if (n->kind == SN_OBJ &&
+                (f->idx >= n->n_props || !key_candidates(n, f->idx))) return -1;
             f->phase = P_OBJ_KEY;
             return 0;
         }
         if (c == '}') {
-            if (!close_allowed(n, f->idx)) return -1;
+            if (n->kind == SN_OBJ && !close_allowed(n, f->idx)) return -1;
             frame_done(v);
             return 0;
         }
@@ -1888,6 +1916,7 @@ bool sval_ws_is_content(const sval *v) {
     // whitespace as content rather than reach into it.
     if (f->node->kind == SN_ANY) return true;
     if (f->node->kind == SN_RAW && f->phase == P_RAW) return true;
+    if (f->node->kind == SN_MAP && f->phase == P_OBJ_INKEY) return true;
     // Mid-string (P_STR with the opening quote consumed) is the content case.
     return f->phase == P_STR &&
            (f->node->kind == SN_STR || f->node->kind == SN_ENUM);
@@ -2062,6 +2091,9 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
             eq_putc(q, '}');
             break;
         }
+        case SN_MAP:
+            eq_put(q, "{}");
+            break;
         case SN_SEQ:
             for (int i = 0; i < n->n_props; i++)
                 emit_min_choice(q, n->props[i], depth + 1, choice);
@@ -2186,12 +2218,30 @@ int sval_close(sval *v, char *out, int cap) {
             }
             break;
         case P_OBJ_KEY1:
-            close_obj(&q, n, f->idx, false, false, choice);
+            if (n->kind == SN_MAP) eq_putc(&q, '}');
+            else close_obj(&q, n, f->idx, false, false, choice);
             break;
         case P_OBJ_KEY: // a ',' was already consumed
-            close_obj(&q, n, f->idx, false, true, choice);
+            if (n->kind == SN_MAP) {
+                eq_put(&q, "\"\":");
+                emit_min_choice(&q, n->items, 0, choice);
+                eq_putc(&q, '}');
+            } else {
+                close_obj(&q, n, f->idx, false, true, choice);
+            }
             break;
         case P_OBJ_INKEY: {
+            if (n->kind == SN_MAP) {
+                if (f->sub == 1) eq_putc(&q, 'n');
+                while (f->sub >= 2) {
+                    eq_putc(&q, '0');
+                    f->sub = f->sub == 5 ? 0 : f->sub + 1;
+                }
+                eq_put(&q, "\":");
+                emit_min_choice(&q, n->items, 0, choice);
+                eq_putc(&q, '}');
+                break;
+            }
             // finish the lowest still-alive candidate key, give it a value
             for (int i = 0; i < n->n_props; i++) {
                 if (!(f->alive & (1ull << i))) continue;
@@ -2206,11 +2256,14 @@ int sval_close(sval *v, char *out, int cap) {
         }
         case P_OBJ_COLON:
             eq_putc(&q, ':');
-            emit_min_choice(&q, n->props[f->sub], 0, choice);
-            close_obj(&q, n, f->idx, true, false, choice);
+            emit_min_choice(&q, n->kind == SN_MAP ? n->items : n->props[f->sub],
+                            0, choice);
+            if (n->kind == SN_MAP) eq_putc(&q, '}');
+            else close_obj(&q, n, f->idx, true, false, choice);
             break;
         case P_OBJ_NEXT: // a value just completed, comma needed before more
-            close_obj(&q, n, f->idx, true, false, choice);
+            if (n->kind == SN_MAP) eq_putc(&q, '}');
+            else close_obj(&q, n, f->idx, true, false, choice);
             break;
         case P_ARR_FIRST:
         case P_ARR_NEXT:

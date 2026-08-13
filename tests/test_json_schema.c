@@ -826,6 +826,61 @@ static void test_schema_accepts_claude_open_metadata_object(void) {
     jv_free(schema_json);
 }
 
+static void test_schema_typed_additional_properties_map(void) {
+    const char *src =
+        "{\"type\":\"object\",\"additionalProperties\":{"
+        "\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"string\"}},"
+        "\"required\":[\"n\"],\"additionalProperties\":false}}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    const char *good = "{\"alpha\":{\"n\":\"x\"},\"beta\":{\"n\":\"y\"}}";
+    sval v;
+    sval_init(&v, schema);
+    assert(sval_feed(&v, good, (int)strlen(good)) && v.done);
+
+    const char *bad[] = {
+        "{\"alpha\":{}}",
+        "{\"alpha\":{\"n\":1}}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        sval_init(&v, schema);
+        assert(!sval_feed(&v, bad[i], (int)strlen(bad[i])));
+    }
+
+    // Arbitrary keys are real string content (including escapes), and every
+    // started map must still force-close to a document accepted by the same
+    // schema when generation stops at a token boundary.
+    const char *partial[] = {
+        "{\"alpha",
+        "{\"a\\\\",
+        "{\"alpha\":",
+        "{\"alpha\":{\"n\":\"x\"},",
+    };
+    for (size_t i = 0; i < sizeof(partial) / sizeof(*partial); i++) {
+        sval_init(&v, schema);
+        assert(sval_feed(&v, partial[i], (int)strlen(partial[i])));
+        if (i == 0) assert(sval_ws_is_content(&v));
+        char suffix[256];
+        int n = sval_close(&v, suffix, sizeof(suffix));
+        assert(n > 0);
+        char full[512];
+        snprintf(full, sizeof(full), "%s%s", partial[i], suffix);
+        jv *parsed = json_parse(full, strlen(full));
+        assert(parsed != NULL);
+        jv_free(parsed);
+        sval check;
+        sval_init(&check, schema);
+        assert(sval_feed(&check, full, (int)strlen(full)) && check.done);
+    }
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 // The compiled object enforces a CLOSED property set. `false` asks for
 // exactly that and compiles; `true` asks for the opposite and used to be
 // dropped, making the output STRICTER than the schema permitted.
@@ -1387,6 +1442,7 @@ int main(void) {
     test_schema_rejects_required_without_properties();
     test_schema_accepts_annotation_keywords();
     test_schema_accepts_claude_open_metadata_object();
+    test_schema_typed_additional_properties_map();
     test_schema_oneof_const_scalars();
     test_schema_oneof_const_numeric_prefixes();
     test_schema_rejects_oversized_oneof_const_scalars();

@@ -7,6 +7,13 @@ were written.
 
 ## Unreleased
 
+- Metal full-offload admission now budgets aggregate weight mappings against
+  the working set instead of the device's single-buffer limit; weights larger
+  than `maxBufferLength` can therefore reach the existing multi-buffer path.
+- JSON Schema object compilation accepts closed empty records and homogeneous
+  maps expressed with schema-valued `additionalProperties`; arbitrary keys,
+  typed values, and truncation completion are enforced by the streaming
+  validator. Mixed fixed/open object shapes still fail closed.
 - **Metal decode attention is faster, and now tolerance-gated.** The
   cooperative KV read (one simdgroup per KV row, lanes splitting `head_dim`)
   is the default: **+3.0–4.3 %** decode at 2.3k–8.1k token spans. It clears

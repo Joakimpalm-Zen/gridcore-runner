@@ -7,7 +7,7 @@
 #include "jsonmode.h"
 
 enum sn_kind { SN_ANY, SN_NULL, SN_BOOL, SN_NUM, SN_INT, SN_STR, SN_ENUM,
-               SN_OBJ, SN_ARR, SN_UNION, SN_COND, SN_SEQ, SN_RAW };
+               SN_OBJ, SN_MAP, SN_ARR, SN_UNION, SN_COND, SN_SEQ, SN_RAW };
 
 // One segment of a compiled `pattern`: a literal run, then `min_tail` to
 // `max_tail` bytes of `ascii` when `has_class`. max_tail is -1 for the
@@ -25,7 +25,7 @@ struct snode {
     char  **lits; int n_lits;                       // enum literals (JSON text)
     char  **keys; int *key_len; snode **props;      // object properties
     bool   *req;  int n_props;                      //   (declared order)
-    snode  *items; int min_items, max_items;        // array
+    snode  *items; int min_items, max_items;        // array items / map values
     snode **alts; int n_alts;                       // type unions
     bool    whitespace_significant;                 // protocol literals/branches
     int64_t num_min, num_max;                       // enforced integer interval

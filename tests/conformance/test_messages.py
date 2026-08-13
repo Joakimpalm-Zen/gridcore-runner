@@ -347,6 +347,37 @@ def test_named_tool_choice_selects_that_tool(client):
                             content=d["content"])
 
 
+def test_schema_valued_additional_properties_map_compiles(client):
+    """Older Claude Code declarations use homogeneous object maps rather
+    than a fixed ``properties`` list. The Messages translation must preserve
+    that value schema instead of rejecting it or weakening it to any JSON."""
+    tool = {
+        "name": "index_records",
+        "description": "Index records by arbitrary identifier.",
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "properties": {"n": {"type": "string"}},
+                "required": ["n"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    d = client.messages({
+        "messages": [{"role": "user", "content": "index no records"}],
+        "max_tokens": 48,
+        "temperature": 0,
+        "tools": [tool],
+        "tool_choice": {"type": "tool", "name": "index_records"},
+    }, name="messages-typed-additional-properties").expect_status(200).json
+    uses = [b for b in d["content"] if b["type"] == "tool_use"]
+    if not uses or uses[0]["name"] != "index_records" or \
+            not isinstance(uses[0].get("input"), dict):
+        raise ProtocolError("typed-map tool did not produce an object call",
+                            content=d["content"])
+
+
 def test_tool_result_closes_the_loop(client):
     """The second half of an agent turn: the assistant's tool_use is replayed
     and its tool_result fed back. Asserted by input-token growth, so the test
