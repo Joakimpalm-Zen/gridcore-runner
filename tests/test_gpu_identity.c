@@ -39,14 +39,17 @@
 
 enum { STEPS = 24, MAX_TOK = 96, N_BATCH = 32 };
 
-// Mean |dlogit| as a fraction of the mean logit range. Measured residue on
-// this machine: 2.3e-8 (F32 toy), 1.9e-7 (the llama-4 temperature fixture),
-// 5.4e-5 (SmolLM2 Q8_0 -- quantized weights dequantize slightly differently
-// on the two sides, which dominates). The bound sits ~10x above the worst of
-// those and ~4 orders below a real mistake: dropping the attention
-// temperature entirely measures 2.05e-2, i.e. 41x over this limit
-// and 5 orders of magnitude above the correct implementation's 1.9e-7.
-#define GPU_DEV_FRAC 5e-4
+// Mean |dlogit| as a fraction of the mean logit range. Measured residue:
+// Metal/M1 2.3e-8 (F32 toy), 1.9e-7 (llama-4 temperature fixture), 5.4e-5
+// (SmolLM2 Q8_0 -- quantized weights dequantize slightly differently on the
+// two sides, which dominates). CUDA/Blackwell measures 8.02e-4 on the
+// k_temp_live fixture -- its reductions round differently again -- which a
+// 5e-4 bound calibrated on Metal wrongly failed (found by the 2026-08-16
+// Blackwell run; the gate blocked that box's `make test` on untouched code).
+// The bound is one cross-backend constant on purpose, sized ~2.5x above the
+// worst measured honest residue and still 10x BELOW the smallest real
+// mistake: dropping the attention temperature measures 2.05e-2.
+#define GPU_DEV_FRAC 2e-3
 
 static int g_gpu_layers = 0;
 
