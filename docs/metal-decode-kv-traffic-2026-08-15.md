@@ -104,3 +104,52 @@ this specific rewrite fixes it.
 - Any remaining suspicion of attention *parallelism*: the chunked path already
   dispatches 256 threadgroups, and this shows the bottleneck is per-byte read
   efficiency, which more threadgroups do not change.
+
+
+---
+
+## Follow-up, 2026-08-16: the cooperative read was built, and coalescing is
+## only a small part of it
+
+`k_attn_coop` / `k_attn_chunk_coop` (behind `RUNNER_METAL_ATTN_COOP=1`) do
+exactly what this document proposed: one simdgroup owns a KV row, its 32 lanes
+split `head_dim`, and the per-row dot ends in a `simd_sum`.
+
+A correction to the proposal above, found by the gate: patching `k_attn` alone
+does nothing, because **at decode the CHUNKED path is taken whenever the span
+is worth splitting**. `k_attn` only ever runs on short spans; the kernel that
+matters at long context is `k_attn_chunk`. The tolerance gate reported "never
+dispatched" before any timing was taken from it.
+
+Measured, round-robin, one env-switched binary:
+
+| span | coop off | coop on | delta |
+|---:|---:|---:|---:|
+| 2,326 | 12.26 | 12.63 | +3.0 % |
+| 4,641 | 9.68 | 10.10 | +4.3 % |
+| 8,110 | 7.24 | 7.47 | +3.2 % |
+
+Real and consistent — no overlap between arms — but **the prediction was that
+the slope would fall, and it barely does**: 0.681 → 0.660 ms/MB, i.e. the KV
+read goes 1.47 → 1.52 GB/s. Some of the +3–4 % is a lower intercept, not a
+lower slope.
+
+So K-side coalescing is **not** the dominant cause of the 18× gap. The
+hypothesis in the section above is thereby narrowed rather than confirmed.
+
+### What the next candidate is, with arithmetic
+
+The scores scratch. `ah` is `att_all + h * n_ctx` — **device** memory, one
+float per position — and the kernel makes four passes over it per head per
+layer per token: write the scores, read for the max, read-modify-write for
+`exp`/sum, and read again in the V accumulation.
+
+At an 8,110-token span with 8 heads over 35 layers that is
+`8110 × 4 B × 8 × 4 passes × 35 ≈ 36 MB` of scratch traffic per decode token,
+against 131 MB of KV. Roughly **28 % of the KV volume, in a buffer that never
+needed to leave the chip** — a chunk's scores are `chunk` floats (≤ 256 at the
+measured settings) and would fit threadgroup memory, which `k_attn_chunk`
+already allocates 1024 B of.
+
+That is arithmetic, not a measurement, and it is offered as the next thing to
+test rather than the next thing to build.
