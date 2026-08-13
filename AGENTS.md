@@ -89,7 +89,24 @@ Required behavior:
   confirmation; a silently skipped rebuild produces exactly the reassuring
   result the exercise exists to disprove.
 
-Working rule: a mutation test proves nothing until the rebuild is proven.
+The same trap applies to any A/B that builds two binaries from one tree
+(`git stash` / checkout / branch switch, build, copy, restore, build). Observed
+a third time on 2026-08-14, where `touch` was already being used and still did
+not help: the touch and the preceding build landed in the SAME whole second, so
+make saw the binary as current. Both binaries came out byte-identical and the
+comparison drawn from them was vacuous.
+
+Required behavior:
+
+- `sleep 1` before the `touch` that precedes a rebuild, so the source is
+  strictly newer than the previous build.
+- Confirm the two binaries DIFFER before trusting any number from them —
+  by hash, or better, by a behavioral probe that the change should alter. A
+  hash can differ for reasons unrelated to the change; a behavioral probe
+  cannot.
+
+Working rule: a mutation test proves nothing until the rebuild is proven, and
+an A/B proves nothing until the two binaries are shown to differ.
 
 ## 4. Grill Me Always
 
