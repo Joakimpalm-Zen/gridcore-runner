@@ -92,9 +92,12 @@ def test_server_reports_declared_but_unconsumed_heads(runner_bin, models):
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
+    # The test may inherit a real console on a developer's Windows machine.
+    # Make the headless intent explicit so --serve cannot leave a detached
+    # tray controller holding runner.exe open for the suite's later relinks.
     proc = subprocess.Popen(
         [runner_bin, "-m", str(models["mtp"]), "--serve", "--port", str(port),
-         "--gpu", "off"], cwd=ROOT,
+         "--gpu", "off", "--no-tray"], cwd=ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(120):
