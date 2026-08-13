@@ -22,7 +22,23 @@ Two further traps:
     pass/fail says nothing about a diff. Compare baseline against changed with
     identical flags, or build properly.
 
-`make` is not installed in the MSYS2 environment there (`C:\msys64\usr\bin\make.exe`
-absent), so `make OS=Windows_NT` — the check the plan says was used to build the
-runner on that box — cannot currently run. Installing it restores real Windows
-verification.
+The earlier note that `make` was absent is stale. Rechecked 2026-08-13:
+`C:\msys64\usr\bin\make.exe` is present (GNU Make 4.4.1), and a fresh detached
+Runner checkout completed the native MinGW/UCRT gate at `aa359e2` with
+`make OS=Windows_NT -j2 test` (exit 0). The run passed the native, CUDA, and
+tray-core gates; Python totals were client 30 passed/1 skipped, main 162/17,
+MoE 28/0, and prune 9/0. No validation runner or tray process survived it.
+
+That run found two Windows-only test-harness defects before it went green:
+`d302a7a` makes the compatibility test's executable stub native on Windows,
+and `aa359e2` stops the MTP admission test from raising a detached tray that
+locks `runner.exe` before a later relink. Both were reproduced red on Windows,
+then verified by targeted tests and the clean full gate. Do not install or
+change the machine based on the old absence claim; verify the current tool
+directly before diagnosing the setup.
+
+The headless tray seams are also verified: menu dumping passed, and the idle,
+loaded, and running BMPs have distinct hashes and pixel counts. Pixel analysis
+confirmed that loaded preserves the idle icon's two opposing sweeps while
+filling the core, and running draws the four-segment ring. This proves the GDI
+raster states, not visibility or click behavior in the live Windows taskbar.
