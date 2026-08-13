@@ -13,6 +13,7 @@ static bool valid(const char *text) {
 }
 
 int main(void) {
+    assert(strcmp(reason_phrase(405), "Method Not Allowed") == 0);
     assert(valid("Host: 127.0.0.1:8080\r\n\r\n"));
     assert(valid("host: localhost\r\n\r\n"));
     assert(valid("Host: [::1]:65535\r\n\r\n"));
