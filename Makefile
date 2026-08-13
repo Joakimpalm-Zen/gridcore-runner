@@ -863,6 +863,42 @@ else
 	@echo "metal E-series smoke skipped: macOS-only backend"
 endif
 
+# Multi-buffer weight wrap, forced. Every model this is developed on fits a
+# single MTLBuffer, so the split path would otherwise ship untested:
+# RUNNER_METAL_MAX_BUF shrinks the per-buffer ceiling until a fixture has to
+# span several wraps. What is being gated is that the split changes NOTHING --
+# the wrap is at tensor boundaries, so output must stay byte-identical.
+test-metal-multibuf: runner $(TEST_GPU_ID) test.gguf
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ! ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+	  echo "metal multi-buffer: SKIP (no Metal device)"; exit 0; fi; \
+	prompt="The city of Lisbon sits on seven hills above the Tagus estuary"; \
+	for pair in test.gguf:262144 \
+	            $(if $(wildcard test-moe-fixture.moe1.gguf),test-moe-fixture.moe1.gguf:65536) \
+	            $(if $(wildcard models/SmolLM2-135M-Instruct-Q8_0.gguf),models/SmolLM2-135M-Instruct-Q8_0.gguf:33554432); do \
+	  m=$${pair%%:*}; cap=$${pair##*:}; \
+	  ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 12 -b 8 --temp 0 --gpu auto \
+	    > mb-one.out 2>/dev/null; \
+	  RUNNER_METAL_MAX_BUF=$$cap ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 12 -b 8 \
+	    --temp 0 --gpu auto > mb-many.out 2> mb-many.err; \
+	  grep -q "Metal backend" mb-many.err || { \
+	    echo "FAIL: $$m did not engage Metal under a forced buffer cap"; exit 1; }; \
+	  grep -q "weights copied" mb-many.err && { \
+	    echo "FAIL: $$m fell back to a copied buffer — the split path was not exercised"; exit 1; }; \
+	  n=$$(grep -oE "wrapped in [0-9]+" mb-many.err | grep -oE "[0-9]+" | head -1); \
+	  [ -n "$$n" ] && [ "$$n" -ge 2 ] || { \
+	    echo "FAIL: $$m did not split (wrapped in $${n:-1}) — the gate would pass vacuously"; exit 1; }; \
+	  cmp -s mb-one.out mb-many.out || { \
+	    echo "FAIL: $$m output differs across a $$n-buffer split"; exit 1; }; \
+	  echo "  metal multi-buffer ok ($$m, $$n buffers, byte-identical)"; \
+	done; \
+	RUNNER_METAL_MAX_BUF=262144 ./$(TEST_GPU_ID) test.gguf; \
+	rm -f mb-one.out mb-many.out mb-many.err
+else
+	@echo "metal multi-buffer: SKIP (macOS-only backend)"
+endif
+
 test-metal-swa: runner
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
@@ -965,6 +1001,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(MAKE) --no-print-directory test-shader-embed
 	$(MAKE) --no-print-directory test-metal-shader-gate
 	$(MAKE) --no-print-directory test-metal-kquant
+	$(MAKE) --no-print-directory test-metal-multibuf
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		set -e; \

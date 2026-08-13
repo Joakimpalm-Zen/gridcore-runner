@@ -440,6 +440,16 @@ tolerance tests. CUDA currently promotes Q4_K/Q6_K/Q8_0 on the gated dense
 families and Q4_0 on Gemma 4; the latter was bit-identical over 820 tensor-core
 dispatches on the real 31B QAT artifact. `RUNNER_CUDA_TC=0` and
 `RUNNER_METAL_MM=0` pin the scalar matvec paths for identity investigations.
+Weights are wrapped zero-copy from the model mmap. A file larger than the
+device's `maxBufferLength` — 4.29 GB on an M1, against a 5.73 GB working set —
+is wrapped in several buffers instead of being copied or forced into a
+CPU/GPU layer split. The cuts fall on tensor boundaries, so no tensor spans two
+buffers and output is byte-identical to a single-buffer wrap;
+`RUNNER_METAL_MAX_BUF` shrinks the per-buffer ceiling so that path can be
+exercised on a machine whose models all fit one buffer, and
+`make test-metal-multibuf` is the gate. A single tensor larger than the ceiling
+still cannot be wrapped and says so.
+
 `RUNNER_METAL_MV=1` opts into a reassociating Metal *decode* matvec (q4_0/q8_0,
 float4 accumulation and the q4_0 zero-point factored out of the inner loop).
 It clears the 0/64 teacher-forced flip bar on both formats but measured

@@ -13,6 +13,10 @@
 #include <math.h>
 
 enum { METAL_TYPE_SLOTS = T_MXFP4 + 1 };
+// Weight-mmap wraps. Enough for a 64 GB monolithic file at the M1's 4.29 GB
+// per-buffer ceiling, with room to spare; exceeding it is reported, not
+// silently truncated.
+enum { METAL_MAX_WBUF = 24 };
 
 typedef struct {
     id<MTLDevice>       dev;
@@ -26,7 +30,22 @@ typedef struct {
     id<MTLComputePipelineState> p_mm[METAL_TYPE_SLOTS];       // tiled prefill GEMM
     id<MTLComputePipelineState> p_mvf[METAL_TYPE_SLOTS];      // fast decode matvec
     id<MTLComputePipelineState> p_moe_mv[METAL_TYPE_SLOTS];   // indexed by ggml type
-    id<MTLBuffer> weights;                      // wraps the model mmap (zero copy)
+    // The model mmap, wrapped zero-copy. Usually ONE buffer; more when the file
+    // exceeds maxBufferLength, which on an M1 is 4.29 GB against a 5.73 GB
+    // working set (0.75x) and is the ceiling that actually bites for a big
+    // monolithic GGUF.
+    //
+    // The split is at TENSOR boundaries, so no tensor ever straddles two
+    // buffers and no kernel had to learn about this: a dispatch reads exactly
+    // one weight tensor, so binding the containing buffer and passing an
+    // offset within it is all that changes. Adjacent wraps may overlap by one
+    // page, because a no-copy wrap must start page-aligned and tensors are
+    // not; wrapping the same read-only pages twice costs a page of mapping and
+    // keeps every tensor whole.
+    id<MTLBuffer> wbuf[METAL_MAX_WBUF];
+    uint64_t      wbuf_base[METAL_MAX_WBUF];   // file offset of each wrap's byte 0
+    uint64_t      wbuf_end[METAL_MAX_WBUF];    // one past its last file offset
+    int           n_wbuf;
     bool          weights_copied;
     id<MTLBuffer> kc, vc;
     id<MTLBuffer> x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
@@ -158,7 +177,8 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     free(g->sinks); free(g->gib); free(g->geb); free(g->ueb); free(g->deb);
     free(g->pan); free(g->pfn);
     free(g->gpn1); free(g->gprn2); free(g->gpn2); free(g->ggis); free(g->gdsc);
-    id<MTLBuffer> bufs[] = { g->weights, g->kc, g->vc, g->x, g->xb, g->xb2,
+    for (int i = 0; i < g->n_wbuf; i++) [g->wbuf[i] release];
+    id<MTLBuffer> bufs[] = { g->kc, g->vc, g->x, g->xb, g->xb2,
                              g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
                              g->logits, g->moe_logits, g->moe_sel, g->moe_selw,
                              g->moe_hb, g->moe_hb2, g->moe_eout,
@@ -584,6 +604,184 @@ bool gpu_kv_q8_ok(void) {
 // from the page cache the remaining layers stream through, so on a heavily
 // oversubscribed machine it makes the tail page harder than before. Explicit
 // --gpu-layers bypasses this: an operator asking for a specific split gets it.
+static bool metal_wrap_check(gpu_t *g, model_t *m, uint64_t wlen);
+
+// Per-buffer ceiling for the weight wraps. RUNNER_METAL_MAX_BUF overrides the
+// device's maxBufferLength so the multi-buffer path can be exercised on a
+// machine whose models all fit one buffer -- which is every machine this was
+// developed on. Without a knob the split path would ship untested.
+static uint64_t metal_wbuf_cap(id<MTLDevice> dev) {
+    const char *e = getenv("RUNNER_METAL_MAX_BUF");
+    if (e && *e) {
+        long long v = atoll(e);
+        if (v > 0) return (uint64_t)v;
+    }
+    return (uint64_t)dev.maxBufferLength;
+}
+
+// Wrap [0, wlen) of the model mmap in as few zero-copy buffers as the
+// per-buffer ceiling allows, cutting only at TENSOR boundaries so no tensor is
+// ever split across two of them. That is what lets every kernel stay unchanged:
+// a dispatch reads exactly one weight tensor, so the caller binds the
+// containing buffer and passes an offset within it.
+//
+// Wraps may overlap by up to a page. A no-copy wrap must begin page-aligned
+// and tensors are not page-aligned, so a cut rounds its base DOWN to a page,
+// which re-includes the tail of the previous group. Those bytes are read-only
+// and never addressed through the second wrap; the cost is one page of extra
+// mapping per cut, and the alternative (cutting mid-tensor) is a correctness
+// bug.
+static bool metal_wrap_weights(gpu_t *g, model_t *m, id<MTLDevice> dev,
+                               uint64_t wlen, size_t page) {
+    uint64_t cap = metal_wbuf_cap(dev);
+    g->n_wbuf = 0;
+    if (wlen == 0 || cap == 0) return false;
+
+    // Tensor extents inside the wrapped prefix, in file order. GGUF writes
+    // them ascending, but nothing in the format promises it, and a descending
+    // file would silently produce overlapping groups -- so sort.
+    uint64_t n = m->gf.n_tensors;
+    typedef struct { uint64_t beg, end; } ext;
+    ext *ex = calloc(n ? n : 1, sizeof(ext));
+    if (!ex) return false;
+    uint64_t n_ex = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        gguf_tensor *t = &m->gf.tensors[i];
+        if (!t->data) continue;
+        uint64_t beg = (uint64_t)((uint8_t *)t->data - (uint8_t *)m->gf.map);
+        uint64_t end = beg + t->nbytes;
+        if (beg >= wlen) continue;          // beyond the wrapped prefix
+        if (end > wlen) end = wlen;
+        ex[n_ex].beg = beg;
+        ex[n_ex].end = end;
+        n_ex++;
+    }
+    if (n_ex == 0) { free(ex); return false; }
+    for (uint64_t i = 1; i < n_ex; i++) {   // insertion sort: near-sorted input
+        ext k = ex[i];
+        uint64_t j = i;
+        while (j > 0 && ex[j - 1].beg > k.beg) { ex[j] = ex[j - 1]; j--; }
+        ex[j] = k;
+    }
+
+    uint64_t gi = 0;
+    while (gi < n_ex) {
+        if (g->n_wbuf >= METAL_MAX_WBUF) {
+            fprintf(stderr, "gpu: this model needs more than %d weight buffers "
+                    "at a %.2f GB per-buffer limit — not wrapping\n",
+                    METAL_MAX_WBUF, cap / 1e9);
+            free(ex);
+            return false;
+        }
+        uint64_t base = ex[gi].beg & ~(uint64_t)(page - 1);
+        uint64_t last = ex[gi].end;
+        if (last - base > cap) {
+            // One tensor bigger than the ceiling. Nothing here can split it,
+            // and pretending otherwise would wrap it short.
+            fprintf(stderr, "gpu: a single %.2f GB tensor exceeds the %.2f GB "
+                    "per-buffer limit — not wrapping\n",
+                    (double)(ex[gi].end - ex[gi].beg) / 1e9, cap / 1e9);
+            free(ex);
+            return false;
+        }
+        uint64_t gj = gi + 1;
+        while (gj < n_ex && ex[gj].end - base <= cap) { last = ex[gj].end; gj++; }
+
+        uint64_t len = (last - base + page - 1) & ~(uint64_t)(page - 1);
+        if (base + len > m->gf.map_size) len = m->gf.map_size - base;
+        id<MTLBuffer> b = [dev newBufferWithBytesNoCopy:(uint8_t *)m->gf.map + base
+                                                 length:(NSUInteger)len
+                                                options:MTLResourceStorageModeShared
+                                            deallocator:nil];
+        if (!b) {
+            for (int i = 0; i < g->n_wbuf; i++) { [g->wbuf[i] release]; g->wbuf[i] = nil; }
+            g->n_wbuf = 0;
+            free(ex);
+            return false;
+        }
+        g->wbuf[g->n_wbuf] = b;
+        g->wbuf_base[g->n_wbuf] = base;
+        g->wbuf_end[g->n_wbuf] = base + len;
+        g->n_wbuf++;
+        gi = gj;
+    }
+    free(ex);
+    if (!metal_wrap_check(g, m, wlen)) {
+        for (int i = 0; i < g->n_wbuf; i++) { [g->wbuf[i] release]; g->wbuf[i] = nil; }
+        g->n_wbuf = 0;
+        return false;
+    }
+    if (g->n_wbuf > 1)
+        fprintf(stderr, "gpu: weights wrapped in %d buffers (%.2f GB "
+                "per-buffer limit)\n", g->n_wbuf, cap / 1e9);
+    return true;
+}
+
+// Which wrap holds [off, off+len), and where inside it. The LENGTH is part of
+// the question: a kernel reads a whole tensor, and a wrap that contains the
+// first byte but not the last would read past its own mapping. Linear over at
+// most METAL_MAX_WBUF entries, and one compare in the single-buffer case.
+//
+// Returns nil only when no single wrap contains the range, which
+// metal_wrap_check() has already ruled out at init -- so a nil here is a
+// programming error, and the callers say so rather than binding something
+// plausible and returning wrong numbers.
+static id<MTLBuffer> metal_wbuf_for(gpu_t *g, uint64_t off, uint64_t len,
+                                    uint64_t *within) {
+    for (int i = 0; i < g->n_wbuf; i++)
+        if (off >= g->wbuf_base[i] && off + len <= g->wbuf_end[i]) {
+            *within = off - g->wbuf_base[i];
+            return g->wbuf[i];
+        }
+    *within = 0;
+    return nil;
+}
+
+// Bind helper for the three sites that address the weight mmap. Keeps the
+// fallback in ONE place: with a single wrap the resolver always succeeds, so
+// this degrades to exactly the old behaviour and the diagnostic can never fire.
+static uint64_t metal_bind_weights(gpu_t *g, id<MTLComputeCommandEncoder> e,
+                                   uint64_t off, uint64_t len) {
+    uint64_t within = 0;
+    id<MTLBuffer> wb = metal_wbuf_for(g, off, len, &within);
+    if (!wb) {
+        static bool told;
+        if (!told) {
+            told = true;
+            fprintf(stderr, "gpu: internal — no weight wrap holds [%llu,+%llu); "
+                    "results from this model are not trustworthy\n",
+                    (unsigned long long)off, (unsigned long long)len);
+        }
+        wb = g->wbuf[0];
+        within = off;
+    }
+    [e setBuffer:wb offset:0 atIndex:0];
+    return within;
+}
+
+// Every range a kernel will address must sit inside ONE wrap. The split is
+// made at tensor boundaries so this holds by construction; checking it turns a
+// silent wrong-answer bug into a refusal that falls back to a copied buffer.
+// MoE expert banks are checked at full tensor length because the kernel strides
+// across experts from the base offset, so the whole stack has to be reachable.
+static bool metal_wrap_check(gpu_t *g, model_t *m, uint64_t wlen) {
+    for (uint64_t i = 0; i < m->gf.n_tensors; i++) {
+        gguf_tensor *t = &m->gf.tensors[i];
+        if (!t->data) continue;
+        uint64_t beg = (uint64_t)((uint8_t *)t->data - (uint8_t *)m->gf.map);
+        if (beg >= wlen) continue;
+        uint64_t len = t->nbytes;
+        if (beg + len > wlen) len = wlen - beg;
+        uint64_t within;
+        if (!metal_wbuf_for(g, beg, len, &within)) {
+            fprintf(stderr, "gpu: tensor %s straddles a weight-buffer boundary "
+                    "— not wrapping\n", t->name);
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool metal_partial_pays(const model_t *m, uint64_t wrapped) {
     uint64_t have = plat_ram_available_bytes();
     if (!have) return false;                 // cannot tell: do not gamble
@@ -880,17 +1078,18 @@ bool gpu_init(model_t *m) {
         }
     }
 
-    g->weights = [dev newBufferWithBytesNoCopy:m->gf.map
-                                        length:wlen
-                                       options:MTLResourceStorageModeShared
-                                   deallocator:nil];
-    if (!g->weights) {
-        // fallback: copy (costs RAM but still works)
-        g->weights = [dev newBufferWithBytes:m->gf.map
+    if (!metal_wrap_weights(g, m, dev, wlen, page)) {
+        // fallback: copy (costs RAM but still works). One buffer by
+        // definition -- a copy this large only happens for a model well under
+        // the per-buffer ceiling, since the ceiling is what forced the split.
+        g->wbuf[0] = [dev newBufferWithBytes:m->gf.map
                                       length:m->gf.map_size
                                      options:MTLResourceStorageModeShared];
+        g->wbuf_base[0] = 0;
+        g->wbuf_end[0] = m->gf.map_size;
+        g->n_wbuf = g->wbuf[0] ? 1 : 0;
         g->weights_copied = true;
-        if (!g->weights) {
+        if (!g->wbuf[0]) {
             // say what was asked for and what the device allows — the RAM
             // warning two lines below this in a load gives numbers, and a
             // bare "allocation failed" gives a scheduler nothing to reason
@@ -1174,11 +1373,12 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
         n_in % 32 == 0 &&
         !((w->type == T_Q4_K || w->type == T_Q6_K || w->type == T_Q2_K ||
            w->type == T_Q3_K || w->type == T_IQ4_XS) && n_in % 256 != 0)) {
-        mm_args ma = { n_in, n_out, n_col,
-                       (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
-                       bias != nil, x_stride, y_stride };
         [e setComputePipelineState:g->p_mm[w->type]];
-        [e setBuffer:g->weights offset:0 atIndex:0];
+        mm_args ma = { n_in, n_out, n_col,
+                       metal_bind_weights(g, e,
+                           (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
+                           w->nbytes),
+                       bias != nil, x_stride, y_stride };
         [e setBuffer:x offset:x_off atIndex:1];
         [e setBuffer:y offset:y_off atIndex:2];
         [e setBytes:&ma length:sizeof(ma) atIndex:3];
@@ -1197,8 +1397,7 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
     }
     int col_tile = metal_col_tile();
     if (col_tile > n_col) col_tile = n_col;
-    mv_args a = { n_in, n_out,
-                  (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
+    mv_args a = { n_in, n_out, 0,
                   bias != nil, n_col, x_stride, y_stride, col_tile };
     // Fast decode matvec: single column only. At n_col > 1 either the tiled
     // GEMM above already took the work, or this type has no mm kernel and the
@@ -1215,7 +1414,9 @@ static void enc_mv_n(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
         g_disp.mv++;
     }
     [e setComputePipelineState:mv];
-    [e setBuffer:g->weights offset:0 atIndex:0];
+    a.w_off = metal_bind_weights(g, e,
+                  (uint64_t)((uint8_t *)w->data - (uint8_t *)m->gf.map),
+                  w->nbytes);
     [e setBuffer:x offset:x_off atIndex:1];
     [e setBuffer:y offset:y_off atIndex:2];
     [e setBytes:&a length:sizeof(a) atIndex:3];
@@ -1371,11 +1572,12 @@ static void enc_moe_mv(gpu_t *g, id<MTLComputeCommandEncoder> e, model_t *m,
                        id<MTLBuffer> y, NSUInteger y_off,
                        int n_in, int n_out, int nslots, int xs, int ys,
                        id<MTLBuffer> bias, int bias_stride) {
-    moe_args a = { n_in, n_out,
-                   (uint64_t)((uint8_t *)base->data - (uint8_t *)m->gf.map),
-                   estride, xs, ys, bias != nil, bias_stride };
     [e setComputePipelineState:g->p_moe_mv[base->type]];
-    [e setBuffer:g->weights offset:0 atIndex:0];
+    moe_args a = { n_in, n_out,
+                   metal_bind_weights(g, e,
+                       (uint64_t)((uint8_t *)base->data - (uint8_t *)m->gf.map),
+                       base->nbytes),
+                   estride, xs, ys, bias != nil, bias_stride };
     [e setBuffer:x offset:x_off atIndex:1];
     [e setBuffer:y offset:y_off atIndex:2];
     [e setBytes:&a length:sizeof(a) atIndex:3];
