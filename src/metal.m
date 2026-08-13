@@ -490,6 +490,15 @@ static id<MTLComputePipelineState> mk_pipeline(id<MTLDevice> dev,
     [fn release];
     if (!p) fprintf(stderr, "gpu: pipeline %s failed: %s\n",
                     name.UTF8String, err.localizedDescription.UTF8String);
+    // Threadgroup memory is the occupancy currency: an Apple GPU core has
+    // 32 KB of it, so a kernel asking 14 KB gets 2 resident threadgroups and
+    // one asking 8 KB gets 4. That ratio is invisible from throughput alone,
+    // and a tile-shape sweep that cannot see it is guessing.
+    if (p && metal_env_on("RUNNER_METAL_STATS"))
+        fprintf(stderr, "metal-pipeline %-16s tgmem=%5lu B  max_threads=%lu\n",
+                name.UTF8String,
+                (unsigned long)p.staticThreadgroupMemoryLength,
+                (unsigned long)p.maxTotalThreadsPerThreadgroup);
     return p;
 }
 
