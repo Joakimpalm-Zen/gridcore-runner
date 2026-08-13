@@ -251,11 +251,15 @@ def run_command(command, timeout):
     }
 
 
-def run_tokenizer(model, reference, corpus, timeout):
-    result = run_command([
-        sys.executable, str(TOKENIZER_SCRIPT), "--gguf", str(model), "--ref", reference,
-        "--corpus", str(corpus), "--expect", "0",
-    ], timeout)
+def run_tokenizer(model, reference, corpus, timeout, reference_ids=None):
+    command = [sys.executable, str(TOKENIZER_SCRIPT),
+               "--gguf", str(model)]
+    if reference_ids is not None:
+        command += ["--ref-ids", str(reference_ids)]
+    else:
+        command += ["--ref", reference]
+    command += ["--corpus", str(corpus), "--expect", "0"]
+    result = run_command(command, timeout)
     if result["status"] == "fail" and "strings differ" not in result.get("stdout_tail", ""):
         detail = (result.get("stdout_tail", "") + result.get("stderr_tail", "")).lower()
         if any(marker in detail for marker in (
@@ -346,16 +350,26 @@ def main(argv=None):
                 declared = entry.get("checks", [])
                 if "tokenizer" in declared:
                     tok_ref = entry.get("tokenizer_reference")
+                    tok_ids = entry.get("tokenizer_reference_ids")
+                    if tok_ids:
+                        tok_ids = Path(tok_ids)
+                        if not tok_ids.is_absolute():
+                            tok_ids = ROOT / tok_ids
                     corpus = ROOT / "tests/fixtures/tokenizer-corpus.txt"
-                    if not tok_ref:
+                    if not tok_ref and not tok_ids:
                         item["checks"]["tokenizer"] = {
                             "status": "not_executed", "reason": "tokenizer_reference_not_declared"}
+                    elif tok_ids and not tok_ids.is_file():
+                        item["checks"]["tokenizer"] = {
+                            "status": "not_executed",
+                            "reason": "tokenizer_reference_capture_not_found"}
                     elif not corpus.is_file():
                         item["checks"]["tokenizer"] = {
                             "status": "not_executed", "reason": "tokenizer_corpus_not_found"}
                     else:
                         item["checks"]["tokenizer"] = run_tokenizer(
-                            path, tok_ref, corpus, args.timeout)
+                            path, tok_ref, corpus, args.timeout,
+                            reference_ids=tok_ids)
                         failed |= item["checks"]["tokenizer"]["status"] != "pass"
                 for cls, fn in (("cpu_cuda", run_cpu_cuda),
                                 ("chat", run_chat),

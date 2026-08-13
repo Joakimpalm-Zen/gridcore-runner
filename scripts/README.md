@@ -59,7 +59,8 @@ runner; several are load-bearing gates for changing it.
   (via `tests/test_ornith_cpu.py`).
 - **`make-vocab-fixture.py`** — tokenizer vocab fixtures in `tests/fixtures/`.
 - **`tokenizer-corpus.py` / `difftok.py`** — regenerate / diff the 721-string
-  tokenizer conformance corpus against HuggingFace reference tokenizers.
+  tokenizer conformance corpus against Hugging Face reference tokenizers;
+  revision-bound `--capture` files make the reference side replayable offline.
 - **`ornith-reference.py`** — reference layout contract for Ornith GGUFs
   (unit-tested by `tests/test_ornith_reference.py`).
 - **`embed-ptx.py`** — embeds `src/kernels.ptx` into `src/kernels_ptx.h`

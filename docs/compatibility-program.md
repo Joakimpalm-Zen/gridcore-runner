@@ -93,11 +93,12 @@ with the GGUF and immutable reference revision from the published report.
 That run needs the network, and for a gated repo it needs credentials — which
 is what has kept this check off contributors' machines and out of CI. The
 reference tokenization of a fixed corpus is a constant, so it only has to be
-fetched once: add `--capture PATH` to an authenticated run to write the
-reference ids out, then every later run replays them with `--ref-ids PATH` and
-touches no network at all. A capture records the SHA-256 of the exact corpus it
-was taken against and refuses to be replayed against a different one, because
-ids compared to the wrong strings would report confident nonsense.
+fetched once: add `--capture PATH --ref-revision COMMIT` to an authenticated
+run to write the reference ids out, then every later run replays them with
+`--ref-ids PATH` and touches no network at all. A capture records the immutable
+reference revision and the SHA-256 of the exact corpus it was taken against;
+replay refuses a different corpus because ids compared to the wrong strings
+would report confident nonsense.
 
 Note that a capture cannot be reconstructed from the published compat reports.
 Their `stdout_tail` records the diverging cases in full — string, runner ids

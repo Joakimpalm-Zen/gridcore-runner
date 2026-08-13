@@ -54,6 +54,8 @@
       "file": "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
       "sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
       "tokenizer_reference": "mistralai/Mistral-7B-Instruct-v0.3",
+      "tokenizer_reference_revision": "c170c708c41dac9275d15a8fff4eca08d52bab71",
+      "tokenizer_reference_ids": "tests/compatibility/tokenizer-references/mistral-7b-instruct-v0.3.json",
       "reference": {
         "implementation": "llama.cpp",
         "revision": "b10076"
@@ -239,6 +241,8 @@
       "file": "models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
       "sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
       "tokenizer_reference": "microsoft/Phi-3.5-mini-instruct",
+      "tokenizer_reference_revision": "2fe192450127e6a83f7441aef6e3ca586c338b77",
+      "tokenizer_reference_ids": "tests/compatibility/tokenizer-references/phi-3.5-mini-instruct.json",
       "reference": {
         "implementation": "llama.cpp",
         "revision": "b10076"
@@ -672,6 +676,8 @@
       "file": "models/Lucie-7B-Instruct-Q4_K_M.gguf",
       "sha256": "0d889e0c126eb0424e478029dd9198af2afdffce29b0d98a86455c3c5b506db3",
       "tokenizer_reference": "OpenLLM-France/Lucie-7B-Instruct-v1.1",
+      "tokenizer_reference_revision": "5242dfecd662b2637176df3caad15a9d0fec6c0f",
+      "tokenizer_reference_ids": "tests/compatibility/tokenizer-references/lucie-7b-instruct-v1.1.json",
       "reference": {
         "implementation": "llama.cpp",
         "revision": "b10076"
@@ -810,6 +816,8 @@
       "file": "models/salamandra-7b-instruct-Q4_K_M-f32.gguf",
       "sha256": "bac8e8c1d1d9d53cbdb148b8ff9ad378ddb392429207099e85b5aae3a43bff3d",
       "tokenizer_reference": "BSC-LT/salamandra-7b-instruct",
+      "tokenizer_reference_revision": "a3ed5452fafb3698a0423b1a18bfb5888f4e611b",
+      "tokenizer_reference_ids": "tests/compatibility/tokenizer-references/salamandra-7b-instruct.json",
       "reference": {
         "implementation": "llama.cpp",
         "revision": "b10076"

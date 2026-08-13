@@ -47,6 +47,12 @@ def test_model_manifest_covers_every_claimed_architecture():
         assert model["reference"]["implementation"] == "llama.cpp"
         assert model["reference"]["revision"]
         assert model["checks"]
+        capture_path = model.get("tokenizer_reference_ids")
+        if capture_path:
+            capture = json.loads((ROOT / capture_path).read_text())
+            assert capture["ref"] == model["tokenizer_reference"]
+            assert capture["ref_revision"] == model["tokenizer_reference_revision"]
+            assert len(capture["ids"]) == 721
 
 
 def test_manifest_validation_rejects_duplicate_ids(tmp_path):
@@ -250,6 +256,23 @@ def test_unavailable_tokenizer_reference_is_skip_not_failure(tmp_path):
         ROOT / "tests/fixtures/tokenizer-corpus.txt", 10)
     assert result["status"] == "not_executed"
     assert result["reason"] == "tokenizer_reference_unavailable"
+
+
+def test_tokenizer_capture_is_replayed_without_network_reference(tmp_path):
+    module = load_module()
+    script = tmp_path / "difftok.py"
+    script.write_text(
+        "import sys\nprint('ARGS ' + ' '.join(sys.argv[1:]))\n")
+    module.TOKENIZER_SCRIPT = script
+    capture = tmp_path / "reference-ids.json"
+    capture.write_text("{}")
+    result = module.run_tokenizer(
+        tmp_path / "model.gguf", "gated/model",
+        ROOT / "tests/fixtures/tokenizer-corpus.txt", 10,
+        reference_ids=capture)
+    assert result["status"] == "pass"
+    assert f"--ref-ids {capture}" in result["stdout_tail"]
+    assert "--ref gated/model" not in result["stdout_tail"]
 
 
 # ------------------------------------------- executable check contracts (v2)

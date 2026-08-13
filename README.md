@@ -971,7 +971,7 @@ files by SHA-256 and declares checks independently:
 | Check | Meaning |
 |---|---|
 | `load` | The pinned file hashes and loads. |
-| `tokenizer` | The committed 721-string corpus is compared with the model's Hugging Face tokenizer. |
+| `tokenizer` | The committed 721-string corpus is compared with the model's Hugging Face tokenizer; revision-bound ID captures make declared rows replayable offline. |
 | `greedy_reference` | Greedy tokens are compared with a pinned llama.cpp revision. |
 | `cpu_cuda` | CPU and CUDA scalar-path greedy output are compared. |
 | `chat` | A real Chat Completions request answers through the model template. |
@@ -998,6 +998,13 @@ declares a reference and the corpus exists, and greedy reference when both
 binaries and the pinned model are present. Every other declared check, and any
 check missing a prerequisite, is retained as `not_executed` with a machine-
 readable reason; absence from a run is never presented as a pass.
+
+Tokenizer rows with `tokenizer_reference_ids` use the committed capture rather
+than the network. Each capture names the Hugging Face repository and immutable
+revision, binds itself to the corpus SHA-256, and contains only token IDs—never
+credentials or model weights. `scripts/difftok.py --ref-ids CAPTURE` is the
+standalone replay path; `--capture CAPTURE --ref-revision COMMIT` creates one
+during an authenticated evidence run.
 
 - Qwen3-4B's 2026-08-03 scalar CPU/CUDA recheck passed 4 of 5 prompts at 128
   tokens, so there is no blanket identity claim for that file.

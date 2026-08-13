@@ -7,6 +7,12 @@ were written.
 
 ## Unreleased
 
+- Tokenizer differentials can now replay revision-bound Hugging Face reference
+  ID captures without network access or credentials. The four outstanding
+  divergent rows (Mistral-7B-v0.3, Phi-3.5-mini, Lucie-7B and Salamandra-7B)
+  carry committed 721-string captures, and a fresh Blackwell build reproduced
+  their established 44/2/259/16 divergence counts exactly.
+
 ## v0.1.17-alpha — 2026-08-13
 
 Forty-seven commits since v0.1.16-alpha: two operator-facing capabilities,

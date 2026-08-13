@@ -67,14 +67,15 @@ def corpus_digest(corpus):
     return h.hexdigest()
 
 
-def reference_tokenizer(ref):
+def reference_tokenizer(ref, revision=None):
     from tokenizers import Tokenizer
 
     if os.path.isdir(ref):
         return Tokenizer.from_file(os.path.join(ref, "tokenizer.json"))
     if os.path.isfile(ref):
         return Tokenizer.from_file(ref)
-    return Tokenizer.from_pretrained(ref)
+    return Tokenizer.from_pretrained(
+        ref, revision=revision or "main", token=os.environ.get("HF_TOKEN"))
 
 
 def main():
@@ -84,6 +85,8 @@ def main():
                     help="HF repo id, a directory containing tokenizer.json, "
                          "or a path to tokenizer.json. Not needed with "
                          "--ref-ids.")
+    ap.add_argument("--ref-revision",
+                    help="immutable Hugging Face revision used by --ref")
     # Offline reference. Loading --ref by repo id needs the network and, for a
     # gated repo, credentials -- which is what keeps this check out of CI and
     # off contributors' machines. The reference tokenization of a fixed corpus
@@ -131,11 +134,12 @@ def main():
     else:
         if not args.ref:
             raise SystemExit("one of --ref or --ref-ids is required")
-        tok = reference_tokenizer(args.ref)
+        tok = reference_tokenizer(args.ref, args.ref_revision)
         theirs = [tok.encode(s, add_special_tokens=False).ids for s in corpus]
         if args.capture:
             with open(args.capture, "w", encoding="utf-8") as f:
                 json.dump({"ref": args.ref,
+                           "ref_revision": args.ref_revision,
                            "corpus": os.path.basename(args.corpus),
                            "corpus_sha256": corpus_digest(corpus),
                            "ids": theirs}, f)
