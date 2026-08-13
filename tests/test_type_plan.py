@@ -122,10 +122,10 @@ def test_untargeted_tensors_are_byte_identical(runner_bin, moe_model, tmp_path):
 def test_unknown_type_is_rejected_not_silently_ignored(runner_bin, moe_model, tmp_path):
     out = tmp_path / "bad"
     proc = run_plan(runner_bin, moe_model, out,
-                    {"default": "keep", "rules": [{"match": "x", "type": "q3_k"}]},
+                    {"default": "keep", "rules": [{"match": "x", "type": "q2_k"}]},
                     tmp_path)
     assert proc.returncode != 0
-    assert b"q3_k" in proc.stderr
+    assert b"q2_k" in proc.stderr
     assert not pathlib.Path(out).exists()
 
 

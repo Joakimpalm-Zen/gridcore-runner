@@ -67,6 +67,10 @@ evaluation's worth of findings. Grouped by what a user notices first.
   behind the selective-precision artifact class: per-tensor-class
   precision is the finest GGUF can express (experts are stacked), and it
   is enough — see Artifacts.
+- **Q3_K writer for `--type-plan`**: stacked MoE expert banks can now move to
+  Q3_K while unmatched attention/shared tensors remain byte-identical. A
+  hermetic in-process GGUF test pins the writer/reader layout, exact grid
+  round-trip, and exact zero.
 - **Quality bar v2**: gate tooling reports margin-qualified top-1
   (0.5-nat reference-side tie band, derived from the tc-tol precedent)
   beside plain top-1, both always printed. Adopted as the publication

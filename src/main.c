@@ -160,7 +160,7 @@ static void usage(const char *prog) {
         "  --type-plan PLAN.json  per-tensor precision while rewriting:\n"
         "                 {\"default\":\"keep\",\"rules\":[{\"match\":\"_exps.weight\",\n"
         "                 \"type\":\"q4_0\"}]}. First matching rule wins; types are\n"
-        "                 keep|q8_0|q4_0|f16. Per-tensor is the finest GGUF can\n"
+        "                 keep|q8_0|q4_0|q3_k|f16. Per-tensor is the finest GGUF can\n"
         "                 express: experts are stored stacked, one tensor per\n"
         "                 layer, so per-EXPERT precision is not representable\n"
         "  --prune-experts LIST.json  drop MoE experts per layer while\n"

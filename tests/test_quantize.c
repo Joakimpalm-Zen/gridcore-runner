@@ -267,6 +267,35 @@ static void check_qat_exact(const char *path, const float *want, size_t n) {
     gguf_close(&g);
 }
 
+// Q3_K writer tracer bullet: a hermetic expert tensor already on a simple
+// Q3_K grid must survive the writer -> existing reader round trip exactly,
+// including zero.  The attention tensor is outside the type-plan rule and
+// must retain both its type and its source bytes.
+static void check_q3_plan_exact(const char *path, const float *want,
+                                const float *kept, size_t n) {
+    gguf_file g;
+    assert(gguf_open(&g, path));
+    gguf_tensor *q = gguf_find_tensor(&g, "blk.0.ffn_down_exps.weight");
+    gguf_tensor *k = gguf_find_tensor(&g, "blk.0.attn_q.weight");
+    assert(q && q->type == T_Q3_K);
+    assert(k && k->type == T_F32);
+    assert(memcmp(k->data, kept, n * sizeof(float)) == 0);
+    float *got = malloc(n * sizeof(float));
+    assert(got);
+    dequant_row(q->type, q->data, got, (int)n);
+    for (size_t i = 0; i < n; i++) {
+        if (got[i] != want[i]) {
+            fprintf(stderr, "Q3_K exact round-trip mismatch at %zu: got %.9g want %.9g\n",
+                    i, (double)got[i], (double)want[i]);
+            assert(0);
+        }
+        if (want[i] == 0.0f)
+            assert(memcmp(&got[i], &want[i], sizeof(float)) == 0);
+    }
+    free(got);
+    gguf_close(&g);
+}
+
 int main(void) {
     f16_init();   // dequant_row's scale lookup table (unused by the quantizer
                   // itself, but the round-trip check below dequantizes)
@@ -310,6 +339,34 @@ int main(void) {
         check_qat_exact(qat_out, qw, QAT_N);
         remove(qat); remove(qat_out);
         printf("ok: a QAT-grid source repacks to q4_0 bit-exactly\n");
+    }
+
+
+    // Q3_K selective writer: only the expert tensor changes precision.
+    {
+        const char *q3in = "q_q3_in.gguf", *q3out = "q_q3_out.gguf";
+        const char *plan = "q_q3_plan.json";
+        enum { Q3_N = 256 };
+        static float expert[Q3_N], attention[Q3_N];
+        for (int i = 0; i < Q3_N; i++) {
+            expert[i] = 0.25f * (float)((i % 8) - 4);
+            attention[i] = (float)i * 0.001f + 1.0f;
+        }
+        tdesc q3ts[2] = {
+            { "blk.0.ffn_down_exps.weight", {Q3_N, 1}, 2, expert, Q3_N },
+            { "blk.0.attn_q.weight",        {Q3_N, 1}, 2, attention, Q3_N },
+        };
+        write_gguf(q3in, q3ts, 2, 0);
+        FILE *pf = fopen(plan, "wb");
+        assert(pf);
+        const char plan_json[] =
+            "{\"default\":\"keep\",\"rules\":[{\"match\":\"_exps.weight\",\"type\":\"q3_k\"}]}";
+        assert(fwrite(plan_json, 1, sizeof(plan_json) - 1, pf) == sizeof(plan_json) - 1);
+        fclose(pf);
+        assert(quantize_gguf_plan(q3in, q3out, T_KEEP, NULL, plan) == 0);
+        check_q3_plan_exact(q3out, expert, attention, Q3_N);
+        remove(q3in); remove(q3out); remove(plan);
+        printf("ok: Q3_K plan round-trips exactly and preserves unselected bytes\n");
     }
 
     // RNR-015: in-place requant must not truncate its own input

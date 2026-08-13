@@ -25,6 +25,10 @@
 
 typedef struct { f16_t d; uint8_t qs[16]; } wblock_q4_0;
 typedef struct { f16_t d; int8_t qs[32]; }  wblock_q8_0;
+typedef struct {
+    uint8_t hmask[32], qs[64], scales[12];
+    f16_t d;
+} wblock_q3_K;
 
 static void quantize_row_q8_0(const float *x, uint8_t *dst, int n) {
     wblock_q8_0 *b = (wblock_q8_0 *)dst;
@@ -122,6 +126,116 @@ static void quantize_row_q4_0(const float *x, uint8_t *dst, int n) {
             if (q1 < 0) q1 = 0;
             b->qs[j] = (uint8_t)(q0 | (q1 << 4));
         }
+    }
+}
+
+static int nearest_int(float v) {
+    // Exact ggml reference rounding for K-quants (nearest, ties-to-even for
+    // the default IEEE environment), avoiding a libm implementation choice.
+    float biased = v + 12582912.0f;
+    int bits;
+    memcpy(&bits, &biased, sizeof(bits));
+    return (bits & 0x007fffff) - 0x00400000;
+}
+
+static float make_q3_quants(const float *x, int8_t *q) {
+    float vmax = 0.0f, amax = 0.0f;
+    for (int i = 0; i < 16; i++) {
+        float a = fabsf(x[i]);
+        if (a > amax) { amax = a; vmax = x[i]; }
+    }
+    if (amax < 1e-15f) {
+        memset(q, 0, 16);
+        return 0.0f;
+    }
+    float iscale = -4.0f / vmax;
+    float sumlx = 0.0f, suml2 = 0.0f;
+    for (int i = 0; i < 16; i++) {
+        int l = nearest_int(iscale * x[i]);
+        if (l < -4) l = -4;
+        if (l > 3) l = 3;
+        q[i] = (int8_t)l;
+        float w = x[i] * x[i];
+        sumlx += w * x[i] * l;
+        suml2 += w * l * l;
+    }
+    for (int itry = 0; itry < 5; itry++) {
+        int changed = 0;
+        for (int i = 0; i < 16; i++) {
+            float w = x[i] * x[i];
+            float slx = sumlx - w * x[i] * q[i];
+            if (slx <= 0.0f) continue;
+            float sl2 = suml2 - w * q[i] * q[i];
+            int l = nearest_int(x[i] * sl2 / slx);
+            if (l < -4) l = -4;
+            if (l > 3) l = 3;
+            if (l == q[i]) continue;
+            slx += w * x[i] * l;
+            sl2 += w * l * l;
+            if (sl2 > 0.0f && slx * slx * suml2 > sumlx * sumlx * sl2) {
+                q[i] = (int8_t)l;
+                sumlx = slx;
+                suml2 = sl2;
+                changed++;
+            }
+        }
+        if (!changed) break;
+    }
+    for (int i = 0; i < 16; i++) q[i] += 4;
+    return suml2 > 0.0f ? sumlx / suml2 : 0.0f;
+}
+
+// GGML Q3_K's 256-value super-block: sixteen signed 3-bit groups, with the
+// group scales themselves quantized to signed 6-bit values.  The layout is
+// deliberately the inverse of dq_q3_K in quants.c; the hermetic writer test
+// drives that existing reader, so a layout disagreement cannot pass.
+static void quantize_row_q3_K(const float *x, uint8_t *dst, int n) {
+    wblock_q3_K *out = (wblock_q3_K *)dst;
+    for (int ib = 0; ib < n / 256; ib++, out++, x += 256) {
+        int8_t q[256];
+        float scales[16];
+        float max_scale = 0.0f, amax = 0.0f;
+        for (int j = 0; j < 16; j++) {
+            scales[j] = make_q3_quants(x + 16 * j, q + 16 * j);
+            float a = fabsf(scales[j]);
+            if (a > amax) { amax = a; max_scale = scales[j]; }
+        }
+        memset(out, 0, sizeof(*out));
+        if (max_scale != 0.0f) {
+            float iscale = -32.0f / max_scale;
+            for (int j = 0; j < 16; j++) {
+                int l = nearest_int(iscale * scales[j]);
+                if (l < -32) l = -32;
+                if (l > 31) l = 31;
+                l += 32;
+                if (j < 8) out->scales[j] = (uint8_t)(l & 15);
+                else out->scales[j - 8] |= (uint8_t)((l & 15) << 4);
+                out->scales[j % 4 + 8] |= (uint8_t)((l >> 4) << (2 * (j / 4)));
+            }
+            out->d = f32_to_f16(1.0f / iscale);
+        }
+        for (int j = 0; j < 16; j++) {
+            int sc = j < 8 ? out->scales[j] & 15 : out->scales[j - 8] >> 4;
+            sc = (sc | (((out->scales[8 + j % 4] >> (2 * (j / 4))) & 3) << 4)) - 32;
+            float d = f16_to_f32(out->d) * sc;
+            if (d == 0.0f) continue;
+            for (int k = 0; k < 16; k++) {
+                int l = nearest_int(x[16 * j + k] / d);
+                if (l < -4) l = -4;
+                if (l > 3) l = 3;
+                q[16 * j + k] = (int8_t)(l + 4);
+            }
+        }
+        int m = 0;
+        uint8_t hm = 1;
+        for (int j = 0; j < 256; j++) {
+            if (q[j] > 3) { out->hmask[m] |= hm; q[j] -= 4; }
+            if (++m == 32) { m = 0; hm <<= 1; }
+        }
+        for (int j = 0; j < 256; j += 128)
+            for (int k = 0; k < 32; k++)
+                out->qs[j / 4 + k] = (uint8_t)(q[j + k] | (q[j + k + 32] << 2) |
+                    (q[j + k + 64] << 4) | (q[j + k + 96] << 6));
     }
 }
 
@@ -270,7 +384,7 @@ static void prune_plan_free(prune_plan_t *p) {
 //
 // Rules are tried in order and the first substring match wins; "default"
 // applies to everything unmatched. Types are the ones this quantizer can
-// actually write (q8_0, q4_0, f16, keep) — naming one it cannot is an error at
+// actually write (q8_0, q4_0, q3_k, f16, keep) — naming one it cannot is an error at
 // load, not a silent fallback.
 typedef struct { char *match; int type; } type_rule_t;
 typedef struct { type_rule_t *rules; int n; int dflt; } type_plan_t;
@@ -280,6 +394,7 @@ static int type_from_name(const char *s) {
     if (!strcmp(s, "keep")) return T_KEEP;
     if (!strcmp(s, "q8_0")) return T_Q8_0;
     if (!strcmp(s, "q4_0")) return T_Q4_0;
+    if (!strcmp(s, "q3_k")) return T_Q3_K;
     if (!strcmp(s, "f16"))  return T_F16;
     return -2;
 }
@@ -320,7 +435,7 @@ static bool type_plan_load(const char *path, type_plan_t *plan) {
         plan->dflt = type_from_name(jv_str(d, NULL));
         if (plan->dflt == -2) {
             fprintf(stderr, "error: type-plan default \"%s\" is not one of "
-                    "keep|q8_0|q4_0|f16\n", jv_str(d, "?"));
+                    "keep|q8_0|q4_0|q3_k|f16\n", jv_str(d, "?"));
             ok = false;
         }
     }
@@ -341,7 +456,7 @@ static bool type_plan_load(const char *path, type_plan_t *plan) {
             int ty = type_from_name(jv_str(t, NULL));
             if (ty == -2) {
                 fprintf(stderr, "error: type-plan rule %d type \"%s\" is not "
-                        "one of keep|q8_0|q4_0|f16\n", i, jv_str(t, "?"));
+                        "one of keep|q8_0|q4_0|q3_k|f16\n", i, jv_str(t, "?"));
                 ok = false;
                 break;
             }
@@ -859,6 +974,7 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
                     switch (out_type[i]) {
                         case T_Q8_0: quantize_row_q8_0(rowf, rowq, (int)row_len); break;
                         case T_Q4_0: quantize_row_q4_0(rowf, rowq, (int)row_len); break;
+                        case T_Q3_K: quantize_row_q3_K(rowf, rowq, (int)row_len); break;
                         case T_F16:  quantize_row_f16(rowf, rowq, (int)row_len); break;
                         default:     memcpy(rowq, rowf, sizeof(float) * (size_t)row_len); break;
                     }
@@ -886,6 +1002,7 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
             switch (out_type[i]) {
                 case T_Q8_0: quantize_row_q8_0(rowf, rowq, (int)t->ne[0]); break;
                 case T_Q4_0: quantize_row_q4_0(rowf, rowq, (int)t->ne[0]); break;
+                case T_Q3_K: quantize_row_q3_K(rowf, rowq, (int)t->ne[0]); break;
                 case T_F16:  quantize_row_f16(rowf, rowq, (int)t->ne[0]); break;
                 default:     memcpy(rowq, rowf, sizeof(float) * t->ne[0]); break;
             }
