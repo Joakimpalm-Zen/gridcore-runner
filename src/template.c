@@ -1300,8 +1300,9 @@ bool muse_user_payload_strip(sbuf *payload) {
 
 int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
-    if (e && e->atem) return atem_map(e, doc, n, content, tc);
-    if (e && e->muse_user_header) {
+    if (!e || !doc || !content || !tc) return -1;
+    if (e->atem) return atem_map(e, doc, n, content, tc);
+    if (e->muse_user_header) {
         const char *end = doc + n;
         const char *message = atem_find(doc, end, "<|message|>");
         if (!message) return -1;

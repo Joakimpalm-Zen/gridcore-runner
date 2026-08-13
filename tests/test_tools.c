@@ -1243,7 +1243,19 @@ static void test_system_turn_teaches_the_envelope(void) {
     jv_free(tools);
 }
 
+static void test_buffered_mapper_rejects_invalid_arguments(void) {
+    tool_envelope e = {0};
+    sbuf content = {0}, calls = {0};
+    const char *doc = "{\"tool\":\"ping\",\"args\":{}}";
+
+    assert(tool_envelope_map(NULL, doc, strlen(doc), &content, &calls) == -1);
+    assert(tool_envelope_map(&e, NULL, 0, &content, &calls) == -1);
+    assert(tool_envelope_map(&e, doc, strlen(doc), NULL, &calls) == -1);
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, NULL) == -1);
+}
+
 int main(void) {
+    test_buffered_mapper_rejects_invalid_arguments();
     test_atem_structured_tool_automaton();
     test_atem_scalar_is_raw_until_parameter_close();
     test_atem_truncation_closes_started_call();
