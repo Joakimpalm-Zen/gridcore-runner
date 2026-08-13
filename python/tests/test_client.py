@@ -509,6 +509,16 @@ class LaunchTests(unittest.TestCase):
             model_registry_argument(
                 {f"m{i}": "p" * 1000 for i in range(12)})
 
+    def test_registry_argument_applies_native_limits_to_utf8_bytes(self):
+        # The C server measures argv with strlen(), so a multibyte value that
+        # fits by Python character count can still overflow the native field.
+        with self.assertRaises(ValueError):
+            model_registry_argument({"å" * 32: "model.gguf"})
+        with self.assertRaises(ValueError):
+            model_registry_argument({"m": "å" * 512})
+        with self.assertRaises(ValueError):
+            model_registry_argument({f"m{i}": "å" * 500 for i in range(5)})
+
     def test_server_args_use_runner_owned_fit_and_parent_lifetime(self):
         launch = ServerLaunch(
             executable="runner.exe",

@@ -65,6 +65,13 @@ _MAX_PATH = 1023
 _MAX_SPEC = 4095
 
 
+def _utf8_size(value: str, field: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ValueError(f"model registry {field} is not valid UTF-8") from error
+
+
 def model_registry_argument(models: Mapping[str, str | Path]) -> str:
     if not models:
         raise ValueError("model registry must not be empty")
@@ -76,19 +83,24 @@ def model_registry_argument(models: Mapping[str, str | Path]) -> str:
         path = str(models[name])
         if not name or any(char in name for char in ",="):
             raise ValueError(f"invalid model registry name: {name!r}")
-        if len(name) > _MAX_NAME:
+        name_size = _utf8_size(name, "name")
+        if name_size > _MAX_NAME:
             raise ValueError(
-                f"model registry name too long ({len(name)} > {_MAX_NAME}): {name!r}")
+                f"model registry name too long ({name_size} > {_MAX_NAME} bytes): "
+                f"{name!r}")
         if not path or "," in path:
             raise ValueError(f"invalid model registry path: {path!r}")
-        if len(path) > _MAX_PATH:
+        path_size = _utf8_size(path, "path")
+        if path_size > _MAX_PATH:
             raise ValueError(
-                f"model registry path too long ({len(path)} > {_MAX_PATH}) for {name!r}")
+                f"model registry path too long ({path_size} > {_MAX_PATH} bytes) "
+                f"for {name!r}")
         entries.append(f"{name}={path}")
     spec = ",".join(entries)
-    if len(spec) > _MAX_SPEC:
+    spec_size = _utf8_size(spec, "spec")
+    if spec_size > _MAX_SPEC:
         raise ValueError(
-            f"model registry spec too long ({len(spec)} > {_MAX_SPEC} bytes); "
+            f"model registry spec too long ({spec_size} > {_MAX_SPEC} bytes); "
             "the server would drop it")
     return spec
 
