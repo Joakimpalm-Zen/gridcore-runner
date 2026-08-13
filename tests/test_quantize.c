@@ -205,6 +205,68 @@ static void check_file_type(const char *path, uint32_t want) {
     gguf_close(&g);
 }
 
+
+// ---- QAT grid-exact repack -----------------------------------------------
+//
+// A quantization-aware-trained checkpoint's weights ALREADY sit on the q4_0
+// grid: every value is d*(q-8) for one per-block scale d and integer q in
+// [0,15]. Requantizing such a block should therefore be LOSSLESS -- the answer
+// is already there to be read off.
+//
+// The stock quantizer does not read it off. It derives d from the value of
+// largest magnitude, `d = vmax / -8`, which recovers the true scale only when
+// the block actually contains q == 0. A QAT block whose codes never reach 0
+// yields a scale that is too small, and the values at the other end of the
+// range then saturate at q == 15 and come back WRONG -- a pure repack that
+// loses information the source had already committed to.
+//
+// This fixture is that case, built so the arithmetic is checkable by eye:
+// d = 0.5 (exact in fp16), codes 1..15 and no 0, so the extreme values are
+// -3.5 and +3.5. `vmax` is whichever of those the scan meets first, giving
+// d = 3.5/8 = 0.4375, and +3.5 then needs q = 16 -- clamped to 15, i.e.
+// 3.0625. Off by 0.4375 on a repack that should have been exact.
+#define QAT_D 0.5f
+static void fill_qat_grid(float *dst, int n_blocks) {
+    for (int b = 0; b < n_blocks; b++)
+        for (int j = 0; j < 32; j++) {
+            // codes 1..15, never 0, so `vmax / -8` cannot see the true scale
+            int code = 1 + ((b * 32 + j) % 15);
+            dst[b * 32 + j] = QAT_D * (float)(code - 8);
+        }
+}
+
+// Every value must come back bit-for-bit. Not "close": the source was already
+// on the grid, so any difference at all is information destroyed by a repack.
+static void check_qat_exact(const char *path, const float *want, size_t n) {
+    gguf_file g;
+    assert(gguf_open(&g, path));
+    const gguf_tensor *t = NULL;
+    for (uint64_t i = 0; i < g.n_tensors; i++)
+        if (!strcmp(g.tensors[i].name, "blk.0.attn_q.weight")) t = &g.tensors[i];
+    assert(t && t->type == T_Q4_0);
+    float *got = malloc(sizeof(float) * n);
+    assert(got);
+    dequant_row(t->type, t->data, got, (int)n);
+    size_t bad = 0;
+    double worst = 0;
+    size_t first = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (got[i] == want[i]) continue;
+        if (!bad) first = i;
+        bad++;
+        double d = fabs((double)got[i] - (double)want[i]);
+        if (d > worst) worst = d;
+    }
+    if (bad) {
+        fprintf(stderr, "QAT grid repack lost %zu/%zu values; first at %zu "
+                "(want %.6f got %.6f), worst |delta| %.6f\n",
+                bad, n, first, (double)want[first], (double)got[first], worst);
+        assert(0);
+    }
+    free(got);
+    gguf_close(&g);
+}
+
 int main(void) {
     f16_init();   // dequant_row's scale lookup table (unused by the quantizer
                   // itself, but the round-trip check below dequantizes)
@@ -230,6 +292,25 @@ int main(void) {
     assert(quantize_gguf(q40, q80back, T_Q8_0, NULL) == 0);
     check_file_type(q80back, 2);
     printf("ok: general.file_type follows the output histogram\n");
+
+    // QAT grid-exact repack: a source already on the q4_0 grid must survive
+    // a q4_0 repack bit-for-bit.
+    {
+        const char *qat = "q_qat_in.gguf", *qat_out = "q_qat_out.gguf";
+        enum { QAT_BLOCKS = 64, QAT_N = QAT_BLOCKS * 32 };
+        static float qw[QAT_N], qn[8];
+        fill_qat_grid(qw, QAT_BLOCKS);
+        for (int i = 0; i < 8; i++) qn[i] = 1.0f;
+        tdesc qts[2] = {
+            { "output_norm.weight",  {8, 1},  1, qn, 8 },
+            { "blk.0.attn_q.weight", {32, QAT_BLOCKS}, 2, qw, QAT_N },
+        };
+        write_gguf(qat, qts, 2, 0);
+        assert(quantize_gguf(qat, qat_out, T_Q4_0, NULL) == 0);
+        check_qat_exact(qat_out, qw, QAT_N);
+        remove(qat); remove(qat_out);
+        printf("ok: a QAT-grid source repacks to q4_0 bit-exactly\n");
+    }
 
     // RNR-015: in-place requant must not truncate its own input
     const char *inplace = "q_inplace.gguf";

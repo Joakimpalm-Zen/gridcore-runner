@@ -194,6 +194,18 @@ Repack weight matrices to `q8_0`, `q4_0`, or `f16`:
 Norms, biases, and rope factors stay f32; tensors already smaller than the
 target are retained. Metadata is copied.
 
+A `q4_0` repack is **lossless where the source is already on the q4_0 grid**,
+which is the case for quantization-aware-trained checkpoints: every value is
+one per-block scale times an integer code, so the answer is already in the
+file. Runner recovers that scale and those codes exactly instead of
+re-deriving a scale from the block's extreme value — the derived route is
+correct only when a block's codes actually reach zero, and on a block where
+they do not it saturates the far end of the range and changes values a pure
+repack had no need to touch. A candidate is accepted only when the value the
+dequantizer will produce equals the source float bit for bit across the whole
+block, so a source that is not on a grid falls through to the derived scale
+and its output is byte-for-byte what it was before.
+
 `--prune-experts` rewrites stacked-layout MoE tensors using an explicit JSON
 plan. It is a mechanism, not a quality claim: pruning needs a model-specific
 evaluation against the unpruned parent.

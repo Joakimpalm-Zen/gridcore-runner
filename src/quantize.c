@@ -42,10 +42,69 @@ static void quantize_row_q8_0(const float *x, uint8_t *dst, int n) {
     }
 }
 
+// QAT grid-exact repack.
+//
+// A quantization-aware-trained checkpoint's weights already sit on the q4_0
+// grid: every value is d*(q-8) for one per-block scale d and integer q in
+// [0,15]. Requantizing such a block should be LOSSLESS, because the answer is
+// already there to be read off.
+//
+// The derived-scale path below cannot read it off. `d = vmax / -8` recovers
+// the true scale only when the block actually contains q == 0; a QAT block
+// whose codes never reach 0 gets a scale that is too small, and the values at
+// the far end of the range then saturate at q == 15 and come back wrong. On a
+// 64-block fixture with codes 1..15 that is 1770 of 2048 values changed, worst
+// error 0.4375 -- on a repack that should have been exact.
+//
+// So try to RECOVER the grid first. The smallest nonzero magnitude in the
+// block is m*d for some integer m in [1,8], which gives eight candidate
+// scales; take the largest that works, since a coarser grid that still
+// reproduces every value is equally exact and leaves the codes better centred.
+//
+// The acceptance test is the whole safety argument: a candidate is accepted
+// only if the value the DEQUANTIZER will compute -- f16_to_f32 of the stored
+// scale, times the code -- equals the source float bit for bit, for all 32
+// values. That folds the fp16 storage of the scale into the same check (a
+// bf16-scaled source is exactly representable, since bf16's 7 mantissa bits
+// fit fp16's 10, but only inside fp16's narrower exponent range), and it means
+// imprecision anywhere can only cause a REJECTION, never a wrong write. On any
+// rejection the derived-scale path runs unchanged, so a non-QAT model gets
+// byte-identical output to before.
+static bool q4_0_grid_exact(const float *xp, wblock_q4_0 *b) {
+    float amin = 0;
+    bool any = false;
+    for (int j = 0; j < 32; j++) {
+        float a = fabsf(xp[j]);
+        if (a != 0.0f && (!any || a < amin)) { amin = a; any = true; }
+    }
+    if (!any) return false;      // all-zero block: the derived path is already exact
+
+    for (int m = 1; m <= 8; m++) {
+        f16_t dh = f32_to_f16(amin / (float)m);
+        float ds = f16_to_f32(dh);
+        if (ds == 0.0f) continue;            // underflowed fp16, or no f16 table
+        uint8_t q[32];
+        bool ok = true;
+        for (int j = 0; j < 32; j++) {
+            float kf = roundf(xp[j] / ds);
+            if (kf < -8.0f || kf > 7.0f) { ok = false; break; }
+            int k = (int)kf;
+            if (ds * (float)k != xp[j]) { ok = false; break; }
+            q[j] = (uint8_t)(k + 8);
+        }
+        if (!ok) continue;
+        b->d = dh;
+        for (int j = 0; j < 16; j++) b->qs[j] = (uint8_t)(q[j] | (q[j + 16] << 4));
+        return true;
+    }
+    return false;
+}
+
 static void quantize_row_q4_0(const float *x, uint8_t *dst, int n) {
     wblock_q4_0 *b = (wblock_q4_0 *)dst;
     for (int i = 0; i < n / 32; i++, b++) {
         const float *xp = x + i * 32;
+        if (q4_0_grid_exact(xp, b)) continue;
         float amax = 0, vmax = 0;
         for (int j = 0; j < 32; j++) {
             float v = fabsf(xp[j]);
