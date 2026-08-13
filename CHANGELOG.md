@@ -7,13 +7,59 @@ were written.
 
 ## Unreleased
 
-- Metal full-offload admission now budgets aggregate weight mappings against
-  the working set instead of the device's single-buffer limit; weights larger
-  than `maxBufferLength` can therefore reach the existing multi-buffer path.
-- JSON Schema object compilation accepts closed empty records and homogeneous
-  maps expressed with schema-valued `additionalProperties`; arbitrary keys,
-  typed values, and truncation completion are enforced by the streaming
-  validator. Mixed fixed/open object shapes still fail closed.
+## v0.1.17-alpha — 2026-08-13
+
+Forty-seven commits since v0.1.16-alpha: two operator-facing capabilities,
+the removal of Metal's single-buffer ceiling, a measured Metal prefill/decode
+pass, broader tool-schema compatibility, quantizer work, and a cross-platform
+hardening and certification sweep.
+
+### Operator and API capabilities
+
+- **`--fit` answers whether a GGUF will run before loading its weights.** A
+  separate header-only parser reads metadata and tensor descriptors without
+  weakening the normal loader's truncation checks. The report accounts for
+  sparse-MoE hot sets and KV-cache upper bounds and returns `FITS`,
+  `FITS WITH --kv q8`, or `PAGES`; a ranged header download can be checked
+  without teaching Runner to fetch URLs.
+- **`/health` now exposes process and work telemetry:** current and peak RSS,
+  cumulative prompt/generated tokens, and cumulative generation seconds
+  across every API surface. The counters are monotonic raw measurements so a
+  supervisor can choose its own averaging window.
+- Gemma-4 `enable_thinking:true` now emits the model's real thinking marker in
+  the first system turn, including when the caller supplied no system text.
+
+### Schema, tools, and client compatibility
+
+- Anchored string patterns can contain serial fixed-length ASCII-class
+  segments such as `^[A-Z]{3}[0-9]{4}$`; validation and forced completion use
+  the same segment machine. Ambiguous variable-length middle segments remain
+  rejected.
+- Object schemas now accept `additionalProperties:false` without a
+  `properties` member as the exact empty record, and homogeneous maps expressed
+  with schema-valued `additionalProperties`. Arbitrary keys, typed values, and
+  truncation completion are enforced; mixed fixed/open shapes still fail
+  closed.
+- The Python client enforces model-registry limits in UTF-8 bytes and rejects
+  malformed streamed tool-call fragments and finish reasons while retaining
+  partial output in protocol errors.
+- Muse buffered mapping no longer searches beyond the supplied byte span and
+  rejects malformed map inputs instead of relying on a trailing NUL.
+
+### Metal performance and capacity
+
+- **Weight files larger than `MTLDevice.maxBufferLength` are wrapped as
+  several zero-copy, tensor-boundary buffers.** Full-offload admission budgets
+  the aggregate mapping against the working set rather than clamping the whole
+  model to one buffer. Forced 2/4/5-buffer gates are byte-identical and refuse
+  unsplittable single tensors or excessive wrap counts loudly.
+- QK/head norms and elementwise prefill work now batch across `grid.y`. The
+  dispatch census at batch 64 fell from 15,947 to 827 (19.3x fewer), moving
+  measured e2b-q40 prefill by **+3.55%** while preserving bit identity.
+- Metal now applies Llama-4's position-dependent attention temperature on
+  NoPE layers. A mutation-tested cross-backend logit gate detects its removal;
+  its tolerance was recalibrated from Metal-only evidence to include honest
+  CUDA reduction residue without approaching the smallest known real defect.
 - **Metal decode attention is faster, and now tolerance-gated.** The
   cooperative KV read (one simdgroup per KV row, lanes splitting `head_dim`)
   is the default: **+3.0–4.3 %** decode at 2.3k–8.1k token spans. It clears
@@ -23,8 +69,42 @@ were written.
   the CPU — `RUNNER_METAL_ATTN_COOP=0` pins the identical kernel back, and
   every CPU-vs-GPU byte comparison in the suite sets it.
 - `RUNNER_METAL_STATS` reports per-pipeline threadgroup memory and a
-  cooperative-dispatch count, so promotions of this kind are verifiable
-  rather than inferred.
+  cooperative-dispatch count, a per-kind dispatch census, and decode KV bytes,
+  so promotions and bottlenecks are measured rather than inferred.
+- The accompanying negative results are retained as release evidence: a
+  fourfold-leaner reassociating decode matvec measured neutral and stays off;
+  GEMM tile/occupancy alternatives lost to the shipped 64x32x32 shape; and the
+  long-context loss was isolated to a 1.52 GB/s KV read rather than missing
+  attention parallelism.
+
+### Quantization and correctness hardening
+
+- Q4_0 repacking is lossless when a QAT source is already exactly on the Q4_0
+  grid; the recovered candidate is accepted only if the shipped dequantizer
+  reproduces every source float bit for bit. Non-grid inputs retain the prior
+  derived-scale path.
+- `--type-plan` can write selective Q3_K expert banks with exact round-trip and
+  untouched-tensor byte identity. The finer fused-int8 activation experiment
+  remains gated off after failing the promotion bar.
+- A focused review removed the tray's remaining shell launch, released
+  quantizer plans on every early exit, rejected invalid model-load arguments,
+  made parser/cache bounds explicit, made C11 aggregate construction explicit,
+  and labels unsupported HTTP methods correctly.
+- Windows gates now use a native executable stub and force test-spawned MTP
+  servers headless, eliminating the WinError 193 portability failure and the
+  detached tray process that locked `runner.exe` during later relinks.
+
+### Reproducibility and release evidence
+
+- Compatibility reports are now a release gate. The manifest uses per-model
+  reference revisions as its single truth and pins CPU/CUDA certification to
+  the decided 128 generated tokens. A Blackwell ledger plus raw per-model CUDA
+  evidence and a clean native Windows run are committed.
+- `difftok.py` can capture a reference tokenizer once and replay its IDs
+  offline, guarded by the exact corpus SHA-256.
+- The contributor rules now cover the whole-second mtime trap in mutation and
+  two-binary A/B builds: a restored source must be observably rebuilt, and the
+  compared binaries must differ by a behavior the experiment should change.
 
 ## v0.1.16-alpha — 2026-08-12
 
