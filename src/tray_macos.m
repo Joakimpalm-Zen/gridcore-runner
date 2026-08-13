@@ -6,9 +6,15 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include "tray.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+
+extern char **environ;
 
 #define TRAY_MAX_ITEMS 128
 
@@ -223,6 +229,24 @@ static void agent_path(char *out, size_t cap) {
              home ? home : ".");
 }
 
+static void unload_old_agent(void) {
+    char *argv[] = {
+        (char *)"launchctl", (char *)"remove",
+        (char *)"ai.gridcore.runner.tray", NULL,
+    };
+    posix_spawn_file_actions_t fa;
+    if (posix_spawn_file_actions_init(&fa) != 0) return;
+    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, 1, 2);
+
+    pid_t pid;
+    int rc = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) return;
+
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+}
+
 // One-time migration of the pre-rename agent (Gridcore -> Xyntetik). The old
 // label must be unloaded before the new one registers, or two trays can end
 // up installed; autostart state is preserved by re-creating the agent under
@@ -239,7 +263,7 @@ static void migrate_old_agent(void) {
     FILE *f = fopen(op, "rb");
     if (!f) return;
     fclose(f);
-    system("launchctl remove ai.gridcore.runner.tray 2>/dev/null");
+    unload_old_agent();
     remove(op);
     tray_platform_autostart_set(true);
 }
