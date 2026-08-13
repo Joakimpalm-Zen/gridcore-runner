@@ -227,3 +227,49 @@ weighted by kernel shape, or simply not made.
 - With the batch dimension no longer collapsing anywhere, the next prefill
   lever is not dispatch shape at all — it is the tiled GEMM and the memory
   traffic beneath it.
+
+
+---
+
+## Follow-up, 2026-08-14: where prefill's GPU time actually goes
+
+The section above ends by naming the tiled GEMM and the traffic beneath it as
+the next lever. Measured, diagnosis only, on SmolLM2-135M-Q8_0 (145 MB, fully
+resident, so no paging confound):
+
+**The tiled GEMM is worth 3.35x.** Prefill GPU time at n = 64, with the GEMM on
+and with `RUNNER_METAL_MM=0` forcing the batched matvec instead:
+
+| route | GPU time at n=64 |
+|---|---:|
+| tiled GEMM (default) | **38.69 ms** |
+| batched matvec | 129.47 ms |
+
+So prefill is matmul-dominated: 210 of the 482 dispatches are `mm`, and
+swapping only that route triples the time. Everything else in the forward —
+61 rmsnorm, 60 rope, 30 store, 30 attn, 90 elem — shares whatever is left of
+38.69 ms.
+
+**The dispatch batching held up.** Re-fitting `t(n) = a + b·n` on the same
+model after the 2026-08-13 work:
+
+| | fixed a | slope b |
+|---|---:|---:|
+| before batching | 17.2 ms | 0.33 ms/token |
+| after | 18.0 ms | **0.135 ms/token** |
+
+The per-token slope fell 59 %, which is what removing 240 per-token dispatches
+should do, and is independent corroboration of that result. (The fit is local:
+at n = 64 the GEMM's own work has grown and the linear model no longer holds —
+26.6 ms predicted against 38.69 measured.)
+
+**And the fixed cost is not bandwidth.** 145 MB of weights in 18.0 ms is
+**8 GB/s**, against roughly 68 GB/s of roofline on this machine. Prefill's
+per-forward floor is therefore latency and occupancy inside the GEMM at small
+tile counts, not memory traffic — the opposite of decode, which
+`docs/negative-result-metal-multirow-matvec.md` establishes IS traffic-bound.
+
+That is the actionable narrowing: the remaining prefill lever is the GEMM
+kernel's occupancy (tile shape, simdgroup count, staging), and a bandwidth
+argument does not apply to it. No kernel was changed here, per the
+diagnosis-only scope.
