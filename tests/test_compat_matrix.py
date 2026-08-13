@@ -1,6 +1,7 @@
 import importlib.util
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
@@ -166,7 +167,15 @@ def test_reports_are_append_only(tmp_path):
 
 
 def _executable(path, body):
-    path.write_text("#!/bin/sh\n" + body)
+    if os.name == "nt":
+        # CreateProcess cannot execute a POSIX shebang script.  Keep this an
+        # integration test of the real subprocess boundary by giving Windows
+        # its native no-op wrapper instead of mocking the runner calls away.
+        path = path.with_suffix(".cmd")
+        body = "@exit /b 0\r\n"
+    else:
+        body = "#!/bin/sh\n" + body
+    path.write_text(body)
     path.chmod(0o755)
     return path
 
