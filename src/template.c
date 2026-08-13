@@ -496,7 +496,7 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<|start_of_role|>assistant<|end_of_role|>",
                        NULL, NULL);
         break;
-    case TMPL_GEMMA4:
+    case TMPL_GEMMA4: {
         // gemma4 (reference: llama.cpp models/templates/google-gemma-4-31B-it
         // .jinja): <|turn>role\n CONTENT <turn|>\n per turn, a native system
         // role (unlike gemma1-3), assistant role named "model"
@@ -566,6 +566,7 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             // header used to get wrong.
         }
         break;
+    }
     case TMPL_GEMMA: {
         // gemma has no system role: fold a system message into the first
         // user turn; the assistant role is named "model"

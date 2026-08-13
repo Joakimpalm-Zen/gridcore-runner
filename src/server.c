@@ -160,7 +160,8 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     }
     size_t total = ts.n + 64;
     int n_cm = 0, n_own = 0;
-    if (ts.n) cm[n_cm++] = (chat_msg){ "system", ts.s };
+    if (ts.n)
+        cm[n_cm++] = (chat_msg){ .role = "system", .content = ts.s };
     for (int i = 0; i < msgs->n; i++) {
         if (i == 0 && ornith_merged_system) continue;
         const char *role = jv_str(jv_get(msgs->items[i], "role"), "user");
@@ -178,7 +179,9 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         if (!content) continue;
         owned[n_own++] = content;
         if (s->tmpl == TMPL_ORNITH && !strcmp(role, "tool")) role = "user";
-        cm[n_cm++] = (chat_msg){ role, content, turn_name };
+        cm[n_cm++] = (chat_msg){
+            .role = role, .content = content, .name = turn_name,
+        };
         total += strlen(role) + strlen(content) + 64;
     }
     if (n_cm == 0) {

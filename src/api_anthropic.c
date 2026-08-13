@@ -30,7 +30,7 @@ typedef struct {
 
 static void turn_add_borrowed(turnbuf *t, const char *role, const char *text) {
     if (t->n >= t->cap) { t->failed = true; return; }
-    t->cm[t->n++] = (chat_msg){ role, text };
+    t->cm[t->n++] = (chat_msg){ .role = role, .content = text };
     t->total += strlen(role) + strlen(text) + 64;
 }
 
@@ -493,4 +493,3 @@ void handle_count_tokens(slot_t *s, sock_t fd, jv *req) {
     send_built(fd, &r);
     free(r.s);
 }
-

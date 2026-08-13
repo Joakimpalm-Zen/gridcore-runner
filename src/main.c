@@ -1011,8 +1011,10 @@ int main(int argc, char **argv) {
         chat_msg msgs[2];
         int n_msgs = 0;
         if (first_turn && system_prompt[0])
-            msgs[n_msgs++] = (chat_msg){ "system", system_prompt };
-        msgs[n_msgs++] = (chat_msg){ "user", line };
+            msgs[n_msgs++] = (chat_msg){
+                .role = "system", .content = system_prompt,
+            };
+        msgs[n_msgs++] = (chat_msg){ .role = "user", .content = line };
         render_messages(tmpl, msgs, n_msgs, true, thinking,
                         rendered, sizeof(rendered));
         n_prompt = tok_encode(&tok, rendered, toks, (int)tok_cap,

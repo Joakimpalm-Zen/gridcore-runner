@@ -364,14 +364,17 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
     }
     size_t total = ts.n + 128;
     int n_cm = 0, n_own = 0;
-    if (ts.n) cm[n_cm++] = (chat_msg){ "system", ts.s };
+    if (ts.n)
+        cm[n_cm++] = (chat_msg){ .role = "system", .content = ts.s };
     const char *instructions = jv_str(jv_get(req, "instructions"), NULL);
     if (instructions && instructions[0]) {
-        cm[n_cm++] = (chat_msg){ "system", instructions };
+        cm[n_cm++] = (chat_msg){
+            .role = "system", .content = instructions,
+        };
         total += strlen(instructions) + 64;
     }
     if (input->type == J_STR) {
-        cm[n_cm++] = (chat_msg){ "user", input->str };
+        cm[n_cm++] = (chat_msg){ .role = "user", .content = input->str };
         total += strlen(input->str) + 64;
     } else {
         for (int i = 0; i < input->n; i++) {
@@ -379,7 +382,7 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
             char *text = responses_item_text(input->items[i], &role);
             if (!text) continue;
             owned[n_own++] = text;
-            cm[n_cm++] = (chat_msg){ role, text };
+            cm[n_cm++] = (chat_msg){ .role = role, .content = text };
             total += strlen(role) + strlen(text) + 64;
         }
     }
