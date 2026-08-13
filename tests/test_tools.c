@@ -336,6 +336,25 @@ static void test_muse_generic_envelope_is_constrained_behind_user_recipient(void
     assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
     assert(calls.s && strstr(calls.s, "\"name\":\"ping\""));
     free(content.s); free(calls.s);
+
+    size_t doc_n = strlen(doc);
+    char *bounded = malloc(doc_n);
+    assert(bounded != NULL);
+    memcpy(bounded, doc, doc_n); /* deliberately no trailing NUL */
+    content = (sbuf){0};
+    calls = (sbuf){0};
+    assert(tool_envelope_map(&e, bounded, doc_n, &content, &calls) == 1);
+    assert(calls.s && strstr(calls.s, "\"name\":\"ping\""));
+    free(bounded); free(content.s); free(calls.s);
+
+    char *missing_header = malloc(2);
+    assert(missing_header != NULL);
+    memcpy(missing_header, "{}", 2); /* no marker and no trailing NUL */
+    content = (sbuf){0};
+    calls = (sbuf){0};
+    assert(tool_envelope_map(&e, missing_header, 2, &content, &calls) == -1);
+    free(missing_header); free(content.s); free(calls.s);
+
     tool_envelope_free(&e); jv_free(tools);
 }
 

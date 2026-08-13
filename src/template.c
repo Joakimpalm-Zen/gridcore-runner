@@ -1301,8 +1301,9 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
     if (e && e->atem) return atem_map(e, doc, n, content, tc);
     if (e && e->muse_user_header) {
-        const char *message = strstr(doc, "<|message|>");
-        if (!message || message >= doc + n) return -1;
+        const char *end = doc + n;
+        const char *message = atem_find(doc, end, "<|message|>");
+        if (!message) return -1;
         message += strlen("<|message|>");
         n -= (size_t)(message - doc);
         doc = message;
