@@ -144,6 +144,8 @@ test-paging-warn.exe
 test-metal-coverage
 test-instances
 test-instances.exe
+test-metal-admission
+test-metal-admission.exe
 test-metal-shaders
 test-metal-shaders.exe
 test-metal-kquants

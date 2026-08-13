@@ -460,8 +460,10 @@ CPU/GPU layer split. The cuts fall on tensor boundaries, so no tensor spans two
 buffers and output is byte-identical to a single-buffer wrap;
 `RUNNER_METAL_MAX_BUF` shrinks the per-buffer ceiling so that path can be
 exercised on a machine whose models all fit one buffer, and
-`make test-metal-multibuf` is the gate. A single tensor larger than the ceiling
-still cannot be wrapped and says so.
+`make test-metal-multibuf` is the byte-identity gate. A separate pure admission
+gate simulates a file above `maxBufferLength` but below the aggregate working
+set, ensuring it remains a full offload. A single tensor larger than the
+per-buffer ceiling still cannot be wrapped and says so.
 
 `RUNNER_METAL_ATTN_COOP=0` pins the byte-identical decode attention kernel.
 The default is the cooperative KV read: one simdgroup owns a KV row and its

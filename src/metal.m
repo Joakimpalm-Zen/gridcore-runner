@@ -5,6 +5,7 @@
 #include "runner.h"
 #include "kernels_metal.h"
 #include "compat.h"   // plat_ram_available_bytes: the residency guard below
+#include "metal_admission.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -839,15 +840,14 @@ static bool metal_partial_pays(const model_t *m, uint64_t wrapped) {
     // Both passed the old tail-fits check. Neither could hold its wrap
     // resident, so the pinned pages thrashed against everything else.
     //
-    // What survives is narrow and honest: partial offload helps a model that
-    // FITS in RAM but exceeds maxBufferLength (0.75x the working set), where
-    // full offload is impossible for buffer-size reasons alone. There the win
-    // is the ordinary compute blend, not residency.
-    // So the automatic rule is the narrow case only: the WHOLE model fits in
-    // RAM, and full offload is impossible for buffer-size reasons alone. Then
-    // the split costs nothing in residency and gains the compute blend. An
-    // oversubscribed model is refused however the split is drawn, because
-    // whatever is pinned is taken from what the rest must stream through.
+    // What survives is narrow and honest: partial offload helps only when the
+    // WHOLE model fits in RAM but its weights plus KV/scratch exceed Metal's
+    // aggregate working-set budget. maxBufferLength no longer enters this
+    // decision: the multi-buffer wrapper removes that per-resource ceiling.
+    // In the fits-in-RAM case the split costs nothing in residency and gains
+    // the ordinary compute blend. An oversubscribed model is refused however
+    // the split is drawn, because whatever is pinned is taken from what the
+    // rest must stream through.
     uint64_t total = m->gf.map_size;
     uint64_t margin = have / 8;              // KV, scratch, the OS
     return total + margin <= have && wrapped <= total;
@@ -1054,29 +1054,21 @@ bool gpu_init(model_t *m) {
     int gpu_K = m->n_layer;
     uint64_t ws_limit = dev.recommendedMaxWorkingSetSize;
     {
-        // TWO ceilings, and the second is the one that actually bites.
-        //
-        // recommendedMaxWorkingSetSize is the total a device wants resident.
-        // maxBufferLength is the largest SINGLE MTLBuffer, and it is smaller:
-        // 4.29 GB against 5.73 on an M1, 0.75x. The weight wrap is one buffer,
-        // so it is bounded by maxBufferLength, not by the working set.
-        //
-        // Missing this produced a failure whose own message was self-
-        // contradictory -- "10.3 GB requested, device working-set limit
-        // 12.7 GB", requested < limit, yet it failed -- reported from a 16 GB
-        // M2 Pro on 2026-08-07. It also explains, correctly this time, why a
-        // 5.17 GB artifact would not load here earlier: 5.17 > 4.29. The
-        // comment that used to sit here blamed KV and scratch for that, and
-        // was wrong.
-        //
-        // The budget still subtracts KV and scratch on the working-set side,
-        // since those are separate buffers competing for the same residency.
+        // recommendedMaxWorkingSetSize is the aggregate residency ceiling.
+        // The budget subtracts KV and scratch and keeps a safety margin.
+        // maxBufferLength is smaller (4.29 GB against 5.73 GB on an M1), but
+        // it is only the size of each individual wrap: metal_wrap_weights()
+        // cuts a larger file into several tensor-boundary buffers. Clamping
+        // this budget to maxBufferLength preserved the old ceiling in the
+        // admission decision even after the multi-buffer implementation had
+        // removed it from allocation.
         uint64_t other = (uint64_t)model_kv_byte_off(m, m->n_layer) * 2
                        + 512ull * 1024 * 1024;
-        uint64_t budget = ws_limit > other
-                        ? (uint64_t)((double)(ws_limit - other) * 0.94) : 0;
-        uint64_t max_buf = (uint64_t)dev.maxBufferLength;
-        if (budget > max_buf) budget = max_buf;
+        metal_weight_limits limits = {
+            .working_set = ws_limit,
+            .max_buffer = (uint64_t)dev.maxBufferLength,
+        };
+        uint64_t budget = metal_full_weight_budget(limits, other);
         int cap = m->gpu_layers_override;
         bool need_split = wlen > budget || (cap > 0 && cap < m->n_layer);
         if (need_split) {
@@ -2260,5 +2252,3 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
     }
     return (float *)g->logits.contents + (size_t)(n - 1) * m->n_vocab;
 }
-
-
