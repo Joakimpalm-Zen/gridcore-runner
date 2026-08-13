@@ -36,6 +36,7 @@ enum { STEPS = 64, MAX_TOK = 192, N_BATCH = 64 };
 
 static int g_fail = 0;
 static int g_gpu_layers = 0;
+static bool g_kv_q8 = false;   // exercise kv_dot_coop's q8 branch
 
 static void ck(int cond, const char *what) {
     if (!cond) { fprintf(stderr, "FAIL: %s\n", what); g_fail = 1; }
@@ -109,6 +110,7 @@ static bool run_config(config *c, const char *path, const int32_t *toks,
     p.n_ctx    = n_tok + 8;
     p.n_batch  = N_BATCH;
     p.gpu_layers_override = g_gpu_layers;
+    p.kv_q8 = g_kv_q8;
 
     if (!model_load(&m, path, &p)) {
         fprintf(stderr, "  %-12s load failed\n", c->name);
@@ -187,7 +189,15 @@ static void top1_stats(const config *a, const config *b, int n_vocab,
 
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "test.gguf";
-    if (argc > 2) g_gpu_layers = atoi(argv[2]);
+    // argv[2]: GPU layers, or "q8" to store the KV cache quantized. The q8
+    // cache is not a variant of the same code -- kv_dot_coop has a separate
+    // branch for it (one 32-element block per lane step against a per-block
+    // scale), and without this the cooperative route's q8 path would be
+    // promoted having never executed.
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "q8")) g_kv_q8 = true;
+        else g_gpu_layers = atoi(argv[i]);
+    }
 
     f16_init();
 
@@ -218,8 +228,8 @@ int main(int argc, char **argv) {
     for (int i = n_tok; i < MAX_TOK; i++) toks[i] = toks[i - n_tok + 1];
     n_tok = MAX_TOK;
 
-    printf("attn-tol: %s | %d tokens, %d teacher-forced positions\n",
-           path, n_tok, STEPS);
+    printf("attn-tol: %s | %d tokens, %d teacher-forced positions%s\n",
+           path, n_tok, STEPS, g_kv_q8 ? " | kv q8" : "");
     if (!has_mv_type) {
         printf("  skipped: no fast-capable tensor in this model (kernels: "
                "Q4_0/Q8_0)\n" "attn-tol: ok (skipped)\n");

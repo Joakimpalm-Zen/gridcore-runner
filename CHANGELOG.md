@@ -5,6 +5,20 @@ is in **alpha**; the HTTP protocol and CLI may still change between alpha
 releases. Entries below the rename keep the names that were true when they
 were written.
 
+## Unreleased
+
+- **Metal decode attention is faster, and now tolerance-gated.** The
+  cooperative KV read (one simdgroup per KV row, lanes splitting `head_dim`)
+  is the default: **+3.0–4.3 %** decode at 2.3k–8.1k token spans. It clears
+  zero top-1 flips out of 64 teacher-forced positions on every local model
+  that reaches it, in both f16 and q8 KV formats. Because it reassociates the
+  per-row dot, Metal decode at long context is no longer byte-identical to
+  the CPU — `RUNNER_METAL_ATTN_COOP=0` pins the identical kernel back, and
+  every CPU-vs-GPU byte comparison in the suite sets it.
+- `RUNNER_METAL_STATS` reports per-pipeline threadgroup memory and a
+  cooperative-dispatch count, so promotions of this kind are verifiable
+  rather than inferred.
+
 ## v0.1.16-alpha — 2026-08-12
 
 Four days, three overnight measurement campaigns, and one external

@@ -650,11 +650,11 @@ ifeq ($(shell uname -s),Darwin)
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu off > metal-cpu.out 2>/dev/null; \
 		env RUNNER_METAL_INJECT_FAILURE=once MallocScribble=1 MallocGuardEdges=1 \
-		    env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-fallback.out 2> metal-fallback.err; \
+		    env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-fallback.out 2> metal-fallback.err; \
 		cmp -s metal-cpu.out metal-fallback.out; \
 		grep -q "falling back to CPU" metal-fallback.err; \
 		env RUNNER_METAL_INIT_INJECT_FAILURE=after-kv MallocScribble=1 MallocGuardEdges=1 \
-		    env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-init-fallback.out 2> metal-init-fallback.err; \
+		    env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-init-fallback.out 2> metal-init-fallback.err; \
 		cmp -s metal-cpu.out metal-init-fallback.out; \
 		grep -q "Metal initialization failed" metal-init-fallback.err; \
 		echo "metal fallback ownership ok"; \
@@ -704,7 +704,7 @@ ifeq ($(shell uname -s),Darwin)
 	      else prompt="$$long"; fi; \
 	      ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 12 --temp 0 --gpu off \
 	        > metal-kquant-cpu.out 2>/dev/null; \
-	      ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 12 --temp 0 --gpu auto \
+	      env RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m $$m -p "$$prompt" -n 12 --temp 0 --gpu auto \
 	        > metal-kquant-gpu.out 2> metal-kquant-gpu.err; \
 	      if grep -q "without a Metal kernel" metal-kquant-gpu.err; then \
 	        echo "FAIL: $$m fell back to CPU — this parity check would compare"; \
@@ -765,10 +765,10 @@ ifeq ($(shell uname -s),Darwin)
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		$(PYTHON) scripts/make-test-moe.py test-moe-fixture; \
 		./$(RUNNER_EXE) -m test-moe-fixture.dense.gguf -p "hello world" -n 12 --temp 0 --gpu off > metal-moe-dense.out 2>/dev/null; \
-		env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-moe-fixture.moe1.gguf -p "hello world" -n 12 --temp 0 --gpu auto > metal-moe1.out 2> metal-moe1.err; \
+		env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-moe-fixture.moe1.gguf -p "hello world" -n 12 --temp 0 --gpu auto > metal-moe1.out 2> metal-moe1.err; \
 		cmp -s metal-moe-dense.out metal-moe1.out; \
 		grep -q "Metal backend" metal-moe1.err; \
-		env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-moe-fixture.moe2.gguf -p "hello world" -n 12 --temp 0 --gpu auto > metal-moe2.out 2> metal-moe2.err; \
+		env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-moe-fixture.moe2.gguf -p "hello world" -n 12 --temp 0 --gpu auto > metal-moe2.out 2> metal-moe2.err; \
 		cmp -s metal-moe-dense.out metal-moe2.out; \
 		grep -q "Metal backend" metal-moe2.err; \
 		echo "metal MoE ok"; \
@@ -785,7 +785,7 @@ ifeq ($(shell uname -s),Darwin)
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		$(PYTHON) scripts/make-test-moe.py test-moe-fixture; \
 		./$(RUNNER_EXE) -m test-moe-fixture.gptoss-mxfp4.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-gptoss-moe-cpu.out 2>/dev/null; \
-		env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-moe-fixture.gptoss-mxfp4.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-gptoss-moe-gpu.out 2> metal-gptoss-moe-gpu.err; \
+		env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-moe-fixture.gptoss-mxfp4.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-gptoss-moe-gpu.out 2> metal-gptoss-moe-gpu.err; \
 		cmp -s metal-gptoss-moe-cpu.out metal-gptoss-moe-gpu.out; \
 		grep -q "Metal backend" metal-gptoss-moe-gpu.err; \
 		echo "metal gpt-oss MoE ok"; \
@@ -802,7 +802,7 @@ ifeq ($(shell uname -s),Darwin)
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		$(PYTHON) scripts/make-test-moe.py test-moe-fixture; \
 		./$(RUNNER_EXE) -m test-moe-fixture.gemma4-moe.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-gemma4-moe-cpu.out 2>/dev/null; \
-		env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-moe-fixture.gemma4-moe.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-gemma4-moe-gpu.out 2> metal-gemma4-moe-gpu.err; \
+		env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-moe-fixture.gemma4-moe.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-gemma4-moe-gpu.out 2> metal-gemma4-moe-gpu.err; \
 		cmp -s metal-gemma4-moe-cpu.out metal-gemma4-moe-gpu.out; \
 		grep -q "Metal backend" metal-gemma4-moe-gpu.err; \
 		echo "metal gemma4 MoE ok"; \
@@ -819,12 +819,12 @@ ifeq ($(shell uname -s),Darwin)
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		$(PYTHON) scripts/make-test-model.py --gemma4-hetero test-g4h.gguf; \
 		./$(RUNNER_EXE) -m test-g4h.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-g4h-dense-cpu.out 2>/dev/null; \
-		env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-g4h.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-g4h-dense-gpu.out 2> metal-g4h-dense-gpu.err; \
+		env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-g4h.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-g4h-dense-gpu.out 2> metal-g4h-dense-gpu.err; \
 		cmp -s metal-g4h-dense-cpu.out metal-g4h-dense-gpu.out; \
 		grep -q "Metal backend" metal-g4h-dense-gpu.err; \
 		$(PYTHON) scripts/make-test-moe.py test-moe-fixture; \
 		./$(RUNNER_EXE) -m test-moe-fixture.gemma4-moe-hetero.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-g4h-moe-cpu.out 2>/dev/null; \
-		env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-moe-fixture.gemma4-moe-hetero.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-g4h-moe-gpu.out 2> metal-g4h-moe-gpu.err; \
+		env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-moe-fixture.gemma4-moe-hetero.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-g4h-moe-gpu.out 2> metal-g4h-moe-gpu.err; \
 		cmp -s metal-g4h-moe-cpu.out metal-g4h-moe-gpu.out; \
 		grep -q "Metal backend" metal-g4h-moe-gpu.err; \
 		echo "metal gemma4 heterogeneous ok"; \
@@ -841,7 +841,7 @@ ifeq ($(shell uname -s),Darwin)
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		$(PYTHON) scripts/make-test-model.py --arch gemma3 --act-overflow test-actovf.gguf; \
 		./$(RUNNER_EXE) -m test-actovf.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-actovf-cpu.out 2>/dev/null; \
-		env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-actovf.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-actovf-gpu.out 2> metal-actovf-gpu.err; \
+		env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-actovf.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-actovf-gpu.out 2> metal-actovf-gpu.err; \
 		cmp -s metal-actovf-cpu.out metal-actovf-gpu.out; \
 		grep -q "Metal backend" metal-actovf-gpu.err; \
 		echo "metal GELU overflow ok"; \
@@ -859,7 +859,7 @@ ifeq ($(shell uname -s),Darwin)
 		for cfg in 0,16 3,0 3,16; do \
 		  $(PYTHON) scripts/make-test-model.py --eseries $$cfg test-es.gguf; \
 		  ./$(RUNNER_EXE) -m test-es.gguf -p "hello world" -n 8 --temp 0 --gpu off > metal-es-cpu.out 2>/dev/null; \
-		  env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-es.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-es-gpu.out 2> metal-es-gpu.err; \
+		  env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-es.gguf -p "hello world" -n 8 --temp 0 --gpu auto > metal-es-gpu.out 2> metal-es-gpu.err; \
 		  cmp -s metal-es-cpu.out metal-es-gpu.out || { echo "eseries $$cfg differs"; exit 1; }; \
 		  grep -q "Metal backend" metal-es-gpu.err || { echo "eseries $$cfg: Metal never engaged"; exit 1; }; \
 		done; \
@@ -913,7 +913,7 @@ ifeq ($(shell uname -s),Darwin)
 	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
 		$(PYTHON) scripts/make-test-model.py --arch qwen3 --swa 8,2 test-swa.gguf; \
 		./$(RUNNER_EXE) -m test-swa.gguf -p "abcdefghijklmnopqrstuvwxyz0123456789" -n 12 --temp 0 --gpu off > metal-swa-cpu.out 2>/dev/null; \
-		env RUNNER_METAL_MM=0 ./$(RUNNER_EXE) -m test-swa.gguf -p "abcdefghijklmnopqrstuvwxyz0123456789" -n 12 --temp 0 --gpu auto > metal-swa-gpu.out 2> metal-swa-gpu.err; \
+		env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test-swa.gguf -p "abcdefghijklmnopqrstuvwxyz0123456789" -n 12 --temp 0 --gpu auto > metal-swa-gpu.out 2> metal-swa-gpu.err; \
 		cmp -s metal-swa-cpu.out metal-swa-gpu.out; \
 		grep -q "Metal backend" metal-swa-gpu.err; \
 		echo "metal SWA ok"; \

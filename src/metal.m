@@ -568,10 +568,17 @@ void gpu_mv_force(int on) {
     g_mv_state = on < 0 ? MV_ENV_UNSET : (on != 0);
 }
 
-// Cooperative KV score read (k_attn_coop). Same disposition as the fast
-// matvec: it reassociates the per-row dot into a simd_sum over 32 lane
-// partials, so it cannot live on the identity route, and it ships OFF until a
-// measurement promotes it. RUNNER_METAL_ATTN_COOP=1 opts in.
+// Cooperative KV score read (k_attn_coop / k_attn_chunk_coop). It reassociates
+// the per-row dot into a simd_sum over 32 lane partials, so it cannot live on
+// the identity route -- it answers to tests/test_attn_tol.c the way the tiled
+// prefill GEMM answers to test_tc_tol.c.
+//
+// PROMOTED 2026-08-17, and it is opt-OUT now: `RUNNER_METAL_ATTN_COOP=0` pins
+// the byte-identical kernel back, exactly as `RUNNER_METAL_MM=0` does for
+// prefill. The cert that bought this is in the suite's
+// m1-night-results-2026-08-17.md -- 0/64 teacher-forced flips on every local
+// model that engages the route, both KV cache formats, at a measured
+// +3.0-4.3% decode across 2.3k-8.1k spans.
 enum { COOP_ENV_UNSET = -2 };
 static int g_coop_state = COOP_ENV_UNSET;
 static unsigned long g_coop_dispatches = 0;
@@ -584,9 +591,11 @@ unsigned long gpu_attn_coop_dispatches(void) { return g_coop_dispatches; }
 static bool metal_attn_coop_on(void) {
     if (g_coop_state == COOP_ENV_UNSET) {
         const char *e = getenv("RUNNER_METAL_ATTN_COOP");
-        g_coop_state = e && *e && strcmp(e, "0") && strcmp(e, "off");
+        if (!e || !*e) g_coop_state = -1;                 // promoted default
+        else g_coop_state = strcmp(e, "0") && strcmp(e, "off");
     }
-    return g_coop_state > 0;
+    if (g_coop_state >= 0) return g_coop_state != 0;
+    return true;   // promoted: decode attention, every arch that reaches it
 }
 
 static unsigned long g_mv_dispatches = 0;
@@ -2243,10 +2252,11 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                         / (double)(g_disp.kv_swa + g_disp.kv_global));
         fprintf(stderr, "metal-census n=%d total=%lu | mm=%lu mv=%lu mvf=%lu "
                 "rmsnorm=%lu qknorm=%lu headnorm=%lu rope=%lu store=%lu "
-                "attn=%lu attn_chunk=%lu elem=%lu moe=%lu\n",
+                "attn=%lu attn_chunk=%lu(coop %lu) elem=%lu moe=%lu\n",
                 n, tot, g_disp.mm, g_disp.mv, g_disp.mvf, g_disp.rmsnorm,
                 g_disp.qknorm, g_disp.headnorm, g_disp.rope, g_disp.store,
-                g_disp.attn, g_disp.attn_chunk, g_disp.elem, g_disp.moe);
+                g_disp.attn, g_disp.attn_chunk, g_coop_dispatches,
+                g_disp.elem, g_disp.moe);
     }
     return (float *)g->logits.contents + (size_t)(n - 1) * m->n_vocab;
 }

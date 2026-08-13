@@ -439,8 +439,20 @@ from a backend name. CUDA tensor-core and Metal tiled prefill kernels
 reassociate floating-point sums, so they are promoted by teacher-forced
 tolerance tests. CUDA currently promotes Q4_K/Q6_K/Q8_0 on the gated dense
 families and Q4_0 on Gemma 4; the latter was bit-identical over 820 tensor-core
-dispatches on the real 31B QAT artifact. `RUNNER_CUDA_TC=0` and
-`RUNNER_METAL_MM=0` pin the scalar matvec paths for identity investigations.
+dispatches on the real 31B QAT artifact.
+
+On Metal that now covers **decode as well as prefill**: the cooperative KV
+attention read was promoted on 2026-08-17 after clearing zero teacher-forced
+top-1 flips out of 64 on every local model that reaches it — gemma-4 E2B,
+gemma-3-4B, granite-4.1-8B under a layer split, SmolLM2, and the NoPE /
+attention-temperature fixtures — in both f16 and q8 KV cache formats, for a
+measured +3.0–4.3 % decode across 2.3k–8.1k token spans. So Metal decode at
+long context is a tolerance-gated route, not a byte-identical one.
+
+`RUNNER_CUDA_TC=0`, `RUNNER_METAL_MM=0` and `RUNNER_METAL_ATTN_COOP=0` pin the
+byte-identical scalar paths for identity investigations; every CPU-vs-GPU byte
+comparison in the test suite sets them. `./test-attn-tol MODEL.gguf` is the
+attention gate.
 Weights are wrapped zero-copy from the model mmap. A file larger than the
 device's `maxBufferLength` — 4.29 GB on an M1, against a 5.73 GB working set —
 is wrapped in several buffers instead of being copied or forced into a
@@ -451,13 +463,11 @@ exercised on a machine whose models all fit one buffer, and
 `make test-metal-multibuf` is the gate. A single tensor larger than the ceiling
 still cannot be wrapped and says so.
 
-`RUNNER_METAL_ATTN_COOP=1` opts into a cooperative KV read in Metal decode
-attention: one simdgroup owns a KV row and its lanes split `head_dim`, so a
-load covers 32 consecutive elements instead of 32 rows. It clears the 0/64
-teacher-forced flip bar and measures **+3 to +4 %** decode at 2.3k–8.1k token
-spans on an M1, but it reassociates the per-row dot into a `simd_sum`, so it is
-**off by default** and the byte-identical kernel stays on the default path.
-`./test-attn-tol MODEL.gguf` is the gate.
+`RUNNER_METAL_ATTN_COOP=0` pins the byte-identical decode attention kernel.
+The default is the cooperative KV read: one simdgroup owns a KV row and its
+lanes split `head_dim`, so a load covers 32 consecutive elements instead of 32
+rows. It reassociates the per-row dot into a `simd_sum`, which is why it
+answers to `./test-attn-tol` rather than to an identity claim.
 
 `RUNNER_METAL_MV=1` opts into a reassociating Metal *decode* matvec (q4_0/q8_0,
 float4 accumulation and the q4_0 zero-point factored out of the inner loop).
