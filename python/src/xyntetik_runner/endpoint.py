@@ -294,6 +294,42 @@ class RunnerEndpoint:
                 raise RunnerProtocolError(
                     f"runner sent a non-string {field} delta", partial=partial
                 )
+        tool_calls = delta.get("tool_calls")
+        if tool_calls is not None:
+            if not isinstance(tool_calls, list):
+                raise RunnerProtocolError(
+                    "runner sent tool_calls that is not an array", partial=partial
+                )
+            for fragment in tool_calls:
+                if not isinstance(fragment, dict):
+                    raise RunnerProtocolError(
+                        "runner sent a tool-call fragment that is not an object",
+                        partial=partial,
+                    )
+                index = fragment.get("index", 0)
+                if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                    raise RunnerProtocolError(
+                        "runner sent an invalid tool-call index", partial=partial
+                    )
+                call_id = fragment.get("id")
+                if call_id is not None and not isinstance(call_id, str):
+                    raise RunnerProtocolError(
+                        "runner sent a non-string tool-call id", partial=partial
+                    )
+                function = fragment.get("function")
+                if function is not None and not isinstance(function, dict):
+                    raise RunnerProtocolError(
+                        "runner sent a tool-call function that is not an object",
+                        partial=partial,
+                    )
+                if function:
+                    for field in ("name", "arguments"):
+                        value = function.get(field)
+                        if value is not None and not isinstance(value, str):
+                            raise RunnerProtocolError(
+                                f"runner sent a non-string tool-call {field}",
+                                partial=partial,
+                            )
         return delta
 
     def _read_json(

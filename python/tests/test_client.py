@@ -250,6 +250,32 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual([c.name for c in result.tool_calls], ["f", "g"])
         self.assertEqual([c.id for c in result.tool_calls], ["a", "b"])
 
+    def test_stream_rejects_malformed_tool_call_fragments_with_partial(self):
+        malformed = (
+            '"not-a-list"',
+            '["not-an-object"]',
+            '[{"index":-1,"function":{}}]',
+            '[{"index":"0","function":{}}]',
+            '[{"index":0,"id":7,"function":{}}]',
+            '[{"index":0,"function":"not-an-object"}]',
+            '[{"index":0,"function":{"name":7}}]',
+            '[{"index":0,"function":{"arguments":{}}}]',
+        )
+        for fragments in malformed:
+            lines = [
+                b'data: {"choices":[{"delta":{"content":"partial"}}]}\n',
+                ('data: {"choices":[{"delta":{"tool_calls":' + fragments
+                 + '}}]}\n').encode(),
+            ]
+            endpoint = RunnerEndpoint(
+                "http://127.0.0.1:8080",
+                opener=lambda request, timeout, lines=lines: _Response(lines),
+            )
+            with self.subTest(fragments=fragments):
+                with self.assertRaises(RunnerProtocolError) as caught:
+                    endpoint.stream_chat({"messages": []})
+                self.assertEqual(caught.exception.partial, "partial")
+
     def test_stream_rejects_premature_eof_with_partial_text(self):
         endpoint = RunnerEndpoint(
             "http://127.0.0.1:8080",
