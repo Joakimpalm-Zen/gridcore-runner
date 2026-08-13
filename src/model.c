@@ -1061,7 +1061,9 @@ static void warn_if_it_will_not_stay_resident(const model_t *m, bool locked) {
 }
 
 bool model_load(model_t *m, const char *path, const model_params *p) {
+    if (!m) return false;
     memset(m, 0, sizeof(*m));
+    if (!path || !p) return false;
     if (!model_load_inner(m, path, p)) {
         model_free(m);
         return false;

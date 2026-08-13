@@ -72,6 +72,8 @@ int main(void) {
     p.n_ctx = 64;
     p.n_batch = 4;
 
+    assert(!model_load(NULL, path, &p));
+
     model_t m;
     memset(&m, 0xA5, sizeof(m));
     assert(!model_load(&m, path, &p));
@@ -86,6 +88,21 @@ int main(void) {
 
     // A caller that keeps the old "free after failure" habit must still be safe.
     model_free(&m);
+
+    // Invalid public API arguments must fail without leaving a model that
+    // crashes the same cleanup path.
+    memset(&m, 0xA5, sizeof(m));
+    assert(!model_load(&m, NULL, &p));
+    assert(m.gf.map == NULL);
+    assert(m.path == NULL);
+    model_free(&m);
+
+    memset(&m, 0xA5, sizeof(m));
+    assert(!model_load(&m, path, NULL));
+    assert(m.gf.map == NULL);
+    assert(m.path == NULL);
+    model_free(&m);
+
     remove(path);
     printf("model load failure cleanup ok\n");
     return 0;
