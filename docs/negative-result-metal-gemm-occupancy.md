@@ -118,10 +118,40 @@ threads × 8 values). At `MM_TK=64` it fills half of each row and leaves the
 rest stale, so the kernel is fast because it does less work. The number is
 discarded.
 
-Making `MM_TK` a real knob means rewriting that loop to stride generally over
-`32 * MM_TK` values, and confirming each type's `DEQ_CHUNK` still addresses its
-block layout correctly when `sub` spans more than one 32-element block. That is
-a contained piece of work and is the only untried lever left here.
+Making `MM_TK` a real knob is **larger than "rewrite that loop", and the
+evidence for doing it is absent.** Scoped properly on 2026-08-16:
+
+The staging loop's index arithmetic generalises easily — stride linearly over
+`MM_TM * MM_TK` values at 8 per thread, `r = idx / MM_TK`, `sub = idx % MM_TK`,
+which reproduces the current mapping exactly at 64×32. That part is contained.
+
+What is not contained is every `DEQ_CHUNK`. Each computes its block from `k0`
+alone and then offsets by `sub` **assuming `sub < 32`**:
+
+```c
+// k_mm_q8_0
+device const uchar *blk = wb + a.w_off + ((ulong)row * nb + k0 / 32) * 34;
+device const char  *q   = (device const char *)(blk + 2) + sub;
+```
+
+At `MM_TK=64`, `sub` reaches 56 and `q[j]` walks off the end of a 34-byte block
+into the next block's scale. Every one of the ~12 `k_mm_*` kernels needs its
+block selection moved from `k0` to `k0 + sub`, with per-type granularity (q4_K
+indexes 256-element superblocks and a sub-block scale, mxfp4 and the iq types
+each differ again).
+
+And the reason to do it is missing. The `MM_TK=64` figure that motivated this —
+86.69 tok/s against 83.53 — came from exactly the bug above: the loop filled
+half of each row, so the kernel was fast because it read less. It failed parity.
+There is no measurement suggesting a larger k-step helps. The theoretical
+argument is fewer barriers (18 k-iterations instead of 36 at `n_in=576`), but
+this same document shows the kernel is not barrier- or occupancy-bound —
+doubling resident threadgroups was neutral.
+
+So: a dozen per-type numerical edits, each able to produce a silent wrong
+answer, to test a hypothesis with no supporting evidence and one refuted
+argument. **Skipped deliberately**, and the shape is written down so a future
+session can take it if a reason appears.
 
 ## Conclusion
 
