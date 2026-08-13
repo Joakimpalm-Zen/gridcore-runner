@@ -23,6 +23,7 @@ typedef struct {
     id<MTLCommandQueue> queue;
     id<MTLComputePipelineState> p_rmsnorm, p_qknorm, p_headnorm, p_rope, p_store, p_attn;
     id<MTLComputePipelineState> p_attn_chunk, p_attn_comb;
+    id<MTLComputePipelineState> p_attn_coop, p_attn_chunk_coop;  // cooperative KV score read
     id<MTLComputePipelineState> p_silu, p_gelu, p_add, p_scale, p_head_transform;
     id<MTLComputePipelineState> p_sigmul;   // attention output gate (x *= sigmoid(g))
     id<MTLComputePipelineState> p_moe_route, p_moe_actmul, p_moe_sum;
@@ -177,6 +178,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     free(g->sinks); free(g->gib); free(g->geb); free(g->ueb); free(g->deb);
     free(g->pan); free(g->pfn);
     free(g->gpn1); free(g->gprn2); free(g->gpn2); free(g->ggis); free(g->gdsc);
+    [g->p_attn_coop release]; [g->p_attn_chunk_coop release];
     for (int i = 0; i < g->n_wbuf; i++) [g->wbuf[i] release];
     id<MTLBuffer> bufs[] = { g->kc, g->vc, g->x, g->xb, g->xb2,
                              g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
@@ -566,6 +568,27 @@ void gpu_mv_force(int on) {
     g_mv_state = on < 0 ? MV_ENV_UNSET : (on != 0);
 }
 
+// Cooperative KV score read (k_attn_coop). Same disposition as the fast
+// matvec: it reassociates the per-row dot into a simd_sum over 32 lane
+// partials, so it cannot live on the identity route, and it ships OFF until a
+// measurement promotes it. RUNNER_METAL_ATTN_COOP=1 opts in.
+enum { COOP_ENV_UNSET = -2 };
+static int g_coop_state = COOP_ENV_UNSET;
+static unsigned long g_coop_dispatches = 0;
+
+void gpu_attn_coop_force(int on) {
+    g_coop_state = on < 0 ? COOP_ENV_UNSET : (on != 0);
+}
+unsigned long gpu_attn_coop_dispatches(void) { return g_coop_dispatches; }
+
+static bool metal_attn_coop_on(void) {
+    if (g_coop_state == COOP_ENV_UNSET) {
+        const char *e = getenv("RUNNER_METAL_ATTN_COOP");
+        g_coop_state = e && *e && strcmp(e, "0") && strcmp(e, "off");
+    }
+    return g_coop_state > 0;
+}
+
 static unsigned long g_mv_dispatches = 0;
 unsigned long gpu_mv_dispatches(void) { return g_mv_dispatches; }
 
@@ -928,6 +951,8 @@ bool gpu_init(model_t *m) {
     g->p_rope         = mk_pipeline(dev, lib, @"k_rope");
     g->p_store        = mk_pipeline(dev, lib, @"k_store_kv");
     g->p_attn         = mk_pipeline(dev, lib, @"k_attn");
+    g->p_attn_coop    = mk_pipeline(dev, lib, @"k_attn_coop");
+    g->p_attn_chunk_coop = mk_pipeline(dev, lib, @"k_attn_chunk_coop");
     g->p_attn_chunk   = mk_pipeline(dev, lib, @"k_attn_chunk");
     g->p_attn_comb    = mk_pipeline(dev, lib, @"k_attn_combine");
     g->p_silu         = mk_pipeline(dev, lib, @"k_silu_mul");
@@ -2031,7 +2056,10 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                                        model_attn_scale(m, l), q8, window,
                                        a_chunk, a_nch, q_dim,
                                        m->n_head * m->n_ctx };
-                [e setComputePipelineState:g->p_attn_chunk];
+                bool coopc = metal_attn_coop_on() && g->p_attn_chunk_coop;
+                if (coopc) g_coop_dispatches++;
+                [e setComputePipelineState:coopc ? g->p_attn_chunk_coop
+                                                 : g->p_attn_chunk];
                 [e setBuffer:g->q       offset:0 atIndex:0];
                 [e setBuffer:g->kc      offset:0 atIndex:1];
                 [e setBuffer:g->vc      offset:0 atIndex:2];
@@ -2062,7 +2090,12 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                              model_attn_scale(m, l), q8, window,
                              g->sinks[l] != nil,
                              q_dim, m->n_head * m->n_ctx, xdim };
-            [e setComputePipelineState:g->p_attn];
+            // Cooperative twin at decode only: the score loop is what
+            // scatters, and at n > 1 each column has its own KV range, which
+            // the coop form's simdgroup-per-row split does not describe.
+            bool coop = (n == 1) && metal_attn_coop_on() && g->p_attn_coop;
+            if (coop) g_coop_dispatches++;
+            [e setComputePipelineState:coop ? g->p_attn_coop : g->p_attn];
             [e setBuffer:g->q   offset:0 atIndex:0];
             [e setBuffer:g->kc  offset:0 atIndex:1];
             [e setBuffer:g->vc  offset:0 atIndex:2];
@@ -2073,7 +2106,8 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
             // Widest power-of-two threadgroup this pipeline allows, capped
             // at the red[] scratch in the kernel. The reduction halves tpg
             // each step, so a non-power-of-two would drop lanes silently.
-            NSUInteger amax = g->p_attn.maxTotalThreadsPerThreadgroup;
+            NSUInteger amax = (coop ? g->p_attn_coop : g->p_attn)
+                                  .maxTotalThreadsPerThreadgroup;
             if (amax > 256) amax = 256;   // measured optimum; red[] is sized to match
             NSUInteger atpg = 1;
             while (atpg * 2 <= amax) atpg *= 2;

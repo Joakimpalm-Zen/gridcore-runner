@@ -37,6 +37,10 @@ unsigned long gpu_tc_dispatches(void) { return 0; }
 void gpu_mv_force(int on) { (void)on; }
 unsigned long gpu_mv_dispatches(void) { return 0; }
 
+// Metal-only lever; present so the gate links and reports 'never here'.
+void gpu_attn_coop_force(int on) { (void)on; }
+unsigned long gpu_attn_coop_dispatches(void) { return 0; }
+
 bool gpu_moe_ok(void) {
     return false;   // no backend here at all
 }

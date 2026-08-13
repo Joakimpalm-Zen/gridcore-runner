@@ -74,6 +74,11 @@ void   gpu_mv_force(int on);
 // an exactly-matching one, and a gate that cannot see its own subject passes
 // vacuously.
 unsigned long gpu_mv_dispatches(void);
+// test hook for the cooperative-KV attention gate: force the reassociating
+// score read on (1) or off (0) regardless of RUNNER_METAL_ATTN_COOP; -1
+// returns to the env default. A no-op on backends without one.
+void   gpu_attn_coop_force(int on);
+unsigned long gpu_attn_coop_dispatches(void);
 // test hook: force (1) or forbid (0) the eager MoE routing path; -1 = env
 void   gpu_moe_eager_force(int on);
 bool   gpu_init(model_t *m);                     // false = unsupported, use CPU

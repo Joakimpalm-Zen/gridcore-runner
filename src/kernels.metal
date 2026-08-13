@@ -1283,6 +1283,117 @@ struct attn_args {
     int   q_stride, att_stride, out_stride;
 };
 
+// Cooperative-read variant of the K-score loop (RUNNER_METAL_ATTN_COOP=1).
+//
+// The 2026-08-15 diagnosis measured decode's KV read at 1.52 GB/s, ~18x worse
+// per byte than the weight read in the same forward, and named the cause:
+// k_attn gives each THREAD a whole KV row, so adjacent lanes address memory
+// `row_b` apart -- 1024 B on e2b -- and one simdgroup load touches 32 distinct
+// cache lines. (The V accumulation below is already coalesced: consecutive
+// threads take consecutive elements of the SAME row, so only the score loop
+// scatters, and only that loop changes here.)
+//
+// Cooperative form: one SIMDGROUP owns a row and its 32 lanes split the head
+// dimension, so a load covers 32 consecutive elements instead of 32 rows, and
+// the per-row dot finishes with one simd_sum.
+//
+// That reduction is why this is a separate kernel rather than an edit: summing
+// 32 lane partials through a reduction tree is not the sequential accumulation
+// k_attn performs, so the result is NOT bit-identical and the identity route
+// cannot host it. It answers to tests/test_attn_tol.c the way the fast matvec
+// answers to test_mv_tol.c, and ships off until a measurement promotes it.
+static inline float kv_dot_coop(device const uchar *row, device const float *qh,
+                                int hd, int q8, uint lane) {
+    float s = 0;
+    if (q8) {
+        // One 32-element block per lane step: the block's scale is read once
+        // and the 32 quants beneath it are contiguous.
+        for (int b = (int)lane; b < hd / 32; b += 32) {
+            device const uchar *blk = row + (ulong)b * 34;
+            float d = (float)*(device const half *)blk;
+            device const char *q = (device const char *)(blk + 2);
+            device const float *xp = qh + b * 32;
+            float t = 0;
+            for (int j = 0; j < 32; j++) t += xp[j] * (float)q[j];
+            s += d * t;
+        }
+    } else {
+        device const half *k = (device const half *)row;
+        for (int i = (int)lane; i < hd; i += 32) s += qh[i] * (float)k[i];
+    }
+    return simd_sum(s);
+}
+
+// Shared prologue and epilogue for the two attention kernels below. They
+// differ ONLY in how the K scores are computed; keeping the rest in one place
+// is what stops the gated variant from drifting from the route it is measured
+// against.
+#define ATTN_PROLOGUE \
+    /* Decode gives this kernel only n_head threadgroups (8 on gemma-3-4b) on */ \
+    /* an 8-core GPU, and its work grows linearly with context, so */ \
+    /* threads-per-group is the only parallelism lever short of splitting the */ \
+    /* KV range across threadgroups. 128 -> 256 is worth ~11% at 3k context; */ \
+    /* 512 and 1024 measured IDENTICAL to 256 on an M1 (the pipeline allows */ \
+    /* 1024), because per-thread work shrinks as fast as the reduction's */ \
+    /* barrier count grows. 256 is therefore the measured size, and the extra */ \
+    /* threadgroup scratch for 1024 buys nothing. The host still clamps to the */ \
+    /* pipeline limit and to a power of two, which these reductions require. */ \
+    threadgroup float red[256]; \
+    uint tid = tid3.x, tpg = tpg3.x; \
+    uint h = tgpig.x, col = tgpig.y; \
+    int hd = a.head_dim; \
+    int kvh = h / (a.n_head / a.n_head_kv); \
+    int kv_dim = a.n_head_kv * hd; \
+    ulong row_b = kv_row_bytes(kv_dim, a.q8); \
+    ulong base = a.l_off + kv_head_off(kvh, hd, a.q8); \
+    int pos = a.pos + (int)col; \
+    device const float *q = q_all + (ulong)col * a.q_stride; \
+    device float *att = att_all + (ulong)col * a.att_stride; \
+    device float *out = out_all + (ulong)col * a.out_stride; \
+    device const float *qh = q + h * hd; \
+    device float *ah = att + (ulong)h * a.n_ctx; \
+    int t0 = 0; \
+    if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1; \
+
+
+#define ATTN_EPILOGUE \
+ \
+    /* max */ \
+    float mx = -1e30f; \
+    for (int t = t0 + tid; t <= pos; t += tpg) mx = max(mx, ah[t]); \
+    if (a.has_sinks && tid == 0) mx = max(mx, sinks[h]); \
+    red[tid] = mx; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    for (uint off = tpg / 2; off > 0; off >>= 1) { \
+        if (tid < off) red[tid] = max(red[tid], red[tid + off]); \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+    } \
+    mx = red[0]; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    /* exp + sum */ \
+    float sum = 0; \
+    for (int t = t0 + tid; t <= pos; t += tpg) { \
+        float e = exp(ah[t] - mx); \
+        ah[t] = e; \
+        sum += e; \
+    } \
+    if (a.has_sinks && tid == 0) sum += exp(sinks[h] - mx); \
+    red[tid] = sum; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    for (uint off = tpg / 2; off > 0; off >>= 1) { \
+        if (tid < off) red[tid] += red[tid + off]; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+    } \
+    sum = red[0]; \
+    threadgroup_barrier(mem_flags::mem_device); \
+ \
+    for (int i = tid; i < hd; i += tpg) { \
+        float o = 0; \
+        for (int t = t0; t <= pos; t++) \
+            o += ah[t] * kv_pair(vc + base + (ulong)t * row_b, i / 2, a.q8)[i & 1]; \
+        out[h * hd + i] = o / sum; \
+    }
+
 kernel void k_attn(device const float *q_all   [[buffer(0)]],
                    device const uchar *kc      [[buffer(1)]],
                    device const uchar *vc      [[buffer(2)]],
@@ -1293,72 +1404,38 @@ kernel void k_attn(device const float *q_all   [[buffer(0)]],
                    uint3 tgpig [[threadgroup_position_in_grid]],
                    uint3 tid3 [[thread_position_in_threadgroup]],
                    uint3 tpg3 [[threads_per_threadgroup]]) {
-    // Decode gives this kernel only n_head threadgroups (8 on gemma-3-4b) on
-    // an 8-core GPU, and its work grows linearly with context, so
-    // threads-per-group is the only parallelism lever short of splitting the
-    // KV range across threadgroups. 128 -> 256 is worth ~11% at 3k context;
-    // 512 and 1024 measured IDENTICAL to 256 on an M1 (the pipeline allows
-    // 1024), because per-thread work shrinks as fast as the reduction's
-    // barrier count grows. 256 is therefore the measured size, and the extra
-    // threadgroup scratch for 1024 buys nothing. The host still clamps to the
-    // pipeline limit and to a power of two, which these reductions require.
-    threadgroup float red[256];
-    uint tid = tid3.x, tpg = tpg3.x;
-    uint h = tgpig.x, col = tgpig.y;
-    int hd = a.head_dim;
-    int kvh = h / (a.n_head / a.n_head_kv);
-    int kv_dim = a.n_head_kv * hd;
-    ulong row_b = kv_row_bytes(kv_dim, a.q8);
-    ulong base = a.l_off + kv_head_off(kvh, hd, a.q8);
-    int pos = a.pos + (int)col;
-    device const float *q = q_all + (ulong)col * a.q_stride;
-    device float *att = att_all + (ulong)col * a.att_stride;
-    device float *out = out_all + (ulong)col * a.out_stride;
-    device const float *qh = q + h * hd;
-    device float *ah = att + (ulong)h * a.n_ctx;
-    int t0 = 0;
-    if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1;
-
+    ATTN_PROLOGUE
     for (int t = t0 + tid; t <= pos; t += tpg) {
         ah[t] = kv_dot(kc + base + (ulong)t * row_b, qh, hd, a.q8) * a.scale;
     }
     threadgroup_barrier(mem_flags::mem_device);
+    ATTN_EPILOGUE
+}
 
-    // max
-    float mx = -1e30f;
-    for (int t = t0 + tid; t <= pos; t += tpg) mx = max(mx, ah[t]);
-    if (a.has_sinks && tid == 0) mx = max(mx, sinks[h]);
-    red[tid] = mx;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint off = tpg / 2; off > 0; off >>= 1) {
-        if (tid < off) red[tid] = max(red[tid], red[tid + off]);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+// Cooperative-read twin: one simdgroup owns a KV row and its lanes split
+// head_dim, so a load covers 32 consecutive elements instead of 32 rows.
+// Everything after the score loop is the shared epilogue.
+kernel void k_attn_coop(device const float *q_all   [[buffer(0)]],
+                   device const uchar *kc      [[buffer(1)]],
+                   device const uchar *vc      [[buffer(2)]],
+                   device float       *att_all [[buffer(3)]],
+                   device float       *out_all [[buffer(4)]],
+                   constant attn_args &a   [[buffer(5)]],
+                   device const float *sinks [[buffer(6)]],
+                   uint3 tgpig [[threadgroup_position_in_grid]],
+                   uint3 tid3 [[thread_position_in_threadgroup]],
+                   uint3 tpg3 [[threads_per_threadgroup]]) {
+    ATTN_PROLOGUE
+    {
+        uint lane = tid & 31u, sg = tid >> 5, n_sg = tpg >> 5;
+        for (int t = t0 + (int)sg; t <= pos; t += (int)n_sg) {
+            float sc = kv_dot_coop(kc + base + (ulong)t * row_b, qh, hd,
+                                   a.q8, lane) * a.scale;
+            if (lane == 0) ah[t] = sc;
+        }
     }
-    mx = red[0];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    // exp + sum
-    float sum = 0;
-    for (int t = t0 + tid; t <= pos; t += tpg) {
-        float e = exp(ah[t] - mx);
-        ah[t] = e;
-        sum += e;
-    }
-    if (a.has_sinks && tid == 0) sum += exp(sinks[h] - mx);
-    red[tid] = sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint off = tpg / 2; off > 0; off >>= 1) {
-        if (tid < off) red[tid] += red[tid + off];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    sum = red[0];
     threadgroup_barrier(mem_flags::mem_device);
-
-    for (int i = tid; i < hd; i += tpg) {
-        float o = 0;
-        for (int t = t0; t <= pos; t++)
-            o += ah[t] * kv_pair(vc + base + (ulong)t * row_b, i / 2, a.q8)[i & 1];
-        out[h * hd + i] = o / sum;
-    }
+    ATTN_EPILOGUE
 }
 
 // ------------------------------------------------- chunked decode attention
@@ -1388,6 +1465,74 @@ struct attn_chunk_args {
     int   q_stride, att_stride;
 };
 
+/* Shared halves of the chunked attention kernel; the two variants below
+   differ only in how the K scores are read. */
+#define ATTNC_PROLOGUE \
+    threadgroup float red[256]; \
+    uint tid = tid3.x, tpg = tpg3.x; \
+    uint h = tgpig.x, z = tgpig.y; \
+    int hd = a.head_dim; \
+    int kvh = h / (a.n_head / a.n_head_kv); \
+    int kv_dim = a.n_head_kv * hd; \
+    ulong row_b = kv_row_bytes(kv_dim, a.q8); \
+    ulong base = a.l_off + kv_head_off(kvh, hd, a.q8); \
+    int pos = a.pos; \
+    device const float *qh = q_all + h * hd; \
+    device float *ah = att_all + (ulong)h * a.n_ctx; \
+ \
+    int t0 = 0; \
+    if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1; \
+    int lo = t0 + (int)z * a.chunk; \
+    int hi = min(lo + a.chunk - 1, pos); \
+ \
+    device float *acc = acc_all + ((ulong)h * a.n_chunks + z) * hd; \
+    device float *ms  = ms_all  + ((ulong)h * a.n_chunks + z) * 2; \
+ \
+    if (lo > hi) { /* empty chunk: neutral partial */ \
+        for (int i = tid; i < hd; i += tpg) acc[i] = 0; \
+        if (tid == 0) { ms[0] = -1e30f; ms[1] = 0; } \
+        return; \
+    } \
+
+
+#define ATTNC_EPILOGUE \
+ \
+    float mx = -1e30f; \
+    for (int t = lo + (int)tid; t <= hi; t += tpg) mx = max(mx, ah[t]); \
+    red[tid] = mx; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    for (uint off = tpg / 2; off > 0; off >>= 1) { \
+        if (tid < off) red[tid] = max(red[tid], red[tid + off]); \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+    } \
+    mx = red[0]; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+ \
+    float sum = 0; \
+    for (int t = lo + (int)tid; t <= hi; t += tpg) { \
+        float e = exp(ah[t] - mx); \
+        ah[t] = e; \
+        sum += e; \
+    } \
+    red[tid] = sum; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    for (uint off = tpg / 2; off > 0; off >>= 1) { \
+        if (tid < off) red[tid] += red[tid + off]; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+    } \
+    sum = red[0]; \
+    threadgroup_barrier(mem_flags::mem_device); \
+ \
+    /* UNNORMALISED: the combine pass owns the division, because the divisor is */ \
+    /* not known until every chunk's maximum is. */ \
+    for (int i = tid; i < hd; i += tpg) { \
+        float o = 0; \
+        for (int t = lo; t <= hi; t++) \
+            o += ah[t] * kv_pair(vc + base + (ulong)t * row_b, i / 2, a.q8)[i & 1]; \
+        acc[i] = o; \
+    } \
+    if (tid == 0) { ms[0] = mx; ms[1] = sum; }
+
 kernel void k_attn_chunk(device const float *q_all   [[buffer(0)]],
                          device const uchar *kc      [[buffer(1)]],
                          device const uchar *vc      [[buffer(2)]],
@@ -1398,71 +1543,37 @@ kernel void k_attn_chunk(device const float *q_all   [[buffer(0)]],
                          uint3 tgpig [[threadgroup_position_in_grid]],
                          uint3 tid3  [[thread_position_in_threadgroup]],
                          uint3 tpg3  [[threads_per_threadgroup]]) {
-    threadgroup float red[256];
-    uint tid = tid3.x, tpg = tpg3.x;
-    uint h = tgpig.x, z = tgpig.y;
-    int hd = a.head_dim;
-    int kvh = h / (a.n_head / a.n_head_kv);
-    int kv_dim = a.n_head_kv * hd;
-    ulong row_b = kv_row_bytes(kv_dim, a.q8);
-    ulong base = a.l_off + kv_head_off(kvh, hd, a.q8);
-    int pos = a.pos;
-    device const float *qh = q_all + h * hd;
-    device float *ah = att_all + (ulong)h * a.n_ctx;
-
-    int t0 = 0;
-    if (a.window > 0 && pos - a.window + 1 > 0) t0 = pos - a.window + 1;
-    int lo = t0 + (int)z * a.chunk;
-    int hi = min(lo + a.chunk - 1, pos);
-
-    device float *acc = acc_all + ((ulong)h * a.n_chunks + z) * hd;
-    device float *ms  = ms_all  + ((ulong)h * a.n_chunks + z) * 2;
-
-    if (lo > hi) {                       // empty chunk: neutral partial
-        for (int i = tid; i < hd; i += tpg) acc[i] = 0;
-        if (tid == 0) { ms[0] = -1e30f; ms[1] = 0; }
-        return;
-    }
-
+    ATTNC_PROLOGUE
     for (int t = lo + (int)tid; t <= hi; t += tpg)
         ah[t] = kv_dot(kc + base + (ulong)t * row_b, qh, hd, a.q8) * a.scale;
     threadgroup_barrier(mem_flags::mem_device);
+    ATTNC_EPILOGUE
+}
 
-    float mx = -1e30f;
-    for (int t = lo + (int)tid; t <= hi; t += tpg) mx = max(mx, ah[t]);
-    red[tid] = mx;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint off = tpg / 2; off > 0; off >>= 1) {
-        if (tid < off) red[tid] = max(red[tid], red[tid + off]);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+// Cooperative-read twin of the chunked kernel. This is the one that matters
+// at long context: decode takes the chunked path whenever the span is worth
+// splitting, so k_attn_coop above only ever runs on short spans.
+kernel void k_attn_chunk_coop(device const float *q_all   [[buffer(0)]],
+                         device const uchar *kc      [[buffer(1)]],
+                         device const uchar *vc      [[buffer(2)]],
+                         device float       *att_all [[buffer(3)]],
+                         device float       *acc_all [[buffer(4)]],
+                         device float       *ms_all  [[buffer(5)]],
+                         constant attn_chunk_args &a [[buffer(6)]],
+                         uint3 tgpig [[threadgroup_position_in_grid]],
+                         uint3 tid3  [[thread_position_in_threadgroup]],
+                         uint3 tpg3  [[threads_per_threadgroup]]) {
+    ATTNC_PROLOGUE
+    {
+        uint lane = tid & 31u, sg = tid >> 5, n_sg = tpg >> 5;
+        for (int t = lo + (int)sg; t <= hi; t += (int)n_sg) {
+            float sc = kv_dot_coop(kc + base + (ulong)t * row_b, qh, hd,
+                                   a.q8, lane) * a.scale;
+            if (lane == 0) ah[t] = sc;
+        }
     }
-    mx = red[0];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    float sum = 0;
-    for (int t = lo + (int)tid; t <= hi; t += tpg) {
-        float e = exp(ah[t] - mx);
-        ah[t] = e;
-        sum += e;
-    }
-    red[tid] = sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint off = tpg / 2; off > 0; off >>= 1) {
-        if (tid < off) red[tid] += red[tid + off];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    sum = red[0];
     threadgroup_barrier(mem_flags::mem_device);
-
-    // UNNORMALISED: the combine pass owns the division, because the divisor is
-    // not known until every chunk's maximum is.
-    for (int i = tid; i < hd; i += tpg) {
-        float o = 0;
-        for (int t = lo; t <= hi; t++)
-            o += ah[t] * kv_pair(vc + base + (ulong)t * row_b, i / 2, a.q8)[i & 1];
-        acc[i] = o;
-    }
-    if (tid == 0) { ms[0] = mx; ms[1] = sum; }
+    ATTNC_EPILOGUE
 }
 
 struct attn_comb_args { int head_dim, n_head, n_chunks, has_sinks, out_stride; };

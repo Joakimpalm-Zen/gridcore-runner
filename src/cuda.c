@@ -1819,6 +1819,10 @@ unsigned long gpu_tc_dispatches(void) { return g_tc_dispatches; }
 void gpu_mv_force(int on) { (void)on; }
 unsigned long gpu_mv_dispatches(void) { return 0; }
 
+// Metal-only lever; present so the gate links and reports 'never here'.
+void gpu_attn_coop_force(int on) { (void)on; }
+unsigned long gpu_attn_coop_dispatches(void) { return 0; }
+
 // Same hook for the MoE routing path: the fused-vs-eager tolerance gate has to
 // run both inside one process, which an env var read at first launch cannot
 // express. -1 restores the env default (RUNNER_MOE_EAGER).

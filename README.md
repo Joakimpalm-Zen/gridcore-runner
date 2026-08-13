@@ -451,6 +451,14 @@ exercised on a machine whose models all fit one buffer, and
 `make test-metal-multibuf` is the gate. A single tensor larger than the ceiling
 still cannot be wrapped and says so.
 
+`RUNNER_METAL_ATTN_COOP=1` opts into a cooperative KV read in Metal decode
+attention: one simdgroup owns a KV row and its lanes split `head_dim`, so a
+load covers 32 consecutive elements instead of 32 rows. It clears the 0/64
+teacher-forced flip bar and measures **+3 to +4 %** decode at 2.3k–8.1k token
+spans on an M1, but it reassociates the per-row dot into a `simd_sum`, so it is
+**off by default** and the byte-identical kernel stays on the default path.
+`./test-attn-tol MODEL.gguf` is the gate.
+
 `RUNNER_METAL_MV=1` opts into a reassociating Metal *decode* matvec (q4_0/q8_0,
 float4 accumulation and the q4_0 zero-point factored out of the inner loop).
 It clears the 0/64 teacher-forced flip bar on both formats but measured

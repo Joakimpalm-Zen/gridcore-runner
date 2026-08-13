@@ -152,3 +152,5 @@ test-autofit
 test-autofit.exe
 test-gpu-identity
 test-gpu-identity.exe
+test-attn-tol
+test-attn-tol.exe
