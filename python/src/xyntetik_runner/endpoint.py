@@ -276,6 +276,11 @@ class RunnerEndpoint:
                 "runner sent a stream chunk whose choice is not an object",
                 partial=partial,
             )
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            raise RunnerProtocolError(
+                "runner sent a non-string finish reason", partial=partial
+            )
         return choices[0]
 
     @staticmethod

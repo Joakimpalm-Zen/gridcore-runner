@@ -276,6 +276,20 @@ class EndpointTests(unittest.TestCase):
                     endpoint.stream_chat({"messages": []})
                 self.assertEqual(caught.exception.partial, "partial")
 
+    def test_stream_rejects_non_string_finish_reason_with_partial(self):
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: _Response([
+                b'data: {"choices":[{"delta":{"content":"partial"}}]}\n',
+                b'data: {"choices":[{"delta":{},"finish_reason":7}]}\n',
+            ]),
+        )
+
+        with self.assertRaises(RunnerProtocolError) as caught:
+            endpoint.stream_chat({"messages": []})
+
+        self.assertEqual(caught.exception.partial, "partial")
+
     def test_stream_rejects_premature_eof_with_partial_text(self):
         endpoint = RunnerEndpoint(
             "http://127.0.0.1:8080",
