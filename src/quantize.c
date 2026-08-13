@@ -638,6 +638,11 @@ static const prune_layer_t *resolve_prune(const gguf_tensor *t, const prune_plan
     return prune_plan_find(plan, layer);
 }
 
+static void quantize_plans_free(prune_plan_t *prune, type_plan_t *types) {
+    prune_plan_free(prune);
+    type_plan_free(types);
+}
+
 int quantize_gguf(const char *in_path, const char *out_path, int target,
                   const char *prune_path) {
     return quantize_gguf_plan(in_path, out_path, target, prune_path, NULL);
@@ -654,20 +659,21 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
     type_plan_t tplan;
     memset(&tplan, 0, sizeof(tplan));
     if (type_plan_path && !type_plan_load(type_plan_path, &tplan)) {
-        prune_plan_free(&plan);
-    type_plan_free(&tplan);
+        quantize_plans_free(&plan, &tplan);
         return 1;
     }
 
     gguf_file g;
-    if (!gguf_open(&g, in_path)) { prune_plan_free(&plan); return 1; }
+    if (!gguf_open(&g, in_path)) {
+        quantize_plans_free(&plan, &tplan);
+        return 1;
+    }
     for (uint64_t i = 0; i < g.n_tensors; i++) {
         if (!ggml_type_supported(g.tensors[i].type)) {
             fprintf(stderr, "error: tensor %s has unsupported type %s\n",
                     g.tensors[i].name, ggml_type_name(g.tensors[i].type));
             gguf_close(&g);
-            prune_plan_free(&plan);
-    type_plan_free(&tplan);
+            quantize_plans_free(&plan, &tplan);
             return 1;
         }
     }
@@ -694,7 +700,9 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
             if (router->n_dims < 2) {
                 fprintf(stderr, "error: %s has %d dims, expected 2\n",
                         router->name, router->n_dims);
-                gguf_close(&g); prune_plan_free(&plan); return 1;
+                gguf_close(&g);
+                quantize_plans_free(&plan, &tplan);
+                return 1;
             }
             int64_t orig_n = router->ne[router->n_dims - 1];
             const prune_layer_t *pl = prune_plan_find(&plan, layer);
@@ -706,7 +714,9 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
                         fprintf(stderr, "error: prune-plan layer_%d lists "
                                 "expert %d, but blk.%d only has %lld experts\n",
                                 layer, pl->ids[j], layer, (long long)orig_n);
-                        gguf_close(&g); prune_plan_free(&plan); return 1;
+                        gguf_close(&g);
+                        quantize_plans_free(&plan, &tplan);
+                        return 1;
                     }
                 final_count = pl->n_ids;
                 if (final_count < orig_n) any_pruned = true;
@@ -721,7 +731,9 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
             fprintf(stderr, "error: --prune-experts lists %d layer(s) but "
                     "only %d matched an MoE layer in %s\n",
                     plan.n, n_moe_seen, in_path);
-            gguf_close(&g); prune_plan_free(&plan); return 1;
+            gguf_close(&g);
+            quantize_plans_free(&plan, &tplan);
+            return 1;
         }
         if (any_pruned && all_equal && n_moe_seen == n_moe_layers) {
             uniform_prune = true;
@@ -740,8 +752,7 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
         fprintf(stderr, "error: general.alignment=%llu is not a power of two\n",
                 (unsigned long long)align);
         gguf_close(&g);
-        prune_plan_free(&plan);
-    type_plan_free(&tplan);
+        quantize_plans_free(&plan, &tplan);
         return 1;
     }
     uint64_t amask = align - 1;
@@ -752,7 +763,11 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
     // input. (RNR-015.)
     size_t tlen = strlen(out_path) + sizeof(".partial");
     char *tmp_path = malloc(tlen);
-    if (!tmp_path) { gguf_close(&g); prune_plan_free(&plan); return 1; }
+    if (!tmp_path) {
+        gguf_close(&g);
+        quantize_plans_free(&plan, &tplan);
+        return 1;
+    }
     snprintf(tmp_path, tlen, "%s.partial", out_path);
 
     FILE *f = fopen(tmp_path, "wb");
@@ -760,8 +775,7 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
         fprintf(stderr, "error: cannot write %s\n", tmp_path);
         free(tmp_path);
         gguf_close(&g);
-        prune_plan_free(&plan);
-    type_plan_free(&tplan);
+        quantize_plans_free(&plan, &tplan);
         return 1;
     }
     writer w = { f, true };
@@ -1013,8 +1027,7 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
     bool write_ok = wr_close(&w);
     free(rowf); free(rowq); free(out_type); free(out_off); free(eff_ne);
     gguf_close(&g);
-    prune_plan_free(&plan);
-    type_plan_free(&tplan);
+    quantize_plans_free(&plan, &tplan);
 
     if (!write_ok) {
         remove(tmp_path);

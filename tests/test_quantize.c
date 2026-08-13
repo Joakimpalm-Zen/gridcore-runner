@@ -388,6 +388,20 @@ int main(void) {
     check_bytes(dest, sentinel, sizeof(sentinel));
     printf("ok: failed requant left the destination untouched\n");
 
+    // A type plan is parsed before the input GGUF is opened. If that open
+    // fails, the already-owned rules must still be released (ASan/LSan gate).
+    const char *missing_plan = "q_missing_plan.json";
+    FILE *mpf = fopen(missing_plan, "wb"); assert(mpf);
+    const char missing_plan_json[] =
+        "{\"default\":\"keep\",\"rules\":[{\"match\":\"weight\",\"type\":\"q8_0\"}]}";
+    assert(fwrite(missing_plan_json, 1, sizeof(missing_plan_json) - 1, mpf) ==
+           sizeof(missing_plan_json) - 1);
+    fclose(mpf);
+    assert(quantize_gguf_plan("q_does_not_exist.gguf", dest, T_KEEP, NULL,
+                              missing_plan) != 0);
+    remove(missing_plan);
+    printf("ok: a missing input releases its parsed type plan\n");
+
     // RNR-015 on the late install path: the temp file is complete, and only
     // replacing the destination fails. This is the Windows destroy-destination
     // window in a platform-independent smoke.
