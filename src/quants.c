@@ -1963,7 +1963,7 @@ float vec_dot(int type, const void *row, const float *x, int n) {
 // in int8 with an int32 accumulator: `_mm512_dpbusd_epi32` (AVX-512 VNNI) does
 // 64 multiply-accumulates per instruction, ~3 ops per 32 weights all in.
 //
-// Every promoted format reduces to the same two numbers per 32-element block:
+// Every promoted format reduces to the same two numbers per activation block:
 //   dot   = sum(q_unsigned[j] * xq[j])   — one VNNI accumulate chain
 //   sumxq = sum(xq[j])                   — precomputed at activation-quant time
 // because each format's value is affine in an UNSIGNED quant code:
@@ -1978,7 +1978,7 @@ float vec_dot(int type, const void *row, const float *x, int n) {
 // vec_dot. It ships tolerance-gated with `RUNNER_CPU_I8=0` pinning the scalar
 // path, exactly as `RUNNER_CUDA_TC=0` pins the scalar CUDA prefill.
 
-#define I8A_QK 32
+#define I8A_QK 16
 typedef struct { float d; int32_t s; int8_t qs[I8A_QK]; } block_i8a;
 
 #if defined(__AVX512F__) && defined(__AVX512VNNI__) && defined(__AVX512VL__)
@@ -2007,18 +2007,18 @@ bool i8_dot_ok(int type, int n) {
 }
 
 // RUNNER_CPU_I8: OFF by default — no combo was promoted. Measured 2026-08-13
-// on the Zen 5 / AVX-512 VNNI box:
+// on the Zen 5 / AVX-512 VNNI box. Re-gated at I8A_QK=16 on 2026-08-13:
 //
-//   model                   gate (0/64 flips)   decode gain
-//   Llama-3.2-3B  Q4_K_M    2/64  FAIL          +6%
-//   granite-4.1-8b Q4_0     2/64  FAIL          +6%
-//   SmolLM2-135M  Q8_0      0/64  pass          -4%
+//   model                   gate (0/64 flips)   median decode gain
+//   Llama-3.2-3B  Q4_K_M    1/64  FAIL          +7.8%
+//   granite-4.1-8b Q4_0     2/64  FAIL          +1.0%
+//   SmolLM2-135M  Q8_0      0/64  pass          +1.0%
 //
 // The kernel itself is 2.4-2.5x the scalar dot in isolation (mvbench), but
 // the dot is only ~10% of decode wall time on this box — the thread-pool
 // barrier and DRAM are the wall — so the end-to-end prize was never large
 // enough to justify defaulting on a route that flips near-tie tokens. Both
-// failing rows flip only near-ties (worst margin ~0.001 of the logit range)
+// failing rows flip only near-ties (worst margin <=0.0019 of the logit range)
 // and both sit far inside the deviation bound, but the promotion bar for a
 // tolerance-gated fast route on this engine is 0/64 and it is not widened to
 // fit a lever. `RUNNER_CPU_I8=1` opts in; test-i8-tol is the gate.
@@ -2041,7 +2041,7 @@ void i8_dot_force(int on) { g_i8_force = on < 0 ? -1 : (on != 0); }
 static unsigned long g_i8_dispatches = 0;
 unsigned long i8_dot_dispatches(void) { return g_i8_dispatches; }
 
-// Quantize an activation row into 32-element int8 blocks, carrying each
+// Quantize an activation row into 16-element int8 blocks, carrying each
 // block's quant sum. The rounding is defined as
 //     trunc(fma(x, 1/d, copysign(0.5, x)))
 // — round-half-away-from-zero, computed with a SINGLE rounding — so the
@@ -2060,12 +2060,9 @@ void i8_quant_act(const float *x, void *dst, int n) {
     const __m256 sign = _mm256_castsi256_ps(_mm256_set1_epi32(0x80000000));
     const __m256 half = _mm256_set1_ps(0.5f);
     for (int i = 0; i < n / I8A_QK; i++, b++, x += I8A_QK) {
-        __m256 v0 = _mm256_loadu_ps(x),      v1 = _mm256_loadu_ps(x + 8);
-        __m256 v2 = _mm256_loadu_ps(x + 16), v3 = _mm256_loadu_ps(x + 24);
+        __m256 v0 = _mm256_loadu_ps(x), v1 = _mm256_loadu_ps(x + 8);
         __m256 mx = _mm256_max_ps(_mm256_andnot_ps(sign, v0),
                                   _mm256_andnot_ps(sign, v1));
-        mx = _mm256_max_ps(mx, _mm256_andnot_ps(sign, v2));
-        mx = _mm256_max_ps(mx, _mm256_andnot_ps(sign, v3));
         __m128 m4 = _mm_max_ps(_mm256_castps256_ps128(mx),
                                _mm256_extractf128_ps(mx, 1));
         m4 = _mm_max_ps(m4, _mm_movehl_ps(m4, m4));
@@ -2079,26 +2076,19 @@ void i8_quant_act(const float *x, void *dst, int n) {
                         _mm256_or_ps(_mm256_and_ps(v0, sign), half)));
         __m256i q1 = _mm256_cvttps_epi32(_mm256_fmadd_ps(v1, sc,
                         _mm256_or_ps(_mm256_and_ps(v1, sign), half)));
-        __m256i q2 = _mm256_cvttps_epi32(_mm256_fmadd_ps(v2, sc,
-                        _mm256_or_ps(_mm256_and_ps(v2, sign), half)));
-        __m256i q3 = _mm256_cvttps_epi32(_mm256_fmadd_ps(v3, sc,
-                        _mm256_or_ps(_mm256_and_ps(v3, sign), half)));
         // sum before the narrowing packs: int32 lanes are already the quants
-        __m256i sv = _mm256_add_epi32(_mm256_add_epi32(q0, q1),
-                                      _mm256_add_epi32(q2, q3));
+        __m256i sv = _mm256_add_epi32(q0, q1);
         __m128i s4 = _mm_add_epi32(_mm256_castsi256_si128(sv),
                                    _mm256_extracti128_si256(sv, 1));
         s4 = _mm_add_epi32(s4, _mm_shuffle_epi32(s4, 0x4E));
         s4 = _mm_add_epi32(s4, _mm_shuffle_epi32(s4, 0xB1));
         b->s = _mm_cvtsi128_si32(s4);
-        // packs are lane-wise on 256-bit registers: pack 0/1 and 2/3 to i16
-        // (lane order 0-3,8-11,4-7,12-15), then to i8, then permute back
+        // packs are lane-wise: restore q0[0..7],q1[0..7] after narrowing.
         __m256i p01 = _mm256_packs_epi32(q0, q1);
-        __m256i p23 = _mm256_packs_epi32(q2, q3);
-        __m256i p8  = _mm256_packs_epi16(p01, p23);
-        p8 = _mm256_permutevar8x32_epi32(p8,
-                 _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
-        _mm256_storeu_si256((__m256i *)b->qs, p8);
+        __m128i p8 = _mm_packs_epi16(_mm256_castsi256_si128(p01),
+                                     _mm256_extracti128_si256(p01, 1));
+        p8 = _mm_shuffle_epi32(p8, 0xD8);
+        _mm_storeu_si128((__m128i *)b->qs, p8);
     }
 #else
     for (int i = 0; i < n / I8A_QK; i++, b++, x += I8A_QK) {
@@ -2136,8 +2126,10 @@ static inline __m256i i8_mac32(__m256i acc, __m256i wu, __m256i xq) {
 #endif
 }
 
-static inline __m256i i8a_load(const block_i8a *b) {
-    return _mm256_loadu_si256((const __m256i *)b->qs);
+static inline __m256i i8a_load32(const block_i8a *b) {
+    return _mm256_inserti128_si256(
+        _mm256_castsi128_si256(_mm_loadu_si128((const __m128i *)b[0].qs)),
+        _mm_loadu_si128((const __m128i *)b[1].qs), 1);
 }
 
 static float dot_q8_0_i8(const block_q8_0 *b, const block_i8a *xq, int n) {
@@ -2146,27 +2138,31 @@ static float dot_q8_0_i8(const block_q8_0 *b, const block_i8a *xq, int n) {
     const __m256i flip = _mm256_set1_epi8((char)0x80);
     __m256 facc = _mm256_setzero_ps();
     float mins = 0;
-    for (int i = 0; i < n / I8A_QK; i++) {
+    for (int i = 0; i < n / QK; i++) {
         __m256i wu = _mm256_xor_si256(
             _mm256_loadu_si256((const __m256i *)b[i].qs), flip);
         __m256i acc;
 #if RUNNER_I8_VNNI
-        acc = _mm256_dpbusd_epi32(_mm256_setzero_si256(), wu, i8a_load(&xq[i]));
+        acc = _mm256_dpbusd_epi32(_mm256_setzero_si256(), wu, i8a_load32(&xq[2*i]));
 #else
         // codes reach 255 here, so maddubs would saturate: split the weight
         // into magnitude (<=128, safe as the unsigned operand) and sign
         __m256i w = _mm256_loadu_si256((const __m256i *)b[i].qs);
         __m256i mag = _mm256_abs_epi8(w);
-        __m256i sx  = _mm256_sign_epi8(i8a_load(&xq[i]), w);
+        __m256i sx  = _mm256_sign_epi8(i8a_load32(&xq[2*i]), w);
         __m256i p16 = _mm256_maddubs_epi16(mag, sx);
         acc = _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
         (void)wu;
 #endif
-        float ax = xq[i].d, dw = f16_to_f32(b[i].d);
-        facc = _mm256_fmadd_ps(_mm256_set1_ps(dw * ax),
+        float ax0 = xq[2*i].d, ax1 = xq[2*i + 1].d;
+        float dw = f16_to_f32(b[i].d);
+        __m256 scale = _mm256_setr_ps(dw*ax0,dw*ax0,dw*ax0,dw*ax0,
+                                      dw*ax1,dw*ax1,dw*ax1,dw*ax1);
+        facc = _mm256_fmadd_ps(scale,
                                _mm256_cvtepi32_ps(acc), facc);
 #if RUNNER_I8_VNNI
-        mins -= dw * ax * 128.0f * (float)xq[i].s;
+        mins -= dw * 128.0f * (ax0 * (float)xq[2*i].s +
+                                ax1 * (float)xq[2*i + 1].s);
 #endif
     }
     return hsum8(facc) + mins;
@@ -2179,16 +2175,20 @@ static float dot_q4_0_i8(const block_q4_0 *b, const block_i8a *xq, int n) {
     const __m128i mF = _mm_set1_epi8(0xF);
     __m256 facc = _mm256_setzero_ps();
     float mins = 0;
-    for (int i = 0; i < n / I8A_QK; i++) {
+    for (int i = 0; i < n / QK; i++) {
         __m128i q  = _mm_loadu_si128((const __m128i *)b[i].qs);
         __m128i lo = _mm_and_si128(q, mF);
         __m128i hi = _mm_and_si128(_mm_srli_epi16(q, 4), mF);
         __m256i wu = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
-        __m256i acc = i8_mac32(_mm256_setzero_si256(), wu, i8a_load(&xq[i]));
-        float ax = xq[i].d, dw = f16_to_f32(b[i].d);
-        facc = _mm256_fmadd_ps(_mm256_set1_ps(dw * ax),
+        __m256i acc = i8_mac32(_mm256_setzero_si256(), wu, i8a_load32(&xq[2*i]));
+        float ax0 = xq[2*i].d, ax1 = xq[2*i + 1].d;
+        float dw = f16_to_f32(b[i].d);
+        __m256 scale = _mm256_setr_ps(dw*ax0,dw*ax0,dw*ax0,dw*ax0,
+                                      dw*ax1,dw*ax1,dw*ax1,dw*ax1);
+        facc = _mm256_fmadd_ps(scale,
                                _mm256_cvtepi32_ps(acc), facc);
-        mins -= dw * ax * 8.0f * (float)xq[i].s;
+        mins -= dw * 8.0f * (ax0 * (float)xq[2*i].s +
+                              ax1 * (float)xq[2*i + 1].s);
     }
     return hsum8(facc) + mins;
 }
@@ -2214,15 +2214,21 @@ static float dot_q4_K_i8(const block_q4_K *b, const block_i8a *xq, int n) {
             __m256i qv = _mm256_loadu_si256((const __m256i *)q);
             __m256i lo = _mm256_and_si256(qv, mF);
             __m256i hi = _mm256_and_si256(_mm256_srli_epi16(qv, 4), mF);
-            __m256i a1 = i8_mac32(_mm256_setzero_si256(), lo, i8a_load(&xq[blk]));
-            __m256i a2 = i8_mac32(_mm256_setzero_si256(), hi, i8a_load(&xq[blk + 1]));
-            float ax1 = xq[blk].d, ax2 = xq[blk + 1].d;
-            facc = _mm256_fmadd_ps(_mm256_set1_ps(d1 * ax1),
+            __m256i a1 = i8_mac32(_mm256_setzero_si256(), lo, i8a_load32(&xq[blk]));
+            __m256i a2 = i8_mac32(_mm256_setzero_si256(), hi, i8a_load32(&xq[blk + 2]));
+            float ax10=xq[blk].d, ax11=xq[blk+1].d;
+            float ax20=xq[blk+2].d, ax21=xq[blk+3].d;
+            __m256 s1 = _mm256_setr_ps(d1*ax10,d1*ax10,d1*ax10,d1*ax10,
+                                        d1*ax11,d1*ax11,d1*ax11,d1*ax11);
+            __m256 s2 = _mm256_setr_ps(d2*ax20,d2*ax20,d2*ax20,d2*ax20,
+                                        d2*ax21,d2*ax21,d2*ax21,d2*ax21);
+            facc = _mm256_fmadd_ps(s1,
                                    _mm256_cvtepi32_ps(a1), facc);
-            facc = _mm256_fmadd_ps(_mm256_set1_ps(d2 * ax2),
+            facc = _mm256_fmadd_ps(s2,
                                    _mm256_cvtepi32_ps(a2), facc);
-            mins -= m1 * ax1 * (float)xq[blk].s + m2 * ax2 * (float)xq[blk + 1].s;
-            q += 32; is += 2; blk += 2;
+            mins -= m1 * (ax10*(float)xq[blk].s + ax11*(float)xq[blk+1].s)
+                  + m2 * (ax20*(float)xq[blk+2].s + ax21*(float)xq[blk+3].s);
+            q += 32; is += 2; blk += 4;
         }
     }
     return hsum8(facc) + mins;

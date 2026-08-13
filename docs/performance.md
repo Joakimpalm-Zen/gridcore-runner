@@ -111,6 +111,14 @@ is not widened to fit a lever. **No combo promoted.** The route ships behind
 `RUNNER_CPU_I8=1`, `./test-i8-tol MODEL.gguf` is the gate, and the scalar route
 is unchanged and byte-identical to the pre-branch binary at every thread count.
 
+The finer 16-value activation block was measured on the same Zen 5 VNNI box
+on 2026-08-13. It preserves the scalar/vector single-rounding identity
+contract, but does not clear promotion: Llama improves from 2 to **1/64**
+flips, Granite remains **2/64**, and SmolLM2 remains 0/64. Median decode deltas
+(three pp512/tg256 runs, 8/16/8 threads) are +7.8%, +1.0%, and +1.0%
+respectively. CPU/CUDA remains 9/9 identical. The candidate is therefore kept
+behind `RUNNER_CPU_I8=1`; it is not a default or certification flip.
+
 ### The actual wall: the thread pool, at 65-138 us per matvec
 
 Decode issues ~200 `tpool_run` calls per token. The condvar-only pool cost two

@@ -474,12 +474,13 @@ static void test_q8_kv(int n) {
 //     dropped min term or a bad scale fails it by orders of magnitude;
 //   * against the true f32 dot, the error must stay under the analytic
 //     activation-quantization bound (per block: |x|max/254 * sum|w|).
-typedef struct { float d; int32_t s; int8_t qs[QK]; } ref_block_i8a;
+#define I8_REF_QK 16
+typedef struct { float d; int32_t s; int8_t qs[I8_REF_QK]; } ref_block_i8a;
 
 static void ref_i8_quant_act(const float *x, ref_block_i8a *b, int n) {
-    for (int i = 0; i < n / QK; i++, b++, x += QK) {
+    for (int i = 0; i < n / I8_REF_QK; i++, b++, x += I8_REF_QK) {
         float amax = 0;
-        for (int j = 0; j < QK; j++) {
+        for (int j = 0; j < I8_REF_QK; j++) {
             float a = fabsf(x[j]);
             if (a > amax) amax = a;
         }
@@ -487,7 +488,7 @@ static void ref_i8_quant_act(const float *x, ref_block_i8a *b, int n) {
         float id = d > 0 ? 1.0f / d : 0.0f;
         b->d = d;
         int32_t s = 0;
-        for (int j = 0; j < QK; j++) {
+        for (int j = 0; j < I8_REF_QK; j++) {
             // round half away from zero with a single rounding — see the
             // i8_quant_act contract in quants.c
             b->qs[j] = (int8_t)fmaf(x[j], id, copysignf(0.5f, x[j]));
@@ -503,24 +504,24 @@ static void ref_i8_quant_act(const float *x, ref_block_i8a *b, int n) {
 static void test_i8_quant_act(void) {
     enum { N = 4096 };
     float *x = malloc(N * sizeof(float));
-    void *got = malloc((size_t)(N / QK) * sizeof(ref_block_i8a));
-    ref_block_i8a *ref = malloc((size_t)(N / QK) * sizeof(ref_block_i8a));
+    void *got = malloc((size_t)(N / I8_REF_QK) * sizeof(ref_block_i8a));
+    ref_block_i8a *ref = malloc((size_t)(N / I8_REF_QK) * sizeof(ref_block_i8a));
     for (int trial = 0; trial < 200; trial++) {
         for (int i = 0; i < N; i++) x[i] = frnd() * (float)(1 << (trial % 20));
         if (trial % 4 == 1) {
             // exact half-integer products: amax fixes d to a power of two, so
             // (k + 0.5) * d is representable and x*id lands exactly on k+0.5
             float u = ldexpf(1.0f, (trial % 9) - 4);
-            for (int b = 0; b < N / QK; b++) {
-                x[b * QK] = 127.0f * u;
-                for (int j = 1; j < QK; j++)
-                    x[b * QK + j] = ((float)(int)(rnd32() % 253 - 126) + 0.5f) * u;
+            for (int b = 0; b < N / I8_REF_QK; b++) {
+                x[b * I8_REF_QK] = 127.0f * u;
+                for (int j = 1; j < I8_REF_QK; j++)
+                    x[b * I8_REF_QK + j] = ((float)(int)(rnd32() % 253 - 126) + 0.5f) * u;
             }
         }
         if (trial % 4 == 2) memset(x, 0, N * sizeof(float));
         i8_quant_act(x, got, N);
         ref_i8_quant_act(x, ref, N);
-        CHECK(memcmp(got, ref, (size_t)(N / QK) * sizeof(ref_block_i8a)) == 0,
+        CHECK(memcmp(got, ref, (size_t)(N / I8_REF_QK) * sizeof(ref_block_i8a)) == 0,
               "i8_quant_act trial=%d: differs from the scalar definition", trial);
         if (g_fail > 20) break;
     }
@@ -537,18 +538,18 @@ static void test_i8_dot(int type, int n) {
     float *x = malloc((size_t)n * sizeof(float));
     double *w = malloc((size_t)n * sizeof(double));
     void *xq = malloc(i8_act_size(n));
-    ref_block_i8a *xr = malloc((size_t)(n / QK) * sizeof(ref_block_i8a));
-    CHECK(i8_act_size(n) == (size_t)(n / QK) * sizeof(ref_block_i8a),
+    ref_block_i8a *xr = malloc((size_t)(n / I8_REF_QK) * sizeof(ref_block_i8a));
+    CHECK(i8_act_size(n) == (size_t)(n / I8_REF_QK) * sizeof(ref_block_i8a),
           "i8_act_size(%d) = %zu, reference layout is %zu",
-          n, i8_act_size(n), (size_t)(n / QK) * sizeof(ref_block_i8a));
+          n, i8_act_size(n), (size_t)(n / I8_REF_QK) * sizeof(ref_block_i8a));
     for (int trial = 0; trial < 8; trial++) {
         make_row(type, row, n);
         for (int i = 0; i < n; i++) x[i] = frnd();
         // trial 3: a zero activation block (d == 0 divides by nothing)
-        if (trial == 3) memset(x, 0, QK * sizeof(float));
+        if (trial == 3) memset(x, 0, I8_REF_QK * sizeof(float));
         // trial 4: one block far larger than the rest — per-block scaling is
         // the whole point, a row-wide scale would lose the small blocks
-        if (trial == 4) for (int i = 0; i < QK; i++) x[i] = frnd() * 4096.0f;
+        if (trial == 4) for (int i = 0; i < I8_REF_QK; i++) x[i] = frnd() * 4096.0f;
         ref_weights(type, row, w, n);
 
         i8_quant_act(x, xq, n);
@@ -560,7 +561,7 @@ static void test_i8_dot(int type, int n) {
         // (b) same-quantization reference: only fp32 rounding may differ
         double qref = 0, qmag = 0;
         for (int i = 0; i < n; i++) {
-            double xv = (double)xr[i / QK].d * xr[i / QK].qs[i % QK];
+            double xv = (double)xr[i / I8_REF_QK].d * xr[i / I8_REF_QK].qs[i % I8_REF_QK];
             qref += w[i] * xv;
             qmag += fabs(w[i] * xv);
         }
@@ -572,13 +573,13 @@ static void test_i8_dot(int type, int n) {
 
         // (c) against the true dot, within the activation-quantization bound
         double ref = 0, bound = 0;
-        for (int b = 0; b < n / QK; b++) {
+        for (int b = 0; b < n / I8_REF_QK; b++) {
             double amax = 0, sw = 0;
-            for (int j = 0; j < QK; j++) {
-                double xv = x[b * QK + j];
-                ref += w[b * QK + j] * xv;
+            for (int j = 0; j < I8_REF_QK; j++) {
+                double xv = x[b * I8_REF_QK + j];
+                ref += w[b * I8_REF_QK + j] * xv;
                 if (fabs(xv) > amax) amax = fabs(xv);
-                sw += fabs(w[b * QK + j]);
+                sw += fabs(w[b * I8_REF_QK + j]);
             }
             bound += amax / 254.0 * sw;   // half a quantization step per element
         }

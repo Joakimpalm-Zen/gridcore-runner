@@ -12,6 +12,11 @@ evaluation's worth of findings. Grouped by what a user notices first.
 
 ### Correctness fixes, some of them shipped defects
 
+- **Finer fused-int8 activation candidate, still gated off:** `I8A_QK` is 16
+  instead of 32, with exact scalar/SIMD block identity retained. The two
+  failing model rows re-gate at 1/64 and 2/64 top-1 flips, so this remains an
+  opt-in measurement candidate and does not change the default.
+
 - **CUDA tensor-core prefill for Q8_0/Q4_0 computed 16 of its 64 token
   columns** and published uninitialised shared memory as logits for the
   rest, on the DEFAULT path, since the 2026-07-29 batch widening. Found by
