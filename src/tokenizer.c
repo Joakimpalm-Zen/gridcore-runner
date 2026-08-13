@@ -564,7 +564,7 @@ static bool cp_other(uint32_t c)  { return !cp_space(c) && !cp_letter(c) && !cp_
 
 // case-insensitive 's 't 're 've 'm 'll 'd, as (?i:...) in the newer regexes
 static int contraction_len(const uint32_t *cp, int i, int ncp) {
-    if (cp[i] != '\'' || i + 1 >= ncp) return 0;
+    if (i < 0 || i >= ncp || cp[i] != '\'' || i + 1 >= ncp) return 0;
     uint32_t a = cp[i + 1] | 32, b = (i + 2 < ncp) ? (cp[i + 2] | 32) : 0;
     if (a == 's' || a == 't' || a == 'm' || a == 'd') return 2;
     if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') || (a == 'l' && b == 'l')) return 3;
@@ -1159,7 +1159,6 @@ int tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
                     : t->model == TOK_BPE_SPM
                     ? bpe_spm_encode_text(t, text + seg, i - seg, out, cap, n_out)
                     : bpe_encode_text(t, text + seg, i - seg, out, cap, n_out);
-                first = false;
             }
             if (n_out < cap) out[n_out++] = matched;
             i += t->tokens[matched].n;

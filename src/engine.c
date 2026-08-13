@@ -379,6 +379,7 @@ static void pfx_trim(size_t need) {
                 if (((*pp)->hits > 0) != (proven == 1)) continue;
                 if (!victim || (*pp)->used < (*victim)->used) victim = pp;
             }
+        if (!victim) break; // every entry belongs to one of the two classes
         PFX.evictions++;
         pfx_drop(victim);
     }
@@ -686,7 +687,7 @@ int prefix_cache_load(const char *path, const engine *e) {
         loaded++;
     }
     uint64_t want = 0;
-    bool have_digest = rd(f, &want, sizeof want);
+    bool have_digest = !bad && rd(f, &want, sizeof want);
     pthread_mutex_unlock(&PFX.mu);
     fclose(f);
 
