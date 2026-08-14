@@ -786,6 +786,37 @@ recovered within the parameter's declared bounds. A native `to=user` text answer
 the model's own end-of-turn token and reports `finish_reason:"stop"`; only a
 genuine token-limit cut reports `"length"`.
 
+### gemma4 native tool calling
+
+A loaded gemma-4 model that receives `tools` declares them the way its own
+chat template does — `<|tool>declaration:NAME{description:<|"|>...<|"|>,
+parameters:{...}}<tool|>`, inside the caller's system turn rather than in a
+prepended one — and calls them as `<|tool_call>call:NAME{city:<|"|>Oslo<|"|>}
+<tool_call|>`, with results replayed as `<|tool_response>response:NAME{...}
+<tool_response|>` from inside the model turn that made the call. Those bytes
+are compared against the reference template case by case in
+`scripts/template-conformance.py`.
+
+The native syntax does not cost the strict envelope. The generated turn is
+still constrained: the tool name comes from an enumeration of the declared
+functions, each argument key and type from that function's schema, and
+`tool_choice` (`auto`, `required`, named, `none`) selects which branches
+exist at all — `required` removes the prose branch, which is what enforcement
+means here. A call cut off by the token limit is closed to the smallest legal
+ending and still reports `finish_reason:"length"`. What the client receives is
+ordinary JSON: `arguments` is translated out of gemma4's `<|"|>` spelling on
+both the buffered and the streamed path, so no native framing reaches an
+OpenAI client.
+
+Two limits are worth knowing before you write a schema for this family. Every
+DECLARED parameter is emitted whether or not it is `required`, so an optional
+parameter is one the model will always fill in — give it a description that
+says what to put there. And a parameter with no declared `type` is rejected
+with a 400 that names it: gemma4's native call syntax has no spelling for a
+free-form value, and refusing is better than an unconstrained call the mapper
+may not be able to read back. Both differ from the generic JSON envelope,
+which other families still use.
+
 `enable_thinking`, either at the top level or inside `chat_template_kwargs`,
 is the request-level form of `--think`/`--no-think`. Omitting it is not the
 same as sending `false`: an absent field renders whatever the model family's

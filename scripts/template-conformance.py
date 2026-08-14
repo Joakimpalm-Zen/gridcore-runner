@@ -774,8 +774,13 @@ def build_renderer():
     p = subprocess.run(["make", "-C", ROOT, exe],
                        capture_output=True, text=True)
     if p.returncode or not os.path.exists(out):
+        # `or ""` is not defensiveness for its own sake: on Windows this
+        # returned None and the slice raised a TypeError from inside the
+        # error path, hiding the one thing the caller needed to read --
+        # `sys/socket.h: No such file or directory`. A diagnostic that
+        # crashes while reporting is worse than no diagnostic.
         return None, ("cannot build the runner-side renderer (make %s):\n%s%s"
-                      % (exe, p.stdout[-2000:], p.stderr[-2000:]))
+                      % (exe, (p.stdout or "")[-2000:], (p.stderr or "")[-2000:]))
     return out, None
 
 

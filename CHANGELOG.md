@@ -7,6 +7,23 @@ were written.
 
 ## Unreleased
 
+- gemma4 tool requests now use the family's native protocol, and stay on the
+  strict envelope while doing it. Declarations render as
+  `<|tool>declaration:NAME{...}<tool|>` inside the caller's system turn (the
+  reference's `format_function_declaration`, byte-exact), calls and results as
+  `<|tool_call>call:NAME{k:v}<tool_call|>` / `<|tool_response>`. The obvious
+  route to that syntax — dropping gemma4 off the strict path, as ornith is —
+  was rejected: `env != NULL` is what buys constrained decoding, hence
+  forced-truncation recovery, streamed tool-call deltas and `tool_choice`
+  enforcement. The grammar changed instead, so a gemma4 call is constrained to
+  declared names, declared argument keys and declared types, and `arguments`
+  still reaches OpenAI clients as JSON rather than in gemma4's `<|"|>`
+  spelling. Measured on gemma-4-E2B and gemma-4-31B: truncated calls at
+  `max_tokens` 8/12/16 return parseable arguments with `finish_reason`
+  `"length"`. Two limits are deliberate and documented in `src/schema.c` — an
+  optional parameter is always emitted, and a parameter with no declared
+  `type` is a 400 rather than a silently unconstrained value.
+  gemma4's conformance backlog: 3 to 0.
 - **Correction to the entry below (2026-08-14).** Its claim of conformance to
   the Harmony reference is narrower than stated. A first-ever conformance audit
   of every chat template against its upstream reference found that runner puts
