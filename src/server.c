@@ -81,19 +81,31 @@ static char *message_text(jv *msg, int tmpl) {
         if (reason) sb_put(&b, reason, strlen(reason));
         sb_lit(&b, "\n</think>\n\n");
     }
+    // gemma4 renders an assistant turn's CALLS before its visible text --
+    //   <|tool_call>...<tool_call|><|tool_response>...<tool_response|>SURE
+    // -- so the flattened turn has to carry them in that order for the
+    // renderer to place the results between the two. Every other family
+    // appends the calls after the content, which is what they have always
+    // done and what their own references expect.
+    jv *calls = jv_get(msg, "tool_calls");
+    if (tmpl == TMPL_GEMMA4) tool_history_render_for(tmpl, calls, &b);
     if (content && content->type == J_STR) {
         sb_put(&b, content->str, strlen(content->str));
     } else if (content && content->type == J_ARR) {
+        // `parts` counts TEXT PARTS, not bytes already in the buffer: the
+        // separator belongs between two text parts. Testing b.n would put one
+        // in front of the first part whenever something was written ahead of
+        // the content -- ornith's <think> block, or gemma4's calls above.
+        int parts = 0;
         for (int i = 0; i < content->n; i++) {
             const char *type = jv_str(jv_get(content->items[i], "type"), "");
             const char *text = jv_str(jv_get(content->items[i], "text"), NULL);
             if (strcmp(type, "text") != 0 || !text) continue; // images etc.
-            if (b.n) sb_lit(&b, "\n");
+            if (parts++) sb_lit(&b, "\n");
             sb_put(&b, text, strlen(text));
         }
     }
-    jv *calls = jv_get(msg, "tool_calls");
-    tool_history_render_for(tmpl, calls, &b);
+    if (tmpl != TMPL_GEMMA4) tool_history_render_for(tmpl, calls, &b);
     if (tmpl == TMPL_ORNITH && !strcmp(role, "tool")) {
         sbuf wrapped = {0};
         sb_lit(&wrapped, "<tool_response>\n");
@@ -245,7 +257,12 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         if (i == 0 && ornith_merged_system) continue;
         const char *role = jv_str(jv_get(msgs->items[i], "role"), "user");
         const char *turn_name = NULL;
-        if (s->tmpl == TMPL_MUSE && !strcmp(role, "tool"))
+        // gemma4 names the function in its <|tool_response> block
+        // (`response:NAME{...}`) exactly as muse names its tool turn, so the
+        // result needs the same resolution. Without it every replayed result
+        // reported for the template's own `'unknown'` fallback.
+        if ((s->tmpl == TMPL_MUSE || s->tmpl == TMPL_GEMMA4) &&
+            !strcmp(role, "tool"))
             turn_name = tool_result_name(msgs, i);
         if (s->tmpl == TMPL_HARMONY && !strcmp(role, "tool")) {
             turn_name = harmony_result_name(msgs, i);

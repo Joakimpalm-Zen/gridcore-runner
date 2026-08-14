@@ -4,6 +4,7 @@
 #include "template.h"
 #include "json.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -165,6 +166,15 @@ static size_t emit(char *out, size_t cap, size_t off, const char *fmt,
     if (off >= cap) return off;
     int n = snprintf(out + off, cap - off, fmt, a, b);
     return n > 0 ? off + (size_t)n : off;
+}
+
+// The first n bytes of s. Same would-have-written accounting as emit(), so a
+// truncated render still reports the size the caller has to grow to.
+static size_t emit_n(char *out, size_t cap, size_t off, const char *s,
+                     size_t n) {
+    if (off >= cap) return off;
+    int k = snprintf(out + off, cap - off, "%.*s", (int)n, s);
+    return k > 0 ? off + (size_t)k : off;
 }
 
 // pre + s + post, with s optionally stripped of leading and trailing ASCII
@@ -550,6 +560,39 @@ static void harmony_render_tool_defs(const jv *tools, sbuf *out) {
         }
     }
     sb_lit(out, "\n} // namespace functions");
+}
+
+// ---------------------------------------------------------------- gemma4
+//
+// The flattened assistant turn for this family is `<|tool_call>call:NAME{...}
+// <tool_call|>` blocks followed by any visible text (server.c's message_text
+// puts the calls first for TMPL_GEMMA4 precisely because the reference emits
+// them before the content). These two read that shape back so the renderer can
+// place the tool RESULTS between the calls and the text, which is where the
+// reference puts them.
+//
+// Sniffing the marker rather than carrying a flag is the same call the ORNITH
+// case above makes for `<tool_response>`: the syntax is this file's, so
+// recognising it here is not a leak across a module boundary.
+static const char *g4_calls_end(const char *s) {
+    static const char OPEN[] = "<|tool_call>";
+    static const char CLOSE[] = "<tool_call|>";
+    if (strncmp(s, OPEN, sizeof(OPEN) - 1)) return NULL;
+    const char *last = NULL, *p = s;
+    for (;;) {
+        const char *h = strstr(p, CLOSE);
+        if (!h) break;
+        last = h + sizeof(CLOSE) - 1;
+        p = last;
+    }
+    return last;
+}
+
+// `captured_content | trim | length > 0` on the reference's side.
+static bool g4_has_text(const char *s) {
+    for (; *s; s++)
+        if (!strchr(" \t\n\r\f\v", *s)) return true;
+    return false;
 }
 
 size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
@@ -1016,24 +1059,80 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         //
         // The continuation is for the MODEL role only -- the reference gates it
         // on `role == 'model'` -- so consecutive USER turns still get one
-        // <|turn>user each. Adjacency here is DIRECT (msgs[i-1]) rather than
-        // the reference's "previous non-tool role": the reference folds a tool
-        // result into <|tool_response> blocks inside the open turn, while
-        // runner renders a `tool` message as its own <|turn>tool turn, so
-        // skipping over it when deciding to continue would leave that turn
-        // unbalanced. That divergence is the tool path's and is untouched here.
+        // <|turn>user each.
+        //
+        // Adjacency is the reference's PREVIOUS NON-TOOL role, not msgs[i-1].
+        // It was direct adjacency until 2026-08-14, because runner rendered a
+        // `tool` message as its own <|turn>tool turn and skipping over one
+        // would have left that turn unbalanced. The tool result is now a
+        // <|tool_response> block inside the open model turn, which is what the
+        // reference does, so the reason for the narrower rule is gone and the
+        // merge widens to match:
+        //
+        //   {%- set continue_same_model_turn =
+        //         (role == 'model' and ns.prev_non_tool_role == 'assistant') -%}
+        //   ...
+        //   {%- set ns.prev_non_tool_role = message['role'] -%}   (non-tool only)
+        //
+        // Without the widening, the answer that follows a tool result opened a
+        // second model turn where the reference continues the first.
+        //
+        // `tool` messages are not iterated at all. The reference's loop body is
+        // wrapped in `{%- if message['role'] != 'tool' -%}`, and it renders the
+        // results by forward-scanning from the assistant turn that made the
+        // calls (below). A tool message no such turn claims is therefore
+        // DROPPED, exactly as the reference drops it.
+        //
+        // g4_prev is the reference's ns.prev_message_type, which the generation
+        // prompt reads: 0 = neither, 1 = 'tool_call', 2 = 'tool_response'.
+        int g4_prev = 0;
+        const char *prev_non_tool = NULL;
         for (int i = g4_first; i < n_msgs; i++) {
+            if (!strcmp(msgs[i].role, "tool")) continue;
+            g4_prev = 0;
             bool asst = !strcmp(msgs[i].role, "assistant");
             const char *role = asst ? "model" : msgs[i].role;
-            bool merge_prev = asst && i > g4_first &&
-                              !strcmp(msgs[i - 1].role, "assistant");
-            bool merge_next = asst && i + 1 < n_msgs &&
-                              !strcmp(msgs[i + 1].role, "assistant");
+            bool merge_prev = asst && prev_non_tool &&
+                              !strcmp(prev_non_tool, "assistant");
             if (!merge_prev)
                 off = emit(out, cap, off, "<|turn>%s\n", role, NULL);
-            off = emit(out, cap, off, "%s", msgs[i].content, NULL);
-            if (!merge_next)
+            // calls first, then the results they collected, then the text
+            const char *calls_end = g4_calls_end(msgs[i].content);
+            const char *text = calls_end ? calls_end : msgs[i].content;
+            if (calls_end) {
+                off = emit_n(out, cap, off, msgs[i].content,
+                             (size_t)(calls_end - msgs[i].content));
+                g4_prev = 1;
+            }
+            bool tr = false;
+            for (int k = i + 1; calls_end && k < n_msgs &&
+                                !strcmp(msgs[k].role, "tool"); k++) {
+                off = emit(out, cap, off,
+                           "<|tool_response>response:%s{value:<|\"|>",
+                           msgs[k].name ? msgs[k].name : "unknown", NULL);
+                off = emit(out, cap, off, "%s<|\"|>}<tool_response|>",
+                           msgs[k].content, NULL);
+                tr = true;
+                g4_prev = 2;
+            }
+            off = emit(out, cap, off, "%s", text, NULL);
+            // the reference's three-way close, in its own order
+            const char *next_non_tool = NULL;
+            for (int k = i + 1; k < n_msgs; k++)
+                if (strcmp(msgs[k].role, "tool")) {
+                    next_non_tool = msgs[k].role;
+                    break;
+                }
+            bool continues = asst && next_non_tool &&
+                             !strcmp(next_non_tool, "assistant") &&
+                             (!calls_end || tr);
+            if (g4_prev == 1 && !tr)
+                off = emit(out, cap, off, "<|tool_response>", NULL, NULL);
+            else if (continues)
+                ;  // the next assistant message continues this turn
+            else if (!(tr && !g4_has_text(text) && !next_non_tool))
                 off = emit(out, cap, off, "<turn|>\n", NULL, NULL);
+            prev_non_tool = msgs[i].role;
         }
         // Generation prompt, read from the MODEL'S OWN chat template
         // (gguf tokenizer.chat_template on gemma-4-E2B), not from a summary
@@ -1063,15 +1162,20 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         // Thinking is not selected HERE for this family — it was selected in
         // the first system turn above, which is where the template puts it.
         if (add_assistant) {
-            bool after_tool = n_msgs > 0 &&
-                              !strcmp(msgs[n_msgs - 1].role, "tool");
-            if (!after_tool)
+            // g4_prev is ns.prev_message_type, so the three branches are the
+            // template's three branches. It used to be approximated by "the
+            // last message is a `tool` message", which is a different question:
+            // it answered yes for a tool message no assistant turn claims (the
+            // reference drops those and emits the ordinary header) and no for
+            // an assistant turn whose calls have no results yet (the reference
+            // leaves prev_message_type == 'tool_call' and emits nothing).
+            if (g4_prev == 0)
                 off = emit(out, cap, off, "<|turn>model\n", NULL, NULL);
-            else if (thinking == THINK_ON)
+            else if (g4_prev == 2 && thinking == THINK_ON)
                 off = emit(out, cap, off, "<|channel>thought\n", NULL, NULL);
-            // prev was a tool response and thinking is off: emit nothing,
-            // which is what the template does and what the unconditional
-            // header used to get wrong.
+            // prev was a tool response and thinking is off, or a call still
+            // awaiting its result: emit nothing, which is what the template
+            // does and what the unconditional header used to get wrong.
         }
         break;
     }
@@ -1359,6 +1463,82 @@ const char *tool_result_name(const jv *messages, int message_index) {
     return id[0] ? id : NULL;
 }
 
+// gemma-4's `format_argument` macro with escape_keys=False, which is how the
+// reference writes a tool call's arguments. It is NOT JSON: object keys are
+// bare, strings are delimited by the <|"|> token rather than by quotes (and
+// are NOT escaped inside it), and members come out in `| dictsort` order.
+//
+//   {%- elif argument is string -%} {{- '<|"|>' + argument + '<|"|>' -}}
+//   {%- elif argument is mapping -%} ... {%- if escape_keys -%} ... {%- else -%}
+//                                        {{- key -}} {%- endif -%}
+//
+// The whole point of the <|"|> token is that a string argument needs no
+// escaping: the delimiter is a token the vocabulary reserves, so a quote or a
+// backslash in the value is ordinary text. Verified against the reference
+// (2026-08-14): `{"s": 'he said "hi" \\ x'}` renders `s:<|"|>he said "hi" \ x
+// <|"|>` with nothing escaped.
+//
+// jinja's dictsort defaults to case_sensitive=False and python's sort is
+// stable, so the order is by lowercased key with ties left in insertion order.
+static int g4_key_before(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        int ca = tolower((unsigned char)*a), cb = tolower((unsigned char)*b);
+        if (ca != cb) return ca < cb ? 1 : -1;
+    }
+    return *a ? -1 : (*b ? 1 : 0);
+}
+
+static void g4_format_argument(const jv *v, sbuf *out) {
+    if (!v || v->type == J_NULL) { sb_lit(out, "null"); return; }
+    if (v->type == J_STR) {
+        sb_lit(out, "<|\"|>");
+        sb_put(out, v->str, strlen(v->str));
+        sb_lit(out, "<|\"|>");
+        return;
+    }
+    if (v->type == J_BOOL) { sb_lit(out, v->b ? "true" : "false"); return; }
+    if (v->type == J_ARR) {
+        sb_lit(out, "[");
+        for (int i = 0; i < v->n; i++) {
+            if (i) sb_lit(out, ",");
+            g4_format_argument(v->items[i], out);
+        }
+        sb_lit(out, "]");
+        return;
+    }
+    if (v->type == J_OBJ) {
+        sb_lit(out, "{");
+        // insertion-sort the member indices: an arguments object is a handful
+        // of keys, and a stable sort is required for dictsort's tie-breaking.
+        int order[64];
+        int n = v->n < (int)(sizeof order / sizeof *order)
+              ? v->n : (int)(sizeof order / sizeof *order);
+        for (int i = 0; i < n; i++) {
+            int j = i;
+            order[i] = i;
+            while (j > 0 && g4_key_before(v->keys[i], v->keys[order[j - 1]]) > 0) {
+                order[j] = order[j - 1];
+                j--;
+            }
+            order[j] = i;
+        }
+        for (int i = 0; i < n; i++) {
+            if (i) sb_lit(out, ",");
+            sb_put(out, v->keys[order[i]], strlen(v->keys[order[i]]));
+            sb_lit(out, ":");
+            g4_format_argument(v->items[order[i]], out);
+        }
+        sb_lit(out, "}");
+        return;
+    }
+    // J_NUM. jv stores every number as a double, so this inherits the residual
+    // json.h:71-76 already records for jv_dump_tojson: `3.0` comes back as `3`
+    // and an integer past 2^53 loses precision. The reference prints python's
+    // repr of the parsed value, so those two shapes differ; ordinary tool
+    // arguments (small ints, short decimals) agree.
+    jv_dump(v, out);
+}
+
 void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
     if (!calls || calls->type != J_ARR) return;
     // Harmony history is one native recipient turn per call. The server
@@ -1371,6 +1551,21 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
         const char *name = jv_str(jv_get(fn, "name"), NULL);
         const char *args = jv_str(jv_get(fn, "arguments"), "{}");
         if (!name) continue;
+        if (tmpl == TMPL_GEMMA4) {
+            // The wire format hands runner `arguments` as a JSON STRING; the
+            // reference is handed the parsed mapping and runs it through
+            // format_argument. Replaying the JSON text verbatim -- which this
+            // did until 2026-08-14 -- put a shape in the history that the
+            // model's own template never writes: `{"city": "Oslo"}` where the
+            // reference writes `{city:<|"|>Oslo<|"|>}`.
+            jv *g4 = json_parse(args, strlen(args));
+            sb_fmt(out, "<|tool_call>call:%s", name);
+            if (g4 && g4->type == J_OBJ) g4_format_argument(g4, out);
+            else sb_lit(out, "{}");
+            sb_lit(out, "<tool_call|>");
+            jv_free(g4);
+            continue;
+        }
         if (tmpl != TMPL_ORNITH && tmpl != TMPL_MUSE) {
             sb_fmt(out, "<|tool_call>call:%s%s<tool_call|>", name, args);
             continue;

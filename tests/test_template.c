@@ -1395,16 +1395,13 @@ static void test_gemma4_generation_prompt(void) {
                        "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
     assert(strstr(out, "channel>thought") == NULL);
 
-    // after a tool response the template emits NO generation prompt at all
-    // when thinking is off, and an OPEN thought tag when it is on
-    const chat_msg after_tool[] = { { "user", "HI" }, { "tool", "42" } };
-    render_messages(TMPL_GEMMA4, after_tool, 2, true, THINK_DEFAULT,
-                    out, sizeof(out));
-    assert(strstr(out, "<|turn>model") == NULL);
-    assert(strstr(out, "channel>thought") == NULL);
-    render_messages(TMPL_GEMMA4, after_tool, 2, true, THINK_ON,
-                    out, sizeof(out));
-    assert(strstr(out, "<|channel>thought\n") != NULL);
+    // What the template does after a tool RESPONSE -- no generation prompt at
+    // all when thinking is off, an OPEN thought tag when it is on -- is
+    // asserted in test_gemma4_tool_turns, on a conversation that actually
+    // reaches that state. It used to be asserted here on `{user, tool}`, a
+    // conversation whose tool message the reference drops without ever setting
+    // ns.prev_message_type, so the expectation was runner's own behaviour
+    // rather than the template's.
 
     render_messages(TMPL_GEMMA4, msgs, 1, false, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "<|turn>user\nHI<turn|>\n") == 0);
@@ -1495,6 +1492,118 @@ static void test_gemma4_consecutive_assistant(void) {
     render_messages(TMPL_GEMMA4, uu, 2, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "<|turn>user\nHI<turn|>\n"
                        "<|turn>user\nAGAIN<turn|>\n<|turn>model\n") == 0);
+}
+
+// The gemma-4 TOOL turn. Every expected string below is what the family's own
+// tokenizer.chat_template (read from models/e2b-q40.gguf) renders through
+// jinja for the same conversation, minus the BOS runner leaves to the
+// tokenizer -- NOT what runner produced. Until 2026-08-14 the conformance
+// matrix declared this family without `tool_family`, so no tool row was ever
+// generated and none of this had been compared to anything.
+//
+// The reference does NOT give a tool result a turn of its own. It skips
+// `role: tool` in its message loop entirely and instead forward-scans the
+// consecutive tool messages from INSIDE the assistant turn that made the
+// calls, emitting one <|tool_response> block per result into that still-open
+// turn:
+//
+//   {%- elif message.get('tool_calls') -%}
+//       {%- for k in range(loop.index0 + 1, loop_messages | length) -%}
+//           ... {{- format_tool_response_block(ns_tname.name, tool_body) -}}
+//
+// so the turn framing runner used to emit -- <turn|>\n<|turn>tool\n42<turn|>\n
+// -- is a boundary the model's own template never produces.
+static void test_gemma4_tool_turns(void) {
+    char out[1024];
+    const char *call = "<|tool_call>call:t{a:1}<tool_call|>";
+
+    // A call and its result: ONE model turn, left OPEN. The reference's
+    // closing branch is `not (ns_tr_out.flag and not has_content and not
+    // next_nt.found)`, all three of which hold here, so nothing is emitted --
+    // and the generation prompt is suppressed too, because
+    // ns.prev_message_type is 'tool_response'.
+    const chat_msg call_result[] = {
+        { "user", "HI" }, { "assistant", call }, { "tool", "42", "t" },
+    };
+    render_messages(TMPL_GEMMA4, call_result, 3, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out,
+        "<|turn>user\nHI<turn|>\n"
+        "<|turn>model\n<|tool_call>call:t{a:1}<tool_call|>"
+        "<|tool_response>response:t{value:<|\"|>42<|\"|>}<tool_response|>")
+        == 0);
+
+    // Thinking ON adds the open thought channel after the result -- the one
+    // generation prompt this family emits after a tool response.
+    render_messages(TMPL_GEMMA4, call_result, 3, true, THINK_ON,
+                    out, sizeof(out));
+    assert(strcmp(out,
+        "<|turn>system\n<|think|>\n<turn|>\n"
+        "<|turn>user\nHI<turn|>\n"
+        "<|turn>model\n<|tool_call>call:t{a:1}<tool_call|>"
+        "<|tool_response>response:t{value:<|\"|>42<|\"|>}<tool_response|>"
+        "<|channel>thought\n") == 0);
+
+    // A call with NO result yet closes with a BARE <|tool_response> -- an open
+    // marker inviting the result, not a turn boundary:
+    //   {%- if ns.prev_message_type == 'tool_call' and not ns_tr_out.flag -%}
+    //       {{- '<|tool_response>' -}}
+    const chat_msg call_only[] = {
+        { "user", "HI" }, { "assistant", call },
+    };
+    render_messages(TMPL_GEMMA4, call_only, 2, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out,
+        "<|turn>user\nHI<turn|>\n"
+        "<|turn>model\n<|tool_call>call:t{a:1}<tool_call|>"
+        "<|tool_response>") == 0);
+
+    // Two calls, two results: all four blocks in the one model turn, calls
+    // before results.
+    const chat_msg two[] = {
+        { "user", "HI" },
+        { "assistant", "<|tool_call>call:t{a:1}<tool_call|>"
+                       "<|tool_call>call:t{a:2}<tool_call|>" },
+        { "tool", "42", "t" }, { "tool", "43", "t" },
+    };
+    render_messages(TMPL_GEMMA4, two, 4, true, THINK_DEFAULT, out, sizeof(out));
+    assert(strcmp(out,
+        "<|turn>user\nHI<turn|>\n"
+        "<|turn>model\n<|tool_call>call:t{a:1}<tool_call|>"
+        "<|tool_call>call:t{a:2}<tool_call|>"
+        "<|tool_response>response:t{value:<|\"|>42<|\"|>}<tool_response|>"
+        "<|tool_response>response:t{value:<|\"|>43<|\"|>}<tool_response|>")
+        == 0);
+
+    // The answer that follows a tool result CONTINUES the same model turn.
+    // This is what the reference's `ns.prev_non_tool_role` is for: the merge
+    // skips over the tool messages, where runner's used to look at msgs[i-1]
+    // and see `tool`.
+    const chat_msg after[] = {
+        { "user", "HI" }, { "assistant", call }, { "tool", "42", "t" },
+        { "assistant", "DONE" }, { "user", "BYE" },
+    };
+    render_messages(TMPL_GEMMA4, after, 5, true, THINK_DEFAULT, out,
+                    sizeof(out));
+    assert(strcmp(out,
+        "<|turn>user\nHI<turn|>\n"
+        "<|turn>model\n<|tool_call>call:t{a:1}<tool_call|>"
+        "<|tool_response>response:t{value:<|\"|>42<|\"|>}<tool_response|>"
+        "DONE<turn|>\n"
+        "<|turn>user\nBYE<turn|>\n<|turn>model\n") == 0);
+
+    // A tool message that no assistant tool_calls turn claims renders as
+    // NOTHING. The reference's loop opens with `{%- if message['role'] !=
+    // 'tool' -%}`, so an unclaimed result is dropped and the generation prompt
+    // is unaffected -- ns.prev_message_type is still whatever the last
+    // non-tool message left. The golden here used to assert the opposite (that
+    // '<|turn>model' was suppressed after ANY trailing tool message), which
+    // generalised the reference's 'tool_response' branch to a state a bare
+    // tool message never reaches.
+    const chat_msg orphan[] = { { "user", "HI" }, { "tool", "42", "t" } };
+    render_messages(TMPL_GEMMA4, orphan, 2, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
 }
 
 static void test_chatml_think_shape(void) {
@@ -1663,6 +1772,58 @@ static void test_muse_tool_result_id_resolves_prior_name(void) {
     jv_free(messages);
 }
 
+// gemma-4 writes a call's arguments through its own `format_argument` macro
+// with escape_keys=False, NOT as JSON: bare object keys, strings delimited by
+// the <|"|> token and not escaped inside it, and `| dictsort` order, which
+// jinja defaults to case-INSENSITIVE. Every expectation below was read off the
+// reference template (models/e2b-q40.gguf tokenizer.chat_template) rendered
+// through jinja, not off runner.
+static void test_gemma4_tool_history_uses_the_reference_argument_syntax(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"t\","
+        "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}}]";
+    jv *calls = json_parse(src, strlen(src));
+    assert(calls != NULL);
+    sbuf out = {0};
+    tool_history_render_for(TMPL_GEMMA4, calls, &out);
+    assert(out.s != NULL);
+    assert(strcmp(out.s,
+                  "<|tool_call>call:t{city:<|\"|>Oslo<|\"|>}<tool_call|>") == 0);
+    free(out.s);
+    jv_free(calls);
+
+    // dictsort is case-insensitive and stable: a, B, b, C.
+    const char *mixed =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"t\",\"arguments\":"
+        "\"{\\\"B\\\":1,\\\"a\\\":true,\\\"C\\\":null,\\\"b\\\":[1,\\\"x\\\"]}\""
+        "}}]";
+    calls = json_parse(mixed, strlen(mixed));
+    assert(calls != NULL);
+    sbuf m = {0};
+    tool_history_render_for(TMPL_GEMMA4, calls, &m);
+    assert(m.s != NULL);
+    assert(strcmp(m.s, "<|tool_call>call:t{a:true,B:1,b:[1,<|\"|>x<|\"|>],"
+                       "C:null}<tool_call|>") == 0);
+    free(m.s);
+    jv_free(calls);
+
+    // a quote and a backslash pass through UNESCAPED: the <|"|> delimiter is a
+    // reserved token, so the value needs no escaping and the reference applies
+    // none.
+    const char *quoted =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"t\",\"arguments\":"
+        "\"{\\\"s\\\":\\\"he said \\\\\\\"hi\\\\\\\"\\\"}\"}}]";
+    calls = json_parse(quoted, strlen(quoted));
+    assert(calls != NULL);
+    sbuf q = {0};
+    tool_history_render_for(TMPL_GEMMA4, calls, &q);
+    assert(q.s != NULL);
+    assert(strcmp(q.s, "<|tool_call>call:t{s:<|\"|>he said \"hi\"<|\"|>}"
+                       "<tool_call|>") == 0);
+    free(q.s);
+    jv_free(calls);
+}
+
 static void test_muse_parallel_tool_history_has_native_turn_boundaries(void) {
     const char *src =
         "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
@@ -1740,10 +1901,12 @@ int main(void) {
     test_name_roundtrip();
     test_gemma4_generation_prompt();
     test_gemma4_consecutive_assistant();
+    test_gemma4_tool_turns();
     test_chatml_think_shape();
     test_chatml_tool_result_renders_as_a_user_tool_response();
     test_muse_tools_and_result_golden();
     test_muse_tool_result_id_resolves_prior_name();
+    test_gemma4_tool_history_uses_the_reference_argument_syntax();
     test_muse_parallel_tool_history_has_native_turn_boundaries();
     test_muse_tool_history_skips_bad_calls_without_leading_boundary();
     test_muse_user_payload_strip_removes_only_recipient_header();

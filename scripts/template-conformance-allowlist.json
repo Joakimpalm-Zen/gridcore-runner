@@ -36,7 +36,7 @@
       "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
       "cite": {
         "file": "src/template.c",
-        "lines": "679-694",
+        "lines": "718-730",
         "anchor": "BOS is added by the tokenizer,"
       },
       "corroborating_cite": {
@@ -54,7 +54,7 @@
       "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
       "cite": {
         "file": "src/template.c",
-        "lines": "679-694",
+        "lines": "718-730",
         "anchor": "BOS is added by the tokenizer,"
       },
       "corroborating_cite": {
@@ -72,7 +72,7 @@
       "why": "Llama-3.2's reference system turn carries 'Cutting Knowledge Date' plus a strftime_now() 'Today Date'. Runner does not embed a live date in a prompt: it is not model behaviour, it is wall-clock leakage, and it defeats the prefix cache by changing the prompt prefix every midnight.",
       "cite": {
         "file": "src/template.c",
-        "lines": "678-693",
+        "lines": "718-730",
         "anchor": "runner does not embed a live date in a prompt"
       },
       "patch": {
@@ -86,7 +86,7 @@
       "why": "Consequence of llama3/cutting-knowledge-header: with the date header gone and no caller system message, the reference's system turn has no content left. Runner emits no turn at all rather than an empty one. This entry exists only to keep the residue of another deviation from reading as drift; it is not an independent decision.",
       "cite": {
         "file": "src/template.c",
-        "lines": "678-693",
+        "lines": "718-730",
         "anchor": "runner does not embed a live date in a prompt"
       },
       "depends_on": "llama3/cutting-knowledge-header",
@@ -101,7 +101,7 @@
       "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
       "cite": {
         "file": "src/template.c",
-        "lines": "679-694",
+        "lines": "718-730",
         "anchor": "BOS is added by the tokenizer,"
       },
       "corroborating_cite": {
@@ -119,7 +119,7 @@
       "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
       "cite": {
         "file": "src/template.c",
-        "lines": "679-694",
+        "lines": "718-730",
         "anchor": "BOS is added by the tokenizer,"
       },
       "corroborating_cite": {
@@ -137,7 +137,7 @@
       "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
       "cite": {
         "file": "src/template.c",
-        "lines": "679-694",
+        "lines": "718-730",
         "anchor": "BOS is added by the tokenizer,"
       },
       "corroborating_cite": {
@@ -155,7 +155,7 @@
       "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
       "cite": {
         "file": "src/template.c",
-        "lines": "679-694",
+        "lines": "718-730",
         "anchor": "BOS is added by the tokenizer,"
       },
       "corroborating_cite": {
@@ -173,7 +173,7 @@
       "why": "With no caller system message the Apertus reference substitutes a default one built around strftime_now('%Y-%m-%d'); runner omits it for the same reason as llama3's date header. NOTE the omission is WIDER than the date: the whole default system turn goes, including the 'You are Apertus...' identity line and the knowledge-cutoff line. That is a deliberate scope choice (runner does not invent a persona the caller did not ask for), but it is a bigger deviation than the cited comment's wording suggests on its own.",
       "cite": {
         "file": "src/template.c",
-        "lines": "676-691",
+        "lines": "715-727",
         "anchor": "when there is no system message the reference"
       },
       "patch": {
@@ -188,7 +188,7 @@
       "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
       "cite": {
         "file": "src/template.c",
-        "lines": "679-694",
+        "lines": "718-730",
         "anchor": "BOS is added by the tokenizer,"
       },
       "corroborating_cite": {
@@ -206,7 +206,7 @@
       "why": "muse-glimmer's default system block carries a 'Current date:' line; runner omits it, same live-date-in-a-prompt reasoning as llama3 and apertus. CAVEAT, recorded on purpose: the cited comment says the line 'is conditional in the template (current_date is defined)'. Under transformers it is NOT conditional -- the template falls back to strftime_now -- so the STATED reason is inaccurate even though the omission is deliberate and consistent with the other families. The comment should be corrected in src/template.c; this entry stays valid on the live-date policy alone.",
       "cite": {
         "file": "src/template.c",
-        "lines": "881-896",
+        "lines": "921-933",
         "anchor": "current_date is defined"
       },
       "patch": {
@@ -220,7 +220,7 @@
       "why": "The reference generation prompt is the bare '<|start|>assistant'. Runner primes '<|channel|>analysis<|message|>' instead, because the decoded open marker is the bare word 'analysis' -- far too common to hunt for in a free stream -- and priming lets the channel splitter start already inside reasoning. Only WITHOUT tools: with tools runner leaves the header bare so the constrained recipient stays reachable, which the builtin mirrors.",
       "cite": {
         "file": "src/template.c",
-        "lines": "857-872",
+        "lines": "897-909",
         "anchor": "Priming lets the splitter start already inside"
       },
       "patch": {

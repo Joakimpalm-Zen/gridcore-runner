@@ -93,7 +93,8 @@ NO_MID_SYSTEM = (
 
 class Family:
     def __init__(self, runner, source, note="", tool_family=False,
-                 thinking_var=None, skip=None, tokenizer=(), cannot=None):
+                 thinking_var=None, skip=None, tokenizer=(), cannot=None,
+                 oracle_tool_shape=None):
         self.runner = runner            # --chat-template name
         self.source = source            # ("hf", repo) | ("gguf", path)
         self.note = note
@@ -106,6 +107,18 @@ class Family:
         # manufacture agreement (or disagreement) out of an unrelated vocab.
         # Several names because a shelf may hold any quant of the checkpoint.
         self.tokenizer = tokenizer
+        # How THIS reference wants tools handed to it. Runner is always fed the
+        # OpenAI wire form, because that is what a client sends; only the
+        # ORACLE side is reshaped, and only where the template cannot read the
+        # wire form at all. None is the common case (an OpenAI-wrapped
+        # tools[] and a MAPPING for tool_call.arguments -- see the call site).
+        # "flat-string" is apertus: `render_tools` reads tool.name /
+        # tool.description / tool.parameters straight off the item, so an
+        # OpenAI-wrapped declaration raises UndefinedError; and its call block
+        # is `'{"' + function.name + '": ' + function.arguments + '}'`, a
+        # string concatenation that raises TypeError on a mapping. It is the
+        # one family that wants the arguments STRING the wire actually carries.
+        self.oracle_tool_shape = oracle_tool_shape
         # Cases this family genuinely CANNOT express, with the side that
         # refuses ("reference" = the upstream template raises, "runner" = the
         # server refuses the request) and why. Every entry is re-verified on
@@ -160,6 +173,19 @@ FAMILIES = {
         note="src/template.h cites 'gemma-4 tokenizer.chat_template (read "
              "from the GGUF)'; byte-identical to google/gemma-4-E2B-it's "
              "chat_template.jinja on HF",
+        # The reference DOES define a tool protocol, so the tool rows are
+        # generated and compared. Read out of the template itself, not
+        # inferred from runner: a declaration is `<|tool>` + the
+        # format_function_declaration macro + `<tool|>` inside the leading
+        # `<|turn>system` block; a call is
+        # `<|tool_call>call:NAME{k:v,...}<tool_call|>`; a result is
+        # `<|tool_response>response:NAME{k:v}<tool_response|>` emitted from
+        # INSIDE the assistant turn that made the call, by the template's
+        # forward-scan over the consecutive `role: tool` messages. Until
+        # 2026-08-14 this family was declared without tool_family, so the
+        # matrix generated no tool rows at all and the entire tool path was
+        # UNMEASURED while the family reported CLEAN.
+        tool_family=True,
         thinking_var="enable_thinking",
         tokenizer=("e2b-q40.gguf", "e4b-q4km.gguf")),
     "mistral": Family("mistral", ("hf", "mistralai/Mistral-7B-Instruct-v0.3"),
@@ -173,6 +199,15 @@ FAMILIES = {
     "apertus": Family(
         "apertus", ("hf", "swiss-ai/Apertus-8B-Instruct-2509"),
         note="tests/test_template.c cites this repo's chat_template.jinja",
+        # The reference DOES define a tool protocol, read out of the template
+        # itself: a declaration is the `render_tools` TypeScript block inside
+        # the developer turn (`'Tool Capabilities:\n' + render_tools(tools)`,
+        # where no tools gives the literal `Tool Capabilities: disabled`); a
+        # call is `<|tools_prefix|>[{"NAME": ARGS}]<|tools_suffix|>`; a result
+        # has NO token of its own -- it is the raw output text inside a `[`,`]`
+        # list appended to the still-open assistant turn. Declared without
+        # tool_family until 2026-08-14, so none of it had been compared.
+        tool_family=True, oracle_tool_shape="flat-string",
         tokenizer=("Apertus-8B-Instruct-2509-Q4_K_M.gguf",),
         cannot={"system-mid-history": NO_MID_SYSTEM_ROLE}),
     "ornith": Family(
@@ -1131,7 +1166,13 @@ def run(args):
             tools = TOOLS if "tool" in cid else None
             declined = fam.cannot.get(cid)
             omsgs = omsgs_override if omsgs_override is not None else msgs
-            if tools:
+            if tools and fam.oracle_tool_shape == "flat-string":
+                # apertus: declarations flattened out of the OpenAI wrapper,
+                # arguments left as the wire's JSON string. Both are what its
+                # template reads; feeding it the common shape raises rather
+                # than rendering, which is not a conformance answer.
+                tools = [t.get("function", t) for t in tools]
+            elif tools:
                 # Reference templates assume tool_call.arguments is a MAPPING:
                 # muse raises outright on a string, harmony/qwen/granite run
                 # it through |tojson and would double-encode one. OpenAI wire
