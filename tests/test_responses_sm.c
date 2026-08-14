@@ -207,13 +207,281 @@ static void test_utf8_tail_is_held_until_the_character_completes(void) {
            cases[i].what);
 }
 
-int main(void) {
+// ------------------------------------------- native-envelope failure paths
+//
+// A Harmony (gpt-oss) turn produces NOTHING through tool_stream_feed: the whole
+// protocol document is buffered and demultiplexed at the end, in
+// tool_stream_finish. So the mapping either succeeds and the client gets every
+// delta at once, or it fails and the client gets nothing at all — and "nothing
+// at all" used to mean an SSE stream with no finish_reason, no `data: [DONE]`
+// and no terminator of any kind, because a mapping failure was recorded as
+// `g.dead` (the flag that means the CLIENT went away) and every terminal block
+// is guarded by `if (!g.dead)`.
+//
+// These drive the real entry point — run_completion over a socketpair, with the
+// byte-vocabulary test model — because reachability is the bug: an emitter
+// tested in isolation would pass while the code that calls it is skipped.
+static const char *g_model_path = "test.gguf";
+
+typedef struct { model_t m; tokenizer tok; slot_t s; } harness;
+
+static bool harness_open(harness *h) {
+    memset(h, 0, sizeof(*h));
+    model_params p;
+    memset(&p, 0, sizeof(p));
+    p.gpu_mode  = GPU_AUTO;
+    p.n_threads = 1;
+    p.n_ctx     = 128;
+    p.n_batch   = 8;
+    if (!model_load(&h->m, g_model_path, &p)) return false;
+    if (!tokenizer_init(&h->tok, &h->m.gf)) { model_free(&h->m); return false; }
+    h->s.m   = &h->m;
+    h->s.tok = &h->tok;
+    h->s.tmpl = TMPL_HARMONY;
+    h->s.smp_base.temp = 0;              // greedy: the turn must be repeatable
+    h->s.smp_base.top_p = 1;
+    h->s.smp_base.repeat_penalty = 1.0f;
+    h->s.smp_base.rng = 1;
+    h->s.smp = h->s.smp_base;
+    engine_init(&h->s.e, &h->m, &h->tok, &h->s.smp);
+    SV.model_name    = "test-harmony";
+    SV.n_predict_cap = 64;
+    return true;
+}
+
+static void harness_close(harness *h) {
+    tokenizer_free(&h->tok);
+    model_free(&h->m);
+}
+
+static const char *HARNESS_TOOLS =
+    "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":"
+    "{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]";
+
+// One request through run_completion, captured off the wire.
+//
+// run_completion writes synchronously and nothing drains the far end until it
+// returns, so a case whose response exceeds the socketpair's buffer would block
+// forever. Every case here is a handful of small events; keep it that way, or
+// drain from a second thread.
+static void run_request(harness *h, const char *req_json,
+                        const tool_envelope *env, int api,
+                        char *out, size_t cap) {
+    out[0] = 0;
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { ck(0, "socketpair"); return; }
+    jv *req = json_parse(req_json, strlen(req_json));
+    if (!req) { ck(0, "request parsed"); close(sv[0]); close(sv[1]); return; }
+    run_completion(&h->s, sv[0], "hello", api, req, env);
+    jv_free(req);
+    shutdown(sv[0], SHUT_WR);
+    size_t got = 0;
+    for (;;) {
+        ssize_t r = recv(sv[1], out + got, cap - 1 - got, 0);
+        if (r <= 0) break;
+        got += (size_t)r;
+        if (got >= cap - 1) break;
+    }
+    out[got] = 0;
+    close(sv[0]);
+    close(sv[1]);
+}
+
+static char g_wire[262144];
+
+// DEFECT A. However a stream ends, it must END. A Harmony document that cannot
+// be mapped is a generation fault, not a dead client: the client is still
+// there, still reading, and owed a terminal chunk it can stop on.
+static void test_unmappable_harmony_stream_still_terminates(void) {
+    harness h;
+    if (!harness_open(&h)) { ck(0, "test model loaded"); return; }
+    jv *tools = json_parse(HARNESS_TOOLS, strlen(HARNESS_TOOLS));
+    tool_envelope env = {0};
+    char err[224];
+    ck(tool_envelope_build(tools, NULL, NULL, &env, err, sizeof(err)) == 1,
+       "harmony envelope built");
+    env.harmony = true;
+    env.tools   = tools;
+
+    // max_tokens 0 is a legal request that generates no document at all, so
+    // harmony_map has nothing to map and returns -1 — the same terminal state
+    // a stop-corrupted document reaches, with no model randomness in it.
+    run_request(&h, "{\"stream\":true,\"max_tokens\":0}", &env, API_CHAT,
+                g_wire, sizeof(g_wire));
+    ck(strstr(g_wire, "\"role\":\"assistant\"") != NULL,
+       "the stream opened with the role delta");
+    ck(strstr(g_wire, "\"finish_reason\":\"") != NULL,
+       "an unmappable harmony stream still reports a finish_reason");
+    ck(strstr(g_wire, "data: [DONE]") != NULL,
+       "an unmappable harmony stream still sends data: [DONE]");
+    ck(strstr(g_wire, "<|channel|>") == NULL,
+       "no harmony protocol text reaches the client as content");
+    // and it says which fault it was: "stop" over an empty message would tell
+    // the caller the model chose to say nothing
+    ck(strstr(g_wire, "\"finish_reason\":\"error\"") != NULL,
+       "the terminal chunk reports a generation fault, not a clean stop");
+    ck(strstr(g_wire, "\"finish_detail\":\"envelope_unmapped\"") != NULL,
+       "runner_telemetry keeps which fault it was");
+
+    // The same promise on the other two streaming surfaces: a Responses turn
+    // must reach a terminal response event, and an Anthropic turn must reach
+    // message_stop. Neither has a `data: [DONE]` to fall back on.
+    run_request(&h, "{\"stream\":true,\"max_tokens\":0}", &env, API_RESPONSES,
+                g_wire, sizeof(g_wire));
+    ck(strstr(g_wire, "event: response.incomplete") != NULL,
+       "an unmappable harmony Responses stream reaches a terminal event");
+    ck(strstr(g_wire, "\"reason\":\"envelope_unmapped\"") != NULL,
+       "and names the reason rather than claiming a token-budget truncation");
+    ck(strstr(g_wire, "<|channel|>") == NULL,
+       "no harmony protocol text reaches a Responses client");
+
+    run_request(&h, "{\"stream\":true,\"max_tokens\":0}", &env, API_MESSAGES,
+                g_wire, sizeof(g_wire));
+    ck(strstr(g_wire, "event: message_delta") != NULL,
+       "an unmappable harmony Anthropic stream reports a stop_reason");
+    ck(strstr(g_wire, "event: message_stop") != NULL,
+       "an unmappable harmony Anthropic stream reaches message_stop");
+    ck(strstr(g_wire, "<|channel|>") == NULL,
+       "no harmony protocol text reaches an Anthropic client");
+
+    tool_envelope_free(&env);
+    jv_free(tools);
+    harness_close(&h);
+}
+
+// DEFECT A, the trigger. A `stop` sequence is a rule about the model's VISIBLE
+// text. Under a strict tool envelope the generated document is protocol —
+// Harmony channel markers, a recipient header, or the JSON envelope's own
+// syntax — and the caller never sees a byte of it, so matching their strings
+// against it fires on framing they did not write.
+//
+// It also corrupts the turn, which is what made this a hang rather than a
+// surprise: stop_feed drops the matched bytes from the emitted document while
+// the constraint validator has ALREADY consumed them, so the closer
+// constraint_close computes no longer continues the text the client received.
+// Measured on this fixture — generic envelope, buffered, stop `"` — the client
+// got `"content":"{tool"`, raw envelope syntax served as assistant text. On the
+// Harmony envelope the mapping fails outright and the stream never terminates.
+//
+// Honouring it properly is not available on this path: the Harmony
+// demultiplexer does not know which bytes are visible text until the document
+// is finished, by which point there is nothing left to stop. So the only
+// choices are to refuse or to ignore, and this server does not ignore what a
+// caller asked for.
+static void test_stop_with_a_strict_envelope_is_refused(void) {
+    harness h;
+    if (!harness_open(&h)) { ck(0, "test model loaded"); return; }
+    jv *tools = json_parse(HARNESS_TOOLS, strlen(HARNESS_TOOLS));
+    char err[224];
+
+    tool_envelope harmony = {0};
+    ck(tool_envelope_build(tools, NULL, NULL, &harmony, err, sizeof(err)) == 1,
+       "harmony envelope built");
+    harmony.harmony = true;
+    harmony.tools   = tools;
+    run_request(&h, "{\"stream\":true,\"stop\":[\"\\n\\n\"]}", &harmony,
+                API_CHAT, g_wire, sizeof(g_wire));
+    ck(!strncmp(g_wire, "HTTP/1.1 400", 12),
+       "stop alongside native harmony tool calling is refused, not accepted");
+    ck(strstr(g_wire, "stop") != NULL, "the refusal names the field");
+    ck(strstr(g_wire, "data: [DONE]") == NULL,
+       "the refusal is an HTTP error, not a half-opened SSE stream");
+    tool_envelope_free(&harmony);
+
+    // the same refusal for the generic JSON envelope, reached through the
+    // Anthropic spelling of the field: one rule, however it was asked for
+    h.s.tmpl = TMPL_CHATML;
+    tool_envelope generic = {0};
+    ck(tool_envelope_build(tools, NULL, NULL, &generic, err, sizeof(err)) == 1,
+       "generic envelope built");
+    run_request(&h, "{\"stop_sequences\":[\"\\\"\"]}", &generic, API_MESSAGES,
+                g_wire, sizeof(g_wire));
+    ck(!strncmp(g_wire, "HTTP/1.1 400", 12),
+       "stop_sequences alongside the generic tool envelope is refused too");
+    ck(strstr(g_wire, "{tool") == NULL,
+       "and no envelope syntax is served as assistant content");
+    tool_envelope_free(&generic);
+
+    // The refusal is narrow: without a strict envelope there is no protocol
+    // document to confuse, and `stop` keeps working exactly as documented.
+    run_request(&h, "{\"max_tokens\":4,\"stop\":[\"z\"]}", NULL, API_CHAT,
+                g_wire, sizeof(g_wire));
+    ck(!strncmp(g_wire, "HTTP/1.1 200", 12),
+       "stop without tools is still honoured");
+
+    jv_free(tools);
+    harness_close(&h);
+}
+
+// DEFECT B. The buffered path degrades by handing back whatever was generated
+// when the envelope will not map. For a strict envelope that is not a degraded
+// answer, it is the protocol itself: Harmony's control-token spellings reach
+// g.out verbatim (engine.c forwards tok_raw for decoded-empty control tokens),
+// and the generic envelope's raw JSON syntax reaches it the same way. Both were
+// served to clients as assistant `content` — the Harmony case verbatim down to
+// `to=functions.unknown`, the generic case measured on this fixture as `{tool`.
+//
+// A document nobody can read is not content. The client gets an empty answer
+// and a finish reason that says a fault happened, which it can act on.
+static void test_unmappable_envelope_is_not_served_as_content(void) {
+    jv *tools = json_parse(HARNESS_TOOLS, strlen(HARNESS_TOOLS));
+    char err[224];
+
+    // the exact document a stop sequence used to produce: the framing is
+    // intact enough to look like Harmony and broken enough not to map
+    static const char HARMONY_BROKEN[] =
+        "<|channel|>analysis<|message|>Let me check the weather.<|end|>"
+        "<|start|>assistant<|channel|>commentary to=functions.unknown"
+        "<|constrain|>json<|message|>{\"city\":\"Oslo\"}";
+    tool_envelope harmony = {0};
+    ck(tool_envelope_build(tools, NULL, NULL, &harmony, err, sizeof(err)) == 1,
+       "harmony envelope built");
+    harmony.harmony = true;
+    harmony.tools   = tools;
+
+    gen_ctx g;
+    memset(&g, 0, sizeof(g));
+    sb_put(&g.out, HARMONY_BROKEN, sizeof(HARMONY_BROKEN) - 1);
+    sbuf tc = {0};
+    int rc = envelope_map_buffered(&harmony, &g, &tc);
+    ck(rc == -1, "the broken harmony document does not map");
+    ck(g.out.n == 0,
+       "an unmappable harmony document is not handed back as content");
+    ck(!g.out.n || !strstr(g.out.s, "<|channel|>"),
+       "no harmony control-token spelling survives into content");
+    free(g.out.s); free(g.reason.s); free(tc.s);
+    tool_envelope_free(&harmony);
+
+    // and the same for the generic JSON envelope, whose raw document is
+    // envelope syntax rather than anything the caller asked to read
+    tool_envelope generic = {0};
+    ck(tool_envelope_build(tools, NULL, NULL, &generic, err, sizeof(err)) == 1,
+       "generic envelope built");
+    memset(&g, 0, sizeof(g));
+    sb_put(&g.out, "{tool", 5);
+    tc = (sbuf){0};
+    rc = envelope_map_buffered(&generic, &g, &tc);
+    ck(rc == -1, "the broken generic document does not map");
+    ck(g.out.n == 0,
+       "an unmappable generic envelope is not handed back as content");
+    free(g.out.s); free(g.reason.s); free(tc.s);
+    tool_envelope_free(&generic);
+
+    jv_free(tools);
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1) g_model_path = argv[1];
     test_utf8_tail_is_held_until_the_character_completes();
     test_message_item_order();
     test_event_names_agree();
     test_sequence_numbers_are_dense();
     test_function_call_item_has_no_content_part();
     test_unclosed_item_emits_no_done();
+    test_unmappable_harmony_stream_still_terminates();
+    test_stop_with_a_strict_envelope_is_refused();
+    test_unmappable_envelope_is_not_served_as_content();
     if (!g_fail) fprintf(stderr, "all responses state-machine tests passed\n");
     return g_fail;
 }

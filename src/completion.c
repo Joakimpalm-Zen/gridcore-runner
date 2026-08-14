@@ -810,15 +810,30 @@ static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
 // its <think> block returns an EMPTY answer, and a harness that saw the
 // non-standard reason recorded incapability instead of truncation — every
 // agent case scored 0.00 for every model in the Syntetik-MoE baseline.
+//
+// "envelope_error" is widened the same way and for the same reason: it is a
+// generation fault, which this surface already spells "error" (see e->oom), and
+// inventing a second non-standard value would only give typed clients a second
+// case they have never heard of. Which fault it was survives as finish_detail.
 static const char *openai_finish(const char *finish) {
-    return !strcmp(finish, "reasoning_limit") ? "length" : finish;
+    if (!strcmp(finish, "reasoning_limit")) return "length";
+    if (!strcmp(finish, "envelope_error"))  return "error";
+    return finish;
 }
 
 // Non-NULL only when the wire value above lost a distinction worth keeping.
 static const char *finish_detail_of(const char *finish) {
-    return !strcmp(finish, "reasoning_limit") ? "reasoning_limit" : NULL;
+    if (!strcmp(finish, "reasoning_limit")) return "reasoning_limit";
+    if (!strcmp(finish, "envelope_error"))  return "envelope_unmapped";
+    return NULL;
 }
 
+// KNOWN GAP: this vocabulary has no member for a generation fault. "error"
+// (e->oom) and "envelope_error" both land on end_turn below, which understates
+// them — but every alternative in the union is a different lie, and "refusal"
+// in particular would have the caller telling a user the model declined. The
+// turn's emptiness is the honest signal Anthropic clients get; the chat and
+// Responses surfaces carry the fault itself.
 static const char *anth_stop_reason(const char *finish, bool stop_hit) {
     if (!strcmp(finish, "tool_calls")) return "tool_use";
     if (!strcmp(finish, "length") ||
@@ -1004,6 +1019,64 @@ static int stop_feed(gen_ctx *g, const char *bytes, int n) {
         rc = emit_channel(g, 0, g->hold.s, (int)rel);
         memmove(g->hold.s, g->hold.s + rel, keep);
         g->hold.n = keep;
+    }
+    return rc;
+}
+
+// The buffered counterpart of tool_stream_finish: one finished strict-envelope
+// document, demultiplexed into the channels the client actually receives.
+//
+// Strict mode means the whole response IS the envelope, guaranteed by the
+// schema rather than fished out of free text. A truncated call was closed to a
+// legal document by sval_close, so it still PARSES — but only a cleanly
+// finished document reports "tool_calls"; a truncated one keeps "length" so the
+// caller knows the arguments are minimal closures, not the model's intent
+// (finding A, 2026-08-11 evaluation).
+//
+// Consumes g->out and replaces it with whatever the client should see; appends
+// any calls to tc. Returns the number of tool calls (parallel turns map several
+// at once), 0 for a plain answer, or -1 when the document could not be mapped.
+static int envelope_map_buffered(const tool_envelope *env, gen_ctx *g, sbuf *tc) {
+    sbuf mapped = {0};
+    sbuf mapped_reason = {0};
+    int rc = tool_envelope_map_channels(
+        env, g->out.s ? g->out.s : "", g->out.n, &mapped_reason, &mapped, tc);
+    if (rc >= 0 && mapped_reason.n) {
+        free(g->reason.s);
+        g->reason = mapped_reason;
+    } else free(mapped_reason.s);
+    if (rc >= 1) {
+        if (env->harmony && mapped.n) {
+            // Harmony's commentary message is intentionally visible before its
+            // recipient-bearing call. OpenAI-shaped responses permit content
+            // and tool_calls together, and the streaming demux already emits
+            // both in that order.
+            free(g->out.s);
+            g->out = mapped;
+        } else {
+            g->out.n = 0;
+            free(mapped.s);
+        }
+    } else if (rc == 0) {
+        free(g->out.s);
+        g->out = mapped;         // the final branch's payload is the reply
+    } else {
+        // Unparseable. The old fallback here handed g->out back verbatim, on
+        // the reading that a degraded answer beats none — but under a strict
+        // envelope g->out is not an answer at all, it is the protocol. Harmony
+        // control-token spellings reach it verbatim (engine.c forwards tok_raw
+        // for decoded-empty control tokens), so clients were served
+        // `<|channel|>analysis<|message|>...to=functions.unknown...` as
+        // assistant content; the generic envelope leaks its own JSON syntax the
+        // same way, measured as `{tool`. Neither is text anybody asked for, and
+        // a client cannot tell either from a real answer.
+        //
+        // So the document is dropped and the turn reports the fault instead.
+        // An empty answer with an honest finish reason is something a caller
+        // can retry on; protocol framing dressed as content is not.
+        free(mapped.s);
+        free(g->out.s);
+        g->out = (sbuf){0};
     }
     return rc;
 }
@@ -1366,6 +1439,38 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             return;
         }
     }
+    // A stop sequence is a rule about the model's VISIBLE text — that is the
+    // only thing the caller can see to write a rule about, and it is why the
+    // filter already excludes the reasoning channel. Under the strict tool
+    // envelope the generated document is not text at all: it is protocol
+    // (Harmony channel markers and recipient headers, Muse's <atem:invoke>, or
+    // the generic envelope's own JSON syntax), and the client receives only the
+    // demultiplexed result. Matching their strings against the raw document
+    // fires on framing they never wrote and never see — ["\n\n"], ["}"] and
+    // ["<|"] are ordinary agent defaults and every one of them hits.
+    //
+    // It also corrupts the turn rather than merely cutting it short. stop_feed
+    // drops the matched bytes from the emitted document, but the constraint
+    // validator consumed them before the sink ever ran, so the completion
+    // constraint_close synthesizes continues a state the client's copy never
+    // reached. Measured: the generic envelope with stop `"` returns
+    // `"content":"{tool"` — envelope syntax served as assistant text; the
+    // Harmony envelope fails to map at all.
+    //
+    // Honouring the request properly is not available on this path. The
+    // Harmony demultiplexer cannot tell visible text from framing until the
+    // document is complete, and by then there is nothing left to stop. So the
+    // choice is between refusing and ignoring, and a field this server cannot
+    // use is an error rather than a silent downgrade — the same call
+    // parallel_tool_calls makes in server.c, for the same reason: a caller who
+    // is quietly ignored has no way to detect it.
+    if (n_stops > 0 && env) {
+        send_error(fd, 400,
+                   "stop is not supported with tool calling: the sequences "
+                   "would be matched against the tool-call protocol the model "
+                   "generates, not the text you receive");
+        return;
+    }
     jv *rf = jv_get(req, "response_format");
     if (rf) {
         // An unrecognised or malformed response_format used to fall through to
@@ -1680,7 +1785,23 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         emit_channel(&g, 0, g.hold.s, (int)g.hold.n);
         g.hold.n = 0;
     }
-    if (g.tsx_on && tool_stream_finish(&g.tsx) != 0) g.dead = true;
+    // A native-envelope document the demultiplexer cannot map is a GENERATION
+    // fault, not a dead client — and the difference decides whether the stream
+    // is terminated. Recording it as g.dead skipped all three terminal blocks
+    // below, so the client got the opening events and then nothing: no deltas,
+    // no finish_reason, no `data: [DONE]`, a bare FIN, and a server log that
+    // blamed the client for leaving. It is still there, still reading, and owed
+    // a terminal chunk it can stop on.
+    //
+    // tool_stream_finish returns -1 for exactly that failure; any other
+    // non-zero value came from a sink refusing to write, which IS the client
+    // going away.
+    bool unmapped = false;
+    if (g.tsx_on) {
+        int fin = tool_stream_finish(&g.tsx);
+        if (fin == -1)     unmapped = true;
+        else if (fin != 0) g.dead = true;
+    }
     // Anything still held for a multi-byte character the model never finished
     // goes out now rather than disappearing. It is genuinely truncated, so it
     // renders as U+FFFD — but silently dropping bytes would make the streamed
@@ -1688,8 +1809,12 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     flush_text_delta(&g, 0);
     flush_text_delta(&g, 1);
     // e->oom: generation hit an allocation failure — report it truthfully as
-    // "error", never let it masquerade as a clean "stop".
+    // "error", never let it masquerade as a clean "stop". An unmappable
+    // envelope is the same class of truth: the turn produced no answer anyone
+    // can read, and reporting "stop" over an empty message would tell the
+    // caller the model chose to say nothing.
     const char *finish = e->oom ? "error"
+                       : unmapped ? "envelope_error"
                        : e->prelude_exhausted ? "reasoning_limit"
                        : g.stopped || e->hit_stop ? "stop" : "length";
     // a streamed call reports the same terminal reason a buffered one does.
@@ -1708,16 +1833,23 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         // when generation stopped mid-item
         bool cut = strcmp(finish, "length") == 0 ||
                    strcmp(finish, "reasoning_limit") == 0;
+        // The turn produced a document nothing could read, so it did not
+        // complete — and the reason is neither of the two standard ones.
+        // "max_output_tokens" would be the closest lie, and a lie a client can
+        // act on: it retries with a larger budget forever. An unrecognised
+        // reason string is inert by comparison, and true.
+        bool failed = strcmp(finish, "envelope_error") == 0;
         // a tool call that was truncated is still an executable call — the
         // envelope schema closed it to a legal document — so only a message
         // is reported as unfinished
-        if (cut && resp_shape_of(g.item_kind) == &RESP_MESSAGE)
+        if ((cut || failed) && resp_shape_of(g.item_kind) == &RESP_MESSAGE)
             g.close_status = "incomplete";
         resp_close_item(&g);
         if (!g.dead) {
-            bool truncated = cut;
+            bool truncated = cut || failed;
             resp_doc d = { .status = truncated ? "incomplete" : "completed",
-                           .incomplete = truncated ? "max_output_tokens" : NULL,
+                           .incomplete = failed ? "envelope_unmapped"
+                                       : cut   ? "max_output_tokens" : NULL,
                            .output_json = g.out_items.s ? g.out_items.s : "",
                            .output_n = g.out_items.n,
                            .output_text = g.out_text.s,
@@ -1821,42 +1953,13 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         sbuf tc = {0};
         int n_tc = 0;
         if (env) {
-            // Strict mode: the whole response IS the envelope, guaranteed by
-            // the schema rather than fished out of free text. A truncated
-            // call was closed to a legal document by sval_close, so it still
-            // PARSES — but only a cleanly finished document reports
-            // "tool_calls"; a truncated one keeps "length" so the caller
-            // knows the arguments are minimal closures, not the model's
-            // intent (finding A, 2026-08-11 evaluation).
-            sbuf mapped = {0};
-            sbuf mapped_reason = {0};
-            int rc = tool_envelope_map_channels(
-                env, g.out.s ? g.out.s : "", g.out.n,
-                &mapped_reason, &mapped, &tc);
-            if (rc >= 0 && mapped_reason.n) {
-                free(g.reason.s);
-                g.reason = mapped_reason;
-            } else free(mapped_reason.s);
-            if (rc >= 1) {
-                n_tc = rc;              // parallel turns map several at once
-                if (!strcmp(finish, "stop")) finish = "tool_calls";
-                if (env->harmony && mapped.n) {
-                    // Harmony's commentary message is intentionally visible
-                    // before its recipient-bearing call. OpenAI-shaped
-                    // responses permit content and tool_calls together, and
-                    // the streaming demux already emits both in that order.
-                    free(g.out.s);
-                    g.out = mapped;
-                } else {
-                    g.out.n = 0;
-                    free(mapped.s);
-                }
-            } else if (rc == 0) {
-                free(g.out.s);
-                g.out = mapped;      // the final branch's payload is the reply
-            } else {
-                free(mapped.s);      // unparseable: hand back what was generated
-            }
+            n_tc = envelope_map_buffered(env, &g, &tc);
+            if (n_tc >= 1 && !strcmp(finish, "stop")) finish = "tool_calls";
+            // The document was dropped, so the turn has no answer to report.
+            // Saying "stop" over the resulting empty content would claim the
+            // model chose to say nothing; the streamed path names the same
+            // fault the same way.
+            if (n_tc < 0) { n_tc = 0; finish = "envelope_error"; }
         } else if (chat) {
             if (s->tmpl == TMPL_MUSE && schema)
                 muse_user_payload_strip(&g.out);
@@ -1903,9 +2006,16 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             // from the envelope: one mapping, two renderings.
             jv *call = n_tc ? json_parse(tc.s, tc.n) : NULL;
             jv *fn = jv_get(call, "function");
-            bool truncated = strcmp(finish, "length") == 0;
+            bool cut    = strcmp(finish, "length") == 0;
+            // the streamed branch above reports the same fault the same way:
+            // a turn whose document could not be mapped did not complete, and
+            // "max_output_tokens" would send the caller retrying with a bigger
+            // budget forever
+            bool failed = strcmp(finish, "envelope_error") == 0;
+            bool truncated = cut || failed;
             resp_doc d = { .status = truncated ? "incomplete" : "completed",
-                           .incomplete = truncated ? "max_output_tokens" : NULL,
+                           .incomplete = failed ? "envelope_unmapped"
+                                       : cut   ? "max_output_tokens" : NULL,
                            .with_output = true,
                            .call_name = jv_str(jv_get(fn, "name"), NULL),
                            .call_args = jv_str(jv_get(fn, "arguments"), "{}"),
@@ -2033,6 +2143,10 @@ done: ;
             s->id, g.id, n_prompt, keep, n_gen,
             n_gen / (gtime > 0 ? gtime : 1e-9),
             schema ? " [schema]" : e->json_mode ? " [json]" : e->dm ? " [spec]" : "",
-            g.dead ? " [client gone]" : "", paging);
+            // "[client gone]" is an accusation, and it used to be made about a
+            // client that never left: an unmappable envelope set the same flag.
+            // The two are named apart so a log line means what it says.
+            g.dead ? " [client gone]"
+                   : unmapped ? " [envelope unmapped]" : "", paging);
     completion_cleanup(e, schema, &g);
 }

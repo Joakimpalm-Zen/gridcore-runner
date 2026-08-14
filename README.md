@@ -644,6 +644,16 @@ Chat supports buffered and SSE responses, part-array content, assistant
 and `keep_alive` in swap mode. Tool declarations are rendered into the model
 prompt and constrained back into well-formed `tool_calls`.
 
+Stop strings and tool declarations cannot be combined: a request carrying both
+`stop` (or Anthropic's `stop_sequences`) and `tools` is refused with HTTP 400.
+A stop string is a rule about the model's visible text, but under the tool
+envelope the model generates protocol — Harmony channel markers and recipient
+headers, or the generic envelope's own JSON syntax — and the caller receives
+only the demultiplexed result. Matching stop strings against that document
+fires on framing nobody wrote (`["\n\n"]`, `["}"]` and `["<|"]` all hit) and
+desynchronises the constrained-decoding closer from the text already sent.
+Runner refuses the request rather than ignoring the field.
+
 `parallel_tool_calls:true` compiles the generic JSON tool envelope into a
 bounded `{"calls":[...]}` array (up to 8 entries) over the same discriminated
 union, instead of a single object; a direct answer is just a one-element
@@ -793,7 +803,8 @@ sampling controls, metadata, thinking-channel blocks, and Anthropic SSE event
 ordering. `max_tokens` is required.
 
 Runner refuses hosted tools, MCP/container execution, image/document blocks,
-parallel tool use, and forced thinking on a model with no reasoning channel.
+parallel tool use, `stop_sequences` sent alongside `tools` (see Chat
+Completions above), and forced thinking on a model with no reasoning channel.
 It implements protocol translation only; it never executes a tool.
 
 ### Coding-agent evidence
@@ -962,6 +973,15 @@ closures rather than the model's completed intent. If the model never starts
 the document, runner returns empty content rather than inventing required
 values. Syntax and schema shape are guaranteed; semantic correctness and tool
 selection remain the model's responsibility.
+
+If an envelope document cannot be mapped back at all, runner reports the fault
+instead of serving the raw protocol as an answer: content is empty,
+`finish_reason` is `"error"` with `runner_telemetry.finish_detail:
+"envelope_unmapped"`, and Responses reports `status: "incomplete"` with reason
+`envelope_unmapped`. A stream that ends this way is still terminated — a
+terminal chunk carrying the finish reason, then `data: [DONE]` (Responses
+`response.incomplete`, Anthropic `message_delta` then `message_stop`) — so a
+client is never left waiting on events that will not arrive.
 
 ## Support matrix
 
