@@ -38,7 +38,7 @@
     "in-progress": "someone is actively fixing this; see `note`"
   },
   "generated_by": "scripts/template-conformance.py --write-baseline",
-  "generated_at": "2026-08-14T19:18:09+00:00",
+  "generated_at": "2026-08-14T19:34:10+00:00",
   "oracles": {
     "apertus": {
       "source": "hf:swiss-ai/Apertus-8B-Instruct-2509",
@@ -323,18 +323,6 @@
       "reference_excerpt": "', CJK: \u6f22\u5b57\u3001\u0623\u0647\u0644\u0627\u064b </s><s>[INST] And at sunset? [/INST]'",
       "runner_excerpt": "', CJK: \u6f22\u5b57\u3001\u0623\u0647\u0644\u0627\u064b </s>[INST] And at sunset? [/INST]'",
       "token_delta": -1
-    },
-    {
-      "id": "muse/tool-call-with-text",
-      "status": "open",
-      "note": "",
-      "digest": "52a782521580f598",
-      "allowlist_applied": [
-        "bos"
-      ],
-      "first_diff_at": 1760,
-      "reference_excerpt": "'t_weather<|message|><atem:function_calls>\\n<atem:invoke name=\"get_weather\">\\n<atem:parameter'",
-      "runner_excerpt": "'t_weather<|message|>Let me look that up.<atem:function_calls>\\n<atem:invoke name=\"get_weath'"
     },
     {
       "id": "ornith/tool-call-with-text",

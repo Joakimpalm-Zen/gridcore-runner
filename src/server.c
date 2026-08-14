@@ -89,6 +89,25 @@ static char *message_text(jv *msg, int tmpl) {
     // done and what their own references expect.
     jv *calls = jv_get(msg, "tool_calls");
     if (tmpl == TMPL_GEMMA4) tool_history_render_for(tmpl, calls, &b);
+    // Muse's reference emits NO visible text in a turn that carries calls:
+    // the turn is addressed `to=NAME` and holds only the
+    // <atem:function_calls> block, so text before it is a shape the model
+    // never saw at that position. Runner rendered it anyway until 2026-08-14,
+    // which the matrix could not see because it had no case with text AND
+    // calls in one turn.
+    //
+    // This DISCARDS something the client sent, and that is the deliberate
+    // choice rather than an oversight: a recipient turn is the model's own
+    // protocol for "I am calling this function", and prepending prose to it
+    // teaches a turn shape its training never contained. The text is not lost
+    // to the conversation -- a client that wants the model to say something
+    // before calling sends it as its own assistant turn, which renders as an
+    // ordinary `to=user` message. Ruled 2026-08-14; the alternatives
+    // considered were allowlisting the divergence and synthesising a
+    // preceding `to=user` turn, which no reference writes.
+    bool muse_calls = tmpl == TMPL_MUSE && calls && calls->type == J_ARR &&
+                      calls->n > 0;
+    if (muse_calls) content = NULL;
     if (content && content->type == J_STR) {
         sb_put(&b, content->str, strlen(content->str));
     } else if (content && content->type == J_ARR) {
