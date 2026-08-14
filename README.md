@@ -648,7 +648,8 @@ Stop strings and tool declarations cannot be combined: a request carrying both
 `stop` (or Anthropic's `stop_sequences`) and `tools` is refused with HTTP 400.
 A stop string is a rule about the model's visible text, but under the tool
 envelope the model generates protocol — Harmony channel markers and recipient
-headers, or the generic envelope's own JSON syntax — and the caller receives
+headers, Muse's `<atem:invoke>` blocks, gemma-4's `<|tool_call>` blocks, or the
+generic envelope's own JSON syntax — and the caller receives
 only the demultiplexed result. Matching stop strings against that document
 fires on framing nobody wrote (`["\n\n"]`, `["}"]` and `["<|"]` all hit).
 Runner refuses the request rather than ignoring the field. The refusal is a
@@ -762,8 +763,9 @@ does not leak prompt syntax into `content`. `tool_choice` (`auto`, `required`,
 named, and `none`) still controls the allowed recipients.
 `parallel_tool_calls:true` with a required/named native choice constrains a
 bounded two-call turn. With native `tool_choice:"auto"`, the same flag retains
-the auto turn and therefore permits at most one call. Other model families keep
-the existing JSON-schema tool path unchanged.
+the auto turn and therefore permits at most one call. Families without a native
+protocol of their own — everything except gpt-oss, Muse Glimmer and gemma-4 —
+keep the generic JSON-schema tool path unchanged.
 
 When native `tool_choice:"auto"` is combined with a JSON-schema
 `response_format`, the `to=user` alternative is compiled against that final
@@ -1097,7 +1099,7 @@ error object so the two faults stay distinguishable.
 | `qwen35` | Dense Qwen3.5/Ornith Gated DeltaNet plus full attention; CPU and CUDA. |
 | `qwen3moe` | Fused and legacy split sparse-MoE layouts on CPU/CUDA; supported fused layouts on Metal. |
 | `gemma3` | Regular and QAT layouts, sliding-window attention, sandwich norms. |
-| `gemma4` | Heterogeneous attention, thinking channels, E-series, and supported dense/MoE layouts. |
+| `gemma4` | Heterogeneous attention, thinking channels, E-series, supported dense/MoE layouts, and the family's native tool protocol. |
 | `phi3` | Fused QKV and gate/up tensors, LongRoPE factors. |
 | `gpt-oss` | Attention sinks, alpha-sigmoid GLU, expert biases, MXFP4 experts. Tokenizer exact (0/721 differential) and chat renders the real Harmony format (analysis channel as `reasoning_content`) as of 2026-08-14; cross-engine greedy identity remains inside the model's own measured KV-precision sensitivity envelope rather than certified. |
 | `apertus` | xIELU FFN; CPU and CUDA. |

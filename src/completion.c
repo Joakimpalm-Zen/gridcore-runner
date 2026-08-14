@@ -1526,8 +1526,9 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     // only thing the caller can see to write a rule about, and it is why the
     // filter already excludes the reasoning channel. Under the strict tool
     // envelope the generated document is not text at all: it is protocol
-    // (Harmony channel markers and recipient headers, Muse's <atem:invoke>, or
-    // the generic envelope's own JSON syntax), and the client receives only the
+    // (Harmony channel markers and recipient headers, Muse's <atem:invoke>,
+    // gemma4's <|tool_call> blocks, or the generic envelope's own JSON
+    // syntax), and the client receives only the
     // demultiplexed result. Matching their strings against the raw document
     // fires on framing they never wrote and never see — ["\n\n"], ["}"] and
     // ["<|"] are ordinary agent defaults and every one of them hits.

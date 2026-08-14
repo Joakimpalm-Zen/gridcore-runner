@@ -597,6 +597,31 @@ def sha(text):
 # are present the fixture is verified against the live render, so a fixture
 # recorded from an older library version is reported rather than trusted.
 
+# Every subprocess this harness runs is captured as BYTES and decoded here,
+# never through `text=True`. Two independent reasons, both found on Windows
+# 2026-08-14 while making the gate run there at all:
+#
+#   * `text=True` returned `stdout is None` -- with `stderr` correctly `''`
+#     and returncode 0 -- for a ~31KB `input=` payload on CPython 3.12.10,
+#     while the identical call in bytes mode returned all 30604 bytes. Small
+#     payloads were fine, which is exactly the kind of size-dependent fault
+#     that would have read as "Windows is flaky" forever.
+#   * `text=True` decodes with the LOCALE encoding. The box is Swedish, so
+#     that is cp1252, and this gate compares prompts BYTE-EXACTLY -- the
+#     unicode-emoji and typographic-quote cases would have come back
+#     mojibake and diffed against a reference that was never wrong. A
+#     byte-exact comparison has no business going through a locale codec.
+def _run_captured(argv, payload=None):
+    """(returncode, stdout_text, stderr_text). UTF-8 in, UTF-8 out."""
+    p = subprocess.run(argv,
+                       input=payload.encode("utf-8") if payload is not None
+                             else None,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return (p.returncode,
+            (p.stdout or b"").decode("utf-8", "replace"),
+            (p.stderr or b"").decode("utf-8", "replace"))
+
+
 def harmony_render_live(cases):
     """(doc, err). doc is {"library_version":..., "renders": {...}}."""
     payload = json.dumps({"cases": cases})
@@ -604,13 +629,11 @@ def harmony_render_live(cases):
     for py in (os.environ.get("RUNNER_HARMONY_PYTHON"), sys.executable):
         if not py:
             continue
-        p = subprocess.run([py, HARMONY_SCRIPT], input=payload,
-                           capture_output=True, text=True)
-        if p.returncode == 0:
-            return json.loads(p.stdout), None
-        tried.append("%s: %s" % (py, p.stderr.strip().splitlines()[-1]
-                                 if p.stderr.strip() else "exit %d"
-                                 % p.returncode))
+        rc, out, errtext = _run_captured([py, HARMONY_SCRIPT], payload)
+        if rc == 0:
+            return json.loads(out), None
+        tried.append("%s: %s" % (py, errtext.strip().splitlines()[-1]
+                                 if errtext.strip() else "exit %d" % rc))
     return None, "; ".join(tried)
 
 
@@ -771,25 +794,24 @@ def build_renderer():
     if sys.platform.startswith("win"):
         exe += ".exe"
     out = os.path.join(ROOT, exe)
-    p = subprocess.run(["make", "-C", ROOT, exe],
-                       capture_output=True, text=True)
-    if p.returncode or not os.path.exists(out):
-        # `or ""` is not defensiveness for its own sake: on Windows this
-        # returned None and the slice raised a TypeError from inside the
-        # error path, hiding the one thing the caller needed to read --
-        # `sys/socket.h: No such file or directory`. A diagnostic that
-        # crashes while reporting is worse than no diagnostic.
+    rc, mkout, mkerr = _run_captured(["make", "-C", ROOT, exe])
+    if rc or not os.path.exists(out):
         return None, ("cannot build the runner-side renderer (make %s):\n%s%s"
-                      % (exe, (p.stdout or "")[-2000:], (p.stderr or "")[-2000:]))
+                      % (exe, mkout[-2000:], mkerr[-2000:]))
     return out, None
 
 
 def run_renderer(binary, payload):
-    p = subprocess.run([binary], input=json.dumps(payload),
-                       capture_output=True, text=True)
-    if p.returncode:
-        raise SystemExit("runner renderer failed: %s" % p.stderr)
-    return json.loads(p.stdout)
+    rc, out, err = _run_captured([binary], json.dumps(payload))
+    if rc:
+        raise SystemExit("runner renderer failed: %s" % err)
+    if not out:
+        # Distinguish "the driver printed nothing" from "the JSON was bad",
+        # because those have completely different causes and the bare
+        # json.loads TypeError named neither.
+        raise SystemExit("runner renderer produced no output (exit 0). "
+                         "stderr:\n%s" % (err[-2000:] or "(empty)"))
+    return json.loads(out)
 
 
 def render_runner(binary, cases):
