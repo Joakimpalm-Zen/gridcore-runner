@@ -670,7 +670,16 @@ that truncates mid-call still closes to a legal, executable document —
 
 gpt-oss uses its trained Harmony tool protocol instead of that generic
 envelope. Runner renders the official TypeScript `# Tools` namespace in the
-Harmony system turn, constrains the generated recipient to `functions.NAME`,
+Harmony **developer** turn — the slot the reference reserves for OpenAI
+function tools, after `# Instructions` and separated from it by a blank line,
+or alone in a developer turn of its own when the caller sent no system
+message. The system turn has a second `# Tools` slot that renders identical
+bytes, but it is for the model's built-in browser/python tools and Runner
+never uses it. Declaring tools also appends `Calls to these tools must go to
+the commentary channel: 'functions'.` to the system turn, on the line after
+`# Valid channels`; that channel list is the constant `analysis, commentary,
+final` whether or not tools are declared. Runner then constrains the
+generated recipient to `functions.NAME`,
 constrains the JSON after `<|constrain|>` against that function's declared
 parameters, and maps the native `commentary`/`<|call|>` turn back to ordinary
 OpenAI `tool_calls`. `tool_choice` (`auto`, `required`, named, and `none`),
@@ -701,7 +710,10 @@ line; an object schema's own description, a property title, and a property
 description each take a single `// ` prefix, which leaves a multi-line value's
 continuation as a bare uncommented line. That is the reference's own quirk,
 reproduced deliberately and pinned by goldens rendered through openai-harmony
-0.0.8 (abd677f7). Strict Harmony tool turns bound a pre-call analysis or visible
+0.0.8 (abd677f7) via `DeveloperContent.with_function_tools` — the
+function-tool slot, named in each golden's comment because the builtin-tool
+slot renders the same bytes in the wrong turn — and cross-checked against the
+`chat_template` embedded in the official gpt-oss GGUF. Strict Harmony tool turns bound a pre-call analysis or visible
 commentary message to 192 UTF-8 bytes; at that boundary the trained assistant
 handoff is forced, preserving enough output budget for model-generated
 arguments instead of letting a turn narrate its intent forever. The bound is
@@ -712,17 +724,6 @@ then repeats the call it was just answered before replying on the next round. A
 prose tool result fits inside the bound and answers directly. Lifting the bound
 is measured and worse, not untried:
 [docs/negative-result-harmony-analysis-bound.md](docs/negative-result-harmony-analysis-bound.md).
-
-> **Known deviation, measured 2026-08-14.** The reference renderer places the
-> `# Tools` namespace in the DEVELOPER turn, after `# Instructions`, and emits
-> `Calls to these tools must go to the commentary channel: 'functions'.` in the
-> system turn; it also lists `commentary` in `# Valid channels` whether or not
-> tools are declared. Runner does none of those three. The golden that appeared
-> to verify this placement was genuine openai-harmony output driven through the
-> builtin-tool slot rather than the function-tool slot, so it confirmed the
-> namespace's CONTENTS and not its position. A fix is in progress; until it
-> lands, treat the placement described above as runner's own, not the
-> reference's.
 
 For example, the usual OpenAI request needs no Runner-specific switch:
 

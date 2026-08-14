@@ -621,32 +621,61 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         sbuf system = {0};
         sb_lit(&system, "<|start|>system<|message|>You are ChatGPT, a large "
                         "language model trained by OpenAI.\n\nReasoning: medium");
-        if (have_tools) {
-            sb_lit(&system, "\n\n");
-            harmony_render_tool_defs(tools, &system);
-        }
-        sb_fmt(&system, "\n\n# Valid channels: analysis, %sfinal. Channel must "
-                        "be included for every message.",
-               have_tools ? "commentary, " : "");
+        // The channel list is a CONSTANT in the reference, not a function of
+        // the declared tools: SystemContent::default() (openai-harmony
+        // abd677f7, chat.rs) always requires analysis, commentary, final, and
+        // the model's own GGUF jinja template writes the same three as a
+        // literal. commentary is where the model puts a user-visible preamble
+        // before a tool call, so it is legal even with nothing to call.
+        sb_lit(&system, "\n\n# Valid channels: analysis, commentary, final. "
+                        "Channel must be included for every message.");
+        // Declared function tools add one routing line to the SYSTEM turn.
+        // The reference gates it on the CONVERSATION carrying a developer
+        // `functions` namespace with at least one tool, not on the system
+        // turn's own contents (encoding.rs:175-194 feeds
+        // RenderOptions::conversation_has_function_tools, consumed at :996).
+        if (have_tools)
+            sb_lit(&system, "\nCalls to these tools must go to the commentary "
+                            "channel: 'functions'.");
         sb_lit(&system, "<|end|>");
         off = emit(out, cap, off, "%s", system.s, NULL);
         free(system.s);
-        bool wrote_dev = false;
+
+        // The DEVELOPER turn carries the caller's instructions and the tool
+        // namespace, in that order, separated by a blank line, and it sits
+        // immediately after the system preamble. Both halves are optional and
+        // the turn exists if either does — the reference builds it from
+        // DeveloperContent's two fields and joins the present ones with "\n\n"
+        // (openai-harmony abd677f7, encoding.rs:1012-1037), and the model's own
+        // GGUF jinja gates the whole turn on `developer_message or tools`.
+        //
+        // The namespace goes HERE, not in the system turn. openai-harmony has a
+        // second slot that renders identical bytes into the system turn
+        // (SystemContent::with_tools), but that one is for the model's BUILT-IN
+        // tools; OpenAI function tools, which is all Runner ever declares, are
+        // developer content. Only the position differs, so a golden taken from
+        // the wrong slot looks perfect and is wrong.
+        sbuf dev = {0};
+        for (int i = 0; i < n_msgs; i++) {
+            if (strcmp(msgs[i].role, "system")) continue;
+            // fold every system message into one instructions block, in order
+            sb_lit(&dev, dev.n ? "\n\n" : "# Instructions\n\n");
+            sb_fmt(&dev, "%s", msgs[i].content);
+        }
+        if (have_tools) {
+            if (dev.n) sb_lit(&dev, "\n\n");
+            harmony_render_tool_defs(tools, &dev);
+        }
+        if (dev.n) {
+            off = emit(out, cap, off, "<|start|>developer<|message|>",
+                       NULL, NULL);
+            off = emit(out, cap, off, "%s<|end|>", dev.s, NULL);
+        }
+        free(dev.s);
+
         for (int i = 0; i < n_msgs; i++) {
             const chat_msg *mm = &msgs[i];
-            if (!strcmp(mm->role, "system")) {
-                // fold every system message into one developer turn, in order
-                off = emit(out, cap, off, wrote_dev
-                           ? "\n\n%s"
-                           : "<|start|>developer<|message|># Instructions\n\n%s",
-                           mm->content, NULL);
-                wrote_dev = true;
-                continue;
-            }
-            if (wrote_dev) {
-                off = emit(out, cap, off, "<|end|>", NULL, NULL);
-                wrote_dev = false;
-            }
+            if (!strcmp(mm->role, "system")) continue;  // already in developer
             if (!strcmp(mm->role, "assistant") && mm->name && mm->name[0]) {
                 const char *prefix = !strncmp(mm->name, "functions.", 10)
                                    ? "" : "functions.";
@@ -689,7 +718,6 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
                 off = emit(out, cap, off, "%s<|end|>", mm->content, NULL);
             }
         }
-        if (wrote_dev) off = emit(out, cap, off, "<|end|>", NULL, NULL);
         // Generation prompt. The bare header lets the model pick its own
         // channel, which is what it is trained to do and what the splitter
         // expects by default; THINK_ON/THINK_OFF prime a channel explicitly,

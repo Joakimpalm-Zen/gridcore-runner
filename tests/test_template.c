@@ -215,6 +215,23 @@ static void test_detect_harmony(tokenizer *t) {
     assert(template_detect(granite, t) == TMPL_GRANITE);
 }
 
+// Rendered with openai-harmony 0.0.8 (git abd677f7) through
+//
+//     Conversation.from_messages([
+//         Message.from_role_and_content(Role.SYSTEM, SystemContent.new()),
+//         Message.from_role_and_content(Role.DEVELOPER,
+//             DeveloperContent.new().with_instructions("Be terse.")),
+//         ... user / assistant(final) / user ...])
+//
+// then two documented Runner deltas applied by hand:
+//   - the reference's "Knowledge cutoff: 2024-06" line is omitted (see the
+//     comment on the Harmony branch in template.c);
+//   - the reference stops at the last turn; Runner appends its own primed
+//     generation header, `<|channel|>analysis` for THINK_DEFAULT.
+// Everything else below is the reference's bytes verbatim. Note in particular
+// that `# Valid channels` lists commentary even with no tools declared: the
+// reference's channel list is a constant (chat.rs, SystemContent::default),
+// not a function of the tool set.
 static void test_harmony_render_golden(void) {
     const chat_msg msgs[] = {
         { .role = "system",    .content = "Be terse." },
@@ -228,7 +245,8 @@ static void test_harmony_render_golden(void) {
     assert(strcmp(out,
         "<|start|>system<|message|>You are ChatGPT, a large language model "
         "trained by OpenAI.\n\nReasoning: medium\n\n# Valid channels: "
-        "analysis, final. Channel must be included for every message.<|end|>"
+        "analysis, commentary, final. Channel must be included for every "
+        "message.<|end|>"
         "<|start|>developer<|message|># Instructions\n\nBe terse.<|end|>"
         "<|start|>user<|message|>What is 2+2?<|end|>"
         "<|start|>assistant<|channel|>final<|message|>4<|end|>"
@@ -247,11 +265,62 @@ static void test_harmony_render_without_system(void) {
     assert(strstr(out, "<|start|>assistant") != NULL);
 }
 
-// Tool requests use OpenAI's native Harmony system-tool section and leave the
-// assistant header bare so the model can choose analysis, commentary, or
-// final. This golden was rendered with openai-harmony abd677f7 (the pinned
-// protocol oracle), with date and knowledge-cutoff fields deliberately unset
-// just like Runner's existing date-stable Harmony chat prompt.
+// Declaring function tools adds one line to the SYSTEM turn, immediately after
+// the channel list. The reference gates it on the conversation containing a
+// developer `functions` namespace with at least one tool
+// (encoding.rs:175-194, :996-1001), so it is present exactly when Runner has
+// tools to render and absent otherwise. Confirmed against openai-harmony
+// 0.0.8 (git abd677f7) via DeveloperContent.new().with_function_tools([...]).
+static void test_harmony_tools_add_the_commentary_routing_line(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"city\":{\"type\":\"string\"}},"
+        "\"required\":[\"city\"]}}}]";
+    jv *tools = json_parse(src, strlen(src));
+    assert(tools != NULL);
+    const chat_msg msgs[] = { { .role = "user", .content = "hi" } };
+    char with[4096], without[4096];
+    render_messages_with_tools(TMPL_HARMONY, msgs, 1, true, THINK_DEFAULT,
+                               tools, with, sizeof(with));
+    render_messages_with_tools(TMPL_HARMONY, msgs, 1, true, THINK_DEFAULT,
+                               NULL, without, sizeof(without));
+    assert(strstr(with,
+        "# Valid channels: analysis, commentary, final. Channel must be "
+        "included for every message.\nCalls to these tools must go to the "
+        "commentary channel: 'functions'.<|end|>") != NULL);
+    assert(strstr(without, "Calls to these tools") == NULL);
+    jv_free(tools);
+}
+
+// Tool requests leave the assistant header bare so the model can choose
+// analysis, commentary, or final.
+//
+// WHICH ORACLE CALL PRODUCED THIS, and why it matters. openai-harmony has TWO
+// slots that render an identical `# Tools` namespace, and picking the wrong one
+// changes only the POSITION of the block, never a byte inside it:
+//
+//   SystemContent.new().with_tools(ns)          -> namespace in the SYSTEM turn
+//   DeveloperContent.new().with_function_tools  -> namespace in the DEVELOPER turn
+//
+// The SYSTEM slot is for the model's BUILT-IN tools (browser, python). OpenAI
+// function tools — everything Runner ever renders — belong in the DEVELOPER
+// slot. An earlier version of this golden was generated through
+// SystemContent.with_tools, so it verified the namespace's CONTENTS while
+// blessing the wrong POSITION for two releases. The bytes below came from
+//
+//     Conversation.from_messages([
+//         Message.from_role_and_content(Role.SYSTEM, SystemContent.new()),
+//         Message.from_role_and_content(Role.DEVELOPER,
+//             DeveloperContent.new().with_instructions("Be terse.")
+//                                   .with_function_tools([get_weather])),
+//         Message.from_role_and_content(Role.USER, "Weather in Oslo?")])
+//
+// rendered by openai-harmony 0.0.8 (git abd677f7) and cross-checked against the
+// `chat_template` embedded in models/gpt-oss-20b-MXFP4.gguf, which agrees.
+// Two documented Runner deltas are applied by hand: the reference's
+// "Knowledge cutoff: 2024-06" line is omitted, and Runner appends its own
+// generation header (bare `<|start|>assistant` when tools are declared).
 static void test_harmony_tool_definitions_golden(void) {
     const char *src =
         "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
@@ -269,15 +338,83 @@ static void test_harmony_tool_definitions_golden(void) {
                                tools, out, sizeof(out));
     assert(strcmp(out,
         "<|start|>system<|message|>You are ChatGPT, a large language model "
-        "trained by OpenAI.\n\nReasoning: medium\n\n# Tools\n\n## functions\n\n"
+        "trained by OpenAI.\n\nReasoning: medium\n\n# Valid channels: "
+        "analysis, commentary, final. Channel must be included for every "
+        "message.\nCalls to these tools must go to the commentary channel: "
+        "'functions'.<|end|>"
+        "<|start|>developer<|message|># Instructions\n\nBe terse.\n\n"
+        "# Tools\n\n## functions\n\n"
         "namespace functions {\n\n// Get weather\n"
         "type get_weather = (_: {\ncity: string,\n}) => any;\n\n"
-        "} // namespace functions\n\n# Valid channels: analysis, commentary, "
-        "final. Channel must be included for every message."
-        "<|end|><|start|>developer<|message|># Instructions\n\nBe terse."
-        "<|end|><|start|>user<|message|>Weather in Oslo?<|end|>"
+        "} // namespace functions<|end|>"
+        "<|start|>user<|message|>Weather in Oslo?<|end|>"
         "<|start|>assistant") == 0);
     jv_free(tools);
+}
+
+// The developer turn exists for EITHER half of its content. Runner used to emit
+// one only for a caller system message, so tools with no system message had
+// nowhere left to go once the namespace moved off the system turn. The
+// reference emits `# Tools` alone, with no `# Instructions` heading and no
+// leading blank line; the GGUF jinja agrees (`{%- if developer_message or
+// tools %}`). Bytes from openai-harmony 0.0.8 (git abd677f7),
+// DeveloperContent.new().with_function_tools([get_weather]) and no
+// .with_instructions(), minus the knowledge-cutoff line and plus Runner's
+// generation header.
+static void test_harmony_tools_without_instructions_still_get_a_developer_turn(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"city\":{\"type\":\"string\"}},"
+        "\"required\":[\"city\"]}}}]";
+    jv *tools = json_parse(src, strlen(src));
+    assert(tools != NULL);
+    const chat_msg msgs[] = { { .role = "user", .content = "hi" } };
+    char out[4096];
+    render_messages_with_tools(TMPL_HARMONY, msgs, 1, true, THINK_DEFAULT,
+                               tools, out, sizeof(out));
+    assert(strcmp(out,
+        "<|start|>system<|message|>You are ChatGPT, a large language model "
+        "trained by OpenAI.\n\nReasoning: medium\n\n# Valid channels: "
+        "analysis, commentary, final. Channel must be included for every "
+        "message.\nCalls to these tools must go to the commentary channel: "
+        "'functions'.<|end|>"
+        "<|start|>developer<|message|># Tools\n\n## functions\n\n"
+        "namespace functions {\n\n// Get weather\n"
+        "type get_weather = (_: {\ncity: string,\n}) => any;\n\n"
+        "} // namespace functions<|end|>"
+        "<|start|>user<|message|>hi<|end|>"
+        "<|start|>assistant") == 0);
+    jv_free(tools);
+}
+
+// Every caller system message lands in ONE developer turn, in order, joined by
+// a blank line — and that turn sits directly after the system preamble even
+// when a system message arrived late in the list. Both the reference and the
+// GGUF jinja put developer content in exactly one turn in exactly that
+// position, and the tool namespace has to append to the same turn, so a second
+// developer turn opened mid-history would leave the namespace with two possible
+// homes. The instruction bytes match openai-harmony 0.0.8 (git abd677f7)
+// rendered from DeveloperContent.new().with_instructions("Be terse.\n\nBe
+// kind."), which is what folding two messages produces.
+static void test_harmony_folds_every_system_message_into_one_developer_turn(void) {
+    const chat_msg msgs[] = {
+        { .role = "system", .content = "Be terse." },
+        { .role = "user",   .content = "hi" },
+        { .role = "system", .content = "Be kind." },
+    };
+    char out[4096];
+    render_messages(TMPL_HARMONY, msgs, 3, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strstr(out,
+        "message.<|end|>"
+        "<|start|>developer<|message|># Instructions\n\nBe terse.\n\n"
+        "Be kind.<|end|>"
+        "<|start|>user<|message|>hi<|end|>") != NULL);
+    // exactly one developer turn, not one per system message
+    const char *first = strstr(out, "<|start|>developer");
+    assert(first != NULL);
+    assert(strstr(first + 1, "<|start|>developer") == NULL);
 }
 
 // The TypeScript inside `namespace functions` is the tool-calling half of the
@@ -1053,7 +1190,10 @@ int main(void) {
     test_detect_harmony(&t);
     test_harmony_render_golden();
     test_harmony_render_without_system();
+    test_harmony_tools_add_the_commentary_routing_line();
     test_harmony_tool_definitions_golden();
+    test_harmony_tools_without_instructions_still_get_a_developer_turn();
+    test_harmony_folds_every_system_message_into_one_developer_turn();
     test_harmony_schema_scalar_branches();
     test_harmony_schema_enum_and_array_branches();
     test_harmony_schema_type_array_and_nullable();
