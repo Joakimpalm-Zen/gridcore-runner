@@ -224,8 +224,10 @@ static void test_detect_harmony(tokenizer *t) {
 //         ... user / assistant(final) / user ...])
 //
 // then two documented Runner deltas applied by hand:
-//   - the reference's "Knowledge cutoff: 2024-06" line is omitted (see the
-//     comment on the Harmony branch in template.c);
+//   - the reference's "Current date: <today>" line is omitted, because it is a
+//     live wall-clock value that would evict the prefix cache at midnight (see
+//     the comment on the Harmony branch in template.c). The "Knowledge cutoff"
+//     line beside it is NOT omitted: it is a frozen literal and costs nothing;
 //   - the reference stops at the last turn; Runner appends its own primed
 //     generation header, `<|channel|>analysis` for THINK_DEFAULT.
 // Everything else below is the reference's bytes verbatim. Note in particular
@@ -244,7 +246,8 @@ static void test_harmony_render_golden(void) {
                     out, sizeof(out));
     assert(strcmp(out,
         "<|start|>system<|message|>You are ChatGPT, a large language model "
-        "trained by OpenAI.\n\nReasoning: medium\n\n# Valid channels: "
+        "trained by OpenAI.\nKnowledge cutoff: 2024-06\n\nReasoning: medium"
+        "\n\n# Valid channels: "
         "analysis, commentary, final. Channel must be included for every "
         "message.<|end|>"
         "<|start|>developer<|message|># Instructions\n\nBe terse.<|end|>"
@@ -252,6 +255,39 @@ static void test_harmony_render_golden(void) {
         "<|start|>assistant<|channel|>final<|message|>4<|end|>"
         "<|start|>user<|message|>And 3+3?<|end|>"
         "<|start|>assistant<|channel|>analysis<|message|>") == 0);
+}
+
+// The knowledge cutoff is part of the system preamble, and Runner used to drop
+// it along with the current date. Those two lines are not the same kind of
+// thing. `Current date:` is strftime_now() — a live wall-clock value that would
+// change the prompt prefix at midnight and evict the whole prefix cache, so
+// Runner omits it (the same call llama3, apertus and muse make). The cutoff is
+// a FROZEN string literal: identical on every render, no interpolation, no
+// cache cost. Dropping it cost the model a fact it is trained to have and
+// bought nothing.
+//
+// Both references agree on the bytes. openai-harmony 0.0.8 (git abd677f7)
+// renders SystemContent.new() with no conversation_start_date as
+//
+//     ...trained by OpenAI.\nKnowledge cutoff: 2024-06\n\nReasoning: medium\n\n
+//
+// (verbatim in its own test-data/test_reasoning_system_message.txt), and the
+// `chat_template` in models/gpt-oss-20b-MXFP4.gguf emits the same literal at
+// its build_system_message() macro, between the identity line and the
+// conditional `Current date:`. Note the separator: identity ends with a SINGLE
+// \n now, because the blank line before `Reasoning:` comes from the end of the
+// cutoff/date block, not from the identity line.
+static void test_harmony_system_turn_carries_the_knowledge_cutoff(void) {
+    const chat_msg msgs[] = { { .role = "user", .content = "hi" } };
+    char out[2048];
+    render_messages(TMPL_HARMONY, msgs, 1, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strstr(out,
+        "<|start|>system<|message|>You are ChatGPT, a large language model "
+        "trained by OpenAI.\nKnowledge cutoff: 2024-06\n\n"
+        "Reasoning: medium\n\n") != NULL);
+    // and the live date stays out: no `Current date:` line, in any year
+    assert(strstr(out, "Current date") == NULL);
 }
 
 static void test_harmony_render_without_system(void) {
@@ -318,9 +354,10 @@ static void test_harmony_tools_add_the_commentary_routing_line(void) {
 //
 // rendered by openai-harmony 0.0.8 (git abd677f7) and cross-checked against the
 // `chat_template` embedded in models/gpt-oss-20b-MXFP4.gguf, which agrees.
-// Two documented Runner deltas are applied by hand: the reference's
-// "Knowledge cutoff: 2024-06" line is omitted, and Runner appends its own
-// generation header (bare `<|start|>assistant` when tools are declared).
+// Two documented Runner deltas are applied by hand: the reference's live
+// "Current date:" line is omitted (the frozen "Knowledge cutoff" beside it is
+// kept), and Runner appends its own generation header (bare
+// `<|start|>assistant` when tools are declared).
 static void test_harmony_tool_definitions_golden(void) {
     const char *src =
         "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
@@ -338,7 +375,8 @@ static void test_harmony_tool_definitions_golden(void) {
                                tools, out, sizeof(out));
     assert(strcmp(out,
         "<|start|>system<|message|>You are ChatGPT, a large language model "
-        "trained by OpenAI.\n\nReasoning: medium\n\n# Valid channels: "
+        "trained by OpenAI.\nKnowledge cutoff: 2024-06\n\nReasoning: medium"
+        "\n\n# Valid channels: "
         "analysis, commentary, final. Channel must be included for every "
         "message.\nCalls to these tools must go to the commentary channel: "
         "'functions'.<|end|>"
@@ -359,7 +397,7 @@ static void test_harmony_tool_definitions_golden(void) {
 // leading blank line; the GGUF jinja agrees (`{%- if developer_message or
 // tools %}`). Bytes from openai-harmony 0.0.8 (git abd677f7),
 // DeveloperContent.new().with_function_tools([get_weather]) and no
-// .with_instructions(), minus the knowledge-cutoff line and plus Runner's
+// .with_instructions(), minus the live current-date line and plus Runner's
 // generation header.
 static void test_harmony_tools_without_instructions_still_get_a_developer_turn(void) {
     const char *src =
@@ -375,7 +413,8 @@ static void test_harmony_tools_without_instructions_still_get_a_developer_turn(v
                                tools, out, sizeof(out));
     assert(strcmp(out,
         "<|start|>system<|message|>You are ChatGPT, a large language model "
-        "trained by OpenAI.\n\nReasoning: medium\n\n# Valid channels: "
+        "trained by OpenAI.\nKnowledge cutoff: 2024-06\n\nReasoning: medium"
+        "\n\n# Valid channels: "
         "analysis, commentary, final. Channel must be included for every "
         "message.\nCalls to these tools must go to the commentary channel: "
         "'functions'.<|end|>"
@@ -1189,6 +1228,7 @@ int main(void) {
     test_muse_user_payload_strip_removes_only_recipient_header();
     test_detect_harmony(&t);
     test_harmony_render_golden();
+    test_harmony_system_turn_carries_the_knowledge_cutoff();
     test_harmony_render_without_system();
     test_harmony_tools_add_the_commentary_routing_line();
     test_harmony_tool_definitions_golden();

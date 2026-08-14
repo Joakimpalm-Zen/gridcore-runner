@@ -617,10 +617,21 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         // effort, channel declaration) — NOT the caller's system message. A
         // caller system message is a DEVELOPER turn in Harmony, which is the
         // one structural thing that surprises people porting from ChatML.
+        //
+        // The preamble carries the knowledge cutoff but NOT the current date.
+        // The reference emits both, adjacent, which makes them look like one
+        // decision; they are two. `Current date:` is strftime_now() — a live
+        // wall-clock value, so the prompt prefix would change at midnight and
+        // evict the whole prefix cache for no gain (the same call llama3,
+        // apertus and muse make). The cutoff is a FROZEN literal: byte-
+        // identical on every render, nothing to interpolate, no cache cost, and
+        // it is a fact the model is trained to have. Omitting it was a
+        // side-effect of omitting the date, not a decision.
         bool have_tools = tools && tools->type == J_ARR && tools->n;
         sbuf system = {0};
         sb_lit(&system, "<|start|>system<|message|>You are ChatGPT, a large "
-                        "language model trained by OpenAI.\n\nReasoning: medium");
+                        "language model trained by OpenAI.\n"
+                        "Knowledge cutoff: 2024-06\n\nReasoning: medium");
         // The channel list is a CONSTANT in the reference, not a function of
         // the declared tools: SystemContent::default() (openai-harmony
         // abd677f7, chat.rs) always requires analysis, commentary, final, and
@@ -747,9 +758,14 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         // carry a recipient — ` to=user` for answers, ` to=self` for
         // reasoning turns, which is what the think_open/close pair splits.
         // When no system message is present the reference injects a default
-        // one whose constant parts are reproduced here; its current-date
-        // line is conditional in the template (`current_date is defined`)
-        // and omitted here — a live date would also defeat the prefix cache.
+        // one whose constant parts are reproduced here. Its current-date line
+        // is omitted for one reason only: a live wall-clock date changes the
+        // prompt prefix at midnight and evicts the prefix cache, which is the
+        // same call llama3, apertus and harmony make. It is NOT omitted
+        // because the reference makes it optional — an earlier version of this
+        // comment claimed the template gates it on `current_date is defined`,
+        // which is false: that branch falls through to `elif strftime_now is
+        // defined`, so under transformers the line always renders.
         // Structured tools are rendered below with the model's native atem
         // declaration macro; the legacy wrapper passes NULL and stays plain.
         sbuf muse_tail = {0};
