@@ -9,6 +9,37 @@
 #include <string.h>
 #include <math.h>
 
+// Which of the three Mistral instruction framings a [INST] template writes.
+//
+// The question is answered from the TEMPLATE TEXT, which is the same artifact
+// the <<SYS>> split one line below already reads. A vocabulary size or a model
+// name would also separate these checkpoints today, but both are DESCRIPTIONS
+// of a checkpoint and can drift from it independently -- a re-quantised GGUF
+// keeps its template and loses its name, a merge keeps the name and takes
+// somebody else's template. The template cannot drift from itself: it is the
+// thing that decides the bytes.
+//
+// The predicate keys on RENDERED facts rather than on spellings, so it holds
+// across quoting styles, whitespace control and the derivatives that copied
+// one of these templates and reformatted it:
+//
+//   a space immediately before [/INST]  -> v0.1 / v0.2   (' [INST] ' ... ' [/INST]')
+//   otherwise, no space after [INST]    -> Nemo-2407     ('[INST]'   ... '[/INST]')
+//   otherwise                           -> v0.3          ('[INST] '  ... '[/INST]')
+//
+// Both tests are immune to the quote character because the marker literal
+// itself carries the space: ' [/INST]' can only appear inside a string that
+// renders a space there, and "[INST] " likewise. A template that writes
+// neither marker with a space -- or one this build has never seen -- falls to
+// v0.3, which is the population: Mistral-Small-Instruct-2409's template is
+// byte-identical to v0.3's, and the derivative shelf copied that one. Nemo is
+// the outlier.
+static int mistral_variant(const char *meta_tmpl) {
+    if (strstr(meta_tmpl, " [/INST]"))  return TMPL_MISTRAL_V1;
+    if (!strstr(meta_tmpl, "[INST] "))  return TMPL_MISTRAL_NEMO;
+    return TMPL_MISTRAL;
+}
+
 int template_detect(const char *meta_tmpl, tokenizer *tok) {
     if (meta_tmpl) {
         // apertus first: its vocabulary inherits Mistral's [INST]/[/INST]
@@ -41,7 +72,8 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         if (strstr(meta_tmpl, "<|turn>"))             return TMPL_GEMMA4;
         if (strstr(meta_tmpl, "<start_of_turn>"))     return TMPL_GEMMA;
         if (strstr(meta_tmpl, "[INST]"))
-            return strstr(meta_tmpl, "<<SYS>>") ? TMPL_LLAMA2 : TMPL_MISTRAL;
+            return strstr(meta_tmpl, "<<SYS>>") ? TMPL_LLAMA2
+                                                : mistral_variant(meta_tmpl);
     }
     if (tok_find(tok, "<|assistant_start|>") >= 0) return TMPL_APERTUS;
     if (tok_find(tok, "<|channel|>") >= 0 && tok_find(tok, "<|return|>") >= 0)
@@ -90,7 +122,14 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "zephyr")) return TMPL_ZEPHYR;
     if (!strcmp(name, "gemma"))  return TMPL_GEMMA;
     if (!strcmp(name, "gemma4")) return TMPL_GEMMA4;
+    // `mistral` is the v0.3 form. The two others are named for the checkpoints
+    // that carry them rather than for their spacing, because that is what an
+    // operator has in front of them when they reach for the flag: a GGUF whose
+    // card says Nemo-2407, or a v0.1/v0.2 7B. `mistral-nemo` also matches the
+    // sampler preset of the same name in src/sample.c.
     if (!strcmp(name, "mistral")) return TMPL_MISTRAL;
+    if (!strcmp(name, "mistral-v1")) return TMPL_MISTRAL_V1;
+    if (!strcmp(name, "mistral-nemo")) return TMPL_MISTRAL_NEMO;
     if (!strcmp(name, "phi3"))    return TMPL_PHI3;
     if (!strcmp(name, "apertus")) return TMPL_APERTUS;
     if (!strcmp(name, "ornith")) return TMPL_ORNITH;
@@ -109,6 +148,8 @@ const char *template_name(int t) {
         case TMPL_GEMMA:  return "gemma";
         case TMPL_GEMMA4: return "gemma4";
         case TMPL_MISTRAL: return "mistral";
+        case TMPL_MISTRAL_V1: return "mistral-v1";
+        case TMPL_MISTRAL_NEMO: return "mistral-nemo";
         case TMPL_PHI3:    return "phi3";
         case TMPL_APERTUS: return "apertus";
         case TMPL_ORNITH: return "ornith";
@@ -124,6 +165,24 @@ static size_t emit(char *out, size_t cap, size_t off, const char *fmt,
     if (off >= cap) return off;
     int n = snprintf(out + off, cap - off, fmt, a, b);
     return n > 0 ? off + (size_t)n : off;
+}
+
+// pre + s + post, with s optionally stripped of leading and trailing ASCII
+// whitespace first. Mistral v0.3's reference renders its assistant turn as
+// `" " + content|trim + eos_token`, and jinja's trim is part of the bytes the
+// model was trained on, not formatting. Returns the same would-have-written
+// offset emit() does, so a truncated render still reports the size the caller
+// needs to grow to.
+static size_t emit_trimmed(char *out, size_t cap, size_t off, const char *pre,
+                           const char *s, bool trim, const char *post) {
+    size_t n = strlen(s);
+    if (trim) {
+        while (n && strchr(" \t\n\r\f\v", s[n - 1])) n--;
+        while (n && strchr(" \t\n\r\f\v", *s)) { s++; n--; }
+    }
+    if (off >= cap) return off;
+    int k = snprintf(out + off, cap - off, "%s%.*s%s", pre, (int)n, s, post);
+    return k > 0 ? off + (size_t)k : off;
 }
 
 // Per-request opt-in for the thinking shape. Accepted at the top level and
@@ -981,8 +1040,7 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<start_of_turn>model\n", NULL, NULL);
         break;
     }
-    case TMPL_LLAMA2:
-    case TMPL_MISTRAL: {
+    case TMPL_LLAMA2: {
         // fold an initial system message into the first user turn
         const char *sys = NULL;
         for (int i = 0; i < n_msgs; i++) {
@@ -990,11 +1048,7 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             if (!strcmp(m->role, "system")) { sys = m->content; continue; }
             if (!strcmp(m->role, "user")) {
                 if (sys) {
-                    // mistral has no <<SYS>> block; its template accepts only
-                    // user and assistant, so the system text leads the turn
-                    off = tmpl == TMPL_MISTRAL
-                        ? emit(out, cap, off, "[INST] %s\n\n", sys, NULL)
-                        : emit(out, cap, off, "[INST] <<SYS>>\n%s\n<</SYS>>\n\n", sys, NULL);
+                    off = emit(out, cap, off, "[INST] <<SYS>>\n%s\n<</SYS>>\n\n", sys, NULL);
                     off = emit(out, cap, off, "%s [/INST]", m->content, NULL);
                     sys = NULL;
                 } else {
@@ -1002,6 +1056,77 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
                 }
             } else { // assistant
                 off = emit(out, cap, off, " %s </s>", m->content, NULL);
+            }
+        }
+        break;
+    }
+    case TMPL_MISTRAL:
+    case TMPL_MISTRAL_V1:
+    case TMPL_MISTRAL_NEMO: {
+        // Three framings, one loop. Until 2026-08-14 there was no loop at all
+        // for Mistral: it fell through llama-2's case with the <<SYS>> block
+        // swapped out, which produced a FOURTH framing matching no Mistral
+        // checkpoint (see template.h). Each of the three below is the bytes
+        // its own checkpoint's chat_template renders, verified by running that
+        // template through jinja rather than by reading runner's output back.
+        //
+        //   v0.1 / v0.2      ' [INST] ' sys '\n\n' user ' [/INST]'  first turn
+        //                    ' ' assistant '</s>'
+        //   v0.3 / Small     '[INST] '  ... user '[/INST]'          LAST turn
+        //                    ' ' trim(assistant) '</s>'
+        //   Nemo-2407        '[INST]'   ... user '[/INST]'          LAST turn
+        //                    assistant '</s>'
+        //
+        // The v0.3 assistant turn is `" " + content|trim + eos_token`; the
+        // other two do not trim. That is the reference's own filter, not a
+        // tidy-up added here.
+        const bool v1   = tmpl == TMPL_MISTRAL_V1;
+        const bool nemo = tmpl == TMPL_MISTRAL_NEMO;
+        const char *open  = v1 ? " [INST] " : nemo ? "[INST]" : "[INST] ";
+        const char *close = v1 ? " [/INST]" : "[/INST]";
+
+        // Which user turn carries the system text. v0.1/v0.2 put it on the
+        // first user turn after the system message; v0.3 and Nemo on the last.
+        //
+        // DELIBERATE DEVIATION, and the only one: the v0.3 and Nemo references
+        // fold on `loop.last`, so they attach the system text only when the
+        // final message is a user turn -- a conversation ending in an
+        // assistant turn (a prefill or continuation) renders with the caller's
+        // system prompt silently dropped. Runner attaches it to the last USER
+        // turn instead. Every conversation that ends with a user turn, which is
+        // every generation request, renders byte-identically to the reference;
+        // the prefill shape differs by keeping a system prompt the caller sent
+        // rather than discarding it.
+        const char *sys = NULL;
+        int sys_at = -1, fold_at = -1;
+        for (int i = 0; i < n_msgs; i++)
+            if (!strcmp(msgs[i].role, "system")) {
+                sys = msgs[i].content;
+                sys_at = i;
+            }
+        for (int i = sys_at + 1; sys && i < n_msgs; i++)
+            if (!strcmp(msgs[i].role, "user")) {
+                fold_at = i;
+                if (v1) break;
+            }
+
+        for (int i = 0; i < n_msgs; i++) {
+            const chat_msg *m = &msgs[i];
+            if (!strcmp(m->role, "system")) continue;
+            if (!strcmp(m->role, "user")) {
+                if (i == fold_at) {
+                    // no <<SYS>> block anywhere in this family: its template
+                    // accepts only user and assistant, so the system text
+                    // leads the turn's content
+                    off = emit(out, cap, off, "%s%s", open, sys);
+                    off = emit(out, cap, off, "\n\n%s", m->content, NULL);
+                } else {
+                    off = emit(out, cap, off, "%s%s", open, m->content);
+                }
+                off = emit(out, cap, off, "%s", close, NULL);
+            } else { // assistant
+                off = emit_trimmed(out, cap, off, nemo ? "" : " ", m->content,
+                                   tmpl == TMPL_MISTRAL, "</s>");
             }
         }
         break;

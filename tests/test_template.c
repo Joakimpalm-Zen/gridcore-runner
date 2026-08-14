@@ -24,10 +24,204 @@ static void test_detect_llama2_vs_mistral(tokenizer *t) {
         "{{ messages[0]['content'] }}\n<</SYS>>\n\n{% endif %}";
     const char *mistral =
         "{{ bos_token }}{% for message in messages %}"
-        "{{ '[INST] ' + message['content'] + ' [/INST]' }}{% endfor %}";
+        "{{ '[INST] ' + message['content'] + '[/INST]' }}{% endfor %}";
 
     assert(template_detect(llama2, t) == TMPL_LLAMA2);
     assert(template_detect(mistral, t) == TMPL_MISTRAL);
+}
+
+// "Mistral" is not one framing. Three are in circulation, and the difference
+// between them is a SPACE next to each instruction marker -- which is not
+// cosmetic: on Mistral-7B-Instruct-v0.3, measured on hardware, `[INST] What is
+// 2+2? [/INST]` is 11 SentencePiece tokens and `[INST] What is 2+2?[/INST]` is
+// 10. Each divergent space costs a token the model was not trained to see
+// there.
+//
+// The three, with the fragments below copied from the checkpoints' own
+// tokenizer_config.json chat_template (fetched 2026-08-14):
+//
+//   v0.1 / v0.2   ' [INST] ' ... ' [/INST]'   byte-identical templates
+//                 (sha256[:16] 796853172235ab3a for both), system text folded
+//                 into the FIRST user turn
+//   v0.3 / Small  "[INST] " ... "[/INST]"     byte-identical templates
+//   -2409         (sha256[:16] e16746b40344d6c5 for both), system text folded
+//                 into the LAST user turn
+//   Nemo-2407     "[INST]" ... "[/INST]"      (sha256[:16] e4676cb56dffea77),
+//                 no space anywhere, system text into the LAST user turn
+//
+// Detection reads the TEMPLATE TEXT, one line from the <<SYS>> split that
+// already separates llama-2 from Mistral, because the template IS the
+// artifact: a vocabulary size or a model name is a description of the
+// checkpoint and can drift from it independently, while the template cannot
+// drift from itself. The predicate is a rendered fact, not a spelling:
+//
+//   a space immediately before [/INST]  -> the v0.1/v0.2 form
+//   otherwise, no space after [INST]    -> Nemo
+//   otherwise                           -> the v0.3 form
+//
+// v0.3 is the default because its form is shared by Mistral-Small-2409 and the
+// wider derivative population; Nemo is the outlier, not the rule.
+static void test_detect_mistral_variants(tokenizer *t) {
+    // mistralai/Mistral-7B-Instruct-v0.1 and -v0.2 (identical templates)
+    const char *v1 =
+        "{%- if message['role'] == 'user' %}\n"
+        "    {%- if loop.first and system_message is defined %}\n"
+        "        {{- ' [INST] ' + system_message + '\\n\\n'"
+        " + message['content'] + ' [/INST]' }}\n"
+        "    {%- else %}\n"
+        "        {{- ' [INST] ' + message['content'] + ' [/INST]' }}\n"
+        "    {%- endif %}\n"
+        "{%- endif %}";
+    // mistralai/Mistral-7B-Instruct-v0.3 and Mistral-Small-Instruct-2409
+    const char *v3 =
+        "{%- if loop.last and system_message is defined %}\n"
+        "    {{- \"[INST] \" + system_message + \"\\n\\n\""
+        " + message[\"content\"] + \"[/INST]\" }}\n"
+        "{%- else %}\n"
+        "    {{- \"[INST] \" + message[\"content\"] + \"[/INST]\" }}\n"
+        "{%- endif %}";
+    // mistralai/Mistral-Nemo-Instruct-2407
+    const char *nemo =
+        "{%- if loop.last and system_message is defined %}\n"
+        "    {{- \"[INST]\" + system_message + \"\\n\\n\""
+        " + message[\"content\"] + \"[/INST]\" }}\n"
+        "{%- else %}\n"
+        "    {{- \"[INST]\" + message[\"content\"] + \"[/INST]\" }}\n"
+        "{%- endif %}";
+
+    assert(template_detect(v1, t) == TMPL_MISTRAL_V1);
+    assert(template_detect(v3, t) == TMPL_MISTRAL);
+    assert(template_detect(nemo, t) == TMPL_MISTRAL_NEMO);
+
+    // A Mistral-shaped template this build has never seen renders the v0.3
+    // form rather than guessing: that is the population, and it is also what
+    // `--chat-template mistral` selects.
+    const char *unknown =
+        "{{ bos_token }}{% for m in messages %}"
+        "{{ '[INST] ' + m['content'] + '[/INST]' }}{% endfor %}";
+    assert(template_detect(unknown, t) == TMPL_MISTRAL);
+
+    // llama-2 keeps its own path: <<SYS>> is still what splits the families,
+    // and llama-2's template also writes ' [/INST]' with a leading space, so
+    // the variant predicate must never be reached for it.
+    const char *llama2 =
+        "{% if messages[0]['role'] == 'system' %}[INST] <<SYS>>\n"
+        "{{ messages[0]['content'] }}\n<</SYS>>\n\n{% endif %}"
+        "{{ content + ' [/INST]' }}";
+    assert(template_detect(llama2, t) == TMPL_LLAMA2);
+}
+
+// Every expected string below was produced by rendering the checkpoint's OWN
+// chat_template through jinja with transformers' semantics (trim_blocks and
+// lstrip_blocks on), then removing the leading BOS -- which runner never
+// spells into a template because the tokenizer prepends it at encode time.
+// They are not derived from runner's own output; that is the mistake this
+// family's four-year-old rendering was.
+static void test_render_mistral_v1(void) {
+    char out[512];
+    const chat_msg user[] = { { "user", "HI" } };
+    const chat_msg sys_user[] = { { "system", "SYS" }, { "user", "HI" } };
+    const chat_msg turns[] = { { "system", "SYS" }, { "user", "U1" },
+                               { "assistant", "A1" }, { "user", "U2" } };
+
+    render_messages(TMPL_MISTRAL_V1, user, 1, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, " [INST] HI [/INST]") == 0);
+
+    // system text leads the FIRST user turn in this form
+    render_messages(TMPL_MISTRAL_V1, sys_user, 2, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, " [INST] SYS\n\nHI [/INST]") == 0);
+
+    render_messages(TMPL_MISTRAL_V1, turns, 4, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, " [INST] SYS\n\nU1 [/INST] A1</s> [INST] U2 [/INST]")
+           == 0);
+}
+
+static void test_render_mistral_v3(void) {
+    char out[512];
+    const chat_msg user[] = { { "user", "HI" } };
+    const chat_msg sys_user[] = { { "system", "SYS" }, { "user", "HI" } };
+    const chat_msg turns[] = { { "system", "SYS" }, { "user", "U1" },
+                               { "assistant", "A1" }, { "user", "U2" } };
+
+    render_messages(TMPL_MISTRAL, user, 1, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST] HI[/INST]") == 0);
+
+    render_messages(TMPL_MISTRAL, sys_user, 2, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST] SYS\n\nHI[/INST]") == 0);
+
+    // and here is the difference that is not whitespace: the system text goes
+    // to the LAST user turn, not the first
+    render_messages(TMPL_MISTRAL, turns, 4, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST] U1[/INST] A1</s>[INST] SYS\n\nU2[/INST]") == 0);
+
+    // the assistant turn is ' ' + content|trim + eos in this form, so an empty
+    // one is a bare ' </s>' and a padded one loses its padding
+    const chat_msg empty[] = { { "user", "U1" }, { "assistant", "" },
+                               { "user", "U2" } };
+    render_messages(TMPL_MISTRAL, empty, 3, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST] U1[/INST] </s>[INST] U2[/INST]") == 0);
+
+    const chat_msg padded[] = { { "user", "U1" }, { "assistant", "  A1  " },
+                                { "user", "U2" } };
+    render_messages(TMPL_MISTRAL, padded, 3, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST] U1[/INST] A1</s>[INST] U2[/INST]") == 0);
+}
+
+static void test_render_mistral_nemo(void) {
+    char out[512];
+    const chat_msg user[] = { { "user", "HI" } };
+    const chat_msg turns[] = { { "system", "SYS" }, { "user", "U1" },
+                               { "assistant", "A1" }, { "user", "U2" } };
+
+    render_messages(TMPL_MISTRAL_NEMO, user, 1, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST]HI[/INST]") == 0);
+
+    render_messages(TMPL_MISTRAL_NEMO, turns, 4, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST]U1[/INST]A1</s>[INST]SYS\n\nU2[/INST]") == 0);
+
+    // Nemo does NOT trim the assistant turn -- v0.3 does. Same conversation,
+    // two different byte strings, which is the whole reason the variants are
+    // separate renderers rather than one with a spacing switch.
+    const chat_msg padded[] = { { "user", "U1" }, { "assistant", "  A1  " },
+                                { "user", "U2" } };
+    render_messages(TMPL_MISTRAL_NEMO, padded, 3, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST]U1[/INST]  A1  </s>[INST]U2[/INST]") == 0);
+}
+
+// The one place runner deliberately does NOT follow the v0.3 and Nemo
+// references. Their fold is `loop.last`: the system text is attached only when
+// the LAST message is a user turn, so a conversation ending in an assistant
+// turn -- a prefill or continuation request -- renders with the caller's
+// system prompt silently discarded. Verified against both templates on
+// 2026-08-14: [system, user, assistant] renders '[INST] U1[/INST] A1</s>',
+// with no SYS anywhere.
+//
+// Runner attaches it to the last USER turn instead. Every conversation that
+// ends with a user turn -- which is every generation request -- renders
+// byte-identically to the reference; only the prefill shape differs, and it
+// differs by keeping a system prompt the caller sent rather than dropping it.
+static void test_render_mistral_keeps_system_on_a_prefill(void) {
+    const chat_msg msgs[] = { { "system", "SYS" }, { "user", "U1" },
+                              { "assistant", "A1" } };
+    char out[512];
+
+    render_messages(TMPL_MISTRAL, msgs, 3, false, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST] SYS\n\nU1[/INST] A1</s>") == 0);
+    render_messages(TMPL_MISTRAL_NEMO, msgs, 3, false, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "[INST]SYS\n\nU1[/INST]A1</s>") == 0);
 }
 
 // phi3 uses zephyr's <|role|> framing but terminates turns with <|end|>
@@ -1044,33 +1238,44 @@ static void test_ornith_groups_consecutive_tool_responses(void) {
         "<|im_start|>assistant\n"));
 }
 
-// The system prompt is folded into the first user turn either way; only the
-// framing differs.
+// The system prompt is folded into a user turn either way, and the framing
+// differs -- but so does the TURN. This assertion used to read
+// "[INST] SYS\n\nHI [/INST]" for mistral, which pinned two defects at once:
+// the space before [/INST] that no Mistral template writes, and the fold into
+// the first user turn, which only the v0.1/v0.2 form does. With one user turn
+// first and last are the same turn, so what is left here is the spacing.
 static void test_render_system_prompt(void) {
     const chat_msg msgs[] = { { "system", "SYS" }, { "user", "HI" } };
     char out[1024];
 
     render_messages(TMPL_MISTRAL, msgs, 2, true, THINK_DEFAULT, out, sizeof(out));
-    assert(strcmp(out, "[INST] SYS\n\nHI [/INST]") == 0);
+    assert(strcmp(out, "[INST] SYS\n\nHI[/INST]") == 0);
 
     render_messages(TMPL_LLAMA2, msgs, 2, true, THINK_DEFAULT, out, sizeof(out));
     assert(strcmp(out, "[INST] <<SYS>>\nSYS\n<</SYS>>\n\nHI [/INST]") == 0);
 }
 
-// Without a system message the two are identical, which is why detection has
-// to key on the template text rather than on the rendered output.
+// This test used to assert `strcmp(mistral, llama2) == 0` under the heading
+// "Without a system message the two are identical". That was a claim about the
+// REFERENCES, and it was false against all four upstream Mistral templates:
+// llama-2 writes ' [/INST]', v0.3 writes '[/INST]', and the two therefore
+// cannot agree on any conversation at all. The invariant is now the opposite
+// one, and it is the reason the families need separate renderers rather than a
+// shared case with a system-block switch.
 static void test_render_without_system(void) {
     const chat_msg msgs[] = { { "user", "HI" } };
     char mistral[512], llama2[512];
     render_messages(TMPL_MISTRAL, msgs, 1, true, THINK_DEFAULT, mistral, sizeof(mistral));
     render_messages(TMPL_LLAMA2, msgs, 1, true, THINK_DEFAULT, llama2, sizeof(llama2));
-    assert(strcmp(mistral, "[INST] HI [/INST]") == 0);
-    assert(strcmp(mistral, llama2) == 0);
+    assert(strcmp(mistral, "[INST] HI[/INST]") == 0);
+    assert(strcmp(llama2, "[INST] HI [/INST]") == 0);
+    assert(strcmp(mistral, llama2) != 0);
 }
 
 static void test_name_roundtrip(void) {
     static const char *const names[] = {
         "chatml", "llama2", "llama3", "zephyr", "gemma", "gemma4", "mistral",
+        "mistral-v1", "mistral-nemo",
         "phi3", "apertus", "ornith", "raw",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++) {
@@ -1352,6 +1557,11 @@ int main(void) {
     }
 
     test_detect_llama2_vs_mistral(&t);
+    test_detect_mistral_variants(&t);
+    test_render_mistral_v1();
+    test_render_mistral_v3();
+    test_render_mistral_nemo();
+    test_render_mistral_keeps_system_on_a_prefill();
     test_detect_zephyr_vs_phi3(&t);
     test_phi3_without_generation_prompt_ends_with_eos();
     test_detect_by_marker(&t);

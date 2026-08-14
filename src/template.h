@@ -6,9 +6,11 @@
 #include <stdbool.h>
 #include "tokenizer.h"
 
-// MISTRAL is LLAMA2's [INST] framing without the <<SYS>> block: Mistral's own
-// template rejects a system role outright, so the text is folded into the
-// first user turn rather than wrapped in markers it never saw in training.
+// MISTRAL is [INST] framing without llama-2's <<SYS>> block: Mistral's own
+// template rejects a system role outright, so the text is folded into a user
+// turn rather than wrapped in markers it never saw in training. It is NOT
+// llama-2's renderer with that block swapped out, which is what it was until
+// 2026-08-14 -- see TMPL_MISTRAL_V1 below for what that cost.
 enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        TMPL_GEMMA4, TMPL_MISTRAL, TMPL_PHI3, TMPL_APERTUS, TMPL_ORNITH,
        TMPL_MUSE, TMPL_GRANITE,
@@ -22,7 +24,32 @@ enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        // somewhere to attach -- rendering is otherwise identical, and every
        // tmpl-dependent branch elsewhere keys on TMPL_ORNITH, so this falls
        // into the same generic path TMPL_CHATML does.
-       TMPL_CHATML_THINK };
+       TMPL_CHATML_THINK,
+       // The other two Mistral instruction framings in circulation. TMPL_MISTRAL
+       // above is the v0.3 form -- shared byte-for-byte with
+       // Mistral-Small-Instruct-2409 and the derivative population that copied
+       // it -- and is what `--chat-template mistral` and any Mistral-shaped
+       // template this build cannot place select.
+       //
+       //   TMPL_MISTRAL       "[INST] "  ... "[/INST]"    v0.3 / Small-2409
+       //   TMPL_MISTRAL_V1    " [INST] " ... " [/INST]"   v0.1 / v0.2
+       //   TMPL_MISTRAL_NEMO  "[INST]"   ... "[/INST]"    Nemo-Instruct-2407
+       //
+       // Whitespace, and not cosmetic whitespace: this is SentencePiece, where
+       // `[INST] What is 2+2? [/INST]` is 11 tokens and
+       // `[INST] What is 2+2?[/INST]` is 10 -- measured on
+       // Mistral-7B-Instruct-v0.3 on hardware. Every divergent space is a token
+       // in a position the model never trained on.
+       //
+       // They also disagree about something bigger than spacing: v0.1/v0.2 fold
+       // the system text into the FIRST user turn, v0.3 and Nemo into the LAST.
+       //
+       // Until 2026-08-14 runner rendered all Mistral checkpoints through
+       // llama-2's case with only the <<SYS>> block swapped out, producing a
+       // FOURTH framing (`[INST] ` ... ` [/INST]`, system into the first turn)
+       // that matches no Mistral checkpoint at all. It was never trying to be
+       // Mistral.
+       TMPL_MISTRAL_V1, TMPL_MISTRAL_NEMO };
 
 // How the generation prompt should treat a thinking model.
 //

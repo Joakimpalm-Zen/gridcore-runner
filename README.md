@@ -305,7 +305,7 @@ flags into unrelated feature sections.
 | `--rope-scale F` | Force linear rope position scaling. |
 | `--rope-base F` | Override the rope frequency base. |
 | `--system TEXT` | System prompt in interactive chat. |
-| `--chat-template NAME` | Force `chatml`, `chatml-think`, `llama2`, `llama3`, `mistral`, `zephyr`, `phi3`, `gemma`, `gemma4`, `apertus`, `ornith`, `muse`, `granite`, `harmony`, or `raw`; default is auto-detection. |
+| `--chat-template NAME` | Force `chatml`, `chatml-think`, `llama2`, `llama3`, `mistral`, `mistral-v1`, `mistral-nemo`, `zephyr`, `phi3`, `gemma`, `gemma4`, `apertus`, `ornith`, `muse`, `granite`, `harmony`, or `raw`; default is auto-detection. The three Mistral framings are not interchangeable: `mistral` is the v0.3 / Mistral-Small-2409 form and the fallback for an unrecognised Mistral template, `mistral-v1` is v0.1/v0.2, `mistral-nemo` is Nemo-Instruct-2407. They differ by a space beside each `[INST]`/`[/INST]` marker and by which user turn carries the system prompt — one SentencePiece token per divergent space. |
 | `--no-bos` | Do not add the beginning-of-sequence token. |
 | `--ignore-eos` | Continue generation past end-of-text tokens. |
 
