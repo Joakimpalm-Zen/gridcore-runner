@@ -2,6 +2,60 @@
 
 *2026-08-14. Status: implemented, measured, reverted. Not in the product.*
 
+> ## CORRECTION 2026-08-14 (later the same day): the motivating symptom is gone
+>
+> **This document's premise no longer holds.** It was written because a JSON
+> tool result made gpt-oss-20b repeat a call it had just been answered, while
+> a prose result did not. That asymmetry was real when measured — and it was
+> caused by something this document does not mention.
+>
+> Runner was replaying tool results as
+> `<|start|>functions.NAME<|channel|>commentary<|message|>`, which the
+> openai-harmony reference parser **rejects outright** (`Unknown role:
+> functions.NAME`): a namespaced author is only recognised as the tool role
+> via the ` to=assistant` branch. Every multi-turn tool conversation was
+> replaying history in a shape gpt-oss never saw in training. Fixed in
+> `0ab3238`.
+>
+> Re-measured on the fixed tree, same box, same model, temperature 0, each
+> arm run twice:
+>
+> | tool result | `enable_thinking` | finish_reason | repeat call |
+> |---|---|---|---|
+> | JSON  | on  | `stop` | no |
+> | prose | on  | `stop` | no |
+> | JSON  | off | `tool_calls` | **yes** |
+> | prose | off | `tool_calls` | **yes** |
+>
+> **The JSON-versus-prose axis collapsed completely.** Payload shape no longer
+> makes any difference. What remains is a different symptom with a different
+> trigger: with thinking disabled the model repeats the call regardless of how
+> the result is formatted — and with thinking disabled there is no analysis
+> channel, so the 192-byte bound this document is about is not even in play.
+>
+> **What still stands.** The experiment itself is unaffected: lifting the bound
+> on the auto branch really did produce an unbounded loop with corrupted
+> arguments, and that measurement is reproducible. Do not re-attempt it on the
+> strength of this correction.
+>
+> **What does not.** The reasoning that connected the bound to the observed
+> repeat call. That chain ran: JSON result → analysis cut mid-quotation → hand
+> off to the call branch. Prose results now behave identically to JSON, so
+> mid-quotation truncation cannot be what distinguishes them, because nothing
+> distinguishes them any more.
+>
+> **What this cost, recorded deliberately.** A later investigation ranked the
+> malformed history *below* payload shape as an explanation, reasoning that the
+> header was identical in both arms so it could not explain an asymmetry
+> between them. That reasoning was sound and the conclusion was still wrong:
+> the header was identical, but it was identically *broken*, and repairing it
+> removed the asymmetry rather than either arm. A shared defect can be the
+> cause of a difference it does not itself vary with.
+>
+> The open question is now "why does `enable_thinking:false` cause a repeat
+> call", which is not this document's subject. See the follow-up plan item.
+
+
 ## What was tried
 
 A strict Harmony tool turn bounds the model's pre-call `analysis` (or visible
