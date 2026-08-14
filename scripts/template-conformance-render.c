@@ -65,8 +65,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
+
+// The socket headers come from http.h, which already carries the
+// winsock-vs-BSD split for the whole project. Including <sys/socket.h> here
+// directly is what kept this driver -- and therefore the entire template
+// conformance gate -- from building on Windows at all: MinGW-w64 has no such
+// header, so `make template-conformance-render.exe` died at the first
+// #include and the gate silently ran on two platforms out of three.
 
 // --------------------------------------------------------- captured render
 
@@ -177,16 +182,72 @@ static char *read_all(FILE *f, size_t *out_n) {
 // A refusal is not a difference and not a pass: the python side turns it into
 // NOT-CHECKED.
 
-static void drain(int fd, char *buf, size_t cap) {
+static void drain(sock_t fd, char *buf, size_t cap) {
     size_t got = 0;
     for (;;) {
-        ssize_t r = recv(fd, buf + got, cap - 1 - got, 0);
+        int r = sock_recv(fd, buf + got, cap - 1 - got);
         if (r <= 0) break;
         got += (size_t)r;
         if (got >= cap - 1) break;
     }
     buf[got] = 0;
 }
+
+// A connected pair of sockets: handle_chat writes its response to one end and
+// this file reads it back from the other.
+//
+// POSIX gets the real thing. Winsock has no socketpair() and no AF_UNIX
+// socketpair to emulate it with, so Windows gets a loopback pair -- listen on
+// an ephemeral 127.0.0.1 port, connect, accept, drop the listener. That is
+// the standard substitute and it is honest here for a specific reason: the
+// thing under test is what handle_chat WRITES, and a socket is a socket to
+// the code doing the writing.
+//
+// Deliberately not "just use a pipe": server.c's response path is socket
+// calls (send/recv through http.c), and on Windows a pipe HANDLE is not a
+// SOCKET -- send() on one fails with WSAENOTSOCK. The point of this driver is
+// to run runner's real code, so the fake has to be socket-shaped.
+static bool pair_open(sock_t sv[2]) {
+#ifndef _WIN32
+    int fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return false;
+    sv[0] = fds[0];
+    sv[1] = fds[1];
+    return true;
+#else
+    sock_t ln = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (ln == SOCK_INVALID) return false;
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;                                   // any free port
+    int alen = (int)sizeof(a);
+    sv[0] = sv[1] = SOCK_INVALID;
+    if (bind(ln, (struct sockaddr *)&a, alen) != 0 || listen(ln, 1) != 0 ||
+        getsockname(ln, (struct sockaddr *)&a, &alen) != 0)
+        goto fail;
+    sv[0] = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sv[0] == SOCK_INVALID) goto fail;
+    if (connect(sv[0], (struct sockaddr *)&a, alen) != 0) goto fail;
+    sv[1] = accept(ln, NULL, NULL);
+    if (sv[1] == SOCK_INVALID) goto fail;
+    sock_close(ln);
+    return true;
+fail:
+    if (sv[0] != SOCK_INVALID) sock_close(sv[0]);
+    if (sv[1] != SOCK_INVALID) sock_close(sv[1]);
+    sock_close(ln);
+    return false;
+#endif
+}
+
+// Half-close the writing end so drain() sees EOF instead of blocking. The two
+// platforms spell the same operation differently.
+#ifdef _WIN32
+#define PAIR_SHUT_WR SD_SEND
+#else
+#define PAIR_SHUT_WR SHUT_WR
+#endif
 
 // The `message` field of runner's error body, unescaped enough to read.
 static void error_message(const char *body, char *out, size_t cap) {
@@ -216,20 +277,20 @@ static int render_one(int tmpl, bool addgen, jv *request,
     g_prompt_calls = 0;
     err[0] = 0;
 
-    int sv[2];
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
-        snprintf(err, errcap, "socketpair failed");
+    sock_t sv[2];
+    if (!pair_open(sv)) {
+        snprintf(err, errcap, "cannot open a socket pair: %s", sock_errstr());
         return -1;
     }
     slot_t s = {0};
     s.tmpl = tmpl;
-    handle_chat(&s, (sock_t)sv[0], request);
-    shutdown(sv[0], SHUT_WR);
+    handle_chat(&s, sv[0], request);
+    shutdown(sv[0], PAIR_SHUT_WR);
 
     static char body[8192];
     drain(sv[1], body, sizeof body);
-    close(sv[0]);
-    close(sv[1]);
+    sock_close(sv[0]);
+    sock_close(sv[1]);
 
     if (g_prompt_calls == 1 && g_prompt) {
         *prompt = g_prompt;
@@ -392,6 +453,9 @@ static int do_tokenize(jv *jobs, sbuf *out) {
 }
 
 int main(void) {
+    // Winsock must be started before any socket call; on POSIX this is the
+    // no-op the same function already is for runner's own main.
+    sock_init();
     size_t n_in = 0;
     char *in = read_all(stdin, &n_in);
     if (!in) { fprintf(stderr, "oom\n"); return 2; }
