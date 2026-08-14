@@ -122,6 +122,8 @@ test-responses-sm
 test-responses-sm.exe
 test-prompt-budget
 test-prompt-budget.exe
+test-tool-attribution
+test-tool-attribution.exe
 test-moe-router
 test-moe-router.exe
 test-attn/

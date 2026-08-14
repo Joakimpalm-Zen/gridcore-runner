@@ -100,9 +100,20 @@ static const char *anth_call_name(jv *messages, int before, const char *id) {
     return NULL;
 }
 
+// The one function declared, when exactly one is. See the note at the
+// tool_result block below for why a single declaration is a deduction and not
+// a guess. Reads the translated (nested) tool shape, so it is the same rule
+// the other two surfaces apply.
+static const char *sole_tool_name(const jv *tools) {
+    if (!tools || tools->type != J_ARR || tools->n != 1) return NULL;
+    jv *fn = jv_get(tools->items[0], "function");
+    const char *name = jv_str(jv_get(fn, "name"), NULL);
+    return name && name[0] ? name : NULL;
+}
+
 static bool anth_blocks(jv *messages, int message_index, jv *msg,
-                        const char *role, bool harmony, turnbuf *t,
-                        char *err, int errcap) {
+                        const char *role, bool harmony, const char *sole_tool,
+                        turnbuf *t, char *err, int errcap) {
     jv *content = jv_get(msg, "content");
     if (content && content->type == J_STR) {
         turn_add(t, role, strdup(content->str));
@@ -163,9 +174,26 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
             // it in the same Anthropic message
             char *result = anth_tool_result_text(b);
             if (harmony) {
-                const char *name = anth_call_name(
-                    messages, message_index,
-                    jv_str(jv_get(b, "tool_use_id"), NULL));
+                const char *id = jv_str(jv_get(b, "tool_use_id"), NULL);
+                const char *name = anth_call_name(messages, message_index, id);
+                if (!name) name = sole_tool;
+                // Harmony authors a tool turn BY the function, so a result
+                // with no name to carry has no on-protocol rendering at all:
+                // it comes out as a turn shape the model has never seen. A
+                // 200 on that is a wrong answer dressed as a right one, so
+                // the request is refused with the thing the caller can fix.
+                if (!name) {
+                    snprintf(err, errcap,
+                             "tool_result cannot be attributed to a tool: "
+                             "%s%.40s%s. Replay the assistant tool_use block "
+                             "that made the call.",
+                             id ? "no tool_use block in `messages` carries id "
+                                  "\"" : "it carries no tool_use_id",
+                             id ? id : "", id ? "\"" : "");
+                    free(result);
+                    free(body.s);
+                    return false;
+                }
                 turn_add_native(t, "tool", result, name, NULL);
             } else turn_add(t, "tool", result);
         } else if (!strcmp(bt, "thinking") || !strcmp(bt, "redacted_thinking")) {
@@ -474,7 +502,7 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
             break;
         }
         ok = anth_blocks(msgs, i, msg, role, env->harmony,
-                         &t, terr, sizeof(terr));
+                         sole_tool_name(tools), &t, terr, sizeof(terr));
     }
     if (ok && t.failed) {
         snprintf(terr, sizeof(terr), "out of memory building the prompt");

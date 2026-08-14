@@ -105,6 +105,47 @@ static char *message_text(jv *msg, int tmpl) {
     return b.s;
 }
 
+// The function a tool turn is reporting for, resolved for HARMONY.
+//
+// template.c's tool_result_name() has a last resort this surface cannot use:
+// with no `name` and an unmatched `tool_call_id` it hands back the ID, and
+// Harmony authors the turn by that string -- `<|start|>functions.call_1`,
+// a function name invented from an identifier and declared nowhere. So the
+// lookup is done here without that step, and an unresolved result is treated
+// as unresolved rather than named after its id.
+static const char *harmony_result_name(const jv *msgs, int message_index) {
+    jv *msg = msgs->items[message_index];
+    const char *name = jv_str(jv_get(msg, "name"), NULL);
+    if (name && name[0]) return name;
+    const char *id = jv_str(jv_get(msg, "tool_call_id"), NULL);
+    if (!id) return NULL;
+    for (int i = 0; i < message_index; i++) {
+        jv *calls = jv_get(msgs->items[i], "tool_calls");
+        if (!calls || calls->type != J_ARR) continue;
+        for (int k = 0; k < calls->n; k++) {
+            const char *candidate = jv_str(jv_get(calls->items[k], "id"), NULL);
+            if (!candidate || strcmp(candidate, id)) continue;
+            jv *fn = jv_get(calls->items[k], "function");
+            const char *fname = jv_str(jv_get(fn, "name"), NULL);
+            if (fname && fname[0]) return fname;
+        }
+    }
+    return NULL;
+}
+
+// The one function declared, when exactly one is. A tool result whose call is
+// not in the history has no name to look up -- but with a single declared tool
+// there is nothing to choose BETWEEN: it is the only function in the namespace
+// the model is reading and the only one it could have called. That deduction
+// is not the move `functions.call_1` made, which names a function that was
+// never declared at all. With two or more, there is nothing to deduce from.
+static const char *sole_tool_name(const jv *tools) {
+    if (!tools || tools->type != J_ARR || tools->n != 1) return NULL;
+    jv *fn = jv_get(tools->items[0], "function");
+    const char *name = jv_str(jv_get(fn, "name"), NULL);
+    return name && name[0] ? name : NULL;
+}
+
 static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     jv *msgs = jv_get(req, "messages");
     if (!msgs || msgs->type != J_ARR || msgs->n == 0) {
@@ -206,9 +247,35 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         if (i == 0 && ornith_merged_system) continue;
         const char *role = jv_str(jv_get(msgs->items[i], "role"), "user");
         const char *turn_name = NULL;
-        if ((s->tmpl == TMPL_MUSE || s->tmpl == TMPL_HARMONY) &&
-            !strcmp(role, "tool"))
+        if (s->tmpl == TMPL_MUSE && !strcmp(role, "tool"))
             turn_name = tool_result_name(msgs, i);
+        if (s->tmpl == TMPL_HARMONY && !strcmp(role, "tool")) {
+            turn_name = harmony_result_name(msgs, i);
+            if (!turn_name) turn_name = sole_tool_name(tools);
+            // Harmony authors a tool turn BY the function that ran, so a
+            // result nothing can name has no on-protocol rendering: it would
+            // go out either as a turn shape the model has never seen or under
+            // an invented function name, and either way the caller is told
+            // 200. Refused instead, naming the field that would fix it.
+            if (!turn_name) {
+                const char *id = jv_str(jv_get(msgs->items[i], "tool_call_id"),
+                                        NULL);
+                for (int k = 0; k < n_own; k++) free(owned[k]);
+                free(owned); free(cm); free(ts.s);
+                tool_envelope_free(&env);
+                char e[288];
+                snprintf(e, sizeof(e),
+                         "messages[%d] is a tool result that cannot be "
+                         "attributed to a tool: %s%.40s%s. Give it a `name`, "
+                         "or a `tool_call_id` matching an earlier assistant "
+                         "tool_calls[].id.", i,
+                         id ? "no earlier assistant tool_calls[] carries id \""
+                            : "it carries neither", id ? id : "",
+                         id ? "\"" : " `name` nor `tool_call_id`");
+                send_error(fd, 400, e);
+                return;
+            }
+        }
         if (s->tmpl == TMPL_MUSE && !strcmp(role, "assistant")) {
             jv *calls = jv_get(msgs->items[i], "tool_calls");
             if (calls && calls->type == J_ARR && calls->n) {

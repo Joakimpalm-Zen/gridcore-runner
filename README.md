@@ -681,15 +681,24 @@ them in history. A replayed tool result is spelled
 `<|start|>functions.NAME to=assistant<|channel|>commentary`: the recipient is
 not decoration, because the reference resolves the author token before the
 channel and accepts a namespaced author as the tool role only through that
-`to=` branch. The `# Tools` TypeScript follows the openai-harmony reference
-renderer rather than TypeScript validity, so that one tool schema yields one
-prompt across engines instead of a per-engine spelling. Only the tool-level
-description is split into one `// ` comment per line; an object schema's own
-description, a property title, and a property description each take a single
-`// ` prefix, which leaves a multi-line value's continuation as a bare
-uncommented line. That is the reference's own quirk, reproduced deliberately
-and pinned by goldens rendered through openai-harmony 0.0.8 (abd677f7). Strict
-Harmony tool turns bound a pre-call analysis or visible
+`to=` branch. It must also be attributable, because the turn is authored by the
+function that ran: runner resolves that name from the call the result answers —
+`tool_call_id` on Chat, `call_id` on Responses, `tool_use_id` on Messages — and
+falls back to the sole declared function when exactly one tool is declared,
+since there is no other function in the namespace the result could be from.
+When the lookup finds nothing and two or more tools are declared, the request is
+refused with a 400 naming the field that would fix it, rather than rendering a
+turn shape gpt-oss was never trained on or a function name invented from an
+identifier. Runner is stateless, so a client that keeps its own history has to
+send the call item back alongside its result. The `# Tools` TypeScript follows
+the openai-harmony reference renderer rather than TypeScript validity, so that
+one tool schema yields one prompt across engines instead of a per-engine
+spelling. Only the tool-level description is split into one `// ` comment per
+line; an object schema's own description, a property title, and a property
+description each take a single `// ` prefix, which leaves a multi-line value's
+continuation as a bare uncommented line. That is the reference's own quirk,
+reproduced deliberately and pinned by goldens rendered through openai-harmony
+0.0.8 (abd677f7). Strict Harmony tool turns bound a pre-call analysis or visible
 commentary message to 192 UTF-8 bytes; at that boundary the trained assistant
 handoff is forced, preserving enough output budget for model-generated
 arguments instead of letting a turn narrate its intent forever. The bound is

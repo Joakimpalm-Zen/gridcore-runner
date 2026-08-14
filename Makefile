@@ -111,15 +111,22 @@ TEST_PAGING_WARN = $(TEST_BATCH:test-batch%=test-paging-warn%)
 TEST_AUTOFIT = $(TEST_BATCH:test-batch%=test-autofit%)
 TEST_RESP_SM = $(TEST_BATCH:test-batch%=test-responses-sm%)
 TEST_BUDGET = $(TEST_BATCH:test-batch%=test-prompt-budget%)
+TEST_ATTRIB = $(TEST_BATCH:test-batch%=test-tool-attribution%)
 # test_responses_sm drives the framer through a POSIX socketpair(); winsock
 # has none, so on Windows the suite skips it LOUDLY (it runs in Linux CI and
 # on the POSIX dev boxes) rather than shimming the transport under the test.
+# test_tool_attribution reads its refusals back off the same kind of pair, so
+# it skips on the same terms.
 ifeq ($(OS),Windows_NT)
 TEST_RESP_SM_DEP =
 TEST_RESP_SM_RUN = @echo "skip: test-responses-sm (POSIX socketpair; covered by Linux CI)"
+TEST_ATTRIB_DEP =
+TEST_ATTRIB_RUN = @echo "skip: test-tool-attribution (POSIX socketpair; covered by Linux CI)"
 else
 TEST_RESP_SM_DEP = $(TEST_RESP_SM)
 TEST_RESP_SM_RUN = ./$(TEST_RESP_SM)
+TEST_ATTRIB_DEP = $(TEST_ATTRIB)
+TEST_ATTRIB_RUN = ./$(TEST_ATTRIB)
 endif
 TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
@@ -553,6 +560,20 @@ TEST_BUDGET_SRC = tests/test_prompt_budget.c src/gguf.c src/compat.c \
 $(TEST_BUDGET): $(TEST_BUDGET_SRC) src/server.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_BUDGET_SRC) -o $@ $(LDFLAGS)
 
+# a replayed tool result must name the function it came from, on all three
+# tool-calling surfaces. Same recipe as the budget test -- handle_chat is
+# static in server.c, so that TU is #included by the test and left out of the
+# link -- plus a socketpair, because half of what is asserted is the 400 a
+# request that cannot be attributed gets back.
+TEST_ATTRIB_SRC = tests/test_tool_attribution.c src/gguf.c src/compat.c \
+                  $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
+                  src/jsonmode.c src/schema.c src/json.c src/engine.c \
+                  src/template.c src/vramreg.c src/http.c src/registry.c \
+                  src/scheduler.c src/api_responses.c src/api_anthropic.c \
+                  $(GPU_SRC)
+$(TEST_ATTRIB): $(TEST_ATTRIB_SRC) src/server.c $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_ATTRIB_SRC) -o $@ $(LDFLAGS)
+
 # server_run twice in one process: the property a once-per-process global can
 # hide forever, because nothing ever asks the state to come back.
 TEST_RESTART = $(TEST_BATCH:test-batch%=test-server-restart%)
@@ -955,7 +976,8 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_GGUF_SPLIT) $(TEST_PARSE) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
-      $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) runner test.gguf
+      $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
+      runner test.gguf
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)
@@ -973,6 +995,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TEMPLATE)
 	./$(TEST_TOOLS)
 	./$(TEST_BUDGET)
+	$(TEST_ATTRIB_RUN)
 	./$(TEST_SHARED)
 	./$(TEST_FILE_ID)
 	./$(TEST_BATCH)
@@ -1161,7 +1184,7 @@ clean:
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \
-	      $(TEST_BUDGET) \
+	      $(TEST_BUDGET) $(TEST_ATTRIB) \
 	      $(TEST_SPLIT_GUARD) split-guard.out
 	rm -rf test-attn
 	rm -rf .build

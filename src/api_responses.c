@@ -222,6 +222,22 @@ static const char *responses_call_name(jv *items, int before, const char *id) {
     return NULL;
 }
 
+// The one function declared, when exactly one is. A tool result whose call is
+// not in the history has no name to look up -- but with a single declared tool
+// there is nothing to choose BETWEEN: it is the only function the model was
+// shown and the only one it could have called. Deducing it is not the same
+// move as inventing `functions.call_1` from an id, which names a function that
+// was never declared at all.
+//
+// Two or more, and there is nothing to deduce from. That is where the request
+// is refused rather than attributed to a guess.
+static const char *sole_tool_name(const jv *tools) {
+    if (!tools || tools->type != J_ARR || tools->n != 1) return NULL;
+    jv *fn = jv_get(tools->items[0], "function");
+    const char *name = jv_str(jv_get(fn, "name"), NULL);
+    return name && name[0] ? name : NULL;
+}
+
 // Stateful Responses features this runtime has no store behind. Refusing them
 // is the project invariant: a client that asked the server to remember a turn
 // and got a 200 would believe it did.
@@ -409,9 +425,39 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
             const char *name = NULL;
             if (env.harmony && !strcmp(type, "function_call"))
                 name = jv_str(jv_get(input->items[i], "name"), NULL);
-            else if (env.harmony && !strcmp(type, "function_call_output"))
-                name = responses_call_name(
-                    input, i, jv_str(jv_get(input->items[i], "call_id"), NULL));
+            else if (env.harmony && !strcmp(type, "function_call_output")) {
+                const char *cid = jv_str(jv_get(input->items[i], "call_id"),
+                                         NULL);
+                name = responses_call_name(input, i, cid);
+                if (!name) name = sole_tool_name(tools);
+                // Harmony has no way to say "a tool returned this" without
+                // saying WHICH: the turn is authored by the function itself.
+                // With nothing to name it, the choices are an off-protocol
+                // turn the model has never seen or a fabricated function name,
+                // and both are answered 200 as if the request had been
+                // understood. So it is refused instead, with the one thing the
+                // caller can act on.
+                if (!name) {
+                    for (int k = 0; k < n_own; k++) free(owned[k]);
+                    free(owned); free(cm); free(ts.s);
+                    tool_envelope_free(&env);
+                    jv_free(tools);
+                    jv_free(choice_owned);
+                    // its own buffer: `terr` is sized for the envelope
+                    // compiler's messages, and this one quotes an id
+                    char e[288];
+                    snprintf(e, sizeof(e),
+                             "function_call_output cannot be attributed to a "
+                             "tool: %s%.40s%s. This runtime is stateless, so "
+                             "send the matching function_call item in `input` "
+                             "alongside its output.",
+                             cid ? "no function_call in `input` carries "
+                                   "call_id \"" : "it carries no call_id",
+                             cid ? cid : "", cid ? "\"" : "");
+                    send_error(fd, 400, e);
+                    return;
+                }
+            }
             cm[n_cm++] = (chat_msg){ .role = role, .content = text,
                                     .name = name };
             total += strlen(role) + strlen(text) + 64;
