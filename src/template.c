@@ -257,7 +257,10 @@ static void muse_render_tool_defs(const jv *tools, sbuf *b) {
         muse_json_string(b, jv_str(jv_get(fn, "description"), ""));
         sb_lit(b, ", \"parameters\": ");
         jv *params = jv_get(fn, "parameters");
-        if (params) jv_dump(params, b); else sb_lit(b, "{}");
+        // spaced, not compact: muse.jinja:73 renders this through jinja's
+        // `tojson`, whose default separators are `, ` and `: `. Same JSON,
+        // different tokens, therefore a different prompt.
+        if (params) jv_dump_tojson(params, b); else sb_lit(b, "{}");
         sb_lit(b, "}");
     }
     sb_lit(b,
@@ -1266,7 +1269,9 @@ void tools_render_for(int tmpl, const jv *tools, sbuf *out) {
     sb_lit(out, "# Tools\n\nYou have access to the following functions:\n\n<tools>");
     for (int i = 0; i < tools->n; i++) {
         sb_lit(out, "\n");
-        jv_dump(tools->items[i], out);
+        // spaced for the same reason as muse above: ornith.jinja:50 is
+        // `{{- tool | tojson }}`.
+        jv_dump_tojson(tools->items[i], out);
     }
     sb_lit(out,
         "\n</tools>\n\nIf you choose to call a function ONLY reply in the "

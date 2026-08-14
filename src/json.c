@@ -515,7 +515,12 @@ void sb_esc(sbuf *b, const char *s, size_t n) {
     free(tmp);
 }
 
-void jv_dump(const jv *v, sbuf *o) {
+// `comma` and `colon` are the only difference between the two public dumps:
+// "," / ":" is the compact wire format, ", " / ": " is what jinja's tojson
+// emits. Everything else -- escaping, number formatting, key order -- is
+// shared on purpose, so the two can never disagree about anything but spacing.
+static void jv_dump_sep(const jv *v, sbuf *o,
+                        const char *comma, const char *colon) {
     if (!v) { sb_lit(o, "null"); return; }
     switch (v->type) {
     case J_NULL: sb_lit(o, "null"); break;
@@ -537,21 +542,26 @@ void jv_dump(const jv *v, sbuf *o) {
     case J_ARR:
         sb_lit(o, "[");
         for (int i = 0; i < v->n; i++) {
-            if (i) sb_lit(o, ",");
-            jv_dump(v->items[i], o);
+            if (i) sb_lit(o, comma);
+            jv_dump_sep(v->items[i], o, comma, colon);
         }
         sb_lit(o, "]");
         break;
     case J_OBJ:
         sb_lit(o, "{");
         for (int i = 0; i < v->n; i++) {
-            if (i) sb_lit(o, ",");
+            if (i) sb_lit(o, comma);
             sb_lit(o, "\"");
             sb_esc(o, v->keys[i], strlen(v->keys[i]));
-            sb_lit(o, "\":");
-            jv_dump(v->items[i], o);
+            sb_lit(o, "\"");
+            sb_lit(o, colon);
+            jv_dump_sep(v->items[i], o, comma, colon);
         }
         sb_lit(o, "}");
         break;
     }
 }
+
+void jv_dump(const jv *v, sbuf *o) { jv_dump_sep(v, o, ",", ":"); }
+
+void jv_dump_tojson(const jv *v, sbuf *o) { jv_dump_sep(v, o, ", ", ": "); }

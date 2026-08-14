@@ -431,7 +431,10 @@ static void test_ornith_native_tool_protocol(void) {
     assert(prompt.s != NULL);
     assert(strstr(prompt.s, "# Tools\n"));
     assert(strstr(prompt.s, "<tools>\n"));
-    assert(strstr(prompt.s, "\"name\":\"get_weather\""));
+    // SPACED, not compact: ornith.jinja:50 is `{{- tool | tojson }}`, and
+    // jinja's tojson separates with `, ` and `: `. The compact spelling this
+    // line used to assert was runner's own output, not the reference's.
+    assert(strstr(prompt.s, "\"name\": \"get_weather\""));
     assert(strstr(prompt.s, "<function=example_function_name>"));
     assert(strstr(prompt.s, "<parameter=example_parameter_1>"));
 

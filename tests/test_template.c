@@ -1443,6 +1443,12 @@ static void test_chatml_tool_result_renders_as_a_user_tool_response(void) {
 // derives valid recipient namespaces from dotted function names, and renders
 // tool results as named tool turns.  Keep the whole turn byte-exact: moving
 // any of these fragments changes the prompt the real model sees.
+// The `parameters` object is SPACED (`, ` / `: `), not compact: muse.jinja:73
+// renders it through jinja's `tojson`, whose default separators are those.
+// This golden previously pinned runner's own compact output -- it was written
+// from the implementation rather than the oracle, which is the exact
+// circularity that let a family drift. Expected bytes here come from the
+// reference render, not from jv_dump.
 static void test_muse_tools_and_result_golden(void) {
     const char *src =
         "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
@@ -1473,8 +1479,8 @@ static void test_muse_tools_and_result_golden(void) {
         "{\"name\": \"weather\", \"description\": \"\"}\n"
         "{\"name\": \"math\", \"description\": \"\"}\n"
         "// Function schemas\n"
-        "{\"name\": \"weather.get\", \"description\": \"Get weather\", \"parameters\": {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}}}}\n"
-        "{\"name\": \"math.add\", \"description\": \"Add values\", \"parameters\": {\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}}\n\n"
+        "{\"name\": \"weather.get\", \"description\": \"Get weather\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}}}\n"
+        "{\"name\": \"math.add\", \"description\": \"Add values\", \"parameters\": {\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"integer\"}}}}\n\n"
         "Here's an example of how to call a function in the tool set:\n"
         "(If the tool namespace is not specified, invoke the function directly as `example_function_name` rather than `example_tool_name.example_function_name`)\n\n"
         "to=example_tool_name.example_function_name\n\n"

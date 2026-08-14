@@ -1,5 +1,25 @@
 # Muse Glimmer native atem certification — 2026-08-11
 
+> **NOTE 2026-08-14: the tool-declaration bytes changed after this run.**
+> `muse_render_tool_defs` serialised each function's `parameters` with runner's
+> compact JSON writer; `muse.jinja:73` renders it through jinja's `tojson`,
+> whose separators are `, ` and `: `. Runner now matches the reference
+> (`jv_dump_tojson`), so every prompt in this certification was built from
+> slightly different bytes than the engine produces today.
+>
+> Re-verified on the same box and the same model file
+> (`muse-glimmer-30B-kquant-17gb`) against the corrected declaration: a
+> `tool_choice:"required"` turn still renders native atem, constrains from the
+> recipient header and maps to `weather.get({"city":"Oslo"})` with
+> `finish_reason:"tool_calls"`; 1-, 3- and 8-token forced truncations still
+> close to schema-valid, parseable arguments with `finish_reason:"length"`.
+>
+> That is a SPOT CHECK of this document's headline claims, not a re-run. The
+> 105-request torture matrix and the 120/120 atem run below have NOT been
+> re-executed against the new bytes, and their pass counts should be read as
+> measured on the older declaration until they are.
+
+
 Environment: `ccbuild`, NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation
 Edition MIG 1g.24gb, all 52 Muse Glimmer layers on CUDA. Model:
 `models/muse-glimmer-30B-kquant-17gb/muse-glimmer-30B-kquant-17gb.gguf`.

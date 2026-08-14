@@ -38,7 +38,7 @@
     "in-progress": "someone is actively fixing this; see `note`"
   },
   "generated_by": "scripts/template-conformance.py --write-baseline",
-  "generated_at": "2026-08-14T12:13:31+00:00",
+  "generated_at": "2026-08-14T13:43:52+00:00",
   "oracles": {
     "apertus": {
       "source": "hf:swiss-ai/Apertus-8B-Instruct-2509",
@@ -283,70 +283,34 @@
       "token_delta": -1
     },
     {
-      "id": "muse/multi-tool-call",
-      "status": "open",
-      "note": "",
-      "digest": "58185a02bd553644",
-      "allowlist_applied": [
-        "bos"
-      ],
-      "first_diff_at": 919,
-      "reference_excerpt": "'arameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"C'",
-      "runner_excerpt": "'arameters\": {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City nam'"
-    },
-    {
-      "id": "muse/tool-call+result",
-      "status": "open",
-      "note": "JSON separators in the tool declaration block: the reference's |tojson emits python's default '{\"type\": \"function\"' (space after ':' and ','), runner emits compact '{\"type\":\"function\"'. Byte drift inside a block the model was trained on verbatim.",
-      "digest": "0520e569f7ae1fb4",
-      "allowlist_applied": [
-        "bos"
-      ],
-      "first_diff_at": 919,
-      "reference_excerpt": "'arameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"C'",
-      "runner_excerpt": "'arameters\": {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City nam'"
-    },
-    {
-      "id": "muse/tool-then-conversation",
-      "status": "open",
-      "note": "",
-      "digest": "e6adcb2ca1361d4a",
-      "allowlist_applied": [
-        "bos"
-      ],
-      "first_diff_at": 919,
-      "reference_excerpt": "'arameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"C'",
-      "runner_excerpt": "'arameters\": {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City nam'"
-    },
-    {
       "id": "ornith/multi-tool-call",
       "status": "open",
       "note": "",
-      "digest": "a2d377d0903fc7dc",
+      "digest": "d55b57e80b3695ee",
       "allowlist_applied": [],
-      "first_diff_at": 89,
-      "reference_excerpt": "'s:\\n\\n<tools>\\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get t'",
-      "runner_excerpt": "'s:\\n\\n<tools>\\n{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the cur'"
+      "first_diff_at": 547,
+      "reference_excerpt": "'xample_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple line'",
+      "runner_excerpt": "'xample_parameter_2>\\nvalue_2\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nFunction ca'"
     },
     {
       "id": "ornith/tool-call+result",
       "status": "open",
       "note": "Same compact-vs-spaced JSON separators as muse/tool-call+result, inside ornith's <tools> block.",
-      "digest": "a179cf2984f4a346",
+      "digest": "b2783290763a754a",
       "allowlist_applied": [],
-      "first_diff_at": 89,
-      "reference_excerpt": "'s:\\n\\n<tools>\\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get t'",
-      "runner_excerpt": "'s:\\n\\n<tools>\\n{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the cur'"
+      "first_diff_at": 547,
+      "reference_excerpt": "'xample_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple line'",
+      "runner_excerpt": "'xample_parameter_2>\\nvalue_2\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nFunction ca'"
     },
     {
       "id": "ornith/tool-then-conversation",
       "status": "open",
       "note": "",
-      "digest": "21c8ad107f99540b",
+      "digest": "f7ca0fcc55b78850",
       "allowlist_applied": [],
-      "first_diff_at": 89,
-      "reference_excerpt": "'s:\\n\\n<tools>\\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get t'",
-      "runner_excerpt": "'s:\\n\\n<tools>\\n{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the cur'"
+      "first_diff_at": 547,
+      "reference_excerpt": "'xample_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple line'",
+      "runner_excerpt": "'xample_parameter_2>\\nvalue_2\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nFunction ca'"
     }
   ]
 }

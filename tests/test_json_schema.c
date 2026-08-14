@@ -1410,6 +1410,82 @@ static void test_escape_replaces_ill_formed_utf8(void) {
     puts("ok: ill-formed UTF-8 is replaced, well-formed passes through");
 }
 
+// jv_dump_tojson exists to reproduce jinja's `tojson` filter byte for byte,
+// because four families declare their tools through it (chatml.jinja:11,
+// chatml-think.jinja:9, ornith.jinja:50, muse.jinja:73) and the declaration
+// block is prompt text the model was trained on, not presentation.
+//
+// Every `want` below was RECORDED from that filter -- jinja2 with the
+// reference's own tojson (json.dumps(ensure_ascii=False), the settings
+// scripts/template-conformance.py installs) -- not written from expectation.
+static void test_tojson_dump_matches_jinja(void) {
+    struct { const char *doc; const char *want; const char *what; } cases[] = {
+        // the tool declaration the conformance matrix actually sends
+        { "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+          "\"description\":\"Get the current weather for a city.\","
+          "\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":"
+          "{\"type\":\"string\",\"description\":\"City name.\"}},"
+          "\"required\":[\"city\"]}}}",
+          "{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", "
+          "\"description\": \"Get the current weather for a city.\", "
+          "\"parameters\": {\"type\": \"object\", \"properties\": {\"city\": "
+          "{\"type\": \"string\", \"description\": \"City name.\"}}, "
+          "\"required\": [\"city\"]}}}",
+          "the tool declaration block" },
+        // empty containers take NO inner space
+        { "{}", "{}", "empty object" },
+        { "[]", "[]", "empty array" },
+        { "{\"a\":{},\"b\":[],\"c\":[[],{}]}",
+          "{\"a\": {}, \"b\": [], \"c\": [[], {}]}", "nested empty containers" },
+        // insertion order, never sorted (json.dumps sort_keys defaults False)
+        { "{\"z\":1,\"a\":2,\"m\":3}", "{\"z\": 1, \"a\": 2, \"m\": 3}",
+          "key order is the document's, not sorted" },
+        // ensure_ascii=False: non-ASCII stays raw UTF-8, never \uXXXX
+        { "{\"k\":\"caf\\u00e9 \\u20ac \\ud83d\\ude00\"}",
+          "{\"k\": \"caf\xC3\xA9 \xE2\x82\xAC \xF0\x9F\x98\x80\"}",
+          "non-ASCII is raw UTF-8" },
+        // short forms for \" \\ \n \t \r \b \f, \u00xx lowercase for the
+        // rest of C0, and NEITHER '/' nor DEL is escaped
+        { "{\"k\":\"a\\\"b\\\\c\\nd\\te\\rf\\bg\\fh\\u001fi/j\\u007f\"}",
+          "{\"k\": \"a\\\"b\\\\c\\nd\\te\\rf\\bg\\fh\\u001fi/j\x7f\"}",
+          "escaping" },
+        { "{\"t\":true,\"f\":false,\"n\":null}",
+          "{\"t\": true, \"f\": false, \"n\": null}", "literals" },
+        { "[1,\"a\",null,true,{},[]]", "[1, \"a\", null, true, {}, []]",
+          "array separators" },
+        { "{\"nested\":{\"deep\":{\"x\":[1,2,3]}}}",
+          "{\"nested\": {\"deep\": {\"x\": [1, 2, 3]}}}", "nesting" },
+        { "\"plain string\"", "\"plain string\"", "bare string" },
+        { "42", "42", "bare number" },
+        { "{\"min\":0,\"max\":100,\"mult\":0.01}",
+          "{\"min\": 0, \"max\": 100, \"mult\": 0.01}", "schema numerics" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        jv *v = json_parse(cases[i].doc, strlen(cases[i].doc));
+        assert(v != NULL && cases[i].what);
+        sbuf spaced = { 0 };
+        jv_dump_tojson(v, &spaced);
+        assert(!spaced.failed && spaced.s && cases[i].what);
+        if (strcmp(spaced.s, cases[i].want) != 0) {
+            fprintf(stderr, "tojson drift (%s)\n  want: %s\n  got : %s\n",
+                    cases[i].what, cases[i].want, spaced.s);
+            assert(0);
+        }
+        // and the compact dump the HTTP response path uses must NOT have
+        // moved: this variant is additive, and a body that silently
+        // reformatted would be the expensive way to find that out
+        sbuf compact = { 0 };
+        jv_dump(v, &compact);
+        assert(!compact.failed && compact.s && cases[i].what);
+        assert(strstr(compact.s, ", ") == NULL && cases[i].what);
+        assert(strstr(compact.s, "\": ") == NULL && cases[i].what);
+        free(spaced.s);
+        free(compact.s);
+        jv_free(v);
+    }
+    puts("ok: jv_dump_tojson reproduces jinja's tojson; jv_dump stays compact");
+}
+
 int main(void) {
     test_strict_bounded_numbers();
     test_json_rejects_unpaired_utf16_surrogates();
@@ -1457,6 +1533,7 @@ int main(void) {
     test_schema_close_mid_discriminator_matches_args();
     test_schema_rejects_discriminator_after_conditional_args();
     test_escape_replaces_ill_formed_utf8();
+    test_tojson_dump_matches_jinja();
     puts("json/schema tests ok");
     return 0;
 }

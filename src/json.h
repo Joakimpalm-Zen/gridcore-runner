@@ -54,7 +54,26 @@ void sb_fmt(sbuf *b, const char *fmt, ...);
 #endif
 void sb_esc(sbuf *b, const char *s, size_t n); // appends as JSON string content
 
-// re-serialize a parsed value (inverse of json_parse, minus formatting)
+// re-serialize a parsed value (inverse of json_parse, minus formatting).
+// Compact -- no space after ':' or ',' -- and that is the HTTP API's format:
+// every response body the server emits comes out of here.
 void jv_dump(const jv *v, sbuf *o);
+
+// The same JSON with jinja's `tojson` spacing: ", " between members and ": "
+// after a key. NOT a prettier jv_dump -- it exists because several families
+// declare their tools through `{{ tool | tojson }}` (chatml.jinja:11,
+// chatml-think.jinja:9, ornith.jinja:50, muse.jinja:73) and that block is
+// prompt text the model was trained on verbatim, so the separators are part
+// of the contract. Use it ONLY when reproducing a reference template that
+// pipes the value through `tojson`; the API response path stays on jv_dump,
+// where these bytes would be gratuitous drift in every body.
+//
+// Known residual, NOT fixed here: `jv` stores every number as a double, so
+// this cannot reproduce python's int/float distinction (`1.0` comes back as
+// `1`) and formats non-integral values with "%.10g" rather than python's
+// shortest round-trip repr. Schema numerals in practice (0, 100, 0.01) agree;
+// a float needing more than 10 significant digits, a non-integral value
+// written as `1.0`, or an integer past 2^63 will not.
+void jv_dump_tojson(const jv *v, sbuf *o);
 
 #endif
