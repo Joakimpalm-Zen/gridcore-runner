@@ -206,7 +206,7 @@
       "why": "muse-glimmer's default system block carries a 'Current date:' line; runner omits it, same live-date-in-a-prompt reasoning as llama3 and apertus. CAVEAT, recorded on purpose: the cited comment says the line 'is conditional in the template (current_date is defined)'. Under transformers it is NOT conditional -- the template falls back to strftime_now -- so the STATED reason is inaccurate even though the omission is deliberate and consistent with the other families. The comment should be corrected in src/template.c; this entry stays valid on the live-date policy alone.",
       "cite": {
         "file": "src/template.c",
-        "lines": "859-874",
+        "lines": "881-896",
         "anchor": "current_date is defined"
       },
       "patch": {
@@ -220,7 +220,7 @@
       "why": "The reference generation prompt is the bare '<|start|>assistant'. Runner primes '<|channel|>analysis<|message|>' instead, because the decoded open marker is the bare word 'analysis' -- far too common to hunt for in a free stream -- and priming lets the channel splitter start already inside reasoning. Only WITHOUT tools: with tools runner leaves the header bare so the constrained recipient stays reachable, which the builtin mirrors.",
       "cite": {
         "file": "src/template.c",
-        "lines": "835-850",
+        "lines": "857-872",
         "anchor": "Priming lets the splitter start already inside"
       },
       "patch": {

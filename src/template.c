@@ -692,10 +692,32 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         off = emit(out, cap, off,
                    "<|developer_start|>Deliberation: disabled\n"
                    "Tool Capabilities: disabled<|developer_end|>", NULL, NULL);
+        // Consecutive assistant messages are ONE turn, not two. The reference
+        // carries an `ns.in_assistant` flag and opens the turn only when it is
+        // false -- `{%- if not ns.in_assistant -%}{{ assistant_token }}` --
+        // closing it at the next user turn or at the end of the conversation.
+        // The two contents are therefore concatenated with NO separator.
+        // Emitting <|assistant_end|><|assistant_start|> between them handed the
+        // model a turn boundary its own template never produces.
+        //
+        // Adjacency here is DIRECT (msgs[i-1]), not "previous non-tool
+        // message". The reference keeps a `tool` message inside the open
+        // assistant turn, but runner renders one as a turn of its own
+        // (<|tool_start|>...<|tool_end|>, a framing the reference has no
+        // concept of), so skipping over it when deciding to continue would
+        // leave that turn unbalanced. That divergence is the tool path's, and
+        // is untouched here.
         for (int i = first; i < n_msgs; i++) {
-            off = emit(out, cap, off, "<|%s_start|>%s",
-                       msgs[i].role, msgs[i].content);
-            off = emit(out, cap, off, "<|%s_end|>", msgs[i].role, NULL);
+            bool asst = !strcmp(msgs[i].role, "assistant");
+            bool merge_prev = asst && i > first &&
+                              !strcmp(msgs[i - 1].role, "assistant");
+            bool merge_next = asst && i + 1 < n_msgs &&
+                              !strcmp(msgs[i + 1].role, "assistant");
+            if (!merge_prev)
+                off = emit(out, cap, off, "<|%s_start|>", msgs[i].role, NULL);
+            off = emit(out, cap, off, "%s", msgs[i].content, NULL);
+            if (!merge_next)
+                off = emit(out, cap, off, "<|%s_end|>", msgs[i].role, NULL);
         }
         if (add_assistant)
             off = emit(out, cap, off, "<|assistant_start|>", NULL, NULL);
@@ -976,11 +998,42 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
                 off = emit(out, cap, off, "<turn|>\n", NULL, NULL);
             }
         }
+        // Consecutive assistant messages are ONE model turn, not two. The
+        // reference suppresses BOTH ends of the framing:
+        //
+        //   {%- set continue_same_model_turn =
+        //         (role == 'model' and ns.prev_non_tool_role == 'assistant') -%}
+        //   {%- if not continue_same_model_turn -%}
+        //       {{- '<|turn>' + role + '\n' }}
+        //   {%- endif -%}
+        //   ... {%- set continues_into_next = (role == 'model'
+        //         and next_nt.role == 'assistant' and ...) -%}
+        //
+        // so the contents are concatenated with NO separator. Emitting
+        // <turn|>\n<|turn>model\n between them handed the model a turn
+        // boundary its own template never produces, and cost 5 extra tokens
+        // on gemma-4-E2B's vocabulary.
+        //
+        // The continuation is for the MODEL role only -- the reference gates it
+        // on `role == 'model'` -- so consecutive USER turns still get one
+        // <|turn>user each. Adjacency here is DIRECT (msgs[i-1]) rather than
+        // the reference's "previous non-tool role": the reference folds a tool
+        // result into <|tool_response> blocks inside the open turn, while
+        // runner renders a `tool` message as its own <|turn>tool turn, so
+        // skipping over it when deciding to continue would leave that turn
+        // unbalanced. That divergence is the tool path's and is untouched here.
         for (int i = g4_first; i < n_msgs; i++) {
-            const char *role = !strcmp(msgs[i].role, "assistant") ? "model"
-                                                                  : msgs[i].role;
-            off = emit(out, cap, off, "<|turn>%s\n", role, NULL);
-            off = emit(out, cap, off, "%s<turn|>\n", msgs[i].content, NULL);
+            bool asst = !strcmp(msgs[i].role, "assistant");
+            const char *role = asst ? "model" : msgs[i].role;
+            bool merge_prev = asst && i > g4_first &&
+                              !strcmp(msgs[i - 1].role, "assistant");
+            bool merge_next = asst && i + 1 < n_msgs &&
+                              !strcmp(msgs[i + 1].role, "assistant");
+            if (!merge_prev)
+                off = emit(out, cap, off, "<|turn>%s\n", role, NULL);
+            off = emit(out, cap, off, "%s", msgs[i].content, NULL);
+            if (!merge_next)
+                off = emit(out, cap, off, "<turn|>\n", NULL, NULL);
         }
         // Generation prompt, read from the MODEL'S OWN chat template
         // (gguf tokenizer.chat_template on gemma-4-E2B), not from a summary

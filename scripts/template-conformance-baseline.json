@@ -38,7 +38,7 @@
     "in-progress": "someone is actively fixing this; see `note`"
   },
   "generated_by": "scripts/template-conformance.py --write-baseline",
-  "generated_at": "2026-08-14T13:43:52+00:00",
+  "generated_at": "2026-08-14T14:07:42+00:00",
   "oracles": {
     "apertus": {
       "source": "hf:swiss-ai/Apertus-8B-Instruct-2509",
@@ -98,19 +98,6 @@
     }
   },
   "known_differences": [
-    {
-      "id": "apertus/consecutive-assistant",
-      "status": "open",
-      "note": "",
-      "digest": "51bd3f0bdfeaa6be",
-      "allowlist_applied": [
-        "bos",
-        "default-system-with-live-date"
-      ],
-      "first_diff_at": 190,
-      "reference_excerpt": "'Rayleigh scattering.Also, the sky is not actually blue at night.<|assistant_end|><|user_st'",
-      "runner_excerpt": "'Rayleigh scattering.<|assistant_end|><|assistant_start|>Also, the sky is not actually blue'"
-    },
     {
       "id": "chatml-think/multi-tool-call",
       "status": "open",
@@ -190,19 +177,6 @@
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
       "runner_excerpt": "'<|im_start|>system\\nReply with exactly one JSON object and nothing else.\\nTo answer the user'"
-    },
-    {
-      "id": "gemma4/consecutive-assistant",
-      "status": "open",
-      "note": "",
-      "digest": "ef2d944043bcd818",
-      "allowlist_applied": [
-        "bos"
-      ],
-      "first_diff_at": 92,
-      "reference_excerpt": "'Rayleigh scattering.Also, the sky is not actually blue at night.<turn|>\\n<|turn>user\\nAnd at'",
-      "runner_excerpt": "'Rayleigh scattering.<turn|>\\n<|turn>model\\nAlso, the sky is not actually blue at night.<turn'",
-      "token_delta": 5
     },
     {
       "id": "llama2/empty-assistant-content",

@@ -325,6 +325,85 @@ static void test_render_apertus_without_system(void) {
         "<|assistant_start|>") == 0);
 }
 
+// Two adjacent assistant messages are ONE assistant turn in this family, not
+// two. The reference tracks `ns.in_assistant` and emits <|assistant_start|>
+// only when it is false, closing with <|assistant_end|> at the next user turn
+// or the end of the conversation:
+//
+//   {%- elif message.role == 'assistant' -%}
+//       {%- if not ns.in_assistant -%}
+//           {{ assistant_token }}
+//           {%- set ns.in_assistant = true -%}
+//       {%- endif -%}
+//
+// so the two contents are CONCATENATED with no separator between them.
+// Expected bytes below are what swiss-ai/Apertus-8B-Instruct-2509's
+// chat_template.jinja renders through jinja2 for these conversations, minus
+// the two documented runner omissions (BOS, and the default system message
+// carrying strftime_now()) -- not what runner produced.
+static void test_apertus_consecutive_assistant(void) {
+    char out[1024];
+    const char *dev = "<|developer_start|>Deliberation: disabled\n"
+                      "Tool Capabilities: disabled<|developer_end|>";
+    char want[1024];
+
+    // mid-conversation: one turn, contents concatenated, closed by the user
+    const chat_msg mid[] = {
+        { "system", "SYS" }, { "user", "HI" },
+        { "assistant", "YO" }, { "assistant", "AND" }, { "user", "BYE" },
+    };
+    render_messages(TMPL_APERTUS, mid, 5, true, THINK_DEFAULT, out, sizeof(out));
+    snprintf(want, sizeof(want), "<|system_start|>SYS<|system_end|>%s"
+             "<|user_start|>HI<|user_end|>"
+             "<|assistant_start|>YOAND<|assistant_end|>"
+             "<|user_start|>BYE<|user_end|><|assistant_start|>", dev);
+    assert(strcmp(out, want) == 0);
+
+    // three in a row collapse just as two do
+    const chat_msg three[] = {
+        { "system", "SYS" }, { "user", "HI" }, { "assistant", "YO" },
+        { "assistant", "AND" }, { "assistant", "ALSO" }, { "user", "BYE" },
+    };
+    render_messages(TMPL_APERTUS, three, 6, true, THINK_DEFAULT, out,
+                    sizeof(out));
+    snprintf(want, sizeof(want), "<|system_start|>SYS<|system_end|>%s"
+             "<|user_start|>HI<|user_end|>"
+             "<|assistant_start|>YOANDALSO<|assistant_end|>"
+             "<|user_start|>BYE<|user_end|><|assistant_start|>", dev);
+    assert(strcmp(out, want) == 0);
+
+    // trailing: the merged turn still CLOSES, and the generation prompt opens
+    // the next one -- the reference's end-of-loop `{%- if ns.in_assistant ...`
+    const chat_msg trail[] = {
+        { "system", "SYS" }, { "user", "HI" },
+        { "assistant", "YO" }, { "assistant", "AND" },
+    };
+    render_messages(TMPL_APERTUS, trail, 4, true, THINK_DEFAULT, out,
+                    sizeof(out));
+    snprintf(want, sizeof(want), "<|system_start|>SYS<|system_end|>%s"
+             "<|user_start|>HI<|user_end|>"
+             "<|assistant_start|>YOAND<|assistant_end|><|assistant_start|>",
+             dev);
+    assert(strcmp(out, want) == 0);
+    render_messages(TMPL_APERTUS, trail, 4, false, THINK_DEFAULT, out,
+                    sizeof(out));
+    snprintf(want, sizeof(want), "<|system_start|>SYS<|system_end|>%s"
+             "<|user_start|>HI<|user_end|>"
+             "<|assistant_start|>YOAND<|assistant_end|>", dev);
+    assert(strcmp(out, want) == 0);
+
+    // ...and consecutive USER turns are NOT merged: the reference has no
+    // in_user state, so each one is its own <|user_start|>...<|user_end|>.
+    const chat_msg uu[] = {
+        { "system", "SYS" }, { "user", "HI" }, { "user", "AGAIN" },
+    };
+    render_messages(TMPL_APERTUS, uu, 3, true, THINK_DEFAULT, out, sizeof(out));
+    snprintf(want, sizeof(want), "<|system_start|>SYS<|system_end|>%s"
+             "<|user_start|>HI<|user_end|><|user_start|>AGAIN<|user_end|>"
+             "<|assistant_start|>", dev);
+    assert(strcmp(out, want) == 0);
+}
+
 static void test_detect_by_marker(tokenizer *t) {
     assert(template_detect("<|im_start|>system", t) == TMPL_CHATML);
     assert(template_detect("<|start_header_id|>system<|end_header_id|>", t) == TMPL_LLAMA3);
@@ -1342,6 +1421,82 @@ static void test_gemma4_generation_prompt(void) {
                        "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
 }
 
+// Two adjacent assistant messages are ONE model turn in this family, not two.
+// The reference (gemma-4-E2B tokenizer.chat_template, read from the GGUF)
+// suppresses BOTH ends of the framing:
+//
+//   {%- set continue_same_model_turn =
+//         (role == 'model' and ns.prev_non_tool_role == 'assistant') -%}
+//   {%- if not continue_same_model_turn -%}
+//       {{- '<|turn>' + role + '\n' }}
+//   {%- endif -%}
+//   ...
+//   {%- set continues_into_next = (
+//       role == 'model' and next_nt.role == 'assistant' and ...) -%}
+//
+// so the contents are CONCATENATED with no separator. Only the MODEL role is
+// continued this way -- `continue_same_model_turn` tests `role == 'model'`, so
+// consecutive user turns still get one <|turn>user each.
+//
+// Expected bytes below are what that template renders through jinja2, minus
+// the BOS token runner leaves to the tokenizer -- not what runner produced.
+static void test_gemma4_consecutive_assistant(void) {
+    char out[1024];
+
+    const chat_msg mid[] = {
+        { "user", "HI" }, { "assistant", "YO" }, { "assistant", "AND" },
+        { "user", "BYE" },
+    };
+    render_messages(TMPL_GEMMA4, mid, 4, true, THINK_DEFAULT, out, sizeof(out));
+    assert(strcmp(out, "<|turn>user\nHI<turn|>\n"
+                       "<|turn>model\nYOAND<turn|>\n"
+                       "<|turn>user\nBYE<turn|>\n<|turn>model\n") == 0);
+
+    // three in a row collapse just as two do
+    const chat_msg three[] = {
+        { "user", "HI" }, { "assistant", "YO" }, { "assistant", "AND" },
+        { "assistant", "ALSO" }, { "user", "BYE" },
+    };
+    render_messages(TMPL_GEMMA4, three, 5, true, THINK_DEFAULT, out,
+                    sizeof(out));
+    assert(strcmp(out, "<|turn>user\nHI<turn|>\n"
+                       "<|turn>model\nYOANDALSO<turn|>\n"
+                       "<|turn>user\nBYE<turn|>\n<|turn>model\n") == 0);
+
+    // trailing: the merged turn still CLOSES (next_nt.role is None, so
+    // continues_into_next is false) and the generation prompt opens a new one
+    const chat_msg trail[] = {
+        { "user", "HI" }, { "assistant", "YO" }, { "assistant", "AND" },
+    };
+    render_messages(TMPL_GEMMA4, trail, 3, true, THINK_DEFAULT, out,
+                    sizeof(out));
+    assert(strcmp(out, "<|turn>user\nHI<turn|>\n"
+                       "<|turn>model\nYOAND<turn|>\n<|turn>model\n") == 0);
+    render_messages(TMPL_GEMMA4, trail, 3, false, THINK_DEFAULT, out,
+                    sizeof(out));
+    assert(strcmp(out, "<|turn>user\nHI<turn|>\n"
+                       "<|turn>model\nYOAND<turn|>\n") == 0);
+
+    // the merge is independent of the thinking system turn, which is emitted
+    // ahead of the loop and consumes messages[0]
+    const chat_msg with_sys[] = {
+        { "system", "SYS" }, { "user", "HI" }, { "assistant", "YO" },
+        { "assistant", "AND" }, { "user", "BYE" },
+    };
+    render_messages(TMPL_GEMMA4, with_sys, 5, true, THINK_ON, out, sizeof(out));
+    assert(strcmp(out, "<|turn>system\n<|think|>\nSYS<turn|>\n"
+                       "<|turn>user\nHI<turn|>\n"
+                       "<|turn>model\nYOAND<turn|>\n"
+                       "<|turn>user\nBYE<turn|>\n<|turn>model\n") == 0);
+
+    // ...and consecutive USER turns are NOT merged: the reference continues
+    // the MODEL role only.
+    const chat_msg uu[] = { { "user", "HI" }, { "user", "AGAIN" } };
+    render_messages(TMPL_GEMMA4, uu, 2, true, THINK_DEFAULT, out, sizeof(out));
+    assert(strcmp(out, "<|turn>user\nHI<turn|>\n"
+                       "<|turn>user\nAGAIN<turn|>\n<|turn>model\n") == 0);
+}
+
 static void test_chatml_think_shape(void) {
     const chat_msg msgs[] = { { "user", "HI" } };
     char out[512];
@@ -1579,10 +1734,12 @@ int main(void) {
     test_muse_plain_thinking_close_leaves_no_recipient_residue();
     test_detect_and_render_apertus(&t);
     test_render_apertus_without_system();
+    test_apertus_consecutive_assistant();
     test_render_system_prompt();
     test_render_without_system();
     test_name_roundtrip();
     test_gemma4_generation_prompt();
+    test_gemma4_consecutive_assistant();
     test_chatml_think_shape();
     test_chatml_tool_result_renders_as_a_user_tool_response();
     test_muse_tools_and_result_golden();
