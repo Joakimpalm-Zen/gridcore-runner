@@ -3439,7 +3439,56 @@ static int ornith_tool_calls_parse(sbuf *content, sbuf *tc) {
     return n_calls;
 }
 
+// gemma4 on the UNCONSTRAINED path.
+//
+// The generic parser above recognises `<|tool_call>call:NAME{...}` -- it is
+// the marker runner itself replays for the families with no native protocol
+// -- and copies the braced region into `arguments` VERBATIM. For gemma4 that
+// region is `{city:<|"|>Oslo<|"|>}`, which is not JSON, so a client calling
+// json.loads() on it fails. Its brace matcher is JSON-aware too: it tracks
+// `"` as a string delimiter, and a quote inside a gemma4 <|"|> string would
+// desync it.
+//
+// This path became reachable for gemma4 on 2026-08-14. Declarations are now
+// rendered natively whenever tools are present -- including under
+// `tool_choice:"none"`, where no envelope is built -- so a model that calls
+// anyway lands here rather than in gemma4_map. Same conversion, driven from
+// the same g4_one_call the strict path uses, so the two cannot disagree
+// about what an argument means.
+static int gemma4_tool_calls_parse(sbuf *content, sbuf *tc) {
+    if (!content->s) return 0;
+    static const char OPEN[] = "<|tool_call>";
+    int n_calls = 0;
+    char *w = content->s;
+    const char *p = content->s, *end = content->s + content->n;
+    while (p < end) {
+        const char *o = atem_find(p, end, OPEN);
+        if (!o) { memmove(w, p, (size_t)(end - p)); w += end - p; break; }
+        memmove(w, p, (size_t)(o - p));
+        w += o - p;
+        const char *at = o;
+        size_t before = tc->n;
+        if (n_calls) sb_lit(tc, ",");
+        if (!g4_one_call(&at, end, n_calls, tc)) {
+            // not a well-formed call after all (truncated, or the marker in
+            // ordinary text): leave the bytes as content and move past the
+            // marker so the scan cannot loop on it
+            tc->n = before;
+            if (tc->s) tc->s[tc->n] = 0;
+            memmove(w, o, sizeof(OPEN) - 1);
+            w += sizeof(OPEN) - 1;
+            p = o + sizeof(OPEN) - 1;
+            continue;
+        }
+        n_calls++;
+        p = at;
+    }
+    if (n_calls) content->n = (size_t)(w - content->s);
+    return n_calls;
+}
+
 int tool_calls_parse_for(int tmpl, sbuf *content, sbuf *tc) {
     return tmpl == TMPL_ORNITH ? ornith_tool_calls_parse(content, tc)
+         : tmpl == TMPL_GEMMA4 ? gemma4_tool_calls_parse(content, tc)
                                : tool_calls_parse(content, tc);
 }

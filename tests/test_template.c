@@ -1814,6 +1814,33 @@ static void test_tool_result_id_survives_a_nameless_matching_call(void) {
     jv_free(messages);
 }
 
+static void test_gemma4_unconstrained_call_still_yields_json_arguments(void) {
+    // The path taken when NO envelope was built -- gemma4 with tools and
+    // tool_choice:"none". The generic parser recognises this marker and would
+    // copy `{city:<|"|>Oslo<|"|>}` into `arguments` verbatim, which no OpenAI
+    // client can json.loads(). Content around the call must survive, and the
+    // call itself must come back as JSON.
+    sbuf content = {0}, tc = {0};
+    const char *doc = "Sure.<|tool_call>call:get_weather"
+                      "{city:<|\"|>Oslo<|\"|>,n:2}<tool_call|>";
+    sb_put(&content, doc, strlen(doc));
+    assert(tool_calls_parse_for(TMPL_GEMMA4, &content, &tc) == 1);
+    assert(content.n == 5 && !strncmp(content.s, "Sure.", 5));
+    assert(tc.s != NULL);
+    assert(strstr(tc.s, "\"name\":\"get_weather\""));
+    assert(strstr(tc.s, "{\\\"city\\\":\\\"Oslo\\\",\\\"n\\\":2}"));
+    assert(!strstr(tc.s, "<|"));
+    free(content.s); free(tc.s);
+
+    // a bare marker in ordinary prose is not a call and must stay content
+    content = (sbuf){0}; tc = (sbuf){0};
+    const char *prose = "write <|tool_call> to call a tool";
+    sb_put(&content, prose, strlen(prose));
+    assert(tool_calls_parse_for(TMPL_GEMMA4, &content, &tc) == 0);
+    assert(content.n == strlen(prose));
+    free(content.s); free(tc.s);
+}
+
 // gemma-4 writes a call's arguments through its own `format_argument` macro
 // with escape_keys=False, NOT as JSON: bare object keys, strings delimited by
 // the <|"|> token and not escaped inside it, and `| dictsort` order, which
@@ -1949,6 +1976,7 @@ int main(void) {
     test_muse_tools_and_result_golden();
     test_muse_tool_result_id_resolves_prior_name();
     test_tool_result_id_survives_a_nameless_matching_call();
+    test_gemma4_unconstrained_call_still_yields_json_arguments();
     test_gemma4_tool_history_uses_the_reference_argument_syntax();
     test_muse_parallel_tool_history_has_native_turn_boundaries();
     test_muse_tool_history_skips_bad_calls_without_leading_boundary();
