@@ -2,6 +2,52 @@
 
 Per-artifact gate evidence. Status table (quick view): `docs/cert-matrix-status.md`.
 
+> ## CORRECTION — 2026-08-14: every gpt-oss chat-smoke row below is INVALID
+>
+> **What was wrong.** `TMPL_HARMONY` did not exist when this report was
+> produced. It landed 2026-08-12 in `0229dff`; this run is dated 2026-08-05.
+> Until then gpt-oss fell through `template_detect`'s terminal fallback and
+> was rendered as **llama2**. Every gate-6 chat-smoke result here therefore
+> measured a gpt-oss model being fed `[INST] ... [/INST]` framing it was never
+> trained on.
+>
+> **How this was established.** Building the parent of the Harmony commit
+> (`e464ac1`, whose `src/template.h` contains no `TMPL_HARMONY`) and loading
+> the canonical `gpt-oss-20b-MXFP4.gguf` prints
+> `chat mode (template: llama2)`. The evidence files agree: `t1.1-chat-smoke.json`
+> opens `" Assistant: 4."` and `t2.13-chat-smoke.json` continues
+> `[/INST] User: ... [/INST]` — the models were completing markup this runner
+> injected.
+>
+> **Attributions retracted.** These explanations are withdrawn; each blamed a
+> model or a third party for a defect in runner's own prompt construction:
+> * "consistent with the Harmony-rendering divergence" (gate 6, item 1) and
+>   "Same Harmony-rendering / stop-handling characteristic" (items 2, 9) —
+>   Harmony was not being rendered at all.
+> * "Unsloth's chat-template fix plausibly explains the difference"
+>   (items 3, 11) — runner never read the GGUF's `chat_template` for these
+>   runs, so a patch to it cannot explain any observed difference. The
+>   difference in stopping behaviour is real; its stated cause is not
+>   supported.
+> * **Item 13 (Huihui abliterated v2): "chat smoke hallucinates a FOREIGN
+>   `[/INST]` template marker (not gpt-oss's own Harmony) — a distinct, more
+>   specific failure than the rest of the family."** The `[/INST]` was in the
+>   prompt runner built. The model was completing our markup, not
+>   hallucinating it, and it was not a distinct failure. This retraction
+>   matters most: a third party's model was recorded as failing in a specific
+>   way for something this project caused.
+>
+> **What still stands.** Gates 1/2/3/4/5/7 are unaffected — tokenizer, KLD,
+> cpu_cuda and throughput all run through raw `/v1/completions` or
+> `--bench-json`, never the chat template. Item 12's "tool calling is clean"
+> also stands: it is grammar-constrained, so it passed despite the framing.
+> Row 1 has already been superseded by a passing 2026-08-15 re-run under
+> `TMPL_HARMONY`.
+>
+> The rows are left as written. This project records what was believed when,
+> and corrects on top rather than editing history.
+
+
 ## Environment
 
 | item | value |

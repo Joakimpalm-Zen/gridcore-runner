@@ -45,8 +45,12 @@ llama.cpp b10076 are token-identical on the file; OpenLLM-France's own
 official GGUF carries the same defect — reported upstream as
 [OpenLLM-France/Lucie-Training#3](https://github.com/OpenLLM-France/Lucie-Training/issues/3)). Lucie still does NOT hold the tokenizer check, because
 the check certifies the shipped artifact against the HF reference — but the
-failure names the right culprit. Teuken's chat template emits artifacts
-(`{Answer}`) though the surface and tool calls work. `reference_compare.py`
+failure names the right culprit. Teuken renders through the llama2 fallback and its chat row shows that
+framing's artifacts, though the surface and tool calls work. (Corrected
+2026-08-14: this previously read "Teuken's chat template emits artifacts
+(`{Answer}`)". Teuken ships no chat template — its GGUF carries no
+`tokenizer.chat_template` and it detects as `llama2`, the terminal
+fallback — so the artifacts were runner's own framing, not Teuken's.) `reference_compare.py`
 was also fixed in this run: Runner now rejects unknown model names, so the
 script asks each server for its served model id instead of sending a
 placeholder.

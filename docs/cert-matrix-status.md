@@ -7,6 +7,17 @@ unless a row notes a split reference.
 
 Verdicts: CERTIFIED / CERTIFIED-WITH-CAVEAT / FAILED / REFUSED / NOT FOUND / SKIPPED.
 
+> **CORRECTION 2026-08-14 — the gpt-oss "chat smoke" column is invalid.**
+> `TMPL_HARMONY` landed 2026-08-12 (`0229dff`), after this run, so gpt-oss was
+> rendered through `template_detect`'s llama2 fallback. Verified by building
+> `e464ac1` and observing `chat mode (template: llama2)`. In particular row
+> 13's "hallucinates a FOREIGN `[/INST]` template marker" is withdrawn: the
+> `[/INST]` came from runner's own prompt, so that model was completing our
+> markup rather than hallucinating, and its failure was not distinct from the
+> family. All non-chat gates are unaffected (raw `/v1/completions`).
+> Detail: `docs/cert-matrix-2026-08-05.md`.
+
+
 ## Tier 1 — canonical + QAT
 
 | # | artifact | resolved repo/file | verdict | note |
