@@ -33,6 +33,8 @@ typedef struct {
     int   n_stop;
     sbuf  hold;         // held-back tail that may still begin a stop match
     bool  stopped;      // a stop sequence matched; excluded from output
+    engine *eng;        // the generating engine, so a stop match can truncate
+                        // its constrained document to what was delivered
     const char *stop_hit; // which one matched (Anthropic reports it back)
     long  created;      // stamped once: every chunk of a stream reports the
                         // same creation time, as the buffered body does
@@ -984,6 +986,14 @@ static int emit_channel(gen_ctx *g, int reasoning, const char *bytes, int n) {
 // g->hold so a stop spanning token boundaries still matches, and only the
 // tail that could still begin a stop is withheld from the client
 static int stop_feed(gen_ctx *g, const char *bytes, int n) {
+    // A stop sequence is a rule about the MODEL's visible text. The tail the
+    // engine synthesizes to close a truncated constrained document is not
+    // that — it is the server making the client's copy legal — and filtering
+    // it eats exactly the bytes that do the work: closing `{"a":"xx` yields
+    // `","b":""}`, and `"}"` or `"\n\n"` are ordinary stops that match a
+    // closer even when the model never produced one.
+    if (g->eng && g->eng->constraint_closing)
+        return emit_channel(g, 0, bytes, n);
     sb_put(&g->hold, bytes, n);
     size_t at = 0, hit_len = 0;
     for (size_t i = 0; !hit_len && i < g->hold.n; i++)
@@ -999,6 +1009,11 @@ static int stop_feed(gen_ctx *g, const char *bytes, int n) {
         }
     if (hit_len) {
         if (at > 0) emit_channel(g, 0, g->hold.s, (int)at);
+        // The constraint validator consumed these bytes before this sink ever
+        // ran, so it is now ahead of the client's copy by everything dropped
+        // here. Tell it, or the tail it synthesizes at the end of generation
+        // continues a document the client does not have.
+        if (g->eng) engine_constraint_truncate(g->eng, (int)(g->hold.n - at));
         g->hold.n = 0;
         g->stopped = true;
         return 1; // abort generation
@@ -1706,7 +1721,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         engine_think_started(e);
 
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
-                  .stop_strs = stops, .n_stop = n_stops,
+                  .stop_strs = stops, .n_stop = n_stops, .eng = e,
                   .created = (long)time(NULL) };
     tool_envelope muse_plain_env = {.muse_plain_payload = true};
     snprintf(g.id, sizeof(g.id), "%s", req_id);

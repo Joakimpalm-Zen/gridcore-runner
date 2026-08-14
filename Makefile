@@ -112,6 +112,7 @@ TEST_AUTOFIT = $(TEST_BATCH:test-batch%=test-autofit%)
 TEST_RESP_SM = $(TEST_BATCH:test-batch%=test-responses-sm%)
 TEST_BUDGET = $(TEST_BATCH:test-batch%=test-prompt-budget%)
 TEST_ATTRIB = $(TEST_BATCH:test-batch%=test-tool-attribution%)
+TEST_STOP_CONSTRAINT = $(TEST_BATCH:test-batch%=test-stop-constraint%)
 # test_responses_sm drives the framer through a POSIX socketpair(); winsock
 # has none, so on Windows the suite skips it LOUDLY (it runs in Linux CI and
 # on the POSIX dev boxes) rather than shimming the transport under the test.
@@ -545,6 +546,18 @@ TEST_RESP_SM_SRC = tests/test_responses_sm.c src/gguf.c src/compat.c \
 $(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/completion.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_RESP_SM_SRC) -o $@ $(LDFLAGS)
 
+# a client "stop" sequence under constrained output. Same link as the framing
+# test above and for the same reason -- gen_ctx and stop_feed are static in
+# completion.c, and the property under test is that the engine's validator and
+# that sink agree on what the client received, so neither side may be stubbed.
+TEST_STOP_CONSTRAINT_SRC = tests/test_stop_constraint.c src/gguf.c src/compat.c \
+                  $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
+                  src/jsonmode.c src/schema.c src/json.c src/engine.c \
+                  src/template.c src/vramreg.c src/http.c src/registry.c \
+                  src/scheduler.c $(GPU_SRC)
+$(TEST_STOP_CONSTRAINT): $(TEST_STOP_CONSTRAINT_SRC) src/completion.c $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_STOP_CONSTRAINT_SRC) -o $@ $(LDFLAGS)
+
 # the per-request prompt BUDGET, on all three tool-calling surfaces. The
 # renderer truncates silently at its cap, so a buffer estimate that misses a
 # term drops the tail of the prompt -- the user's own turn -- with no error.
@@ -977,7 +990,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
-      runner test.gguf
+      $(TEST_STOP_CONSTRAINT) runner test.gguf
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)
@@ -1001,6 +1014,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_BATCH)
 	./$(TEST_PREFIX)
 	./$(TEST_GRAMMAR_FF)
+	./$(TEST_STOP_CONSTRAINT)
 	$(TEST_RESP_SM_RUN)
 	./$(TEST_KV_TOL)
 	./$(TEST_TC_TOL)
@@ -1184,7 +1198,7 @@ clean:
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \
-	      $(TEST_BUDGET) $(TEST_ATTRIB) \
+	      $(TEST_BUDGET) $(TEST_ATTRIB) $(TEST_STOP_CONSTRAINT) \
 	      $(TEST_SPLIT_GUARD) split-guard.out
 	rm -rf test-attn
 	rm -rf .build

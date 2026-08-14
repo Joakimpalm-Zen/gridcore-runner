@@ -124,6 +124,8 @@ test-prompt-budget
 test-prompt-budget.exe
 test-tool-attribution
 test-tool-attribution.exe
+test-stop-constraint
+test-stop-constraint.exe
 test-moe-router
 test-moe-router.exe
 test-attn/

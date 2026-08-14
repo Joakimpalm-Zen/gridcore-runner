@@ -59,6 +59,20 @@ typedef struct {
     bool constraint_includes_prelude;
     sval  sv;
     jsonv jv;
+    // The constrained payload exactly as it was fed to sv/jv, so the validator
+    // can be re-seated on any PREFIX of it (engine_constraint_truncate). Only
+    // the real engine records: the sample-lookahead copies below are shallow,
+    // and a copy that appended here would realloc the original's buffer out
+    // from under it. Lives for one generation; see cdoc_release.
+    char *cdoc; int cdoc_n, cdoc_cap;
+    bool  cdoc_rec;
+    // True while the generation callback is receiving the engine's synthesized
+    // closing tail rather than the model's output. A sink that filters model
+    // text — a client `stop` sequence is the one that exists — must pass this
+    // through untouched: it is the server completing a truncated document to
+    // something legal, and the bytes that do that are exactly the ones an
+    // ordinary stop (`}`, `"\n\n"`) matches.
+    bool  constraint_closing;
     // constrained thinking-tag prelude: probe for think_open, sample freely
     // through think_close, then enforce sv/jv and emit only the payload
     uint8_t constraint_phase;
@@ -168,6 +182,25 @@ int    engine_generate(engine *e, float *logits, int max_new,
 // call engine_gen_end: that is where a truncated constrained document is
 // closed to something valid.
 enum { ENGINE_STEP_DONE = 0, ENGINE_STEP_MORE = 1 };
+// Discard the last `n` bytes of the constrained document, as if the model had
+// never generated them, and returns how many were actually discarded.
+//
+// A sink that does not deliver everything the engine handed it — a client
+// `stop` sequence drops the matched bytes and whatever was held behind them —
+// leaves the validator AHEAD of the document the client received, and the
+// closing tail engine_gen_end synthesizes then continues a state nobody has.
+// Reporting the shortfall here re-seats the validator on exactly the delivered
+// prefix, so the closer completes the client's copy instead of the engine's.
+//
+// The truncation point is a byte offset, not a token or a node boundary: it may
+// land mid-token, inside a string, or between an object's members. All three
+// are ordinary validator states, because the payload is replayed from its start
+// and the validator is a byte machine — there is no un-feed, and none is needed.
+//
+// Call it before engine_gen_end (or before engine_generate returns, i.e. from
+// the generation callback itself); afterwards the document is gone.
+int    engine_constraint_truncate(engine *e, int n);
+
 void   engine_gen_begin(engine *e, int max_new);
 int    engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
                        int32_t *next_tok, int *next_pos);

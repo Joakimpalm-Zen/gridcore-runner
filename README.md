@@ -650,9 +650,12 @@ A stop string is a rule about the model's visible text, but under the tool
 envelope the model generates protocol — Harmony channel markers and recipient
 headers, or the generic envelope's own JSON syntax — and the caller receives
 only the demultiplexed result. Matching stop strings against that document
-fires on framing nobody wrote (`["\n\n"]`, `["}"]` and `["<|"]` all hit) and
-desynchronises the constrained-decoding closer from the text already sent.
-Runner refuses the request rather than ignoring the field.
+fires on framing nobody wrote (`["\n\n"]`, `["}"]` and `["<|"]` all hit).
+Runner refuses the request rather than ignoring the field. The refusal is a
+semantic one: a stop match no longer corrupts the document — under a plain
+`response_format` it truncates the constraint validator with it, described
+under structured output below — but a rule the caller wrote about visible text
+cannot be honoured against protocol the caller never sees.
 
 `parallel_tool_calls:true` compiles the generic JSON tool envelope into a
 bounded `{"calls":[...]}` array (up to 8 entries) over the same discriminated
@@ -994,6 +997,17 @@ closures rather than the model's completed intent. If the model never starts
 the document, runner returns empty content rather than inventing required
 values. Syntax and schema shape are guaranteed; semantic correctness and tool
 selection remain the model's responsibility.
+
+A client `stop` sequence is handled as a truncation the caller asked for. The
+matched bytes are withheld from the response, as they are in unconstrained
+text, and the constraint validator is truncated with them — re-seated on
+exactly the document the caller received — so the minimal legal suffix
+completes that copy rather than the longer one the model had reached. The
+delivered document parses and conforms; `finish_reason` is `"stop"` (Anthropic
+`stop_reason: "stop_sequence"`, carrying the matched string). The suffix itself
+is never stop-matched: it is runner closing the document rather than model
+text, and `["}"]` or `["\n\n"]` would otherwise eat the very bytes that make it
+legal.
 
 If an envelope document cannot be mapped back at all, runner reports the fault
 instead of serving the raw protocol as an answer: content is empty,

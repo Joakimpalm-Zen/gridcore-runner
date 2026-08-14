@@ -6,6 +6,7 @@
 #include "compat.h"
 
 
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,9 @@ enum { CP_PROBE, CP_THINK, CP_AFTER_THINK, CP_OUTPUT };
 // everything that decides what this engine's KV bytes mean; see the shared
 // prefix cache below, which is the only thing that consumes it
 static uint64_t model_identity(const model_t *m, const tokenizer *tok);
+// the constrained document recorded for engine_constraint_truncate; defined
+// with the rest of the constraint layer
+static void cdoc_release(engine *e);
 
 static void constraint_reset(engine *e) {
     e->constraint_phase = !e->constraint_includes_prelude &&
@@ -30,7 +34,9 @@ static void constraint_reset(engine *e) {
 
 bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     free(e->hist); // slot engines are re-inited on model swap; e must be zeroed
+    free(e->cdoc);
     memset(e, 0, sizeof(*e));
+    e->cdoc_rec = true;
     e->m = m;
     e->tok = tok;
     e->smp = smp;
@@ -116,6 +122,7 @@ void engine_reset(engine *e) {
     jsonv_init(&e->jv);
     if (e->schema) sval_init(&e->sv, e->schema);
     constraint_reset(e);
+    cdoc_release(e);
     e->dpos = 0;
 }
 
@@ -143,6 +150,7 @@ int engine_rewind(engine *e, const int32_t *toks, int n) {
     jsonv_init(&e->jv);
     if (e->schema) sval_init(&e->sv, e->schema);
     constraint_reset(e);
+    cdoc_release(e);
     return keep;
 }
 
@@ -834,6 +842,38 @@ static bool all_insignificant_ws(const sval *sv, const char *bytes, int n) {
     return true;
 }
 
+// Record payload bytes so the validator can be re-seated on a prefix of them.
+// A failure to grow simply stops recording: the buffer exists to make a stop
+// match honest, and losing it must degrade that one behaviour rather than end
+// a generation that is otherwise fine.
+static void cdoc_put(engine *e, const char *bytes, int n) {
+    if (!e->cdoc_rec || n <= 0) return;
+    if (e->cdoc_n > INT_MAX - n) { e->cdoc_rec = false; return; }
+    if (e->cdoc_n + n > e->cdoc_cap) {
+        int cap = e->cdoc_cap ? e->cdoc_cap : 512;
+        while (cap < e->cdoc_n + n) {
+            if (cap > (1 << 26)) { e->cdoc_rec = false; return; }
+            cap *= 2;
+        }
+        char *p = realloc(e->cdoc, (size_t)cap);
+        if (!p) { e->cdoc_rec = false; return; }
+        e->cdoc = p;
+        e->cdoc_cap = cap;
+    }
+    memcpy(e->cdoc + e->cdoc_n, bytes, (size_t)n);
+    e->cdoc_n += n;
+}
+
+// The recording is per generation, not per engine: it is dead weight between
+// requests, and freeing it here is what keeps every teardown path that frees
+// only e->hist correct.
+static void cdoc_release(engine *e) {
+    free(e->cdoc);
+    e->cdoc = NULL;
+    e->cdoc_n = e->cdoc_cap = 0;
+    e->cdoc_rec = true;
+}
+
 static bool constraint_payload_feed(engine *e, bool schema,
                                     const char *bytes, int n) {
     if (schema) {
@@ -846,12 +886,14 @@ static bool constraint_payload_feed(engine *e, bool schema,
         if (!jsonv_feed(&tmp, bytes, n)) return false;
         e->jv = tmp;
     }
+    cdoc_put(e, bytes, n);
     return true;
 }
 
 static void constraint_payload_reset(engine *e, bool schema) {
     if (schema) sval_init(&e->sv, e->schema);
     else        jsonv_init(&e->jv);
+    e->cdoc_n = 0;
 }
 
 // Feed one decoded token through the optional thinking prelude and then the
@@ -931,6 +973,11 @@ static bool constraint_feed(engine *e, bool schema, const char *bytes, int n,
     if (payload_ok) {
         if (schema) e->sv = sv;
         else        e->jv = jv;
+        // CP_PROBE feeds the payload validator directly rather than through
+        // constraint_payload_feed, so the recording has to be made here too --
+        // otherwise a document that started without a thinking prelude is
+        // untruncatable.
+        cdoc_put(e, bytes, n);
     }
     e->constraint_tag_possible = tag_ok;
     e->constraint_tag_match = tag_ok ? match : 0;
@@ -966,6 +1013,7 @@ static bool constraint_spelling_ok(engine *e, int id, bool schema) {
     const char *sp = tok_raw(e->tok, id);
     if (!sp || !*sp) return false;
     engine tmp = *e;
+    tmp.cdoc_rec = false;   // shallow copy: it must not touch e's recording
     int visible;
     return constraint_feed(&tmp, true, sp, (int)strlen(sp), &visible);
 }
@@ -1005,8 +1053,36 @@ static bool constraint_token_ok(engine *e, int id, bool schema) {
                constraint_done(e, schema) ||
                constraint_spelling_ok(e, id, schema);
     engine tmp = *e;
+    tmp.cdoc_rec = false;   // shallow copy: it must not touch e's recording
     int visible;
     return constraint_feed(&tmp, schema, buf, n, &visible);
+}
+
+// See engine.h. Replay, not rollback: the validator has no un-feed, but it is
+// a deterministic byte machine, so re-seating it on the delivered prefix of a
+// document it already accepted reproduces exactly the state the model would
+// have been in had it stopped there.
+int engine_constraint_truncate(engine *e, int n) {
+    if (!e || n <= 0 || (!e->schema && !e->json_mode)) return 0;
+    // Nothing was recorded (an allocation failure, or no payload yet), so
+    // there is no state to re-seat and the old behaviour stands.
+    if (!e->cdoc_rec || e->cdoc_n <= 0) return 0;
+    if (n > e->cdoc_n) n = e->cdoc_n;
+    int keep = e->cdoc_n - n;
+    bool schema = e->schema != NULL;
+    constraint_payload_reset(e, schema);   // clears cdoc_n
+    if (keep > 0) {
+        // Fed directly rather than through constraint_payload_feed: the
+        // whitespace suppression there is a rule about which TOKENS a
+        // constrained model may sample, and replay must reproduce the bytes
+        // the validator actually saw, not re-apply that rule to them.
+        bool ok = schema ? sval_feed(&e->sv, e->cdoc, keep)
+                         : jsonv_feed(&e->jv, e->cdoc, keep);
+        if (ok) e->cdoc_n = keep;
+        else constraint_payload_reset(e, schema); // unreachable: a prefix of an
+                                                  // accepted document is accepted
+    }
+    return n;
 }
 
 static bool schema_ok(void *ud, int id) {
@@ -1337,6 +1413,7 @@ static int grammar_draft(engine *e, int32_t *d, int max_d) {
 // budget expired mid-document: complete it so constrained output stays valid
 // JSON (the caller's finish_reason stays "length")
 static void constraint_close(engine *e, gen_cb cb, void *ud) {
+    e->constraint_closing = true;
     // A hard token ceiling may land inside the reasoning prelude. Preserve the
     // constrained-output contract by synthesizing the same minimal valid tail
     // used for an ordinary mid-document ceiling; reasoning tokens still count
@@ -1354,6 +1431,10 @@ static void constraint_close(engine *e, gen_cb cb, void *ud) {
         int cn = jsonv_close(&e->jv, cbuf, sizeof(cbuf));
         if (cn > 0 && cb) cb(ud, cbuf, cn);
     }
+    // the recorded document has served its only purpose; every generation ends
+    // here, so this is where it stops costing memory
+    cdoc_release(e);
+    e->constraint_closing = false;
 }
 
 static int engine_generate_spec(engine *e, float *logits, int max_new,
@@ -1532,9 +1613,13 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             // round — acceptance collapsed to ~zero)
             if (e->dpos > e->pos - 1) e->dpos = e->pos - 1;
             if (rc) {
-                if (gen_time) *gen_time = now_s() - t0;
-                SPEC_STATS();
-                return n_gen;
+                // An aborted callback is not only a client that left: a
+                // matched stop sequence arrives here too, and leaving by this
+                // door skipped the close entirely, so the caller was served a
+                // constrained document with no legal ending at all. The solo
+                // loop always closes (engine_gen_end does), and which loop
+                // served the request must not decide what the client gets.
+                goto done;
             }
             i = -1; // signal: already advanced
             break;
@@ -1677,8 +1762,14 @@ bool engine_wants_spec(const engine *e) {
 
 int engine_generate(engine *e, float *logits, int max_new,
                     gen_cb cb, void *ud, double *gen_time) {
-    if (engine_wants_spec(e))
-        return engine_generate_spec(e, logits, max_new, cb, ud, gen_time);
+    if (engine_wants_spec(e)) {
+        // the speculative walk has exits that bypass constraint_close (a
+        // completed document, a client that left); release here so no path
+        // out of a generation keeps the recording alive
+        int n = engine_generate_spec(e, logits, max_new, cb, ud, gen_time);
+        cdoc_release(e);
+        return n;
+    }
     engine_gen_begin(e, max_new);
     int32_t tok; int pos;
     while (engine_gen_step(e, logits, cb, ud, &tok, &pos) == ENGINE_STEP_MORE)
