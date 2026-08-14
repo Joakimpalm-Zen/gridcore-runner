@@ -95,7 +95,17 @@ def test_thinking_prelude_is_bounded_with_distinct_finish_reason(tmp_path):
     fixture_env["ORNITH_TEST_SEED"] = "1"  # deterministically emits prelude whitespace
     subprocess.run([sys.executable, os.path.join(root, "scripts", "make-test-ornith.py"),
                     str(model)], check=True, cwd=root, env=fixture_env)
-    srv = RunnerServer(find_runner(root), str(model), ctx=64, parallel=1,
+    # ctx=256, not the 64 the neighbouring tests use, and the difference is
+    # not padding. This test ASKS for the ornith template, and until runner
+    # 88837e8 `--chat-template` was parsed and then silently discarded under
+    # --serve -- so it actually ran against the fixture's auto-detected
+    # fallback, whose render of this conversation is 34 tokens. The ornith
+    # template renders the same conversation in 73. The flag works now, the
+    # prompt the test asked for no longer fits in 64, and the request 400s
+    # with context_length_exceeded before reaching the behaviour under test.
+    # The number was calibrated against a bug; this is what it should have
+    # been all along.
+    srv = RunnerServer(find_runner(root), str(model), ctx=256, parallel=1,
                        extra_args=["--gpu", "off", "--chat-template", "ornith"])
     srv.start()
     try:
@@ -158,7 +168,11 @@ def test_thinking_prelude_reason_survives_streaming(tmp_path):
     fixture_env["ORNITH_TEST_SEED"] = "1"
     subprocess.run([sys.executable, os.path.join(root, "scripts", "make-test-ornith.py"),
                     str(model)], check=True, cwd=root, env=fixture_env)
-    srv = RunnerServer(find_runner(root), str(model), ctx=64, parallel=1,
+    # ctx=256 for the reason spelled out in
+    # test_thinking_prelude_is_bounded_with_distinct_finish_reason: the ornith
+    # template this test forces renders 73 prompt tokens, not the 34 of the
+    # fallback it silently got while --chat-template was ignored under --serve.
+    srv = RunnerServer(find_runner(root), str(model), ctx=256, parallel=1,
                        extra_args=["--gpu", "off", "--chat-template", "ornith"])
     srv.start()
     try:
