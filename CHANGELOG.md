@@ -7,6 +7,38 @@ were written.
 
 ## Unreleased
 
+- **Correction to the entry below (2026-08-14).** Its claim of conformance to
+  the Harmony reference is narrower than stated. A first-ever conformance audit
+  of every chat template against its upstream reference found that runner puts
+  the `# Tools` namespace in the SYSTEM turn where the reference puts it in the
+  DEVELOPER turn, never emits `Calls to these tools must go to the commentary
+  channel: 'functions'.`, and makes `commentary` in `# Valid channels`
+  conditional on tools where the reference always lists it. The golden that
+  appeared to verify the placement was real openai-harmony output obtained
+  through the builtin-tool slot instead of the function-tool slot, so it
+  checked the namespace's contents and not its position. What WAS verified
+  against the reference stands: the TypeScript type rendering, the
+  `to=assistant` tool-result spelling, and the comment rules. The audit also
+  found pre-existing drift in mistral, llama2, ornith and the ChatML families,
+  none of it introduced by this work. Fixes and a conformance gate are in
+  progress; `scripts/template-conformance.py` is the measurement.
+- Prompt buffers are now measured rather than estimated. Every surface rendered
+  the Harmony tool namespace into a buffer whose size predated it, and `emit()`
+  truncates silently at its cap — dropping the TAIL, i.e. the newest user turn
+  and the generation header. Measured on gpt-oss-20b: a 120-byte tool
+  description made `/v1/responses` and `/v1/messages` answer about London when
+  asked about Oslo. `render_prompt_alloc` renders, checks whether the buffer
+  came back full, and grows until it provably fit.
+- A `stop` sequence no longer desynchronises constrained decoding. The
+  validator consumed bytes the sink dropped, so the synthesized closer
+  continued a document the client never received: `json_schema` + `stop`
+  returned invalid JSON, the closer was itself stop-filtered (so `stop:["}"]`
+  broke a `json_object` request even with no stop in the output), and the
+  speculative walk skipped closing entirely. `stop` alongside a strict tool
+  envelope is now a 400 rather than a silent downgrade.
+- Harmony tool results are attributed or refused, never invented. An
+  unresolvable id used to render `<|start|>tool` on two surfaces and a
+  fabricated `functions.call_1` on the third.
 - gpt-oss tool requests now use native OpenAI Harmony: official TypeScript
   tool declarations, channel-first commentary recipients, schema-constrained
   arguments, named/required/auto/none choices, response-format finals, native

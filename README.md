@@ -305,7 +305,7 @@ flags into unrelated feature sections.
 | `--rope-scale F` | Force linear rope position scaling. |
 | `--rope-base F` | Override the rope frequency base. |
 | `--system TEXT` | System prompt in interactive chat. |
-| `--chat-template NAME` | Force `chatml`, `llama2`, `llama3`, `mistral`, `zephyr`, `phi3`, `gemma`, `gemma4`, `apertus`, `ornith`, `muse`, `granite`, or `raw`; default is auto-detection. |
+| `--chat-template NAME` | Force `chatml`, `chatml-think`, `llama2`, `llama3`, `mistral`, `zephyr`, `phi3`, `gemma`, `gemma4`, `apertus`, `ornith`, `muse`, `granite`, `harmony`, or `raw`; default is auto-detection. |
 | `--no-bos` | Do not add the beginning-of-sequence token. |
 | `--ignore-eos` | Continue generation past end-of-text tokens. |
 
@@ -712,6 +712,17 @@ then repeats the call it was just answered before replying on the next round. A
 prose tool result fits inside the bound and answers directly. Lifting the bound
 is measured and worse, not untried:
 [docs/negative-result-harmony-analysis-bound.md](docs/negative-result-harmony-analysis-bound.md).
+
+> **Known deviation, measured 2026-08-14.** The reference renderer places the
+> `# Tools` namespace in the DEVELOPER turn, after `# Instructions`, and emits
+> `Calls to these tools must go to the commentary channel: 'functions'.` in the
+> system turn; it also lists `commentary` in `# Valid channels` whether or not
+> tools are declared. Runner does none of those three. The golden that appeared
+> to verify this placement was genuine openai-harmony output driven through the
+> builtin-tool slot rather than the function-tool slot, so it confirmed the
+> namespace's CONTENTS and not its position. A fix is in progress; until it
+> lands, treat the placement described above as runner's own, not the
+> reference's.
 
 For example, the usual OpenAI request needs no Runner-specific switch:
 
