@@ -1772,6 +1772,48 @@ static void test_muse_tool_result_id_resolves_prior_name(void) {
     jv_free(messages);
 }
 
+static void test_tool_result_id_survives_a_nameless_matching_call(void) {
+    // The matched call carries an id but no function name -- a shape a client
+    // can send and a translated Anthropic history can produce. Before the fix
+    // this returned NULL, i.e. finding the call was WORSE than not finding
+    // it: with no match at all the id is handed back and at least identifies
+    // the turn. Both cases must now reach the id.
+    const char *src =
+        "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_7\","
+        "\"type\":\"function\",\"function\":{\"arguments\":\"{}\"}}]},"
+        "{\"role\":\"tool\",\"tool_call_id\":\"call_7\",\"content\":\"sunny\"}]";
+    jv *messages = json_parse(src, strlen(src));
+    assert(messages != NULL);
+    const char *got = tool_result_name(messages, 1);
+    assert(got != NULL && !strcmp(got, "call_7"));
+    jv_free(messages);
+
+    // and an EMPTY name is the same case as an absent one
+    const char *empty =
+        "[{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_8\","
+        "\"type\":\"function\",\"function\":{\"name\":\"\"}}]},"
+        "{\"role\":\"tool\",\"tool_call_id\":\"call_8\",\"content\":\"x\"}]";
+    messages = json_parse(empty, strlen(empty));
+    assert(messages != NULL);
+    got = tool_result_name(messages, 1);
+    assert(got != NULL && !strcmp(got, "call_8"));
+    jv_free(messages);
+
+    // a LATER call with the same id and a real name wins over the nameless
+    // one, which is what "keep looking" buys beyond the id fallback
+    const char *later =
+        "[{\"role\":\"assistant\",\"tool_calls\":["
+        "{\"id\":\"call_9\",\"type\":\"function\",\"function\":{}},"
+        "{\"id\":\"call_9\",\"type\":\"function\","
+        "\"function\":{\"name\":\"weather.get\"}}]},"
+        "{\"role\":\"tool\",\"tool_call_id\":\"call_9\",\"content\":\"x\"}]";
+    messages = json_parse(later, strlen(later));
+    assert(messages != NULL);
+    got = tool_result_name(messages, 1);
+    assert(got != NULL && !strcmp(got, "weather.get"));
+    jv_free(messages);
+}
+
 // gemma-4 writes a call's arguments through its own `format_argument` macro
 // with escape_keys=False, NOT as JSON: bare object keys, strings delimited by
 // the <|"|> token and not escaped inside it, and `| dictsort` order, which
@@ -1906,6 +1948,7 @@ int main(void) {
     test_chatml_tool_result_renders_as_a_user_tool_response();
     test_muse_tools_and_result_golden();
     test_muse_tool_result_id_resolves_prior_name();
+    test_tool_result_id_survives_a_nameless_matching_call();
     test_gemma4_tool_history_uses_the_reference_argument_syntax();
     test_muse_parallel_tool_history_has_native_turn_boundaries();
     test_muse_tool_history_skips_bad_calls_without_leading_boundary();

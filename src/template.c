@@ -1779,7 +1779,18 @@ const char *tool_result_name(const jv *messages, int message_index) {
             const char *candidate = jv_str(jv_get(calls->items[k], "id"), NULL);
             if (!candidate || strcmp(candidate, id)) continue;
             jv *fn = jv_get(calls->items[k], "function");
-            return jv_str(jv_get(fn, "name"), NULL);
+            const char *fname = jv_str(jv_get(fn, "name"), NULL);
+            // A MATCH with no usable name keeps looking, and failing that
+            // falls through to the id below. Returning here instead -- which
+            // this did until 2026-08-14 -- made finding the call WORSE than
+            // not finding it: an unmatched id still resolves to the id
+            // itself, while a matched-but-nameless call resolved to NULL and
+            // the turn was rendered for the template's `unknown` fallback.
+            // server.c's harmony_result_name already scanned on for this
+            // reason; the two now agree on everything except the final id
+            // step, which Harmony deliberately does not take (it would author
+            // a turn as a function named after an identifier).
+            if (fname && fname[0]) return fname;
         }
     }
     return id[0] ? id : NULL;
