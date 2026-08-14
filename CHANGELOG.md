@@ -7,6 +7,19 @@ were written.
 
 ## Unreleased
 
+- The chat-template conformance gate now runs on Windows, where it had never
+  run at all: `scripts/template-conformance-render.c` included
+  `<sys/socket.h>` and called `socketpair()`, neither of which MinGW-w64 has,
+  so the driver failed to build and the gate covered two platforms while being
+  described as covering three. The driver now takes its socket headers from
+  `http.h` and opens a loopback pair on Windows. Behind that sat a second
+  fault that would have produced FALSE DRIFT rather than a crash:
+  `subprocess.run(capture_output=True, text=True)` returned `stdout is None`
+  for the 31KB job payload (returncode 0, stderr intact) while bytes mode
+  returned all 30604, and `text=True` decodes with the locale encoding — so on
+  a non-UTF-8 machine a byte-exact gate would have diffed mojibake against a
+  correct reference. Captures are bytes plus explicit UTF-8 now. macOS,
+  Linux/CUDA and Windows/MinGW report the same 20 known differences.
 - gemma4 tool requests now use the family's native protocol, and stay on the
   strict envelope while doing it. Declarations render as
   `<|tool>declaration:NAME{...}<tool|>` inside the caller's system turn (the
