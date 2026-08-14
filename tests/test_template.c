@@ -444,25 +444,103 @@ static void test_harmony_schema_nested_objects(void) {
         "}) => any;\n\n} // namespace functions");
 }
 
-// KNOWN DIVERGENCE, pinning runner's behaviour rather than the reference's.
-// openai-harmony abd677f7 prints a description with a single "// " prefix, so
-// a description containing a newline emits its continuation as a bare line in
-// the middle of the type — "// multi\nline desc\n". Runner comments every
-// line. Reproducing the reference here would mean emitting text that is not a
-// comment, so this stays as-is until someone decides the prompt contract needs
-// the reference's exact bytes more than it needs valid TypeScript.
-static void test_harmony_schema_multiline_description_is_commented(void) {
+// DELIBERATELY MIRRORS A KNOWN UPSTREAM QUIRK — do not "fix" this back.
+//
+// THE RULE: the TOOL-level description splits into one comment per line.
+// EVERY other description or title takes a single "// " prefix and is not
+// split. openai-harmony abd677f7:
+//     tool-level      for line in tool.description.lines()  encoding.rs:775-777
+//     object-level    format!("{indent}// {desc_str}\n")    encoding.rs:486-488
+//     property title  format!("{indent}// {t}\n{indent}//\n") encoding.rs:508-510
+//     property desc   format!("{indent}// {desc_str}\n")    encoding.rs:518
+//     oneOf property  format!("{indent}// {desc_str}\n")    encoding.rs:565
+// so a multi-line value at any of the four non-tool sites drops its
+// continuation into the type body as a bare, uncommented line — and the
+// continuation carries no indent, because the newline is inside the formatted
+// string rather than between two formatted lines. The official gpt-oss jinja
+// chat template does the same, which is what llama.cpp and LM Studio drive the
+// model with.
+//
+// That is invalid TypeScript, and it is nonetheless the contract: the owner's
+// call is cross-engine portability, so the same tool schema must produce the
+// same prompt bytes in runner as in llama.cpp. Commenting the continuation
+// lines here would make runner the odd one out. Every expected block below was
+// rendered through openai-harmony abd677f7 itself and copied byte-for-byte.
+static void test_harmony_schema_multiline_property_text_mirrors_reference(void) {
     assert_harmony_tool_ts(
         "[{\"type\":\"function\",\"function\":{\"name\":\"md\","
         "\"description\":\"Multi-line description\","
         "\"parameters\":{\"type\":\"object\",\"properties\":{"
-        "\"f\":{\"type\":\"string\",\"description\":\"multi\\nline desc\"}},"
+        "\"f\":{\"type\":\"string\",\"title\":\"TITLE one\\nTITLE two\","
+        "\"description\":\"multi\\nline desc\"}},"
         "\"required\":[\"f\"]}}}]",
         "namespace functions {\n\n// Multi-line description\n"
         "type md = (_: {\n"
+        "// TITLE one\n"
+        "TITLE two\n"
+        "//\n"
         "// multi\n"
-        "// line desc\n"
+        "line desc\n"
         "f: string,\n"
+        "}) => any;\n\n} // namespace functions");
+
+    // the description a oneOf property lifts above its own name takes the
+    // same single-prefix path in the reference (encoding.rs:565)
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"oo\","
+        "\"description\":\"OneOf multi\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"val\":{\"description\":\"one-of\\nspanning two\",\"oneOf\":["
+        "{\"type\":\"string\"},{\"type\":\"integer\"}]}},"
+        "\"required\":[\"val\"]}}}]",
+        "namespace functions {\n\n// OneOf multi\n"
+        "type oo = (_: {\n"
+        "// one-of\n"
+        "spanning two\n"
+        "val:\n"
+        " | string\n"
+        " | number\n"
+        ",\n"
+        "}) => any;\n\n} // namespace functions");
+
+    // An object schema's OWN description is the fourth non-tool site
+    // (encoding.rs:486-488). At the top level it lands between "(_: " and the
+    // opening brace, so the continuation line separates the two.
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"ob\","
+        "\"description\":\"Object level\","
+        "\"parameters\":{\"type\":\"object\","
+        "\"description\":\"OBJ one\\nOBJ two\",\"properties\":{"
+        "\"g\":{\"type\":\"string\"}},\"required\":[\"g\"]}}}]",
+        "namespace functions {\n\n// Object level\n"
+        "type ob = (_: // OBJ one\n"
+        "OBJ two\n"
+        "{\n"
+        "g: string,\n"
+        "}) => any;\n\n} // namespace functions");
+
+    // The same site at a non-empty indent, reached through a nested object.
+    // The reference prints the text TWICE — once as the property description
+    // and once as the nested object's own — and indents only the line that
+    // carries the "// " marker, so the second copy's continuation stays flush
+    // left both times.
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"nb\","
+        "\"description\":\"Nested level\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"inner\":{\"type\":\"object\","
+        "\"description\":\"INNER one\\nINNER two\",\"properties\":{"
+        "\"k\":{\"type\":\"string\"}},\"required\":[\"k\"]}},"
+        "\"required\":[\"inner\"]}}}]",
+        "namespace functions {\n\n// Nested level\n"
+        "type nb = (_: {\n"
+        "// INNER one\n"
+        "INNER two\n"
+        "inner:     // INNER one\n"
+        "INNER two\n"
+        "{\n"
+        "    k: string,\n"
+        "    },\n"
         "}) => any;\n\n} // namespace functions");
 }
 
@@ -533,6 +611,16 @@ static void test_harmony_schema_oneof_property(void) {
 // A continued tool conversation must replay the native recipient-bearing
 // assistant call and the named tool result. Generic <|tool_call> wrappers or a
 // role:"tool" message are both off-protocol for Harmony.
+//
+// The result turn carries ` to=assistant`. That recipient is not decoration:
+// openai-harmony resolves the author token BEFORE consuming the channel, and a
+// namespaced author like "functions.get_weather" is no known Role — it is
+// recognised as Role::Tool only through the recipient fallback branch
+// (encoding.rs:1386-1398). Without it the reference rejects the whole prompt
+// with `Unknown role: functions.get_weather`; with it the turn parses to
+// author.role=TOOL, name="functions.get_weather", channel="commentary",
+// recipient="assistant". The expected bytes below were produced by rendering
+// this same exchange through openai-harmony abd677f7's own renderer.
 static void test_harmony_tool_history_golden(void) {
     const char *src =
         "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
@@ -555,8 +643,60 @@ static void test_harmony_tool_history_golden(void) {
         "<|start|>user<|message|>Weather?<|end|>"
         "<|start|>assistant to=functions.get_weather<|channel|>commentary "
         "<|constrain|>json<|message|>{\"city\":\"Oslo\"}<|call|>"
-        "<|start|>functions.get_weather<|channel|>commentary<|message|>"
-        "{\"temp\":4}<|end|><|start|>assistant") != NULL);
+        "<|start|>functions.get_weather to=assistant<|channel|>commentary"
+        "<|message|>{\"temp\":4}<|end|><|start|>assistant") != NULL);
+    jv_free(tools);
+}
+
+// The analysis body may legally CONTAIN the handoff text. Inside a free-text
+// region the constraint masks the control tokens, so the model types the
+// handoff byte-by-byte as ordinary characters — that is the normal path, not an
+// exotic one. schema.c bounds the analysis region with the 36-byte
+// "<|end|><|start|>assistant<|channel|>", so a bare "<|end|><|start|>assistant"
+// NOT followed by "<|channel|>" is accepted as body text. The mapper must use
+// the same 36-byte sentinel; with the shorter 25-byte one it stops at the first
+// occurrence, the following final/call_prefix compares both miss, and a
+// schema-legal document maps to -1.
+static void test_harmony_analysis_body_may_contain_the_handoff_text(void) {
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"add\","
+        "\"description\":\"Add\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"a\":{\"type\":\"integer\"},"
+        "\"b\":{\"type\":\"integer\"}},\"required\":[\"a\",\"b\"]}}}]";
+    jv *tools = json_parse(src, strlen(src));
+    assert(tools != NULL);
+    tool_envelope e;
+    char err[192];
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+    e.harmony = true;
+    e.tools = tools;
+
+    sbuf reason = {0}, content = {0}, calls = {0};
+    const char *doc =
+        "<|channel|>analysis<|message|>quoting "
+        "<|end|><|start|>assistantX"
+        "<|end|><|start|>assistant<|channel|>commentary to=functions.add"
+        "<|constrain|>json<|message|>{\"a\":1,\"b\":2}";
+    assert(tool_envelope_map_channels(&e, doc, strlen(doc), &reason,
+                                      &content, &calls) == 1);
+    assert(!strcmp(reason.s, "quoting <|end|><|start|>assistantX"));
+    assert(content.n == 0);
+    assert(strstr(calls.s, "\"name\":\"add\"") != NULL);
+    assert(strstr(calls.s, "{\\\"a\\\":1,\\\"b\\\":2}") != NULL);
+    free(reason.s); free(content.s); free(calls.s);
+
+    // the ordinary handoff still maps, so the wider sentinel did not simply
+    // move the failure to the common case
+    reason = (sbuf){0}; content = (sbuf){0}; calls = (sbuf){0};
+    doc = "<|channel|>analysis<|message|>Need arithmetic."
+          "<|end|><|start|>assistant<|channel|>final<|message|>3<|return|>";
+    assert(tool_envelope_map_channels(&e, doc, strlen(doc), &reason,
+                                      &content, &calls) == 0);
+    assert(!strcmp(reason.s, "Need arithmetic."));
+    assert(!strcmp(content.s, "3"));
+    free(reason.s); free(content.s); free(calls.s);
+
+    tool_envelope_free(&e);
     jv_free(tools);
 }
 
@@ -919,10 +1059,11 @@ int main(void) {
     test_harmony_schema_type_array_and_nullable();
     test_harmony_schema_comments_and_defaults();
     test_harmony_schema_nested_objects();
-    test_harmony_schema_multiline_description_is_commented();
+    test_harmony_schema_multiline_property_text_mirrors_reference();
     test_harmony_schema_oneof_toplevel();
     test_harmony_schema_oneof_property();
     test_harmony_tool_history_golden();
+    test_harmony_analysis_body_may_contain_the_handoff_text();
     test_harmony_reasoning_preamble_and_parallel_history();
     test_harmony_thinking_controls_the_primed_channel();
     test_harmony_split_hides_analysis_from_content();

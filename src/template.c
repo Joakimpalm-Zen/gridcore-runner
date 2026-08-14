@@ -224,6 +224,24 @@ static bool harmony_required(jv *schema, const char *name) {
     return false;
 }
 
+// THE COMMENTING RULE, in one place so nobody has to rediscover it site by
+// site: the TOOL-level description splits into one "// " comment per line
+// (harmony_comment_lines, below); EVERY other description or title in the
+// namespace takes a single "// " prefix and is not split
+// (harmony_comment_once). Those other four sites are the object schema's own
+// description, a property's title, a property's description, and the
+// description a oneOf property lifts above its own name.
+//
+// The reference is what makes the rule, not taste: openai-harmony abd677f7
+// splits only at encoding.rs:775-777 and uses a single format! at
+// encoding.rs:486-488, 508-510, 518 and 565. A multi-line value at any of the
+// four therefore drops its continuation into the type body as a bare,
+// uncommented, unindented line. That is invalid TypeScript and it is
+// deliberately reproduced: the goal is one prompt per tool schema across
+// engines rather than a runner-specific spelling, so conformance is measured
+// against openai-harmony, the protocol's reference implementation, and not
+// against what would read better as TypeScript. Commenting the continuations
+// would make runner the odd engine out.
 static void harmony_comment_lines(sbuf *out, const char *indent,
                                   const char *text) {
     if (!text || !*text) return;
@@ -236,6 +254,15 @@ static void harmony_comment_lines(sbuf *out, const char *indent,
         if (!nl) break;
         p = nl + 1;
     }
+}
+
+// One "// " prefix for the whole text, newlines and all — the non-tool half of
+// the commenting rule above. Only the marker line is indented, matching the
+// reference's single format!.
+static void harmony_comment_once(sbuf *out, const char *indent,
+                                 const char *text) {
+    if (!text || !*text) return;
+    sb_fmt(out, "%s// %s\n", indent, text);
 }
 
 static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out);
@@ -331,7 +358,7 @@ static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out) {
     const char *type = jv_str(tv, "any");
     if (!strcmp(type, "object")) {
         const char *desc = jv_str(jv_get(schema, "description"), NULL);
-        if (desc) harmony_comment_lines(out, indent, desc);
+        if (desc) harmony_comment_once(out, indent, desc);
         sb_lit(out, "{\n");
         jv *props = jv_get(schema, "properties");
         if (props && props->type == J_OBJ) {
@@ -347,12 +374,12 @@ static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out) {
                     harmony_required(schema, props->keys[i]) ? "" : "?";
                 const char *title = jv_str(jv_get(p, "title"), NULL);
                 if (title) {
-                    harmony_comment_lines(out, indent, title);
+                    harmony_comment_once(out, indent, title);
                     sb_fmt(out, "%s//\n", indent);
                 }
                 const char *pd = jv_str(jv_get(p, "description"), NULL);
                 if (pd && !pone)
-                    harmony_comment_lines(out, indent, pd);
+                    harmony_comment_once(out, indent, pd);
                 jv *examples = jv_get(p, "examples");
                 if (examples && examples->type == J_ARR && examples->n) {
                     sb_fmt(out, "%s// Examples:\n", indent);
@@ -375,7 +402,7 @@ static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out) {
                                          NULL)
                                 : NULL;
                     bool desc_above = pd && !(v0d && !strcmp(pd, v0d));
-                    if (desc_above) harmony_comment_lines(out, indent, pd);
+                    if (desc_above) harmony_comment_once(out, indent, pd);
                     if (dflt) {
                         sb_fmt(out, "%s// ", indent);
                         harmony_default_text(out, dflt, p, true);
@@ -631,7 +658,14 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             } else if (!strcmp(mm->role, "tool") && mm->name && mm->name[0]) {
                 const char *prefix = !strncmp(mm->name, "functions.", 10)
                                    ? "" : "functions.";
-                off = emit(out, cap, off, "<|start|>%s%s<|channel|>commentary",
+                // ` to=assistant` is load-bearing, not decoration. The
+                // reference resolves the author token BEFORE it consumes the
+                // channel, and a namespaced author ("functions.NAME") matches
+                // no known role; it is accepted as Role::Tool only via the
+                // recipient fallback branch. Drop the recipient and the whole
+                // prompt fails to parse with "Unknown role: functions.NAME".
+                off = emit(out, cap, off,
+                           "<|start|>%s%s to=assistant<|channel|>commentary",
                            prefix, mm->name);
                 off = emit(out, cap, off, "<|message|>%s<|end|>",
                            mm->content, NULL);
@@ -1605,13 +1639,22 @@ static int harmony_map(const tool_envelope *e, const char *doc, size_t n,
     static const char commentary[] = "<|channel|>commentary<|message|>";
     static const char final[] = "<|channel|>final<|message|>";
     static const char handoff_text[] = "<|end|><|start|>assistant";
+    // The analysis region is bounded in schema.c by the LONGER form, the one
+    // that already names a channel. Searching for the short form here would
+    // stop at the first "<|end|><|start|>assistant" the model typed as body
+    // text — legal under the schema, since inside a free-text region the
+    // control tokens are masked and the handoff can only be spelled out
+    // byte-by-byte — and then fail every following compare. Only the search
+    // uses the longer form; p still advances by the short one, so "<|channel|>"
+    // is left in place for the final/call_prefix compares below.
+    static const char handoff_channel[] = "<|end|><|start|>assistant<|channel|>";
     static const char call_prefix[] =
         "<|channel|>commentary to=functions.";
     static const char call_header[] = "<|constrain|>json<|message|>";
     if ((size_t)(end - p) >= sizeof(analysis) - 1 &&
         !memcmp(p, analysis, sizeof(analysis) - 1)) {
         p += sizeof(analysis) - 1;
-        const char *handoff = atem_find(p, end, handoff_text);
+        const char *handoff = atem_find(p, end, handoff_channel);
         if (!handoff) return -1;
         if (reasoning) sb_put(reasoning, p, (size_t)(handoff - p));
         p = handoff + sizeof(handoff_text) - 1;
