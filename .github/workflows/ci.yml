@@ -702,3 +702,43 @@ jobs:
         with:
           name: consumer-compatibility-report
           path: tests/compatibility/out/consumers.json
+
+  # Chat-template conformance: runner renders chat templates natively in C, so
+  # the ONLY thing standing between a family and silent drift is a comparison
+  # against the model's own jinja template. The `unix` job above builds and
+  # runs tests/test_template.c, but that gate cannot find drift: its goldens
+  # were written from runner's own output, so it proves self-consistency and
+  # nothing else. That is precisely how 30 real differences accumulated across
+  # 8 families unnoticed. This job is the oracle.
+  #
+  # It gets its own job rather than a step in `unix`, for two reasons:
+  #   - it is the one gate here that talks to a third party (huggingface.co).
+  #     Isolated, a red here is unambiguous and does not tar the build matrix.
+  #   - it reports three outcomes, not two: exit 2 means NOT CHECKED (oracle
+  #     unreachable), never "conformant". Read the summary line before
+  #     assuming a red is drift. The fetch already retries 3x on transport
+  #     errors, so a red is more likely real than not.
+  #
+  # --network-only restricts it to the families whose reference is fetched
+  # over HTTP. gemma/gemma4/granite/harmony read their template out of a
+  # multi-GB local GGUF and are simply not checkable on a CI runner; asking
+  # for them would guarantee a permanent exit 2. Those four are covered by
+  # `make template-conformance` on a dev box with models/, and their backlog
+  # stays recorded in scripts/template-conformance-baseline.json either way.
+  template-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: install jinja2
+        # jinja2 renders the REFERENCE side. Without it nothing is compared,
+        # and the harness says so (exit 2) instead of passing.
+        run: |
+          python3 -m venv .tmpl-venv
+          .tmpl-venv/bin/python -m pip install --quiet jinja2
+      - name: runner C renderer vs upstream jinja templates
+        run: .tmpl-venv/bin/python scripts/template-conformance.py --network-only
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: template-oracles
+          path: .build/template-oracles/

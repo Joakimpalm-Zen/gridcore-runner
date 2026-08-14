@@ -1083,6 +1083,54 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 		echo "Python client tests skipped: pytest is not installed; install it with '$(PYTHON) -m pip install pytest'"; \
 	fi
 
+# --------------------------------------------------------------------------
+# Template conformance: runner's native C chat renderer vs the model's OWN
+# jinja chat template, byte for byte.
+#
+# Runner renders chat templates in C rather than executing jinja. That is
+# deliberate, but it makes silent drift the DEFAULT failure mode, and
+# tests/test_template.c cannot catch it: its goldens were written from
+# runner's own output, so they prove self-consistency and nothing else. This
+# target is the missing oracle.
+#
+# NOT part of `make test`, on purpose. Three reasons, in order of weight:
+#
+#   1. It needs an oracle that is not in the tree. The HF-backed families are
+#      fetched over the network; the rest are read out of multi-GB GGUFs under
+#      models/. `make test` is the offline gate, and a gate that goes red
+#      because huggingface.co blinked is a gate people learn to ignore --
+#      which is exactly how the goldens rotted in the first place.
+#   2. The cache cannot rescue it either: the oracles live under .build/, and
+#      `make clean` wipes .build. `make clean && make test` would therefore
+#      always need the network back.
+#   3. It reports THREE outcomes, not two (exit 2 = "not checked"), because an
+#      unavailable oracle must never be counted as conformance. `make test` is
+#      binary. Folding a three-state gate into it loses the state that matters.
+#
+# So it gets its own target, and CI runs it as its own job (.github/workflows/
+# ci.yml, job `template-conformance`) restricted to the network-backed
+# families, where a red is unambiguous.
+#
+#   make template-conformance           run the gate (fetches missing oracles)
+#   make template-conformance-refresh   re-fetch every oracle first
+#   make template-conformance-baseline  re-record the known-difference backlog
+#
+# The backlog (scripts/template-conformance-baseline.json) holds the
+# differences that are BUGS. The gate fails on NEW drift; the backlog keeps
+# the existing ones counted and visible instead of quietly allowlisted.
+# Intentional deviations go in scripts/template-conformance-allowlist.json,
+# and only with a source citation the harness re-verifies on every run.
+TEMPLATE_CONFORMANCE = scripts/template-conformance.py
+
+template-conformance:
+	$(PYTHON) $(TEMPLATE_CONFORMANCE)
+
+template-conformance-refresh:
+	$(PYTHON) $(TEMPLATE_CONFORMANCE) --refresh
+
+template-conformance-baseline:
+	$(PYTHON) $(TEMPLATE_CONFORMANCE) --write-baseline
+
 smoke: runner test.gguf
 	./$(RUNNER_EXE) --version
 	./$(RUNNER_EXE) --caps
@@ -1254,4 +1302,5 @@ test-makefile-sane:
 	echo "makefile ok (no discarded recipes)"
 
 
+.PHONY: template-conformance template-conformance-refresh template-conformance-baseline
 .PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard

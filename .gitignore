@@ -4,6 +4,14 @@ runner-no-write-timeout
 runner-sigpipe-default
 runner-debug
 runner-debug.exe
+# build scratch. Also holds .build/template-oracles/ — the upstream jinja chat
+# templates `make template-conformance` fetches to compare runner's native C
+# renderer against. They are vendor files under each model's own license, so
+# they are cached, never committed; the sha256 of each one IS committed, in
+# scripts/template-conformance-baseline.json, so an upstream change is still
+# visible. NOTE `make clean` removes this whole directory, which means the
+# next conformance run re-fetches (network, plus models/ for the GGUF-sourced
+# families). That is why the gate is not wired into `make test`.
 .build/
 test-json-schema
 test-json-schema.exe

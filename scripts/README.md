@@ -9,6 +9,14 @@ runner; several are load-bearing gates for changing it.
   baseline and a candidate binary on 5 prompts. A faster binary that changes
   tokens is a regression, not a win.
 - **`kernel-bench.py`** — prefill/decode tok/s as JSON for one binary+model.
+- **`template-conformance.py`** — byte-exact comparison of runner's native C
+  chat renderer against each family's upstream jinja template, the gate whose
+  absence let five families drift unnoticed. `make template-conformance`.
+  Intentional deviations live in `template-conformance-allowlist.json`, each
+  carrying a source citation the gate re-verifies and fails on when it rots;
+  known differences awaiting fixes live in
+  `template-conformance-baseline.json`, which should only ever shrink. Exit 2
+  means NOT CHECKED (no jinja2, no network, no oracle) and is never a pass.
 - **`compat_matrix.py`** — verify pinned real-model hashes and emit architecture
   load/inference evidence without committing the GGUFs.
 - **`consumer_compat.py`** — run pinned OpenAI/Anthropic SDK, LiteLLM and

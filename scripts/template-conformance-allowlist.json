@@ -1,0 +1,260 @@
+{
+  "version": 1,
+  "_README": [
+    "INTENTIONAL deviations of runner's native C chat renderer from a family's",
+    "upstream jinja chat template. Read by scripts/template-conformance.py, which",
+    "applies each `patch` to the ORACLE text before the byte comparison, so what",
+    "remains in the diff is UNEXPLAINED.",
+    "",
+    "An entry here is a claim that runner is right and the reference is not being",
+    "followed ON PURPOSE. That claim has to be checkable, so every entry MUST",
+    "carry a `cite` naming the source file, the line range, and an `anchor` -- a",
+    "literal substring that must still be found inside that range. The harness",
+    "verifies all three on every run.",
+    "",
+    "Three ways an entry rots, all of them reported as gate failures:",
+    "  STALE CITATION  the anchor is no longer in the cited line range (the",
+    "                  harness prints where the anchor moved to, if anywhere)",
+    "  DEAD CITATION   the anchor is gone from the file entirely -- the reason",
+    "                  this deviation was allowed no longer exists in the code",
+    "  UNUSED          the patch never fired in any case, so runner no longer",
+    "                  takes this deviation and the entry is stale permission",
+    "",
+    "What does NOT belong here: a difference nobody can justify. That is an",
+    "unfixed bug; it goes in scripts/template-conformance-baseline.json with a",
+    "status, and it stays visible until someone fixes it."
+  ],
+  "patch_ops": {
+    "strip-bos": "remove the family's own bos_token from the front of the oracle render",
+    "drop-first-match": "delete the first regex match ('pattern', optional 'dotall')",
+    "builtin": "a named non-declarative patch implemented in the harness ('name')"
+  },
+  "deviations": [
+    {
+      "id": "llama2/bos",
+      "family": "llama2",
+      "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "BOS is added by the tokenizer,"
+      },
+      "corroborating_cite": {
+        "file": "src/tokenizer.c",
+        "lines": "1135-1140",
+        "anchor": "if (add_bos && t->add_bos && t->bos_id >= 0 && n_out < cap)"
+      },
+      "patch": {
+        "op": "strip-bos"
+      }
+    },
+    {
+      "id": "llama3/bos",
+      "family": "llama3",
+      "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "BOS is added by the tokenizer,"
+      },
+      "corroborating_cite": {
+        "file": "src/tokenizer.c",
+        "lines": "1135-1140",
+        "anchor": "if (add_bos && t->add_bos && t->bos_id >= 0 && n_out < cap)"
+      },
+      "patch": {
+        "op": "strip-bos"
+      }
+    },
+    {
+      "id": "llama3/cutting-knowledge-header",
+      "family": "llama3",
+      "why": "Llama-3.2's reference system turn carries 'Cutting Knowledge Date' plus a strftime_now() 'Today Date'. Runner does not embed a live date in a prompt: it is not model behaviour, it is wall-clock leakage, and it defeats the prefix cache by changing the prompt prefix every midnight.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "runner does not embed a live date in a prompt"
+      },
+      "patch": {
+        "op": "drop-first-match",
+        "pattern": "Cutting Knowledge Date: December 2023\nToday Date: [^\n]*\n\n"
+      }
+    },
+    {
+      "id": "llama3/empty-system-turn",
+      "family": "llama3",
+      "why": "Consequence of llama3/cutting-knowledge-header: with the date header gone and no caller system message, the reference's system turn has no content left. Runner emits no turn at all rather than an empty one. This entry exists only to keep the residue of another deviation from reading as drift; it is not an independent decision.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "runner does not embed a live date in a prompt"
+      },
+      "depends_on": "llama3/cutting-knowledge-header",
+      "patch": {
+        "op": "drop-first-match",
+        "pattern": "^<\\|start_header_id\\|>system<\\|end_header_id\\|>\n\n<\\|eot_id\\|>"
+      }
+    },
+    {
+      "id": "gemma/bos",
+      "family": "gemma",
+      "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "BOS is added by the tokenizer,"
+      },
+      "corroborating_cite": {
+        "file": "src/tokenizer.c",
+        "lines": "1135-1140",
+        "anchor": "if (add_bos && t->add_bos && t->bos_id >= 0 && n_out < cap)"
+      },
+      "patch": {
+        "op": "strip-bos"
+      }
+    },
+    {
+      "id": "gemma4/bos",
+      "family": "gemma4",
+      "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "BOS is added by the tokenizer,"
+      },
+      "corroborating_cite": {
+        "file": "src/tokenizer.c",
+        "lines": "1135-1140",
+        "anchor": "if (add_bos && t->add_bos && t->bos_id >= 0 && n_out < cap)"
+      },
+      "patch": {
+        "op": "strip-bos"
+      }
+    },
+    {
+      "id": "mistral/bos",
+      "family": "mistral",
+      "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "BOS is added by the tokenizer,"
+      },
+      "corroborating_cite": {
+        "file": "src/tokenizer.c",
+        "lines": "1135-1140",
+        "anchor": "if (add_bos && t->add_bos && t->bos_id >= 0 && n_out < cap)"
+      },
+      "patch": {
+        "op": "strip-bos"
+      }
+    },
+    {
+      "id": "apertus/bos",
+      "family": "apertus",
+      "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "BOS is added by the tokenizer,"
+      },
+      "corroborating_cite": {
+        "file": "src/tokenizer.c",
+        "lines": "1135-1140",
+        "anchor": "if (add_bos && t->add_bos && t->bos_id >= 0 && n_out < cap)"
+      },
+      "patch": {
+        "op": "strip-bos"
+      }
+    },
+    {
+      "id": "apertus/default-system-with-live-date",
+      "family": "apertus",
+      "why": "With no caller system message the Apertus reference substitutes a default one built around strftime_now('%Y-%m-%d'); runner omits it for the same reason as llama3's date header. NOTE the omission is WIDER than the date: the whole default system turn goes, including the 'You are Apertus...' identity line and the knowledge-cutoff line. That is a deliberate scope choice (runner does not invent a persona the caller did not ask for), but it is a bigger deviation than the cited comment's wording suggests on its own.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "when there is no system message the reference"
+      },
+      "patch": {
+        "op": "drop-first-match",
+        "pattern": "^<\\|system_start\\|>You are Apertus.*?<\\|system_end\\|>",
+        "dotall": true
+      }
+    },
+    {
+      "id": "muse/bos",
+      "family": "muse",
+      "why": "BOS is not spelled into runner's templates at all: the tokenizer prepends it at encode time from tokenizer.ggml.add_bos_token, so a template that also emitted it would double it.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "BOS is added by the tokenizer,"
+      },
+      "corroborating_cite": {
+        "file": "src/tokenizer.c",
+        "lines": "1135-1140",
+        "anchor": "if (add_bos && t->add_bos && t->bos_id >= 0 && n_out < cap)"
+      },
+      "patch": {
+        "op": "strip-bos"
+      }
+    },
+    {
+      "id": "muse/current-date",
+      "family": "muse",
+      "why": "muse-glimmer's default system block carries a 'Current date:' line; runner omits it, same live-date-in-a-prompt reasoning as llama3 and apertus. CAVEAT, recorded on purpose: the cited comment says the line 'is conditional in the template (current_date is defined)'. Under transformers it is NOT conditional -- the template falls back to strftime_now -- so the STATED reason is inaccurate even though the omission is deliberate and consistent with the other families. The comment should be corrected in src/template.c; this entry stays valid on the live-date policy alone.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "751-766",
+        "anchor": "current_date is defined"
+      },
+      "patch": {
+        "op": "drop-first-match",
+        "pattern": "\nCurrent date: \\d{4}-\\d{2}-\\d{2}\\."
+      }
+    },
+    {
+      "id": "harmony/knowledge-cutoff-and-date",
+      "family": "harmony",
+      "why": "The harmony reference system turn carries 'Knowledge cutoff' and a strftime_now() 'Current date'. Runner omits both: same live-date policy as llama3, apertus and muse.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "582-587",
+        "anchor": "runner does not embed a live date in a prompt"
+      },
+      "patch": {
+        "op": "drop-first-match",
+        "pattern": "Knowledge cutoff: 2024-06\nCurrent date: \\d{4}-\\d{2}-\\d{2}\n"
+      }
+    },
+    {
+      "id": "harmony/primed-analysis-channel",
+      "family": "harmony",
+      "why": "The reference generation prompt is the bare '<|start|>assistant'. Runner primes '<|channel|>analysis<|message|>' instead, because the decoded open marker is the bare word 'analysis' -- far too common to hunt for in a free stream -- and priming lets the channel splitter start already inside reasoning. Only WITHOUT tools: with tools runner leaves the header bare so the constrained recipient stays reachable, which the builtin mirrors.",
+      "cite": {
+        "file": "src/template.c",
+        "lines": "731-746",
+        "anchor": "Priming lets the splitter start already inside"
+      },
+      "patch": {
+        "op": "builtin",
+        "name": "harmony-prime-analysis"
+      }
+    },
+    {
+      "id": "chatml/qwen-default-system",
+      "family": "chatml",
+      "why": "Qwen2.5's template injects its own house system prompt ('You are Qwen, created by Alibaba Cloud...') when the caller sends none. TMPL_CHATML is the GENERIC ChatML renderer -- the shared path for every <|im_start|> model, which is exactly why TMPL_CHATML_THINK was split off it rather than duplicated -- so a Qwen-specific persona cannot be baked into it. Qwen2.5 is only the concrete checkpoint the oracle is read from.",
+      "cite": {
+        "file": "src/template.h",
+        "lines": "18-25",
+        "anchor": "into the same generic path TMPL_CHATML does."
+      },
+      "patch": {
+        "op": "drop-first-match",
+        "pattern": "^<\\|im_start\\|>system\nYou are Qwen, created by Alibaba Cloud\\. You are a helpful assistant\\.<\\|im_end\\|>\n"
+      }
+    }
+  ]
+}

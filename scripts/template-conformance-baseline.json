@@ -1,0 +1,377 @@
+{
+  "version": 1,
+  "_README": [
+    "KNOWN DIFFERENCES between runner's native C renderer and each",
+    "family's upstream jinja template. These are BUGS AWAITING FIXES,",
+    "not intentional deviations -- intentional deviations live in",
+    "scripts/template-conformance-allowlist.json with a citation, and",
+    "never appear here.",
+    "",
+    "This file exists so the gate is useful TODAY: it fails on NEW",
+    "drift while the pre-existing backlog stays visible and counted.",
+    "Every entry is a bug ticket. The file should only ever shrink.",
+    "",
+    "Regenerate after fixing (or after deliberately changing) a case:",
+    "    make template-conformance-baseline",
+    "`status` and `note` are preserved across regeneration; the",
+    "digest and excerpts are recomputed.",
+    "",
+    "`digest` fingerprints the (reference, runner) pair, with today's",
+    "date neutralised. If it moves, the difference changed SHAPE and",
+    "the gate says CHANGED rather than quietly accepting a second bug",
+    "hiding behind the first.",
+    "",
+    "`oracles` pins the sha256 of each upstream template this backlog",
+    "was recorded against. If upstream moves, the gate says so."
+  ],
+  "status_values": {
+    "open": "a bug nobody is working on right now",
+    "in-progress": "someone is actively fixing this; see `note`"
+  },
+  "generated_by": "scripts/template-conformance.py --write-baseline",
+  "generated_at": "2026-08-14T09:00:14+00:00",
+  "oracles": {
+    "apertus": {
+      "source": "hf:swiss-ai/Apertus-8B-Instruct-2509",
+      "sha256": "56f72c27fa2e5653"
+    },
+    "chatml": {
+      "source": "hf:Qwen/Qwen2.5-7B-Instruct",
+      "sha256": "cd8e9439f0570856"
+    },
+    "chatml-think": {
+      "source": "hf:Qwen/Qwen3-4B",
+      "sha256": "a55ee1b1660128b7"
+    },
+    "gemma": {
+      "source": "gguf:models/google_gemma-3-4b-it-Q4_K_M.gguf",
+      "sha256": "7de1c58e208eda46"
+    },
+    "gemma4": {
+      "source": "gguf:models/e2b-q40.gguf",
+      "sha256": "0a2c8073c878ab1d"
+    },
+    "granite": {
+      "source": "gguf:models/granite-4.1-8b-Q4_0.gguf",
+      "sha256": "fed2756d2d24e127"
+    },
+    "harmony": {
+      "source": "gguf:models/gpt-oss-20b-MXFP4.gguf",
+      "sha256": "a4c9919cbbd4acdd"
+    },
+    "llama2": {
+      "source": "hf:unsloth/llama-2-7b-chat",
+      "sha256": "e8d5b5a546d3f19d"
+    },
+    "llama3": {
+      "source": "hf:unsloth/Llama-3.2-3B-Instruct",
+      "sha256": "5816fce10444e03c"
+    },
+    "mistral": {
+      "source": "hf:mistralai/Mistral-7B-Instruct-v0.3",
+      "sha256": "e16746b40344d6c5"
+    },
+    "muse": {
+      "source": "hf:meta-models/Muse-Glimmer-30B",
+      "sha256": "cfc67e5f349f3769"
+    },
+    "ornith": {
+      "source": "hf:ornith-ai/Ornith-1.0-9B",
+      "sha256": "8b4d21a1e70ccbc8"
+    },
+    "phi3": {
+      "source": "hf:microsoft/Phi-3.5-mini-instruct",
+      "sha256": "78d976a442bcde2f"
+    },
+    "zephyr": {
+      "source": "hf:HuggingFaceH4/zephyr-7b-beta",
+      "sha256": "66291cf0045c2425"
+    }
+  },
+  "known_differences": [
+    {
+      "id": "chatml-think/tool-call+result",
+      "status": "open",
+      "note": "Same as chatml/tool-call+result -- identical digest, same generic tool protocol substituted for Qwen's native one. Fixing one should fix both.",
+      "digest": "5858abfe7268ea17",
+      "allowlist_applied": [],
+      "first_diff_at": 23,
+      "reference_excerpt": "'m_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functions '",
+      "runner_excerpt": "'m_start|>system\\nYou have these tools available. To call one, reply with exactly <|tool_cal'"
+    },
+    {
+      "id": "chatml-think/trailing-assistant+gen",
+      "status": "open",
+      "note": "Qwen3 emits '<think>\\n\\n</think>\\n\\n' in front of a HISTORICAL assistant message's content (its template strips reasoning out of history and leaves the empty block behind). Runner emits the content bare, so a replayed conversation does not look to the model like the ones it was trained on.",
+      "digest": "038faa5383849669",
+      "allowlist_applied": [],
+      "first_diff_at": 72,
+      "reference_excerpt": "'im_start|>assistant\\n<think>\\n\\n</think>\\n\\nBlue, because of Rayleigh scattering.<|im_end|>\\n<|i'",
+      "runner_excerpt": "'im_start|>assistant\\nBlue, because of Rayleigh scattering.<|im_end|>\\n<|im_start|>assistant\\n'"
+    },
+    {
+      "id": "chatml-think/trailing-assistant-nogen",
+      "status": "open",
+      "note": "Same bug as chatml-think/trailing-assistant+gen, without the generation prompt.",
+      "digest": "55f862a8ce6a9e6b",
+      "allowlist_applied": [],
+      "first_diff_at": 72,
+      "reference_excerpt": "'im_start|>assistant\\n<think>\\n\\n</think>\\n\\nBlue, because of Rayleigh scattering.<|im_end|>\\n'",
+      "runner_excerpt": "'im_start|>assistant\\nBlue, because of Rayleigh scattering.<|im_end|>\\n'"
+    },
+    {
+      "id": "chatml/tool-call+result",
+      "status": "open",
+      "note": "Tool declarations: the reference builds Qwen's native '# Tools' block with <tools>...</tools> JSON and a <tool_call> reply protocol. Runner emits its own generic '<|tool_call>call:NAME{args}<tool_call|>' protocol instead (src/server.c tools_render_for + tool_history_render_for). A protocol the model was not trained on is a real functional gap, not a formatting one.",
+      "digest": "5858abfe7268ea17",
+      "allowlist_applied": [],
+      "first_diff_at": 23,
+      "reference_excerpt": "'m_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functions '",
+      "runner_excerpt": "'m_start|>system\\nYou have these tools available. To call one, reply with exactly <|tool_cal'"
+    },
+    {
+      "id": "harmony/system+multiturn+gen",
+      "status": "in-progress",
+      "note": "The system turn's '# Valid channels' list omits 'commentary': runner emits 'analysis, final', the reference 'analysis, commentary, final'. Harmony puts tool calls on the commentary channel, so a model told the channel is not valid is being contradicted by its own tool protocol. BEING FIXED right now by another agent -- expect these digests to move; re-run 'make template-conformance-baseline' after the fix lands.",
+      "digest": "25a985c73107701b",
+      "allowlist_applied": [
+        "knowledge-cutoff-and-date",
+        "primed-analysis-channel"
+      ],
+      "first_diff_at": 275,
+      "reference_excerpt": "'a helpful assistant.\\n\\n<|end|><|start|>user<|message|>What color is the sky?<|end|><|start|'",
+      "runner_excerpt": "'a helpful assistant.<|end|><|start|>user<|message|>What color is the sky?<|end|><|start|>a'"
+    },
+    {
+      "id": "harmony/system+user+gen",
+      "status": "in-progress",
+      "note": "The system turn's '# Valid channels' list omits 'commentary': runner emits 'analysis, final', the reference 'analysis, commentary, final'. Harmony puts tool calls on the commentary channel, so a model told the channel is not valid is being contradicted by its own tool protocol. BEING FIXED right now by another agent -- expect these digests to move; re-run 'make template-conformance-baseline' after the fix lands.",
+      "digest": "24944ef4d710f396",
+      "allowlist_applied": [
+        "knowledge-cutoff-and-date",
+        "primed-analysis-channel"
+      ],
+      "first_diff_at": 275,
+      "reference_excerpt": "'a helpful assistant.\\n\\n<|end|><|start|>user<|message|>What color is the sky?<|end|><|start|'",
+      "runner_excerpt": "'a helpful assistant.<|end|><|start|>user<|message|>What color is the sky?<|end|><|start|>a'"
+    },
+    {
+      "id": "harmony/tool-call+result",
+      "status": "in-progress",
+      "note": "The system turn's '# Valid channels' list omits 'commentary': runner emits 'analysis, final', the reference 'analysis, commentary, final'. Harmony puts tool calls on the commentary channel, so a model told the channel is not valid is being contradicted by its own tool protocol. BEING FIXED right now by another agent -- expect these digests to move; re-run 'make template-conformance-baseline' after the fix lands. This case additionally orders '# Tools' BEFORE '# Valid channels'; the reference has them the other way round.",
+      "digest": "35b9dc4457a7aa44",
+      "allowlist_applied": [
+        "knowledge-cutoff-and-date"
+      ],
+      "first_diff_at": 639,
+      "reference_excerpt": "'channel|>commentary json<|message|>{\"city\": \"Oslo\"}<|call|><|start|>functions.get_weather '",
+      "runner_excerpt": "'channel|>commentary <|constrain|>json<|message|>{\"city\": \"Oslo\"}<|call|><|start|>functions'"
+    },
+    {
+      "id": "harmony/trailing-assistant-nogen",
+      "status": "in-progress",
+      "note": "The system turn's '# Valid channels' list omits 'commentary': runner emits 'analysis, final', the reference 'analysis, commentary, final'. Harmony puts tool calls on the commentary channel, so a model told the channel is not valid is being contradicted by its own tool protocol. BEING FIXED right now by another agent -- expect these digests to move; re-run 'make template-conformance-baseline' after the fix lands.",
+      "digest": "afa0f325bb59a054",
+      "allowlist_applied": [
+        "knowledge-cutoff-and-date"
+      ],
+      "first_diff_at": 339,
+      "reference_excerpt": "'yleigh scattering.<|return|>'",
+      "runner_excerpt": "'yleigh scattering.<|end|>'"
+    },
+    {
+      "id": "llama2/multiturn+gen",
+      "status": "open",
+      "note": "Llama-2 restarts every user turn with BOS: the reference emits '</s><s>[INST]' at each turn boundary. Runner emits '</s>[INST]'. NOT covered by the allowlisted 'bos' deviation -- the tokenizer prepends ONE leading BOS, it does not insert one per turn. Multi-turn only.",
+      "digest": "916b82a8544883f2",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 80,
+      "reference_excerpt": "'igh scattering. </s><s>[INST] And at sunset? [/INST]'",
+      "runner_excerpt": "'igh scattering. </s>[INST] And at sunset? [/INST]'"
+    },
+    {
+      "id": "llama2/multiturn-nogen",
+      "status": "open",
+      "note": "Same as llama2/multiturn+gen (identical digest).",
+      "digest": "916b82a8544883f2",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 80,
+      "reference_excerpt": "'igh scattering. </s><s>[INST] And at sunset? [/INST]'",
+      "runner_excerpt": "'igh scattering. </s>[INST] And at sunset? [/INST]'"
+    },
+    {
+      "id": "llama2/system+multiturn+gen",
+      "status": "open",
+      "note": "Same missing per-turn '<s>' as llama2/multiturn+gen, with a system block in front.",
+      "digest": "fd928f18b2746db4",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 127,
+      "reference_excerpt": "'igh scattering. </s><s>[INST] And at sunset? [/INST]'",
+      "runner_excerpt": "'igh scattering. </s>[INST] And at sunset? [/INST]'"
+    },
+    {
+      "id": "mistral/multiturn+gen",
+      "status": "open",
+      "note": "Same marker spacing as mistral/trailing-assistant+gen, over more turns.",
+      "digest": "67b0ed13978bb961",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 29,
+      "reference_excerpt": "'at color is the sky?[/INST] Blue, because of Rayleigh scattering.</s>[INST] And at sunset?'",
+      "runner_excerpt": "'at color is the sky? [/INST] Blue, because of Rayleigh scattering. </s>[INST] And at sunse'"
+    },
+    {
+      "id": "mistral/multiturn-nogen",
+      "status": "open",
+      "note": "Same as mistral/multiturn+gen (identical digest).",
+      "digest": "67b0ed13978bb961",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 29,
+      "reference_excerpt": "'at color is the sky?[/INST] Blue, because of Rayleigh scattering.</s>[INST] And at sunset?'",
+      "runner_excerpt": "'at color is the sky? [/INST] Blue, because of Rayleigh scattering. </s>[INST] And at sunse'"
+    },
+    {
+      "id": "mistral/system+multiturn+gen",
+      "status": "open",
+      "note": "Bigger than spacing: Mistral's reference folds the system text into the LAST user turn; runner folds it into the FIRST. src/template.h says the system text is 'folded into the first user turn rather than wrapped in markers it never saw in training' -- correct in spirit, wrong turn. This one changes which tokens the model attends to, not just whitespace.",
+      "digest": "4308ba67e74ae10c",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 7,
+      "reference_excerpt": "'[INST] What color is the sky?[/INST] Blue, because of Rayleigh scattering.</s>[INST] You a'",
+      "runner_excerpt": "'[INST] You are a helpful assistant.\\n\\nWhat color is the sky? [/INST] Blue, because of Rayle'"
+    },
+    {
+      "id": "mistral/system+user+gen",
+      "status": "open",
+      "note": "Same '[/INST]' spacing as mistral/user-only+gen.",
+      "digest": "63ebd39dd541c3ab",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 59,
+      "reference_excerpt": "'at color is the sky?[/INST]'",
+      "runner_excerpt": "'at color is the sky? [/INST]'"
+    },
+    {
+      "id": "mistral/trailing-assistant+gen",
+      "status": "open",
+      "note": "Two spacings: '?[/INST]' and 'scattering.</s>'. Runner puts a space before both markers.",
+      "digest": "ef63524e110e1bf0",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 29,
+      "reference_excerpt": "'at color is the sky?[/INST] Blue, because of Rayleigh scattering.</s>'",
+      "runner_excerpt": "'at color is the sky? [/INST] Blue, because of Rayleigh scattering. </s>'"
+    },
+    {
+      "id": "mistral/trailing-assistant-nogen",
+      "status": "open",
+      "note": "Same as mistral/trailing-assistant+gen (identical digest).",
+      "digest": "ef63524e110e1bf0",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 29,
+      "reference_excerpt": "'at color is the sky?[/INST] Blue, because of Rayleigh scattering.</s>'",
+      "runner_excerpt": "'at color is the sky? [/INST] Blue, because of Rayleigh scattering. </s>'"
+    },
+    {
+      "id": "mistral/user-only+gen",
+      "status": "open",
+      "note": "Spacing: the reference emits '...sky?[/INST]', runner emits '...sky? [/INST]'. Mistral's template has no space before the closing instruction marker. Affects every mistral case.",
+      "digest": "70e286eaccec225c",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 29,
+      "reference_excerpt": "'at color is the sky?[/INST]'",
+      "runner_excerpt": "'at color is the sky? [/INST]'"
+    },
+    {
+      "id": "mistral/user-only-nogen",
+      "status": "open",
+      "note": "Same as mistral/user-only+gen (identical digest).",
+      "digest": "70e286eaccec225c",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 29,
+      "reference_excerpt": "'at color is the sky?[/INST]'",
+      "runner_excerpt": "'at color is the sky? [/INST]'"
+    },
+    {
+      "id": "muse/tool-call+result",
+      "status": "open",
+      "note": "JSON separators in the tool declaration block: the reference's |tojson emits python's default '{\"type\": \"function\"' (space after ':' and ','), runner emits compact '{\"type\":\"function\"'. Byte drift inside a block the model was trained on verbatim.",
+      "digest": "0520e569f7ae1fb4",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 919,
+      "reference_excerpt": "'arameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"C'",
+      "runner_excerpt": "'arameters\": {\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\",\"description\":\"City nam'"
+    },
+    {
+      "id": "ornith/think-off",
+      "status": "open",
+      "note": "enable_thinking=false: the reference closes the block immediately ('<think>\\n\\n</think>\\n\\n'), runner leaves it OPEN ('<think>\\n'). An open think block is the opposite instruction to the one the caller asked for.",
+      "digest": "2975efee04c7b8f7",
+      "allowlist_applied": [],
+      "first_diff_at": 138,
+      "reference_excerpt": "'|>assistant\\n<think>\\n\\n</think>\\n\\n'",
+      "runner_excerpt": "'|>assistant\\n<think>\\n'"
+    },
+    {
+      "id": "ornith/tool-call+result",
+      "status": "open",
+      "note": "Same compact-vs-spaced JSON separators as muse/tool-call+result, inside ornith's <tools> block.",
+      "digest": "a179cf2984f4a346",
+      "allowlist_applied": [],
+      "first_diff_at": 89,
+      "reference_excerpt": "'s:\\n\\n<tools>\\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get t'",
+      "runner_excerpt": "'s:\\n\\n<tools>\\n{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the cur'"
+    },
+    {
+      "id": "phi3/multiturn-nogen",
+      "status": "open",
+      "note": "Same missing '<|endoftext|>' as phi3/user-only-nogen.",
+      "digest": "37e276a13bcab678",
+      "allowlist_applied": [],
+      "first_diff_at": 129,
+      "reference_excerpt": "'d at sunset?<|end|>\\n<|endoftext|>'",
+      "runner_excerpt": "'d at sunset?<|end|>\\n'"
+    },
+    {
+      "id": "phi3/trailing-assistant-nogen",
+      "status": "open",
+      "note": "Same missing '<|endoftext|>' as phi3/user-only-nogen.",
+      "digest": "835958dcac6a1257",
+      "allowlist_applied": [],
+      "first_diff_at": 98,
+      "reference_excerpt": "' scattering.<|end|>\\n<|endoftext|>'",
+      "runner_excerpt": "' scattering.<|end|>\\n'"
+    },
+    {
+      "id": "phi3/user-only-nogen",
+      "status": "open",
+      "note": "Phi-3.5 appends '<|endoftext|>' when add_generation_prompt is false; runner does not. Only affects the no-generation-prompt path, which is what prompt-continuation and scoring use.",
+      "digest": "9fd5e266849a7d7f",
+      "allowlist_applied": [],
+      "first_diff_at": 39,
+      "reference_excerpt": "' is the sky?<|end|>\\n<|endoftext|>'",
+      "runner_excerpt": "' is the sky?<|end|>\\n'"
+    }
+  ]
+}
