@@ -104,8 +104,13 @@ void server_work_totals(unsigned long long *prompt_tokens,
 
 static int  ta_status;          // HTTP status the route answered with, or 0
 static char ta_error[1024];     // the error body, verbatim
+// The template the next ta_run() serves on. Harmony for everything the
+// original attribution rule covers; the unnamed-call checks below also run it
+// on a plain ChatML slot, because that drop was in the item reader and had
+// nothing to do with Harmony.
+static int  ta_tmpl = TMPL_HARMONY;
 
-// Run one request body through a route on a Harmony slot. Whatever the route
+// Run one request body through a route on a `ta_tmpl` slot. Whatever the route
 // writes to the socket is read back; whatever it hands run_completion is kept.
 static void ta_run(void (*route)(slot_t *, sock_t, jv *), const char *body) {
     free(ta_prompt);
@@ -121,7 +126,7 @@ static void ta_run(void (*route)(slot_t *, sock_t, jv *), const char *body) {
     jv *req = json_parse(body, strlen(body));
     assert(req);
     slot_t s = {0};
-    s.tmpl = TMPL_HARMONY;
+    s.tmpl = ta_tmpl;
     route(&s, (sock_t)sv[0], req);
     jv_free(req);
 
@@ -205,6 +210,26 @@ static void ta_expect_named(const char *what, const char *fn) {
         fprintf(stderr, "--- prompt: %s\n", ta_prompt);
 }
 
+// A REPLAYED CALL (not a result) survived into the prompt under `fn`. Harmony
+// writes the assistant's own call as a turn addressed to the function; the
+// generic templates write runner's call syntax. Both are checked by the one
+// thing that matters here: the call is in the prompt, and it names `fn`.
+static void ta_expect_call_named(const char *what, const char *fn) {
+    char msg[192], want[128];
+    snprintf(msg, sizeof msg, "%s: a prompt was produced", what);
+    ck(ta_prompt != NULL, msg);
+    if (ta_tmpl == TMPL_HARMONY)
+        snprintf(want, sizeof want, "<|start|>assistant to=functions.%s", fn);
+    else
+        snprintf(want, sizeof want, "call:%s", fn);
+    snprintf(msg, sizeof msg, "%s: the replayed call is in the prompt, as %s",
+             what, fn);
+    ck(ta_prompt && strstr(ta_prompt, want) != NULL, msg);
+    ta_never_off_protocol(what);
+    if (getenv("RUNNER_ATTR_TRACE") && ta_prompt)
+        fprintf(stderr, "--- prompt: %s\n", ta_prompt);
+}
+
 // ------------------------------------------------------------ request bodies
 
 #define TA_ONE_TOOL_RESP \
@@ -279,6 +304,88 @@ static void test_responses_resolvable_is_unchanged(void) {
            "\"output\":\"12:00\"}],"
            TA_TWO_TOOLS_RESP "}");
     ta_expect_named("responses, resolvable call_id", "get_time");
+}
+
+// ---- /v1/responses: the OTHER half of the same hole. A `function_call`
+// input item is the assistant's own earlier call, replayed. It carries its
+// name in `name` -- and when that field was absent, responses_item_text()
+// returned NULL and the loop `continue`d the item.
+//
+// That is the tool-attribution failure running in reverse: instead of a result
+// nothing can name, a CALL nothing can name, dropped from the history while
+// the request answers 200. The model is then shown a tool result for a call it
+// never made, and the caller is told the turn was understood. The rule has to
+// be the same one -- deduce it when exactly one tool is declared, refuse
+// otherwise -- because the alternative is the silent discard f26e635 exists to
+// stop.
+//
+// Nothing here is Harmony-specific: the drop was in the item reader, which
+// every template goes through, so the refusal is checked on a ChatML slot too.
+
+static void test_responses_unnamed_call_two_tools(void) {
+    ta_run(handle_responses,
+           "{\"model\":\"m\",\"input\":["
+           "{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather?\"},"
+           "{\"type\":\"function_call\",\"call_id\":\"" TA_LONG_CALL_ID "\","
+           "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}],"
+           TA_TWO_TOOLS_RESP "}");
+    ta_expect_refused("responses, function_call with no name, 2 tools");
+}
+
+static void test_responses_unnamed_call_one_tool(void) {
+    ta_run(handle_responses,
+           "{\"model\":\"m\",\"input\":["
+           "{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather?\"},"
+           "{\"type\":\"function_call\",\"call_id\":\"call_1\","
+           "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}],"
+           TA_ONE_TOOL_RESP "}");
+    ta_expect_call_named("responses, function_call with no name, 1 tool",
+                         "get_weather");
+}
+
+static void test_responses_unnamed_call_no_tools(void) {
+    ta_run(handle_responses,
+           "{\"model\":\"m\",\"input\":["
+           "{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather?\"},"
+           "{\"type\":\"function_call\",\"call_id\":\"" TA_LONG_CALL_ID "\","
+           "\"arguments\":\"{}\"}]}");
+    ta_expect_refused("responses, function_call with no name, no tools");
+}
+
+static void test_responses_unnamed_call_two_tools_chatml(void) {
+    ta_tmpl = TMPL_CHATML;
+    ta_run(handle_responses,
+           "{\"model\":\"m\",\"input\":["
+           "{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather?\"},"
+           "{\"type\":\"function_call\",\"call_id\":\"" TA_LONG_CALL_ID "\","
+           "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}],"
+           TA_TWO_TOOLS_RESP "}");
+    ta_expect_refused("responses, function_call with no name, 2 tools, chatml");
+    ta_tmpl = TMPL_HARMONY;
+}
+
+static void test_responses_unnamed_call_one_tool_chatml(void) {
+    ta_tmpl = TMPL_CHATML;
+    ta_run(handle_responses,
+           "{\"model\":\"m\",\"input\":["
+           "{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather?\"},"
+           "{\"type\":\"function_call\",\"call_id\":\"call_1\","
+           "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}],"
+           TA_ONE_TOOL_RESP "}");
+    ta_expect_call_named("responses, function_call with no name, 1 tool, chatml",
+                         "get_weather");
+    ta_tmpl = TMPL_HARMONY;
+}
+
+static void test_responses_named_call_is_unchanged(void) {
+    ta_run(handle_responses,
+           "{\"model\":\"m\",\"input\":["
+           "{\"type\":\"message\",\"role\":\"user\",\"content\":\"time?\"},"
+           "{\"type\":\"function_call\",\"call_id\":\"call_1\","
+           "\"name\":\"get_time\",\"arguments\":\"{}\"}],"
+           TA_TWO_TOOLS_RESP "}");
+    ta_expect_call_named("responses, function_call carrying its own name",
+                         "get_time");
 }
 
 // ---- /v1/messages: the same hole, reached by not replaying the tool_use
@@ -373,6 +480,12 @@ int main(void) {
     test_responses_orphan_output_two_tools();
     test_responses_orphan_output_one_tool();
     test_responses_resolvable_is_unchanged();
+    test_responses_unnamed_call_two_tools();
+    test_responses_unnamed_call_one_tool();
+    test_responses_unnamed_call_no_tools();
+    test_responses_unnamed_call_two_tools_chatml();
+    test_responses_unnamed_call_one_tool_chatml();
+    test_responses_named_call_is_unchanged();
     test_messages_orphan_result_two_tools();
     test_messages_orphan_result_one_tool();
     test_messages_resolvable_is_unchanged();

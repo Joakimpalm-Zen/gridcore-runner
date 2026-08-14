@@ -86,6 +86,11 @@ typedef struct {
     // default wall-clock ceiling per generation, 0 = none (RUNNER_REQUEST_TIMEOUT)
     double      req_timeout;
     bool        ignore_eos;   // process-level --ignore-eos, including reloads
+    // --chat-template resolved to a TMPL_* value, or -1 for auto-detection.
+    // Read by registry.c on every load, so the override outlives a /unload or
+    // a --ttl expiry; main.c refuses the flag with a swap set, so this is only
+    // ever the single served model's own template.
+    int         tmpl_override;
 } server_state;
 
 extern server_state SV;

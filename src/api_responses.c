@@ -164,7 +164,14 @@ static jv *responses_schema(jv *req, bool *bad, char *err, int errcap) {
 
 // Flatten one `input` item to prompt text, appending it as a chat turn.
 // Returns the role to file it under, or NULL when the item carries nothing.
-static char *responses_item_text(jv *item, const char **role) {
+//
+// `call_name` is the function a `function_call` item was made under, already
+// resolved by the caller -- which is also where a call that cannot be named is
+// refused. It is resolved out there rather than in here because Harmony needs
+// the same name on the turn itself, and because a name this function cannot
+// find is a reason to answer 400, not to return NULL and be skipped.
+static char *responses_item_text(jv *item, const char **role,
+                                 const char *call_name) {
     const char *type = jv_str(jv_get(item, "type"), NULL);
     sbuf b = {0};
     // a tool result the caller is feeding back: this is the tool loop
@@ -179,10 +186,8 @@ static char *responses_item_text(jv *item, const char **role) {
     // syntax so the history reads like what the model actually emitted
     if (type && !strcmp(type, "function_call")) {
         *role = "assistant";
-        const char *name = jv_str(jv_get(item, "name"), NULL);
         const char *args = jv_str(jv_get(item, "arguments"), "{}");
-        if (!name) { free(b.s); return NULL; }
-        sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", name, args);
+        sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", call_name, args);
         return b.s;
     }
     *role = jv_str(jv_get(item, "role"), "user");
@@ -220,22 +225,6 @@ static const char *responses_call_name(jv *items, int before, const char *id) {
             return jv_str(jv_get(item, "name"), NULL);
     }
     return NULL;
-}
-
-// The one function declared, when exactly one is. A tool result whose call is
-// not in the history has no name to look up -- but with a single declared tool
-// there is nothing to choose BETWEEN: it is the only function the model was
-// shown and the only one it could have called. Deducing it is not the same
-// move as inventing `functions.call_1` from an id, which names a function that
-// was never declared at all.
-//
-// Two or more, and there is nothing to deduce from. That is where the request
-// is refused rather than attributed to a guess.
-static const char *sole_tool_name(const jv *tools) {
-    if (!tools || tools->type != J_ARR || tools->n != 1) return NULL;
-    jv *fn = jv_get(tools->items[0], "function");
-    const char *name = jv_str(jv_get(fn, "name"), NULL);
-    return name && name[0] ? name : NULL;
 }
 
 // Stateful Responses features this runtime has no store behind. Refusing them
@@ -414,17 +403,49 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
         for (int i = 0; i < input->n; i++) {
             const char *role = "user";
             const char *type = jv_str(jv_get(input->items[i], "type"), "");
-            char *text = responses_item_text(input->items[i], &role);
+            bool is_call = !strcmp(type, "function_call");
+            // The function a replayed call was made under. It used to be read
+            // inside responses_item_text(), which returned NULL when the item
+            // carried no `name` -- and a NULL there is `continue`d, so the
+            // assistant's own call left the conversation while the request
+            // still answered 200. The model was then shown a tool result for a
+            // call it never made, with nothing in the response saying so.
+            //
+            // Same rule as the unattributable tool RESULT below, for the same
+            // reason: deduce the name when exactly one function is declared
+            // (there is nothing to choose between), and otherwise refuse with
+            // the field that would fix it. Never invent one, and never drop
+            // the turn.
+            const char *call_name = NULL;
+            if (is_call) {
+                call_name = jv_str(jv_get(input->items[i], "name"), NULL);
+                if (!call_name || !call_name[0])
+                    call_name = sole_tool_name(tools);
+                if (!call_name) {
+                    for (int k = 0; k < n_own; k++) free(owned[k]);
+                    free(owned); free(cm); free(ts.s);
+                    tool_envelope_free(&env);
+                    jv_free(tools);
+                    jv_free(choice_owned);
+                    send_error(fd, 400,
+                               "function_call cannot be attributed to a tool: "
+                               "the item carries no `name`, and `tools` does "
+                               "not declare exactly one function to deduce it "
+                               "from. Send `name` on the function_call item.");
+                    return;
+                }
+            }
+            char *text = responses_item_text(input->items[i], &role, call_name);
             if (!text) continue;
-            if (env.harmony && !strcmp(type, "function_call")) {
+            if (env.harmony && is_call) {
                 free(text);
                 text = strdup(jv_str(jv_get(input->items[i], "arguments"), "{}"));
                 if (!text) continue;
             }
             owned[n_own++] = text;
             const char *name = NULL;
-            if (env.harmony && !strcmp(type, "function_call"))
-                name = jv_str(jv_get(input->items[i], "name"), NULL);
+            if (env.harmony && is_call)
+                name = call_name;
             else if (env.harmony && !strcmp(type, "function_call_output")) {
                 const char *cid = jv_str(jv_get(input->items[i], "call_id"),
                                          NULL);

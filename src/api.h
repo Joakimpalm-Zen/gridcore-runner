@@ -40,6 +40,21 @@ char *render_prompt_alloc(int tmpl, const chat_msg *msgs, int n_msgs,
                           bool add_assistant, int thinking, const jv *tools,
                           size_t hint);
 
+// The one function declared, when exactly one is; NULL otherwise (server.c).
+//
+// A tool turn whose call is not in the history has no name to look up -- but
+// with a single declared tool there is nothing to choose BETWEEN: it is the
+// only function in the namespace the model is reading and the only one it
+// could have called. That deduction is not the move `functions.call_1` made,
+// which names a function that was never declared at all.
+//
+// Two or more, and there is nothing to deduce from. That is where the request
+// is refused rather than attributed to a guess.
+//
+// `tools` is the OpenAI-shaped array all three surfaces normalize to, so the
+// name lives at tools[0].function.name on every one of them.
+const char *sole_tool_name(const jv *tools);
+
 // POST /v1/responses
 void handle_responses(slot_t *s, sock_t fd, jv *req);
 // POST /v1/messages and POST /v1/messages/count_tokens

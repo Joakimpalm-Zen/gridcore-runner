@@ -167,9 +167,18 @@ int swap_to(const char *want) {
         slot_t *s = &SV.slots[0];
         s->m = m;
         s->tok = tok;
+        // A forced --chat-template has to survive the reload too. Without
+        // this, serving one model with an override and then /unload-ing it
+        // (or letting --ttl expire it) brought the model back under the
+        // DETECTED template, silently, on the next request. The flag is
+        // refused for a real swap set, so there is only ever one model whose
+        // template this can be.
         s->tmpl = SV.reg[idx].tmpl =
-            template_detect(gguf_get_str(&s->m->gf, "tokenizer.chat_template", NULL),
-                            s->tok);
+            SV.tmpl_override >= 0
+                ? SV.tmpl_override
+                : template_detect(gguf_get_str(&s->m->gf,
+                                               "tokenizer.chat_template", NULL),
+                                  s->tok);
         // sampling defaults follow the model, so they are re-resolved on every
         // swap; rng state and the penalty exemptions carry across untouched
         char ident[256];

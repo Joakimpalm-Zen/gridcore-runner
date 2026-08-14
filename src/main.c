@@ -192,7 +192,8 @@ static void usage(const char *prog) {
         "  --chat-template chatml|chatml-think|llama2|llama3|mistral|mistral-v1|\n"
         "                 mistral-nemo|zephyr|phi3|gemma|gemma4|apertus|ornith|\n"
         "                 muse|granite|harmony|raw\n"
-        "                 (default: auto)\n"
+        "                 (default: auto). Applies to chat and --serve; not\n"
+        "                 valid with a multi-model -m swap set\n"
         "  --no-bos       do not add BOS token\n"
         "  --ignore-eos   keep generating past end-of-text tokens\n"
         "  --gpu auto|off GPU offload if a backend is available (default auto)\n"
@@ -745,6 +746,25 @@ int main(int argc, char **argv) {
     const char *load_path = one_named ? eq_one + 1 : model_path;
     bool registry = serve && eq_one != NULL && !one_named;
 
+    // --chat-template resolves HERE, not down in the interactive-chat block.
+    // It used to resolve only there, and server mode returns above it, so a
+    // documented public flag was accepted on the command line and silently
+    // discarded on the path most callers take: forcing a template under
+    // --serve produced a byte-identical prompt to auto-detection.
+    int tmpl_override = -1;
+    if (tmpl_arg) {
+        tmpl_override = template_from_name(tmpl_arg);
+        if (tmpl_override < 0) {
+            // previously this fell back to auto-detection without a word,
+            // which is the same discard in a smaller place
+            fprintf(stderr, "error: unknown --chat-template '%s'; see --help "
+                            "for the accepted names\n", tmpl_arg);
+            return 1;
+        }
+        // A multi-model swap set cannot honour one global template; server_run
+        // refuses that combination, where the parsed entry count is known.
+    }
+
     if (quant_out) {
         int tt;
         if (quant_type) {
@@ -832,7 +852,7 @@ int main(int argc, char **argv) {
         }
         int rc = server_run(registry ? NULL : &m, registry ? NULL : &tok,
                             model_path, &mp, smp, &ov, port, parallel, n_threads,
-                            ttl, draft_path, draft_k, ignore_eos);
+                            ttl, draft_path, draft_k, ignore_eos, tmpl_override);
         free(owned_prompt);
         return rc;
     }
@@ -994,7 +1014,8 @@ int main(int argc, char **argv) {
     }
 
     // interactive chat
-    if (tmpl_arg) tmpl = template_from_name(tmpl_arg);
+    // resolved and validated up with the serve checks, so it is a TMPL_* here
+    if (tmpl_override >= 0) tmpl = tmpl_override;
     if (tmpl < 0)
         tmpl = template_detect(gguf_get_str(&m.gf, "tokenizer.chat_template", NULL), &tok);
     if (!system_prompt) system_prompt = "You are a helpful assistant.";

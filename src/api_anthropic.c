@@ -100,17 +100,6 @@ static const char *anth_call_name(jv *messages, int before, const char *id) {
     return NULL;
 }
 
-// The one function declared, when exactly one is. See the note at the
-// tool_result block below for why a single declaration is a deduction and not
-// a guess. Reads the translated (nested) tool shape, so it is the same rule
-// the other two surfaces apply.
-static const char *sole_tool_name(const jv *tools) {
-    if (!tools || tools->type != J_ARR || tools->n != 1) return NULL;
-    jv *fn = jv_get(tools->items[0], "function");
-    const char *name = jv_str(jv_get(fn, "name"), NULL);
-    return name && name[0] ? name : NULL;
-}
-
 static bool anth_blocks(jv *messages, int message_index, jv *msg,
                         const char *role, bool harmony, const char *sole_tool,
                         turnbuf *t, char *err, int errcap) {

@@ -133,13 +133,11 @@ static const char *harmony_result_name(const jv *msgs, int message_index) {
     return NULL;
 }
 
-// The one function declared, when exactly one is. A tool result whose call is
-// not in the history has no name to look up -- but with a single declared tool
-// there is nothing to choose BETWEEN: it is the only function in the namespace
-// the model is reading and the only one it could have called. That deduction
-// is not the move `functions.call_1` made, which names a function that was
-// never declared at all. With two or more, there is nothing to deduce from.
-static const char *sole_tool_name(const jv *tools) {
+// Declared in api.h, where the reason it exists is written down. It lived as
+// an identical private copy in this file, api_responses.c and api_anthropic.c
+// -- one definition each of the same five lines, because the commit that
+// introduced it could not add to api.h.
+const char *sole_tool_name(const jv *tools) {
     if (!tools || tools->type != J_ARR || tools->n != 1) return NULL;
     jv *fn = jv_get(tools->items[0], "function");
     const char *name = jv_str(jv_get(fn, "name"), NULL);
@@ -1093,7 +1091,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults,
                const sampler_override *ov, int port, int parallel,
                int n_threads, int ttl, const char *draft_path, int draft_k,
-               bool ignore_eos) {
+               bool ignore_eos, int tmpl_override) {
     sock_init();
     // The shared server state gets a lifetime, and it is this call. Everything
     // below sets fields on SV and the teardown at the bottom releases them, but
@@ -1122,6 +1120,10 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 #endif
     install_stop_handlers(); // resets the stop flag + listener on both platforms
     SV.ignore_eos = ignore_eos;
+    // Set before anything can load a model: registry.c reads it on every swap
+    // and reload, so a forced template survives /unload and --ttl instead of
+    // being detected away at the next request.
+    SV.tmpl_override = tmpl_override;
     if (ov) SV.ov = *ov;
     // `defaults` arrives already resolved against the preloaded model; in swap
     // mode there is no model yet and swap_to resolves per load
@@ -1228,6 +1230,24 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
             }
             SV.n_reg++;
         }
+        // A real swap set is several models, each detecting its own template.
+        // --chat-template names ONE and has no per-model spelling, so applying
+        // it across the set would be right for at most one member and would
+        // silently mis-render the rest. Refused rather than applied to all or
+        // dropped for all: the caller asked for something this shape of
+        // invocation cannot mean. Checked HERE and not in main.c because this
+        // is where the entry count is actually known -- `-m name=path` on its
+        // own is a one-entry registry (it pins the /v1/models id) and takes
+        // the override perfectly well.
+        if (SV.n_reg > 1 && tmpl_override >= 0) {
+            fprintf(stderr,
+                    "error: --chat-template cannot be used with a swap set "
+                    "(-m \"name=path,name2=path2\"): it names one template and "
+                    "the set holds %d models, each detecting its own. Serve "
+                    "that model on its own instance to force its template.\n",
+                    SV.n_reg);
+            return 1;
+        }
         if (parallel > 1) {
             fprintf(stderr, "note: model swapping uses a single inference slot; "
                     "ignoring --parallel %d\n", parallel);
@@ -1285,8 +1305,17 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         s->smp_base = defaults;
         if (!init_swap_runtime(mp, n_threads, ttl)) return 1;
     } else {
-        int tmpl = template_detect(gguf_get_str(&base->gf, "tokenizer.chat_template", NULL),
+        int tmpl = SV.tmpl_override >= 0
+                 ? SV.tmpl_override
+                 : template_detect(gguf_get_str(&base->gf,
+                                                "tokenizer.chat_template", NULL),
                                    tok);
+        // Announced, because a forced template changes every prompt this
+        // server renders and the operator asked for it explicitly. Detection
+        // stays quiet: it is the default and nobody chose it.
+        if (SV.tmpl_override >= 0)
+            fprintf(stderr, "chat template: %s (forced by --chat-template)\n",
+                    template_name(tmpl));
         model_params slot_mp = *mp;
         slot_mp.verbose = false;
         slot_mp.n_threads = threads_per_slot;
