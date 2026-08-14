@@ -1752,16 +1752,33 @@ void tools_render_for(int tmpl, const jv *tools, sbuf *out) {
         // `{{- tool | tojson }}`.
         jv_dump_tojson(tools->items[i], out);
     }
+    // Verbatim from ornith.jinja:53. It was a PARAPHRASE until 2026-08-14 --
+    // same instructions, fewer words, `value_2` for the multi-line example --
+    // and paraphrasing a system prompt is not a stylistic liberty: this text
+    // is what the model was instruction-tuned against, so every token that
+    // differs is a token it never saw here. The reference's second example
+    // value spans lines precisely BECAUSE it is teaching that a parameter may
+    // (the shortened `value_2` taught the opposite by omission), and its
+    // reminder list is four explicit rules where the paraphrase was three
+    // clauses that dropped the "no function call available" case entirely.
     sb_lit(out,
         "\n</tools>\n\nIf you choose to call a function ONLY reply in the "
         "following format with NO suffix:\n\n<tool_call>\n"
         "<function=example_function_name>\n"
         "<parameter=example_parameter_1>\nvalue_1\n</parameter>\n"
-        "<parameter=example_parameter_2>\nvalue_2\n</parameter>\n"
-        "</function>\n</tool_call>\n\n<IMPORTANT>\n"
-        "Function calls MUST use a function block nested inside tool_call. "
-        "Required parameters MUST be specified. Reasoning may precede the "
-        "tool call, but no text may follow it.\n</IMPORTANT>");
+        "<parameter=example_parameter_2>\n"
+        "This is the value for the second parameter\nthat can span\n"
+        "multiple lines\n</parameter>\n"
+        "</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n"
+        "- Function calls MUST follow the specified format: an inner "
+        "<function=...></function> block must be nested within "
+        "<tool_call></tool_call> XML tags\n"
+        "- Required parameters MUST be specified\n"
+        "- You may provide optional reasoning for your function call in "
+        "natural language BEFORE the function call, but NOT after\n"
+        "- If there is no function call available, answer the question like "
+        "normal with your current knowledge and do not tell the user about "
+        "function calls\n</IMPORTANT>");
 }
 
 const char *tool_result_name(const jv *messages, int message_index) {
@@ -1820,6 +1837,17 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
     // into assistant content would teach a second, conflicting protocol.
     if (tmpl == TMPL_HARMONY) return;
     int muse_calls = 0;
+    // ornith separates consecutive calls with a newline (ornith.jinja:113).
+    //
+    // The reference ALSO opens the first call with "\n\n" when the assistant
+    // turn has visible text (jinja:106-109), and that half is deliberately NOT
+    // implemented: `out` at entry is not the content, it is the content
+    // already wrapped in ornith's <think> block, so there is no honest
+    // `content|trim` test to make from here. The matrix has no case with text
+    // AND calls in one turn, so implementing it from the reference alone
+    // would ship an unmeasured guess -- and a first attempt at exactly that
+    // put "\n\n" after every </think>. Recorded as a matrix gap instead.
+    int orn_calls = 0;
     for (int i = 0; i < calls->n; i++) {
         jv *fn = jv_get(calls->items[i], "function");
         const char *name = jv_str(jv_get(fn, "name"), NULL);
@@ -1866,6 +1894,10 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
             jv_free(obj);
             continue;
         }
+        // Runner emitted no separator at all, so two calls in one turn came
+        // out as `</tool_call><tool_call>` -- a shape the reference never
+        // writes.
+        if (orn_calls++) sb_lit(out, "\n");
         sb_fmt(out, "<tool_call>\n<function=%s>\n", name);
         if (obj && obj->type == J_OBJ) {
             for (int k = 0; k < obj->n; k++) {
