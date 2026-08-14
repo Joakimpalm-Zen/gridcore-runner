@@ -41,6 +41,31 @@
 
 // ---------------------------------------------------------------- routes
 
+// Declared in api.h, where the reason it exists is written down.
+char *render_prompt_alloc(int tmpl, const chat_msg *msgs, int n_msgs,
+                          bool add_assistant, int thinking, const jv *tools,
+                          size_t hint) {
+    size_t cap = hint < 512 ? 512 : hint;
+    for (;;) {
+        char *p = malloc(cap);
+        if (!p) return NULL;
+        size_t n = render_messages_with_tools(tmpl, msgs, n_msgs, add_assistant,
+                                              thinking, tools, p, cap);
+        // Complete iff the render did not fill the buffer. Two independent
+        // signals, because one of them lives in a module this call does not
+        // own: emit() reports an offset at or past `cap` when snprintf
+        // truncated, AND a truncating snprintf always fills to cap-1. A
+        // prompt that happens to end one byte short of `cap` is grown once
+        // unnecessarily, which costs a render; the reverse mistake costs the
+        // user's question.
+        if (n < cap && strlen(p) + 1 < cap) return p;
+        free(p);
+        if (cap > SIZE_MAX / 2) return NULL;  // no size can hold it
+        size_t want = (n > cap ? n : cap) + 1;
+        cap = want > cap * 2 ? want : cap * 2;
+    }
+}
+
 // flatten one OpenAI message to plain text: string content passes through;
 // the AI-SDK part-array form (Cline et al.) concatenates its text parts;
 // assistant tool_calls render in runner's own call syntax so replayed
@@ -194,10 +219,12 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         if (s->tmpl == TMPL_HARMONY && !strcmp(role, "assistant")) {
             const char *reason = jv_str(
                 jv_get(msgs->items[i], "reasoning_content"), NULL);
-            if (reason && reason[0])
+            if (reason && reason[0]) {
                 cm[n_cm++] = (chat_msg){ .role = "assistant",
                                         .content = reason,
                                         .channel = "analysis" };
+                total += strlen(reason) + 64;
+            }
             char *visible = message_text(msgs->items[i], s->tmpl);
             jv *calls = jv_get(msgs->items[i], "tool_calls");
             bool have_calls = calls && calls->type == J_ARR && calls->n;
@@ -239,11 +266,21 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 400, "no message content");
         return;
     }
+    // Native templates render the declarations themselves -- muse's JSON
+    // block, Harmony's TypeScript namespace -- so their bytes belong in the
+    // opening guess. It is only a guess: render_prompt_alloc measures the
+    // real size and grows, so an under-count here costs a render pass, not a
+    // truncated prompt.
+    const jv *native_tools = (s->tmpl == TMPL_MUSE && env.atem) ||
+                             (s->tmpl == TMPL_HARMONY && env.harmony)
+                                 ? tools : NULL;
     sbuf tool_bytes = {0};
-    if (s->tmpl == TMPL_MUSE && tools) jv_dump(tools, &tool_bytes);
+    if (native_tools) jv_dump(tools, &tool_bytes);
     total += tool_bytes.n + 4096;
     free(tool_bytes.s);
-    char *prompt = malloc(total + 256);
+    char *prompt = render_prompt_alloc(s->tmpl, cm, n_cm, true,
+                                       req_thinking_mode(req), native_tools,
+                                       total + 256);
     if (!prompt) {
         for (int i = 0; i < n_own; i++) free(owned[i]);
         free(owned); free(cm); free(ts.s);
@@ -251,12 +288,6 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 500, "out of memory building chat prompt");
         return;
     }
-    render_messages_with_tools(s->tmpl, cm, n_cm, true,
-                               req_thinking_mode(req),
-                               (s->tmpl == TMPL_MUSE && env.atem) ||
-                               (s->tmpl == TMPL_HARMONY && env.harmony)
-                                   ? tools : NULL,
-                               prompt, total + 256);
     run_completion(s, fd, prompt, API_CHAT, req, strict ? &env : NULL);
     free(prompt);
     for (int i = 0; i < n_own; i++) free(owned[i]);

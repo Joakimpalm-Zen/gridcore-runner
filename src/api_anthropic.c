@@ -486,11 +486,13 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
     }
     char *prompt = NULL;
     if (ok) {
-        prompt = malloc(t.total + 256);
-        if (prompt) render_messages_with_tools(
-            s->tmpl, t.cm, t.n, true, req_thinking_mode(req),
-            env->harmony ? env->tools : NULL, prompt, t.total + 256);
-        else ok = false;
+        // t.total is the opening guess only -- under Harmony the tool
+        // namespace it never counted is rendered into the prompt too.
+        prompt = render_prompt_alloc(s->tmpl, t.cm, t.n, true,
+                                     req_thinking_mode(req),
+                                     env->harmony ? env->tools : NULL,
+                                     t.total + 256);
+        if (!prompt) ok = false;
     }
     turnbuf_free(&t);
     free(ts.s);

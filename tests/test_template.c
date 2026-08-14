@@ -280,6 +280,256 @@ static void test_harmony_tool_definitions_golden(void) {
     jv_free(tools);
 }
 
+// The TypeScript inside `namespace functions` is the tool-calling half of the
+// prompt contract, so the schema renderer gets golden coverage per branch.
+// Every expected block below was taken from the pinned protocol oracle
+// (openai-harmony abd677f7, `Encoding::json_schema_to_typescript`) by
+// rendering the same tool through the reference encoder, unless the test says
+// otherwise in its own comment.
+static void assert_harmony_tool_ts(const char *tools_json, const char *want) {
+    jv *tools = json_parse(tools_json, strlen(tools_json));
+    assert(tools != NULL);
+    const chat_msg msgs[] = { { .role = "user", .content = "hi" } };
+    char out[8192];
+    render_messages_with_tools(TMPL_HARMONY, msgs, 1, true, THINK_DEFAULT,
+                               tools, out, sizeof(out));
+    if (!strstr(out, want)) {
+        fprintf(stderr, "harmony schema mismatch\n--- want ---\n%s\n"
+                        "--- got ---\n%s\n", want, out);
+        assert(!"harmony tool namespace mismatch");
+    }
+    jv_free(tools);
+}
+
+// Scalar types collapse to TypeScript's three: integer and number both become
+// number, and every type name the reference does not spell — "null" and any
+// unknown name alike — becomes any, not a literal null.
+static void test_harmony_schema_scalar_branches(void) {
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"scalars\","
+        "\"description\":\"Scalar kinds\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"i\":{\"type\":\"integer\"},\"n\":{\"type\":\"number\"},"
+        "\"b\":{\"type\":\"boolean\"},\"z\":{\"type\":\"null\"},"
+        "\"u\":{\"type\":\"widget\"}},"
+        "\"required\":[\"i\",\"n\",\"b\",\"z\",\"u\"]}}}]",
+        "namespace functions {\n\n// Scalar kinds\n"
+        "type scalars = (_: {\n"
+        "i: number,\n"
+        "n: number,\n"
+        "b: boolean,\n"
+        "z: any,\n"
+        "u: any,\n"
+        "}) => any;\n\n} // namespace functions");
+}
+
+// Enums become string-literal unions; an array becomes `T[]` and, with no
+// items schema to name, `Array<any>`. Element types nest, so an array of
+// objects carries the object's own indentation into the `[]` suffix. Only the
+// string alternatives of an enum are offered, and an enum with none left to
+// offer degrades to plain string rather than to an empty type.
+static void test_harmony_schema_enum_and_array_branches(void) {
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"arrs\","
+        "\"description\":\"Enums and arrays\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{"
+        "\"unit\":{\"type\":\"string\",\"enum\":[\"celsius\",\"fahrenheit\"]},"
+        "\"mixed\":{\"type\":\"string\",\"enum\":[\"a\",1]},"
+        "\"nums\":{\"type\":\"string\",\"enum\":[1,2]},"
+        "\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},"
+        "\"bag\":{\"type\":\"array\"},"
+        "\"mat\":{\"type\":\"array\",\"items\":{\"type\":\"array\","
+        "\"items\":{\"type\":\"integer\"}}},"
+        "\"rows\":{\"type\":\"array\",\"items\":{\"type\":\"object\","
+        "\"properties\":{\"id\":{\"type\":\"integer\"}},\"required\":[\"id\"]}}},"
+        "\"required\":[\"unit\"]}}}]",
+        "namespace functions {\n\n// Enums and arrays\n"
+        "type arrs = (_: {\n"
+        "unit: \"celsius\" | \"fahrenheit\",\n"
+        "mixed?: \"a\",\n"
+        "nums?: string,\n"
+        "tags?: string[],\n"
+        "bag?: Array<any>,\n"
+        "mat?: number[][],\n"
+        "rows?: {\n"
+        "    id: number,\n"
+        "    }[],\n"
+        "}) => any;\n\n} // namespace functions");
+}
+
+// A type given as an array of names is a union of those names. `nullable` adds
+// " | null", but only when the type does not already offer null, so "t" below
+// stays a two-member union rather than repeating null. Non-string entries in a
+// type list are dropped.
+static void test_harmony_schema_type_array_and_nullable(void) {
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"tan\","
+        "\"description\":\"Type arrays and nullable\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"x\":{\"type\":[\"number\",\"string\"]},"
+        "\"y\":{\"type\":[\"integer\",\"null\"]},"
+        "\"s\":{\"type\":\"string\",\"nullable\":true},"
+        "\"t\":{\"type\":[\"string\",\"null\"],\"nullable\":true},"
+        "\"e\":{\"type\":[\"string\",7]},"
+        "\"z\":{\"type\":[]}},"
+        "\"required\":[\"x\"]}}}]",
+        "namespace functions {\n\n// Type arrays and nullable\n"
+        "type tan = (_: {\n"
+        "x: number | string,\n"
+        "y?: number | null,\n"
+        "s?: string | null,\n"
+        "t?: string | null,\n"
+        "e?: string,\n"
+        "z?: any,\n"
+        "}) => any;\n\n} // namespace functions");
+}
+
+// Titles, descriptions and examples become comment lines above the property;
+// a title is followed by a bare `//` separator, and only string examples are
+// listed. A default trails the property. The default of an enum property is
+// printed bare because the enum alternatives above it are already quoted.
+static void test_harmony_schema_comments_and_defaults(void) {
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"cmt\","
+        "\"description\":\"Titles descriptions examples defaults\","
+        "\"parameters\":{\"type\":\"object\","
+        "\"description\":\"The outer object.\",\"properties\":{"
+        "\"a\":{\"type\":\"string\",\"title\":\"The A\",\"description\":\"an a\","
+        "\"examples\":[\"one\",2,\"two\"]},"
+        "\"b\":{\"type\":\"string\",\"default\":\"hi\"},"
+        "\"c\":{\"type\":\"integer\",\"default\":7},"
+        "\"d\":{\"type\":\"string\",\"enum\":[\"x\",\"y\"],\"default\":\"x\"},"
+        "\"e\":{\"type\":\"boolean\",\"default\":false}},"
+        "\"required\":[]}}}]",
+        "namespace functions {\n\n// Titles descriptions examples defaults\n"
+        "type cmt = (_: // The outer object.\n"
+        "{\n"
+        "// The A\n"
+        "//\n"
+        "// an a\n"
+        "// Examples:\n"
+        "// - \"one\"\n"
+        "// - \"two\"\n"
+        "a?: string,\n"
+        "b?: string, // default: \"hi\"\n"
+        "c?: number, // default: 7\n"
+        "d?: \"x\" | \"y\", // default: x\n"
+        "e?: boolean, // default: false\n"
+        "}) => any;\n\n} // namespace functions");
+}
+
+// Nested objects indent their members by four spaces per level and close on an
+// indented brace. An object's own description is emitted twice — once above
+// the property name, once after it — because the reference prints it from both
+// the property loop and the object branch.
+static void test_harmony_schema_nested_objects(void) {
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"nest\","
+        "\"description\":\"Nested\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{\"outer\":{\"type\":\"object\","
+        "\"description\":\"inner obj\",\"properties\":{"
+        "\"deep\":{\"type\":\"object\",\"properties\":{"
+        "\"k\":{\"type\":\"string\"}},\"required\":[\"k\"]},"
+        "\"flat\":{\"type\":\"string\"}},\"required\":[\"deep\"]}},"
+        "\"required\":[\"outer\"]}}}]",
+        "namespace functions {\n\n// Nested\n"
+        "type nest = (_: {\n"
+        "// inner obj\n"
+        "outer:     // inner obj\n"
+        "{\n"
+        "    deep: {\n"
+        "        k: string,\n"
+        "        },\n"
+        "    flat?: string,\n"
+        "    },\n"
+        "}) => any;\n\n} // namespace functions");
+}
+
+// KNOWN DIVERGENCE, pinning runner's behaviour rather than the reference's.
+// openai-harmony abd677f7 prints a description with a single "// " prefix, so
+// a description containing a newline emits its continuation as a bare line in
+// the middle of the type — "// multi\nline desc\n". Runner comments every
+// line. Reproducing the reference here would mean emitting text that is not a
+// comment, so this stays as-is until someone decides the prompt contract needs
+// the reference's exact bytes more than it needs valid TypeScript.
+static void test_harmony_schema_multiline_description_is_commented(void) {
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"md\","
+        "\"description\":\"Multi-line description\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"f\":{\"type\":\"string\",\"description\":\"multi\\nline desc\"}},"
+        "\"required\":[\"f\"]}}}]",
+        "namespace functions {\n\n// Multi-line description\n"
+        "type md = (_: {\n"
+        "// multi\n"
+        "// line desc\n"
+        "f: string,\n"
+        "}) => any;\n\n} // namespace functions");
+}
+
+// A top-level oneOf renders as a leading-pipe union. The leading pipe on the
+// FIRST alternative is not a bug: the reference writes "\n<indent> | " on
+// every iteration including the first, so the union legitimately opens with a
+// pipe on its own line. Alternatives render at indent + 3 spaces and carry
+// their description and default as one trailing comment.
+static void test_harmony_schema_oneof_toplevel(void) {
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"ot\","
+        "\"description\":\"Top-level oneOf\",\"parameters\":{\"oneOf\":["
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
+        "\"required\":[\"a\"]},"
+        "{\"type\":\"string\",\"description\":\"as text\"},"
+        "{\"type\":\"integer\",\"default\":3},"
+        "{\"type\":\"string\",\"enum\":[\"x\",\"y\"],\"default\":\"x\"},"
+        "{\"type\":\"boolean\",\"nullable\":true}]}}}]",
+        "namespace functions {\n\n// Top-level oneOf\n"
+        "type ot = (_: \n"
+        " | {\n"
+        "   a: string,\n"
+        "   }\n"
+        " | string // as text\n"
+        " | number // default: 3\n"
+        " | \"x\" | \"y\" // default: \"x\"\n"
+        " | boolean | null) => any;\n\n} // namespace functions");
+}
+
+// A property whose schema is a oneOf takes a different shape from a top-level
+// oneOf: the property name ends the line with a bare colon, each alternative
+// gets its own line, and the trailing comma sits alone on the closing line.
+// The property description and default move above the property name, and the
+// first alternative's description is suppressed when it duplicates the
+// property description ("same" below), otherwise it stays a trailing comment.
+static void test_harmony_schema_oneof_property(void) {
+    assert_harmony_tool_ts(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"op\","
+        "\"description\":\"Property oneOf\",\"parameters\":{\"type\":\"object\","
+        "\"properties\":{"
+        "\"val\":{\"description\":\"the value\",\"default\":\"q\",\"oneOf\":["
+        "{\"type\":\"string\",\"description\":\"as text\"},"
+        "{\"type\":\"integer\",\"description\":\"as number\",\"default\":4},"
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
+        "\"required\":[\"a\"]}]},"
+        "\"same\":{\"description\":\"shared\",\"oneOf\":["
+        "{\"type\":\"string\",\"description\":\"shared\"},"
+        "{\"type\":\"boolean\",\"description\":\"other\"}]}},"
+        "\"required\":[\"val\"]}}}]",
+        "namespace functions {\n\n// Property oneOf\n"
+        "type op = (_: {\n"
+        "// the value\n"
+        "// default: \"q\"\n"
+        "val:\n"
+        " | string\n"
+        " | number // as number default: 4\n"
+        " | {\n"
+        "   a: string,\n"
+        "   }\n"
+        ",\n"
+        "same?:\n"
+        " | string\n"
+        " | boolean // other\n"
+        ",\n"
+        "}) => any;\n\n} // namespace functions");
+}
+
 // A continued tool conversation must replay the native recipient-bearing
 // assistant call and the named tool result. Generic <|tool_call> wrappers or a
 // role:"tool" message are both off-protocol for Harmony.
@@ -664,6 +914,14 @@ int main(void) {
     test_harmony_render_golden();
     test_harmony_render_without_system();
     test_harmony_tool_definitions_golden();
+    test_harmony_schema_scalar_branches();
+    test_harmony_schema_enum_and_array_branches();
+    test_harmony_schema_type_array_and_nullable();
+    test_harmony_schema_comments_and_defaults();
+    test_harmony_schema_nested_objects();
+    test_harmony_schema_multiline_description_is_commented();
+    test_harmony_schema_oneof_toplevel();
+    test_harmony_schema_oneof_property();
     test_harmony_tool_history_golden();
     test_harmony_reasoning_preamble_and_parallel_history();
     test_harmony_thinking_controls_the_primed_channel();

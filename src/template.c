@@ -238,23 +238,94 @@ static void harmony_comment_lines(sbuf *out, const char *indent,
     }
 }
 
+static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out);
+
+// indent widened by `extra` spaces; NULL on allocation failure, which callers
+// degrade to the unwidened indent rather than losing the type entirely.
+static char *harmony_indent(const char *indent, size_t extra) {
+    size_t il = strlen(indent);
+    char *w = malloc(il + extra + 1);
+    if (!w) return NULL;
+    memcpy(w, indent, il);
+    memset(w + il, ' ', extra);
+    w[il + extra] = 0;
+    return w;
+}
+
+static bool harmony_has_enum(jv *schema) {
+    jv *e = jv_get(schema, "enum");
+    return e && e->type == J_ARR && e->n > 0;
+}
+
+// `default: <value>`, without the comment marker. The reference prints a
+// string default bare when the schema is an enum — the value is already one of
+// the quoted alternatives — and JSON-encoded otherwise. Inside a top-level
+// oneOf the reference skips that enum case, so `enum_bare` selects which of
+// the two spellings this call site uses.
+static void harmony_default_text(sbuf *out, jv *dflt, jv *owner, bool enum_bare) {
+    sb_lit(out, "default: ");
+    if (enum_bare && dflt->type == J_STR && harmony_has_enum(owner))
+        sb_fmt(out, "%s", dflt->str);
+    else
+        jv_dump(dflt, out);
+}
+
+// A `nullable: true` schema gains " | null", but only when the rendered type
+// does not already offer null: type ["string","null"] with nullable set is one
+// union in the reference, not "string | null | null".
+static void harmony_type_nullable(jv *schema, const char *indent, sbuf *out) {
+    size_t mark = out->n;
+    harmony_schema_ts(schema, indent, out);
+    if (!jv_bool(jv_get(schema, "nullable"), false)) return;
+    if (out->failed || !out->s) return;
+    if (strstr(out->s + mark, "null")) return;
+    sb_lit(out, " | null");
+}
+
+// The trailing `// <description> default: <value>` that follows a oneOf
+// alternative. `desc` is passed in because the property-level form suppresses
+// it in cases the alternative itself cannot see.
+static void harmony_variant_comment(sbuf *out, jv *variant, const char *desc,
+                                    bool enum_bare) {
+    jv *dflt = jv_get(variant, "default");
+    if (!desc && !dflt) return;
+    sb_lit(out, " // ");
+    if (desc) sb_fmt(out, "%s", desc);
+    if (desc && dflt) sb_lit(out, " ");
+    if (dflt) harmony_default_text(out, dflt, variant, enum_bare);
+}
+
 static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out) {
     if (!schema || schema->type != J_OBJ) { sb_lit(out, "any"); return; }
     jv *one = jv_get(schema, "oneOf");
     if (one && one->type == J_ARR && one->n) {
+        // Every alternative, the first one included, is introduced by
+        // "\n<indent> | ", so the union opens with a leading pipe on its own
+        // line. Verified against the reference renderer, which writes the same
+        // prefix on the first iteration as on the rest.
+        char *vi = harmony_indent(indent, 3);
         for (int i = 0; i < one->n; i++) {
-            sb_fmt(out, "%s\n%s | ", i ? "" : "", indent);
-            harmony_schema_ts(one->items[i], indent, out);
+            jv *v = one->items[i];
+            sb_fmt(out, "\n%s | ", indent);
+            harmony_type_nullable(v, vi ? vi : indent, out);
+            harmony_variant_comment(out, v,
+                                    jv_str(jv_get(v, "description"), NULL),
+                                    false);
         }
+        free(vi);
         return;
     }
     jv *tv = jv_get(schema, "type");
     if (tv && tv->type == J_ARR) {
+        bool any = false;
         for (int i = 0; i < tv->n; i++) {
-            if (i) sb_lit(out, " | ");
-            const char *t = jv_str(tv->items[i], "any");
+            if (tv->items[i]->type != J_STR) continue;
+            if (any) sb_lit(out, " | ");
+            const char *t = tv->items[i]->str;
             sb_lit(out, !strcmp(t, "integer") ? "number" : t);
+            any = true;
         }
+        if (!any) sb_lit(out, "any");
         return;
     }
     const char *type = jv_str(tv, "any");
@@ -271,32 +342,70 @@ static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out) {
             memcpy(child + il, "    ", 5);
             for (int i = 0; i < props->n; i++) {
                 jv *p = props->items[i];
+                jv *pone = jv_get(p, "oneOf");
+                const char *opt =
+                    harmony_required(schema, props->keys[i]) ? "" : "?";
                 const char *title = jv_str(jv_get(p, "title"), NULL);
                 if (title) {
                     harmony_comment_lines(out, indent, title);
                     sb_fmt(out, "%s//\n", indent);
                 }
                 const char *pd = jv_str(jv_get(p, "description"), NULL);
-                if (pd && !jv_get(p, "oneOf"))
+                if (pd && !pone)
                     harmony_comment_lines(out, indent, pd);
                 jv *examples = jv_get(p, "examples");
                 if (examples && examples->type == J_ARR && examples->n) {
                     sb_fmt(out, "%s// Examples:\n", indent);
                     for (int k = 0; k < examples->n; k++) {
+                        // the reference lists string examples only, but still
+                        // opens the block for a non-string-only list
+                        if (examples->items[k]->type != J_STR) continue;
                         sb_fmt(out, "%s// - ", indent);
                         jv_dump(examples->items[k], out);
                         sb_lit(out, "\n");
                     }
                 }
-                sb_fmt(out, "%s%s%s: ", indent, props->keys[i],
-                       harmony_required(schema, props->keys[i]) ? "" : "?");
-                harmony_schema_ts(p, child, out);
-                if (jv_bool(jv_get(p, "nullable"), false)) sb_lit(out, " | null");
-                sb_lit(out, ",");
                 jv *dflt = jv_get(p, "default");
-                if (dflt) {
-                    sb_lit(out, " // default: ");
-                    jv_dump(dflt, out);
+                if (pone && pone->type == J_ARR) {
+                    // A oneOf property is laid out vertically: comments first,
+                    // then the bare `name:` line, one alternative per line, and
+                    // a comma alone on the closing line.
+                    const char *v0d =
+                        pone->n ? jv_str(jv_get(pone->items[0], "description"),
+                                         NULL)
+                                : NULL;
+                    bool desc_above = pd && !(v0d && !strcmp(pd, v0d));
+                    if (desc_above) harmony_comment_lines(out, indent, pd);
+                    if (dflt) {
+                        sb_fmt(out, "%s// ", indent);
+                        harmony_default_text(out, dflt, p, true);
+                        sb_lit(out, "\n");
+                    }
+                    sb_fmt(out, "%s%s%s:\n", indent, props->keys[i], opt);
+                    char *vi = harmony_indent(indent, 3);
+                    for (int k = 0; k < pone->n; k++) {
+                        jv *v = pone->items[k];
+                        sb_fmt(out, "%s | ", indent);
+                        harmony_type_nullable(v, vi ? vi : indent, out);
+                        // the first alternative says nothing the property
+                        // description above it has not already said
+                        const char *vd = jv_str(jv_get(v, "description"), NULL);
+                        if ((k == 0 && desc_above) ||
+                            (vd && pd && !strcmp(vd, pd)))
+                            vd = NULL;
+                        harmony_variant_comment(out, v, vd, true);
+                        sb_lit(out, "\n");
+                    }
+                    free(vi);
+                    sb_fmt(out, "%s,\n", indent);
+                    continue;
+                }
+                sb_fmt(out, "%s%s%s: ", indent, props->keys[i], opt);
+                harmony_type_nullable(p, child, out);
+                sb_lit(out, ",");
+                if (dflt && !pone) {
+                    sb_lit(out, " // ");
+                    harmony_default_text(out, dflt, p, true);
                 }
                 sb_lit(out, "\n");
             }
@@ -305,12 +414,18 @@ static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out) {
         sb_fmt(out, "%s}", indent);
     } else if (!strcmp(type, "string")) {
         jv *vals = jv_get(schema, "enum");
-        if (vals && vals->type == J_ARR && vals->n) {
+        bool any = false;
+        if (vals && vals->type == J_ARR) {
+            // string alternatives only: the reference drops the rest, and an
+            // enum with nothing left to offer falls back to plain string
             for (int i = 0; i < vals->n; i++) {
-                if (i) sb_lit(out, " | ");
+                if (vals->items[i]->type != J_STR) continue;
+                if (any) sb_lit(out, " | ");
                 jv_dump(vals->items[i], out);
+                any = true;
             }
-        } else sb_lit(out, "string");
+        }
+        if (!any) sb_lit(out, "string");
     } else if (!strcmp(type, "integer") || !strcmp(type, "number")) {
         sb_lit(out, "number");
     } else if (!strcmp(type, "boolean")) {
@@ -319,9 +434,9 @@ static void harmony_schema_ts(jv *schema, const char *indent, sbuf *out) {
         jv *items = jv_get(schema, "items");
         if (items) { harmony_schema_ts(items, indent, out); sb_lit(out, "[]"); }
         else sb_lit(out, "Array<any>");
-    } else if (!strcmp(type, "null")) {
-        sb_lit(out, "null");
     } else {
+        // every remaining type name, "null" among them, is `any`: the
+        // reference has no TypeScript spelling for a null-only parameter
         sb_lit(out, "any");
     }
 }

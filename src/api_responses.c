@@ -425,7 +425,12 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 400, "no input content");
         return;
     }
-    char *prompt = malloc(total + 256);
+    // `total` is the opening guess only -- under Harmony the tool namespace
+    // it never counted is rendered into the prompt too. render_prompt_alloc
+    // measures the real size and grows to it.
+    char *prompt = render_prompt_alloc(s->tmpl, cm, n_cm, true,
+                                       req_thinking_mode(req),
+                                       env.harmony ? tools : NULL, total + 256);
     if (!prompt) {
         for (int i = 0; i < n_own; i++) free(owned[i]);
         free(owned); free(cm); free(ts.s);
@@ -435,10 +440,6 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
         send_error(fd, 500, "out of memory building responses prompt");
         return;
     }
-    render_messages_with_tools(s->tmpl, cm, n_cm, true,
-                               req_thinking_mode(req),
-                               env.harmony ? tools : NULL,
-                               prompt, total + 256);
     run_completion(s, fd, prompt, API_RESPONSES, req, strict ? &env : NULL);
     free(prompt);
     for (int i = 0; i < n_own; i++) free(owned[i]);
