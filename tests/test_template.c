@@ -44,6 +44,44 @@ static void test_detect_zephyr_vs_phi3(tokenizer *t) {
     assert(strcmp(out, "<|user|>\nHI<|end|>\n<|assistant|>\n") == 0);
 }
 
+// Phi-3's reference closes an un-prompted render with the eos token:
+//
+//   {% if add_generation_prompt %}{{ '<|assistant|>\n' }}
+//   {% else %}{{ eos_token }}{% endif %}
+//
+// -- microsoft/Phi-3.5-mini-instruct tokenizer_config.json, whose eos_token is
+// '<|endoftext|>'. Runner emitted nothing in the else branch, so a render with
+// add_assistant=false stopped one token short of the reference.
+//
+// Reachability, stated plainly rather than inflated: every HTTP path renders
+// with add_assistant=true, so no server request takes this branch today. It is
+// reachable through render_messages(), which template.h publishes, and through
+// the conformance gate's *-nogen rows. A published renderer that renders the
+// wrong bytes is a bug at whatever severity.
+//
+// Zephyr shares the <|role|> framing but NOT this branch: its reference emits
+// the generation prompt inside the loop and nothing at all otherwise
+// (HuggingFaceH4/zephyr-7b-beta), so the assertion below pins them apart.
+static void test_phi3_without_generation_prompt_ends_with_eos(void) {
+    const chat_msg msgs[] = { { "user", "HI" }, { "assistant", "YO" } };
+    char out[512];
+
+    render_messages(TMPL_PHI3, msgs, 2, false, THINK_DEFAULT, out, sizeof(out));
+    assert(strcmp(out, "<|user|>\nHI<|end|>\n"
+                       "<|assistant|>\nYO<|end|>\n"
+                       "<|endoftext|>") == 0);
+
+    // with the generation prompt, nothing changes
+    render_messages(TMPL_PHI3, msgs, 2, true, THINK_DEFAULT, out, sizeof(out));
+    assert(strcmp(out, "<|user|>\nHI<|end|>\n"
+                       "<|assistant|>\nYO<|end|>\n"
+                       "<|assistant|>\n") == 0);
+
+    render_messages(TMPL_ZEPHYR, msgs, 2, false, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, "<|user|>\nHI</s>\n<|assistant|>\nYO</s>\n") == 0);
+}
+
 // Apertus (Swiss AI) frames turns with <|role_start|>...<|role_end|>. The
 // prefix "<|user_start|>" contains no substring the other families key on, but
 // detection order still matters: the Apertus vocabulary inherits Mistral's
@@ -120,6 +158,47 @@ static void test_detect_and_render_ornith(tokenizer *t) {
         "<|im_start|>user\nHI<|im_end|>\n"
         "<|im_start|>assistant\n<think>\nPLAN\n</think>\n\nANSWER<|im_end|>\n"
         "<|im_start|>assistant\n<think>\n") == 0);
+}
+
+// enable_thinking=false is a request NOT to reason, and the ornith reference
+// answers it with an ALREADY-CLOSED thought block:
+//
+//   {%- if add_generation_prompt %}
+//       {{- '<|im_start|>assistant\n' }}
+//       {%- if enable_thinking is defined and enable_thinking is false %}
+//           {{- '<think>\n\n</think>\n\n' }}
+//       {%- else %}
+//           {{- '<think>\n' }}
+//       {%- endif %}
+//   {%- endif %}
+//
+// (ornith-ai/Ornith-1.0-9B tokenizer_config.json, rendered through jinja2 with
+// transformers' trim_blocks/lstrip_blocks; the same three renders are the
+// ornith/think-on and ornith/think-off rows of the conformance gate.)
+//
+// Runner used to emit the OPEN block in every mode, so a caller asking for no
+// reasoning got the exact construct that starts it. Both other modes are
+// asserted too: the reference's `else` covers THINK_ON *and* the undefined
+// case, so neither may grow a closed block.
+static void test_ornith_thinking_off_closes_the_thought_block(void) {
+    const chat_msg msgs[] = { { "user", "HI" } };
+    char out[512];
+    const char *head = "<|im_start|>user\nHI<|im_end|>\n<|im_start|>assistant\n";
+
+    render_messages(TMPL_ORNITH, msgs, 1, true, THINK_OFF, out, sizeof(out));
+    assert(strcmp(out, "<|im_start|>user\nHI<|im_end|>\n"
+                       "<|im_start|>assistant\n<think>\n\n</think>\n\n") == 0);
+
+    char open_block[512];
+    snprintf(open_block, sizeof(open_block), "%s<think>\n", head);
+    render_messages(TMPL_ORNITH, msgs, 1, true, THINK_ON, out, sizeof(out));
+    assert(strcmp(out, open_block) == 0);
+    render_messages(TMPL_ORNITH, msgs, 1, true, THINK_DEFAULT, out, sizeof(out));
+    assert(strcmp(out, open_block) == 0);
+
+    // no generation prompt: no thought block in any mode
+    render_messages(TMPL_ORNITH, msgs, 1, false, THINK_OFF, out, sizeof(out));
+    assert(strcmp(out, "<|im_start|>user\nHI<|im_end|>\n") == 0);
 }
 
 typedef struct { char reason[128], content[128]; int nr, nc; } split_capture;
@@ -1089,6 +1168,72 @@ static void test_chatml_think_shape(void) {
     assert(strcmp(out, base) == 0);
 }
 
+// A tool result is NOT a `tool` turn on ChatML. Every reference in the family
+// converts it into a USER turn wrapping the payload in <tool_response>, and
+// groups consecutive results under one turn:
+//
+//   {%- elif message.role == "tool" %}
+//       {%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
+//           {{- '<|im_start|>user' }}
+//       {%- endif %}
+//       {{- '\n<tool_response>\n' }}{{- content }}{{- '\n</tool_response>' }}
+//       {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}
+//           {{- '<|im_end|>\n' }}
+//       {%- endif %}
+//
+// -- Qwen/Qwen3-4B tokenizer_config.json; Qwen/Qwen2.5-7B-Instruct's is the
+// same block keyed on `loop.index0 == 0`, and ornith-ai/Ornith-1.0-9B's on
+// `loop.previtem`. Three independent references, one shape.
+//
+// Runner used to emit `<|im_start|>tool\n{...}<|im_end|>` -- a role header no
+// ChatML checkpoint is trained on -- while already doing this conversion on
+// its own ORNITH path. The goldens are the reference renders of these exact
+// conversations, not runner's prior output.
+static void test_chatml_tool_result_renders_as_a_user_tool_response(void) {
+    char out[1024];
+
+    const chat_msg one[] = {
+        { "user", "Weather in Oslo?" },
+        { "tool", "{\"temp_c\": -3}" },
+    };
+    const char *want_one =
+        "<|im_start|>user\nWeather in Oslo?<|im_end|>\n"
+        "<|im_start|>user\n<tool_response>\n{\"temp_c\": -3}\n"
+        "</tool_response><|im_end|>\n"
+        "<|im_start|>assistant\n";
+    render_messages(TMPL_CHATML, one, 2, true, THINK_DEFAULT, out, sizeof(out));
+    assert(strcmp(out, want_one) == 0);
+    // the branch is shared: chatml-think must get it too, and its own
+    // thinking control must still work on top of the rewritten turn
+    render_messages(TMPL_CHATML_THINK, one, 2, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out, want_one) == 0);
+    render_messages(TMPL_CHATML_THINK, one, 2, true, THINK_OFF,
+                    out, sizeof(out));
+    assert(strcmp(out, "<|im_start|>user\nWeather in Oslo?<|im_end|>\n"
+                       "<|im_start|>user\n<tool_response>\n{\"temp_c\": -3}\n"
+                       "</tool_response><|im_end|>\n"
+                       "<|im_start|>assistant\n<think>\n\n</think>\n\n") == 0);
+
+    // consecutive results share ONE user turn, separated by a bare newline
+    const chat_msg two[] = {
+        { "user", "Weather in Oslo?" },
+        { "tool", "{\"temp_c\": -3}" },
+        { "tool", "{\"temp_c\": 1}" },
+        { "user", "thanks" },
+    };
+    render_messages(TMPL_CHATML, two, 4, true, THINK_DEFAULT, out, sizeof(out));
+    assert(strcmp(out,
+        "<|im_start|>user\nWeather in Oslo?<|im_end|>\n"
+        "<|im_start|>user\n<tool_response>\n{\"temp_c\": -3}\n</tool_response>"
+        "\n<tool_response>\n{\"temp_c\": 1}\n</tool_response><|im_end|>\n"
+        "<|im_start|>user\nthanks<|im_end|>\n"
+        "<|im_start|>assistant\n") == 0);
+
+    // and no `tool` header survives anywhere
+    assert(strstr(out, "<|im_start|>tool") == NULL);
+}
+
 // Muse's own template places tool metadata after the reasoning-strength line,
 // derives valid recipient namespaces from dotted function names, and renders
 // tool results as named tool turns.  Keep the whole turn byte-exact: moving
@@ -1208,9 +1353,11 @@ int main(void) {
 
     test_detect_llama2_vs_mistral(&t);
     test_detect_zephyr_vs_phi3(&t);
+    test_phi3_without_generation_prompt_ends_with_eos();
     test_detect_by_marker(&t);
     test_detect_and_render_ornith(&t);
     test_ornith_groups_consecutive_tool_responses();
+    test_ornith_thinking_off_closes_the_thought_block();
     test_ornith_split_starts_inside_prompted_think();
     test_muse_split_closes_on_fed_reasoning_boundary();
     test_muse_plain_thinking_close_leaves_no_recipient_residue();
@@ -1221,6 +1368,7 @@ int main(void) {
     test_name_roundtrip();
     test_gemma4_generation_prompt();
     test_chatml_think_shape();
+    test_chatml_tool_result_renders_as_a_user_tool_response();
     test_muse_tools_and_result_golden();
     test_muse_tool_result_id_resolves_prior_name();
     test_muse_parallel_tool_history_has_native_turn_boundaries();

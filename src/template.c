@@ -524,14 +524,43 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
                            msgs[i].role, msgs[i].content);
             }
         }
-        if (add_assistant)
-            off = emit(out, cap, off, "<|im_start|>assistant\n<think>\n", NULL, NULL);
+        if (add_assistant) {
+            off = emit(out, cap, off, "<|im_start|>assistant\n", NULL, NULL);
+            // ornith's reference branches on enable_thinking exactly the way
+            // Qwen3's does below: `false` means an ALREADY-CLOSED thought
+            // block, everything else (including undefined) means an OPEN one.
+            // Emitting the open block for THINK_OFF handed a caller who asked
+            // for no reasoning the one construct that starts it.
+            off = emit(out, cap, off,
+                       thinking == THINK_OFF ? "<think>\n\n</think>\n\n"
+                                             : "<think>\n", NULL, NULL);
+        }
         break;
     case TMPL_CHATML:
     case TMPL_CHATML_THINK:
-        for (int i = 0; i < n_msgs; i++)
+        for (int i = 0; i < n_msgs; i++) {
+            // A tool result is not a `tool` turn in this family: every ChatML
+            // reference -- Qwen2.5, Qwen3 and ornith alike -- renders it as a
+            // USER turn carrying a <tool_response> block, and folds
+            // consecutive results into one turn. Runner already did exactly
+            // this on its ORNITH path; emitting `<|im_start|>tool` here sent
+            // the model a role header its own template never produces.
+            if (!strcmp(msgs[i].role, "tool")) {
+                bool prev_tool = i > 0 && !strcmp(msgs[i - 1].role, "tool");
+                bool next_tool = i + 1 < n_msgs &&
+                                 !strcmp(msgs[i + 1].role, "tool");
+                if (!prev_tool)
+                    off = emit(out, cap, off, "<|im_start|>user", NULL, NULL);
+                off = emit(out, cap, off,
+                           "\n<tool_response>\n%s\n</tool_response>",
+                           msgs[i].content, NULL);
+                if (!next_tool)
+                    off = emit(out, cap, off, "<|im_end|>\n", NULL, NULL);
+                continue;
+            }
             off = emit(out, cap, off, "<|im_start|>%s\n%s<|im_end|>\n",
                        msgs[i].role, msgs[i].content);
+        }
         if (add_assistant) {
             off = emit(out, cap, off, "<|im_start|>assistant\n", NULL, NULL);
             // Qwen3's enable_thinking=false branch, verbatim from
@@ -565,8 +594,13 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         for (int i = 0; i < n_msgs; i++)
             off = emit(out, cap, off, "<|%s|>\n%s<|end|>\n",
                        msgs[i].role, msgs[i].content);
+        // ...and, unlike zephyr, its reference has an `else` arm: with no
+        // generation prompt the render ends with the eos token
+        // (microsoft/Phi-3.5-mini-instruct spells it '<|endoftext|>').
         if (add_assistant)
             off = emit(out, cap, off, "<|assistant|>\n", NULL, NULL);
+        else
+            off = emit(out, cap, off, "<|endoftext|>", NULL, NULL);
         break;
     case TMPL_APERTUS: {
         // apertus (reference: swiss-ai/Apertus-8B-Instruct-2509

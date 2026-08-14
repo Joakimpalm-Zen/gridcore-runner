@@ -38,7 +38,7 @@
     "in-progress": "someone is actively fixing this; see `note`"
   },
   "generated_by": "scripts/template-conformance.py --write-baseline",
-  "generated_at": "2026-08-14T11:18:47+00:00",
+  "generated_at": "2026-08-14T11:31:03+00:00",
   "oracles": {
     "apertus": {
       "source": "hf:swiss-ai/Apertus-8B-Instruct-2509",
@@ -115,7 +115,7 @@
       "id": "chatml-think/multi-tool-call",
       "status": "open",
       "note": "",
-      "digest": "73ac3f1d52c76f8e",
+      "digest": "bf96766f0af2c694",
       "allowlist_applied": [],
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
@@ -125,7 +125,7 @@
       "id": "chatml-think/tool-call+result",
       "status": "open",
       "note": "Same as chatml/tool-call+result -- identical digest, same generic tool protocol substituted for Qwen's native one. Fixing one should fix both.",
-      "digest": "45cd14cacc542f9c",
+      "digest": "ab4eab0ba0301eda",
       "allowlist_applied": [],
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
@@ -135,7 +135,7 @@
       "id": "chatml-think/tool-then-conversation",
       "status": "open",
       "note": "",
-      "digest": "046d0bba369989a3",
+      "digest": "fd31fa2e90c8ddb2",
       "allowlist_applied": [],
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
@@ -165,7 +165,7 @@
       "id": "chatml/multi-tool-call",
       "status": "open",
       "note": "",
-      "digest": "73ac3f1d52c76f8e",
+      "digest": "bf96766f0af2c694",
       "allowlist_applied": [],
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
@@ -175,7 +175,7 @@
       "id": "chatml/tool-call+result",
       "status": "open",
       "note": "Tool declarations: the reference builds Qwen's native '# Tools' block with <tools>...</tools> JSON and a <tool_call> reply protocol. Runner emits its own generic '<|tool_call>call:NAME{args}<tool_call|>' protocol instead (src/server.c tools_render_for + tool_history_render_for). A protocol the model was not trained on is a real functional gap, not a formatting one.",
-      "digest": "45cd14cacc542f9c",
+      "digest": "ab4eab0ba0301eda",
       "allowlist_applied": [],
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
@@ -185,7 +185,7 @@
       "id": "chatml/tool-then-conversation",
       "status": "open",
       "note": "",
-      "digest": "046d0bba369989a3",
+      "digest": "fd31fa2e90c8ddb2",
       "allowlist_applied": [],
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
@@ -485,16 +485,6 @@
       "runner_excerpt": "'s:\\n\\n<tools>\\n{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the cur'"
     },
     {
-      "id": "ornith/think-off",
-      "status": "open",
-      "note": "enable_thinking=false: the reference closes the block immediately ('<think>\\n\\n</think>\\n\\n'), runner leaves it OPEN ('<think>\\n'). An open think block is the opposite instruction to the one the caller asked for.",
-      "digest": "2975efee04c7b8f7",
-      "allowlist_applied": [],
-      "first_diff_at": 138,
-      "reference_excerpt": "'|>assistant\\n<think>\\n\\n</think>\\n\\n'",
-      "runner_excerpt": "'|>assistant\\n<think>\\n'"
-    },
-    {
       "id": "ornith/tool-call+result",
       "status": "open",
       "note": "Same compact-vs-spaced JSON separators as muse/tool-call+result, inside ornith's <tools> block.",
@@ -513,36 +503,6 @@
       "first_diff_at": 89,
       "reference_excerpt": "'s:\\n\\n<tools>\\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get t'",
       "runner_excerpt": "'s:\\n\\n<tools>\\n{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get the cur'"
-    },
-    {
-      "id": "phi3/multiturn-nogen",
-      "status": "open",
-      "note": "Same missing '<|endoftext|>' as phi3/user-only-nogen.",
-      "digest": "37e276a13bcab678",
-      "allowlist_applied": [],
-      "first_diff_at": 129,
-      "reference_excerpt": "'d at sunset?<|end|>\\n<|endoftext|>'",
-      "runner_excerpt": "'d at sunset?<|end|>\\n'"
-    },
-    {
-      "id": "phi3/trailing-assistant-nogen",
-      "status": "open",
-      "note": "Same missing '<|endoftext|>' as phi3/user-only-nogen.",
-      "digest": "835958dcac6a1257",
-      "allowlist_applied": [],
-      "first_diff_at": 98,
-      "reference_excerpt": "' scattering.<|end|>\\n<|endoftext|>'",
-      "runner_excerpt": "' scattering.<|end|>\\n'"
-    },
-    {
-      "id": "phi3/user-only-nogen",
-      "status": "open",
-      "note": "Phi-3.5 appends '<|endoftext|>' when add_generation_prompt is false; runner does not. Only affects the no-generation-prompt path, which is what prompt-continuation and scoring use.",
-      "digest": "9fd5e266849a7d7f",
-      "allowlist_applied": [],
-      "first_diff_at": 39,
-      "reference_excerpt": "' is the sky?<|end|>\\n<|endoftext|>'",
-      "runner_excerpt": "' is the sky?<|end|>\\n'"
     }
   ]
 }
