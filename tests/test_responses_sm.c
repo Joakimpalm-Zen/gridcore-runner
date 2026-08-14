@@ -336,14 +336,129 @@ static void test_unmappable_harmony_stream_still_terminates(void) {
     ck(strstr(g_wire, "<|channel|>") == NULL,
        "no harmony protocol text reaches a Responses client");
 
+    // The Anthropic stream terminates too, but not with message_delta /
+    // message_stop: those assert a completed Message, and this turn produced
+    // none. Its terminator is the documented `error` event — see
+    // test_anthropic_streamed_fault_is_an_error_event below.
+
+    tool_envelope_free(&env);
+    jv_free(tools);
+    harness_close(&h);
+}
+
+// DEFECT C, streaming. The headers went out with the 200 before a token
+// existed, so there is no status code left to set — and Anthropic's SSE
+// protocol has a terminator for exactly this, documented alongside
+// overloaded_error:
+//
+//   event: error
+//   data: {"type": "error", "error": {"type": "overloaded_error", ...}}
+//
+// So the stream ends on `error`, and specifically NOT on message_delta +
+// message_stop: message_delta would have to carry one of the seven
+// stop_reasons (end_turn, before this), and message_stop asserts a Message
+// that completed. Terminating is not optional — leaving the stream hanging is
+// the failure 6c4dfc2 fixed on the OpenAI side and must not come back here.
+static void test_anthropic_streamed_fault_is_an_error_event(void) {
+    harness h;
+    if (!harness_open(&h)) { ck(0, "test model loaded"); return; }
+    jv *tools = json_parse(HARNESS_TOOLS, strlen(HARNESS_TOOLS));
+    tool_envelope env = {0};
+    char err[224];
+    ck(tool_envelope_build(tools, NULL, NULL, &env, err, sizeof(err)) == 1,
+       "harmony envelope built");
+    env.harmony = true;
+    env.tools   = tools;
+
     run_request(&h, "{\"stream\":true,\"max_tokens\":0}", &env, API_MESSAGES,
                 g_wire, sizeof(g_wire));
-    ck(strstr(g_wire, "event: message_delta") != NULL,
-       "an unmappable harmony Anthropic stream reports a stop_reason");
-    ck(strstr(g_wire, "event: message_stop") != NULL,
-       "an unmappable harmony Anthropic stream reaches message_stop");
+    ck(strstr(g_wire, "event: message_start") != NULL,
+       "the Anthropic stream opened with message_start");
+    ck(strstr(g_wire, "event: error") != NULL,
+       "an unmappable harmony Anthropic stream terminates on an error event");
+    ck(strstr(g_wire, "\"type\":\"error\"") != NULL,
+       "the event names itself in data.type as well as in event:");
+    ck(strstr(g_wire, "\"error\":{\"type\":\"api_error\"") != NULL,
+       "carrying Anthropic's error object, typed api_error");
+    ck(strstr(g_wire, "\"finish_detail\":\"envelope_unmapped\"") != NULL,
+       "and runner_telemetry keeps which fault it was");
+    ck(strstr(g_wire, "event: message_delta") == NULL,
+       "no message_delta: there is no stop_reason that means \"faulted\"");
+    ck(strstr(g_wire, "\"stop_reason\":\"end_turn\"") == NULL,
+       "and nothing claims the model finished its turn normally");
+    ck(strstr(g_wire, "event: message_stop") == NULL,
+       "no message_stop: it would assert a Message that completed");
+    ck(strstr(g_wire, "event: content_block_start") == NULL,
+       "and no empty text block is invented to stand in for the answer");
     ck(strstr(g_wire, "<|channel|>") == NULL,
        "no harmony protocol text reaches an Anthropic client");
+
+    // Narrow again: an ordinary stream still ends the ordinary way.
+    run_request(&h, "{\"stream\":true,\"max_tokens\":4}", NULL, API_MESSAGES,
+                g_wire, sizeof(g_wire));
+    ck(strstr(g_wire, "event: message_delta") != NULL,
+       "an ordinary Anthropic stream still reports a stop_reason");
+    ck(strstr(g_wire, "event: message_stop") != NULL,
+       "and still reaches message_stop");
+    ck(strstr(g_wire, "event: error") == NULL,
+       "with no error event");
+
+    tool_envelope_free(&env);
+    jv_free(tools);
+    harness_close(&h);
+}
+
+// DEFECT C, buffered. Anthropic defines exactly seven `stop_reason` values —
+// end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal and
+// model_context_window_exceeded — and NONE of them means "generation faulted".
+// Its own docs draw the line: "Unlike errors, which indicate failures in
+// processing your request, `stop_reason` tells you why Claude completed its
+// response generation." A fault is not a completion, so it is an error object
+// with a 4xx/5xx, not a 200 Message carrying the least-wrong enum member.
+//
+// Before this, a fault landed on `end_turn` — the surface telling the caller
+// the model finished normally over an empty content[], which is the one
+// reading a client cannot recover from.
+static void test_anthropic_buffered_fault_is_an_error_object(void) {
+    harness h;
+    if (!harness_open(&h)) { ck(0, "test model loaded"); return; }
+    jv *tools = json_parse(HARNESS_TOOLS, strlen(HARNESS_TOOLS));
+    tool_envelope env = {0};
+    char err[224];
+    ck(tool_envelope_build(tools, NULL, NULL, &env, err, sizeof(err)) == 1,
+       "harmony envelope built");
+    env.harmony = true;
+    env.tools   = tools;
+
+    // same deterministic fault the streaming test uses: no document at all is
+    // generated, so there is nothing for the demultiplexer to map
+    run_request(&h, "{\"max_tokens\":0}", &env, API_MESSAGES,
+                g_wire, sizeof(g_wire));
+    ck(!strncmp(g_wire, "HTTP/1.1 500", 12),
+       "a buffered Anthropic fault answers 500, not 200");
+    ck(strstr(g_wire, "\"type\":\"error\"") != NULL,
+       "the body is Anthropic's top-level error object");
+    ck(strstr(g_wire, "\"type\":\"api_error\"") != NULL,
+       "typed as api_error: the fault is the server's, and it is retryable");
+    ck(strstr(g_wire, "\"message\":\"") != NULL,
+       "the error object carries a message");
+    ck(strstr(g_wire, "\"stop_reason\"") == NULL,
+       "no stop_reason is reported: the turn did not complete");
+    ck(strstr(g_wire, "\"type\":\"message\"") == NULL,
+       "and no Message object is served for a turn that produced none");
+    ck(strstr(g_wire, "<|channel|>") == NULL,
+       "no harmony protocol text reaches the client");
+
+    // The refusal is narrow. A turn that ends any ordinary way is still a 200
+    // Message with a stop_reason from the documented seven.
+    run_request(&h, "{\"max_tokens\":4}", NULL, API_MESSAGES,
+                g_wire, sizeof(g_wire));
+    ck(!strncmp(g_wire, "HTTP/1.1 200", 12),
+       "an ordinary Anthropic turn is still a 200");
+    ck(strstr(g_wire, "\"type\":\"message\"") != NULL,
+       "and still a Message object");
+    ck(strstr(g_wire, "\"stop_reason\":\"") != NULL,
+       "carrying a stop_reason");
 
     tool_envelope_free(&env);
     jv_free(tools);
@@ -480,6 +595,8 @@ int main(int argc, char **argv) {
     test_function_call_item_has_no_content_part();
     test_unclosed_item_emits_no_done();
     test_unmappable_harmony_stream_still_terminates();
+    test_anthropic_buffered_fault_is_an_error_object();
+    test_anthropic_streamed_fault_is_an_error_event();
     test_stop_with_a_strict_envelope_is_refused();
     test_unmappable_envelope_is_not_served_as_content();
     if (!g_fail) fprintf(stderr, "all responses state-machine tests passed\n");

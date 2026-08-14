@@ -843,6 +843,10 @@ parallel tool use, `stop_sequences` sent alongside `tools` (see Chat
 Completions above), and forced thinking on a model with no reasoning channel.
 It implements protocol translation only; it never executes a tool.
 
+A generation fault is reported as an Anthropic error object rather than a
+`Message` with a made-up `stop_reason` — HTTP 500 `api_error` buffered, the
+documented `event: error` mid-stream. See Constrained output below.
+
 ### Coding-agent evidence
 
 Client compatibility is a dated executable observation, not something inferred
@@ -1022,13 +1026,27 @@ text, and `["}"]` or `["\n\n"]` would otherwise eat the very bytes that make it
 legal.
 
 If an envelope document cannot be mapped back at all, runner reports the fault
-instead of serving the raw protocol as an answer: content is empty,
-`finish_reason` is `"error"` with `runner_telemetry.finish_detail:
-"envelope_unmapped"`, and Responses reports `status: "incomplete"` with reason
-`envelope_unmapped`. A stream that ends this way is still terminated — a
-terminal chunk carrying the finish reason, then `data: [DONE]` (Responses
-`response.incomplete`, Anthropic `message_delta` then `message_stop`) — so a
-client is never left waiting on events that will not arrive.
+instead of serving the raw protocol as an answer. On the OpenAI surfaces
+content is empty, `finish_reason` is `"error"` with
+`runner_telemetry.finish_detail: "envelope_unmapped"`, and Responses reports
+`status: "incomplete"` with reason `envelope_unmapped`. A stream that ends
+this way is still terminated — a terminal chunk carrying the finish reason,
+then `data: [DONE]`, or Responses `response.incomplete` — so a client is never
+left waiting on events that will not arrive.
+
+Anthropic Messages reports the same fault as an **error object**, not a
+`Message`. All seven of its `stop_reason` values describe a turn that
+completed, so none of them can carry a generation fault; a buffered turn
+answers HTTP 500 with `{"type": "error", "error": {"type": "api_error",
+"message": ...}}`, which is the class the Anthropic SDKs retry with backoff,
+and a streamed turn — whose 200 is already sent — terminates on the protocol's
+documented `event: error` carrying the same object, in place of
+`message_delta`/`message_stop`. An allocation failure during generation is
+reported the same way on both. Partial text is not returned alongside it:
+unlike a budget truncation, which is a completion and keeps its content under
+`stop_reason: "max_tokens"`, a fault has no `stop_reason` that would not
+misstate why generation stopped. `runner_telemetry.finish_detail` rides on the
+error object so the two faults stay distinguishable.
 
 ## Support matrix
 

@@ -830,12 +830,29 @@ static const char *finish_detail_of(const char *finish) {
     return NULL;
 }
 
-// KNOWN GAP: this vocabulary has no member for a generation fault. "error"
-// (e->oom) and "envelope_error" both land on end_turn below, which understates
-// them — but every alternative in the union is a different lie, and "refusal"
-// in particular would have the caller telling a user the model declined. The
-// turn's emptiness is the honest signal Anthropic clients get; the chat and
-// Responses surfaces carry the fault itself.
+// A GENERATION FAULT: the turn produced nothing anybody can read, and the
+// reason is the server's rather than the model's or the caller's. Two causes
+// reach this state and both are reported the same way on every surface —
+// e->oom (an allocation failure mid-generation) and "envelope_error" (a
+// constrained document the demultiplexer could not map back).
+//
+// It is deliberately NOT the same class as "length" or "stop": those are
+// completions with a boundary, and a client can use what it got. A fault has
+// no usable turn behind it at all.
+static bool generation_faulted(const char *finish) {
+    return !strcmp(finish, "error") || !strcmp(finish, "envelope_error");
+}
+
+// Anthropic's vocabulary has no member for a generation fault, and it is not
+// an oversight: the API draws the line the other way round from OpenAI's, in
+// its own words — "Unlike errors, which indicate failures in processing your
+// request, `stop_reason` tells you why Claude completed its response
+// generation." All seven values (end_turn, max_tokens, stop_sequence,
+// tool_use, pause_turn, refusal, model_context_window_exceeded) describe a
+// turn that COMPLETED. A fault is an error object, not a stop_reason, so a
+// faulted turn never reaches this function at all — both callers test
+// generation_faulted() and divert to anth_error_json() first. Nothing here
+// understates a fault any more.
 static const char *anth_stop_reason(const char *finish, bool stop_hit) {
     if (!strcmp(finish, "tool_calls")) return "tool_use";
     if (!strcmp(finish, "length") ||
@@ -843,6 +860,46 @@ static const char *anth_stop_reason(const char *finish, bool stop_hit) {
     // a user stop sequence is its own terminal reason in this vocabulary, and
     // the matched string is reported alongside it
     return stop_hit ? "stop_sequence" : "end_turn";
+}
+
+// The error object's members, written once so the buffered body and the
+// streamed `error` event cannot describe the same fault differently — the same
+// reason sse_send names every event from one argument.
+//
+// `api_error` with a 500 is a deliberate pick out of Anthropic's typed set,
+// and each alternative in that set says something false here:
+//
+//   invalid_request_error (400)  blames the caller for a request that was
+//                                accepted and well-formed. Nothing they can
+//                                edit changes the outcome, and a 4xx is the
+//                                one class SDKs do NOT retry.
+//   overloaded_error (529)       means capacity. Clients shed load or fail
+//                                over on it; nothing here is loaded.
+//   timeout_error (504)          nothing timed out.
+//
+// `api_error` is documented as "an unexpected error ... internal to
+// Anthropic's systems. Retry the request with exponential backoff" — which is
+// what both faults are, and what a client should do about them. An unmappable
+// envelope is sampling-dependent, so a retry can genuinely succeed; an
+// allocation failure can clear too. 500 is also the classification under which
+// every official SDK already retries with backoff unprompted.
+//
+// Which fault it was survives in runner_telemetry, exactly as it does on the
+// chat and Responses surfaces, rather than being smuggled into `error.type`
+// where a typed client has no case for it.
+static void anth_error_json(sbuf *r, const char *finish) {
+    const char *msg = !strcmp(finish, "envelope_error")
+        ? "the model's constrained tool-call document could not be mapped "
+          "back to a response, so this turn produced no readable content. "
+          "The request was valid; retry it."
+        : "generation ran out of memory before producing a response. "
+          "The request was valid; retry it.";
+    sb_lit(r, "\"error\":{\"type\":\"api_error\",\"message\":\"");
+    sb_esc(r, msg, strlen(msg));
+    sb_lit(r, "\"}");
+    const char *detail = finish_detail_of(finish);
+    if (detail)
+        sb_fmt(r, ",\"runner_telemetry\":{\"finish_detail\":\"%s\"}", detail);
 }
 
 static int anth_close_block(gen_ctx *g) {
@@ -1882,6 +1939,31 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             resp_send(&g, truncated ? "response.incomplete"
                                     : "response.completed", &f);
         }
+    } else if (stream && api == API_MESSAGES && generation_faulted(finish)) {
+        // The 200 and the headers went out before a token existed, so there is
+        // no status code left to correct — and Anthropic's SSE protocol has a
+        // terminator for exactly this case, documented alongside
+        // overloaded_error. The stream ends on `error`.
+        //
+        // Deliberately NOT message_delta + message_stop: message_delta must
+        // carry one of the seven stop_reasons, all of which describe a turn
+        // that completed, and message_stop asserts a Message that finished.
+        // Sending either would be the buffered end_turn lie in streamed form.
+        // Terminating at all is not optional though — a stream left hanging is
+        // the failure fixed on the OpenAI surfaces in 6c4dfc2, and this is the
+        // Anthropic spelling of the same terminal chunk.
+        //
+        // Nothing synthesises a closing content_block_stop for a block the
+        // fault interrupted. An error may arrive at any point in this protocol
+        // by construction, an SDK accumulator discards the message on it, and
+        // closing a block would be the one gesture that suggested the content
+        // before it was a usable partial answer.
+        if (!g.dead) {
+            sbuf f = {0};
+            sb_lit(&f, ",");
+            anth_error_json(&f, finish);
+            anth_send(&g, "error", &f);
+        }
     } else if (stream && api == API_MESSAGES) {
         // A turn that generated nothing at all still has to describe itself
         // the way the buffered body would, which always carries at least one
@@ -1987,6 +2069,40 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             }
         }
         if (api == API_MESSAGES) {
+            // A fault is an error object here, not a Message. Anthropic's
+            // seven stop_reason values all describe a turn that COMPLETED, so
+            // there is no member to report this with — end_turn, which this
+            // used to send, told the caller the model finished normally over
+            // an empty content[].
+            //
+            // The partial content question, answered deliberately: a turn that
+            // faulted midway may already have produced text, and the analogous
+            // truncation case (stop_reason "max_tokens" WITH the partial in
+            // the body) is not available to borrow. Truncation is a completion
+            // with a known boundary — the budget ran out, and every byte before
+            // it is the model's finished intent up to that point. A mapping
+            // failure has no boundary and no intent: under a strict envelope
+            // the buffer is not a partial answer at all, it is protocol
+            // framing, and envelope_map_buffered has already dropped it for
+            // that reason. So there is nothing to preserve on this path even in
+            // principle. For the oom fault there IS real text, and it is still
+            // dropped: shipping it would require a stop_reason, and every one
+            // of the seven would be a false statement about why generation
+            // stopped. It survives where it belongs — the server log, and the
+            // OpenAI surfaces, which have an "error" finish_reason to carry it
+            // honestly alongside the content.
+            if (generation_faulted(finish)) {
+                sbuf r = {0};
+                sb_lit(&r, "{\"type\":\"error\",");
+                anth_error_json(&r, finish);
+                sb_lit(&r, "}");
+                if (r.failed) send_error(fd, 500, "out of memory building "
+                                                  "response");
+                else send_response(fd, 500, "application/json", r.s, r.n);
+                free(r.s);
+                free(tc.s);
+                goto done;
+            }
             // Same canonical mapping the Responses branch below uses: the
             // chat dialect's tool_calls item is where a call is extracted
             // once, and each surface only renders it in its own vocabulary.
