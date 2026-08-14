@@ -425,6 +425,22 @@ def matrix(family):
             {"role": "tool", "name": "get_weather", "tool_call_id": "call_2",
              "content": '{"temp_c": 1}'},
         ], True, "default"))
+        # An assistant turn with BOTH visible text and calls. Several
+        # references vary their framing on exactly this: ornith opens the
+        # first call with "\n\n" when there is text and with nothing when
+        # there is not (ornith.jinja:106-109), and harmony routes the text
+        # through `commentary` rather than dropping it. Until 2026-08-14 the
+        # matrix had no case with text AND calls in one turn, so that branch
+        # was unmeasurable in every family at once -- and an unmeasurable
+        # branch is where a renderer edit goes to hide.
+        cases.append(("tool-call-with-text", [
+            {"role": "system", "content": SYS},
+            {"role": "user", "content": "Weather in Oslo?"},
+            {"role": "assistant", "content": "Let me look that up.",
+             "tool_calls": [CALL]},
+            {"role": "tool", "name": "get_weather", "tool_call_id": "call_1",
+             "content": '{"temp_c": -3}'},
+        ], True, "default"))
         # A tool result is not the end of the conversation. Everything after
         # it has to come back to ordinary turns -- the case that catches a
         # renderer leaving a tool block open, or replaying the answer that

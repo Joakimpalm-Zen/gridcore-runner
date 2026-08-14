@@ -38,7 +38,7 @@
     "in-progress": "someone is actively fixing this; see `note`"
   },
   "generated_by": "scripts/template-conformance.py --write-baseline",
-  "generated_at": "2026-08-14T18:45:19+00:00",
+  "generated_at": "2026-08-14T19:18:09+00:00",
   "oracles": {
     "apertus": {
       "source": "hf:swiss-ai/Apertus-8B-Instruct-2509",
@@ -65,8 +65,8 @@
       "sha256": "fed2756d2d24e127"
     },
     "harmony": {
-      "source": "fixture:openai-harmony 0.0.8",
-      "sha256": "9d279d841aaaf70a"
+      "source": "lib:openai-harmony 0.0.8",
+      "sha256": "1a21593bf6554bfb"
     },
     "llama2": {
       "source": "hf:unsloth/llama-2-7b-chat",
@@ -123,6 +123,18 @@
       "runner_excerpt": "'<|system_start|>Reply with exactly one JSON object and nothing else.\\nTo answer the user di'"
     },
     {
+      "id": "apertus/tool-call-with-text",
+      "status": "open",
+      "note": "",
+      "digest": "bbc6a5fa352df2ea",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 16,
+      "reference_excerpt": "'<|system_start|>You are a helpful assistant.<|system_end|><|developer_start|>Deliberation:'",
+      "runner_excerpt": "'<|system_start|>Reply with exactly one JSON object and nothing else.\\nTo answer the user di'"
+    },
+    {
       "id": "apertus/tool-then-conversation",
       "status": "open",
       "note": "",
@@ -149,6 +161,16 @@
       "status": "open",
       "note": "Same as chatml/tool-call+result -- identical digest, same generic tool protocol substituted for Qwen's native one. Fixing one should fix both.",
       "digest": "ab4eab0ba0301eda",
+      "allowlist_applied": [],
+      "first_diff_at": 19,
+      "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
+      "runner_excerpt": "'<|im_start|>system\\nReply with exactly one JSON object and nothing else.\\nTo answer the user'"
+    },
+    {
+      "id": "chatml-think/tool-call-with-text",
+      "status": "open",
+      "note": "",
+      "digest": "eb449fedd3612b21",
       "allowlist_applied": [],
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
@@ -199,6 +221,16 @@
       "status": "open",
       "note": "Tool declarations: the reference builds Qwen's native '# Tools' block with <tools>...</tools> JSON and a <tool_call> reply protocol. Runner emits its own generic '<|tool_call>call:NAME{args}<tool_call|>' protocol instead (src/server.c tools_render_for + tool_history_render_for). A protocol the model was not trained on is a real functional gap, not a formatting one.",
       "digest": "ab4eab0ba0301eda",
+      "allowlist_applied": [],
+      "first_diff_at": 19,
+      "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
+      "runner_excerpt": "'<|im_start|>system\\nReply with exactly one JSON object and nothing else.\\nTo answer the user'"
+    },
+    {
+      "id": "chatml/tool-call-with-text",
+      "status": "open",
+      "note": "",
+      "digest": "eb449fedd3612b21",
       "allowlist_applied": [],
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
@@ -291,6 +323,28 @@
       "reference_excerpt": "', CJK: \u6f22\u5b57\u3001\u0623\u0647\u0644\u0627\u064b </s><s>[INST] And at sunset? [/INST]'",
       "runner_excerpt": "', CJK: \u6f22\u5b57\u3001\u0623\u0647\u0644\u0627\u064b </s>[INST] And at sunset? [/INST]'",
       "token_delta": -1
+    },
+    {
+      "id": "muse/tool-call-with-text",
+      "status": "open",
+      "note": "",
+      "digest": "52a782521580f598",
+      "allowlist_applied": [
+        "bos"
+      ],
+      "first_diff_at": 1760,
+      "reference_excerpt": "'t_weather<|message|><atem:function_calls>\\n<atem:invoke name=\"get_weather\">\\n<atem:parameter'",
+      "runner_excerpt": "'t_weather<|message|>Let me look that up.<atem:function_calls>\\n<atem:invoke name=\"get_weath'"
+    },
+    {
+      "id": "ornith/tool-call-with-text",
+      "status": "open",
+      "note": "",
+      "digest": "72b803bc5613bca0",
+      "allowlist_applied": [],
+      "first_diff_at": 1293,
+      "reference_excerpt": "'Let me look that up.\\n\\n<tool_call>\\n<function=get_weather>\\n<parameter=city>\\nOslo\\n</parameter'",
+      "runner_excerpt": "'Let me look that up.<tool_call>\\n<function=get_weather>\\n<parameter=city>\\nOslo\\n</parameter>\\n'"
     }
   ]
 }
