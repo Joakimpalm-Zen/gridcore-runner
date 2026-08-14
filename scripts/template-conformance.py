@@ -47,18 +47,41 @@ import re
 import struct
 import subprocess
 import sys
-import tempfile
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = os.path.join(ROOT, "scripts")
-RENDER_C = os.path.join(SCRIPTS, "template-conformance-render.c")
 ALLOWLIST = os.path.join(SCRIPTS, "template-conformance-allowlist.json")
 BASELINE = os.path.join(SCRIPTS, "template-conformance-baseline.json")
-RUNNER_SRC = ["src/template.c", "src/json.c", "src/tokenizer.c",
-              "src/gguf.c", "src/compat.c", "src/quants.c"]
+HARMONY_SCRIPT = os.path.join(SCRIPTS, "template-conformance-harmony.py")
+HARMONY_FIXTURE = os.path.join(SCRIPTS,
+                               "template-conformance-harmony-oracle.json")
 
 EXIT_OK, EXIT_DRIFT, EXIT_NOT_CHECKED = 0, 1, 2
+
+
+# Conversations a family's own reference template REFUSES to render, so there
+# is no oracle to compare against and the case asserts nothing. Declared, not
+# discovered: every entry is re-verified on each run (see Family.cannot), so
+# one that stops being true is reported as rot rather than quietly skipped.
+#
+# All five reasons are the template's own raise_exception() text, copied from
+# the run that first hit them.
+ALTERNATE = ("reference",
+             "the template raises: 'Conversation roles must alternate "
+             "user/assistant/user/assistant/...'. The family has no rendering "
+             "for this conversation at all, so there is nothing to conform to")
+ALTERNATE_AFTER_SYS = (
+    "reference",
+    "the template raises: 'After the optional system message, conversation "
+    "roles must alternate user/assistant/user/assistant/...'")
+NO_MID_SYSTEM_ROLE = (
+    "reference",
+    "the template raises 'Invalid message role': a system turn is only a role "
+    "this template knows in first position")
+NO_MID_SYSTEM = (
+    "reference",
+    "the template raises: 'System message must be at the beginning.'")
 
 
 # --------------------------------------------------------------- families
@@ -70,13 +93,25 @@ EXIT_OK, EXIT_DRIFT, EXIT_NOT_CHECKED = 0, 1, 2
 
 class Family:
     def __init__(self, runner, source, note="", tool_family=False,
-                 thinking_var=None, skip=None):
+                 thinking_var=None, skip=None, tokenizer=(), cannot=None):
         self.runner = runner            # --chat-template name
         self.source = source            # ("hf", repo) | ("gguf", path)
         self.note = note
         self.tool_family = tool_family  # matrix includes the tool rows
         self.thinking_var = thinking_var
         self.skip = skip                # reason this family has no oracle
+        # GGUF basenames that carry THIS family's tokenizer, best first. The
+        # token-level check needs a tokenizer, and only a tokenizer from the
+        # same family answers the question: borrowing another family's would
+        # manufacture agreement (or disagreement) out of an unrelated vocab.
+        # Several names because a shelf may hold any quant of the checkpoint.
+        self.tokenizer = tokenizer
+        # Cases this family genuinely CANNOT express, with the side that
+        # refuses ("reference" = the upstream template raises, "runner" = the
+        # server refuses the request) and why. Every entry is re-verified on
+        # every run: a declared skip that stops refusing is reported as rot,
+        # so this cannot quietly become a place to hide a case.
+        self.cannot = cannot or {}
 
 
 FAMILIES = {
@@ -84,54 +119,95 @@ FAMILIES = {
         "chatml", ("hf", "Qwen/Qwen2.5-7B-Instruct"),
         note="generic ChatML; Qwen2.5 is the concrete checkpoint the repo "
              "tests against (models/Qwen2.5-7B-Instruct-Q4_K_M.gguf)",
-        tool_family=True),
+        tool_family=True,
+        tokenizer=("Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+                   "Qwen2.5-7B-Instruct-Q8_0.gguf")),
     "chatml-think": Family(
         "chatml-think", ("hf", "Qwen/Qwen3-4B"),
         note="src/template.h cites 'Qwen/Qwen3-* tokenizer_config.json'",
-        tool_family=True, thinking_var="enable_thinking"),
+        tool_family=True, thinking_var="enable_thinking",
+        tokenizer=("Qwen3-4B-Q4_K_M.gguf", "Qwen3-4B-Q8_0.gguf")),
     "llama2": Family(
         "llama2", ("hf", "unsloth/llama-2-7b-chat"),
         note="meta-llama/Llama-2-7b-chat-hf is gated (HTTP 401); this mirror "
-             "carries the identical Llama-2 template"),
+             "carries the identical Llama-2 template",
+        # TinyLlama ships Llama-2's tokenizer verbatim (same 32000-entry
+        # SPM vocab), so it answers the token question for this family when
+        # the 7B chat GGUF is not on the shelf. The report names the file
+        # that was actually used, so the substitution is never silent.
+        tokenizer=("llama-2-7b-chat-Q4_K_M.gguf", "tinyllama-q2k.gguf"),
+        cannot={"consecutive-user": ALTERNATE,
+                "consecutive-assistant": ALTERNATE,
+                "system-mid-history": ALTERNATE}),
     "llama3": Family(
         "llama3", ("hf", "unsloth/Llama-3.2-3B-Instruct"),
         note="meta-llama/Llama-3.2-3B-Instruct is gated (HTTP 401); this "
-             "mirror carries the identical Llama-3.2 template"),
-    "zephyr": Family("zephyr", ("hf", "HuggingFaceH4/zephyr-7b-beta")),
+             "mirror carries the identical Llama-3.2 template",
+        tokenizer=("Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+                   "Llama-3.2-3B-Instruct-Q8_0.gguf")),
+    "zephyr": Family("zephyr", ("hf", "HuggingFaceH4/zephyr-7b-beta"),
+                     tokenizer=("zephyr-7b-beta-Q4_K_M.gguf",)),
     "gemma": Family(
         "gemma", ("gguf", "models/google_gemma-3-4b-it-Q4_K_M.gguf"),
         note="google/gemma-3-4b-it is gated on HF (401); the GGUF the repo "
-             "already tests against carries the same tokenizer.chat_template"),
+             "already tests against carries the same tokenizer.chat_template",
+        tokenizer=("google_gemma-3-4b-it-Q4_K_M.gguf",),
+        cannot={"consecutive-user": ALTERNATE,
+                "consecutive-assistant": ALTERNATE,
+                "system-mid-history": ALTERNATE}),
     "gemma4": Family(
         "gemma4", ("gguf", "models/e2b-q40.gguf"),
         note="src/template.h cites 'gemma-4 tokenizer.chat_template (read "
              "from the GGUF)'; byte-identical to google/gemma-4-E2B-it's "
              "chat_template.jinja on HF",
-        thinking_var="enable_thinking"),
-    "mistral": Family("mistral", ("hf", "mistralai/Mistral-7B-Instruct-v0.3")),
-    "phi3": Family("phi3", ("hf", "microsoft/Phi-3.5-mini-instruct")),
+        thinking_var="enable_thinking",
+        tokenizer=("e2b-q40.gguf", "e4b-q4km.gguf")),
+    "mistral": Family("mistral", ("hf", "mistralai/Mistral-7B-Instruct-v0.3"),
+                      tokenizer=("Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+                                 "Mistral-7B-Instruct-v0.3-Q8_0.gguf"),
+                      cannot={"consecutive-user": ALTERNATE_AFTER_SYS,
+                              "consecutive-assistant": ALTERNATE_AFTER_SYS,
+                              "system-mid-history": ALTERNATE_AFTER_SYS}),
+    "phi3": Family("phi3", ("hf", "microsoft/Phi-3.5-mini-instruct"),
+                   tokenizer=("Phi-3.5-mini-instruct-Q4_K_M.gguf",)),
     "apertus": Family(
         "apertus", ("hf", "swiss-ai/Apertus-8B-Instruct-2509"),
-        note="tests/test_template.c cites this repo's chat_template.jinja"),
+        note="tests/test_template.c cites this repo's chat_template.jinja",
+        tokenizer=("Apertus-8B-Instruct-2509-Q4_K_M.gguf",),
+        cannot={"system-mid-history": NO_MID_SYSTEM_ROLE}),
     "ornith": Family(
         "ornith", ("hf", "ornith-ai/Ornith-1.0-9B"),
         note="docs/ornith-reference.md names the model; the -GGUF repo is the "
              "same checkpoint", tool_family=True,
-        thinking_var="enable_thinking"),
+        thinking_var="enable_thinking",
+        tokenizer=("Ornith-1.0-9B-Q4_K_M.gguf",),
+        cannot={"system-mid-history": NO_MID_SYSTEM}),
     "muse": Family(
         "muse", ("hf", "meta-models/Muse-Glimmer-30B"),
         note="src/template.c cites 'the model's OWN tokenizer.chat_template, "
              "read from the official meta-models GGUF'",
-        tool_family=True),
+        tool_family=True,
+        tokenizer=("Muse-Glimmer-30B-Q4_K_M.gguf",)),
     "granite": Family(
         "granite", ("gguf", "models/granite-4.1-8b-Q4_0.gguf"),
         note="src/template.c cites 'the model's OWN tokenizer.chat_template'; "
-             "the ibm-granite HF repo is gated (401)"),
+             "the ibm-granite HF repo is gated (401)",
+        tokenizer=("granite-4.1-8b-Q4_0.gguf", "granite-4.1-3b-Q8_0.gguf")),
+    # The one family whose oracle is NOT its jinja. gpt-oss's wire format is
+    # defined by the openai-harmony library and its docs/format.md; the jinja
+    # in the GGUF is a reimplementation of that spec with gaps it cannot
+    # close (it has no content_type field, so it can never emit
+    # <|constrain|>). Comparing runner against the reimplementation reported
+    # runner as drifted in three places where runner matches the spec.
+    # scripts/template-conformance-harmony.py holds the mapping and the
+    # evidence.
     "harmony": Family(
-        "harmony", ("gguf", "models/gpt-oss-20b-MXFP4.gguf"),
-        note="src/template.c cites 'the model's OWN tokenizer.chat_template "
-             "in the official GGUF'",
-        tool_family=True),
+        "harmony", ("harmony", "openai-harmony"),
+        note="the openai-harmony library (docs/format.md + encoding.rs) is "
+             "the protocol's reference implementation; the GGUF's jinja is a "
+             "lossy reimplementation of it",
+        tool_family=True,
+        tokenizer=("gpt-oss-20b-MXFP4.gguf",)),
     "raw": Family("raw", None,
                   skip="TMPL_RAW is runner's own no-framing mode: it "
                        "concatenates message contents and has no upstream "
@@ -146,12 +222,28 @@ NETWORK_ONLY = tuple(n for n, f in FAMILIES.items()
                      if f.source and f.source[0] == "hf")
 
 
+
 # ------------------------------------------------------------- the matrix
 
 SYS = "You are a helpful assistant."
 U1 = "What color is the sky?"
 A1 = "Blue, because of Rayleigh scattering."
 U2 = "And at sunset?"
+
+# Non-ASCII that exercises more than "the encoder passes bytes through": a
+# combining mark, an astral-plane emoji, a ZWJ sequence that must not be split,
+# RTL text, CJK, and the two characters a careless JSON or C-string writer
+# breaks on.
+UNI = ('Færre "smutthull" \\ 100 % — kombinert: é, '
+       'emoji: \U0001f300 \U0001f469‍\U0001f4bb, '
+       'RTL: שלום, CJK: 漢字、'
+       'أهلاً')
+
+# Long enough to force the prompt buffer past its opening guess several times
+# over. src/api.h records that a short buffer does not fail the request, it
+# silently truncates the TAIL -- so a renderer edit that changes the size
+# arithmetic has to be caught by a case big enough to reach it.
+LONG = ("Consider the following at length. " * 700).strip()
 
 TOOLS = [{
     "type": "function",
@@ -169,11 +261,26 @@ TOOLS = [{
 CALL = {"id": "call_1", "type": "function",
         "function": {"name": "get_weather",
                      "arguments": '{"city": "Oslo"}'}}
+CALL2 = {"id": "call_2", "type": "function",
+         "function": {"name": "get_weather",
+                      "arguments": '{"city": "Bergen"}'}}
 
 
 def matrix(family):
-    """The same conversations for every family, so results are comparable."""
+    """The same conversations for every family, so results are comparable.
+
+    Each case is (id, messages, add_generation_prompt, thinking,
+    oracle_messages). `oracle_messages` is None except where the two sides
+    must legitimately be fed different INPUT to be asked the same QUESTION --
+    see the content-array case below, which is the only one.
+
+    The universal block runs for every family. The thinking and tool blocks
+    run only where the family has the concept at all; anything a specific
+    family cannot express is declared in Family.cannot with a reason, and
+    re-verified rather than assumed.
+    """
     cases = [
+        # ---- shape of the conversation
         ("user-only+gen", [{"role": "user", "content": U1}], True, "default"),
         ("user-only-nogen", [{"role": "user", "content": U1}], False,
          "default"),
@@ -192,12 +299,70 @@ def matrix(family):
                              {"role": "assistant", "content": A1},
                              {"role": "user", "content": U2}], False,
          "default"),
+        # A trailing assistant turn is what a prefill/continuation request
+        # looks like. With the generation prompt it must NOT open a second
+        # assistant turn; without it the render has to stop mid-turn.
         ("trailing-assistant+gen", [{"role": "user", "content": U1},
                                     {"role": "assistant", "content": A1}],
          True, "default"),
         ("trailing-assistant-nogen", [{"role": "user", "content": U1},
                                       {"role": "assistant", "content": A1}],
          False, "default"),
+        # ---- turn ORDER the renderers assume without saying so
+        ("consecutive-user", [{"role": "user", "content": U1},
+                              {"role": "user", "content": U2}], True,
+         "default"),
+        ("consecutive-assistant", [{"role": "user", "content": U1},
+                                   {"role": "assistant", "content": A1},
+                                   {"role": "assistant", "content": "Also, "
+                                    "the sky is not actually blue at night."},
+                                   {"role": "user", "content": U2}], True,
+         "default"),
+        # A system message that is not message[0]. Several renderers special-
+        # case "the first turn is the system turn" and quietly mis-handle a
+        # later one; mistral folds system text into a user turn and llama2
+        # wraps it in <<SYS>>, both of which are position-sensitive.
+        ("system-mid-history", [{"role": "user", "content": U1},
+                                {"role": "assistant", "content": A1},
+                                {"role": "system", "content":
+                                 "Answer in one sentence from now on."},
+                                {"role": "user", "content": U2}], True,
+         "default"),
+        # ---- shape of the CONTENT
+        #
+        # The AI-SDK part-array form (Cline, the Vercel AI SDK, and every
+        # client that sends images alongside text). src/server.c's
+        # message_text() concatenates the text parts with a newline BEFORE
+        # anything is rendered, so the reference is asked the equivalent
+        # question -- the same conversation with that concatenation already
+        # done. What this compares is therefore whether runner's part
+        # handling reaches the same prompt as the plain string would: a
+        # dropped part, a lost separator or a mangled order all show up.
+        ("content-array",
+         [{"role": "system", "content": SYS},
+          {"role": "user", "content": [
+              {"type": "text", "text": "What color is the sky?"},
+              {"type": "image_url",
+               "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+              {"type": "text", "text": "Answer briefly."}]}],
+         True, "default",
+         [{"role": "system", "content": SYS},
+          {"role": "user", "content":
+           "What color is the sky?\nAnswer briefly."}]),
+        ("empty-assistant-content", [{"role": "user", "content": U1},
+                                     {"role": "assistant", "content": ""},
+                                     {"role": "user", "content": U2}], True,
+         "default"),
+        ("empty-user-content", [{"role": "system", "content": SYS},
+                                {"role": "user", "content": ""}], True,
+         "default"),
+        ("unicode-emoji", [{"role": "system", "content": SYS},
+                           {"role": "user", "content": UNI},
+                           {"role": "assistant", "content": "Ja. " + UNI},
+                           {"role": "user", "content": U2}], True, "default"),
+        ("long-content", [{"role": "system", "content": SYS},
+                          {"role": "user", "content": LONG}], True,
+         "default"),
     ]
     if family.thinking_var:
         for mode in ("on", "off"):
@@ -212,86 +377,65 @@ def matrix(family):
             {"role": "tool", "name": "get_weather", "tool_call_id": "call_1",
              "content": '{"temp_c": -3}'},
         ], True, "default"))
-    return cases
+        # Two calls in ONE assistant turn. Muse chains them with an <|eom|>
+        # recipient header and Harmony emits a separate turn per call, so this
+        # is the case where a renderer edit that assumes "one call per turn"
+        # stops being invisible.
+        cases.append(("multi-tool-call", [
+            {"role": "system", "content": SYS},
+            {"role": "user", "content": "Weather in Oslo and Bergen?"},
+            {"role": "assistant", "content": "", "tool_calls": [CALL, CALL2]},
+            {"role": "tool", "name": "get_weather", "tool_call_id": "call_1",
+             "content": '{"temp_c": -3}'},
+            {"role": "tool", "name": "get_weather", "tool_call_id": "call_2",
+             "content": '{"temp_c": 1}'},
+        ], True, "default"))
+        # A tool result is not the end of the conversation. Everything after
+        # it has to come back to ordinary turns -- the case that catches a
+        # renderer leaving a tool block open, or replaying the answer that
+        # followed a result in the tool channel.
+        cases.append(("tool-then-conversation", [
+            {"role": "system", "content": SYS},
+            {"role": "user", "content": "Weather in Oslo?"},
+            {"role": "assistant", "content": "", "tool_calls": [CALL]},
+            {"role": "tool", "name": "get_weather", "tool_call_id": "call_1",
+             "content": '{"temp_c": -3}'},
+            {"role": "assistant", "content": "It is -3 C in Oslo."},
+            {"role": "user", "content": "Should I bring a coat?"},
+        ], True, "default"))
+    return [c if len(c) == 5 else (c + (None,)) for c in cases]
 
 
 # ------------------------------------------------- runner-side flattening
 #
+# There is none, and that is the point.
+#
 # render_messages_with_tools takes flat {role, content, name, channel} turns,
-# not OpenAI messages. src/server.c:message_text() does that flattening
-# before rendering, so the harness has to do the same or it would compare
-# runner against an input the server never hands it. This mirrors
-# src/server.c; it is the one part of the comparison that is a
-# RE-IMPLEMENTATION rather than runner's own code, and it only matters for
-# the tool row. If server.c's flattening changes, this goes stale silently --
-# the known weak spot of this harness, called out here on purpose.
+# not OpenAI messages, and src/server.c:handle_chat() does that flattening --
+# content part-arrays, tool_calls, harmony's turn explosion, ornith's tool ->
+# user rewrite, the tool-declaration system turn. This harness USED to
+# re-implement that in python, which made the tool rows a comparison of jinja
+# against a COPY of runner rather than against runner, and which could not
+# express a part-array at all.
+#
+# It now hands scripts/template-conformance-render.c the request body
+# verbatim, and that driver #includes src/server.c and runs the real
+# handle_chat. Both sides of the diff are fed the same conversation, and the
+# only thing between the request and the renderer is runner's own code. See
+# the driver's header comment for the single documented substitution
+# (add_generation_prompt, which handle_chat hard-codes to true).
 
-def flatten_for_runner(family, msgs):
-    out = []
-    for m in msgs:
-        role, content = m["role"], m.get("content") or ""
-        calls = m.get("tool_calls") or []
-        if family.runner == "ornith":
-            if role == "assistant":
-                content = ("<think>\n" + (m.get("reasoning_content") or "")
-                           + "\n</think>\n\n" + content)
-                for c in calls:  # tool_history_render_for, ornith branch
-                    args = json.loads(c["function"]["arguments"])
-                    content += "<tool_call>\n<function=%s>\n" % (
-                        c["function"]["name"])
-                    for k, v in args.items():
-                        content += "<parameter=%s>\n%s\n</parameter>\n" % (
-                            k, v if isinstance(v, str) else json.dumps(v))
-                    content += "</function>\n</tool_call>"
-            elif role == "tool":
-                content = "<tool_response>\n" + content + "\n</tool_response>"
-                role = "user"
-            out.append({"role": role, "content": content})
-            continue
-        if family.runner == "harmony":
-            if role == "assistant":
-                if m.get("reasoning_content"):
-                    out.append({"role": "assistant",
-                                "content": m["reasoning_content"],
-                                "channel": "analysis"})
-                if content:
-                    out.append({"role": "assistant", "content": content,
-                                "channel": "commentary" if calls else None})
-                for c in calls:
-                    out.append({"role": "assistant",
-                                "content": c["function"]["arguments"],
-                                "name": c["function"]["name"]})
-                continue
-            out.append({"role": role, "content": content,
-                        "name": m.get("name")})
-            continue
-        if family.runner == "muse":
-            name = m.get("name")
-            if role == "assistant" and calls:
-                name = calls[0]["function"]["name"]
-                body = ""
-                for n, c in enumerate(calls):
-                    args = json.loads(c["function"]["arguments"])
-                    if n:
-                        body += ("<|eom|><|start|>assistant to=%s<|message|>"
-                                 % c["function"]["name"])
-                    body += ('<atem:function_calls>\n<atem:invoke name="%s">\n'
-                             % c["function"]["name"])
-                    for k, v in args.items():
-                        body += ('<atem:parameter name="%s">%s'
-                                 "</atem:parameter>\n") % (
-                            k, v if isinstance(v, str) else json.dumps(v))
-                    body += "</atem:invoke>\n</atem:function_calls>"
-                content += body
-            out.append({"role": role, "content": content, "name": name})
-            continue
-        # generic families: runner's own tool-call marker, from
-        # tool_history_render_for()'s default branch
-        for c in calls:
-            content += "<|tool_call>call:%s%s<tool_call|>" % (
-                c["function"]["name"], c["function"]["arguments"])
-        out.append({"role": role, "content": content})
-    return out
+
+def request_body(family, msgs, thinking, tools):
+    """The request an OpenAI client would send for this case."""
+    req = {"model": "template-conformance", "messages": msgs}
+    if tools:
+        req["tools"] = tools
+    if family.thinking_var and thinking != "default":
+        # runner reads this off the request (template.c:req_thinking_mode);
+        # the reference takes it as a jinja variable named per family.
+        req["enable_thinking"] = (thinking == "on")
+    return req
 
 
 # --------------------------------------------------------- oracle loading
@@ -402,6 +546,139 @@ def sha(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+# ------------------------------------------------------ the harmony oracle
+#
+# Harmony's reference is a LIBRARY, not a template, so it cannot be cached as
+# a .jinja next to the others. Two ways in, in this order:
+#
+#   1. render live, through any interpreter that has openai_harmony (this
+#      one, or RUNNER_HARMONY_PYTHON). Always preferred: a live library
+#      cannot go stale.
+#   2. the committed fixture scripts/template-conformance-harmony-oracle.json,
+#      so a machine without the library still checks harmony instead of
+#      skipping it. Regenerate with `make template-conformance-harmony-oracle`.
+#
+# With neither, harmony is NOT CHECKED -- exit 2, never a pass. And when BOTH
+# are present the fixture is verified against the live render, so a fixture
+# recorded from an older library version is reported rather than trusted.
+
+def harmony_render_live(cases):
+    """(doc, err). doc is {"library_version":..., "renders": {...}}."""
+    payload = json.dumps({"cases": cases})
+    tried = []
+    for py in (os.environ.get("RUNNER_HARMONY_PYTHON"), sys.executable):
+        if not py:
+            continue
+        p = subprocess.run([py, HARMONY_SCRIPT], input=payload,
+                           capture_output=True, text=True)
+        if p.returncode == 0:
+            return json.loads(p.stdout), None
+        tried.append("%s: %s" % (py, p.stderr.strip().splitlines()[-1]
+                                 if p.stderr.strip() else "exit %d"
+                                 % p.returncode))
+    return None, "; ".join(tried)
+
+
+def harmony_oracle(cases):
+    """(renders, meta, rot, err) for the harmony family."""
+    live, lerr = harmony_render_live(cases)
+    fixture = None
+    if os.path.exists(HARMONY_FIXTURE):
+        with open(HARMONY_FIXTURE) as f:
+            fixture = json.load(f)
+
+    def meta_for(doc, how):
+        return {"source": "%s:openai-harmony %s"
+                          % (how, doc.get("library_version", "?")),
+                "sha256": sha(json.dumps(doc["renders"], sort_keys=True)),
+                "fetched_at": doc.get("generated_at", "live")}
+
+    if live:
+        rot = []
+        if fixture:
+            stale = [c for c, t in live["renders"].items()
+                     if fixture.get("renders", {}).get(c) != t]
+            if fixture.get("library_version") != live["library_version"]:
+                rot.append(
+                    "STALE HARMONY ORACLE: the committed fixture was recorded "
+                    "from openai-harmony %s, the installed library is %s. "
+                    "Regenerate: make template-conformance-harmony-oracle"
+                    % (fixture.get("library_version"),
+                       live["library_version"]))
+            elif stale:
+                rot.append(
+                    "STALE HARMONY ORACLE: %d case(s) render differently from "
+                    "the committed fixture (%s). The fixture is what a machine "
+                    "without the library compares against, so it must not "
+                    "drift. Regenerate: make template-conformance-harmony-"
+                    "oracle" % (len(stale), ", ".join(sorted(stale)[:4])))
+        return live["renders"], meta_for(live, "lib"), rot, None
+    if fixture:
+        return fixture["renders"], meta_for(fixture, "fixture"), [], None
+    return None, None, [], (
+        "the harmony oracle is the openai-harmony library, and neither the "
+        "library nor the committed fixture %s is available (%s). Install it "
+        "(pip install openai-harmony), point RUNNER_HARMONY_PYTHON at an "
+        "interpreter that has it, or restore the fixture."
+        % (os.path.relpath(HARMONY_FIXTURE, ROOT), lerr))
+
+
+def harmony_cases(fam):
+    """The matrix as the harmony oracle script wants it."""
+    out = []
+    for cid, msgs, add_gen, _thinking, omsgs in matrix(fam):
+        out.append({"id": cid,
+                    "messages": omsgs if omsgs is not None else msgs,
+                    "add_generation_prompt": add_gen,
+                    "tools": TOOLS if "tool" in cid else None})
+    return out
+
+
+def write_harmony_fixture():
+    """Re-record the committed harmony oracle from the installed library."""
+    fam = FAMILIES["harmony"]
+    doc, err = harmony_render_live(harmony_cases(fam))
+    if not doc:
+        print("REFUSING to write the harmony oracle fixture: the "
+              "openai-harmony library is not importable (%s)." % err)
+        print("The fixture is a RECORDING of the library. Writing one without "
+              "it would invent the oracle it is supposed to preserve.")
+        return EXIT_NOT_CHECKED
+    doc = {
+        "_README": [
+            "The HARMONY oracle, rendered from the openai-harmony library.",
+            "",
+            "gpt-oss's wire format is defined by that library and its",
+            "docs/format.md, not by the jinja chat_template in the GGUF --",
+            "the jinja is a reimplementation with gaps it cannot close (no",
+            "content_type field, so it can never emit <|constrain|>).",
+            "",
+            "This file exists so a machine WITHOUT the library still checks",
+            "harmony rather than skipping it. When the library IS installed",
+            "the gate renders live and verifies this file still matches; a",
+            "mismatch is reported, not accepted.",
+            "",
+            "Regenerate (needs the library):",
+            "    make template-conformance-harmony-oracle",
+            "Adding a case to the matrix requires regenerating this file, or",
+            "that case reports NOT CHECKED on a machine without the library.",
+        ],
+        "library_version": doc["library_version"],
+        "generated_by": "scripts/template-conformance.py "
+                        "--write-harmony-oracle",
+        "generated_at": datetime.datetime.now(
+            datetime.timezone.utc).replace(microsecond=0).isoformat(),
+        "renders": doc["renders"],
+    }
+    with open(HARMONY_FIXTURE, "w") as f:
+        json.dump(doc, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+    print("wrote %s: %d cases from openai-harmony %s"
+          % (os.path.relpath(HARMONY_FIXTURE, ROOT), len(doc["renders"]),
+             doc["library_version"]))
+    return EXIT_OK
+
+
 # ------------------------------------------------------- jinja (reference)
 
 def jinja_env():
@@ -446,24 +723,102 @@ def render_reference(env, tmpl_src, meta, msgs, add_gen, thinking,
 # ------------------------------------------------------------ runner side
 
 def build_renderer():
-    """Compile the runner-side driver. Returns (path, err)."""
-    out = os.path.join(tempfile.mkdtemp(prefix="tmplconf"), "render")
-    cc = os.environ.get("CC", "cc")
-    cmd = [cc, "-O1", "-std=c11", "-I", os.path.join(ROOT, "src"), RENDER_C]
-    cmd += [os.path.join(ROOT, s) for s in RUNNER_SRC]
-    cmd += ["-o", out, "-lm"]
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode:
-        return None, "cannot build the runner-side renderer:\n%s" % p.stderr
+    """Build the runner-side driver. Returns (path, err).
+
+    Through `make`, not a hand-rolled cc line: the driver #includes
+    src/server.c and therefore needs the same object set, CFLAGS and platform
+    LDFLAGS the server itself is built with (Metal on macOS, winsock on
+    Windows). Reproducing that here is exactly the kind of second copy of
+    runner's build that this harness just finished deleting from its render
+    path.
+    """
+    exe = "template-conformance-render"
+    if sys.platform.startswith("win"):
+        exe += ".exe"
+    out = os.path.join(ROOT, exe)
+    p = subprocess.run(["make", "-C", ROOT, exe],
+                       capture_output=True, text=True)
+    if p.returncode or not os.path.exists(out):
+        return None, ("cannot build the runner-side renderer (make %s):\n%s%s"
+                      % (exe, p.stdout[-2000:], p.stderr[-2000:]))
     return out, None
 
 
-def render_runner(binary, cases):
-    p = subprocess.run([binary], input=json.dumps({"cases": cases}),
+def run_renderer(binary, payload):
+    p = subprocess.run([binary], input=json.dumps(payload),
                        capture_output=True, text=True)
     if p.returncode:
         raise SystemExit("runner renderer failed: %s" % p.stderr)
-    return {r["id"]: r["prompt"] for r in json.loads(p.stdout)["results"]}
+    return json.loads(p.stdout)
+
+
+def render_runner(binary, cases):
+    """id -> (prompt, error). error is None on a successful render."""
+    doc = run_renderer(binary, {"cases": cases})
+    return {r["id"]: (r["prompt"], r.get("error")) for r in doc["results"]}
+
+
+# --------------------------------------------------------- the token check
+#
+# The gate compares TEXT, and text is not what the model reads. Whitespace
+# that looks cosmetic in a diff is not cosmetic to a tokenizer: `[INST] X
+# [/INST]` and `[INST] X[/INST]` are different SentencePiece sequences, and
+# that difference -- one extra token per occurrence on
+# Mistral-7B-Instruct-v0.3, measured on hardware -- is exactly the defect the
+# first family in the fix campaign has. A text-only gate cannot tell whether a
+# renderer fix changed what the model actually sees, or only how the diff
+# reads.
+#
+# So the check is ALWAYS ON wherever it can run, rather than a mode or a
+# per-family opt-in:
+#
+#   * a separate mode would not be running during the campaign it exists to
+#     protect, and
+#   * a per-family opt-in makes "nobody enabled it here" indistinguishable
+#     from "it passed", which is the failure this whole script is against.
+#
+# It runs for any family with a tokenizer on the shelf, needs no flag, and
+# reports THREE states per case exactly as the text check does: agreed,
+# differed, or NOT CHECKED because no tokenizer for that family was found.
+# NOT CHECKED is never folded into the pass -- it is counted, printed, and
+# named in the final line. `--require-tokens` promotes it to exit 2, which is
+# what the per-family fix runs should use.
+
+def tokenizer_path(fam):
+    """Absolute path to a GGUF carrying this family's tokenizer, or None."""
+    base = os.environ.get("RUNNER_MODELS_DIR") or os.path.join(ROOT, "models")
+    for name in fam.tokenizer:
+        p = os.path.join(base, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def token_check(binary, jobs):
+    """jobs: [(id, gguf, want_text, mine_text)] -> id -> (verdict, detail)."""
+    if not jobs:
+        return {}
+    payload = []
+    for cid, gguf, want, mine in jobs:
+        payload.append({"id": cid + " #ref", "gguf": gguf, "text": want})
+        payload.append({"id": cid + " #run", "gguf": gguf, "text": mine})
+    doc = run_renderer(binary, {"tokenize": payload})
+    got = {t["id"]: t for t in doc["tokens"]}
+    out = {}
+    for cid, _g, _w, _m in jobs:
+        ref, run = got.get(cid + " #ref"), got.get(cid + " #run")
+        if not ref or not run or ref["ids"] is None or run["ids"] is None:
+            why = ((ref or {}).get("error") or (run or {}).get("error")
+                   or "the driver returned no ids")
+            out[cid] = ("NOT-CHECKED", why)
+            continue
+        a, b = ref["ids"], run["ids"]
+        if a == b:
+            out[cid] = ("same", {"n": len(a), "delta": 0})
+        else:
+            out[cid] = ("differ", {"n": len(a), "delta": len(b) - len(a),
+                                   "at": first_diff_at(a, b)})
+    return out
 
 
 # ----------------------------------------------------------- the allowlist
@@ -671,6 +1026,12 @@ def run(args):
     oracle_meta = {}
     structural = []     # families with no upstream template BY DESIGN
     stale = []          # --refresh failed but a cached oracle was usable
+    rot_skips = []      # Family.cannot entries that stopped being true
+    rot_extra = []      # oracle-specific rot (the harmony fixture)
+    rebased = []        # caches invalidated because the family's source moved
+    tokens = {}         # cid_full -> (verdict, detail)
+    tok_sources = {}    # family -> the GGUF its tokenizer came from
+    tok_missing = {}    # family -> why the token check could not run
     new_drift = changed = fixed = 0
     checked = 0
 
@@ -681,50 +1042,95 @@ def run(args):
             # conform to. Reported, but it does not make the run incomplete.
             structural.append((n, fam.skip))
             continue
-        jpath = os.path.join(args.oracle_dir, n + ".jinja")
-        if args.refresh or not os.path.exists(jpath):
-            ok, ferr = fetch_oracle(n, fam, args.oracle_dir)
-            if not ok and not os.path.exists(jpath):
-                not_checked.append((n, ferr))
+        cases = matrix(fam)
+
+        # ---- harmony: the oracle is a LIBRARY, not a cached template
+        harmony_renders = None
+        tmpl_src, meta = None, {}
+        if fam.source[0] == "harmony":
+            harmony_renders, hmeta, hrot, herr = harmony_oracle(
+                harmony_cases(fam))
+            if herr:
+                not_checked.append((n, herr))
                 continue
-            if not ok:
-                # A refresh that failed with a usable cache still checks
-                # something; say loudly that the oracle may be stale rather
-                # than throwing away a comparison we can make.
-                stale.append((n, ferr))
-        tmpl_src = open(jpath).read()
-        meta = json.load(open(os.path.join(args.oracle_dir, n + ".json")))
-        oracle_meta[n] = {"source": meta.get("source", "?"),
-                          "sha256": meta.get("sha256") or sha(tmpl_src),
-                          "fetched_at": meta.get("fetched_at", "?")}
+            oracle_meta[n] = hmeta
+            rot_extra += hrot
+        else:
+            jpath = os.path.join(args.oracle_dir, n + ".jinja")
+            mpath = os.path.join(args.oracle_dir, n + ".json")
+            # The cache is keyed on the SOURCE, not just the family name.
+            #
+            # Without this, changing where a family's oracle comes from --
+            # a different HF repo, a different GGUF, or (as happened here)
+            # switching harmony from its jinja to the openai-harmony
+            # library -- silently reuses the old basis, and the run goes
+            # green against an oracle the configuration no longer names.
+            # A cached artifact that outlives the reason it was cached is
+            # the same class of bug as every other one this gate exists to
+            # catch, so the mismatch invalidates rather than warns.
+            want_source = "%s:%s" % fam.source
+            cached = os.path.exists(jpath) and os.path.exists(mpath)
+            if cached:
+                try:
+                    with open(mpath) as f:
+                        cached_source = json.load(f).get("source")
+                except (OSError, ValueError):
+                    cached_source = None
+                if cached_source != want_source:
+                    rebased.append(
+                        "%s: cached oracle was fetched from %s, the family now "
+                        "names %s. Re-fetching; the cached copy cannot answer "
+                        "for a source it did not come from."
+                        % (n, cached_source or "an unreadable meta file",
+                           want_source))
+                    cached = False
+            if args.refresh or not cached:
+                ok, ferr = fetch_oracle(n, fam, args.oracle_dir)
+                if not ok and not cached:
+                    not_checked.append((n, ferr))
+                    continue
+                if not ok:
+                    # A refresh that failed with a usable cache still checks
+                    # something; say loudly that the oracle may be stale
+                    # rather than throwing away a comparison we can make.
+                    stale.append((n, ferr))
+            tmpl_src = open(jpath).read()
+            with open(mpath) as f:
+                meta = json.load(f)
+            oracle_meta[n] = {"source": meta.get("source", "?"),
+                              "sha256": meta.get("sha256") or sha(tmpl_src),
+                              "fetched_at": meta.get("fetched_at", "?")}
 
         fam_devs = devs.get(n, [])
         patches = [(d, compile_patch(d, meta.get("bos_token")))
                    for d in fam_devs]
 
-        cases = matrix(fam)
-        jobs = []
-        for cid, msgs, add_gen, thinking in cases:
-            tools = TOOLS if "tool" in cid else None
-            jobs.append({
-                "id": cid, "template": fam.runner,
-                "add_generation_prompt": add_gen, "thinking": thinking,
-                "messages": flatten_for_runner(fam, msgs),
-                "tools": tools,
-                # src/server.c builds a tools system turn for every family
-                # EXCEPT muse and harmony, whose renderers take the
-                # declarations directly. Mirroring that matters: adding the
-                # turn for harmony would manufacture a diff runner never
-                # produces.
-                "server_tools_turn": bool(tools) and fam.runner not in
-                                     ("muse", "harmony"),
-            })
+        jobs = [{"id": cid, "template": fam.runner,
+                 "add_generation_prompt": add_gen,
+                 "request": request_body(fam, msgs, thinking,
+                                         TOOLS if "tool" in cid else None)}
+                for cid, msgs, add_gen, thinking, _om in cases]
         got = render_runner(binary, jobs)
 
-        for cid, msgs, add_gen, thinking in cases:
+        tok_gguf = tokenizer_path(fam)
+        if tok_gguf:
+            tok_sources[n] = tok_gguf
+        else:
+            tok_missing[n] = (
+                "no GGUF carrying the %s tokenizer on the model shelf "
+                "(looked for %s in %s). The text comparison ran; the TOKEN "
+                "comparison did not." % (
+                    n, ", ".join(fam.tokenizer) or "nothing -- no tokenizer "
+                    "is declared for this family",
+                    os.environ.get("RUNNER_MODELS_DIR")
+                    or os.path.join(ROOT, "models")))
+        tok_jobs = []
+
+        for cid, msgs, add_gen, thinking, omsgs_override in cases:
             cid_full = "%s/%s" % (n, cid)
             tools = TOOLS if "tool" in cid else None
-            omsgs = msgs
+            declined = fam.cannot.get(cid)
+            omsgs = omsgs_override if omsgs_override is not None else msgs
             if tools:
                 # Reference templates assume tool_call.arguments is a MAPPING:
                 # muse raises outright on a string, harmony/qwen/granite run
@@ -732,20 +1138,69 @@ def run(args):
                 # format is a JSON string, which is what runner is handed.
                 # Parsing it for the oracle side compares the two renderers on
                 # the same call rather than on an input the template rejects.
-                omsgs = json.loads(json.dumps(msgs))
+                omsgs = json.loads(json.dumps(omsgs))
                 for m in omsgs:
                     for c in m.get("tool_calls") or []:
                         c["function"]["arguments"] = json.loads(
                             c["function"]["arguments"])
-            try:
-                want = render_reference(env, tmpl_src, meta, omsgs, add_gen,
-                                        thinking, fam.thinking_var, tools)
-            except Exception as e:                          # noqa: BLE001
-                # The reference refusing to render is not a pass and not a
-                # difference: it means this case was never compared.
-                not_checked.append((cid_full,
-                                    "reference template refused: %s" % e))
-                results.append((n, cid, "NOT-CHECKED", "reference refused"))
+            mine, mine_err = got[cid]
+
+            refused = None
+            want = None
+            if harmony_renders is not None:
+                want = harmony_renders.get(cid)
+                if want is None:
+                    # A case the committed fixture predates. Never silently
+                    # skipped: with no library to render it live, this case
+                    # was not compared, and that is exit 2.
+                    refused = ("reference",
+                               "no harmony oracle for this case. The library "
+                               "is not installed and the committed fixture "
+                               "predates the case. Regenerate: make "
+                               "template-conformance-harmony-oracle")
+            else:
+                try:
+                    want = render_reference(env, tmpl_src, meta, omsgs,
+                                            add_gen, thinking,
+                                            fam.thinking_var, tools)
+                except Exception as e:                      # noqa: BLE001
+                    refused = ("reference", "%s: %s" % (type(e).__name__, e))
+            if refused is None and mine_err:
+                refused = ("runner", mine_err)
+
+            # ---- a case this family genuinely cannot express
+            #
+            # A declared skip is re-verified, never assumed: if the side that
+            # was supposed to refuse now accepts the case, the declaration is
+            # stale and the gate says so rather than silently dropping a case
+            # that has become checkable.
+            if declined:
+                want_side, why = declined
+                if refused is None:
+                    rot_skips.append(
+                        "STALE SKIP %s: declared as unexpressible (%s refuses: "
+                        "%s) but BOTH sides rendered it. The case is now "
+                        "checkable -- delete the Family.cannot entry."
+                        % (cid_full, want_side, why))
+                elif refused[0] != want_side:
+                    rot_skips.append(
+                        "STALE SKIP %s: declared as refused by the %s side, "
+                        "but it was the %s side that refused (%s). Re-check "
+                        "the reason."
+                        % (cid_full, want_side, refused[0], refused[1]))
+                results.append((n, cid, "cannot-express",
+                                "%s refuses: %s" % (want_side, why)))
+                continue
+
+            if refused is not None:
+                # Not a pass and not a difference: this case was never
+                # compared. If it is genuinely inexpressible for this family,
+                # declare it in Family.cannot with the reason; until then it
+                # keeps the run incomplete, which is exit 2.
+                not_checked.append((cid_full, "%s refused: %s"
+                                    % (refused[0], refused[1])))
+                results.append((n, cid, "NOT-CHECKED",
+                                "%s refused" % refused[0]))
                 continue
             checked += 1
 
@@ -757,8 +1212,9 @@ def run(args):
                         applied.append(d.key())
                         d.used += 1
                         want = patched
-            mine = got[cid]
             entry = known.get(cid_full)
+            if tok_gguf:
+                tok_jobs.append((cid_full, tok_gguf, want, mine))
 
             if mine == want:
                 if entry and not args.write_baseline:
@@ -790,6 +1246,9 @@ def run(args):
             if args.show:
                 detail["show"] = (want, mine)
 
+        # ---- token-level, for the cases that produced two renders
+        tokens.update(token_check(binary, tok_jobs))
+
     # ---- allowlist rot
     #
     # Citations are checked for every SELECTED family, oracle or not: they are
@@ -809,6 +1268,10 @@ def run(args):
                    "template, so the comparison used the cached copy "
                    "(fetched %s). %s"
                    % (n, oracle_meta.get(n, {}).get("fetched_at", "?"), ferr))
+    # A declared per-family skip that stopped being true is the same class of
+    # problem as a rotted allowlist citation: the gate's own premise moved.
+    # So is a committed harmony fixture that no longer matches the library.
+    rot += rot_skips + rot_extra
 
     # ---- upstream oracle movement
     moved = []
@@ -829,16 +1292,35 @@ def run(args):
                   "the backlog of everything it could not check.")
             return EXIT_NOT_CHECKED
         return write_baseline(args, results, oracle_meta, base, known,
-                              set(oracle_meta))
+                              set(oracle_meta), tokens)
 
     return report(args, results, not_checked, structural, rot, moved,
-                  oracle_meta, checked, new_drift, changed, fixed)
+                  oracle_meta, checked, new_drift, changed, fixed,
+                  tokens, tok_sources, tok_missing, known, rebased)
+
+
+def token_line(tokens, cid_full):
+    v = tokens.get(cid_full)
+    if not v:
+        return ""
+    verdict, d = v
+    if verdict == "same":
+        return "  tokens=%d same" % d["n"]
+    if verdict == "differ":
+        return "  tokens %+d (ref %d, first differs at %d)" % (
+            d["delta"], d["n"], d["at"])
+    return "  tokens NOT-CHECKED"
 
 
 def report(args, results, not_checked, structural, rot, moved, oracle_meta,
-           checked, new_drift, changed, fixed):
+           checked, new_drift, changed, fixed, tokens, tok_sources,
+           tok_missing, known, rebased):
+    for r in rebased:
+        print("ORACLE CACHE INVALIDATED  %s" % r)
     per_family = {}
+    tok_drift = []
     for n, cid, verdict, detail in results:
+        cid_full = "%s/%s" % (n, cid)
         per_family.setdefault(n, []).append((cid, verdict, detail))
         if verdict == "ok":
             line = detail
@@ -851,6 +1333,17 @@ def report(args, results, not_checked, structural, rot, moved, oracle_meta,
                 if detail["applied"] else "")
         else:
             line = "%s  %s" % (verdict, detail)
+        # Identical text whose TOKENS differ would mean the tokenizer is not a
+        # function of the text -- report it rather than trust the byte compare.
+        if verdict == "ok" and tokens.get(cid_full, ("", ))[0] == "differ":
+            tok_drift.append("%s: the two renders are byte-identical but "
+                             "tokenize differently. That should be "
+                             "impossible; the tokenizer or this harness is "
+                             "wrong." % cid_full)
+        # A token delta on a KNOWN difference is the number the fix campaign
+        # is actually chasing, so it rides on the case line.
+        line = "%s%s" % (line, token_line(tokens, cid_full)
+                         if verdict != "ok" else "")
         print("  %-13s %-26s %s" % (n, cid, line))
         if isinstance(detail, dict) and detail.get("show"):
             print("      reference: %s" % repr(detail["show"][0]))
@@ -866,18 +1359,41 @@ def report(args, results, not_checked, structural, rot, moved, oracle_meta,
         bad = [v for _c, v, _d in per_family[n]
                if v in ("NEW-DRIFT", "CHANGED", "FIXED")]
         kn = [v for _c, v, _d in per_family[n] if v == "known"]
+        cant = [v for _c, v, _d in per_family[n] if v == "cannot-express"]
         state = ("CLEAN" if not bad and not kn else
                  "%d known" % len(kn) if not bad else
                  "%d NEEDS ATTENTION, %d known" % (len(bad), len(kn)))
-        print("%-15s %-28s [%s %s]" % (n, state, oracle_meta[n]["source"],
-                                       oracle_meta[n]["sha256"]))
+        if cant:
+            state += " (%d n/a)" % len(cant)
+        tk = ("tok:%s" % os.path.basename(tok_sources[n])
+              if n in tok_sources else "tok:NOT-CHECKED")
+        print("%-15s %-30s [%s %s] %s"
+              % (n, state, oracle_meta[n]["source"], oracle_meta[n]["sha256"],
+                 tk))
     for n, why in structural:
-        print("%-15s %-28s %s" % (n, "no upstream oracle", why))
+        print("%-15s %-30s %s" % (n, "no upstream oracle", why))
 
     known_total = sum(1 for _n, _c, v, _d in results if v == "known")
+    cannot_total = sum(1 for _n, _c, v, _d in results if v == "cannot-express")
     print("\n%d cases compared, %d known-bug differences (backlog), "
-          "%d new, %d changed, %d fixed-but-still-listed"
-          % (checked, known_total, new_drift, changed, fixed))
+          "%d new, %d changed, %d fixed-but-still-listed, "
+          "%d not expressible by the family"
+          % (checked, known_total, new_drift, changed, fixed, cannot_total))
+
+    tok_same = sum(1 for v in tokens.values() if v[0] == "same")
+    tok_diff = sum(1 for v in tokens.values() if v[0] == "differ")
+    tok_none = checked - tok_same - tok_diff
+    print("token-level: %d cases checked (%d identical, %d differing), "
+          "%d NOT CHECKED for want of a tokenizer"
+          % (tok_same + tok_diff, tok_same, tok_diff, tok_none))
+    # The number the fix campaign is chasing: how much of the backlog is
+    # costing real tokens rather than only reading badly in a diff.
+    costly = [(cid, d["delta"]) for cid, (v, d) in sorted(tokens.items())
+              if v == "differ" and d["delta"]]
+    if costly:
+        print("             %d differing case(s) change the PROMPT LENGTH: %s"
+              % (len(costly), ", ".join("%s %+d" % c for c in costly[:6])
+                 + (" ..." if len(costly) > 6 else "")))
 
     bad = False
     if not_checked:
@@ -885,11 +1401,24 @@ def report(args, results, not_checked, structural, rot, moved, oracle_meta,
         print("\nNOT CHECKED (%d) -- these produced no comparison at all:"
               % len(not_checked))
         for what, why in not_checked:
-            print("  %-16s %s" % (what, why))
+            print("  %-24s %s" % (what, why))
+    if tok_missing:
+        print("\nTOKENS NOT CHECKED (%d families) -- the text was compared, "
+              "the token sequence was NOT:" % len(tok_missing))
+        for n, why in sorted(tok_missing.items()):
+            print("  %-13s %s" % (n, why))
+        print("  A whitespace-only text difference can still change the token "
+              "sequence the model reads, so this is a real gap, not a "
+              "formality. --require-tokens turns it into exit 2.")
+    if tok_drift:
+        bad = True
+        print("\nTOKENISER DISAGREES WITH THE BYTES (%d):" % len(tok_drift))
+        for t in tok_drift:
+            print("  " + t)
     if rot:
         bad = True
-        print("\nALLOWLIST ROT (%d) -- scripts/template-conformance-"
-              "allowlist.json:" % len(rot))
+        print("\nALLOWLIST / SKIP ROT (%d) -- scripts/template-conformance-"
+              "allowlist.json and Family.cannot:" % len(rot))
         for r in rot:
             print("  " + r)
     if moved:
@@ -897,6 +1426,26 @@ def report(args, results, not_checked, structural, rot, moved, oracle_meta,
         print("\nORACLE MOVED (%d):" % len(moved))
         for m in moved:
             print("  " + m)
+
+    # A recorded token delta that MOVED is drift the byte digest cannot see on
+    # its own only when the text digest also moved -- but a delta that appears
+    # or vanishes under an unchanged digest would mean the tokenizer changed
+    # under us, so it is reported either way.
+    tok_moved = []
+    for cid_full, entry in sorted(known.items()):
+        v = tokens.get(cid_full)
+        if not v or v[0] != "differ" or "token_delta" not in entry:
+            continue
+        if entry["token_delta"] != v[1]["delta"]:
+            tok_moved.append(
+                "%s: recorded token delta %+d, measured %+d. The renderer's "
+                "TOKEN cost changed even though the byte difference did not."
+                % (cid_full, entry["token_delta"], v[1]["delta"]))
+    if tok_moved:
+        bad = True
+        print("\nTOKEN COST MOVED (%d):" % len(tok_moved))
+        for t in tok_moved:
+            print("  " + t)
 
     if new_drift or changed or fixed:
         print("\nFAIL: %d new, %d changed, %d fixed-but-still-listed."
@@ -907,20 +1456,35 @@ def report(args, results, not_checked, structural, rot, moved, oracle_meta,
         print("      Once you have decided, re-record the backlog:")
         print("        make template-conformance-baseline")
         return EXIT_DRIFT
-    if rot or moved:
-        print("\nFAIL: the allowlist or the oracle pins no longer match the "
-              "tree. Nothing drifted, but the gate's own premises did.")
+    if bad and (rot or moved or tok_drift or tok_moved):
+        print("\nFAIL: the allowlist, the skips, the oracle pins or the token "
+              "costs no longer match the tree. Nothing drifted, but the "
+              "gate's own premises did.")
         return EXIT_DRIFT
     if not_checked:
         print("\nNOT CHECKED: %d families/cases were not compared. This is "
               "not a pass." % len(not_checked))
         return EXIT_NOT_CHECKED
+    if tok_missing and args.require_tokens:
+        print("\nNOT CHECKED: --require-tokens, and %d families had no "
+              "tokenizer. This is not a pass." % len(tok_missing))
+        return EXIT_NOT_CHECKED
     print("\nOK: every compared case is conformant or an accounted-for "
           "deviation; %d known bugs remain in the backlog." % known_total)
+    if tok_missing:
+        # Named, not counted. A reader must not be able to infer token
+        # conformance from a green run that never tokenized -- and mistral,
+        # whose defect IS tokenization, is usually on this list.
+        print("    TEXT ONLY for %d of %d families -- no tokenizer was "
+              "available, so the token sequence the model reads was NOT "
+              "compared for:" % (len(tok_missing), len(per_family)))
+        print("      %s" % ", ".join(sorted(tok_missing)))
+        print("    Those families are conformant in BYTES. Whether they are "
+              "conformant in TOKENS is unmeasured here.")
     return EXIT_OK
 
 
-def write_baseline(args, results, oracle_meta, old, known, ran):
+def write_baseline(args, results, oracle_meta, old, known, ran, tokens):
     # Entries for families this run did not cover are carried over verbatim.
     # Regenerating from `--family harmony` must not delete everybody else's
     # backlog.
@@ -931,7 +1495,7 @@ def write_baseline(args, results, oracle_meta, old, known, ran):
             continue
         cid_full = "%s/%s" % (n, cid)
         prev = known.get(cid_full, {})
-        entries.append({
+        e = {
             "id": cid_full,
             "status": prev.get("status", "open"),
             "note": prev.get("note", ""),
@@ -940,7 +1504,25 @@ def write_baseline(args, results, oracle_meta, old, known, ran):
             "first_diff_at": detail["at"],
             "reference_excerpt": detail["reference_excerpt"],
             "runner_excerpt": detail["runner_excerpt"],
-        })
+        }
+        # What this difference COSTS the model, when a tokenizer was
+        # available: the delta in prompt tokens between the reference render
+        # and runner's. 0 means the difference is genuinely cosmetic; anything
+        # else means the model is reading a different sequence. A recorded
+        # delta that later moves is reported as TOKEN COST MOVED, so a
+        # renderer edit cannot change the cost while leaving the bytes alone.
+        tv = tokens.get(cid_full)
+        if tv and tv[0] == "differ":
+            e["token_delta"] = tv[1]["delta"]
+        elif tv and tv[0] == "same":
+            e["token_delta"] = 0
+        elif prev.get("token_delta") is not None:
+            # carried over rather than dropped: re-recording on a machine
+            # without the model must not erase a measurement made on one
+            # that had it.
+            e["token_delta"] = prev["token_delta"]
+            e["token_delta_stale"] = True
+        entries.append(e)
     entries.sort(key=lambda e: e["id"])
     oracles = dict(old.get("oracles", {}))
     # fetched_at is per-run noise; the sha is the pin worth committing.
@@ -950,10 +1532,19 @@ def write_baseline(args, results, oracle_meta, old, known, ran):
         "version": 1,
         "_README": [
             "KNOWN DIFFERENCES between runner's native C renderer and each",
-            "family's upstream jinja template. These are BUGS AWAITING FIXES,",
-            "not intentional deviations -- intentional deviations live in",
-            "scripts/template-conformance-allowlist.json with a citation, and",
-            "never appear here.",
+            "family's REFERENCE -- its upstream jinja template, except for",
+            "harmony, whose reference is the openai-harmony library (the",
+            "GGUF's jinja is a lossy reimplementation of that spec; see",
+            "scripts/template-conformance-harmony.py). These are BUGS",
+            "AWAITING FIXES, not intentional deviations -- intentional",
+            "deviations live in scripts/template-conformance-allowlist.json",
+            "with a citation, and never appear here.",
+            "",
+            "`token_delta` is what the difference COSTS the model: the change",
+            "in prompt token count, measured with the family's own tokenizer.",
+            "0 means genuinely cosmetic. Absent means no tokenizer for that",
+            "family was on the shelf, so the cost was NOT measured -- which is",
+            "not the same as zero.",
             "",
             "This file exists so the gate is useful TODAY: it fails on NEW",
             "drift while the pre-existing backlog stays visible and counted.",
@@ -1016,12 +1607,25 @@ def main():
                     help="do not subtract the allowlisted deviations")
     ap.add_argument("--write-baseline", action="store_true",
                     help="re-record the known-difference backlog")
+    ap.add_argument("--write-harmony-oracle", action="store_true",
+                    help="re-record scripts/template-conformance-harmony-"
+                         "oracle.json from the installed openai-harmony "
+                         "library (the fixture a machine without the library "
+                         "compares harmony against)")
+    ap.add_argument("--require-tokens", action="store_true",
+                    help="treat a family with no local tokenizer as NOT "
+                         "CHECKED (exit 2) instead of reporting the gap. Use "
+                         "this on the family you are actively fixing: a "
+                         "whitespace change that looks cosmetic in the text "
+                         "diff can still change the token sequence.")
     args = ap.parse_args()
     if args.network_only:
         args.family = (args.family or []) + list(NETWORK_ONLY)
     if args.write_baseline and args.raw:
         raise SystemExit("--write-baseline with --raw would record the "
                          "intentional deviations as bugs")
+    if args.write_harmony_oracle:
+        return write_harmony_fixture()
     return run(args)
 
 

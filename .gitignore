@@ -134,6 +134,8 @@ test-tool-attribution
 test-tool-attribution.exe
 test-stop-constraint
 test-stop-constraint.exe
+template-conformance-render
+template-conformance-render.exe
 test-moe-router
 test-moe-router.exe
 test-attn/

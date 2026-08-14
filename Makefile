@@ -113,6 +113,10 @@ TEST_RESP_SM = $(TEST_BATCH:test-batch%=test-responses-sm%)
 TEST_BUDGET = $(TEST_BATCH:test-batch%=test-prompt-budget%)
 TEST_ATTRIB = $(TEST_BATCH:test-batch%=test-tool-attribution%)
 TEST_STOP_CONSTRAINT = $(TEST_BATCH:test-batch%=test-stop-constraint%)
+# not a test: the runner-side driver scripts/template-conformance.py renders
+# through. Built here rather than by the script so it links the SAME object
+# set the server does (see the template-conformance target near the bottom).
+TMPL_CONF_RENDER = $(TEST_BATCH:test-batch%=template-conformance-render%)
 # test_responses_sm drives the framer through a POSIX socketpair(); winsock
 # has none, so on Windows the suite skips it LOUDLY (it runs in Linux CI and
 # on the POSIX dev boxes) rather than shimming the transport under the test.
@@ -586,6 +590,26 @@ TEST_ATTRIB_SRC = tests/test_tool_attribution.c src/gguf.c src/compat.c \
                   $(GPU_SRC)
 $(TEST_ATTRIB): $(TEST_ATTRIB_SRC) src/server.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_ATTRIB_SRC) -o $@ $(LDFLAGS)
+
+# The runner side of the template-conformance gate. Same recipe as the two
+# tests above, and for the same reason: the flattening from an OpenAI request
+# to the renderer's flat turns is handle_chat's, it is static in server.c, and
+# a harness that RE-IMPLEMENTED it would be comparing jinja against a copy of
+# runner rather than against runner. So server.c is #included and the
+# generation path is stubbed out of the link -- the prompt is the artifact,
+# nothing is generated from it.
+#
+# api_responses.c / api_anthropic.c are additionally left out: only server.c's
+# route table refers to them, the gate never reaches it, and dropping them
+# keeps the add_generation_prompt interception (see the driver's header
+# comment) confined to one translation unit.
+TMPL_CONF_RENDER_SRC = scripts/template-conformance-render.c src/gguf.c \
+                  src/compat.c $(QUANTS_OBJ) src/tokenizer.c src/model.c \
+                  src/sample.c src/jsonmode.c src/schema.c src/json.c \
+                  src/engine.c src/template.c src/vramreg.c src/http.c \
+                  src/registry.c src/scheduler.c $(GPU_SRC)
+$(TMPL_CONF_RENDER): $(TMPL_CONF_RENDER_SRC) src/server.c $(HDR)
+	$(CC) $(CFLAGS) -I src $(TMPL_CONF_RENDER_SRC) -o $@ $(LDFLAGS)
 
 # server_run twice in one process: the property a once-per-process global can
 # hide forever, because nothing ever asks the state to come back.
@@ -1131,6 +1155,15 @@ template-conformance-refresh:
 template-conformance-baseline:
 	$(PYTHON) $(TEMPLATE_CONFORMANCE) --write-baseline
 
+# Harmony's oracle is the openai-harmony LIBRARY, not the jinja in the GGUF:
+# that jinja is a reimplementation of the spec with gaps it structurally
+# cannot close (no content_type field, so it can never emit <|constrain|>).
+# This target records the library's renders so a machine without it still
+# checks harmony instead of skipping it. Needs `pip install openai-harmony`,
+# or RUNNER_HARMONY_PYTHON pointing at an interpreter that has it.
+template-conformance-harmony-oracle:
+	$(PYTHON) $(TEMPLATE_CONFORMANCE) --write-harmony-oracle
+
 smoke: runner test.gguf
 	./$(RUNNER_EXE) --version
 	./$(RUNNER_EXE) --caps
@@ -1247,6 +1280,7 @@ clean:
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \
 	      $(TEST_BUDGET) $(TEST_ATTRIB) $(TEST_STOP_CONSTRAINT) \
+	      $(TMPL_CONF_RENDER) \
 	      $(TEST_SPLIT_GUARD) split-guard.out
 	rm -rf test-attn
 	rm -rf .build
@@ -1302,5 +1336,5 @@ test-makefile-sane:
 	echo "makefile ok (no discarded recipes)"
 
 
-.PHONY: template-conformance template-conformance-refresh template-conformance-baseline
+.PHONY: template-conformance template-conformance-refresh template-conformance-baseline template-conformance-harmony-oracle
 .PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard

@@ -215,20 +215,6 @@
       }
     },
     {
-      "id": "harmony/knowledge-cutoff-and-date",
-      "family": "harmony",
-      "why": "The harmony reference system turn carries 'Knowledge cutoff' and a strftime_now() 'Current date'. Runner omits both: same live-date policy as llama3, apertus and muse.",
-      "cite": {
-        "file": "src/template.c",
-        "lines": "582-587",
-        "anchor": "runner does not embed a live date in a prompt"
-      },
-      "patch": {
-        "op": "drop-first-match",
-        "pattern": "Knowledge cutoff: 2024-06\nCurrent date: \\d{4}-\\d{2}-\\d{2}\n"
-      }
-    },
-    {
       "id": "harmony/primed-analysis-channel",
       "family": "harmony",
       "why": "The reference generation prompt is the bare '<|start|>assistant'. Runner primes '<|channel|>analysis<|message|>' instead, because the decoded open marker is the bare word 'analysis' -- far too common to hunt for in a free stream -- and priming lets the channel splitter start already inside reasoning. Only WITHOUT tools: with tools runner leaves the header bare so the constrained recipient stays reachable, which the builtin mirrors.",
