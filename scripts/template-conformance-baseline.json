@@ -38,7 +38,7 @@
     "in-progress": "someone is actively fixing this; see `note`"
   },
   "generated_by": "scripts/template-conformance.py --write-baseline",
-  "generated_at": "2026-08-14T14:49:43+00:00",
+  "generated_at": "2026-08-14T17:07:44+00:00",
   "oracles": {
     "apertus": {
       "source": "hf:swiss-ai/Apertus-8B-Instruct-2509",
@@ -213,45 +213,6 @@
       "first_diff_at": 19,
       "reference_excerpt": "'<|im_start|>system\\nYou are a helpful assistant.\\n\\n# Tools\\n\\nYou may call one or more functio'",
       "runner_excerpt": "'<|im_start|>system\\nReply with exactly one JSON object and nothing else.\\nTo answer the user'"
-    },
-    {
-      "id": "gemma4/multi-tool-call",
-      "status": "open",
-      "note": "",
-      "digest": "4cbd6d4979a115cd",
-      "allowlist_applied": [
-        "bos"
-      ],
-      "first_diff_at": 14,
-      "reference_excerpt": "'<|turn>system\\nYou are a helpful assistant.<|tool>declaration:get_weather{description:<|\"|>'",
-      "runner_excerpt": "'<|turn>system\\nReply with exactly one JSON object and nothing else.\\nTo answer the user dire'",
-      "token_delta": 88
-    },
-    {
-      "id": "gemma4/tool-call+result",
-      "status": "open",
-      "note": "",
-      "digest": "cdfddefe8369ad0b",
-      "allowlist_applied": [
-        "bos"
-      ],
-      "first_diff_at": 14,
-      "reference_excerpt": "'<|turn>system\\nYou are a helpful assistant.<|tool>declaration:get_weather{description:<|\"|>'",
-      "runner_excerpt": "'<|turn>system\\nReply with exactly one JSON object and nothing else.\\nTo answer the user dire'",
-      "token_delta": 88
-    },
-    {
-      "id": "gemma4/tool-then-conversation",
-      "status": "open",
-      "note": "",
-      "digest": "2ece0f278f5ce805",
-      "allowlist_applied": [
-        "bos"
-      ],
-      "first_diff_at": 14,
-      "reference_excerpt": "'<|turn>system\\nYou are a helpful assistant.<|tool>declaration:get_weather{description:<|\"|>'",
-      "runner_excerpt": "'<|turn>system\\nReply with exactly one JSON object and nothing else.\\nTo answer the user dire'",
-      "token_delta": 88
     },
     {
       "id": "llama2/empty-assistant-content",

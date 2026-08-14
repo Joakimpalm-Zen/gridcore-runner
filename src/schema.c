@@ -823,6 +823,17 @@ static bool union_start_bytes(const snode *a, bool set[256]) {
             set['-'] = true;
             for (int d = '0'; d <= '9'; d++) set[d] = true;
             return true;
+        // A sequence starts wherever its first element does. Without the
+        // recursion a SEQ of SEQ reported "no start bytes" and became an
+        // unreachable union alternative -- which is how gemma4's native array
+        // elements (`<|"|>` opener, itself a two-node SEQ) would have failed.
+        case SN_SEQ:
+            return a->n_props > 0 && union_start_bytes(a->props[0], set);
+        // Raw text accepts ANY byte, so as a union alternative it is the
+        // catch-all. Order matters and is the caller's: put it last.
+        case SN_RAW:
+            for (int i = 0; i < 256; i++) set[i] = true;
+            return true;
         default: return false;
     }
 }
@@ -1530,6 +1541,456 @@ snode *schema_compile_harmony_turn(jv *tools, bool allow_final,
     return NULL;
 }
 
+// ------------------------------------------------------------------ gemma4
+//
+// gemma4's native call is `<|tool_call>call:NAME{key:VALUE,...}<tool_call|>`,
+// with values in the reference's format_argument spelling (jinja:124-155,
+// transliterated in template.c): strings delimited by the reserved <|"|>
+// token rather than quotes, object keys UNQUOTED, numbers and booleans bare.
+//
+// This is compiled instead of leaving gemma4 on runner's generic JSON
+// envelope, and the reason is not conformance for its own sake: `env != NULL`
+// is what buys constrained decoding, and constrained decoding is what buys
+// forced-truncation recovery, streamed tool-call deltas and tool_choice
+// enforcement. Taking gemma4 off the strict path to reach its native prompt
+// syntax -- the cheap version of this change -- would have surrendered all
+// three, and the conformance gate would have gone green while it happened.
+// So the envelope stays and its GRAMMAR changes, which is what muse and
+// harmony already do.
+//
+// TWO limitations, both deliberate and both shared with the muse compiler:
+//
+//   * every DECLARED property is emitted, `required` or not. The choice to
+//     skip an optional key mid-object is a multi-byte decision between key
+//     literals, which this validator can only express as an ENUM+COND pair
+//     per position -- quadratic in the property count, with no subtree
+//     sharing. atem_tool_tail made the same call in the same place.
+//   * a parameter with no declared `type` is refused rather than admitted as
+//     free JSON: there is no native spelling to constrain it to. The error
+//     names the parameter, so a caller can type it and retry.
+#define G4_MAX_ITEMS 24      // bounded array: an unbounded one under a token
+                             // budget is a truncation waiting to happen
+#define G4_MAX_DEPTH 6
+
+static snode *g4_value(jv *schema, const char *what, int depth,
+                       char *err, int errcap);
+
+// `[` VALUE ( `,` VALUE ){0,G4_MAX_ITEMS-1} `]`, built tail-first so every
+// choice point is a UNION between `]` and something that cannot start with
+// `]`. That is what makes it decidable: pick_alt resolves a union on the
+// first byte, so the closing bracket and the next element must never share
+// one.
+static snode *g4_array(jv *schema, const char *what, int depth,
+                       char *err, int errcap) {
+    jv *items = jv_get(schema, "items");
+    if (!items || items->type != J_OBJ) {
+        snprintf(err, errcap, "gemma4 %s is an array without an `items` schema",
+                 what);
+        return NULL;
+    }
+    double dmax = jv_num(jv_get(schema, "maxItems"), G4_MAX_ITEMS);
+    int max = dmax > 0 && dmax < G4_MAX_ITEMS ? (int)dmax : G4_MAX_ITEMS;
+    double dmin = jv_num(jv_get(schema, "minItems"), 0);
+    int min = dmin > 0 ? (int)dmin : 0;
+    if (min > max) min = max;
+    snode *tail = atem_lit("]");
+    if (!tail) return NULL;
+    for (int i = max; i >= 1; i--) {
+        // element i: `,`+value+tail when i > 1, bare value+tail when i == 1
+        snode *value = g4_value(items, what, depth + 1, err, errcap);
+        snode *seq = atem_seq(3);
+        if (!value || !seq) { schema_free(value); schema_free(seq); goto oom; }
+        seq->whitespace_significant = true;
+        if (i > 1 && !atem_seq_add(seq, atem_lit(","))) {
+            schema_free(value); schema_free(seq); goto oom;
+        }
+        if (!atem_seq_add(seq, value) || !atem_seq_add(seq, tail)) {
+            schema_free(seq); goto oom;
+        }
+        tail = seq;                       // `tail` is now owned by `seq`
+        if (i > min) {
+            // this element is optional: `]` may come instead
+            snode *u = sn_new(SN_UNION);
+            if (!u) goto oom;
+            u->alts = calloc(2, sizeof(*u->alts));
+            if (!u->alts) { schema_free(u); goto oom; }
+            u->whitespace_significant = true;
+            u->alts[u->n_alts++] = atem_lit("]");
+            u->alts[u->n_alts++] = tail;
+            if (!u->alts[0]) { schema_free(u); tail = NULL; goto oom; }
+            tail = u;
+        }
+    }
+    snode *root = atem_seq(2);
+    if (!root) goto oom;
+    root->whitespace_significant = true;
+    if (!atem_seq_add(root, atem_lit("[")) || !atem_seq_add(root, tail)) {
+        schema_free(root); goto oom;
+    }
+    return root;
+oom:
+    schema_free(tail);
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 array");
+    return NULL;
+}
+
+// `{` key `:` VALUE ( `,` key `:` VALUE )* `}` -- keys UNQUOTED and in
+// jinja dictsort order, which is what format_argument writes.
+static snode *g4_object(jv *props, const char *what, int depth,
+                        char *err, int errcap) {
+    if (props->n == 0) return atem_lit("{}");
+    int *order = malloc(sizeof(int) * (size_t)(props->n > 0 ? props->n : 1));
+    if (!order) {
+        snprintf(err, errcap, "out of memory compiling gemma4 object");
+        return NULL;
+    }
+    jv_dictsort(props, order);
+    snode *seq = atem_seq(props->n * 2 + 2);
+    if (!seq) { free(order); goto oom; }
+    seq->whitespace_significant = true;
+    for (int i = 0; i < props->n; i++) {
+        const char *key = props->keys[order[i]];
+        sbuf open = {0};
+        sb_fmt(&open, "%s%s:", i ? "," : "{", key);
+        bool ok = !open.failed && atem_seq_add(seq, atem_lit(open.s));
+        free(open.s);
+        if (!ok) { free(order); schema_free(seq); goto oom; }
+        char what2[96];
+        snprintf(what2, sizeof(what2), "%s.%s", what, key);
+        snode *value = g4_value(props->items[order[i]], what2, depth + 1,
+                                err, errcap);
+        if (!value || !atem_seq_add(seq, value)) {
+            schema_free(value); free(order); schema_free(seq);
+            return NULL;
+        }
+    }
+    free(order);
+    if (!atem_seq_add(seq, atem_lit("}"))) { schema_free(seq); goto oom; }
+    return seq;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 object");
+    return NULL;
+}
+
+static snode *g4_value(jv *schema, const char *what, int depth,
+                       char *err, int errcap) {
+    if (depth > G4_MAX_DEPTH) {
+        snprintf(err, errcap, "gemma4 %s nests deeper than %d levels",
+                 what, G4_MAX_DEPTH);
+        return NULL;
+    }
+    jv *ty = jv_get(schema, "type");
+    const char *type = jv_str(ty, NULL);
+    if (!type) {
+        // `{"enum": ["c", "f"]}` is a typed parameter written without the
+        // keyword, and a common one. Anything else untyped is refused: the
+        // generic envelope admits it as free JSON, but format_argument has no
+        // free-form spelling to constrain a native call to.
+        jv *en = jv_get(schema, "enum");
+        bool all_str = en && en->type == J_ARR && en->n > 0;
+        for (int i = 0; all_str && i < en->n; i++)
+            if (!en->items[i] || en->items[i]->type != J_STR) all_str = false;
+        if (all_str) type = "string";
+        else {
+            snprintf(err, errcap,
+                     "gemma4 %s has no declared `type`: this family's native "
+                     "call syntax has no spelling for a free-form value, so it "
+                     "cannot be constrained", what);
+            return NULL;
+        }
+    }
+    if (!strcmp(type, "string")) {
+        jv *en = jv_get(schema, "enum");
+        if (en && en->type == J_ARR && en->n > 0 && en->n <= 60) {
+            snode *n = sn_new(SN_ENUM);
+            if (!n) return NULL;
+            n->lits = calloc((size_t)en->n, sizeof(*n->lits));
+            if (!n->lits) { schema_free(n); return NULL; }
+            n->whitespace_significant = true;
+            for (int i = 0; i < en->n; i++) {
+                const char *v = jv_str(en->items[i], NULL);
+                if (!v) {
+                    snprintf(err, errcap,
+                             "gemma4 %s has a non-string enum value", what);
+                    schema_free(n);
+                    return NULL;
+                }
+                sbuf lit = {0};
+                sb_fmt(&lit, "<|\"|>%s<|\"|>", v);
+                if (lit.failed) { free(lit.s); schema_free(n); return NULL; }
+                n->lits[n->n_lits++] = lit.s;
+            }
+            return n;
+        }
+        // The <|"|> delimiter is a reserved token, so the value between the
+        // two needs no escaping and is raw bytes up to the closer.
+        double dmax = jv_num(jv_get(schema, "maxLength"), -1);
+        snode *seq = atem_seq(2);
+        snode *body = dmax > 0 ? atem_raw_bounded("<|\"|>", (int)dmax)
+                               : atem_raw("<|\"|>");
+        if (!seq || !body || !atem_seq_add(seq, atem_lit("<|\"|>")) ||
+            !atem_seq_add(seq, body)) {
+            if (seq && seq->n_props < 2) schema_free(body);
+            schema_free(seq);
+            if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 string");
+            return NULL;
+        }
+        seq->whitespace_significant = true;
+        return seq;
+    }
+    if (!strcmp(type, "boolean")) {
+        snode *n = sn_new(SN_ENUM);
+        if (!n) return NULL;
+        n->lits = calloc(2, sizeof(*n->lits));
+        if (!n->lits) { schema_free(n); return NULL; }
+        n->whitespace_significant = true;
+        n->lits[n->n_lits++] = strdup("true");
+        n->lits[n->n_lits++] = strdup("false");
+        if (!n->lits[0] || !n->lits[1]) { schema_free(n); return NULL; }
+        return n;
+    }
+    if (!strcmp(type, "null")) return atem_lit("null");
+    if (!strcmp(type, "integer") || !strcmp(type, "number")) {
+        // Numbers are spelled identically in JSON and in format_argument, so
+        // the ordinary compiler's bounded node applies unchanged -- including
+        // minimum/maximum enforcement, which a raw run would drop.
+        return compile_node(schema, err, errcap, 0);
+    }
+    if (!strcmp(type, "array")) return g4_array(schema, what, depth, err, errcap);
+    if (!strcmp(type, "object")) {
+        jv *props = jv_get(schema, "properties");
+        if (!props || props->type != J_OBJ) {
+            snprintf(err, errcap,
+                     "gemma4 %s is an object without declared `properties`",
+                     what);
+            return NULL;
+        }
+        return g4_object(props, what, depth, err, errcap);
+    }
+    snprintf(err, errcap, "gemma4 %s has unsupported type \"%s\"", what, type);
+    return NULL;
+}
+
+// `{args}<tool_call|>` for ONE declared tool: the arguments object plus the
+// block close, which is the tail the name ENUM selects.
+static snode *g4_call_tail(jv *tool, char *err, int errcap) {
+    jv *fn = jv_get(tool, "function");
+    if (!fn) fn = tool;
+    const char *name = jv_str(jv_get(fn, "name"), "tool");
+    jv *params = jv_get(fn, "parameters");
+    jv *props = params ? jv_get(params, "properties") : NULL;
+    if (props && props->type != J_OBJ) {
+        snprintf(err, errcap, "gemma4 tool %s: parameters.properties must be "
+                              "an object", name);
+        return NULL;
+    }
+    snode *seq = atem_seq(2);
+    if (!seq) goto oom;
+    seq->whitespace_significant = true;
+    snode *args = props && props->n
+                ? g4_object(props, name, 0, err, errcap)
+                : atem_lit("{}");
+    if (!args || !atem_seq_add(seq, args)) {
+        schema_free(args); schema_free(seq);
+        if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 call");
+        return NULL;
+    }
+    if (!atem_seq_add(seq, atem_lit("<tool_call|>"))) { schema_free(seq); goto oom; }
+    return seq;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 call");
+    return NULL;
+}
+
+// ENUM over the declared names, then the matching tail. `lead` is the block
+// opener, which the caller has already consumed when the turn's discriminator
+// covered it.
+static snode *g4_call(jv *tools, const char *only_tool, bool lead,
+                      char *err, int errcap) {
+    int selected = 0;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        if (!fn) fn = tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!only_tool || (name && !strcmp(name, only_tool))) selected++;
+    }
+    if (!selected) {
+        snprintf(err, errcap, "named gemma4 tool is not declared");
+        return NULL;
+    }
+    snode *root = atem_seq(lead ? 3 : 2);
+    snode *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
+    if (!root || !names || !choice) goto oom;
+    names->lits = calloc((size_t)selected, sizeof(*names->lits));
+    choice->alts = calloc((size_t)selected, sizeof(*choice->alts));
+    if (!names->lits || !choice->alts) goto oom;
+    names->min_items = 1;            // this enum selects the following SN_COND
+    names->whitespace_significant = true;
+    choice->whitespace_significant = true;
+    root->whitespace_significant = true;
+    if (lead && !atem_seq_add(root, atem_lit("<|tool_call>call:"))) goto oom;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        if (!fn) fn = tools->items[i];
+        const char *name = jv_str(jv_get(fn, "name"), NULL);
+        if (!name || !name[0]) {
+            snprintf(err, errcap, "gemma4 tool %d has no function name", i);
+            goto fail;
+        }
+        if (only_tool && strcmp(name, only_tool)) continue;
+        names->lits[names->n_lits] = strdup(name);
+        if (!names->lits[names->n_lits]) goto oom;
+        names->n_lits++;
+        choice->alts[choice->n_alts] = g4_call_tail(tools->items[i], err, errcap);
+        if (!choice->alts[choice->n_alts]) goto fail;
+        choice->n_alts++;
+    }
+    if (!atem_seq_add(root, names)) goto oom;
+    names = NULL;
+    if (!atem_seq_add(root, choice)) goto oom;
+    choice = NULL;
+    return root;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 call");
+fail:
+    schema_free(names); schema_free(choice); schema_free(root);
+    return NULL;
+}
+
+// A visible answer: raw bytes up to the turn close. As a UNION alternative it
+// is the catch-all, which is exactly right -- gemma4 has no marker for "this
+// turn is prose", so anything not starting the native block is prose.
+static snode *g4_final(jv *final_schema, char *err, int errcap) {
+    if (final_schema) return compile_node(final_schema, err, errcap, 0);
+    snode *n = atem_raw("<turn|>");
+    if (!n) snprintf(err, errcap, "out of memory compiling gemma4 answer");
+    return n;
+}
+
+static snode *g4_body(jv *tools, bool allow_final, const char *only_tool,
+                      jv *final_schema, char *err, int errcap) {
+    snode *call = g4_call(tools, only_tool, true, err, errcap);
+    if (!call || !allow_final) return call;
+    snode *fin = g4_final(final_schema, err, errcap);
+    snode *u = fin ? sn_new(SN_UNION) : NULL;
+    if (u) u->alts = calloc(2, sizeof(*u->alts));
+    if (!u || !u->alts) {
+        schema_free(call); schema_free(fin); schema_free(u);
+        if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 turn");
+        return NULL;
+    }
+    u->whitespace_significant = true;
+    // call FIRST: the union resolves on the first byte, and only the call
+    // block can start with '<'. A prose answer takes the raw branch.
+    u->alts[u->n_alts++] = call;
+    u->alts[u->n_alts++] = fin;
+    return u;
+}
+
+snode *schema_compile_gemma4_turn(jv *tools, bool allow_final,
+                                  const char *only_tool, jv *final_schema,
+                                  bool allow_reasoning, bool primed_reasoning,
+                                  char *err, int errcap) {
+    err[0] = 0;
+    if (!tools || tools->type != J_ARR || tools->n <= 0 || tools->n > 60) {
+        snprintf(err, errcap,
+                 "gemma4 tools must be a non-empty array of at most 60 tools");
+        return NULL;
+    }
+    // The prompt already opened `<|channel>thought\n` (a tool-result
+    // continuation with thinking on -- template.c's g4_prev == 2 branch), so
+    // the turn starts INSIDE the thought and the only question is where it
+    // closes.
+    if (primed_reasoning) {
+        snode *seq = atem_seq(2);
+        snode *rest = seq ? g4_body(tools, allow_final, only_tool, final_schema,
+                                    err, errcap) : NULL;
+        if (!seq || !rest || !atem_seq_add(seq, atem_raw("<channel|>")) ||
+            !atem_seq_add(seq, rest)) {
+            if (seq && seq->n_props < 2) schema_free(rest);
+            schema_free(seq);
+            if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 turn");
+            return NULL;
+        }
+        seq->whitespace_significant = true;
+        return seq;
+    }
+    if (!allow_reasoning)
+        return g4_body(tools, allow_final, only_tool, final_schema, err, errcap);
+    // Thought and call blocks BOTH open with '<', so they cannot be two
+    // alternatives of a union -- pick_alt would resolve on that byte and the
+    // second would be unreachable. One ENUM discriminates them instead, and
+    // the union below is left with a single '<' branch against prose.
+    snode *marked = atem_seq(2);
+    snode *disc = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
+    snode *thought = NULL, *call = NULL;
+    if (!marked || !disc || !choice) goto oom;
+    disc->lits = calloc(2, sizeof(*disc->lits));
+    choice->alts = calloc(2, sizeof(*choice->alts));
+    if (!disc->lits || !choice->alts) goto oom;
+    disc->min_items = 1;
+    disc->whitespace_significant = true;
+    choice->whitespace_significant = true;
+    marked->whitespace_significant = true;
+    disc->lits[disc->n_lits++] = strdup("<|channel>thought\n");
+    disc->lits[disc->n_lits++] = strdup("<|tool_call>call:");
+    if (!disc->lits[0] || !disc->lits[1]) goto oom;
+    thought = atem_seq(2);
+    snode *after = thought ? g4_body(tools, allow_final, only_tool,
+                                     final_schema, err, errcap) : NULL;
+    if (!thought || !after ||
+        !atem_seq_add(thought, atem_raw("<channel|>")) ||
+        !atem_seq_add(thought, after)) {
+        if (thought && thought->n_props < 2) schema_free(after);
+        goto oom;
+    }
+    thought->whitespace_significant = true;
+    call = g4_call(tools, only_tool, false, err, errcap);
+    if (!call) goto fail;
+    choice->alts[choice->n_alts++] = thought; thought = NULL;
+    choice->alts[choice->n_alts++] = call;    call = NULL;
+    if (!atem_seq_add(marked, disc)) goto oom;
+    disc = NULL;
+    if (!atem_seq_add(marked, choice)) goto oom;
+    choice = NULL;
+    if (!allow_final) return marked;
+    snode *fin = g4_final(final_schema, err, errcap);
+    snode *u = fin ? sn_new(SN_UNION) : NULL;
+    if (u) u->alts = calloc(2, sizeof(*u->alts));
+    if (!u || !u->alts) {
+        schema_free(fin); schema_free(u); goto oom;
+    }
+    u->whitespace_significant = true;
+    u->alts[u->n_alts++] = marked;
+    u->alts[u->n_alts++] = fin;
+    return u;
+oom:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 turn");
+fail:
+    schema_free(thought); schema_free(call);
+    schema_free(disc); schema_free(choice); schema_free(marked);
+    return NULL;
+}
+
+// Two calls back to back, the bounded multi-call form. gemma4 concatenates
+// call blocks with no separator, so this is simply one tail after the other.
+snode *schema_compile_gemma4_parallel(jv *tools, const char *only_tool,
+                                      char *err, int errcap) {
+    snode *root = atem_seq(2);
+    snode *first = g4_call(tools, only_tool, true, err, errcap);
+    snode *second = first ? g4_call(tools, only_tool, true, err, errcap) : NULL;
+    if (!root || !first || !second) {
+        schema_free(first); schema_free(second); schema_free(root);
+        if (!err[0]) snprintf(err, errcap,
+                              "out of memory compiling parallel gemma4 turn");
+        return NULL;
+    }
+    root->whitespace_significant = true;
+    root->props[root->n_props++] = first;
+    root->props[root->n_props++] = second;
+    return root;
+}
+
 // ---------------------------------------------------------------- validate
 
 // frame phases
@@ -1645,6 +2106,7 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
                 if (c == '-' || (c >= '0' && c <= '9')) return a;
                 break;
             case SN_ANY:  return a;
+            case SN_RAW:  return a;   // catch-all; see union_start_bytes
             default: break;
         }
     }

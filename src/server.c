@@ -208,16 +208,34 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         env.harmony = true;
         env.tools = tools;
     }
+    if (strict && s->tmpl == TMPL_GEMMA4) {
+        env.gemma4 = true;
+        env.tools = tools;
+    }
     // When the strict envelope does not apply — no tools declared, or the
     // ornith template's native protocol — the flag is vacuous and stays
     // TOLERATED, exactly as before: ordinary OpenAI-shaped traffic sends
     // parallel_tool_calls alongside requests that will never call anything,
     // and rejecting those would break it.
+    // Families with a native declaration syntax render it themselves, from
+    // the structured `tools` passed to the renderer below. Everyone else gets
+    // the strict envelope's teaching turn, or the generic declaration block
+    // when the envelope does not apply.
+    //
+    // gemma4 joined that list on 2026-08-14. Unlike muse and harmony it is
+    // listed here UNCONDITIONALLY rather than only on the strict path: its
+    // reference emits `<|tool>declaration:...<tool|>` whenever `tools` are
+    // present, `tool_choice` being a concept the template does not have, and a
+    // caller who sends tool_choice:"none" to gemma4 was previously handed the
+    // generic block -- a second, untrained tool protocol -- for a turn that
+    // must not call anything anyway.
+    bool native_decl = s->tmpl == TMPL_GEMMA4 ||
+                       (s->tmpl == TMPL_MUSE && env.atem) ||
+                       s->tmpl == TMPL_HARMONY;
     sbuf ts = {0};
-    if (strict && s->tmpl != TMPL_HARMONY &&
-        (s->tmpl != TMPL_MUSE || !env.atem))
+    if (strict && !native_decl)
         sb_put(&ts, env.system_turn, strlen(env.system_turn));
-    else if (s->tmpl != TMPL_MUSE && s->tmpl != TMPL_HARMONY)
+    else if (!native_decl && s->tmpl != TMPL_MUSE)
         tools_render_for(s->tmpl, tools, &ts);
     bool ornith_merged_system = false;
     if (s->tmpl == TMPL_ORNITH && ts.n && msgs->n > 0 &&
@@ -354,7 +372,8 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     // real size and grows, so an under-count here costs a render pass, not a
     // truncated prompt.
     const jv *native_tools = (s->tmpl == TMPL_MUSE && env.atem) ||
-                             (s->tmpl == TMPL_HARMONY && env.harmony)
+                             (s->tmpl == TMPL_HARMONY && env.harmony) ||
+                             s->tmpl == TMPL_GEMMA4
                                  ? tools : NULL;
     sbuf tool_bytes = {0};
     if (native_tools) jv_dump(tools, &tool_bytes);

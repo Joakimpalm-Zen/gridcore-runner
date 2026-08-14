@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <math.h>
 
@@ -595,6 +596,310 @@ static bool g4_has_text(const char *s) {
     return false;
 }
 
+// ------------------------------------------- gemma4 tool DECLARATIONS
+//
+// A transliteration of three macros in the model's own chat template
+// (tokenizer.chat_template on gemma-4-E2B; the same text ships as llama.cpp
+// models/templates/google-gemma-4-31B-it.jinja): format_argument,
+// format_parameters and format_function_declaration. Line references below
+// are into that file as fetched into .build/template-oracles/gemma4.jinja.
+//
+// The declaration is not a stylistic variant of runner's generic JSON
+// envelope -- it is the only tool syntax this family was trained on, and it
+// lives INSIDE the caller's system turn rather than in a prepended one of its
+// own. Until 2026-08-14 runner emitted the generic envelope here instead,
+// which the conformance harness could not see at all because gemma4 was never
+// declared a tool_family.
+//
+// Faithfulness notes, each deliberate:
+//   * `| dictsort` is jinja's default, which is CASE-INSENSITIVE and stable.
+//     jv_dictsort (json.c) implements it, and schema.c compiles the grammar
+//     from the SAME function -- a renderer and a validator that disagreed
+//     about key order would reject the model's own trained output.
+//   * format_parameters takes a `required` argument its body never reads
+//     (jinja:7). Not passed here, for the same reason.
+//   * format_function_declaration opens `parameters:{` and closes it only
+//     inside `{%- if params['type'] -%}` (jinja:104-108), so a parameters
+//     object with no `type` renders unbalanced. Reproduced, not repaired: the
+//     bytes the model was trained on are the contract, and every OpenAI tool
+//     schema carries `"type": "object"` anyway.
+//   * numbers go through the same double formatting jv_dump uses, with the
+//     same residual: `1.0` comes back as `1`.
+static bool g4_truthy(const jv *v) {
+    if (!v) return false;
+    switch (v->type) {
+    case J_NULL: return false;
+    case J_BOOL: return v->b;
+    case J_NUM:  return v->num != 0;
+    case J_STR:  return v->str && v->str[0];
+    default:     return v->n > 0;
+    }
+}
+
+static void g4_upper(sbuf *o, const char *s) {
+    for (; s && *s; s++) {
+        char c = *s;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        sb_put(o, &c, 1);
+    }
+}
+
+static void g4_number(sbuf *o, double d) {
+    if (d >= (double)LLONG_MIN && d < 9223372036854775808.0 &&
+        d == (double)(long long)d)
+        sb_fmt(o, "%lld", (long long)d);
+    else
+        sb_fmt(o, "%.10g", d);
+}
+
+// jinja:124-155. `escape_keys` wraps object KEYS in <|"|> as well as values;
+// the call blocks pass False, the declaration's `enum:` passes the default.
+static void g4_format_argument(const jv *v, bool escape_keys, sbuf *o) {
+    if (!v || v->type == J_NULL) { sb_lit(o, "null"); return; }
+    switch (v->type) {
+    case J_STR:
+        sb_lit(o, "<|\"|>"); sb_lit(o, v->str); sb_lit(o, "<|\"|>");
+        break;
+    case J_BOOL: sb_lit(o, v->b ? "true" : "false"); break;
+    case J_NUM:  g4_number(o, v->num); break;
+    case J_OBJ: {
+        sb_lit(o, "{");
+        int *order = malloc(sizeof(int) * (size_t)(v->n > 0 ? v->n : 1));
+        if (!order) { o->failed = true; sb_lit(o, "}"); return; }
+        jv_dictsort(v, order);
+        for (int i = 0; i < v->n; i++) {
+            if (i) sb_lit(o, ",");
+            const char *k = v->keys[order[i]];
+            if (escape_keys) { sb_lit(o, "<|\"|>"); sb_lit(o, k); sb_lit(o, "<|\"|>"); }
+            else sb_lit(o, k);
+            sb_lit(o, ":");
+            g4_format_argument(v->items[order[i]], escape_keys, o);
+        }
+        sb_lit(o, "}");
+        free(order);
+        break;
+    }
+    case J_ARR:
+        sb_lit(o, "[");
+        for (int i = 0; i < v->n; i++) {
+            if (i) sb_lit(o, ",");
+            g4_format_argument(v->items[i], escape_keys, o);
+        }
+        sb_lit(o, "]");
+        break;
+    default: sb_lit(o, "null"); break;
+    }
+}
+
+// `<|"|>a<|"|>,<|"|>b<|"|>` -- the required-list spelling, written out three
+// times in the reference (jinja:41-45, 79-83, 99-103) and once here.
+static void g4_required_list(const jv *req, sbuf *o) {
+    if (!req || req->type != J_ARR) return;
+    for (int i = 0; i < req->n; i++) {
+        if (i) sb_lit(o, ",");
+        sb_lit(o, "<|\"|>");
+        sb_lit(o, jv_str(req->items[i], ""));
+        sb_lit(o, "<|\"|>");
+    }
+}
+
+static void g4_format_parameters(const jv *props, bool filter_keys, sbuf *o);
+
+// The `type: ARRAY` sub-block, jinja:26-58.
+static void g4_array_items(const jv *items, sbuf *o) {
+    sb_lit(o, "items:{");
+    int *order = malloc(sizeof(int) * (size_t)(items->n > 0 ? items->n : 1));
+    if (!order) { o->failed = true; sb_lit(o, "}"); return; }
+    jv_dictsort(items, order);
+    bool first = true;
+    for (int i = 0; i < items->n; i++) {
+        const char *k = items->keys[order[i]];
+        jv *val = items->items[order[i]];
+        if (!val || val->type == J_NULL) continue;   // `is not none`
+        if (!first) sb_lit(o, ",");
+        first = false;
+        if (!strcmp(k, "properties")) {
+            sb_lit(o, "properties:{");
+            if (val->type == J_OBJ) g4_format_parameters(val, false, o);
+            sb_lit(o, "}");
+        } else if (!strcmp(k, "required")) {
+            sb_lit(o, "required:[");
+            g4_required_list(val, o);
+            sb_lit(o, "]");
+        } else if (!strcmp(k, "type")) {
+            sb_lit(o, "type:");
+            if (val->type == J_STR) {
+                sb_lit(o, "<|\"|>"); g4_upper(o, val->str); sb_lit(o, "<|\"|>");
+            } else if (val->type == J_ARR) {
+                sb_lit(o, "[");
+                for (int j = 0; j < val->n; j++) {
+                    if (j) sb_lit(o, ",");
+                    sb_lit(o, "<|\"|>");
+                    g4_upper(o, jv_str(val->items[j], ""));
+                    sb_lit(o, "<|\"|>");
+                }
+                sb_lit(o, "]");
+            } else {
+                g4_format_argument(val, true, o);
+            }
+        } else {
+            sb_lit(o, k); sb_lit(o, ":");
+            g4_format_argument(val, true, o);
+        }
+    }
+    sb_lit(o, "}");
+    free(order);
+}
+
+// jinja:7-91. `standard_keys` is the filter used when an object property
+// carries its sub-properties inline rather than under `properties`.
+static void g4_format_parameters(const jv *props, bool filter_keys, sbuf *o) {
+    static const char *STANDARD[] = { "description", "type", "properties",
+                                      "required", "nullable" };
+    if (!props || props->type != J_OBJ || props->n == 0) return;
+    int *order = malloc(sizeof(int) * (size_t)props->n);
+    if (!order) { o->failed = true; return; }
+    jv_dictsort(props, order);
+    bool found_first = false;
+    for (int i = 0; i < props->n; i++) {
+        const char *key = props->keys[order[i]];
+        jv *val = props->items[order[i]];
+        if (filter_keys) {
+            bool standard = false;
+            for (size_t k = 0; k < sizeof(STANDARD) / sizeof(*STANDARD); k++)
+                if (!strcmp(key, STANDARD[k])) { standard = true; break; }
+            if (standard) continue;
+        }
+        if (found_first) sb_lit(o, ",");
+        found_first = true;
+        sb_lit(o, key); sb_lit(o, ":{");
+        bool add_comma = false;
+        jv *desc = jv_get(val, "description");
+        if (g4_truthy(desc)) {
+            sb_lit(o, "description:<|\"|>");
+            sb_lit(o, jv_str(desc, ""));
+            sb_lit(o, "<|\"|>");
+            add_comma = true;
+        }
+        jv *type = jv_get(val, "type");
+        const char *ts = jv_str(type, "");
+        sbuf up = {0};
+        g4_upper(&up, ts);
+        const char *utype = up.s ? up.s : "";
+        if (!strcmp(utype, "STRING")) {
+            jv *en = jv_get(val, "enum");
+            if (g4_truthy(en)) {
+                if (add_comma) sb_lit(o, ",");
+                add_comma = true;
+                sb_lit(o, "enum:");
+                g4_format_argument(en, true, o);
+            }
+        } else if (!strcmp(utype, "ARRAY")) {
+            jv *items = jv_get(val, "items");
+            if (items && items->type == J_OBJ && items->n > 0) {
+                if (add_comma) sb_lit(o, ",");
+                add_comma = true;
+                g4_array_items(items, o);
+            }
+        }
+        if (g4_truthy(jv_get(val, "nullable"))) {
+            if (add_comma) sb_lit(o, ",");
+            add_comma = true;
+            sb_lit(o, "nullable:true");
+        }
+        if (!strcmp(utype, "OBJECT")) {
+            jv *sub = jv_get(val, "properties");
+            if (sub && sub->type == J_OBJ) {
+                if (add_comma) sb_lit(o, ",");
+                add_comma = true;
+                sb_lit(o, "properties:{");
+                g4_format_parameters(sub, false, o);
+                sb_lit(o, "}");
+            } else if (val && val->type == J_OBJ) {
+                if (add_comma) sb_lit(o, ",");
+                add_comma = true;
+                sb_lit(o, "properties:{");
+                g4_format_parameters(val, true, o);
+                sb_lit(o, "}");
+            }
+            if (g4_truthy(jv_get(val, "required"))) {
+                if (add_comma) sb_lit(o, ",");
+                add_comma = true;
+                sb_lit(o, "required:[");
+                g4_required_list(jv_get(val, "required"), o);
+                sb_lit(o, "]");
+            }
+        }
+        if (add_comma) sb_lit(o, ",");
+        sb_lit(o, "type:<|\"|>");
+        sb_lit(o, utype);
+        sb_lit(o, "<|\"|>}");
+        free(up.s);
+    }
+    free(order);
+}
+
+// jinja:92-123, one tool.
+static void g4_format_declaration(const jv *tool, sbuf *o) {
+    jv *fn = jv_get((jv *)tool, "function");
+    if (!fn) fn = (jv *)tool;
+    sb_lit(o, "declaration:");
+    sb_lit(o, jv_str(jv_get(fn, "name"), ""));
+    sb_lit(o, "{description:<|\"|>");
+    sb_lit(o, jv_str(jv_get(fn, "description"), ""));
+    sb_lit(o, "<|\"|>");
+    jv *params = jv_get(fn, "parameters");
+    if (g4_truthy(params)) {
+        sb_lit(o, ",parameters:{");
+        jv *props = jv_get(params, "properties");
+        if (g4_truthy(props)) {
+            sb_lit(o, "properties:{");
+            g4_format_parameters(props, false, o);
+            sb_lit(o, "},");
+        }
+        jv *req = jv_get(params, "required");
+        if (g4_truthy(req)) {
+            sb_lit(o, "required:[");
+            g4_required_list(req, o);
+            sb_lit(o, "],");
+        }
+        jv *pt = jv_get(params, "type");
+        if (g4_truthy(pt)) {
+            sb_lit(o, "type:<|\"|>");
+            g4_upper(o, jv_str(pt, ""));
+            sb_lit(o, "<|\"|>}");
+        }
+        // no `type`: `parameters:{` stays open. See the header comment.
+    }
+    jv *resp = jv_get(fn, "response");
+    if (resp) {
+        sb_lit(o, ",response:{");
+        jv *rd = jv_get(resp, "description");
+        if (g4_truthy(rd)) {
+            sb_lit(o, "description:<|\"|>");
+            sb_lit(o, jv_str(rd, ""));
+            sb_lit(o, "<|\"|>,");
+        }
+        sbuf rup = {0};
+        g4_upper(&rup, jv_str(jv_get(resp, "type"), ""));
+        if (rup.s && !strcmp(rup.s, "OBJECT"))
+            sb_lit(o, "type:<|\"|>OBJECT<|\"|>}");
+        free(rup.s);
+    }
+    sb_lit(o, "}");
+}
+
+// jinja:206-212: every declaration goes in the FIRST system turn, each in its
+// own `<|tool>...<tool|>`, after any system text and before `<turn|>`.
+static void g4_render_tool_defs(const jv *tools, sbuf *o) {
+    if (!tools || tools->type != J_ARR || tools->n == 0) return;
+    for (int i = 0; i < tools->n; i++) {
+        sb_lit(o, "<|tool>");
+        g4_format_declaration(tools->items[i], o);
+        sb_lit(o, "<tool|>");
+    }
+}
+
 size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
                                   bool add_assistant, int thinking,
                                   const jv *tools,
@@ -1031,15 +1336,32 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         // (A `developer` first message is rendered as its own turn here, as
         // it always has been; the template folds it into the system turn.
         // That divergence predates this path and is untouched by it.)
+        //
+        // TOOLS open that same turn, on the same `or`, and their declarations
+        // go inside it: after the system text, before <turn|>. That is why
+        // this block also runs with thinking off -- with tools declared and no
+        // thinking, the reference still emits one system turn and runner used
+        // to emit a SEPARATE prepended turn carrying its generic JSON envelope
+        // instead (+88 tokens on every gemma4 tool prompt, and a protocol the
+        // model was never trained on). With no tools and no thinking the turn
+        // is left to the loop below, which renders it identically.
+        bool g4_tools = tools && tools->type == J_ARR && tools->n;
         int g4_first = 0;
-        if (thinking == THINK_ON) {
-            off = emit(out, cap, off, "<|turn>system\n<|think|>\n", NULL, NULL);
+        if (thinking == THINK_ON || g4_tools) {
+            off = emit(out, cap, off, "<|turn>system\n", NULL, NULL);
+            if (thinking == THINK_ON)
+                off = emit(out, cap, off, "<|think|>\n", NULL, NULL);
             if (n_msgs > 0 && !strcmp(msgs[0].role, "system")) {
-                off = emit(out, cap, off, "%s<turn|>\n", msgs[0].content, NULL);
+                off = emit(out, cap, off, "%s", msgs[0].content, NULL);
                 g4_first = 1;
-            } else {
-                off = emit(out, cap, off, "<turn|>\n", NULL, NULL);
             }
+            if (g4_tools) {
+                sbuf decls = {0};
+                g4_render_tool_defs(tools, &decls);
+                if (decls.s) off = emit(out, cap, off, "%s", decls.s, NULL);
+                free(decls.s);
+            }
+            off = emit(out, cap, off, "<turn|>\n", NULL, NULL);
         }
         // Consecutive assistant messages are ONE model turn, not two. The
         // reference suppresses BOTH ends of the framing:
@@ -1476,68 +1798,9 @@ const char *tool_result_name(const jv *messages, int message_index) {
 // escaping: the delimiter is a token the vocabulary reserves, so a quote or a
 // backslash in the value is ordinary text. Verified against the reference
 // (2026-08-14): `{"s": 'he said "hi" \\ x'}` renders `s:<|"|>he said "hi" \ x
-// <|"|>` with nothing escaped.
-//
-// jinja's dictsort defaults to case_sensitive=False and python's sort is
-// stable, so the order is by lowercased key with ties left in insertion order.
-static int g4_key_before(const char *a, const char *b) {
-    for (; *a && *b; a++, b++) {
-        int ca = tolower((unsigned char)*a), cb = tolower((unsigned char)*b);
-        if (ca != cb) return ca < cb ? 1 : -1;
-    }
-    return *a ? -1 : (*b ? 1 : 0);
-}
-
-static void g4_format_argument(const jv *v, sbuf *out) {
-    if (!v || v->type == J_NULL) { sb_lit(out, "null"); return; }
-    if (v->type == J_STR) {
-        sb_lit(out, "<|\"|>");
-        sb_put(out, v->str, strlen(v->str));
-        sb_lit(out, "<|\"|>");
-        return;
-    }
-    if (v->type == J_BOOL) { sb_lit(out, v->b ? "true" : "false"); return; }
-    if (v->type == J_ARR) {
-        sb_lit(out, "[");
-        for (int i = 0; i < v->n; i++) {
-            if (i) sb_lit(out, ",");
-            g4_format_argument(v->items[i], out);
-        }
-        sb_lit(out, "]");
-        return;
-    }
-    if (v->type == J_OBJ) {
-        sb_lit(out, "{");
-        // insertion-sort the member indices: an arguments object is a handful
-        // of keys, and a stable sort is required for dictsort's tie-breaking.
-        int order[64];
-        int n = v->n < (int)(sizeof order / sizeof *order)
-              ? v->n : (int)(sizeof order / sizeof *order);
-        for (int i = 0; i < n; i++) {
-            int j = i;
-            order[i] = i;
-            while (j > 0 && g4_key_before(v->keys[i], v->keys[order[j - 1]]) > 0) {
-                order[j] = order[j - 1];
-                j--;
-            }
-            order[j] = i;
-        }
-        for (int i = 0; i < n; i++) {
-            if (i) sb_lit(out, ",");
-            sb_put(out, v->keys[order[i]], strlen(v->keys[order[i]]));
-            sb_lit(out, ":");
-            g4_format_argument(v->items[order[i]], out);
-        }
-        sb_lit(out, "}");
-        return;
-    }
-    // J_NUM. jv stores every number as a double, so this inherits the residual
-    // json.h:71-76 already records for jv_dump_tojson: `3.0` comes back as `3`
-    // and an integer past 2^53 loses precision. The reference prints python's
-    // repr of the parsed value, so those two shapes differ; ordinary tool
-    // arguments (small ints, short decimals) agree.
-    jv_dump(v, out);
-}
+// <|"|>` with nothing escaped. g4_format_argument, which renders it, is up
+// with the declaration macros it shares with -- the reference has one macro
+// for both, and so does this file.
 
 void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
     if (!calls || calls->type != J_ARR) return;
@@ -1560,7 +1823,7 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
             // reference writes `{city:<|"|>Oslo<|"|>}`.
             jv *g4 = json_parse(args, strlen(args));
             sb_fmt(out, "<|tool_call>call:%s", name);
-            if (g4 && g4->type == J_OBJ) g4_format_argument(g4, out);
+            if (g4 && g4->type == J_OBJ) g4_format_argument(g4, false, out);
             else sb_lit(out, "{}");
             sb_lit(out, "<tool_call|>");
             jv_free(g4);
@@ -2170,11 +2433,177 @@ static int harmony_map(const tool_envelope *e, const char *doc, size_t n,
     return failed ? -1 : 1;
 }
 
+// ------------------------------------------------- gemma4 native turn -> API
+//
+// The inverse of g4_format_argument. A caller of the OpenAI API must never see
+// `{city:<|"|>Oslo<|"|>}` in `arguments` -- that field is documented to be a
+// JSON string, clients json.loads() it, and handing them the model's native
+// spelling would break every one of them. So the native value is re-emitted as
+// JSON here, which is the same service atem_map performs for muse.
+//
+// Reading is bounded by `end` throughout rather than by NUL: a truncated
+// document is the NORMAL case on this path (the constraint closer completes
+// it, but a client that hung up mid-stream leaves a partial buffer), and a
+// scan past the end would read whatever the allocator left there.
+static const char G4_Q[] = "<|\"|>";
+
+static bool g4_json_value(const char **pp, const char *end, sbuf *out);
+
+static bool g4_json_string(const char **pp, const char *end, sbuf *out) {
+    const char *p = *pp + sizeof(G4_Q) - 1;
+    const char *close = atem_find(p, end, G4_Q);
+    if (!close) return false;
+    sb_lit(out, "\"");
+    sb_esc(out, p, (size_t)(close - p));
+    sb_lit(out, "\"");
+    *pp = close + sizeof(G4_Q) - 1;
+    return true;
+}
+
+static bool g4_json_object(const char **pp, const char *end, sbuf *out) {
+    const char *p = *pp + 1;                       // past '{'
+    sb_lit(out, "{");
+    bool first = true;
+    while (p < end && *p != '}') {
+        if (!first) {
+            if (*p != ',') return false;
+            p++;
+            sb_lit(out, ",");
+        }
+        first = false;
+        const char *colon = p;
+        while (colon < end && *colon != ':') colon++;
+        if (colon >= end || colon == p) return false;
+        sb_lit(out, "\"");
+        sb_esc(out, p, (size_t)(colon - p));
+        sb_lit(out, "\":");
+        p = colon + 1;
+        if (!g4_json_value(&p, end, out)) return false;
+    }
+    if (p >= end) return false;
+    sb_lit(out, "}");
+    *pp = p + 1;
+    return true;
+}
+
+static bool g4_json_array(const char **pp, const char *end, sbuf *out) {
+    const char *p = *pp + 1;                       // past '['
+    sb_lit(out, "[");
+    bool first = true;
+    while (p < end && *p != ']') {
+        if (!first) {
+            if (*p != ',') return false;
+            p++;
+            sb_lit(out, ",");
+        }
+        first = false;
+        if (!g4_json_value(&p, end, out)) return false;
+    }
+    if (p >= end) return false;
+    sb_lit(out, "]");
+    *pp = p + 1;
+    return true;
+}
+
+static bool g4_json_value(const char **pp, const char *end, sbuf *out) {
+    const char *p = *pp;
+    if (p >= end) return false;
+    if ((size_t)(end - p) >= sizeof(G4_Q) - 1 &&
+        !memcmp(p, G4_Q, sizeof(G4_Q) - 1))
+        return g4_json_string(pp, end, out);
+    if (*p == '{') return g4_json_object(pp, end, out);
+    if (*p == '[') return g4_json_array(pp, end, out);
+    static const char *const words[] = { "true", "false", "null" };
+    for (size_t i = 0; i < sizeof(words) / sizeof(*words); i++) {
+        size_t wn = strlen(words[i]);
+        if ((size_t)(end - p) >= wn && !memcmp(p, words[i], wn)) {
+            sb_put(out, words[i], wn);
+            *pp = p + wn;
+            return true;
+        }
+    }
+    // a number: the one value type spelled identically in both languages
+    const char *q = p;
+    while (q < end && (strchr("+-.eE", *q) || (*q >= '0' && *q <= '9'))) q++;
+    if (q == p) return false;
+    sb_put(out, p, (size_t)(q - p));
+    *pp = q;
+    return true;
+}
+
+// `<|tool_call>call:NAME{ARGS}<tool_call|>` starting at *pp. Appends one
+// tool_calls[] item (without the separating comma) and returns true.
+static bool g4_one_call(const char **pp, const char *end, int index, sbuf *tc) {
+    static const char OPEN[] = "<|tool_call>call:";
+    static const char CLOSE[] = "<tool_call|>";
+    const char *p = *pp;
+    if ((size_t)(end - p) < sizeof(OPEN) - 1 ||
+        memcmp(p, OPEN, sizeof(OPEN) - 1)) return false;
+    p += sizeof(OPEN) - 1;
+    const char *brace = p;
+    while (brace < end && *brace != '{') brace++;
+    if (brace >= end || brace == p) return false;
+    const char *args_at = brace;
+    sbuf args = {0};
+    if (!g4_json_object(&args_at, end, &args) || args.failed) {
+        free(args.s);
+        return false;
+    }
+    // the block close is optional here: a document the constraint closer
+    // finished carries it, one cut off by a dropped connection may not, and
+    // the arguments are already complete either way
+    if ((size_t)(end - args_at) >= sizeof(CLOSE) - 1 &&
+        !memcmp(args_at, CLOSE, sizeof(CLOSE) - 1))
+        args_at += sizeof(CLOSE) - 1;
+    sb_fmt(tc, "{\"id\":\"call_%d\",\"type\":\"function\","
+               "\"function\":{\"name\":\"", index);
+    sb_esc(tc, p, (size_t)(brace - p));
+    sb_lit(tc, "\",\"arguments\":\"");
+    sb_esc(tc, args.s ? args.s : "{}", args.s ? args.n : 2);
+    sb_lit(tc, "\"}}");
+    free(args.s);
+    *pp = args_at;
+    return !tc->failed;
+}
+
+static int gemma4_map(const tool_envelope *e, const char *doc, size_t n,
+                      sbuf *reasoning, sbuf *content, sbuf *tc) {
+    (void)e;
+    const char *p = doc, *end = doc + n;
+    static const char THOUGHT[] = "<|channel>thought\n";
+    static const char THOUGHT_END[] = "<channel|>";
+    if ((size_t)(end - p) >= sizeof(THOUGHT) - 1 &&
+        !memcmp(p, THOUGHT, sizeof(THOUGHT) - 1)) {
+        p += sizeof(THOUGHT) - 1;
+        const char *close = atem_find(p, end, THOUGHT_END);
+        if (reasoning) sb_put(reasoning, p, (size_t)((close ? close : end) - p));
+        p = close ? close + sizeof(THOUGHT_END) - 1 : end;
+    }
+    int calls = 0;
+    while (p < end) {
+        const char *at = p;
+        if (calls) sb_lit(tc, ",");
+        if (!g4_one_call(&at, end, calls, tc)) {
+            if (calls) tc->n -= 1;              // undo the separator
+            break;
+        }
+        calls++;
+        p = at;
+    }
+    if (calls) return tc->failed ? -1 : calls;
+    // No call block: the turn is prose, up to the turn close the model does
+    // not otherwise emit.
+    const char *stop = atem_find(p, end, "<turn|>");
+    sb_put(content, p, (size_t)((stop ? stop : end) - p));
+    return content->failed ? -1 : 0;
+}
+
 int tool_envelope_map_channels(const tool_envelope *e, const char *doc,
                                size_t n, sbuf *reasoning, sbuf *content,
                                sbuf *tc) {
     if (!e || !doc || !content || !tc) return -1;
     if (e->harmony) return harmony_map(e, doc, n, reasoning, content, tc);
+    if (e->gemma4) return gemma4_map(e, doc, n, reasoning, content, tc);
     return tool_envelope_map(e, doc, n, content, tc);
 }
 
@@ -2182,6 +2611,7 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
     if (!e || !doc || !content || !tc) return -1;
     if (e->harmony) return harmony_map(e, doc, n, NULL, content, tc);
+    if (e->gemma4) return gemma4_map(e, doc, n, NULL, content, tc);
     if (e->atem) return atem_map(e, doc, n, content, tc);
     if (e->muse_user_header) {
         const char *end = doc + n;
@@ -2255,6 +2685,11 @@ int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
 
 enum { TS_TOOL, TS_ARGS, TS_FINAL_KEY, TS_FINAL_STR, TS_VALUE, TS_ATEM,
        TS_HARMONY,
+       // gemma4's native turn: an optional thought block, then either call
+       // blocks or prose. Prose gets its own passthrough state rather than
+       // being held to the end of the turn -- unlike TS_ATEM, whose answer
+       // branch waits for <|eot|> before the client sees a byte.
+       TS_G4_START, TS_G4_THOUGHT, TS_G4_CALLS, TS_G4_TEXT,
        TS_MUSE_HEADER, TS_MUSE_CONTENT,
        // parallel_tool_calls: between two entries of {"calls":[...]}. A
        // value ending inside TS_VALUE/TS_FINAL_STR leaves the entry's own
@@ -2539,6 +2974,7 @@ void tool_stream_init(tool_stream *s, const tool_envelope *e,
     s->env = e;
     if (sink) s->sink = *sink;
     s->state = e && e->harmony ? TS_HARMONY
+             : e && e->gemma4 ? TS_G4_START
              : e && e->atem ? TS_ATEM
              : e && e->muse_plain_payload ? TS_MUSE_HEADER : TS_TOOL;
 }
@@ -2604,6 +3040,123 @@ static int ts_atem(tool_stream *s, const char *bytes, int n) {
     }
 }
 
+// True when `head` is a strict, incomplete prefix of `lit` -- i.e. it could
+// still become it once more bytes arrive.
+static bool ts_partial(const tool_stream *s, const char *lit) {
+    size_t ln = strlen(lit);
+    return s->head_n < ln && !memcmp(s->head, lit, s->head_n);
+}
+
+static bool ts_starts(const tool_stream *s, const char *lit) {
+    size_t ln = strlen(lit);
+    return s->head_n >= ln && !memcmp(s->head, lit, ln);
+}
+
+#define G4_CALL_OPEN   "<|tool_call>"
+#define G4_THOUGHT     "<|channel>thought\n"
+#define G4_THOUGHT_END "<channel|>"
+#define G4_TURN_END    "<turn|>"
+
+static int ts_gemma4(tool_stream *s, const char *bytes, int n) {
+    head_put(s, bytes, (size_t)n);
+    for (;;) {
+        switch (s->state) {
+        case TS_DONE: return 0;
+        case TS_G4_START:
+            if (!s->head_n) return 0;
+            if (ts_starts(s, G4_THOUGHT)) {
+                head_drop(s, strlen(G4_THOUGHT));
+                s->state = TS_G4_THOUGHT;
+                break;
+            }
+            if (ts_starts(s, G4_CALL_OPEN)) { s->state = TS_G4_CALLS; break; }
+            // Still ambiguous only while the buffer is a prefix of a marker.
+            // Anything else -- including a '<' that starts neither -- is prose,
+            // and the grammar could not have produced it any other way.
+            if (ts_partial(s, G4_THOUGHT) || ts_partial(s, G4_CALL_OPEN))
+                return 0;
+            s->state = TS_G4_TEXT;
+            break;
+        case TS_G4_THOUGHT: {
+            const char *at = s->head ? strstr(s->head, G4_THOUGHT_END) : NULL;
+            if (!at) return 0;                  // hold: reasoning is not a
+                                                // stream the client can act on
+            size_t upto = (size_t)(at - s->head);
+            int rc = upto && s->sink.reasoning
+                       ? s->sink.reasoning(s->sink.ud, s->head, (int)upto) : 0;
+            head_drop(s, upto + strlen(G4_THOUGHT_END));
+            s->state = TS_G4_START;
+            if (rc) return rc;
+            break;
+        }
+        case TS_G4_CALLS: {
+            if (!ts_starts(s, G4_CALL_OPEN)) {
+                if (ts_partial(s, G4_CALL_OPEN)) return 0;
+                s->state = TS_G4_TEXT;
+                break;
+            }
+            const char *close = s->head ? strstr(s->head, "<tool_call|>") : NULL;
+            if (!close) return 0;
+            size_t upto = (size_t)(close - s->head) + strlen("<tool_call|>");
+            sbuf tc = {0};
+            const char *at = s->head;
+            int rc = 0;
+            if (g4_one_call(&at, s->head + upto, 0, &tc) && !tc.failed) {
+                sbuf wrapped = {0};
+                sb_lit(&wrapped, "["); sb_put(&wrapped, tc.s, tc.n);
+                sb_lit(&wrapped, "]");
+                jv *arr = json_parse(wrapped.s, wrapped.n);
+                jv *fn = arr && arr->type == J_ARR && arr->n == 1
+                           ? jv_get(arr->items[0], "function") : NULL;
+                const char *name = jv_str(jv_get(fn, "name"), NULL);
+                const char *args = jv_str(jv_get(fn, "arguments"), NULL);
+                if (name && args) {
+                    s->called = true;
+                    s->any_called = true;
+                    if (s->sink.call_begin)
+                        rc = s->sink.call_begin(s->sink.ud, name);
+                    if (!rc && s->sink.call_args)
+                        rc = s->sink.call_args(s->sink.ud, args,
+                                               (int)strlen(args));
+                    if (!rc && s->sink.call_end) rc = s->sink.call_end(s->sink.ud);
+                }
+                jv_free(arr);
+                free(wrapped.s);
+            }
+            free(tc.s);
+            head_drop(s, upto);
+            if (rc) return rc;
+            break;
+        }
+        case TS_G4_TEXT: {
+            const char *at = s->head ? strstr(s->head, G4_TURN_END) : NULL;
+            size_t emit_n = s->head_n;
+            bool done = false;
+            if (at) {
+                emit_n = (size_t)(at - s->head);
+                done = true;
+            } else {
+                // hold back the longest tail that could still become the turn
+                // close: emitting it would put framing in the client's content
+                size_t keep = strlen(G4_TURN_END) - 1;
+                if (keep > emit_n) keep = emit_n;
+                for (; keep > 0; keep--)
+                    if (!memcmp(s->head + emit_n - keep, G4_TURN_END, keep)) break;
+                emit_n -= keep;
+            }
+            int rc = emit_n && s->sink.content
+                       ? s->sink.content(s->sink.ud, s->head, (int)emit_n) : 0;
+            head_drop(s, done ? emit_n + strlen(G4_TURN_END) : emit_n);
+            if (done) s->state = TS_DONE;
+            if (rc) return rc;
+            if (!done) return 0;
+            break;
+        }
+        default: return 0;
+        }
+    }
+}
+
 int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
     if (n <= 0) return 0;
     switch (s->state) {
@@ -2612,6 +3165,10 @@ int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
         head_put(s, bytes, (size_t)n);
         return 0;
     case TS_ATEM:      return ts_atem(s, bytes, n);
+    case TS_G4_START:
+    case TS_G4_THOUGHT:
+    case TS_G4_CALLS:
+    case TS_G4_TEXT:   return ts_gemma4(s, bytes, n);
     case TS_MUSE_HEADER:return ts_muse_header(s, bytes, n);
     case TS_MUSE_CONTENT:
         return s->sink.content ? s->sink.content(s->sink.ud, bytes, n) : 0;
@@ -2624,7 +3181,33 @@ int tool_stream_feed(tool_stream *s, const char *bytes, int n) {
 }
 
 int tool_stream_finish(tool_stream *s) {
-    if (!s || s->state != TS_HARMONY) return 0;
+    if (!s) return 0;
+    // gemma4 streams as it goes, so finishing is only about the tail the
+    // states deliberately hold back: the partial `<turn|>` match in TS_G4_TEXT
+    // (which never arrived because the model stopped on its end token instead)
+    // and an unclosed thought. A partial CALL block is dropped rather than
+    // guessed at -- the constraint closer completes truncated calls, so
+    // reaching here with one means the connection died mid-block, and half a
+    // call is not a call.
+    if (s->state == TS_G4_START || s->state == TS_G4_THOUGHT ||
+        s->state == TS_G4_CALLS || s->state == TS_G4_TEXT) {
+        int rc = 0;
+        bool framing = s->state == TS_G4_CALLS ||
+                       (s->state == TS_G4_START &&
+                        (ts_partial(s, G4_THOUGHT) || ts_partial(s, G4_CALL_OPEN)));
+        if (s->head_n && !framing) {
+            if (s->state == TS_G4_THOUGHT)
+                rc = s->sink.reasoning
+                       ? s->sink.reasoning(s->sink.ud, s->head, (int)s->head_n) : 0;
+            else
+                rc = s->sink.content
+                       ? s->sink.content(s->sink.ud, s->head, (int)s->head_n) : 0;
+        }
+        s->head_n = 0;
+        s->state = TS_DONE;
+        return rc;
+    }
+    if (s->state != TS_HARMONY) return 0;
     sbuf reasoning = {0}, content = {0}, tc = {0}, wrapped = {0};
     int mapped = tool_envelope_map_channels(
         s->env, s->head ? s->head : "", s->head_n,

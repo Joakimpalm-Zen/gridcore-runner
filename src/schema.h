@@ -78,6 +78,18 @@ snode *schema_compile_harmony_turn(struct jv *tools, bool allow_final,
                                    struct jv *final_schema,
                                    bool allow_reasoning,
                                    char *err, int errcap);
+// Compile one native gemma4 assistant turn: `<|tool_call>call:NAME{k:v,...}
+// <tool_call|>` in the reference's format_argument spelling, optionally
+// preceded by a `<|channel>thought` block and optionally alternating with a
+// prose answer. `primed_reasoning` is for the continuation turn whose prompt
+// already opened the thought (a tool result with thinking on).
+snode *schema_compile_gemma4_turn(struct jv *tools, bool allow_final,
+                                  const char *only_tool,
+                                  struct jv *final_schema,
+                                  bool allow_reasoning, bool primed_reasoning,
+                                  char *err, int errcap);
+snode *schema_compile_gemma4_parallel(struct jv *tools, const char *only_tool,
+                                      char *err, int errcap);
 void   schema_free(snode *n);
 
 // streaming validator state (memcpy-copyable for token lookahead)

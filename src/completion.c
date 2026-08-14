@@ -1331,6 +1331,17 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     bool harmony_primed_think = chat && s->tmpl == TMPL_HARMONY &&
                                 !(env && env->harmony) &&
                                 req_thinking_mode(req) != THINK_OFF;
+    // gemma4's thought block is opened BY THE PROMPT on a tool-result
+    // continuation with thinking on (template.c's g4_prev == 2 branch), so the
+    // grammar must start inside it. Asked of the prompt itself rather than
+    // re-derived from the message list: the renderer owns that decision, and a
+    // second copy of the condition is a second thing to keep in step.
+    size_t prompt_n = prompt ? strlen(prompt) : 0;
+    static const char G4_THOUGHT_OPEN[] = "<|channel>thought\n";
+    bool gemma4_primed_think =
+        chat && s->tmpl == TMPL_GEMMA4 && prompt_n >= sizeof(G4_THOUGHT_OPEN) - 1 &&
+        !memcmp(prompt + prompt_n - (sizeof(G4_THOUGHT_OPEN) - 1),
+                G4_THOUGHT_OPEN, sizeof(G4_THOUGHT_OPEN) - 1);
     // Major faults are page-ins that went to disk, so the delta across a
     // request IS the paging stall rather than an inference from wall-clock: a
     // slow request that took no major faults was slow for some other reason.
@@ -1588,6 +1599,16 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                 env->tools, env->kind == TCH_AUTO, only,
                 env->kind == TCH_AUTO ? request_schema(req) : NULL,
                 req_thinking_mode(req) != THINK_OFF, serr, sizeof(serr));
+        } else if (env->gemma4) {
+            const char *only = env->kind == TCH_NAMED ? env->named : NULL;
+            schema = env->parallel && env->kind != TCH_AUTO
+                       ? schema_compile_gemma4_parallel(env->tools, only,
+                                                        serr, sizeof(serr))
+                       : schema_compile_gemma4_turn(
+                             env->tools, env->kind == TCH_AUTO, only,
+                             env->kind == TCH_AUTO ? request_schema(req) : NULL,
+                             req_thinking_mode(req) != THINK_OFF,
+                             gemma4_primed_think, serr, sizeof(serr));
         } else if (env->atem) {
             const char *only = env->kind == TCH_NAMED ? env->named : NULL;
             jv *final = env->kind == TCH_AUTO ? request_schema(req) : NULL;
@@ -1783,7 +1804,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     tool_envelope muse_plain_env = {.muse_plain_payload = true};
     snprintf(g.id, sizeof(g.id), "%s", req_id);
     // split thinking channels out of chat responses; raw completions stay raw
-    if (env && env->harmony)
+    if (env && (env->harmony || env->gemma4))
         think_init(&g.ts, NULL, NULL);
     else if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think ||
         harmony_primed_think)

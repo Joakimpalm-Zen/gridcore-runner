@@ -1380,6 +1380,255 @@ static void test_harmony_native_mapping_and_stream_boundaries(void) {
     jv_free(tools);
 }
 
+
+// ---------------------------------------------------------------- gemma4
+//
+// gemma4's native call is `<|tool_call>call:NAME{key:VALUE,...}<tool_call|>`,
+// with strings delimited by the reserved <|"|> token and object keys left
+// UNQUOTED. The point of compiling that rather than leaving the family on the
+// generic JSON envelope is that `env != NULL` is what buys constrained
+// decoding -- so these tests drive the same validator the sampler drives, and
+// the truncation case below is the project's headline claim on this family.
+static void test_gemma4_native_turn_constrains_names_and_arguments(void) {
+    jv *tools = parse(TOOLS);
+    char err[192];
+    snode *root = schema_compile_gemma4_turn(
+        tools, true, NULL, NULL, false, false, err, sizeof(err));
+    if (!root) fprintf(stderr, "gemma4 turn did not compile: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root,
+        "<|tool_call>call:get_weather{city:<|\"|>Oslo<|\"|>,units:<|\"|>c<|\"|>}"
+        "<tool_call|>"));
+    assert(accepts(root, "<|tool_call>call:add{a:1,b:2}<tool_call|>"));
+    // prose is the union's catch-all branch, and it is not the call branch:
+    // a turn that says nothing about tools is a legal answer
+    assert(accepts(root, "It is -3 C in Oslo.<turn|>"));
+    // an undeclared name, a misspelled enum member and a mistyped integer are
+    // all unreachable rather than merely unusual
+    assert(!accepts(root, "<|tool_call>call:unknown{}<tool_call|>"));
+    assert(!accepts(root,
+        "<|tool_call>call:get_weather{city:<|\"|>Oslo<|\"|>,units:<|\"|>k<|\"|>}"
+        "<tool_call|>"));
+    assert(!accepts(root, "<|tool_call>call:add{a:<|\"|>1<|\"|>,b:2}<tool_call|>"));
+    // keys come in jinja dictsort order, which is what the model was trained
+    // on and what template.c renders into the history
+    assert(!accepts(root, "<|tool_call>call:add{b:2,a:1}<tool_call|>"));
+    schema_free(root);
+
+    // tool_choice: "required" removes the prose branch entirely -- enforcement
+    // IS the envelope, and this is the property that dies if gemma4 is taken
+    // off the strict path to reach its native syntax
+    root = schema_compile_gemma4_turn(tools, false, NULL, NULL, false, false,
+                                      err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, "<|tool_call>call:add{a:1,b:2}<tool_call|>"));
+    assert(!accepts(root, "It is -3 C in Oslo.<turn|>"));
+    schema_free(root);
+
+    // tool_choice: {"name": "add"} leaves exactly one branch
+    root = schema_compile_gemma4_turn(tools, false, "add", NULL, false, false,
+                                      err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, "<|tool_call>call:add{a:1,b:2}<tool_call|>"));
+    assert(!accepts(root,
+        "<|tool_call>call:get_weather{city:<|\"|>Oslo<|\"|>,units:<|\"|>c<|\"|>}"
+        "<tool_call|>"));
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_gemma4_thought_block_precedes_either_branch(void) {
+    jv *tools = parse(TOOLS);
+    char err[192];
+    snode *root = schema_compile_gemma4_turn(
+        tools, true, NULL, NULL, true, false, err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root,
+        "<|channel>thought\nOslo needs a lookup.<channel|>"
+        "<|tool_call>call:get_weather{city:<|\"|>Oslo<|\"|>,units:<|\"|>c<|\"|>}"
+        "<tool_call|>"));
+    assert(accepts(root,
+        "<|channel>thought\nNo tool needed.<channel|>It is cold.<turn|>"));
+    assert(accepts(root, "<|tool_call>call:add{a:1,b:2}<tool_call|>"));
+    assert(accepts(root, "Plain answer.<turn|>"));
+    schema_free(root);
+
+    // the continuation turn whose PROMPT already opened the thought: the
+    // document starts inside it, so the grammar must not expect the opener
+    root = schema_compile_gemma4_turn(tools, true, NULL, NULL, true, true,
+                                      err, sizeof(err));
+    assert(root != NULL);
+    assert(accepts(root, "Still cold.<channel|>It is -3 C.<turn|>"));
+    assert(accepts(root,
+        "Need the other city.<channel|>"
+        "<|tool_call>call:get_weather{city:<|\"|>Bergen<|\"|>,units:<|\"|>c<|\"|>}"
+        "<tool_call|>"));
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_gemma4_truncated_call_still_parses(void) {
+    // THE HEADLINE, on this family. A call cut off by the token budget closes
+    // to the smallest schema-legal ending, and what the caller receives is
+    // still JSON their client can execute.
+    jv *tools = parse(TOOLS);
+    char err[192];
+    snode *root = schema_compile_gemma4_turn(
+        tools, true, NULL, NULL, false, false, err, sizeof(err));
+    assert(root != NULL);
+    const char *partial = "<|tool_call>call:get_weather{city:<|\"|>Os";
+    sval v;
+    sval_init(&v, root);
+    assert(sval_feed(&v, partial, (int)strlen(partial)));
+    char tail[256];
+    int n = sval_close(&v, tail, sizeof(tail));
+    assert(n > 0);
+    sbuf doc = {0};
+    sb_put(&doc, partial, strlen(partial));
+    sb_put(&doc, tail, (size_t)n);
+
+    tool_envelope e = {0};
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+    e.gemma4 = true;
+    e.tools = tools;
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc.s, doc.n, &content, &calls) == 1);
+    assert(strstr(calls.s, "\"name\":\"get_weather\""));
+    // the arguments field is a JSON string a client will json.loads(): the
+    // native <|"|> spelling must not survive into it
+    assert(!strstr(calls.s, "<|"));
+    assert(strstr(calls.s, "\\\"city\\\":\\\"Os"));
+    free(doc.s); free(content.s); free(calls.s);
+    tool_envelope_free(&e);
+    schema_free(root);
+    jv_free(tools);
+}
+
+static void test_gemma4_native_mapping_and_stream_boundaries(void) {
+    jv *tools = parse(TOOLS);
+    char err[192];
+    tool_envelope e;
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+    e.gemma4 = true;
+    e.tools = tools;
+
+    sbuf reason = {0}, content = {0}, calls = {0};
+    const char *doc =
+        "<|channel>thought\nNeeds a lookup.<channel|>"
+        "<|tool_call>call:get_weather{city:<|\"|>Oslo<|\"|>,units:<|\"|>c<|\"|>}"
+        "<tool_call|>";
+    assert(tool_envelope_map_channels(&e, doc, strlen(doc), &reason,
+                                      &content, &calls) == 1);
+    assert(!strcmp(reason.s, "Needs a lookup."));
+    assert(content.n == 0);
+    assert(strstr(calls.s, "\"name\":\"get_weather\""));
+    assert(strstr(calls.s, "{\\\"city\\\":\\\"Oslo\\\",\\\"units\\\":\\\"c\\\"}"));
+    free(reason.s); free(content.s); free(calls.s);
+
+    // two calls in one turn: gemma4 concatenates the blocks with no separator
+    reason = (sbuf){0}; content = (sbuf){0}; calls = (sbuf){0};
+    doc = "<|tool_call>call:add{a:1,b:2}<tool_call|>"
+          "<|tool_call>call:add{a:3,b:4}<tool_call|>";
+    assert(tool_envelope_map_channels(&e, doc, strlen(doc), &reason,
+                                      &content, &calls) == 2);
+    assert(strstr(calls.s, "\"id\":\"call_0\"") &&
+           strstr(calls.s, "\"id\":\"call_1\""));
+    free(reason.s); free(content.s); free(calls.s);
+
+    // prose: the turn close is framing and must not reach the client
+    reason = (sbuf){0}; content = (sbuf){0}; calls = (sbuf){0};
+    doc = "It is -3 C in Oslo.<turn|>";
+    assert(tool_envelope_map_channels(&e, doc, strlen(doc), &reason,
+                                      &content, &calls) == 0);
+    assert(!strcmp(content.s, "It is -3 C in Oslo."));
+    free(reason.s); free(content.s); free(calls.s);
+
+    // ---- the streamed path reaches the same call from the same bytes,
+    // whatever the chunk boundaries are
+    doc = "<|channel>thought\nNeeds a lookup.<channel|>"
+          "<|tool_call>call:get_weather{city:<|\"|>Oslo<|\"|>,units:<|\"|>c<|\"|>}"
+          "<tool_call|>";
+    for (size_t step = 1; step <= strlen(doc); step++) {
+        demux_log log;
+        demux_step(&e, doc, step, &log);
+        assert(log.called && log.begins == 1 && log.ends == 1);
+        assert(!strcmp(log.name, "get_weather"));
+        assert(!strcmp(log.args.s, "{\"city\":\"Oslo\",\"units\":\"c\"}"));
+        assert(!strcmp(log.reasoning.s, "Needs a lookup."));
+        assert(log.content.n == 0);
+        log_free(&log);
+    }
+    doc = "It is -3 C in Oslo.<turn|>";
+    for (size_t step = 1; step <= strlen(doc); step++) {
+        demux_log log;
+        demux_step(&e, doc, step, &log);
+        assert(!log.called && log.begins == 0);
+        // the held-back tail is the whole point: a chunk boundary inside
+        // "<turn|>" must not leak a partial marker as assistant text
+        assert(!strcmp(log.content.s, "It is -3 C in Oslo."));
+        log_free(&log);
+    }
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
+static void test_gemma4_structured_arguments_round_trip(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"store\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"payload\":{\"type\":\"object\",\"properties\":{"
+            "\"x\":{\"type\":\"integer\"},\"ok\":{\"type\":\"boolean\"}}},"
+        "\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+        "\"required\":[\"payload\",\"tags\"]}}}]");
+    char err[192];
+    snode *root = schema_compile_gemma4_turn(tools, false, NULL, NULL, false,
+                                             false, err, sizeof(err));
+    if (!root) fprintf(stderr, "gemma4 structured turn: %s\n", err);
+    assert(root != NULL);
+    // nested objects keep UNQUOTED keys and dictsort order (ok before x);
+    // arrays are bounded but variable-length
+    const char *doc = "<|tool_call>call:store{payload:{ok:true,x:2},"
+                      "tags:[<|\"|>a<|\"|>,<|\"|>b<|\"|>]}<tool_call|>";
+    assert(accepts(root, doc));
+    assert(accepts(root,
+        "<|tool_call>call:store{payload:{ok:false,x:0},tags:[]}<tool_call|>"));
+    assert(!accepts(root,
+        "<|tool_call>call:store{payload:{\"ok\":true,\"x\":2},tags:[]}"
+        "<tool_call|>"));
+    schema_free(root);
+
+    tool_envelope e;
+    assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
+    e.gemma4 = true;
+    e.tools = tools;
+    sbuf content = {0}, calls = {0};
+    assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
+    assert(strstr(calls.s,
+        "{\\\"payload\\\":{\\\"ok\\\":true,\\\"x\\\":2},"
+        "\\\"tags\\\":[\\\"a\\\",\\\"b\\\"]}"));
+    free(content.s); free(calls.s);
+    tool_envelope_free(&e);
+    jv_free(tools);
+}
+
+static void test_gemma4_untyped_parameter_is_refused_not_guessed(void) {
+    // The generic envelope admits an untyped parameter as free JSON. gemma4's
+    // native syntax has no free-form spelling, so the choice is between an
+    // error and an unconstrained call that the mapper may not be able to read
+    // back. It errors, and the message names the parameter.
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"note\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"body\":{\"description\":\"anything\"}}}}}]");
+    char err[192];
+    err[0] = 0;
+    snode *root = schema_compile_gemma4_turn(tools, true, NULL, NULL, false,
+                                             false, err, sizeof(err));
+    assert(root == NULL);
+    assert(strstr(err, "body") && strstr(err, "type"));
+    jv_free(tools);
+}
+
 static void test_buffered_mapper_rejects_invalid_arguments(void) {
     tool_envelope e = {0};
     sbuf content = {0}, calls = {0};
@@ -1430,6 +1679,12 @@ int main(void) {
     test_system_turn_teaches_the_envelope();
     test_harmony_native_turn_constrains_channels_recipients_and_args();
     test_harmony_native_mapping_and_stream_boundaries();
+    test_gemma4_native_turn_constrains_names_and_arguments();
+    test_gemma4_thought_block_precedes_either_branch();
+    test_gemma4_truncated_call_still_parses();
+    test_gemma4_native_mapping_and_stream_boundaries();
+    test_gemma4_structured_arguments_round_trip();
+    test_gemma4_untyped_parameter_is_refused_not_guessed();
     puts("tool envelope tests ok");
     return 0;
 }

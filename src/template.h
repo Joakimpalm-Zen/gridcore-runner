@@ -162,6 +162,7 @@ typedef struct {
     int   max_calls;
     bool  atem;           // Muse native recipient + <atem:invoke> protocol
     bool  harmony;        // gpt-oss native channels + functions recipient
+    bool  gemma4;         // gemma4 native <|tool_call>call:NAME{...} protocol
     bool  muse_user_header; // generic JSON override follows to=user header
     bool  muse_plain_payload; // stream a schema payload after to=user header
     struct jv *tools;     // borrowed request declarations for native compiler

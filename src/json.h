@@ -76,4 +76,17 @@ void jv_dump(const jv *v, sbuf *o);
 // written as `1.0`, or an integer past 2^63 will not.
 void jv_dump_tojson(const jv *v, sbuf *o);
 
+// jinja's `| dictsort` over an object's members: fills `order` (which must
+// hold v->n ints) with member indices sorted by key.
+//
+// It lives here, next to jv, because TWO unrelated modules need the identical
+// order and must not each guess it: template.c renders gemma4's declarations
+// and call blocks with dictsorted keys, and schema.c compiles the grammar
+// that constrains those same blocks. A disagreement between the two would be
+// a grammar that rejects the model's own trained output.
+//
+// jinja's default is case_sensitive=False and python's sort is stable, so the
+// order is by LOWERCASED key with ties left in insertion order.
+void jv_dictsort(const jv *obj, int *order);
+
 #endif

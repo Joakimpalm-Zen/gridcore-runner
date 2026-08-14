@@ -565,3 +565,27 @@ static void jv_dump_sep(const jv *v, sbuf *o,
 void jv_dump(const jv *v, sbuf *o) { jv_dump_sep(v, o, ",", ":"); }
 
 void jv_dump_tojson(const jv *v, sbuf *o) { jv_dump_sep(v, o, ", ", ": "); }
+
+static int jv_key_cmp(const char *a, const char *b) {
+    for (;; a++, b++) {
+        unsigned char x = (unsigned char)*a, y = (unsigned char)*b;
+        if (x >= 'A' && x <= 'Z') x = (unsigned char)(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = (unsigned char)(y - 'A' + 'a');
+        if (x != y) return x < y ? -1 : 1;
+        if (!x) return 0;
+    }
+}
+
+// Insertion sort over an index array: an object here holds a handful of
+// members, and stability is the point rather than an implementation detail.
+void jv_dictsort(const jv *obj, int *order) {
+    if (!obj || obj->type != J_OBJ) return;
+    for (int i = 0; i < obj->n; i++) {
+        int j = i;
+        while (j > 0 && jv_key_cmp(obj->keys[order[j - 1]], obj->keys[i]) > 0) {
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = i;
+    }
+}
