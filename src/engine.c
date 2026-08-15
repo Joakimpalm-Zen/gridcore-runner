@@ -1562,16 +1562,10 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                                e->constraint_phase == CP_THINK) &&
                 e->prelude_max > 0 && ++e->prelude_count >= e->prelude_max) {
                 e->prelude_exhausted = true;
-                // mirrors engine_gen_step: under a constraint, close the
-                // prelude rather than ending the turn with nothing
-                if (e->schema || e->json_mode) {
-                    rc = constraint_finish_think(e, e->schema != NULL,
-                                                 cb, ud);
-                } else {
-                    e->pos += i;
-                    if (e->dpos > e->pos) e->dpos = e->pos;
-                    goto done;
-                }
+                // mirrors engine_gen_step: close the prelude rather than
+                // ending the turn with nothing. `in_prelude` already required
+                // a constraint, so there is no other case to handle.
+                rc = constraint_finish_think(e, e->schema != NULL, cb, ud);
             }
             bool constrained_done = e->schema
                                       ? constraint_done(e, true)
@@ -1728,12 +1722,14 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
         // remaining half of the budget goes on the JSON that was asked for.
         // prelude_exhausted still records why, so the server keeps reporting
         // "reasoning_limit".
-        if (e->schema || e->json_mode) {
-            if (constraint_finish_think(e, e->schema != NULL, cb, ud) != 0)
-                return ENGINE_STEP_DONE;
-        } else {
+        // No `else`. `in_prelude` above already required a constraint, so an
+        // unconstrained turn never reaches this bound at ALL -- it runs to
+        // max_tokens like any other. There WAS an else here returning
+        // ENGINE_STEP_DONE, and it was unreachable; on 2026-08-15 it was read
+        // as the unconstrained POLICY and presented to the owner as one, which
+        // is the specific harm of dead code that looks like a decision.
+        if (constraint_finish_think(e, e->schema != NULL, cb, ud) != 0)
             return ENGINE_STEP_DONE;
-        }
     }
     if ((e->schema && constraint_done(e, true)) ||
         (!e->schema && e->json_mode && constraint_done(e, false))) {

@@ -788,6 +788,30 @@ recovered within the parameter's declared bounds. A native `to=user` text answer
 the model's own end-of-turn token and reports `finish_reason:"stop"`; only a
 genuine token-limit cut reports `"length"`.
 
+### Thinking budgets and what happens when they run out
+
+A model that opens a thinking block is bounded differently depending on whether
+the request asked for a structured deliverable, and the asymmetry is
+deliberate:
+
+- **With a constraint** — `response_format` (`json_object` / `json_schema`) or
+  `tools` — the thinking prelude is capped at half the token budget. Hitting
+  that cap does not end the turn: the prelude is closed and the remaining
+  budget goes on the payload that was actually requested. `finish_reason` is
+  the standard `"length"`, and `runner_telemetry.finish_detail` carries
+  `"reasoning_limit"` so the specific cause stays recoverable. This is the
+  shape Anthropic's extended thinking uses — thinking has its own budget under
+  `max_tokens`, and the answer is still produced.
+- **Without one**, there is no prelude cap. The turn runs to `max_tokens` like
+  any other and `finish_reason` is a plain `"length"` with no `finish_detail`.
+  This resembles OpenAI's reasoning models, where reasoning and output share
+  one ceiling and a reasoning-heavy turn can return little or nothing.
+
+The reason for the split: under a constraint the caller is owed a document, and
+returning an empty one is a worse answer than a shorter thought. Measured on
+gemma-4-E2B, two of four tool prompts opened a thinking block and never closed
+it — with `-n 200` that burned 100 tokens and returned a single newline.
+
 ### gemma4 native tool calling
 
 A loaded gemma-4 model that receives `tools` declares them the way its own

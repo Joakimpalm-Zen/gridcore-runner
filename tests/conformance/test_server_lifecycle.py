@@ -152,6 +152,65 @@ def test_thinking_prelude_is_bounded_with_distinct_finish_reason(tmp_path):
         srv.stop()
 
 
+def test_thinking_prelude_cap_does_not_apply_without_a_constraint(tmp_path):
+    """The other half of the prelude contract, ratified by the owner 2026-08-15.
+
+    Runner is deliberately ASYMMETRIC, and both halves are load-bearing:
+
+      * WITH a constraint (json_schema / json_object / tools) the prelude is
+        bounded at max_new/2, and hitting that bound CLOSES the prelude and
+        spends the rest of the budget on the payload, because the caller is
+        owed a document. Pinned by the two tests above. That is the shape
+        Anthropic's extended thinking uses -- thinking gets its own budget
+        under max_tokens and the answer is still produced.
+      * WITHOUT one there is NO prelude bound at all. The turn runs to
+        max_tokens like any other, `finish_reason` is the plain "length", and
+        no `finish_detail` appears because the prelude cap never fired. That
+        resembles OpenAI's reasoning models, where reasoning and output share
+        the ceiling and a reasoning-heavy turn can return little or nothing.
+
+    This second half had nothing pinning it, and the gap was not harmless: the
+    engine carried an unreachable `else` branch that ENDED the turn at the
+    bound, and on 2026-08-15 it was read as the unconstrained policy and
+    described to the owner as one. The branch is gone; this test is what stops
+    the question being re-answered from a code path nobody can reach.
+    """
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = tmp_path / "ornith.gguf"
+    fixture_env = os.environ.copy()
+    fixture_env["ORNITH_TEST_SEED"] = "1"
+    subprocess.run([sys.executable, os.path.join(root, "scripts", "make-test-ornith.py"),
+                    str(model)], check=True, cwd=root, env=fixture_env)
+    # ctx=256 for the reason spelled out in the two tests above: this forces
+    # the ornith template, whose render of the conversation does not fit in 64.
+    srv = RunnerServer(find_runner(root), str(model), ctx=256, parallel=1,
+                       extra_args=["--gpu", "off", "--chat-template", "ornith"])
+    srv.start()
+    try:
+        payload = json.dumps({
+            "messages": [{"role": "user", "content": "emit json"}],
+            "max_tokens": 8,
+            "temperature": 0,
+            # NO response_format and NO tools -- that is the whole point
+        }).encode()
+        req = urllib.request.Request(srv.base_url + "/v1/chat/completions",
+                                     data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            body = json.load(response)
+        choice = body["choices"][0]
+        # the budget ran out, and that is all that happened
+        assert choice["finish_reason"] == "length"
+        # the prelude bound did NOT fire: no constraint, so it is not armed
+        assert "finish_detail" not in body.get("runner_telemetry", {}), (
+            "an unconstrained turn reported a prelude-specific finish reason; "
+            "the cap is supposed to be armed only under a constraint")
+        # and the whole budget was available to it, not half
+        assert body["usage"]["completion_tokens"] == 8
+    finally:
+        srv.stop()
+
+
 def test_thinking_prelude_reason_survives_streaming(tmp_path):
     """A streamed turn must not lose the reason a buffered one keeps.
 
