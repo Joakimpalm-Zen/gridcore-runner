@@ -442,7 +442,7 @@ static void test_ornith_native_tool_protocol(void) {
         "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
         "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\",\\\"days\\\":2}\"}}]");
     sbuf replay = {0};
-    tool_history_render_for(TMPL_ORNITH, history, &replay);
+    tool_history_render_for(TMPL_ORNITH, history, false, &replay);
     assert(!strcmp(replay.s,
         "<tool_call>\n<function=get_weather>\n"
         "<parameter=city>\nOslo\n</parameter>\n"

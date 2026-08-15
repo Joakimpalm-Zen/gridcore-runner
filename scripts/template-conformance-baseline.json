@@ -38,7 +38,7 @@
     "in-progress": "someone is actively fixing this; see `note`"
   },
   "generated_by": "scripts/template-conformance.py --write-baseline",
-  "generated_at": "2026-08-14T19:34:10+00:00",
+  "generated_at": "2026-08-15T15:16:29+00:00",
   "oracles": {
     "apertus": {
       "source": "hf:swiss-ai/Apertus-8B-Instruct-2509",
@@ -323,16 +323,6 @@
       "reference_excerpt": "', CJK: \u6f22\u5b57\u3001\u0623\u0647\u0644\u0627\u064b </s><s>[INST] And at sunset? [/INST]'",
       "runner_excerpt": "', CJK: \u6f22\u5b57\u3001\u0623\u0647\u0644\u0627\u064b </s>[INST] And at sunset? [/INST]'",
       "token_delta": -1
-    },
-    {
-      "id": "ornith/tool-call-with-text",
-      "status": "open",
-      "note": "",
-      "digest": "72b803bc5613bca0",
-      "allowlist_applied": [],
-      "first_diff_at": 1293,
-      "reference_excerpt": "'Let me look that up.\\n\\n<tool_call>\\n<function=get_weather>\\n<parameter=city>\\nOslo\\n</parameter'",
-      "runner_excerpt": "'Let me look that up.<tool_call>\\n<function=get_weather>\\n<parameter=city>\\nOslo\\n</parameter>\\n'"
     }
   ]
 }

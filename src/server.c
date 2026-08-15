@@ -71,8 +71,31 @@ char *render_prompt_alloc(int tmpl, const chat_msg *msgs, int n_msgs,
 // assistant tool_calls render in runner's own call syntax so replayed
 // history reads like what the model actually emitted. Returns a heap
 // string, or NULL when the message carries nothing usable.
+// Does THIS message carry visible text? Asked before anything is written,
+// because the buffer below immediately gains framing (ornith's <think> block)
+// that would make an emptiness test answer the wrong question. Whitespace-only
+// counts as no text, which is the reference's `content|trim`.
+static bool message_has_text(const jv *content) {
+    const char *s = NULL;
+    if (content && content->type == J_STR) s = content->str;
+    else if (content && content->type == J_ARR) {
+        for (int i = 0; i < content->n; i++) {
+            const char *type = jv_str(jv_get(content->items[i], "type"), "");
+            const char *text = jv_str(jv_get(content->items[i], "text"), NULL);
+            if (strcmp(type, "text") || !text) continue;
+            for (const char *p = text; *p; p++)
+                if (!strchr(" \t\n\r\f\v", *p)) return true;
+        }
+        return false;
+    }
+    for (const char *p = s; p && *p; p++)
+        if (!strchr(" \t\n\r\f\v", *p)) return true;
+    return false;
+}
+
 static char *message_text(jv *msg, int tmpl) {
     jv *content = jv_get(msg, "content");
+    bool has_text = message_has_text(content);
     sbuf b = {0};
     const char *role = jv_str(jv_get(msg, "role"), "user");
     const char *reason = jv_str(jv_get(msg, "reasoning_content"), NULL);
@@ -88,7 +111,7 @@ static char *message_text(jv *msg, int tmpl) {
     // appends the calls after the content, which is what they have always
     // done and what their own references expect.
     jv *calls = jv_get(msg, "tool_calls");
-    if (tmpl == TMPL_GEMMA4) tool_history_render_for(tmpl, calls, &b);
+    if (tmpl == TMPL_GEMMA4) tool_history_render_for(tmpl, calls, has_text, &b);
     // Muse's reference emits NO visible text in a turn that carries calls:
     // the turn is addressed `to=NAME` and holds only the
     // <atem:function_calls> block, so text before it is a shape the model
@@ -107,7 +130,7 @@ static char *message_text(jv *msg, int tmpl) {
     // preceding `to=user` turn, which no reference writes.
     bool muse_calls = tmpl == TMPL_MUSE && calls && calls->type == J_ARR &&
                       calls->n > 0;
-    if (muse_calls) content = NULL;
+    if (muse_calls) { content = NULL; has_text = false; }
     if (content && content->type == J_STR) {
         sb_put(&b, content->str, strlen(content->str));
     } else if (content && content->type == J_ARR) {
@@ -124,7 +147,7 @@ static char *message_text(jv *msg, int tmpl) {
             sb_put(&b, text, strlen(text));
         }
     }
-    if (tmpl != TMPL_GEMMA4) tool_history_render_for(tmpl, calls, &b);
+    if (tmpl != TMPL_GEMMA4) tool_history_render_for(tmpl, calls, has_text, &b);
     if (tmpl == TMPL_ORNITH && !strcmp(role, "tool")) {
         sbuf wrapped = {0};
         sb_lit(&wrapped, "<tool_response>\n");
@@ -1186,7 +1209,14 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
         char ident[256];
         sampler_ident(gguf_get_str(&base->gf, "general.name", NULL),
                       base->path, ident, sizeof(ident));
-        SV.preset_name = sampler_preset_for(base->arch, ident)->name;
+        // The template beats the name when they disagree (see sample.h).
+        // tok is not needed: its probes are the fallback for a model with no
+        // template text, and a model with no template text has only its name
+        // to be identified by anyway.
+        int preset_tmpl = tmpl_override >= 0 ? tmpl_override
+                        : template_detect(gguf_get_str(&base->gf,
+                                          "tokenizer.chat_template", NULL), NULL);
+        SV.preset_name = sampler_preset_for(base->arch, ident, preset_tmpl)->name;
     } else {
         SV.preset_name = NULL;
     }

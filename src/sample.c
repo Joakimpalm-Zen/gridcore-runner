@@ -2,6 +2,7 @@
 // validity-constrained selection (used for JSON mode), and the per-family
 // defaults that seed all of the above.
 #include "sample.h"
+#include "template.h"   // TMPL_* — the detected template outranks the name
 
 #include <ctype.h>
 #include <math.h>
@@ -452,7 +453,8 @@ void sampler_ident(const char *name, const char *path, char *buf, size_t n) {
     snprintf(buf, n, "%s %s", name ? name : "", base ? base : "");
 }
 
-const sampler_preset *sampler_preset_for(const char *arch, const char *name) {
+const sampler_preset *sampler_preset_for(const char *arch, const char *name,
+                                        int tmpl) {
     char lname[128];
     size_t n = name ? strlen(name) : 0;
     if (n >= sizeof(lname)) n = sizeof(lname) - 1;
@@ -475,6 +477,19 @@ const sampler_preset *sampler_preset_for(const char *arch, const char *name) {
     if (!strcmp(arch, "phi3"))   return by_name("phi3");
     if (!strcmp(arch, "gemma3") || !strcmp(arch, "gemma4"))
         return by_name("gemma3");
+
+    // The DETECTED TEMPLATE, where there is one, outranks every name test
+    // below. Both signals answer "which family is this", but the template is
+    // read out of the checkpoint while the name is a label a re-quantiser can
+    // change; template.c already distinguishes the three Mistral framings by
+    // their own text, and sample.c used to re-decide the same question from a
+    // substring and disagree. Nemo is the case that bites: its model card
+    // calls out temperature 0.3 as a departure from other Mistral models, so a
+    // Nemo export whose name lost either "mistral" or "nemo" got the plain
+    // Mistral preset at 0.7 while being rendered with the Nemo template.
+    if (tmpl == TMPL_MISTRAL_NEMO) return by_name("mistral-nemo");
+    if (tmpl == TMPL_MISTRAL || tmpl == TMPL_MISTRAL_V1)
+        return by_name("mistral");
 
     // Llama, Mistral and SmolLM2 GGUFs all declare `llama`, so only the model
     // name separates them. Checked before the llama-3 test because "smollm2"
@@ -503,9 +518,9 @@ const sampler_preset *sampler_preset_for(const char *arch, const char *name) {
 }
 
 const sampler_preset *sampler_resolve(sampler *s, const char *arch,
-                                      const char *name,
+                                      const char *name, int tmpl,
                                       const sampler_override *ov) {
-    const sampler_preset *p = sampler_preset_for(arch, name);
+    const sampler_preset *p = sampler_preset_for(arch, name, tmpl);
     s->temp           = p->temp;
     s->top_p          = p->top_p;
     s->min_p          = p->min_p;

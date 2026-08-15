@@ -19,67 +19,67 @@
 static void test_preset_selection(void) {
     const sampler_preset *p;
 
-    p = sampler_preset_for("qwen3", "Qwen3 4B Instruct Awq");
+    p = sampler_preset_for("qwen3", "Qwen3 4B Instruct Awq", -1);
     assert(!strcmp(p->name, "qwen3"));
     assert(EQ(p->temp, 0.6f) && EQ(p->top_p, 0.95f) && p->top_k == 20);
     assert(EQ(p->min_p, 0.0f));
 
-    p = sampler_preset_for("qwen2", "Qwen2.5 32B Instruct");
+    p = sampler_preset_for("qwen2", "Qwen2.5 32B Instruct", -1);
     assert(!strcmp(p->name, "qwen2.5"));
     assert(EQ(p->temp, 0.7f) && EQ(p->top_p, 0.8f) && p->top_k == 20);
     assert(EQ(p->repeat_penalty, 1.05f));
 
-    p = sampler_preset_for("gemma3", "Gemma 3 4b It");
+    p = sampler_preset_for("gemma3", "Gemma 3 4b It", -1);
     assert(!strcmp(p->name, "gemma3"));
     assert(EQ(p->temp, 1.0f) && EQ(p->top_p, 0.95f) && p->top_k == 64);
 
-    p = sampler_preset_for("phi3", "Phi 3.5 Mini Instruct");
+    p = sampler_preset_for("phi3", "Phi 3.5 Mini Instruct", -1);
     assert(!strcmp(p->name, "phi3"));
     assert(EQ(p->temp, 0.0f));
 
     // three families share `general.architecture: llama`, so the name is the
     // only thing that separates them
-    p = sampler_preset_for("llama", "Llama 3.2 3B Instruct");
+    p = sampler_preset_for("llama", "Llama 3.2 3B Instruct", -1);
     assert(!strcmp(p->name, "llama3"));
     assert(EQ(p->temp, 0.6f) && EQ(p->top_p, 0.9f));
-    assert(!strcmp(sampler_preset_for("llama", "Meta Llama 3.1 8B Instruct")->name,
+    assert(!strcmp(sampler_preset_for("llama", "Meta Llama 3.1 8B Instruct", -1)->name,
                    "llama3"));
 
-    p = sampler_preset_for("llama", "Mistral-7B-Instruct-v0.3");
+    p = sampler_preset_for("llama", "Mistral-7B-Instruct-v0.3", -1);
     assert(!strcmp(p->name, "mistral"));
     assert(EQ(p->temp, 0.7f) && EQ(p->top_p, 1.0f));
 
-    p = sampler_preset_for("llama", "Smollm2 1.7B 8k Mix7 Ep2 v2");
+    p = sampler_preset_for("llama", "Smollm2 1.7B 8k Mix7 Ep2 v2", -1);
     assert(!strcmp(p->name, "smollm2"));
     assert(EQ(p->temp, 0.2f) && EQ(p->top_p, 0.9f));
 
     // Mistral Nemo departs from the rest of the Mistral family: the vendor
     // card demands temperature 0.3. Plain Mistrals must NOT land here, and
     // NVIDIA's "Nemotron" (which contains "nemo") must not either.
-    p = sampler_preset_for("llama", "Mistral-Nemo-Instruct-2407");
+    p = sampler_preset_for("llama", "Mistral-Nemo-Instruct-2407", -1);
     assert(!strcmp(p->name, "mistral-nemo"));
     assert(EQ(p->temp, 0.3f));
-    assert(!strcmp(sampler_preset_for("llama", "Mistral-7B-Instruct-v0.3")->name,
+    assert(!strcmp(sampler_preset_for("llama", "Mistral-7B-Instruct-v0.3", -1)->name,
                    "mistral"));
-    assert(strcmp(sampler_preset_for("llama", "Nemotron Mini 4B")->name,
+    assert(strcmp(sampler_preset_for("llama", "Nemotron Mini 4B", -1)->name,
                   "mistral-nemo") != 0);
 
     // European llama-declaring families with published settings.
-    p = sampler_preset_for("llama", "Lucie-7B-Instruct");
+    p = sampler_preset_for("llama", "Lucie-7B-Instruct", -1);
     assert(!strcmp(p->name, "lucie"));
     assert(EQ(p->temp, 0.6f) && EQ(p->top_p, 0.9f));
 
-    p = sampler_preset_for("llama", "salamandra-7b-instruct");
+    p = sampler_preset_for("llama", "salamandra-7b-instruct", -1);
     assert(!strcmp(p->name, "salamandra"));
     assert(EQ(p->temp, 0.6f) && EQ(p->repeat_penalty, 1.2f));
 
-    p = sampler_preset_for("llama", "Teuken-7B-instruct-commercial-v0.4");
+    p = sampler_preset_for("llama", "Teuken-7B-instruct-commercial-v0.4", -1);
     assert(!strcmp(p->name, "teuken"));
     assert(EQ(p->temp, 0.7f) && EQ(p->top_p, 0.95f));
 
     // EuroLLM publishes no sampling settings (gated repo, no guidance in the
     // quantizer mirrors) — it must stay on generic rather than borrow one.
-    assert(!strcmp(sampler_preset_for("llama", "EuroLLM-9B-Instruct")->name,
+    assert(!strcmp(sampler_preset_for("llama", "EuroLLM-9B-Instruct", -1)->name,
                    "generic"));
 
     // Quantizer metadata is unreliable: a real community salamandra GGUF
@@ -88,35 +88,35 @@ static void test_preset_selection(void) {
     char ident[256];
     sampler_ident("snapshots", "models/salamandra-7b-instruct-Q4_K_M-f32.gguf",
                   ident, sizeof(ident));
-    p = sampler_preset_for("llama", ident);
+    p = sampler_preset_for("llama", ident, -1);
     assert(!strcmp(p->name, "salamandra"));
     sampler_ident(NULL, "C:\\models\\Mistral-Nemo-Instruct.gguf",
                   ident, sizeof(ident));
-    assert(!strcmp(sampler_preset_for("llama", ident)->name, "mistral-nemo"));
+    assert(!strcmp(sampler_preset_for("llama", ident, -1)->name, "mistral-nemo"));
 
     // Gridcore Syntetik declares arch "llama", name "gridcore-<size>"; the
     // suite-native contract compiler resolves to a deterministic preset, not
     // a vendor one, and greedy is the point (temp 0, no penalty).
-    p = sampler_preset_for("llama", "gridcore-10m");
+    p = sampler_preset_for("llama", "gridcore-10m", -1);
     assert(!strcmp(p->name, "gridcore"));
     assert(EQ(p->temp, 0.0f) && EQ(p->repeat_penalty, 1.0f) && p->top_k == 0);
-    assert(!strcmp(sampler_preset_for("llama", "Syntetik 350M")->name, "gridcore"));
+    assert(!strcmp(sampler_preset_for("llama", "Syntetik 350M", -1)->name, "gridcore"));
 }
 
 // A model nobody published numbers for must not silently borrow another
 // family's: it falls back to the generic preset, which is what runner shipped
 // as its fixed defaults before presets existed.
 static void test_preset_fallback(void) {
-    const sampler_preset *g = sampler_preset_for("llama", "tinyllama_tinyllama-1.1b-chat-v1.0");
+    const sampler_preset *g = sampler_preset_for("llama", "tinyllama_tinyllama-1.1b-chat-v1.0", -1);
     assert(!strcmp(g->name, "generic"));
     assert(EQ(g->temp, 0.8f) && EQ(g->top_p, 0.95f) && EQ(g->min_p, 0.05f));
     assert(g->top_k == 40 && EQ(g->repeat_penalty, 1.1f));
 
     // "tinyllama" must not be read as the llama-3 family
-    assert(strcmp(sampler_preset_for("llama", "TinyLlama 1.1B")->name, "llama3") != 0);
+    assert(strcmp(sampler_preset_for("llama", "TinyLlama 1.1B", -1)->name, "llama3") != 0);
     // missing or unknown metadata is not an error
-    assert(!strcmp(sampler_preset_for(NULL, NULL)->name, "generic"));
-    assert(!strcmp(sampler_preset_for("mamba", "")->name, "generic"));
+    assert(!strcmp(sampler_preset_for(NULL, NULL, -1)->name, "generic"));
+    assert(!strcmp(sampler_preset_for("mamba", "", -1)->name, "generic"));
 }
 
 static void test_preset_table_is_enumerable(void) {
@@ -134,7 +134,7 @@ static void test_override_precedence(void) {
     sampler s = { .rng = 12345 };
     sampler_override none = {0};
 
-    const sampler_preset *p = sampler_resolve(&s, "qwen3", "Qwen3 4B", &none);
+    const sampler_preset *p = sampler_resolve(&s, "qwen3", "Qwen3 4B", -1, &none);
     assert(!strcmp(p->name, "qwen3"));
     assert(EQ(s.temp, 0.6f) && EQ(s.top_p, 0.95f) && s.top_k == 20);
     assert(s.rng == 12345);  // resolution never disturbs sampler state
@@ -142,7 +142,7 @@ static void test_override_precedence(void) {
     // an explicit value always wins, and only that field moves
     sampler_override ov = { .has_temp = true, .temp = 0.05f,
                             .has_repeat_penalty = true, .repeat_penalty = 1.0f };
-    p = sampler_resolve(&s, "qwen3", "Qwen3 4B", &ov);
+    p = sampler_resolve(&s, "qwen3", "Qwen3 4B", -1, &ov);
     assert(EQ(s.temp, 0.05f) && EQ(s.repeat_penalty, 1.0f));
     assert(EQ(s.top_p, 0.95f) && s.top_k == 20);
 
@@ -150,21 +150,21 @@ static void test_override_precedence(void) {
     // real value rather than "unset"
     sampler_override zero = { .has_top_k = true, .top_k = 0,
                               .has_min_p = true, .min_p = 0.0f };
-    p = sampler_resolve(&s, "llama", "tinyllama", &zero);
+    p = sampler_resolve(&s, "llama", "tinyllama", -1, &zero);
     assert(!strcmp(p->name, "generic"));
     assert(s.top_k == 0 && EQ(s.min_p, 0.0f) && EQ(s.temp, 0.8f));
 
     // resolving twice from the same overrides is idempotent — the server
     // re-resolves on every model swap
     sampler again = s;
-    sampler_resolve(&s, "llama", "tinyllama", &zero);
+    sampler_resolve(&s, "llama", "tinyllama", -1, &zero);
     assert(!memcmp(&again, &s, sizeof s));
 }
 
 static void test_describe(void) {
     sampler s = {0};
     sampler_override none = {0};
-    const sampler_preset *p = sampler_resolve(&s, "gemma3", "Gemma 3 4b It", &none);
+    const sampler_preset *p = sampler_resolve(&s, "gemma3", "Gemma 3 4b It", -1, &none);
     char buf[256];
     sampler_describe(&s, p, buf, sizeof buf);
     assert(strstr(buf, "gemma3"));
@@ -297,7 +297,41 @@ static void test_no_filter_sampling_is_deterministic_and_unbiased(void) {
     puts("ok: no-filter sampling is deterministic and matches the full softmax");
 }
 
+
+// The DETECTED TEMPLATE outranks the model name. Both answer "which family is
+// this", but the template is read out of the checkpoint while the name is a
+// label a re-quantiser can change -- and for Nemo the two presets disagree on
+// the temperature its own model card calls out (0.3, not 0.7).
+static void test_template_outranks_the_model_name(void) {
+    // a Nemo export whose name says nothing about Nemo, or nothing about
+    // Mistral: by name alone both land on the wrong preset
+    assert(!strcmp(sampler_preset_for("llama", "MN-12B-Instruct", -1)->name,
+                   "llama3") ||
+           strcmp(sampler_preset_for("llama", "MN-12B-Instruct", -1)->name,
+                  "mistral-nemo") != 0);
+    assert(!strcmp(sampler_preset_for("llama", "Mistral-12B-Instruct", -1)->name,
+                   "mistral"));
+    // with the template known, both reach mistral-nemo
+    assert(!strcmp(sampler_preset_for("llama", "MN-12B-Instruct",
+                                      TMPL_MISTRAL_NEMO)->name, "mistral-nemo"));
+    assert(!strcmp(sampler_preset_for("llama", "Mistral-12B-Instruct",
+                                      TMPL_MISTRAL_NEMO)->name, "mistral-nemo"));
+    // and the v0.1/v0.2 and v0.3 framings both mean the plain preset
+    assert(!strcmp(sampler_preset_for("llama", "whatever",
+                                      TMPL_MISTRAL)->name, "mistral"));
+    assert(!strcmp(sampler_preset_for("llama", "whatever",
+                                      TMPL_MISTRAL_V1)->name, "mistral"));
+    // a suite-native model still wins over the template: it is checked first
+    // and its name is the only thing that identifies it
+    assert(!strcmp(sampler_preset_for("llama", "gridcore-10m",
+                                      TMPL_MISTRAL_NEMO)->name, "gridcore"));
+    // an unknown template does not disturb name-based selection
+    assert(!strcmp(sampler_preset_for("llama", "Mistral-Nemo-Instruct-2407",
+                                      -1)->name, "mistral-nemo"));
+}
+
 int main(void) {
+    test_template_outranks_the_model_name();
     test_preset_selection();
     test_preset_fallback();
     test_preset_table_is_enumerable();

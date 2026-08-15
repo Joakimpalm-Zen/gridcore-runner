@@ -123,7 +123,16 @@ int req_thinking_mode(struct jv *req);
 // render OpenAI "tools" declarations as a system turn (no-op when absent)
 void tools_render(const struct jv *tools, struct sbuf *out);
 void tools_render_for(int tmpl, const struct jv *tools, struct sbuf *out);
-void tool_history_render_for(int tmpl, const struct jv *calls, struct sbuf *out);
+// Replay an assistant turn's tool_calls in the family's own syntax.
+//
+// `turn_has_text` is whether THAT TURN carried visible content, and it cannot
+// be recovered from `out`: by the time this runs, `out` may already hold
+// framing the caller added (ornith's <think> block), so an empty-buffer test
+// answers a different question. ornith is the family that needs it -- its
+// reference opens the first call with "\n\n" after text and with nothing
+// without it (ornith.jinja:106-109).
+void tool_history_render_for(int tmpl, const struct jv *calls,
+                             bool turn_has_text, struct sbuf *out);
 // Resolve a tool result's native turn name from message.name or from its
 // tool_call_id and a preceding assistant tool_calls entry. Borrowed pointer.
 const char *tool_result_name(const struct jv *messages, int message_index);

@@ -184,8 +184,15 @@ int swap_to(const char *want) {
         char ident[256];
         sampler_ident(gguf_get_str(&s->m->gf, "general.name", NULL),
                       s->m->path, ident, sizeof(ident));
+        // Same template-beats-name rule as the preload path in server.c: a
+        // swapped-in model is identified by the template it ships, and only
+        // falls back to its name when it ships none.
+        int preset_tmpl = SV.tmpl_override >= 0
+                        ? SV.tmpl_override
+                        : template_detect(gguf_get_str(&s->m->gf,
+                                          "tokenizer.chat_template", NULL), NULL);
         const sampler_preset *sp =
-            sampler_resolve(&s->smp, s->m->arch, ident, &SV.ov);
+            sampler_resolve(&s->smp, s->m->arch, ident, preset_tmpl, &SV.ov);
         s->smp_base = s->smp;
         SV.preset_name = sp->name;
         char sdesc[256];

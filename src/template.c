@@ -77,6 +77,12 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
             return strstr(meta_tmpl, "<<SYS>>") ? TMPL_LLAMA2
                                                 : mistral_variant(meta_tmpl);
     }
+    // Every probe below reads the VOCABULARY, and they are the fallback for a
+    // model that ships no chat template text. A caller holding only the
+    // string -- sample.c, asking which family this is so it can pick sampling
+    // defaults -- passes tok=NULL, and tok_find dereferences it, so the whole
+    // block is guarded rather than each line.
+    if (tok) {
     if (tok_find(tok, "<|assistant_start|>") >= 0) return TMPL_APERTUS;
     if (tok_find(tok, "<|channel|>") >= 0 && tok_find(tok, "<|return|>") >= 0)
         return TMPL_HARMONY;
@@ -89,6 +95,7 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         return tok_find(tok, "<|end|>") >= 0 ? TMPL_PHI3 : TMPL_ZEPHYR;
     if (tok_find(tok, "<|turn>") >= 0)             return TMPL_GEMMA4;
     if (tok_find(tok, "<start_of_turn>") >= 0)     return TMPL_GEMMA;
+    }
 
     // Nothing matched. The fallback still renders llama2 — changing what
     // unrecognised models render is a behavioural decision, not a bug fix —
@@ -1830,23 +1837,23 @@ const char *tool_result_name(const jv *messages, int message_index) {
 // with the declaration macros it shares with -- the reference has one macro
 // for both, and so does this file.
 
-void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
+void tool_history_render_for(int tmpl, const jv *calls,
+                             bool turn_has_text, sbuf *out) {
     if (!calls || calls->type != J_ARR) return;
     // Harmony history is one native recipient turn per call. The server
     // expands those turns before rendering; concatenating the generic marker
     // into assistant content would teach a second, conflicting protocol.
     if (tmpl == TMPL_HARMONY) return;
     int muse_calls = 0;
-    // ornith separates consecutive calls with a newline (ornith.jinja:113).
+    // ornith frames each call relative to what precedes it: the first opens
+    // with "\n\n" when the turn carried visible text and with nothing when it
+    // did not, every later one with "\n" (ornith.jinja:106-114).
     //
-    // The reference ALSO opens the first call with "\n\n" when the assistant
-    // turn has visible text (jinja:106-109), and that half is deliberately NOT
-    // implemented: `out` at entry is not the content, it is the content
-    // already wrapped in ornith's <think> block, so there is no honest
-    // `content|trim` test to make from here. The matrix has no case with text
-    // AND calls in one turn, so implementing it from the reference alone
-    // would ship an unmeasured guess -- and a first attempt at exactly that
-    // put "\n\n" after every </think>. Recorded as a matrix gap instead.
+    // `turn_has_text` is a PARAMETER rather than a test on `out`, because at
+    // entry `out` already holds ornith's <think> wrapper -- an emptiness test
+    // there answers "did anything get written", not "did the model say
+    // something", and a first attempt at that put "\n\n" after every
+    // </think>. The caller knows the answer; it passes it down.
     int orn_calls = 0;
     for (int i = 0; i < calls->n; i++) {
         jv *fn = jv_get(calls->items[i], "function");
@@ -1898,6 +1905,7 @@ void tool_history_render_for(int tmpl, const jv *calls, sbuf *out) {
         // out as `</tool_call><tool_call>` -- a shape the reference never
         // writes.
         if (orn_calls++) sb_lit(out, "\n");
+        else if (turn_has_text) sb_lit(out, "\n\n");
         sb_fmt(out, "<tool_call>\n<function=%s>\n", name);
         if (obj && obj->type == J_OBJ) {
             for (int k = 0; k < obj->n; k++) {

@@ -60,7 +60,14 @@ typedef struct {
 
 // Preset for a model. Never NULL: an unrecognised model gets "generic".
 // Either string may be NULL.
-const sampler_preset *sampler_preset_for(const char *arch, const char *name);
+// `tmpl` is the DETECTED chat template (TMPL_* from template.h), or -1 when
+// unknown. It wins over the model name where the two disagree, because the
+// template is read from the checkpoint while the name is a label that can be
+// changed by a re-quantiser: a Mistral-Nemo export renamed without "nemo" in
+// it detected as Nemo by template and as plain Mistral by name, and the two
+// presets differ on the temperature Nemo's own model card calls out.
+const sampler_preset *sampler_preset_for(const char *arch, const char *name,
+                                         int tmpl);
 // combined matching identity: general.name + the load path's basename
 // (quantizer metadata is unreliable; the filename carries the family name)
 void sampler_ident(const char *name, const char *path, char *buf, size_t n);
@@ -70,7 +77,7 @@ const sampler_preset *sampler_preset_at(int i);
 // rng state and the penalty window are left alone — and returns the preset
 // used, so callers can report it.
 const sampler_preset *sampler_resolve(sampler *s, const char *arch,
-                                      const char *name,
+                                      const char *name, int tmpl,
                                       const sampler_override *ov);
 // One-line human summary, e.g.
 // "gemma3 (temp 1.00, top_p 0.95, top_k 64, min_p 0.00, repeat_penalty 1.10)"

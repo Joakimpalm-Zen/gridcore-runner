@@ -1841,6 +1841,37 @@ static void test_gemma4_unconstrained_call_still_yields_json_arguments(void) {
     free(content.s); free(tc.s);
 }
 
+static void test_ornith_first_call_is_framed_by_whether_the_turn_spoke(void) {
+    // ornith.jinja:106-114 — the FIRST call opens with "\n\n" when the turn
+    // carried visible text and with nothing when it did not; every later call
+    // opens with "\n". Runner emitted no separator at all, so two calls came
+    // out as `</tool_call><tool_call>`, a shape the reference never writes.
+    //
+    // `turn_has_text` is a parameter and not a test on the buffer, because at
+    // this point the buffer already holds ornith's <think> wrapper.
+    const char *src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"a\","
+        "\"arguments\":\"{\\\"x\\\":1}\"}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"b\","
+        "\"arguments\":\"{\\\"y\\\":2}\"}}]";
+    jv *calls = json_parse(src, strlen(src));
+    assert(calls != NULL);
+
+    sbuf quiet = {0};
+    tool_history_render_for(TMPL_ORNITH, calls, false, &quiet);
+    assert(quiet.s && !strncmp(quiet.s, "<tool_call>", 11));
+    assert(strstr(quiet.s, "</tool_call>\n<tool_call>"));   // "\n" between
+    assert(!strstr(quiet.s, "</tool_call><tool_call>"));     // never bare
+
+    sbuf spoke = {0};
+    tool_history_render_for(TMPL_ORNITH, calls, true, &spoke);
+    assert(spoke.s && !strncmp(spoke.s, "\n\n<tool_call>", 13));
+    assert(strstr(spoke.s, "</tool_call>\n<tool_call>"));
+
+    free(quiet.s); free(spoke.s);
+    jv_free(calls);
+}
+
 // gemma-4 writes a call's arguments through its own `format_argument` macro
 // with escape_keys=False, NOT as JSON: bare object keys, strings delimited by
 // the <|"|> token and not escaped inside it, and `| dictsort` order, which
@@ -1854,7 +1885,7 @@ static void test_gemma4_tool_history_uses_the_reference_argument_syntax(void) {
     jv *calls = json_parse(src, strlen(src));
     assert(calls != NULL);
     sbuf out = {0};
-    tool_history_render_for(TMPL_GEMMA4, calls, &out);
+    tool_history_render_for(TMPL_GEMMA4, calls, false, &out);
     assert(out.s != NULL);
     assert(strcmp(out.s,
                   "<|tool_call>call:t{city:<|\"|>Oslo<|\"|>}<tool_call|>") == 0);
@@ -1869,7 +1900,7 @@ static void test_gemma4_tool_history_uses_the_reference_argument_syntax(void) {
     calls = json_parse(mixed, strlen(mixed));
     assert(calls != NULL);
     sbuf m = {0};
-    tool_history_render_for(TMPL_GEMMA4, calls, &m);
+    tool_history_render_for(TMPL_GEMMA4, calls, false, &m);
     assert(m.s != NULL);
     assert(strcmp(m.s, "<|tool_call>call:t{a:true,B:1,b:[1,<|\"|>x<|\"|>],"
                        "C:null}<tool_call|>") == 0);
@@ -1885,7 +1916,7 @@ static void test_gemma4_tool_history_uses_the_reference_argument_syntax(void) {
     calls = json_parse(quoted, strlen(quoted));
     assert(calls != NULL);
     sbuf q = {0};
-    tool_history_render_for(TMPL_GEMMA4, calls, &q);
+    tool_history_render_for(TMPL_GEMMA4, calls, false, &q);
     assert(q.s != NULL);
     assert(strcmp(q.s, "<|tool_call>call:t{s:<|\"|>he said \"hi\"<|\"|>}"
                        "<tool_call|>") == 0);
@@ -1902,7 +1933,7 @@ static void test_muse_parallel_tool_history_has_native_turn_boundaries(void) {
     jv *calls = json_parse(src, strlen(src));
     assert(calls != NULL);
     sbuf out = {0};
-    tool_history_render_for(TMPL_MUSE, calls, &out);
+    tool_history_render_for(TMPL_MUSE, calls, false, &out);
     assert(out.s != NULL);
     assert(strstr(out.s,
         "</atem:function_calls><|eom|><|start|>assistant to=weather.get"
@@ -1919,7 +1950,7 @@ static void test_muse_tool_history_skips_bad_calls_without_leading_boundary(void
     jv *calls = json_parse(src, strlen(src));
     assert(calls != NULL);
     sbuf out = {0};
-    tool_history_render_for(TMPL_MUSE, calls, &out);
+    tool_history_render_for(TMPL_MUSE, calls, false, &out);
     assert(out.s != NULL);
     assert(!strncmp(out.s, "<atem:function_calls>", 21));
     assert(strstr(out.s, "<|eom|><|start|>") == NULL);
@@ -1976,6 +2007,7 @@ int main(void) {
     test_muse_tools_and_result_golden();
     test_muse_tool_result_id_resolves_prior_name();
     test_tool_result_id_survives_a_nameless_matching_call();
+    test_ornith_first_call_is_framed_by_whether_the_turn_spoke();
     test_gemma4_unconstrained_call_still_yields_json_arguments();
     test_gemma4_tool_history_uses_the_reference_argument_syntax();
     test_muse_parallel_tool_history_has_native_turn_boundaries();

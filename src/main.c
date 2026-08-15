@@ -834,13 +834,17 @@ int main(int argc, char **argv) {
         char ident[256];
         sampler_ident(gguf_get_str(&m.gf, "general.name", NULL), m.path,
                       ident, sizeof(ident));
-        const sampler_preset *sp = sampler_resolve(&smp, m.arch, ident, &ov);
+        int preset_tmpl = tmpl_override >= 0 ? tmpl_override
+                        : template_detect(gguf_get_str(&m.gf,
+                                          "tokenizer.chat_template", NULL), NULL);
+        const sampler_preset *sp = sampler_resolve(&smp, m.arch, ident,
+                                                   preset_tmpl, &ov);
         char sdesc[256];
         sampler_describe(&smp, sp, sdesc, sizeof(sdesc));
         fprintf(stderr, "sampling: %s\n", sdesc);
     } else {
         // swap mode: no model yet, so the preset is chosen per model at load
-        sampler_resolve(&smp, NULL, NULL, &ov);
+        sampler_resolve(&smp, NULL, NULL, -1, &ov);
     }
 
     if (serve) {
