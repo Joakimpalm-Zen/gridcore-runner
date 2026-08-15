@@ -91,9 +91,9 @@ practice, most first.
   all the way down to Q4_0 while argument agreement decayed to 50% — so
   constrained decoding guarantees the SHAPE of a tool call at any
   quantization, not its contents (the per-quant table and method are in
-  [docs/quant-fidelity.md](docs/quant-fidelity.md)). An agent that receives broken JSON
-  cannot proceed; it retries from scratch, burning tokens, time, and context
-  window. The mechanism here is not ordinary JSON Schema support, it is
+  [docs/quant-fidelity.md](docs/quant-fidelity.md)). An agent that receives no
+  usable tool call cannot proceed; it retries from scratch, burning tokens,
+  time, and context window. The mechanism here is not ordinary JSON Schema support, it is
   forced-truncation recovery: once a document starts, Runner emits the smallest
   schema-legal ending when the token budget expires, so the arguments still
   parse. On local models, where context is tight and generation is slow, that is
