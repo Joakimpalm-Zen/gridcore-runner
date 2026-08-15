@@ -1,0 +1,865 @@
+{
+  "schema_version": "xyntetik.runner.model-compat-report.v1",
+  "generated_utc": "2026-08-15T18:13:10Z",
+  "host": {
+    "os": "Darwin",
+    "machine": "arm64"
+  },
+  "runner": {
+    "path": "/Users/zenzombie/AI_projects/origin/xyntetik-runner/runner",
+    "version": "runner 0.1.18-alpha"
+  },
+  "reference": {
+    "path": null,
+    "version": null
+  },
+  "models": [
+    {
+      "id": "llama-3.2-3b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "expected_sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "mistral-7b-instruct-v0.3-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "expected_sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "qwen2.5-32b-instruct-q3_k_s",
+      "architecture": "qwen2",
+      "file": "models/Qwen2.5-32B-Instruct-Q3_K_S.gguf",
+      "expected_sha256": "a1aefda97dc4641598db576edf61b7b5f70f40abab33fbea39fb84fcaa9be44e",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "qwen3-4b-q4_k_m",
+      "architecture": "qwen3",
+      "file": "models/Qwen3-4B-Q4_K_M.gguf",
+      "expected_sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "ornith-1.0-9b-q4_k_m",
+      "architecture": "qwen35",
+      "file": "models/ornith-1.0-9b-Q4_K_M.gguf",
+      "expected_sha256": "5720d1f671b4996481274fffe01868c3c36e87c135cc8538471cc7bd6087b106",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "phi-3.5-mini-instruct-q4_k_m",
+      "architecture": "phi3",
+      "file": "models/Phi-3.5-mini-instruct-Q4_K_M.gguf",
+      "expected_sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "gemma-3-4b-it-q4_k_m",
+      "architecture": "gemma3",
+      "file": "models/google_gemma-3-4b-it-Q4_K_M.gguf",
+      "expected_sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        }
+      },
+      "resolved_file": "/Users/zenzombie/AI_projects/origin/xyntetik-runner/models/google_gemma-3-4b-it-Q4_K_M.gguf",
+      "actual_sha256": "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
+      "file_status": "pass",
+      "complete": false
+    },
+    {
+      "id": "gemma-4-12b-it-q4_k_m",
+      "architecture": "gemma4",
+      "file": "models/gemma-4-12B-it-Q4_K_M.gguf",
+      "expected_sha256": "e4db6f8c1e48f7297069fa23ca3ff34e0b0155f8de5485498ed9a0e59944bc8c",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "qwen3-30b-a3b-q4_k_m",
+      "architecture": "qwen3moe",
+      "file": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "expected_sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "gemma-4-e4b-it-q4_k_m",
+      "architecture": "gemma4",
+      "file": "models/gemma-4-E4B-it-Q4_K_M.gguf",
+      "expected_sha256": "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "gemma-4-26b-a4b-it-q4_0",
+      "architecture": "gemma4-moe",
+      "file": "models/gemma-4-26B-A4B-it-Q4_0.gguf",
+      "expected_sha256": "d208665ab1cd3a69f7a9a4bc59430e8448c8093d9b06334f566ac59d6d504a03",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "gemma-4-26b-a4b-it-qat-q4_0",
+      "architecture": "gemma4-moe",
+      "file": "models/gemma-4-26B_q4_0-it.gguf",
+      "expected_sha256": "3eca3b8f6d7baf218a7dd6bba5fb59a56ee25fe2d567b6f5f589b4f697eca51d",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "gpt-oss-20b-mxfp4",
+      "architecture": "gpt-oss",
+      "file": "models/gpt-oss-20b-MXFP4.gguf",
+      "expected_sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        }
+      },
+      "resolved_file": "/Users/zenzombie/AI_projects/origin/xyntetik-runner/models/gpt-oss-20b-MXFP4.gguf",
+      "actual_sha256": "27cd6c432c7672cb812a92f611cf3ba7bbc35928262bb1e1253ff4ee6ae35901",
+      "file_status": "pass",
+      "complete": false
+    },
+    {
+      "id": "apertus-8b-instruct-2509-q4_k_m",
+      "architecture": "apertus",
+      "file": "models/Apertus-8B-Instruct-2509-Q4_K_M.gguf",
+      "expected_sha256": "5901007f15aec9aabeea401cbe65559671166fc851bbdf8c26f56c2b61e9cd1d",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "eurollm-9b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/EuroLLM-9B-Instruct-Q4_K_M.gguf",
+      "expected_sha256": "785a3b2883532381704ef74f866f822f179a931801d1ed1cf12e6deeb838806b",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "lucie-7b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Lucie-7B-Instruct-Q4_K_M.gguf",
+      "expected_sha256": "0d889e0c126eb0424e478029dd9198af2afdffce29b0d98a86455c3c5b506db3",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "mistral-nemo-instruct-2407-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+      "expected_sha256": "5964f3e6d9c17b99e3d2174022048f3ec58b12ee8fefa987888e0562d070d52e",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "teuken-7b-instruct-commercial-v0.4-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Teuken-7B-instruct-commercial-v0.4-Q4_K_M.gguf",
+      "expected_sha256": "03fd13daafb6f20c1c5f4b908d163841cdd96803a6f5a7c0c39dd236a2b1630b",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "salamandra-7b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/salamandra-7b-instruct-Q4_K_M-f32.gguf",
+      "expected_sha256": "bac8e8c1d1d9d53cbdb148b8ff9ad378ddb392429207099e85b5aae3a43bff3d",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "tildeopen-30b-q4_k_m",
+      "architecture": "llama",
+      "file": "models/TildeOpen-30b-Q4_K_M.gguf",
+      "expected_sha256": "b051f04a87a74184b70c79ea7e514d7605817eebb5d7b8cc8f610406a52f82d5",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tool": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "trinity-nano-preview-q8_0",
+      "architecture": "afmoe",
+      "file": "models/Trinity-Nano-Preview-Q8_0.gguf",
+      "expected_sha256": "5fcc2428c325e8b2035d280ff28c4c659ea240ce317a9536f230acfc352b79d1",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        }
+      },
+      "resolved_file": "/Users/zenzombie/AI_projects/origin/xyntetik-runner/models/Trinity-Nano-Preview-Q8_0.gguf",
+      "actual_sha256": "5fcc2428c325e8b2035d280ff28c4c659ea240ce317a9536f230acfc352b79d1",
+      "file_status": "pass",
+      "complete": false
+    },
+    {
+      "id": "muse-glimmer-30b-kquant",
+      "architecture": "muse-glimmer",
+      "file": "models/muse-glimmer-30B-kquant-17gb.gguf",
+      "expected_sha256": "7e9b74b7c8875e9e265695df9613bf6290f2392e479ce740495a129019c488d8",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    },
+    {
+      "id": "granite-4.1-8b-q4_0",
+      "architecture": "granite",
+      "file": "models/granite-4.1-8b-Q4_0.gguf",
+      "expected_sha256": "5adf9b6b78921093bd4a805e1060f85d7f744c3eafc14d1ca449364d1e721a1a",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "check_not_requested"
+        }
+      },
+      "resolved_file": "/Users/zenzombie/AI_projects/origin/xyntetik-runner/models/granite-4.1-8b-Q4_0.gguf",
+      "actual_sha256": "5adf9b6b78921093bd4a805e1060f85d7f744c3eafc14d1ca449364d1e721a1a",
+      "file_status": "pass",
+      "complete": false
+    },
+    {
+      "id": "granite-4.1-30b-q3_k_s",
+      "architecture": "granite",
+      "file": "models/granite-4.1-30b-Q3_K_S.gguf",
+      "expected_sha256": "a807f6ea95a69a2e159978299fcbb310c14307cbaaa2a64cbb18b7fc7a087df3",
+      "checks": {
+        "load": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "tokenizer": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "cpu_cuda": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        },
+        "chat": {
+          "status": "not_executed",
+          "reason": "model_file_not_found"
+        }
+      },
+      "file_status": "missing",
+      "file_reason": "model_file_not_found",
+      "complete": false
+    }
+  ],
+  "complete": false,
+  "summary": {
+    "models": 24,
+    "files": {
+      "missing": 20,
+      "pass": 4
+    },
+    "checks": {
+      "load": {
+        "not_executed": 24
+      },
+      "tokenizer": {
+        "not_executed": 19
+      },
+      "greedy_reference": {
+        "not_executed": 17
+      },
+      "cpu_cuda": {
+        "not_executed": 23
+      },
+      "chat": {
+        "not_executed": 24
+      },
+      "tool": {
+        "not_executed": 15
+      },
+      "long_context": {
+        "not_executed": 15
+      }
+    }
+  }
+}
