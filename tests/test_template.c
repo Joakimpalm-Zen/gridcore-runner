@@ -1872,6 +1872,45 @@ static void test_ornith_first_call_is_framed_by_whether_the_turn_spoke(void) {
     jv_free(calls);
 }
 
+static void test_llama2_bos_per_turn_and_the_fallback_that_must_not_get_it(void) {
+    // Reference: bos_token + '[INST] ' + content.strip() + ' [/INST]' on EVERY
+    // user turn. The leading BOS comes from the tokenizer, so only turns 2+
+    // carry the literal here.
+    chat_msg m[] = {
+        { .role = "user",      .content = "one" },
+        { .role = "assistant", .content = "  spaced  " },
+        { .role = "user",      .content = "two" },
+    };
+    char buf[512];
+
+    render_messages(TMPL_LLAMA2, m, 3, false, THINK_DEFAULT, buf, sizeof buf);
+    // turn 1 has no literal (the tokenizer supplies it), turn 2 does
+    assert(!strncmp(buf, "[INST] one [/INST]", 18));
+    assert(strstr(buf, "</s><s>[INST] two [/INST]"));
+    // and content is stripped, as the reference does
+    assert(strstr(buf, " spaced </s>"));
+    assert(!strstr(buf, "  spaced  "));
+
+    // The SAME conversation through the id every UNRECOGNISED model lands on:
+    // identical markup, no <s> literal. In a vocabulary without <s> as a
+    // special it would tokenize as three characters, which is worse than the
+    // token being absent -- and until 2026-08-15 this id did not exist, so
+    // there was no way to have one without the other.
+    char fb[512];
+    render_messages(TMPL_LLAMA2_FALLBACK, m, 3, false, THINK_DEFAULT,
+                    fb, sizeof fb);
+    assert(!strstr(fb, "<s>"));
+    assert(strstr(fb, "</s>[INST] two [/INST]"));
+    assert(strstr(fb, " spaced </s>"));   // the strip still applies
+
+    // detection: a template nothing recognises is the FALLBACK, not llama-2
+    assert(template_detect("{{ some completely unknown framing }}", NULL)
+           == TMPL_LLAMA2_FALLBACK);
+    // and it cannot be asked for by name -- only detection produces it
+    assert(template_from_name("llama2-fallback") == -1);
+    assert(template_from_name("llama2") == TMPL_LLAMA2);
+}
+
 // gemma-4 writes a call's arguments through its own `format_argument` macro
 // with escape_keys=False, NOT as JSON: bare object keys, strings delimited by
 // the <|"|> token and not escaped inside it, and `| dictsort` order, which
@@ -2008,6 +2047,7 @@ int main(void) {
     test_muse_tool_result_id_resolves_prior_name();
     test_tool_result_id_survives_a_nameless_matching_call();
     test_ornith_first_call_is_framed_by_whether_the_turn_spoke();
+    test_llama2_bos_per_turn_and_the_fallback_that_must_not_get_it();
     test_gemma4_unconstrained_call_still_yields_json_arguments();
     test_gemma4_tool_history_uses_the_reference_argument_syntax();
     test_muse_parallel_tool_history_has_native_turn_boundaries();

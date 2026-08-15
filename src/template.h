@@ -49,7 +49,18 @@ enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        // FOURTH framing (`[INST] ` ... ` [/INST]`, system into the first turn)
        // that matches no Mistral checkpoint at all. It was never trying to be
        // Mistral.
-       TMPL_MISTRAL_V1, TMPL_MISTRAL_NEMO };
+       TMPL_MISTRAL_V1, TMPL_MISTRAL_NEMO,
+       // What template_detect returns when NOTHING matched. It renders
+       // llama-2 markup, because changing what unrecognised models render is
+       // a behavioural decision and not this constant's job -- but it is a
+       // DISTINCT id, so "we recognised Llama-2" and "we recognised nothing"
+       // stop being the same answer. They were the same answer until
+       // 2026-08-15, and that conflation is why per-turn BOS could not be
+       // added: the literal <s> would have reached every unrecognised model,
+       // and in a vocabulary without <s> as a special it tokenizes as three
+       // characters, which is worse than the token merely being absent.
+       // Not reachable through --chat-template: you cannot ask for it.
+       TMPL_LLAMA2_FALLBACK };
 
 // How the generation prompt should treat a thinking model.
 //

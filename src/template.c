@@ -120,7 +120,7 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
                 "or `raw` for no framing at all.\n");
         }
     }
-    return TMPL_LLAMA2;
+    return TMPL_LLAMA2_FALLBACK;
 }
 
 int template_from_name(const char *name) {
@@ -907,6 +907,10 @@ static void g4_render_tool_defs(const jv *tools, sbuf *o) {
     }
 }
 
+// Defined below with the tool parsers; llama-2's `.strip()` needs them here.
+static const char *trim_left(const char *p, const char *end);
+static const char *trim_right(const char *p, const char *end);
+
 size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
                                   bool add_assistant, int thinking,
                                   const jv *tools,
@@ -1529,22 +1533,67 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<start_of_turn>model\n", NULL, NULL);
         break;
     }
-    case TMPL_LLAMA2: {
-        // fold an initial system message into the first user turn
+    case TMPL_LLAMA2:
+    case TMPL_LLAMA2_FALLBACK: {
+        // Reference (unsloth/llama-2-7b-chat tokenizer_config.json):
+        //   user      bos_token + '[INST] ' + content.strip() + ' [/INST]'
+        //   assistant ' ' + content.strip() + ' ' + eos_token
+        // with an initial system message folded into the FIRST user turn as
+        // '<<SYS>>\n' + system + '\n<</SYS>>\n\n' + content, before the strip.
+        //
+        // Two things runner got wrong until 2026-08-15, both measured by the
+        // conformance gate:
+        //
+        //   * `.strip()` was not applied. With an empty user turn the folded
+        //     content kept its trailing "\n\n", so `<</SYS>>\n\n [/INST]`
+        //     went out where the reference writes `<</SYS>> [/INST]` -- two
+        //     tokens the model never saw there.
+        //   * BOS is on EVERY user turn, not just the first. The leading one
+        //     comes from the tokenizer (hence the gate's strip-bos
+        //     allowlist), but turns 2+ begin without the sequence-restart
+        //     token the model was trained to see at each instruction
+        //     boundary. So a multi-turn Llama-2 prompt reads `</s><s>[INST]`
+        //     in the reference and `</s>[INST]` here.
+        //
+        // The literal `<s>` is emitted ONLY for a recognised Llama-2.
+        // tok_encode matches specials at any offset, so mid-prompt it becomes
+        // the BOS id -- but in a vocabulary that has no `<s>` special it would
+        // tokenize as the characters `<`, `s`, `>`, which is worse than the
+        // token being absent. TMPL_LLAMA2_FALLBACK is the id every
+        // unrecognised model lands on, and it renders the same markup without
+        // that literal.
+        const bool real_llama2 = tmpl == TMPL_LLAMA2;
         const char *sys = NULL;
+        int user_turns = 0;
         for (int i = 0; i < n_msgs; i++) {
             const chat_msg *m = &msgs[i];
             if (!strcmp(m->role, "system")) { sys = m->content; continue; }
             if (!strcmp(m->role, "user")) {
+                sbuf c = {0};
                 if (sys) {
-                    off = emit(out, cap, off, "[INST] <<SYS>>\n%s\n<</SYS>>\n\n", sys, NULL);
-                    off = emit(out, cap, off, "%s [/INST]", m->content, NULL);
+                    sb_lit(&c, "<<SYS>>\n");
+                    sb_put(&c, sys, strlen(sys));
+                    sb_lit(&c, "\n<</SYS>>\n\n");
                     sys = NULL;
-                } else {
-                    off = emit(out, cap, off, "[INST] %s [/INST]", m->content, NULL);
                 }
+                sb_put(&c, m->content, strlen(m->content));
+                const char *b = c.s ? c.s : "";
+                const char *e = b + (c.s ? c.n : 0);
+                b = trim_left(b, e);
+                e = trim_right(b, e);
+                if (real_llama2 && user_turns) off = emit(out, cap, off, "<s>", NULL, NULL);
+                user_turns++;
+                off = emit(out, cap, off, "[INST] ", NULL, NULL);
+                off = emit_n(out, cap, off, b, (size_t)(e - b));
+                off = emit(out, cap, off, " [/INST]", NULL, NULL);
+                free(c.s);
             } else { // assistant
-                off = emit(out, cap, off, " %s </s>", m->content, NULL);
+                const char *b = m->content, *e = b + strlen(b);
+                b = trim_left(b, e);
+                e = trim_right(b, e);
+                off = emit(out, cap, off, " ", NULL, NULL);
+                off = emit_n(out, cap, off, b, (size_t)(e - b));
+                off = emit(out, cap, off, " </s>", NULL, NULL);
             }
         }
         break;
