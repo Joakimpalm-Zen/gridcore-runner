@@ -5,7 +5,68 @@ is in **alpha**; the HTTP protocol and CLI may still change between alpha
 releases. Entries below the rename keep the names that were true when they
 were written.
 
-## Unreleased
+## v0.1.18-alpha — 2026-08-15
+
+- **Chat templates are now verified against each model's own template, not
+  against runner's memory of it.** `scripts/template-conformance.py` renders a
+  fixed conversation matrix through every family's upstream jinja and through
+  runner's real C renderer, and diffs byte-exactly — at the token level too
+  wherever the family's tokenizer is on the shelf. It replaced a set of
+  goldens that had been written from runner's own output, and therefore proved
+  self-consistency and nothing else; six of them were asserting runner's
+  output as though it were the reference. The gate runs on macOS, Linux and
+  Windows and carries a known-difference backlog that only shrinks. This
+  release closes 6 llama-2 rows, 4 gemma-4, 3 ornith, 1 muse and 2 harmony,
+  and adds cases (assistant turns carrying both text and tool calls) that made
+  previously invisible differences measurable.
+- **Llama-2 prompts were missing a token at every instruction boundary.** The
+  reference emits `bos_token` on EVERY user turn, so a multi-turn conversation
+  reads `</s><s>[INST]`; runner emitted only the leading one. It also never
+  applied the reference's `content.strip()`, so an empty user turn rendered
+  `<</SYS>>\n\n [/INST]` where the reference writes `<</SYS>> [/INST]`. Both
+  fixed. A model whose template runner does NOT recognise now falls back to a
+  distinct internal id rather than being treated as Llama-2 — it still renders
+  the same markup, but it no longer receives Llama-2's BOS literal, which in a
+  vocabulary without `<s>` as a special would have tokenized as three
+  characters.
+- **Mistral is three instruction framings, not one.** `mistral` (v0.3 and
+  Mistral-Small-2409), `mistral-v1` (v0.1/v0.2) and `mistral-nemo`
+  (Nemo-Instruct-2407) differ by a space beside each `[INST]`/`[/INST]` marker
+  and by which user turn carries the system prompt. Runner previously rendered
+  all of them through llama-2's path with the `<<SYS>>` block swapped out,
+  producing a fourth framing that matches no Mistral checkpoint. Measured on
+  Mistral-7B-Instruct-v0.3: `[INST] What is 2+2? [/INST]` is 11 tokens and
+  `[INST] What is 2+2?[/INST]` is 10.
+- **Sampling presets now follow the detected chat template, not the model
+  name.** Both answer "which family is this", but the template is read out of
+  the checkpoint while the name is a label a re-quantiser can change. A
+  Mistral-Nemo export renamed without "nemo" in it was rendered with the Nemo
+  template and sampled with the plain Mistral preset — temperature 0.7 where
+  Nemo's own model card calls out 0.3.
+- **ornith** now renders its tool-declaration prompt verbatim instead of
+  paraphrasing it. The reference's example spans three lines to teach that a
+  parameter may; runner's shortened `value_2` taught the opposite by omission,
+  and the paraphrase dropped the rule that stops a tool-equipped model
+  narrating its lack of tools at the user. Consecutive calls in one turn are
+  also separated as the reference separates them, and the first call is framed
+  on whether the turn carried visible text.
+- **muse** tool turns now carry the call and nothing else, matching the
+  reference's `to=NAME` recipient turn. This DISCARDS assistant text sent
+  alongside tool calls in that turn: a recipient turn is muse's protocol for
+  "I am calling this function", and prose in front of it is a shape the model
+  was not trained on. Send the text as its own assistant turn if you want it
+  in the conversation.
+- **Thinking budgets have a documented contract.** With a constraint
+  (`response_format` or `tools`) the thinking prelude is capped at half the
+  token budget, and hitting that cap closes the prelude and spends the rest on
+  the payload — `finish_reason` stays the standard `"length"` and
+  `runner_telemetry.finish_detail` carries `"reasoning_limit"`. Without a
+  constraint there is no cap. See the README section for why the two differ.
+- **A tool result whose matching call has no function name no longer resolves
+  worse than one with no match at all.** The lookup returned nothing on a
+  nameless match, so the turn rendered under the template's `unknown`
+  fallback, while an unmatched id at least came back as the id. It now keeps
+  looking and falls through to the id.
 
 - The chat-template conformance gate now runs on Windows, where it had never
   run at all: `scripts/template-conformance-render.c` included

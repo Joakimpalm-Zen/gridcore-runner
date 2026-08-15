@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xyntetik-runner-client"
-version = "0.1.17a0"
+version = "0.1.18a0"
 description = "Python client and process boundary for Xyntetik Runner"
 readme = "README.md"
 requires-python = ">=3.11"
