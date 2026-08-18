@@ -1255,7 +1255,8 @@ compat-consumers: runner test.gguf
 FUZZ_CLANG   ?= clang
 FUZZ_TIME    ?= 20
 FUZZ_RSS_MB  ?= 2048
-FUZZ_TARGETS = json_parse schema_compile sval_feed jsonv_feed gguf_open
+FUZZ_TARGETS = json_parse schema_compile sval_feed jsonv_feed gguf_open \
+               http_request
 # TODO: tok_encode (src/tokenizer.c) is deliberately absent. It needs a loaded
 # tokenizer rather than a bare buffer, so the harness has to stand up a vocab
 # first -- and tokenizer.c has been rewritten substantially since the original
@@ -1275,6 +1276,7 @@ FUZZ_SRC_schema_compile = src/json.c src/schema.c src/jsonmode.c
 FUZZ_SRC_sval_feed      = src/json.c src/schema.c src/jsonmode.c
 FUZZ_SRC_jsonv_feed     = src/jsonmode.c
 FUZZ_SRC_gguf_open      = src/gguf.c src/compat.c src/quants.c
+FUZZ_SRC_http_request   = src/http.c src/json.c src/compat.c
 
 fuzz-%: tests/fuzz/fuzz_%.c $(wildcard src/*.c) $(HDR)
 	$(FUZZ_CLANG) $(FUZZ_FLAGS) tests/fuzz/fuzz_$*.c $(FUZZ_SRC_$*) -o $@ -lm
@@ -1297,6 +1299,9 @@ FUZZ_ENV_gguf_open = ASAN_OPTIONS=$(FUZZ_SAN_OPTS):log_path=fuzz-corpus/gguf_ope
 # a valid GGUF header is ~8 KB; without a cap libFuzzer sizes inputs from the
 # largest seed and spends the budget copying weights instead of parsing
 FUZZ_ARGS_gguf_open = -max_len=16384
+# a request header is kilobytes at most; without a cap the mutator spends the
+# budget on multi-megabyte buffers that reach no branch the small ones miss
+FUZZ_ARGS_http_request = -max_len=8192
 
 # $(foreach) not a shell loop: the per-target FUZZ_ENV_*/FUZZ_ARGS_* lookups
 # have to happen while make is expanding, which `for t in ...; $(VAR_$$t)`

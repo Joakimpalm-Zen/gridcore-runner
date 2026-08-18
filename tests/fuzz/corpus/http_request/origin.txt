@@ -1,0 +1,4 @@
+GET / HTTP/1.0
+Host: [::1]:65535
+Origin: http://localhost:3000
+
