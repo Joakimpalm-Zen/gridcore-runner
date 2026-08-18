@@ -136,6 +136,17 @@ def main(argv=None):
     reports = load(args.reports)
     if not reports:
         ap.error("no reports")
+    # A leaderboard is a same-model, same-hardware comparison. render() takes
+    # the model name off whichever report came first on argv and prints it as
+    # THE model of the table, so a glob across the committed result
+    # directories -- which span llama-3.2-3b, smollm2, qwen2.5-7b, gpt-oss-20b
+    # and gemma4-26b -- produced one table of incomparable rows under a name
+    # that is wrong for every report but one.
+    models = sorted({r["data"].get("configuration", {}).get("model", "?")
+                     for r in reports})
+    if len(models) > 1:
+        ap.error("these reports are on different models, which do not compare: "
+                 + ", ".join(models))
     print(render(reports, args.md))
     return 0
 

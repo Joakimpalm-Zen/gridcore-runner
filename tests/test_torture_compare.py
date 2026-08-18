@@ -83,3 +83,37 @@ def test_an_equal_rate_prefers_the_larger_matrix(tmp_path):
     rows = MOD.build_rows(MOD.load([str(small), str(large)]))
 
     assert rows[0]["label"] == "runner 0.1"
+
+
+def test_reports_on_different_models_are_refused_rather_than_merged(tmp_path):
+    """render() takes the model name off whichever report came first on argv
+    and prints it as THE model of the table. A leaderboard is a
+    same-model-same-hardware comparison; one built across models is a table of
+    incomparable rows under a name that is wrong for all but one of them."""
+    import pytest
+
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    a.write_text(json.dumps(_report("runner", "runner 0.1",
+                                    _cases(tool_selection=(3, 3)),
+                                    model="qwen2.5-7b.gguf")))
+    b.write_text(json.dumps(_report("ollama", "0.32.1",
+                                    _cases(tool_selection=(3, 3)),
+                                    model="gptoss-20b.gguf")))
+
+    with pytest.raises(SystemExit) as caught:
+        MOD.main([str(a), str(b)])
+
+    assert caught.value.code == 2
+
+
+def test_reports_on_the_same_model_still_render(tmp_path, capsys):
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    for path, name in ((a, "runner"), (b, "ollama")):
+        path.write_text(json.dumps(_report(name, "1.0",
+                                           _cases(tool_selection=(3, 3)),
+                                           model="qwen2.5-7b.gguf")))
+
+    assert MOD.main([str(a), str(b), "--md"]) == 0
+    assert "qwen2.5-7b.gguf" in capsys.readouterr().out
