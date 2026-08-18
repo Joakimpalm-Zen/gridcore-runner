@@ -544,6 +544,63 @@ static void test_dead_pid_reservation_is_reclaimed(void) {
     vram_release(mine);
 }
 
+// The same orphan one step earlier: the owner is dead, but nobody has reaped
+// it yet.
+//
+// A zombie is a process-table entry, not a process. It answers kill(pid, 0),
+// so plat_pid_alive called it alive and reap() kept its reservation — while it
+// holds no VRAM, no weights and no context, and no signal can move it further.
+// Only its parent's wait() can, and that may never come: a supervisor that
+// does not reap, or a container whose PID 1 is not an init, leaves the entry
+// standing indefinitely. The test above reaps the child before asking, which
+// is why it never saw this.
+//
+// instances.c's instance_pid_alive already excludes zombies, for the tray's
+// version of the same bug ("a permanent ghost row that Stop can never clear").
+// The platform layer the VRAM ledger reaps through did not.
+static void test_unreaped_dead_pid_reservation_is_reclaimed(void) {
+    scratch_dir();
+    const char *gpu = "MIG-zombie-pid-test";
+    uint64_t free_all = 24 * GB;
+
+    int ready[2];
+    assert(pipe(ready) == 0);
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        close(ready[0]);
+        vram_lease *l = vram_claim(gpu, "/models/zombie-Q4_K_M.gguf", 20 * GB,
+                                   0, fixed_free, &free_all, 0, NULL, NULL,
+                                   NULL, 0);
+        char ok = l ? 'y' : 'n';
+        ssize_t w = write(ready[1], &ok, 1);
+        (void)w;
+        for (;;) pause();
+    }
+    close(ready[1]);
+    char ok = 0;
+    assert(read(ready[0], &ok, 1) == 1 && ok == 'y');
+    close(ready[0]);
+
+    kill(child, SIGKILL);
+    // Wait for it to actually die WITHOUT reaping it: WNOWAIT leaves the
+    // zombie in the table, which is the state a non-reaping supervisor sees.
+    siginfo_t si;
+    memset(&si, 0, sizeof si);
+    assert(waitid(P_PID, (id_t)child, &si, WEXITED | WNOWAIT) == 0);
+    assert(kill(child, 0) == 0 && "the zombie still answers kill(pid, 0)");
+
+    char err[1024] = {0};
+    vram_lease *mine = vram_claim(gpu, "/models/mine.gguf", 20 * GB, 0,
+                                  fixed_free, &free_all, 0, NULL, NULL,
+                                  err, sizeof(err));
+    assert(mine && "an unreaped dead owner must not hold the GPU either");
+    vram_release(mine);
+
+    int st = 0;
+    waitpid(child, &st, 0);
+}
+
 // Nothing about a live holder may be lost in the reaping: reap() walks the same
 // array it rewrites, so an entry that dies next to a live one is the case where
 // an off-by-one would quietly delete the survivor.
@@ -818,6 +875,7 @@ int main(void) {
     test_concurrent_claims_mint_distinct_seqs();
     test_stale_guardless_pending_is_reaped();
     test_dead_pid_reservation_is_reclaimed();
+    test_unreaped_dead_pid_reservation_is_reclaimed();
     test_reaping_keeps_live_neighbours();
     test_wait_for_vram_queues_then_proceeds();
     test_cancelled_wait_gives_up_promptly();

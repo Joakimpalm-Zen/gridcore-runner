@@ -548,7 +548,36 @@ bool plat_pid_alive(long pid) {
     if (pid <= 0) return false;
     // EPERM means the process exists but is owned by another user: alive, and
     // its reservation is still real. Only ESRCH proves it is gone.
-    return kill((pid_t)pid, 0) == 0 || errno != ESRCH;
+    if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) return false;
+    // A zombie answers kill(pid, 0) too — it is a process-table entry, not a
+    // process. It holds no VRAM, no weights and no context, and no signal can
+    // move it further; only its parent's wait() can, and that may never come
+    // (a supervisor that does not reap, a container whose PID 1 is not an
+    // init). This function's whole job is deciding whether a dead owner's
+    // record can be reaped, so counting a zombie alive keeps a reservation
+    // standing for a process that has already died, for an unbounded time.
+#ifdef __APPLE__
+    struct kinfo_proc kp;
+    size_t len = sizeof kp;
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+    if (sysctl(mib, 4, &kp, &len, NULL, 0) == 0 && len >= sizeof kp &&
+        kp.kp_proc.p_stat == SZOMB)
+        return false;
+#elif defined(__linux__)
+    char sp[64], buf[512];
+    snprintf(sp, sizeof sp, "/proc/%ld/stat", pid);
+    FILE *f = fopen(sp, "rb");
+    if (f) {
+        size_t rn = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        buf[rn] = 0;
+        // state is the field after the parenthesised comm, which can itself
+        // contain spaces and brackets — so scan from the LAST ')'
+        char *rp = strrchr(buf, ')');
+        if (rp && rp[1] == ' ' && (rp[2] == 'Z' || rp[2] == 'X')) return false;
+    }
+#endif
+    return true;
 }
 
 bool plat_pid_start_time(long pid, uint64_t *out) {
