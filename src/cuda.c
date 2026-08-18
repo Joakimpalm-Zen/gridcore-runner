@@ -3200,6 +3200,27 @@ struct gpu_batch {
     bool        graph_bad;
 };
 
+// enc_mv_batch reproduces the batch-1 result by launching the multi-column
+// TWIN of whatever kernel the batch-1 path would have used. For a type with a
+// decode GEMV but no width-classed twin there IS no such kernel, and
+// enc_mv_batch silently substitutes f_mvb — a different family, with a
+// different reduction and no shared-memory x staging. That costs both halves
+// of the bargain at once: measured on Qwen3-0.6B-q4_0 (Blackwell MIG,
+// 2026-08-18) a 4-wide microbatch ran at 0.11x of sequential decode, i.e.
+// NINE TIMES SLOWER, and its logits were not bit-identical either. Q4_0 is the
+// whole of this set today: it grew a k_gemv_q4_0 on 2026-08-13 and never got
+// the k_gemvb_q4_0_x4/x8 pair. Refuse the microbatch for such a model — the
+// caller then decodes sequentially, which is the faster path anyway.
+static bool batch_mv_twin_ok(const gpu_weights *sw, const gguf_tensor *t) {
+    if (!t) return true;
+    int type = t->type;
+    if (type < 0 || type >= KT_N) return false;
+    if (!sw->f_gemv[type]) return true;   // batch-1 uses f_mv; f_mvb is its twin
+    for (int w = 0; w < BW_N; w++)
+        if (!sw->f_gemvb[w][type]) return false;
+    return true;
+}
+
 // Every member must be decodable in one launch against one weight upload:
 // same shared weights, full offload (a partial split has to hand the boundary
 // activation back to the CPU per sequence, which is a different kernel shape),
@@ -3221,6 +3242,15 @@ static bool batch_eligible(model_t **seqs, int n, gpu_t **lead_out) {
             m->attn_out_gate || m->nope_on_full) return false;
         if (!g->sw->f_rope_seq || !g->sw->f_store_seq || !g->sw->f_attn_dec_seq)
             return false;
+        // every tensor fwd_batch hands to enc_mv_batch must have a real twin
+        if (!batch_mv_twin_ok(g->sw, m->output)) return false;
+        for (int l = 0; l < m->n_layer; l++) {
+            const layer_t *ly = &m->layers[l];
+            const gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
+                                        ly->w_gate, ly->w_up, ly->w_down };
+            for (size_t k = 0; k < sizeof(ws) / sizeof(*ws); k++)
+                if (!batch_mv_twin_ok(g->sw, ws[k])) return false;
+        }
         if (!lead) lead = g;
         // one upload, one geometry: a member from a different registry entry
         // would index a different weight blob with this one's offsets
