@@ -1689,12 +1689,103 @@ static float dot_iq4_xs_avx2(const block_iq4_xs *b, const float *x, int n) {
 // (i8_to_f32x4 / u8_to_f32x4 / fma16) live next to the NEON dequant kernels.
 #if RUNNER_NEON
 
-// No NEON kernels for F16, BF16, Q8_0 or Q4_K on purpose: their scalar loops
-// are simple enough that clang auto-vectorizes them with more parallel
-// accumulator chains than the hand-written versions had — every one was
-// measured slower or at par as an intrinsic kernel. The formats kept below
-// (nibble unpacks and table lookups) are the ones the compiler cannot
-// vectorize on its own.
+// F16, BF16, Q8_0 and Q4_K used to be left to the compiler here, on the
+// grounds that their scalar reductions auto-vectorize. That stopped being true
+// the day this file was pinned to -fno-fast-math (Makefile, test-makefile-sane):
+// vectorizing `s += w[i] * x[i]` REQUIRES reassociating the additions, which is
+// precisely what the pin forbids, so the loops became one serial FMA chain.
+// Measured per 4096-element row on this M1, same source, only the flag moved:
+//
+//              -ffast-math   -fno-fast-math (shipped)
+//   F16            415 ns          3732 ns
+//   BF16           256 ns          3727 ns
+//   Q8_0           314 ns          2100 ns
+//   Q4_K           471 ns          1616 ns
+//
+// The formats that already had kernels were unaffected by the flag, which is
+// how the regression stayed invisible. Kernels below; the reassociation is now
+// explicit and confined to them, exactly as for every other type here.
+
+static float dot_q8_0_neon(const block_q8_0 *b, const float *x, int n) {
+    float32x4_t acc = vdupq_n_f32(0);
+    for (int i = 0; i < n / QK; i++)
+        acc = vfmaq_n_f32(acc, dot32(vld1q_s8(b[i].qs), vld1q_s8(b[i].qs + 16),
+                                     x + i * QK), f16_to_f32(b[i].d));
+    return vaddvq_f32(acc);
+}
+
+// f16 weights: fcvtl widens four at a time, four accumulator chains. Guarded
+// because float16x4_t only exists where the fp16 storage format is declared;
+// aarch64 always declares it, but the fallback below stays correct if it does not.
+#if defined(__ARM_FP16_FORMAT_IEEE)
+#define RUNNER_NEON_F16 1
+static float dot_f16_neon(const f16_t *w, const float *x, int n) {
+    float32x4_t a0 = vdupq_n_f32(0), a1 = vdupq_n_f32(0);
+    float32x4_t a2 = vdupq_n_f32(0), a3 = vdupq_n_f32(0);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint16x8_t h0 = vld1q_u16(w + i), h1 = vld1q_u16(w + i + 8);
+        a0 = vfmaq_f32(a0, vcvt_f32_f16(vreinterpret_f16_u16(vget_low_u16(h0))),
+                       vld1q_f32(x + i));
+        a1 = vfmaq_f32(a1, vcvt_f32_f16(vreinterpret_f16_u16(vget_high_u16(h0))),
+                       vld1q_f32(x + i + 4));
+        a2 = vfmaq_f32(a2, vcvt_f32_f16(vreinterpret_f16_u16(vget_low_u16(h1))),
+                       vld1q_f32(x + i + 8));
+        a3 = vfmaq_f32(a3, vcvt_f32_f16(vreinterpret_f16_u16(vget_high_u16(h1))),
+                       vld1q_f32(x + i + 12));
+    }
+    float s = vaddvq_f32(vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)));
+    for (; i < n; i++) s += (float)((const __fp16 *)w)[i] * x[i];
+    return s;
+}
+#endif
+
+// bf16 -> f32 is a 16-bit left shift with no rounding, so the widen is a shift
+static float dot_bf16_neon(const uint16_t *w, const float *x, int n) {
+    float32x4_t a0 = vdupq_n_f32(0), a1 = vdupq_n_f32(0);
+    float32x4_t a2 = vdupq_n_f32(0), a3 = vdupq_n_f32(0);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        uint16x8_t h0 = vld1q_u16(w + i), h1 = vld1q_u16(w + i + 8);
+        a0 = vfmaq_f32(a0, vreinterpretq_f32_u32(
+                 vshlq_n_u32(vmovl_u16(vget_low_u16(h0)), 16)), vld1q_f32(x + i));
+        a1 = vfmaq_f32(a1, vreinterpretq_f32_u32(
+                 vshlq_n_u32(vmovl_u16(vget_high_u16(h0)), 16)), vld1q_f32(x + i + 4));
+        a2 = vfmaq_f32(a2, vreinterpretq_f32_u32(
+                 vshlq_n_u32(vmovl_u16(vget_low_u16(h1)), 16)), vld1q_f32(x + i + 8));
+        a3 = vfmaq_f32(a3, vreinterpretq_f32_u32(
+                 vshlq_n_u32(vmovl_u16(vget_high_u16(h1)), 16)), vld1q_f32(x + i + 12));
+    }
+    float s = vaddvq_f32(vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)));
+    for (; i < n; i++) s += bf16_to_f32(w[i]) * x[i];
+    return s;
+}
+
+// same shape as dot_q5_K_neon, minus the fifth bit plane
+static float dot_q4_K_neon(const block_q4_K *b, const float *x, int n) {
+    const uint8x16_t mF = vdupq_n_u8(0xF);
+    float s = 0;
+    for (int i = 0; i < n / QK_K; i++, b++) {
+        float d = f16_to_f32(b->d), dmin = f16_to_f32(b->dmin);
+        const uint8_t *q = b->qs;
+        const float *xp = x + i * QK_K;
+        int is = 0;
+        for (int j = 0; j < QK_K; j += 64) {
+            uint8_t sc, mn;
+            get_scale_min_k4(is + 0, b->scales, &sc, &mn);
+            float d1 = d * sc, m1 = dmin * mn;
+            get_scale_min_k4(is + 1, b->scales, &sc, &mn);
+            float d2 = d * sc, m2 = dmin * mn;
+            uint8x16_t q0 = vld1q_u8(q), q1 = vld1q_u8(q + 16);
+            float32x4_t t1 = dot32u(vandq_u8(q0, mF), vandq_u8(q1, mF), xp);
+            float32x4_t t2 = dot32u(vshrq_n_u8(q0, 4), vshrq_n_u8(q1, 4), xp + 32);
+            s += d1 * vaddvq_f32(t1) - m1 * vaddvq_f32(sum32(xp))
+               + d2 * vaddvq_f32(t2) - m2 * vaddvq_f32(sum32(xp + 32));
+            q += 32; is += 2; xp += 64;
+        }
+    }
+    return s;
+}
 
 static float dot_q4_0_neon(const block_q4_0 *b, const float *x, int n) {
     const uint8x16_t mF = vdupq_n_u8(0xF);
@@ -1844,23 +1935,22 @@ float vec_dot(int type, const void *row, const float *x, int n) {
         }
         case T_F16: {
             const f16_t *w = row;
-            float s = 0;
 #if RUNNER_AVX2
             return dot_f16_avx2(w, x, n);
-#elif defined(__ARM_FP16_FORMAT_IEEE)
-            // no NEON kernel on purpose: this loop auto-vectorizes to
-            // fcvtl+fmla and outruns a hand-written 4-wide version
-            const __fp16 *h = (const __fp16 *)w;
-            for (int i = 0; i < n; i++) s += (float)h[i] * x[i];
+#elif RUNNER_NEON_F16
+            return dot_f16_neon(w, x, n);
 #else
+            float s = 0;
             for (int i = 0; i < n; i++) s += f16_to_f32(w[i]) * x[i];
-#endif
             return s;
+#endif
         }
         case T_BF16: {
             const uint16_t *w = row;
 #if RUNNER_AVX2
             return dot_bf16_avx2(w, x, n);
+#elif RUNNER_NEON
+            return dot_bf16_neon(w, x, n);
 #endif
             float s = 0;
             for (int i = 0; i < n; i++) s += bf16_to_f32(w[i]) * x[i];
@@ -1869,6 +1959,8 @@ float vec_dot(int type, const void *row, const float *x, int n) {
         case T_Q8_0: {
 #if RUNNER_AVX2
             return dot_q8_0_avx2(row, x, n);
+#elif RUNNER_NEON
+            return dot_q8_0_neon(row, x, n);
 #endif
             const block_q8_0 *b = row;
             float s = 0;
@@ -1902,6 +1994,8 @@ float vec_dot(int type, const void *row, const float *x, int n) {
         case T_Q4_K: {
 #if RUNNER_AVX2
             return dot_q4_K_avx2(row, x, n);
+#elif RUNNER_NEON
+            return dot_q4_K_neon(row, x, n);
 #endif
             const block_q4_K *b = row;
             float s = 0;

@@ -289,6 +289,55 @@ exactly (8440.6 vs 8373.6 prefill, 169.0 vs 169.0 decode on Llama-3.2-3B), so
 the old denominators were sound and the movement in the ratios is runner's:
 decode 73-79% -> **77-87%**, prefill 4.3-5.6% -> **6.1-9.8%**.
 
+## 2026-08-18 — aarch64: the -fno-fast-math pin had un-vectorized four formats
+
+Everything above is the Zen 5 box. This one is Apple M1, and it is not a lever:
+it is a regression that a correctness fix introduced and nobody re-measured.
+
+`quants.c` is compiled with `-fno-fast-math` on purpose (the Makefile has a
+`test-makefile-sane` gate for it). Vectorizing a reduction like
+`s += w[i] * x[i]` requires reassociating the additions, which is exactly what
+that flag forbids. So the four formats whose NEON kernels had been skipped —
+with a comment saying the compiler auto-vectorized them better than intrinsics
+would — collapsed to a single serial FMA chain the moment the pin landed. The
+formats that already had hand-written kernels were unaffected by the flag,
+which is why nothing looked wrong.
+
+Same source, only the flag moved, ns per 4096-element `vec_dot` row on M1:
+
+| | `-ffast-math` | `-fno-fast-math` (shipped) | with the new kernel |
+|---|---:|---:|---:|
+| F16   | 415 | 3732 | 578 |
+| BF16  | 256 | 3727 | 336 |
+| Q8_0  | 314 | 2100 | 334 |
+| Q4_K  | 471 | 1616 | 545 |
+
+End-to-end, `--gpu off`, 512-token prompt / 256-token greedy decode:
+
+| model | decode: before | after |
+|---|---:|---:|
+| SmolLM2-135M F16 | 28.7 | **104.7** |
+| SmolLM2-135M BF16 | 28.7 | **104.9** |
+| SmolLM2-135M Q8_0 | 38.5 | **104.5** |
+| gemma-3-4b Q4_K_M (24-token run) | 2.9 | **6.4** |
+
+Prefill is unchanged: it goes through `dequant_row` + `vec_dot_f32_multi`, not
+`vec_dot`. A separate pass in the same series gave prefill +8.6% on F16 (the
+weight decode was a 256 KB table gather) and +3.6% / +4.0% on q4_0 / iq4_xs
+(no NEON block dequant existed).
+
+The kernels reassociate, like every other NEON kernel in the file, so this is
+held to the tolerance gates rather than to bit-identity. Greedy output is in
+fact byte-identical to the previous binary on six shelf models — s135-f16,
+s135-bf16, s135-q8_0, SmolLM2-135M-Q8_0, s360-iq4xs, tinyllama-q2k, plus
+gemma-3-4b-Q4_K_M — and `make test`'s CPU-vs-GPU parity gates stay
+byte-identical on the f16, bf16 and Q8_0 models.
+
+Still scalar on aarch64, in cost order: Q3_K (5610 ns), Q2_K (4963),
+Q4_1 (3920), Q5_1 (3814), Q5_0 (3827). Q2_K and Q3_K are the two that matter
+next; both are exactly representable in f32 per value, so a kernel for them can
+be bit-identical rather than tolerance-gated.
+
 ## The levers that remain (bigger, and deliberately not rushed)
 
 Both are architectural changes with real correctness/token-identity risk. They
