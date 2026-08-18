@@ -434,7 +434,8 @@ GEMMs. Metal is all-or-nothing rather than layer-split; a file above
 GGUF sets also run on the CPU: the zero-copy wrap addresses one mapping and a
 split set has one per part, so the backend declines the model at load rather
 than binding weights it cannot place. The embedded shader
-gate compiles the library and verifies all 52 backend-referenced kernels.
+gate compiles the library and verifies every kernel the backend looks up,
+reading that roster out of `src/metal.m` rather than restating it.
 
 **CUDA:** Linux and Windows use the dynamically loaded driver API and embedded
 `sm_75` PTX. Full and partial layer offload are supported. Sparse MoE can keep

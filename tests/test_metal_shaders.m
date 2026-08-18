@@ -24,25 +24,60 @@
 
 #include "../src/kernels_metal.h"   // k_metal_src
 
-// Every kernel mk_pipeline() asks for in src/metal.m. Keep in step with it:
-// scripts/check-generated.py cannot see a name that was renamed in both files.
-static const char *KERNELS[] = {
-    "k_add", "k_attn", "k_attn_chunk", "k_attn_combine", "k_gelu_mul",
-    "k_head_rmsnorm", "k_head_transform",
-    "k_mm_bf16", "k_mm_f16", "k_mm_f32", "k_mm_iq4_nl", "k_mm_iq4_xs",
-    "k_mm_mxfp4", "k_mm_q2_K", "k_mm_q3_K", "k_mm_q4_0", "k_mm_q4_K",
-    "k_mm_q6_K", "k_mm_q8_0",
-    "k_moe_actmul", "k_moe_mv_f16", "k_moe_mv_f32", "k_moe_mv_mxfp4",
-    "k_moe_mv_q4_0", "k_moe_mv_q4_K", "k_moe_mv_q5_K", "k_moe_mv_q6_K",
-    "k_moe_mv_q8_0", "k_moe_route", "k_moe_sum",
-    "k_mv_bf16", "k_mv_f16", "k_mv_f32", "k_mv_iq4_nl", "k_mv_iq4_xs",
-    "k_mv_mxfp4", "k_mv_q2_K", "k_mv_q3_K", "k_mv_q4_0", "k_mv_q4_1",
-    "k_mv_q4_K", "k_mv_q5_0", "k_mv_q5_1", "k_mv_q5_K", "k_mv_q6_K",
-    "k_mv_q8_0",
-    "k_qknorm", "k_rmsnorm", "k_rope", "k_scale", "k_silu_mul", "k_store_kv",
-};
+// The roster is READ OUT OF src/metal.m, not restated here.
+//
+// It used to be a hand-kept array carrying the comment "keep in step with it",
+// and it had silently fallen five kernels behind: k_attn_coop and
+// k_attn_chunk_coop (the cooperative decode attention PROMOTED to the default
+// route on 2026-08-17), k_sigmoid_mul (muse-glimmer's attention output gate)
+// and the two k_mvf_* fast matvecs were all looked up by mk_pipeline() and
+// checked by nothing. A missing function is precisely the quiet failure this
+// file exists to catch, so its roster cannot be a second copy of the backend's.
+//
+// The scan is deliberately literal — the exact `mk_pipeline(dev, lib, @"name")`
+// spelling metal.m uses — so a lookup written some other way shows up as a
+// count that stopped growing rather than as a false pass. MIN_KERNELS below is
+// the guard against the scan itself failing open.
+enum { MAX_KERNELS = 256, NAME_CAP = 64, MIN_KERNELS = 50 };
 
-int main(void) {
+static int scan_pipelines(const char *path, char names[][NAME_CAP]) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[1024];
+    int n = 0;
+    while (fgets(line, sizeof line, f) && n < MAX_KERNELS) {
+        const char *p = line;
+        while ((p = strstr(p, "mk_pipeline(")) != NULL) {
+            const char *q = strstr(p, "@\"");
+            const char *end = q ? strchr(q + 2, '"') : NULL;
+            if (!q || !end || end - (q + 2) >= NAME_CAP) { p += 12; continue; }
+            size_t len = (size_t)(end - (q + 2));
+            memcpy(names[n], q + 2, len);
+            names[n][len] = 0;
+            n++;
+            p = end;
+        }
+    }
+    fclose(f);
+    return n;
+}
+
+int main(int argc, char **argv) {
+    const char *backend = argc > 1 ? argv[1] : "src/metal.m";
+    static char kernels[MAX_KERNELS][NAME_CAP];
+    int n_kernels = scan_pipelines(backend, kernels);
+    if (n_kernels < 0) {
+        fprintf(stderr, "FAIL: cannot read %s — run this from the repo root, "
+                "or pass the backend source as argv[1]\n", backend);
+        return 1;
+    }
+    if (n_kernels < MIN_KERNELS) {
+        fprintf(stderr, "FAIL: only %d mk_pipeline() lookups found in %s. The "
+                "scan, not the backend, is what broke — a gate that checks "
+                "nothing passes.\n", n_kernels, backend);
+        return 1;
+    }
+
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
         if (!dev) {
@@ -64,13 +99,13 @@ int main(void) {
         }
 
         int missing = 0;
-        for (size_t i = 0; i < sizeof(KERNELS) / sizeof(*KERNELS); i++) {
+        for (int i = 0; i < n_kernels; i++) {
             id<MTLFunction> fn = [lib newFunctionWithName:
-                                      [NSString stringWithUTF8String:KERNELS[i]]];
+                                      [NSString stringWithUTF8String:kernels[i]]];
             if (!fn) {
                 fprintf(stderr, "FAIL: kernel %s is missing from the library "
                         "(mk_pipeline would return nil and the backend would "
-                        "quietly run without it)\n", KERNELS[i]);
+                        "quietly run without it)\n", kernels[i]);
                 missing++;
                 continue;
             }
@@ -81,7 +116,7 @@ int main(void) {
                 [dev newComputePipelineStateWithFunction:fn error:&perr];
             if (!p) {
                 fprintf(stderr, "FAIL: kernel %s compiles but has no pipeline: %s\n",
-                        KERNELS[i],
+                        kernels[i],
                         perr ? perr.localizedDescription.UTF8String : "(no diagnostic)");
                 missing++;
             }
@@ -91,8 +126,8 @@ int main(void) {
         [lib release];
         [dev release];
         if (missing) return 1;
-        printf("metal shaders: library compiles, %zu kernels present\n",
-               sizeof(KERNELS) / sizeof(*KERNELS));
+        printf("metal shaders: library compiles, %d kernels present "
+               "(roster read from %s)\n", n_kernels, backend);
     }
     return 0;
 }
