@@ -64,11 +64,12 @@ def test_gpu_off_also_applies_to_speculative_draft(runner_bin, model):
     assert "gpu: CUDA backend" not in stderr
 
 
-def _chat(runner_bin, model, system, n_ctx):
-    return subprocess.run([runner_bin, "-m", model, "--gpu", "off", "-i",
-                           "--system", system, "-c", str(n_ctx), "-n", "1",
-                           "--temp", "0"],
-                          input=b"hello\n/exit\n", cwd=ROOT,
+def _chat(runner_bin, model, system, n_ctx, stdin=b"hello\n/exit\n"):
+    argv = [runner_bin, "-m", model, "--gpu", "off", "-i",
+            "-c", str(n_ctx), "-n", "1", "--temp", "0"]
+    if system is not None:
+        argv += ["--system", system]
+    return subprocess.run(argv, input=stdin, cwd=ROOT,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           timeout=300)
 
@@ -97,3 +98,17 @@ def test_interactive_prompt_is_rendered_whole_or_refused(runner_bin, model):
     ok = _chat(runner_bin, model, "word " * 200, 30000)
     assert ok.returncode == 0, ok.stderr[-400:]
     assert b"context full" not in ok.stderr
+
+
+def test_a_pasted_line_longer_than_the_read_buffer_is_one_turn(runner_bin, model):
+    """Pasting a file into chat mode must ask ONE question.
+
+    The input line was read with fgets into a fixed char line[8192], so a
+    longer paste -- an ordinary "here is my file, what is wrong with it" --
+    came back as two fgets calls and was answered as two unrelated turns, the
+    second one starting mid-token in the middle of the user's text.
+    """
+    proc = _chat(runner_bin, model, None, 30000,
+                 stdin=b"x" * 10000 + b"\n/exit\n")
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert proc.stderr.count(b"tok/s]") == 1, proc.stderr[-400:]

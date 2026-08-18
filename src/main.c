@@ -109,6 +109,36 @@ static void cli_cleanup(engine *e, int32_t *toks, tokenizer *tok, model_t *m) {
     prefix_cache_clear();
 }
 
+// One line of chat input, newline stripped, in a buffer that grows to fit it.
+// NULL at EOF with nothing read, or on allocation failure (*oom set then).
+//
+// A fixed buffer here is not a truncation, it is a SPLIT: fgets stops at the
+// buffer and the remainder of the same paste arrives as the next line, so
+// pasting a file into chat asked two unrelated questions, the second starting
+// mid-word. Callers free the result.
+static char *read_line(FILE *f, bool *oom) {
+    size_t cap = 1024, n = 0;
+    char *buf = malloc(cap);
+    if (!buf) { *oom = true; return NULL; }
+    for (;;) {
+        if (!fgets(buf + n, (int)(cap - n), f)) {
+            if (n == 0) { free(buf); return NULL; }
+            return buf;                      // EOF after a newline-less tail
+        }
+        n += strlen(buf + n);
+        if (n && buf[n - 1] == '\n') { buf[n - 1] = 0; return buf; }
+        if (n + 1 < cap) return buf;         // short read: EOF, no newline
+        // fgets filled the buffer, so the line continues past it. The cap
+        // keeps cap - n inside the int fgets takes; a gigabyte-long single
+        // chat line fails loudly rather than overflowing that conversion.
+        if (cap > (size_t)INT_MAX / 2) { free(buf); *oom = true; return NULL; }
+        char *bigger = realloc(buf, cap * 2);
+        if (!bigger) { free(buf); *oom = true; return NULL; }
+        buf = bigger;
+        cap *= 2;
+    }
+}
+
 static char *unescape(const char *s) {
     char *out = malloc(strlen(s) + 1);
     if (!out) { fprintf(stderr, "error: out of memory\n"); exit(1); }
@@ -1029,14 +1059,17 @@ int main(int argc, char **argv) {
     fprintf(stderr, "chat mode (template: %s) — Ctrl-D or /exit to quit\n\n",
             template_name(tmpl));
 
-    char line[8192];
     bool first_turn = true;
     for (;;) {
         fprintf(stderr, "> ");
-        if (!fgets(line, sizeof(line), stdin)) break;
-        line[strcspn(line, "\n")] = 0;
-        if (!strcmp(line, "/exit") || !strcmp(line, "/quit")) break;
-        if (!line[0]) continue;
+        bool line_oom = false;
+        char *line = read_line(stdin, &line_oom);
+        if (!line) {
+            if (line_oom) fprintf(stderr, "[out of memory reading input]\n");
+            break;
+        }
+        if (!strcmp(line, "/exit") || !strcmp(line, "/quit")) { free(line); break; }
+        if (!line[0]) { free(line); continue; }
 
         chat_msg msgs[2];
         int n_msgs = 0;
@@ -1052,6 +1085,7 @@ int main(int argc, char **argv) {
         char *rendered = render_prompt_alloc(tmpl, msgs, n_msgs, true, thinking,
                                              NULL, strlen(line) +
                                              strlen(system_prompt) + 1024);
+        free(line);   // the render is the only reader; every path below is safe
         if (!rendered) {
             fprintf(stderr, "[out of memory rendering the prompt — turn skipped]\n");
             continue;
