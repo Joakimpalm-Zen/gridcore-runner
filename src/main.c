@@ -917,9 +917,18 @@ int main(int argc, char **argv) {
     }
 
     engine e = {0};
+    int32_t *toks = NULL;
+    // Every failure from here on frees what the success paths free. Written
+    // once so a new error return cannot forget it, and so `make debug` is the
+    // leak gate the comment on cli_cleanup claims it is: measured under
+    // LeakSanitizer on Linux before this, an unreadable --json-schema leaked
+    // 237,668 bytes in 19 allocations and an over-long prompt 30,186 in 21,
+    // while the successful run was clean.
+#define CLI_FAIL do { cli_cleanup(&e, toks, &tok, &m); \
+                      free(owned_prompt); return 1; } while (0)
     if (!engine_init(&e, &m, &tok, &smp)) { // e zero-initialized at declaration
         fprintf(stderr, "error: out of memory initializing engine\n");
-        return 1;
+        CLI_FAIL;
     }
     e.ignore_eos = ignore_eos;
     e.json_mode = json_mode;
@@ -934,22 +943,22 @@ int main(int argc, char **argv) {
     if (schema_file) {
         size_t ssz = 0;
         char *sbuf = read_file(schema_file, &ssz);
-        if (!sbuf) { fprintf(stderr, "error: cannot read %s\n", schema_file); return 1; }
+        if (!sbuf) { fprintf(stderr, "error: cannot read %s\n", schema_file); CLI_FAIL; }
         struct jv *sj = json_parse(sbuf, ssz);
         free(sbuf);
-        if (!sj) { fprintf(stderr, "error: %s is not valid JSON\n", schema_file); return 1; }
+        if (!sj) { fprintf(stderr, "error: %s is not valid JSON\n", schema_file); CLI_FAIL; }
         char serr[128];
         e.schema = schema_compile(sj, serr, sizeof(serr));
         jv_free(sj);
-        if (!e.schema) { fprintf(stderr, "error: unsupported schema: %s\n", serr); return 1; }
+        if (!e.schema) { fprintf(stderr, "error: unsupported schema: %s\n", serr); CLI_FAIL; }
         sval_init(&e.sv, e.schema);
     }
 
     size_t tok_cap = (prompt ? strlen(prompt) : 0) + (size_t)m.n_ctx + 32;
     // tok_encode narrows the capacity to int, so keep it representable
     if (tok_cap > INT_MAX) tok_cap = INT_MAX;
-    int32_t *toks = malloc(sizeof(int32_t) * tok_cap);
-    if (!toks) { fprintf(stderr, "error: out of memory\n"); return 1; }
+    toks = malloc(sizeof(int32_t) * tok_cap);
+    if (!toks) { fprintf(stderr, "error: out of memory\n"); CLI_FAIL; }
     double ptime, gtime, t0;
     int n_prompt, n_gen;
 
@@ -983,13 +992,13 @@ int main(int argc, char **argv) {
         }
         if (!p) {
             fprintf(stderr, "error: out of memory building benchmark prompt\n");
-            return 1;
+            CLI_FAIL;
         }
         n_prompt = tok_encode(&tok, p, toks, (int)tok_cap, !no_bos, true);
         if (n_prompt < 0) {
             fprintf(stderr, "error: out of memory tokenizing benchmark prompt\n");
             free(p);
-            return 1;
+            CLI_FAIL;
         }
         if (!prompt) {
             // Truncating the synthesized prompt is safe (it is filler) and is
@@ -1005,7 +1014,7 @@ int main(int argc, char **argv) {
         if (n_prompt == 0 || n_prompt >= m.n_ctx) {
             fprintf(stderr, "error: benchmark prompt does not fit context\n");
             free(p);
-            return 1;
+            CLI_FAIL;
         }
         t0 = now_s();
         float *logits = engine_feed(&e, toks, n_prompt);
@@ -1013,7 +1022,7 @@ int main(int argc, char **argv) {
         if (!logits) {
             fprintf(stderr, "error: benchmark prompt exceeds context\n");
             free(p);
-            return 1;
+            CLI_FAIL;
         }
         n_gen = engine_generate(&e, logits, n_predict, discard_cb, NULL, &gtime);
         char esc_model[1024];
@@ -1039,13 +1048,14 @@ int main(int argc, char **argv) {
         // one-shot completion
         char *p = unescape(prompt);
         n_prompt = tok_encode(&tok, p, toks, (int)tok_cap, !no_bos, true);
-        if (n_prompt < 0) { fprintf(stderr, "error: out of memory tokenizing prompt\n"); return 1; }
-        if (n_prompt == 0) { fprintf(stderr, "error: empty prompt\n"); return 1; }
+        if (n_prompt < 0) { fprintf(stderr, "error: out of memory tokenizing prompt\n"); free(p); CLI_FAIL; }
+        if (n_prompt == 0) { fprintf(stderr, "error: empty prompt\n"); free(p); CLI_FAIL; }
         if (n_prompt >= m.n_ctx) {
             fprintf(stderr, "error: prompt is %d tokens but context is %d — "
                     "rerun with -c %d or larger\n", n_prompt, m.n_ctx,
                     (n_prompt + n_predict + 1023) / 1024 * 1024);
-            return 1;
+            free(p);
+            CLI_FAIL;
         }
         if (verbose) {
             fprintf(stderr, "prompt tokens (%d):", n_prompt);
@@ -1055,7 +1065,7 @@ int main(int argc, char **argv) {
         t0 = now_s();
         float *logits = engine_feed(&e, toks, n_prompt);
         ptime = now_s() - t0;
-        if (!logits) { fprintf(stderr, "error: prompt exceeds context\n"); return 1; }
+        if (!logits) { fprintf(stderr, "error: prompt exceeds context\n"); free(p); CLI_FAIL; }
 
         if (!prompt_file && !json_mode && !schema_file)
             printf("%s", p); // don't echo file/json/schema prompts
@@ -1150,4 +1160,5 @@ int main(int argc, char **argv) {
     cli_cleanup(&e, toks, &tok, &m);
     free(owned_prompt);
     return 0;
+#undef CLI_FAIL
 }
