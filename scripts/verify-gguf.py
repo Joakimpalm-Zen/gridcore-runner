@@ -187,9 +187,16 @@ def main():
               f"{sorted({t for _, t in unknown})}", file=sys.stderr)
         return 2
 
-    last = max(tensors, key=lambda t: t[3])
-    print(f"\nlast tensor {last[0]} (type {TYPE_NAMES.get(last[2], last[2])}, "
-          f"dims {last[1]})")
+    if tensors:
+        last = max(tensors, key=lambda t: t[3])
+        print(f"\nlast tensor {last[0]} (type "
+              f"{TYPE_NAMES.get(last[2], last[2])}, dims {last[1]})")
+    else:
+        # A GGUF with no tensors is legal and this repo ships several:
+        # make-vocab-fixture.py writes n_tensors = 0 and src/gguf.c accepts it.
+        # max() over an empty table raised, and the traceback's exit 1 is the
+        # code a caller reads as TRUNCATED.
+        print("\nno tensors (metadata-only GGUF)")
     print(f"data ends   {end:,}")
     print(f"slack       {size - end:,} bytes")
 

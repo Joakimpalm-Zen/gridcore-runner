@@ -47,3 +47,16 @@ def test_block_sizes_match_the_engines_own_layouts(type_id, struct):
         f"{MOD.TYPE_NAMES.get(type_id, type_id)} is absent from the table, so "
         f"verify-gguf refuses every file containing one")
     assert MOD.GGML_TYPES[type_id][1] == declared[struct]
+def test_a_tensorless_gguf_is_verified_rather_than_crashing():
+    """make-vocab-fixture.py writes n_tensors = 0 on purpose and src/gguf.c
+    accepts it. `max(tensors, ...)` raised ValueError on those, and the
+    traceback's exit 1 reads to a caller as TRUNCATED."""
+    fixture = ROOT / "tests" / "fixtures" / "vocab-spm.gguf"
+    if not fixture.is_file():
+        pytest.skip(f"{fixture} not present")
+
+    proc = subprocess.run([sys.executable, str(SCRIPT), str(fixture)],
+                          capture_output=True, text=True, timeout=60)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "COMPLETE" in proc.stdout
