@@ -46,6 +46,11 @@ static void test_json_rejects_unpaired_utf16_surrogates(void) {
     assert(json_unescape("\\uDC00", 6, out, &outn) == -1);
     assert(json_unescape("\\uD800x", 7, out, &outn) == -1);
     assert(json_unescape("\\uD800\\u0041", 12, out, &outn) == -1);
+    // a high surrogate followed by any escape that is not \u can never pair:
+    // decoding it alone emits the surrogate as CESU-8 (ED A0 80), which is not
+    // UTF-8 at all and breaks every strict client downstream
+    assert(json_unescape("\\uD800\\n", 8, out, &outn) == -1);
+    assert(json_unescape("\\uD800\\\\", 8, out, &outn) == -1);
     assert(json_unescape("\\uD83D\\uDE00", 12, out, &outn) == 12);
     assert(outn == 4 && !memcmp(out, "\xF0\x9F\x98\x80", 4));
 }

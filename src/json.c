@@ -99,20 +99,20 @@ int json_unescape(const char *s, size_t n, char out[4], int *outn) {
     if (cp == 0) return -1;
     size_t used = 6;
     if (cp >= 0xD800 && cp <= 0xDBFF) {
-        // a high surrogate is only half a character: peek for its pair, but
-        // only wait for bytes that could still be one
+        // A high surrogate is only half a character: peek for its pair, but
+        // only wait for bytes that could still be one. Anything that cannot
+        // complete the pair is rejected outright, INCLUDING an escape that is
+        // not \u -- emitting the surrogate on its own produces ED A0 80, which
+        // is not UTF-8 and breaks every strict client that reads the body.
         if (n < 7) return 0;
-        if (s[6] == '\\') {
-            if (n < 8) return 0;
-            if (s[7] == 'u') {
-                if (n < 12) return 0;
-                int lo = hex4(s + 8);
-                if (lo >= 0xDC00 && lo <= 0xDFFF) {
-                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                    used = 12;
-                } else return -1;
-            }
-        } else return -1;
+        if (s[6] != '\\') return -1;
+        if (n < 8) return 0;
+        if (s[7] != 'u') return -1;
+        if (n < 12) return 0;
+        int lo = hex4(s + 8);
+        if (lo < 0xDC00 || lo > 0xDFFF) return -1;
+        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+        used = 12;
     } else if (cp >= 0xDC00 && cp <= 0xDFFF) return -1;
     *outn = u8_emit((unsigned)cp, out);
     return (int)used;
