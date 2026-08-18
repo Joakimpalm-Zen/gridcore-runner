@@ -252,8 +252,20 @@ static int send_text_delta(gen_ctx *g, int reasoning, const char *bytes, int n) 
 
     int total = held + n;
     char *joined = malloc((size_t)total + 1);
-    if (!joined)                       // never drop text because of an OOM here
+    if (!joined) {
+        // An OOM must not REORDER the stream. Sending the new bytes and
+        // leaving the hold in place did not drop the held half — it delivered
+        // it later, prepended to a subsequent delta or flushed at the end, so
+        // the first half of a character arrived after words the model wrote
+        // after it. Emitting the hold first splits one character across two
+        // deltas (each half escapes to U+FFFD), which is exactly what
+        // flush_text_delta already does at end of generation, and is the only
+        // outcome here that keeps the model's own order.
+        int rc = send_text_delta_raw(g, reasoning, g->u8_pend[ch], held);
+        g->u8_pend_n[ch] = 0;
+        if (rc) return rc;
         return send_text_delta_raw(g, reasoning, bytes, n);
+    }
     memcpy(joined, g->u8_pend[ch], (size_t)held);
     memcpy(joined + held, bytes, (size_t)n);
     g->u8_pend_n[ch] = 0;

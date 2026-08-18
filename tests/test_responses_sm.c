@@ -32,7 +32,18 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+// send_text_delta has exactly one allocation and an error path that used to
+// change the ORDER of the stream, so that allocation has to be failable. The
+// substitution is armed only around the one call under test; everything else
+// in completion.c allocates normally. Every system header the included
+// translation unit needs is already above this line.
+static bool g_starve_malloc = false;
+static void *t_malloc(size_t n) { return g_starve_malloc ? NULL : malloc(n); }
+#define malloc t_malloc
+
 #include "../src/completion.c"
+
+#undef malloc
 
 static int g_fail = 0;
 
@@ -205,6 +216,60 @@ static void test_utf8_tail_is_held_until_the_character_completes(void) {
     for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++)
         ck(u8_incomplete_tail(cases[i].buf, cases[i].n) == cases[i].want,
            cases[i].what);
+}
+
+// The held tail is the FIRST half of a character, so whatever happens to it,
+// it cannot come out after text the model generated later.
+//
+// send_text_delta joins the held bytes to the new ones in one allocation. When
+// that allocation failed the code sent the NEW bytes and left the hold in
+// place — so the held half was prepended to a LATER delta (or flushed at end
+// of generation) and arrived after words the model wrote after it. The comment
+// there said "never drop text because of an OOM"; the stream did not drop it,
+// it moved it, which is the worse of the two.
+//
+// Splitting a character across two deltas under OOM is the honest outcome, and
+// the same one flush_text_delta already takes at end of generation: each half
+// escapes to U+FFFD, in the order the model produced them.
+static void test_a_failed_utf8_join_keeps_the_stream_in_order(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { ck(0, "socketpair"); return; }
+    gen_ctx g;
+    memset(&g, 0, sizeof(g));
+    g.fd = sv[0];
+    g.stream = true;
+    g.api = API_TEXT;
+
+    // first two bytes of a three-byte character: held, nothing emitted
+    send_text_delta(&g, 0, "\xE6\x84", 2);
+    ck(g.u8_pend_n[0] == 2, "an unfinished character is held back");
+
+    // the continuation arrives with the model's next word, and the join fails
+    g_starve_malloc = true;
+    send_text_delta(&g, 0, "\x9A" "hello", 6);
+    g_starve_malloc = false;
+    flush_text_delta(&g, 0);      // end of generation, as run_completion does
+
+    shutdown(sv[0], SHUT_WR);
+    static char buf[65536];
+    size_t got = 0;
+    for (;;) {
+        ssize_t r = recv(sv[1], buf + got, sizeof(buf) - 1 - got, 0);
+        if (r <= 0) break;
+        got += (size_t)r;
+        if (got >= sizeof(buf) - 1) break;
+    }
+    buf[got] = 0;
+    close(sv[0]);
+    close(sv[1]);
+
+    const char *later = strstr(buf, "hello");
+    ck(later != NULL, "the later text is still delivered");
+    // U+FFFD is what an ill-formed half escapes to; none of them may follow
+    // text the model produced after the bytes they came from
+    ck(later && !strstr(later, "\xEF\xBF\xBD"),
+       "held bytes are never delivered after later text");
+    ck(g.u8_pend_n[0] == 0, "nothing is left held once the stream has moved on");
 }
 
 // ------------------------------------------- native-envelope failure paths
@@ -658,6 +723,7 @@ int main(int argc, char **argv) {
     if (argc > 1) g_model_path = argv[1];
     test_every_tool_call_reaches_the_typed_surfaces();
     test_utf8_tail_is_held_until_the_character_completes();
+    test_a_failed_utf8_join_keeps_the_stream_in_order();
     test_message_item_order();
     test_event_names_agree();
     test_sequence_numbers_are_dense();
