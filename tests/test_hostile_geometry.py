@@ -17,6 +17,21 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def _sanitizer_bin():
+    """The ASan/UBSan binary, or None when it is absent or older than the code.
+
+    `make test` does not build it, so a stale one left over from an earlier
+    `make debug` would be reporting on sources that no longer exist — a
+    skipped check is honest, a check against the wrong binary is not.
+    """
+    exe = ROOT / "runner-debug"
+    if not exe.exists():
+        return None
+    newest = max((f.stat().st_mtime for f in (ROOT / "src").iterdir()
+                  if f.is_file()), default=0)
+    return exe if exe.stat().st_mtime >= newest else None
+
+
 def _patch_u32(src, dst, key, value):
     """Rewrite one U32-typed metadata value in place, leaving everything else.
 
@@ -348,9 +363,9 @@ def test_per_layer_embedding_width_overflow_is_caught_before_it_happens(
     assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
     assert _run(runner_bin, bad).returncode > 0, "the width must be refused"
 
-    debug_bin = ROOT / "runner-debug"
-    if not debug_bin.exists():
-        pytest.skip("sanitizer build not present (make debug)")
+    debug_bin = _sanitizer_bin()
+    if not debug_bin:
+        pytest.skip("sanitizer build absent or stale (make debug)")
     proc = _run(debug_bin, bad)
     err = proc.stderr.decode(errors="replace")
     assert "runtime error" not in err, err[:400]
@@ -397,9 +412,9 @@ SANITIZER_FIXTURES = [
 
 @pytest.mark.parametrize("name", SANITIZER_FIXTURES)
 def test_valid_fixtures_are_clean_under_the_sanitizers(name, tmp_path):
-    debug_bin = ROOT / "runner-debug"
-    if not debug_bin.exists():
-        pytest.skip("sanitizer build not present (make debug)")
+    debug_bin = _sanitizer_bin()
+    if not debug_bin:
+        pytest.skip("sanitizer build absent or stale (make debug)")
     model = ROOT / name
     if not model.exists():
         pytest.skip(f"{name} not generated (make test builds it)")
@@ -417,9 +432,9 @@ def test_suppress_list_is_clean_under_the_sanitizers(tmp_path):
     the --suppress-all-but-eos fixture, which no sanitizer run had ever been
     pointed at.
     """
-    debug_bin = ROOT / "runner-debug"
-    if not debug_bin.exists():
-        pytest.skip("sanitizer build not present (make debug)")
+    debug_bin = _sanitizer_bin()
+    if not debug_bin:
+        pytest.skip("sanitizer build absent or stale (make debug)")
     model = tmp_path / "sup.gguf"
     subprocess.run(
         [sys.executable, ROOT / "scripts/make-test-model.py",
@@ -519,8 +534,8 @@ def test_gemma3_sliding_pattern_of_zero_is_not_a_divisor(runner_bin, tmp_path):
 
     assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
     assert _run(runner_bin, bad).returncode == 0, "a zero period is not fatal"
-    debug_bin = ROOT / "runner-debug"
-    if not debug_bin.exists():
-        pytest.skip("sanitizer build not present (make debug)")
+    debug_bin = _sanitizer_bin()
+    if not debug_bin:
+        pytest.skip("sanitizer build absent or stale (make debug)")
     err = _run(debug_bin, bad).stderr.decode(errors="replace")
     assert "division by zero" not in err, err[:400]
