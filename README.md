@@ -339,9 +339,9 @@ flags into unrelated feature sections.
 | Option | Purpose |
 |---|---|
 | `--quantize OUT` | Rewrite the loaded model to `OUT` and exit. |
-| `--quant q8_0\|q4_0\|f16` | Requantization target; default `q4_0`, or keep per-tensor types when pruning alone. |
-| `--type-plan PLAN.json` | Per-tensor rewrite plan. First substring rule wins; types are `keep`, `q8_0`, `q4_0`, `q3_k`, and `f16`. Example: `{"default":"keep","rules":[{"match":"_exps.weight","type":"q3_k"}]}`. |
-| `--prune-experts FILE` | Apply a per-layer MoE expert keep-list while rewriting. |
+| `--quant q8_0\|q4_0\|f16` | Requantization target; default `q4_0`, or keep per-tensor types when pruning alone. Requires `--quantize`; without it the flag is refused rather than ignored. |
+| `--type-plan PLAN.json` | Per-tensor rewrite plan. First substring rule wins; types are `keep`, `q8_0`, `q4_0`, `q3_k`, and `f16`. Example: `{"default":"keep","rules":[{"match":"_exps.weight","type":"q3_k"}]}`. Requires `--quantize`. |
+| `--prune-experts FILE` | Apply a per-layer MoE expert keep-list while rewriting. Requires `--quantize`. |
 | `--bench-json` | Run the built-in prompt/decode benchmark and print JSON metrics. |
 | `--caps` | Print machine, backend, quant, architecture, placement, and sampling capabilities as JSON. |
 | `--fit PATH` | Estimate whether a GGUF fits this machine and exit. Reads only the header, so a partial download answers the question. |

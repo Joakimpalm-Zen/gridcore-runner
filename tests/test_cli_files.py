@@ -145,3 +145,31 @@ def test_debug_tokens_env_prints_every_sampled_id(runner_bin, model):
                         "--draft", str(model), "--draft-k", "2")
     assert not _sampled_ids(runner_bin, model, off,
                             "--draft", str(model), "--draft-k", "2")
+
+
+@pytest.mark.parametrize("flag,arg", [
+    ("--prune-experts", "keep.json"),
+    ("--type-plan", "plan.json"),
+    ("--quant", "q8_0"),
+])
+def test_rewrite_only_flags_require_quantize(runner_bin, model, flag, arg):
+    """A flag that only means something inside --quantize is an error without
+    it, never a silent no-op.
+
+    --prune-experts already said so; --type-plan and --quant did not. Both were
+    parsed, stored, and then read only inside the `if (quant_out)` block that a
+    generating run never enters, so `runner -m m.gguf --quant q8_0 -p hi` ran
+    at the model's own precision and said nothing -- the same silent discard
+    the --chat-template fix was written about, in a place where the user
+    believes they asked for a different file on disk.
+    """
+    proc = _run(runner_bin, model, flag, arg, "-p", "hi", "-n", "1", "--temp", "0")
+    assert proc.returncode != 0, proc.stdout[-200:]
+    assert b"requires --quantize" in proc.stderr, proc.stderr[-300:]
+
+
+def test_quantize_still_accepts_all_three(runner_bin, model, tmp_path):
+    out = tmp_path / "requantized.gguf"
+    proc = _run(runner_bin, model, "--quantize", str(out), "--quant", "q8_0")
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert out.exists()

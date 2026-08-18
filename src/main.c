@@ -817,8 +817,17 @@ int main(int argc, char **argv) {
         return quantize_gguf_plan(model_path, quant_out, tt, prune_experts,
                                   type_plan);
     }
-    if (prune_experts) {
-        fprintf(stderr, "error: --prune-experts requires --quantize OUT\n");
+    // Every flag that only has meaning while rewriting a file. Reaching here
+    // means --quantize was not given, and the block above is their only
+    // reader, so any of them is an instruction that would otherwise be
+    // silently dropped — the same discard --chat-template was fixed for, in a
+    // place where the user believes they asked for a different file on disk.
+    const char *orphan = prune_experts ? "--prune-experts"
+                       : type_plan     ? "--type-plan"
+                       : quant_type    ? "--quant"
+                       : NULL;
+    if (orphan) {
+        fprintf(stderr, "error: %s requires --quantize OUT\n", orphan);
         return 1;
     }
 
