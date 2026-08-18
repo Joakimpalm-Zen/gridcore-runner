@@ -5,6 +5,142 @@ is in **alpha**; the HTTP protocol and CLI may still change between alpha
 releases. Entries below the rename keep the names that were true when they
 were written.
 
+## Unreleased
+
+A full module-by-module code review of the tree. Behaviour changes first.
+
+- **Files written on x86 change bytes.** The portable `f32->f16` conversion
+  rounded ties AWAY from zero; aarch64 converts with `fcvt`, which rounds ties
+  to even, and so do llama.cpp and ggml. 16,808,958 of the 2^32 float bit
+  patterns came out different between the two builds, and that function writes
+  every q8_0 block scale, every f16 KV entry and every scale and weight the
+  requantizer emits — so an f16 requant of the same input was a different FILE
+  on x86 than on ARM, and the KV cache was byte-different for the same prompt
+  on two machines. It also turned NaN into Inf. Now ties-to-even everywhere,
+  verified by an exhaustive sweep of all 2^32 inputs against the hardware
+  instruction: zero differences, NaN payloads included. aarch64 output is
+  unchanged; x86 and other fallback builds now agree with it.
+- **CPU decode on aarch64 is 2.2x to 6.8x faster on the formats that were
+  slow.** `quants.c` is pinned to `-fno-fast-math`, which silently
+  un-vectorized the four dot kernels left to the compiler (F16, BF16, Q8_0,
+  Q4_K) and the generic dequant-then-dot fallback the sub-4-bit formats use;
+  Q2_K/Q3_K still decoded a block one value at a time, and q4_0 — the default
+  requant target — had no NEON block dequant at all. Measured end to end,
+  `--gpu off`, decode tok/s: SmolLM2-135M F16 28.7 -> 104.7, Q8_0 38.5 ->
+  104.5, gemma-3-4b Q4_K_M 2.9 -> 6.4, tinyllama Q2_K 2.80 -> 19.0. Prefill
+  gains separately from an F16 dequant that no longer walks a 256 KB lookup
+  table per weight (+8.6%) and from NEON q4_0/IQ4 dequant. Greedy output is
+  byte-identical on every model checked; the two reassociated reductions are
+  tolerance-gated rather than bit-exact and moved no tokens.
+- **Tokenizing is no longer quadratic in the special-token list.** The scan
+  probed every special token at every input byte; gemma-3 marks 6,414 tokens
+  special, so 4,000 characters of prose cost 25.6M comparisons. Grouping by
+  first byte removes work, not candidates: gemma-3-4b 57.31 ms -> 1.64 ms,
+  granite-4.1 1.10 -> 0.22, SmolLM2 0.81 -> 0.24. Token ids are byte-identical
+  across the committed 721-string corpus and a generated corpus of every
+  special token of seven vocabularies.
+- **Constrained decoding is faster: +15% on a schema, +17% in `--json`
+  mode.** Testing one candidate token copied the whole engine, and the
+  validator underneath it a second time — 7,136 bytes per candidate, per
+  vocabulary entry when `top_k` is off, which is the shipped preset for eight
+  families. Profiling put 1,644 of 5,985 decode samples in `memmove` against
+  249 in the validator. The validators now expose a trial API carrying only
+  live state. Output is byte-identical on greedy and seeded sampled runs.
+- **gpt-oss on CUDA was routed without its router bias.** The fused MoE path —
+  the default for every gpt-oss model on CUDA — passed `0` where the CPU,
+  Metal and the other two CUDA paths pass `ffn_gate_inp.bias`, so the router
+  softmaxed raw logits and at realistic top-k *selected* experts the CPU would
+  not have. Fixed and gated with a top-1 MoE fixture, where the bias decides
+  which expert runs. This does not make gpt-oss CPU/CUDA identical: on
+  gpt-oss-120b the divergence went 0.00946 -> 0.00245 of logit range against a
+  2e-3 bound, so at least one more difference remains
+  ([docs/cuda-gptoss-router-bias-2026-08-18.md](docs/cuda-gptoss-router-bias-2026-08-18.md)).
+- **A multi-tool-call turn no longer vanishes on `/v1/responses` and
+  `/v1/messages`.** Both surfaces derived their single call by parsing the
+  comma-separated call entries without the brackets that make them an array,
+  which returns NULL — so a two-call turn arrived as an empty text block with
+  `stop_reason: "tool_use"`: the surface telling a client a tool was called and
+  handing it nothing to execute. Chat Completions was correct throughout, so
+  the three dialects disagreed about the same turn. Single-call output is
+  byte-identical.
+- **Metal: a session whose every batch is one token decoded garbage.** The
+  chunked decode attention's partial buffers were allocated only on the
+  multi-token path, so a run that never prefills more than one token bound them
+  nil and, past the chunk threshold, produced silent nonsense on the shipped
+  default configuration. Reproduced at `-b 1`; a one-token prompt and the
+  single-token forward before a prefix-cache load reach the same state.
+- **Metal: a split (multi-part) GGUF is now declined instead of computed
+  wrong.** Weight bindings are offsets into the first part's mapping, so
+  tensors in later parts were unresolvable; the backend printed "results from
+  this model are not trustworthy" and ran anyway. It now fails closed at load
+  and the model runs on the CPU.
+- **A hostile GGUF is refused at load rather than trusted.** The worst of them:
+  `bos_token_id` (and eos/unk) went from the file into the token stream with
+  nothing checked against `n_vocab`, and the repeat penalty is a
+  read-modify-write at that index — a crafted file got a controlled
+  out-of-bounds WRITE at an offset it chose (ASan: heap-buffer-overflow 10,240
+  bytes past a 1,024-byte region). Also now refused or bounded: a `block_count`
+  that arrives negative as an int and asks calloc for ~2^64 bytes, per-layer
+  head dims and training contexts above the geometry ceiling, expert and
+  shared-expert FFN widths that outrun their buffers, a gemma-4 rope dim wider
+  than its head, a sliding layer with no window, an undecodable tensor type
+  parking a raw file offset in `data`, a duplicate-name check that switched
+  itself off under memory pressure, and packed-array metadata read at the
+  wrong stride. `make debug` (ASan/UBSan) is clean on the fixtures.
+- **A nested-array tool schema can no longer take the process's memory.**
+  gemma-4 array compilation replicates the element grammar per admissible
+  position, so nesting multiplies: measured 379 MB at four levels, 2.79 GB at
+  five, and about 160 GB at the six the depth limit admitted. `tools[]` is
+  request data, so that was an availability bug; the compiler is now bounded.
+- **`--quant` and `--type-plan` require `--quantize`.** Both were read only
+  inside the rewrite block, so a generating run accepted them, ignored them and
+  exited 0 in silence — including `--type-plan` pointed at a file that does not
+  exist. Refused now, as `--prune-experts` already was.
+- **`-s 0` is refused instead of silently randomized.** Zero is the sampler
+  xorshift's fixed point, and the old guard substituted the clock — so the one
+  seed that reads as "make this reproducible" produced a different completion
+  every run, with nothing on stderr. It is now an error naming the reason;
+  every other seed is unchanged.
+- **The MoE router is no longer quantized with the experts.** `--quant q4_0` on
+  a MoE checkpoint rewrote `ffn_gate_inp.weight` at 4 bits; a perturbation
+  there does not shift an activation, it selects a different expert and swaps a
+  whole FFN. Routers keep their on-disk type on every path (whole-file target,
+  a matching `--type-plan` rule, and pruning), which is what llama.cpp does and
+  what the reference artifacts ship. They are ~0.3% of a 30B-A3B file.
+- **`keep_alive: 0` gives back what `POST /unload` gives back.** It freed the
+  resident model but left the draft loaded and every KV prefix snapshot
+  resident — up to 512 MB by default — so the two spellings of "unload now"
+  returned different amounts of memory. Both now run the same safe-point
+  unload, which also stops it running with the request still counted active.
+- **`/health` publishes `batch_steps` and `batch_sequences`.** The scheduler
+  had incremented them since continuous batching landed and nothing read them.
+  Differenced by a consumer, they are the mean batch size over its own window —
+  the one answer to "is batching earning its decode thread here" that timing
+  requests from outside cannot give. Both stay 0 where no scheduler runs.
+- Structured output, further correctness: a truncated tool call was completed
+  with the WRONG tool's arguments; a nullable object could never be null; a
+  force-closed bounded number could violate its own bounds; force-closing
+  inside a `\u` escape produced unreadable JSON; a schema keyword written with
+  the wrong JSON type was reinterpreted rather than rejected; a raw block's
+  terminator was missed when its own prefix repeated; a half-surrogate followed
+  by an escape decoded to invalid UTF-8; a gemma-4 marker that is not a tool
+  call corrupted the answer.
+- Server and API robustness: `/v1/capabilities` read a model a slot thread had
+  just freed; a compact `/health` request was answered with an RST instead of
+  the answer; an allocation failure could drop a turn and still answer 200, or
+  build an out-of-memory refusal from uninitialised stack; an abandoned
+  generation step did not give its KV row back; every CLI error path leaked the
+  model, tokenizer and engine.
+- Tooling under `scripts/`: fixes to gates that could not fail or could not
+  see. Among them the compat ledger's timeout group-kill (which killed
+  nothing), two ledger checks that certified whichever binary sat in the repo
+  root, `token_divergence` reading top-k logprobs onto the wrong token ids,
+  `quant-fidelity` computing its KLD in the opposite direction to its own
+  bound, a torture leaderboard ranking on absolute pass count instead of pass
+  rate, and a crashed runner being published as a model divergence.
+  `scripts/check-generated.py` — the generated-GPU-header drift gate — now runs
+  in CI, where it had never run.
+
 ## v0.1.18-alpha — 2026-08-15
 
 - **Chat templates are now verified against each model's own template, not
