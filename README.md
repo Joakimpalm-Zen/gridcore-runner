@@ -429,8 +429,12 @@ is implemented on that backend.
 
 **Metal:** Apple Silicon uses zero-copy mapped weights and unified-memory KV.
 Metal supports f16 and q8 KV, dense and selected MoE layouts, and tiled prefill
-GEMMs. Metal is all-or-nothing rather than layer-split; a file above
-`gpu.max_working_set_bytes` in `--caps` falls back to CPU. Multi-part (split)
+GEMMs. Full offload is the preferred and default shape. A file above
+`gpu.max_working_set_bytes` in `--caps` takes a leading-layer split when the
+tensor layout allows a contiguous prefix wrap *and* the whole model still fits
+in RAM; when it does not, the backend falls back to CPU rather than split,
+because pinning part of a model that does not fit measured 8–35x slower than
+CPU-only on an 8 GB M1. `--gpu-layers N` forces a split anyway. Multi-part (split)
 GGUF sets also run on the CPU: the zero-copy wrap addresses one mapping and a
 split set has one per part, so the backend declines the model at load rather
 than binding weights it cannot place. The embedded shader
