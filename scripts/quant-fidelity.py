@@ -182,6 +182,11 @@ def judge_tool_response(request, response):
         message = response.choice.get("message") or {}
     except ConformanceError as exc:
         return _fail(result, categorize(exc), str(exc))
+    # Recorded before the call-count check, because a turn with NO tool call is
+    # a legitimate answer that compare_case scores on this prose alone: leaving
+    # it None makes "both declined and said the same thing" compare None with
+    # None and agree unconditionally.
+    result["content"] = message.get("content")
     calls = message.get("tool_calls")
     if not isinstance(calls, list) or len(calls) != 1:
         return _fail(result, "protocol",
@@ -210,6 +215,7 @@ def judge_tool_stream(request, stream):
         normalized = AGENT_TORTURE.normalize_sse(stream.raw, [stream.raw])
     except ConformanceError as exc:
         return _fail(result, categorize(exc), str(exc))
+    result["content"] = normalized["text"]   # see judge_tool_response
     if not normalized["saw_done"]:
         return _fail(result, "protocol", "stream omitted [DONE]")
     calls = normalized["tool_calls"]

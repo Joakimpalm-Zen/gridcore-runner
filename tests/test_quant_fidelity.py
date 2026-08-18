@@ -701,3 +701,50 @@ def test_matching_tool_call_still_agrees():
     out = module.compare_case(ref, var)
     assert out["tool_selection_correct"] is True
     assert out["argument_exact_match"] is True
+
+
+# The "both declined" branch of compare_case reads `content` off both judged
+# cases. The comparator tests above hand-build that field; these drive the real
+# judges, because a judge that never populates it makes the branch compare
+# None with None and agree unconditionally.
+
+def _prose_response(text, status=200):
+    return _http_response({
+        "choices": [{"message": {"role": "assistant", "content": text},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }, status)
+
+
+def test_judge_tool_response_records_the_prose_of_a_declined_call():
+    result = MOD.judge_tool_response(NESTED_REQUEST,
+                                     _prose_response("I can answer directly: 4."))
+    assert result["tool_name"] is None
+    assert result["content"] == "I can answer directly: 4."
+
+
+def test_judge_tool_stream_records_the_prose_of_a_declined_call():
+    result = MOD.judge_tool_stream(WEATHER_REQUEST, _prose_stream("It is sunny."))
+    assert result["tool_name"] is None
+    assert result["content"] == "It is sunny."
+
+
+def test_two_declined_calls_with_different_prose_do_not_agree_end_to_end():
+    """The zero point's whole job: two greedy runs of the same weights that
+    said DIFFERENT things must not be recorded as agreeing. Scored through the
+    judges rather than hand-built dicts."""
+    ref = dict(MOD.judge_tool_response(NESTED_REQUEST, _prose_response("four")),
+               id="c0", category="nested_arguments")
+    var = dict(MOD.judge_tool_response(NESTED_REQUEST, _prose_response("4")),
+               id="c0", category="nested_arguments")
+
+    assert MOD.compare_case(ref, var)["argument_exact_match"] is False
+
+
+def test_two_declined_calls_with_identical_prose_agree_end_to_end():
+    ref = dict(MOD.judge_tool_response(NESTED_REQUEST, _prose_response("four")),
+               id="c0", category="nested_arguments")
+    var = dict(MOD.judge_tool_response(NESTED_REQUEST, _prose_response("four")),
+               id="c0", category="nested_arguments")
+
+    assert MOD.compare_case(ref, var)["argument_exact_match"] is True
