@@ -190,26 +190,28 @@ static bool gguf_open_one_x(gguf_file *g, const char *path, bool header_only) {
 
     // Reject duplicate metadata keys and tensor names rather than silently
     // resolving to the first entry — a crafted file could otherwise shadow a
-    // real geometry key or tensor with an earlier decoy (RNR-010).
+    // real geometry key or tensor with an earlier decoy (RNR-010). The scratch
+    // array is part of the check, so failing to allocate it fails the open:
+    // skipping the scan would admit exactly the file the check exists to
+    // refuse, and a defense that switches itself off under memory pressure is
+    // not one.
     if (g->n_kv > 1) {
         const char **keys = malloc((size_t)g->n_kv * sizeof(*keys));
-        if (keys) {
-            for (uint64_t i = 0; i < g->n_kv; i++) keys[i] = g->kv[i].key;
-            const char *d = first_duplicate_inplace(keys, g->n_kv);
-            if (d) fprintf(stderr, "error: duplicate GGUF metadata key '%s'\n", d);
-            free(keys);
-            if (d) goto fail;
-        }
+        if (!keys) goto fail;
+        for (uint64_t i = 0; i < g->n_kv; i++) keys[i] = g->kv[i].key;
+        const char *d = first_duplicate_inplace(keys, g->n_kv);
+        if (d) fprintf(stderr, "error: duplicate GGUF metadata key '%s'\n", d);
+        free(keys);
+        if (d) goto fail;
     }
     if (g->n_tensors > 1) {
         const char **names = malloc((size_t)g->n_tensors * sizeof(*names));
-        if (names) {
-            for (uint64_t i = 0; i < g->n_tensors; i++) names[i] = g->tensors[i].name;
-            const char *d = first_duplicate_inplace(names, g->n_tensors);
-            if (d) fprintf(stderr, "error: duplicate GGUF tensor name '%s'\n", d);
-            free(names);
-            if (d) goto fail;
-        }
+        if (!names) goto fail;
+        for (uint64_t i = 0; i < g->n_tensors; i++) names[i] = g->tensors[i].name;
+        const char *d = first_duplicate_inplace(names, g->n_tensors);
+        if (d) fprintf(stderr, "error: duplicate GGUF tensor name '%s'\n", d);
+        free(names);
+        if (d) goto fail;
     }
 
     uint64_t align = gguf_get_u32(g, "general.alignment", 32);
