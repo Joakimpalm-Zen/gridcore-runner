@@ -93,9 +93,17 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = check_freshness(read_published(args.results))
+        published = read_published(args.results)
     except ValueError as exc:
         parser.error(str(exc))
+    if not published:
+        # Path.glob raises nothing on a directory that is missing or no longer
+        # holds report.json, so a reorganisation of tests/torture/results would
+        # leave this permanently green with zero rows. A ledger gate with
+        # nothing to check is a configuration error -- exit 2, which the
+        # scheduled workflow fails on and does not mistake for "stale".
+        parser.error(f"no report.json under {args.results}: nothing to check")
+    result = check_freshness(published)
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:

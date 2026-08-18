@@ -56,3 +56,22 @@ def test_unreachable_registry_is_a_skip_not_stale(tmp_path):
     assert result["current"] == []
     assert result["skipped"][0]["runtime"] == "ollama"
     assert "temporary DNS failure" in result["skipped"][0]["reason"]
+
+
+def test_a_results_directory_with_no_reports_is_a_configuration_error(tmp_path):
+    """Path.glob on a missing or reorganised directory yields nothing and
+    raises nothing, so the scheduled workflow would have gone green forever the
+    moment the reports moved. The workflow treats >1 as a hard failure and only
+    opens the stale-results issue on exactly 1, so exit 2 is the right answer:
+    nothing was checked, and nothing is stale either."""
+    import pytest
+
+    with pytest.raises(SystemExit) as caught:
+        MOD.main(["--results", str(tmp_path / "moved-away"), "--json"])
+
+    assert caught.value.code == 2
+
+
+def test_a_populated_results_directory_still_runs(tmp_path):
+    _report(tmp_path, "vllm", "vllm", "0.26.0")
+    assert MOD.read_published(tmp_path)
