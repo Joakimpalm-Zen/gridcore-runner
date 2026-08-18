@@ -148,7 +148,11 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
             }
             jv *input = jv_get(b, "input");
             if (harmony) {
-                if (body.failed) { free(body.s); t->failed = true; return true; }
+                if (body.failed) {
+                    free(body.s);
+                    t->failed = true;
+                    return true;
+                }
                 if (body.n) {
                     turn_add_native(t, role, body.s, NULL, "commentary");
                     body = (sbuf){0};
@@ -156,7 +160,11 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
                 sbuf args = {0};
                 if (input && input->type != J_NULL) jv_dump(input, &args);
                 else sb_lit(&args, "{}");
-                if (args.failed) { free(args.s); t->failed = true; return true; }
+                if (args.failed) {
+                    free(args.s);
+                    t->failed = true;
+                    return true;
+                }
                 turn_add_native(t, "assistant", args.s, name, NULL);
                 continue;
             }

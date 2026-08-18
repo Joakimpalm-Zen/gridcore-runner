@@ -403,8 +403,12 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
     // The tool turn is content too: a builder that ran out here left `ts` short
     // or empty and the prompt would go out without the declarations the caller
     // sent, asking the model to call tools it was never shown.
-    chat_msg *cm = ts.failed ? NULL : malloc(sizeof(chat_msg) * (size_t)(n_items + 2));
-    char **owned = ts.failed ? NULL : malloc(sizeof(char *) * (size_t)n_items);
+    chat_msg *cm = NULL;
+    char **owned = NULL;
+    if (!ts.failed) {
+        cm = malloc(sizeof(chat_msg) * (size_t)(n_items + 2));
+        owned = malloc(sizeof(char *) * (size_t)n_items);
+    }
     // client-controlled size: a NULL here would be indexed below. Fail cleanly.
     if (!cm || !owned) {
         free(cm); free(owned); free(ts.s);

@@ -215,8 +215,8 @@ static void po_run(void (*route)(slot_t *, sock_t, jv *), int tmpl,
 static bool known_gap(const char *label, const char *missing) {
     if (missing && strstr(label, "harmony") && !strcmp(missing, SYS_MARK))
         return true;   // template.c's developer turn, above
-    if (!missing && strstr(po_message, "out of memory building the tool "
-                                       "envelope"))
+    if (!missing &&
+        strstr(po_message, "out of memory building the tool envelope"))
         return true;   // tool_envelope_build's undifferentiated rc, above
     return false;
 }
