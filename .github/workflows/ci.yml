@@ -14,6 +14,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      # The committed kernels_metal.h / kernels_ptx.h are what every build
+      # embeds, so an edit to kernels.metal can be reviewed and merged while
+      # the shipped binary still carries the OLD shader bytes. `make test` runs
+      # this gate, but no workflow runs `make test`, so until now it never ran
+      # in CI at all. Pure Python, no Metal or CUDA toolchain, well under a
+      # second — and it needs nothing the build produces, so it goes first.
+      - name: generated GPU header drift gate
+        run: python3 scripts/check-generated.py
       - name: build
         run: make
       - name: reject invalid CLI values

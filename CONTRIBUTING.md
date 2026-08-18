@@ -40,6 +40,12 @@ Use `make test` for the fast schema and Python client correctness checks, and
 on Linux, macOS, and Windows; new behavior lands with a smoke there (TDD: watch
 it fail first).
 
+`make test` is a local gate, not a CI one: no workflow invokes it, and the
+checks it runs reach CI only where a workflow names them individually. Anything
+it alone would catch is caught on your machine or not at all — run it before
+pushing, and when you add a check to `make test` decide deliberately whether it
+also belongs in `.github/workflows/ci.yml`.
+
 ## README gate
 
 Every public behavior change includes a README impact check. Features, fixes,
