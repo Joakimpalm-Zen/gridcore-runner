@@ -823,6 +823,17 @@ static int tag_advance(const char *tag, int match, char c) {
 // of it until -n is exhausted. Whitespace is optional wherever it is legal, so
 // refusing it removes no reachable document; inside a string it is content and
 // sval_ws_is_content() says so, leaving those tokens admissible.
+// Read once per process, not once per sampled token. Both decoders call this
+// from inside their token loop, on every slot thread, and getenv walks the
+// whole environment block each time. Same cached shape as the other switches
+// in this file; NULL vs set is the whole test, so RUNNER_DEBUG_TOKENS=0 still
+// enables the trace exactly as it did before.
+static bool debug_tokens(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("RUNNER_DEBUG_TOKENS") ? 1 : 0;
+    return on == 1;
+}
+
 static bool all_insignificant_ws(const sval *sv, const char *bytes, int n) {
     // RUNNER_SCHEMA_ALLOW_WS=1 restores the old behaviour, so the effect can
     // be A/B'd in one binary rather than across two builds -- the only way
@@ -1574,7 +1585,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                 goto done;
             }
             sampler_accept(e->smp, tok);
-            if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
+            if (debug_tokens()) fprintf(stderr, " %d", tok);
             if (is_stop(e, tok) && !e->ignore_eos) {
                 e->hit_stop = true;
                 e->pos += i; // keep the accepted drafts' KV
@@ -1720,7 +1731,7 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
         return ENGINE_STEP_DONE;
     }
     sampler_accept(e->smp, tok);
-    if (getenv("RUNNER_DEBUG_TOKENS")) fprintf(stderr, " %d", tok);
+    if (debug_tokens()) fprintf(stderr, " %d", tok);
     if (is_stop(e, tok) && !e->ignore_eos) {
         e->hit_stop = true;
         return ENGINE_STEP_DONE;

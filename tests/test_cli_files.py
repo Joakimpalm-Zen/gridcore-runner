@@ -1,9 +1,14 @@
-"""CLI file inputs are read robustly (RNR-011).
+"""What the CLI binary does with its inputs and its debug switches.
 
-A prompt/schema file that cannot be read must fail with a clear error, never a
-crash from an unchecked ftell/fread; a readable prompt file is used.
+Started as RNR-011 (a prompt/schema file that cannot be read must fail with a
+clear error, never a crash from an unchecked ftell/fread) and now also covers
+the interactive-chat input path and the sampled-token debug env var — the
+places where main.c's own handling of input is the behaviour under test rather
+than the engine's.
 """
+import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -112,3 +117,31 @@ def test_a_pasted_line_longer_than_the_read_buffer_is_one_turn(runner_bin, model
                  stdin=b"x" * 10000 + b"\n/exit\n")
     assert proc.returncode == 0, proc.stderr[-400:]
     assert proc.stderr.count(b"tok/s]") == 1, proc.stderr[-400:]
+
+
+def _sampled_ids(runner_bin, model, env, *extra):
+    proc = subprocess.run([runner_bin, "-m", model, "--gpu", "off",
+                           "-p", "hi", "-n", "6", "--temp", "0", *extra],
+                          cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, timeout=60)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    return re.search(rb"\n(?: \d+){6}", proc.stderr) is not None
+
+
+def test_debug_tokens_env_prints_every_sampled_id(runner_bin, model):
+    """RUNNER_DEBUG_TOKENS traces the sampled ids on BOTH decode paths.
+
+    The switch is undocumented and was ungated, which is how its getenv came to
+    sit inside the token loop of the plain and speculative decoders alike.
+    Pinned here so the read can be cached without the trace quietly dying.
+    """
+    on = dict(os.environ, RUNNER_DEBUG_TOKENS="1")
+    off = {k: v for k, v in os.environ.items() if k != "RUNNER_DEBUG_TOKENS"}
+
+    assert _sampled_ids(runner_bin, model, on)
+    assert not _sampled_ids(runner_bin, model, off)
+    # the speculative decoder samples in its own loop, with its own read
+    assert _sampled_ids(runner_bin, model, on,
+                        "--draft", str(model), "--draft-k", "2")
+    assert not _sampled_ids(runner_bin, model, off,
+                            "--draft", str(model), "--draft-k", "2")
