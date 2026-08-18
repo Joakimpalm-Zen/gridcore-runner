@@ -2246,13 +2246,17 @@ size_t i8_act_size(int n) {
 
 bool i8_dot_ok(int type, int n) {
 #if RUNNER_AVX2
-    // Q4_K is the only promoted format whose block spans more than 32 weights;
-    // every kernel below indexes activation blocks by a fixed stride, so a row
-    // that does not divide into whole weight blocks is declined outright.
+    // Every kernel below steps in whole WEIGHT blocks — n / QK for q8_0 and
+    // q4_0, n / QK_K for q4_K — so a row that does not divide into them has a
+    // tail no kernel reads. The q8_0/q4_0 arm used to test the 16-element
+    // ACTIVATION block instead, which admitted n = 48 and dropped its last 16
+    // elements: measured on the AVX2 box, vec_dot_i8 of a 48-element all-ones
+    // q8_0 row returned 31.998. Asking ggml_block_size is what keeps this from
+    // drifting away from the strides again.
     switch (type) {
         case T_Q8_0:
-        case T_Q4_0: return n % I8A_QK == 0;
-        case T_Q4_K: return n % QK_K == 0;
+        case T_Q4_0:
+        case T_Q4_K: return n % ggml_block_size(type) == 0;
         default:     return false;
     }
 #else

@@ -1031,6 +1031,15 @@ int main(void) {
 #if defined(__AVX2__) && defined(__FMA__) && defined(__F16C__)
     CHECK(g_i8_checked == 6, "fused int8 route: %d combos exercised, expected 6",
           g_i8_checked);
+    // i8_dot_ok promises a fused kernel EXISTS for (type, n). Every kernel
+    // steps in whole WEIGHT blocks -- n / QK for q8_0 and q4_0, n / QK_K for
+    // q4_K -- but the predicate tested the 16-element ACTIVATION block for the
+    // first two, so a row that is a multiple of 16 and not of 32 was admitted
+    // and its last 16 elements silently dropped.
+    CHECK(!i8_dot_ok(T_Q8_0, 48), "i8_dot_ok must decline a partial q8_0 block");
+    CHECK(!i8_dot_ok(T_Q4_0, 48), "i8_dot_ok must decline a partial q4_0 block");
+    CHECK(i8_dot_ok(T_Q8_0, 64) && i8_dot_ok(T_Q4_0, 64),
+          "a whole-block row is still admitted");
 #endif
 
     if (g_fail) { fprintf(stderr, "test_quants_simd: %d FAILURES\n", g_fail); return 1; }
