@@ -70,6 +70,13 @@ bool         gguf_get_bool(gguf_file *g, const char *key, bool dflt);
 const char  *gguf_get_str (gguf_file *g, const char *key, const char *dflt);
 gguf_tensor *gguf_find_tensor(gguf_file *g, const char *name);
 uint64_t     gguf_mapped_size(const gguf_file *g);
+// The mappings this handle owns: one for a single file, one per part for a
+// split GGUF. Walk them with these rather than reading `map`/`map_size`
+// directly -- those describe the FIRST part only, so anything that locks,
+// unlocks or measures the whole model (mlock, munlock, residency) must
+// iterate. Part `i` past the end is (NULL, 0).
+uint32_t     gguf_map_count(const gguf_file *g);
+void        *gguf_map_part(const gguf_file *g, uint32_t i, size_t *size);
 // Parse metadata and tensor DESCRIPTORS from a file whose data section may be
 // absent or short -- a header-only download, or the first few megabytes of a
 // remote file. This is a separate read path on purpose: gguf_open() refuses a

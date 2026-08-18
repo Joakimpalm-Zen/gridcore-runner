@@ -452,6 +452,18 @@ uint64_t gguf_mapped_size(const gguf_file *g) {
     return g ? g->mapped_size : 0;
 }
 
+uint32_t gguf_map_count(const gguf_file *g) {
+    if (!g) return 0;
+    return g->n_maps ? g->n_maps : 1;   // a single file is one unnamed part
+}
+
+void *gguf_map_part(const gguf_file *g, uint32_t i, size_t *size) {
+    if (size) *size = 0;
+    if (!g || i >= gguf_map_count(g)) return NULL;
+    if (size) *size = g->n_maps ? g->map_sizes[i] : g->map_size;
+    return g->n_maps ? g->maps[i] : g->map;
+}
+
 gguf_kv *gguf_get(gguf_file *g, const char *key) {
     for (uint64_t i = 0; i < g->n_kv; i++)
         if (strcmp(g->kv[i].key, key) == 0) return &g->kv[i];

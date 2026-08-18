@@ -955,10 +955,9 @@ static void model_free_weights(model_t *m) {
     // on a mapping we never locked is a silent no-op that would hide a failed
     // lock rather than report it.
     if (m->weights_locked) {
-        uint32_t n = m->gf.n_maps ? m->gf.n_maps : 1;
-        for (uint32_t i = 0; i < n; i++) {
-            void *map = m->gf.n_maps ? m->gf.maps[i] : m->gf.map;
-            size_t size = m->gf.n_maps ? m->gf.map_sizes[i] : m->gf.map_size;
+        for (uint32_t i = 0; i < gguf_map_count(&m->gf); i++) {
+            size_t size;
+            void *map = gguf_map_part(&m->gf, i, &size);
             if (map && size) plat_munlock(map, size);
         }
         m->weights_locked = false;
@@ -1029,12 +1028,11 @@ static bool model_load_inner(model_t *m, const char *path, const model_params *p
 
 double model_resident_fraction(const model_t *m) {
     if (!m || !gguf_mapped_size(&m->gf)) return -1.0;
-    uint32_t n = m->gf.n_maps ? m->gf.n_maps : 1;
     double weighted = 0.0;
     uint64_t measured = 0;
-    for (uint32_t i = 0; i < n; i++) {
-        void *map = m->gf.n_maps ? m->gf.maps[i] : m->gf.map;
-        size_t size = m->gf.n_maps ? m->gf.map_sizes[i] : m->gf.map_size;
+    for (uint32_t i = 0; i < gguf_map_count(&m->gf); i++) {
+        size_t size;
+        void *map = gguf_map_part(&m->gf, i, &size);
         double fraction = plat_resident_fraction(map, size);
         if (fraction < 0.0) return -1.0;
         weighted += fraction * (double)size;
@@ -1108,18 +1106,17 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     }
     bool locked = false;
     if (p && p->mlock && gguf_mapped_size(&m->gf)) {
-        uint32_t n = m->gf.n_maps ? m->gf.n_maps : 1, done = 0;
+        uint32_t n = gguf_map_count(&m->gf), done = 0;
         locked = true;
         for (; done < n; done++) {
-            void *map = m->gf.n_maps ? m->gf.maps[done] : m->gf.map;
-            size_t size = m->gf.n_maps ? m->gf.map_sizes[done] : m->gf.map_size;
+            size_t size;
+            void *map = gguf_map_part(&m->gf, done, &size);
             if (!map || !size || !plat_mlock(map, size)) { locked = false; break; }
         }
         if (!locked)
             while (done > 0) {
-                done--;
-                void *map = m->gf.n_maps ? m->gf.maps[done] : m->gf.map;
-                size_t size = m->gf.n_maps ? m->gf.map_sizes[done] : m->gf.map_size;
+                size_t size;
+                void *map = gguf_map_part(&m->gf, --done, &size);
                 plat_munlock(map, size);
             }
         if (locked) {
