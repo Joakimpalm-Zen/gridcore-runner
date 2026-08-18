@@ -1248,6 +1248,12 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@# compare a routing path with itself (it self-skips on those, correctly)
 	$(PYTHON) scripts/make-test-moe.py test-moe-fixture
 	./$(TEST_MOE_TOL) test-moe-fixture.moe4.gguf
+	@# CPU/GPU agreement on a router that has a BIAS and routes top-1, so the
+	@# bias decides which expert runs. Every other MoE fixture here either has
+	@# no router bias or selects all its experts, and both hide a dropped bias
+	@# under the tolerances -- which is exactly how the CUDA fused path shipped
+	@# without one. See the fixture's comment in scripts/make-test-moe.py.
+	./$(TEST_GPU_ID) test-moe-fixture.gptoss-top1.gguf
 	./$(TEST_MOE_ROUTER) test-moe-fixture
 	./$(TEST_PAGING_WARN) test-moe-fixture
 	./$(TEST_AUTOFIT)

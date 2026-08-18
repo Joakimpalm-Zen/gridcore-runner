@@ -2361,7 +2361,12 @@ static bool gpu_moe_ffn_fused(gpu_t *g, model_t *m, const layer_t *ly,
     for (int t = 0; t < tn; t++) {
         CUdeviceptr xin = g->xb + (size_t)t * xdim * sizeof(float);
         CUdeviceptr lg  = g->moe_logits + (size_t)t * ne * sizeof(float);
-        if (!enc_mv(g, m, ly->ffn_gate_inp, xin, lg, n_embd, ne, 0, 1, xdim, ne))
+        // gib: the gpt-oss router bias, which applies to the LOGITS before
+        // gating (model.c moe_route). k_moe_route takes no bias input, so it
+        // has to ride the router matvec — as it already does on the eager and
+        // grouped paths and in metal.m.
+        if (!enc_mv(g, m, ly->ffn_gate_inp, xin, lg, n_embd, ne,
+                    g->sw->gib[l], 1, xdim, ne))
             return false;
     }
     if (!enc_moe_route(g, g->moe_logits, g->moe_sel, g->moe_selw, ne, used,

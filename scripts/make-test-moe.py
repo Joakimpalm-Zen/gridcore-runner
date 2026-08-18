@@ -427,6 +427,20 @@ write(f"{OUT}.gptoss-mxfp4.gguf", gptoss,
                             ku("gpt-oss.attention.sliding_window", 8),
                             ku("gpt-oss.attention.sliding_window_pattern", 2)]))
 
+# The same tensors routed TOP-1. At expert_used_count = 2 of 2 every expert
+# runs whatever the router says, so ffn_gate_inp.bias can only reweight the
+# two outputs -- a backend that drops it lands inside every tolerance in the
+# tree. At top-1 the bias decides WHICH expert runs, which is what it does on
+# the shipping gpt-oss models (top-4 of 32/128), and dropping it moves the
+# logits by percent rather than by ulps. Measured on the CUDA fused MoE path:
+# 0.0044 of logit range with the bias dropped, 3.8e-08 with it applied.
+write(f"{OUT}.gptoss-top1.gguf", gptoss,
+      base_meta("gpt-oss", [ku("gpt-oss.expert_count", 2),
+                            ku("gpt-oss.expert_used_count", 1),
+                            ku("gpt-oss.expert_feed_forward_length", FF),
+                            ku("gpt-oss.attention.sliding_window", 8),
+                            ku("gpt-oss.attention.sliding_window_pattern", 2)]))
+
 
 # --- gemma-4 dual-branch MoE fixture. CPU is the oracle here too. The fixture
 # exercises the gemma-only FFN shape: dense GELU branch plus routed GELU experts
