@@ -333,10 +333,32 @@ s135-bf16, s135-q8_0, SmolLM2-135M-Q8_0, s360-iq4xs, tinyllama-q2k, plus
 gemma-3-4b-Q4_K_M — and `make test`'s CPU-vs-GPU parity gates stay
 byte-identical on the f16, bf16 and Q8_0 models.
 
-Still scalar on aarch64, in cost order: Q3_K (5610 ns), Q2_K (4963),
-Q4_1 (3920), Q5_1 (3814), Q5_0 (3827). Q2_K and Q3_K are the two that matter
-next; both are exactly representable in f32 per value, so a kernel for them can
-be bit-identical rather than tolerance-gated.
+### The same flag, one layer down: the generic fallback
+
+Q3_K, Q2_K, Q4_1, Q5_1 and Q5_0 have no `vec_dot` kernel at all; they take the
+generic branch, which decodes a block and then sums it against the activations.
+That sum was the same un-vectorizable serial reduction — and it, not the block
+decode, was the cost. A Q3_K row spent 5610 ns of which the decode is 1979.
+
+One shared helper (`dot_f32_row`, four explicit accumulator chains) in the
+generic branch and in the `T_F32` case, ns per 4096-element row:
+
+| | before | after | `-ffast-math` ceiling |
+|---|---:|---:|---:|
+| Q3_K | 5610 | 2150 | 2182 |
+| Q2_K | 4963 | 1647 | 1674 |
+| Q4_1 | 3920 | 1832 | 1822 |
+| Q5_0 | 3827 | 1135 | 1205 |
+| Q5_1 | 3814 | 1052 | 1206 |
+
+i.e. all five now sit at or past what the compiler managed with fast-math, and
+what remains is the scalar block decode. Decode tok/s, `--gpu off`:
+tinyllama Q2_K 2.80 -> **6.5**, SmolLM2-135M Q2_K 53.5 -> **77.7**.
+
+Left on the table on aarch64: NEON block dequant for Q2_K, Q3_K, Q4_1, Q5_0
+and Q5_1, worth roughly the residual above. Their per-value arithmetic is
+exact, so those decode kernels can be bit-identical; the dot they feed
+reassociates either way.
 
 ## The levers that remain (bigger, and deliberately not rushed)
 

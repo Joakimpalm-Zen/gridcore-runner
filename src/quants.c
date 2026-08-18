@@ -1925,14 +1925,47 @@ static float dot_iq4_xs_neon(const block_iq4_xs *b, const float *x, int n) {
 }
 #endif // RUNNER_NEON
 
+// Plain f32 dot, four accumulator chains. Written out because -fno-fast-math
+// forbids the compiler from reassociating `s += w[i] * x[i]` and therefore from
+// vectorizing it at all: the parallelism has to be explicit. Used by the F32
+// case and by the generic dequantize-then-dot fallback below, where the 256-
+// element serial sum -- not the block decode -- was the cost (a Q3_K row spent
+// 5610 ns, of which only 1979 was the decode).
+static inline float dot_f32_row(const float *w, const float *x, int n) {
+#if RUNNER_NEON
+    float32x4_t a0 = vdupq_n_f32(0), a1 = vdupq_n_f32(0);
+    float32x4_t a2 = vdupq_n_f32(0), a3 = vdupq_n_f32(0);
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        a0 = vfmaq_f32(a0, vld1q_f32(w + i),      vld1q_f32(x + i));
+        a1 = vfmaq_f32(a1, vld1q_f32(w + i + 4),  vld1q_f32(x + i + 4));
+        a2 = vfmaq_f32(a2, vld1q_f32(w + i + 8),  vld1q_f32(x + i + 8));
+        a3 = vfmaq_f32(a3, vld1q_f32(w + i + 12), vld1q_f32(x + i + 12));
+    }
+    float s = vaddvq_f32(vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)));
+#elif RUNNER_AVX2
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 32 <= n; i += 32) {
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(w + i),      _mm256_loadu_ps(x + i), a0);
+        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(w + i + 8),  _mm256_loadu_ps(x + i + 8), a1);
+        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(w + i + 16), _mm256_loadu_ps(x + i + 16), a2);
+        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(w + i + 24), _mm256_loadu_ps(x + i + 24), a3);
+    }
+    float s = hsum8(_mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3)));
+#else
+    int i = 0;
+    float s = 0;
+#endif
+    for (; i < n; i++) s += w[i] * x[i];
+    return s;
+}
+
 float vec_dot(int type, const void *row, const float *x, int n) {
     switch (type) {
-        case T_F32: {
-            const float *w = row;
-            float s = 0;
-            for (int i = 0; i < n; i++) s += w[i] * x[i];
-            return s;
-        }
+        case T_F32:
+            return dot_f32_row(row, x, n);
         case T_F16: {
             const f16_t *w = row;
 #if RUNNER_AVX2
@@ -2097,7 +2130,7 @@ float vec_dot(int type, const void *row, const float *x, int n) {
             float s = 0;
             for (int i = 0; i < n; i += bs, p += ts) {
                 dequant_block(type, p, buf);
-                for (int j = 0; j < bs; j++) s += buf[j] * x[i + j];
+                s += dot_f32_row(buf, x + i, bs);
             }
             return s;
         }
