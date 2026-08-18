@@ -875,14 +875,25 @@ static void cdoc_release(engine *e) {
     e->cdoc_rec = true;
 }
 
+// The validator is fed through a copy so a token whose LAST byte is illegal
+// does not leave it half-consumed. On a scratch engine that protection is
+// already paid for by the copy the caller made, and paying it twice is what
+// constrained decoding actually costs: sval is 7 KB and the sampler probes
+// this once per candidate token -- with top_k off, once per vocabulary entry.
+// Measured with `sample` (SmolLM2-135M-Instruct-Q8_0, 49k vocab, an array
+// schema, --top-k 0 --gpu off): 1644 of 5985 decode-thread samples were in
+// memmove, against 249 in sval_feed -- the copies cost 6.6x the validation
+// they were protecting, and two thirds of them were these.
 static bool constraint_payload_feed(engine *e, bool schema,
                                     const char *bytes, int n) {
     if (schema) {
         if (all_insignificant_ws(&e->sv, bytes, n)) return false;
+        if (e->constraint_scratch) return sval_feed(&e->sv, bytes, n);
         sval tmp = e->sv;
         if (!sval_feed(&tmp, bytes, n)) return false;
         e->sv = tmp;
     } else {
+        if (e->constraint_scratch) return jsonv_feed(&e->jv, bytes, n);
         jsonv tmp = e->jv;
         if (!jsonv_feed(&tmp, bytes, n)) return false;
         e->jv = tmp;
@@ -1015,6 +1026,7 @@ static bool constraint_spelling_ok(engine *e, int id, bool schema) {
     if (!sp || !*sp) return false;
     engine tmp = *e;
     tmp.cdoc_rec = false;   // shallow copy: it must not touch e's recording
+    tmp.constraint_scratch = true;  // ...and may be fed in place, being one
     int visible;
     return constraint_feed(&tmp, true, sp, (int)strlen(sp), &visible);
 }
@@ -1055,6 +1067,7 @@ static bool constraint_token_ok(engine *e, int id, bool schema) {
                constraint_spelling_ok(e, id, schema);
     engine tmp = *e;
     tmp.cdoc_rec = false;   // shallow copy: it must not touch e's recording
+    tmp.constraint_scratch = true;  // ...and may be fed in place, being one
     int visible;
     return constraint_feed(&tmp, schema, buf, n, &visible);
 }

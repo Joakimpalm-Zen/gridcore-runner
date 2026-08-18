@@ -73,6 +73,13 @@ typedef struct {
     // something legal, and the bytes that do that are exactly the ones an
     // ordinary stop (`}`, `"\n\n"`) matches.
     bool  constraint_closing;
+    // Set only on the shallow engine copies constraint_token_ok makes to test
+    // a candidate token. It says "this engine is already a throwaway", which
+    // lets the constraint layer feed the validators in place instead of
+    // through a second copy of its own: a rejected token cannot leave a
+    // half-consumed validator behind when the whole engine is discarded a
+    // line later. Never true on an engine anyone reads afterwards.
+    bool  constraint_scratch;
     // constrained thinking-tag prelude: probe for think_open, sample freely
     // through think_close, then enforce sv/jv and emit only the payload
     uint8_t constraint_phase;
