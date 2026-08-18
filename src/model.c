@@ -2312,11 +2312,14 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             l->ple_proj = need_tensor(g, "blk.%d.proj.weight", i, &ok);
             gguf_tensor *pn = need_tensor(g, "blk.%d.post_norm.weight", i, &ok);
             if (!ok) return false;
+            // check_shape prints "tensor <what> in blk.<n>", so `what` is the
+            // bare role, not a name template — passing the format string put a
+            // literal "blk.%d." in the error text.
             if (!check_shape(l->ple_gate, m->n_embd, m->n_embd_ple,
-                             "blk.%d.inp_gate.weight", i) ||
+                             "inp_gate", i) ||
                 !check_shape(l->ple_proj, m->n_embd_ple, m->n_embd,
-                             "blk.%d.proj.weight", i) ||
-                !check_shape(pn, m->n_embd, 1, "blk.%d.post_norm.weight", i))
+                             "proj", i) ||
+                !check_shape(pn, m->n_embd, 1, "post_norm", i))
                 return false;
             l->ple_post_norm = tensor_to_f32(pn, m->n_embd, &ok);
             if (!ok) return false;
