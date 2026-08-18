@@ -222,9 +222,9 @@ static bool gguf_open_one_x(gguf_file *g, const char *path, bool header_only) {
     uint64_t data_start = aligned_end & ~(align - 1);
     // The header itself must still be entirely present, in BOTH modes: a
     // header-only parse that read past its own mapping would be reading
-    // garbage, not being tolerant.
-    if (data_start > g->map_size && !header_only) goto invalid;
-    if (data_start > g->map_size && header_only) goto invalid;
+    // garbage, not being tolerant. (What the two modes disagree about is the
+    // DATA section, below.)
+    if (data_start > g->map_size) goto invalid;
 
     for (uint64_t i = 0; i < g->n_tensors; i++) {
         gguf_tensor *t = &g->tensors[i];
