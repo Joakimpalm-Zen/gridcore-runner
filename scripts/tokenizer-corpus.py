@@ -306,6 +306,16 @@ def corpus():
         if i > 100000:
             break
 
+    # The slice below is the filler's ceiling, not a place to lose material.
+    # Hand-written blocks that grow past TARGET would be truncated from the
+    # END -- the newest additions first -- and main()'s `len(c) != TARGET`
+    # check cannot see it, because the slice makes that condition
+    # unsatisfiable by construction.
+    if len(out) > TARGET:
+        raise SystemExit(
+            f"corpus grew to {len(out)} strings, past TARGET {TARGET}. Raise "
+            "TARGET and re-pin the reference id captures (--capture) rather "
+            "than dropping the tail.")
     return out[:TARGET]
 
 
