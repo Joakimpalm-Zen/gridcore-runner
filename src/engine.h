@@ -122,6 +122,9 @@ typedef struct {
     int      gtr_nd;
     // in-flight generation budget, owned by engine_gen_begin/step/end
     int      gen_max, gen_count;
+    // KV row engine_gen_step handed out for the caller to forward, -1 when
+    // none is outstanding; see engine_gen_end.
+    int      pending_pos;
     double   gen_t0;
     // yielded between prefill chunks (see engine_set_prefill_yield)
     void (*prefill_yield)(void *ud);
@@ -180,7 +183,12 @@ int    engine_generate(engine *e, float *logits, int max_new,
 //
 // A caller that abandons the loop early (deadline, cancellation) must still
 // call engine_gen_end: that is where a truncated constrained document is
-// closed to something valid.
+// closed to something valid, and where the KV row of the forward that never
+// happened is given back. engine_gen_step counts *next_pos as occupied the
+// moment it hands it over — everything downstream reads e->pos as "rows
+// [0, pos) hold KV computed from hist[0, pos)" — so a step whose forward is
+// abandoned must not leave that row claimed, or the next request's
+// engine_rewind keeps a row nobody ever wrote.
 enum { ENGINE_STEP_DONE = 0, ENGINE_STEP_MORE = 1 };
 // Discard the last `n` bytes of the constrained document, as if the model had
 // never generated them, and returns how many were actually discarded.

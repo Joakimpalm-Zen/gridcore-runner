@@ -108,6 +108,61 @@ static void test_hist_tracks_kv_on_overflow(void) {
     slot_close(&s);
 }
 
+// --------------------------------------------------------- the abandoned step
+//
+// engine_gen_step hands the caller a token and the KV row its forward will
+// occupy, and counts that row as occupied the moment it does. A caller that
+// abandons the loop instead of forwarding -- sched_generate does, on a request
+// deadline, a failed microbatch, or shutdown -- would otherwise leave e->pos
+// covering a row nothing ever wrote, over a hist entry naming the token it
+// would have held. That is the same lie the overflow path above used to tell,
+// and the next request's rewind believes it: it "keeps" the phantom row and
+// decodes against KV nobody computed.
+static void test_abandoned_step_drops_its_row(void) {
+    model_params p = base_params();
+    slot warm, cold;
+    if (!slot_open(&warm, &p) || !slot_open(&cold, &p)) {
+        ck(0, "load two instances for the abandoned step");
+        return;
+    }
+
+    // N is a multiple of BATCH so the continuation's last chunk covers the same
+    // positions in both instances: this is a KV claim, not a batch-shape one.
+    enum { N = 20 };
+    int32_t prompt[N + 2];
+    fill_tokens(prompt, N, warm.m.n_vocab, 31);
+
+    engine_reset(&warm.e);
+    float *lg = engine_feed(&warm.e, prompt, N);
+    ck(lg != NULL, "prefill before the abandoned step");
+
+    engine_gen_begin(&warm.e, 8);
+    int32_t tok = 0;
+    int pos = 0;
+    ck(engine_gen_step(&warm.e, lg, NULL, NULL, &tok, &pos) == ENGINE_STEP_MORE,
+       "the first step asks for a forward");
+    // the caller's deadline expires here; that forward is never issued
+    engine_gen_end(&warm.e, NULL, NULL, NULL);
+    ck(warm.e.pos == N, "an abandoned step gives its KV row back");
+
+    // the observable consequence: the session's next request replays the token
+    // that was delivered, and a rewind that kept the phantom row decodes
+    // against KV nobody computed
+    prompt[N] = tok;
+    fill_tokens(prompt + N + 1, 1, warm.m.n_vocab, 41);
+    int keep = engine_rewind(&warm.e, prompt, N + 2);
+    float *wl = engine_feed(&warm.e, prompt + keep, N + 2 - keep);
+    engine_reset(&cold.e);
+    float *cl = engine_feed(&cold.e, prompt, N + 2);
+    int diffs = (!wl || !cl) ? -1 : 0;
+    if (wl && cl)
+        for (int i = 0; i < warm.m.n_vocab; i++) if (wl[i] != cl[i]) diffs++;
+    ck(diffs == 0, "a rewind after an abandoned step matches a cold prefill");
+
+    slot_close(&warm);
+    slot_close(&cold);
+}
+
 // ------------------------------------------------------------------ the gate
 //
 // Store a prefix from one model instance, fork it into another, and require
@@ -448,6 +503,7 @@ int main(int argc, char **argv) {
     if (argc > 1) g_path = argv[1];
     f16_init();
     test_hist_tracks_kv_on_overflow();
+    test_abandoned_step_drops_its_row();
     test_fork_is_bit_identical();
     test_key_rejects_incompatible_snapshots();
     test_key_changes_after_in_place_weight_edit();

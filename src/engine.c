@@ -41,6 +41,7 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     e->tok = tok;
     e->smp = smp;
     e->think_end_id = -1;
+    e->pending_pos = -1;
     e->stop_ids[e->n_stop++] = tok->eos_id;
     static const char *stops[] = { "<|im_end|>", "<|eot_id|>", "<|end_of_text|>",
                                    "<|endoftext|>", "</s>",
@@ -1654,12 +1655,17 @@ void engine_gen_begin(engine *e, int max_new) {
     e->prelude_count = 0;
     e->prelude_exhausted = false;
     e->prelude_max = max_new < 0 ? 0 : (max_new > 1 ? max_new / 2 : max_new);
+    e->pending_pos = -1;
     e->gen_t0    = now_s();
 }
 
 int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
                     int32_t *next_tok, int *next_pos) {
     char buf[512];
+    // Arriving here at all means the caller forwarded the row the previous
+    // step handed out -- `logits` is that forward's result. Anything still
+    // outstanding when engine_gen_end runs was abandoned instead.
+    e->pending_pos = -1;
     if (!((e->gen_max < 0 || e->gen_count < e->gen_max) && e->pos < e->m->n_ctx))
         return ENGINE_STEP_DONE;
     lp_pre pre;
@@ -1739,10 +1745,19 @@ int engine_gen_step(engine *e, const float *logits, gen_cb cb, void *ud,
     if (e->hist && e->pos < e->m->n_ctx) e->hist[e->pos] = tok;
     *next_tok = (int32_t)tok;
     *next_pos = e->pos++;
+    e->pending_pos = *next_pos;
     return ENGINE_STEP_MORE;
 }
 
 int engine_gen_end(engine *e, gen_cb cb, void *ud, double *gen_time) {
+    // A step whose forward never happened (a deadline, a failed microbatch, a
+    // shutdown -- see sched_generate) owns no KV row: give it back before
+    // anything reads e->pos as the extent of this sequence's cache.
+    if (e->pending_pos >= 0) {
+        e->pos = e->pending_pos;
+        if (e->dpos > e->pos) e->dpos = e->pos;
+        e->pending_pos = -1;
+    }
     constraint_close(e, cb, ud);
     if (gen_time) *gen_time = now_s() - e->gen_t0;
     return e->gen_count;
