@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 
 
@@ -393,6 +394,90 @@ def test_tool_matrix_is_run_against_the_binary_under_test(monkeypatch, tmp_path)
         str(tmp_path / "runner-candidate")
 
 
+def _process_state(pid):
+    """'gone', 'zombie' or 'live' -- the question kill(pid, 0) cannot answer.
+
+    A zombie is a process-table entry, not a process: it has exited, holds
+    nothing, and no signal can move it further, but it answers kill(pid, 0)
+    until its parent wait()s -- which may never happen (a supervisor that does
+    not reap, a container whose PID 1 is not an init). macOS's launchd reaps
+    promptly and hides this; the CI Linux leg does not. src/compat.c's
+    plat_pid_alive reads the state for the same reason.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "gone"
+    except PermissionError:
+        return "live"                # someone else's process: exists, not ours
+    stat = Path("/proc/%d/stat" % pid)
+    if stat.exists():                # Linux
+        try:
+            data = stat.read_text()
+        except OSError:
+            return "gone"
+        # The state letter follows the parenthesised comm, which may itself
+        # contain spaces and brackets -- so scan from the LAST ')'.
+        letter = data.rpartition(")")[2].strip()[:1]
+        return "zombie" if letter in ("Z", "X") else "live"
+    out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                         capture_output=True, text=True)
+    letter = out.stdout.strip()[:1]
+    if out.returncode != 0 or not letter:
+        return "gone"
+    return "zombie" if letter == "Z" else "live"
+
+
+def _pid_is_dead(pid):
+    return _process_state(pid) != "live"
+
+
+def _spawn_zombie():
+    """A dead-but-unreaped process: the parent exits its child and never wait()s."""
+    import subprocess
+    import sys
+
+    code = ("import os, sys, time\n"
+            "pid = os.fork()\n"
+            "if pid == 0: os._exit(0)\n"
+            "sys.stdout.write('%d\\n' % pid); sys.stdout.flush()\n"
+            "time.sleep(60)\n")
+    parent = subprocess.Popen([sys.executable, "-c", code],
+                              stdout=subprocess.PIPE, text=True)
+    return parent, int(parent.stdout.readline())
+
+
+def test_the_liveness_probe_calls_a_zombie_dead():
+    """kill(pid, 0) is not the question 'is this process still running'.
+
+    A zombie -- exited, not yet reaped -- answers it happily, so a probe built
+    on kill alone reports a killed process as alive until somebody wait()s for
+    it. macOS's launchd reaps promptly and hides that; a container whose PID 1
+    is not an init does not, which is why the CI Linux leg saw it first.
+    """
+    import os
+    import time
+
+    import pytest
+
+    if os.name == "nt":
+        pytest.skip("no zombies on Windows")
+
+    parent, zombie = _spawn_zombie()
+    try:
+        for _ in range(50):
+            if _process_state(zombie) != "live":
+                break
+            time.sleep(0.1)
+        assert _process_state(zombie) == "zombie", \
+            "test never produced an unreaped zombie"
+        os.kill(zombie, 0)           # the trap: the entry still answers signals
+        assert _pid_is_dead(zombie)
+    finally:
+        parent.kill()
+        parent.wait()
+
+
 def test_a_timeout_kills_the_grandchildren_too(tmp_path):
     """The check scripts spawn `runner --serve` of their own. subprocess.run's
     timeout kills the direct child only, and the fix written for that read the
@@ -422,10 +507,11 @@ def test_a_timeout_kills_the_grandchildren_too(tmp_path):
                          text=True)
 
     grandchild = int(marker.read_text())
+    # Not kill(pid, 0): the killed grandchild is reparented to PID 1, and where
+    # PID 1 does not reap (the CI container) it stays a signal-answering zombie
+    # forever, which read as "outlived the timeout" on Linux only.
     for _ in range(50):
-        try:
-            os.kill(grandchild, 0)
-        except OSError:
+        if _pid_is_dead(grandchild):
             break
         time.sleep(0.1)
     else:
