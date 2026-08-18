@@ -103,8 +103,6 @@ typedef struct {
     uint16_t disc;      // this object's discriminator choice + 1; 0 = not chosen yet
     uint64_t alive;
     uint64_t num_abs;  // integer magnitude accumulated so far
-    char     num_text[96]; // number spelling for bounded-number validation
-    uint8_t  num_len;
 } sframe;
 
 typedef struct {
@@ -113,6 +111,15 @@ typedef struct {
     bool   done;
     int    last_enum;   // enum literal completed by the most recent child
     jsonv  any;      // generic submachine for open {} schema nodes
+    // Spelling of the number being parsed, for bounded-number validation.
+    // ONE buffer for the whole stack, not one per frame: a number frame never
+    // pushes a child, so the frame parsing a number is always the top one and
+    // no two frames can want this at once. It sits here because the engine
+    // copies this whole struct once per candidate token to test it (see
+    // constraint_token_ok in engine.c) -- 48 replicas of a 96-byte scratch
+    // buffer were two thirds of every one of those copies.
+    char     num_text[96];
+    uint8_t  num_len;
 } sval;
 
 void sval_init (sval *v, const snode *root);

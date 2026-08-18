@@ -2178,17 +2178,20 @@ static bool num_complete(uint8_t st) {
     return st == N_ZERO || st == N_INT || st == N_FRAC || st == N_EXP;
 }
 
-static bool number_put(sframe *f, uint8_t c) {
-    if ((size_t)f->num_len + 1 >= sizeof(f->num_text)) return false;
-    f->num_text[f->num_len++] = (char)c;
-    f->num_text[f->num_len] = 0;
+// The spelling buffer lives in the sval, not the frame: only the top frame
+// can be inside a number (a number frame never pushes a child), so one buffer
+// serves the whole stack.
+static bool number_put(sval *v, uint8_t c) {
+    if ((size_t)v->num_len + 1 >= sizeof(v->num_text)) return false;
+    v->num_text[v->num_len++] = (char)c;
+    v->num_text[v->num_len] = 0;
     return true;
 }
 
-static bool number_in_bounds(const snode *n, const sframe *f) {
-    if (!num_complete(f->sub) || !f->num_len) return false;
+static bool number_in_bounds(const sval *v, const snode *n, const sframe *f) {
+    if (!num_complete(f->sub) || !v->num_len) return false;
     char *end = NULL;
-    double x = strtod(f->num_text, &end);
+    double x = strtod(v->num_text, &end);
     if (!end || *end || !isfinite(x)) return false;
     return (!n->has_real_min || x >= n->real_min) &&
            (!n->has_real_max || x <= n->real_max);
@@ -2346,14 +2349,14 @@ static int feed_byte(sval *v, uint8_t c) {
         case SN_NUM:
         case SN_INT:
             f->phase = P_NUM; f->sub = N_START; f->lit_pos = 0; f->num_abs = 0;
-            f->num_len = 0;
+            v->num_len = 0;
             if (n->kind == SN_INT) return integer_take_byte(n, f, c) ? 0 : -1;
             // a minus under a non-negative minimum is a dead prefix: no
             // suffix can ever satisfy the bound, and the only exit would be
             // an all-tokens-masked stall — reject it up front (the integer
             // path already does)
             if (c == '-' && n->has_real_min && n->real_min >= 0) return -1;
-            if (num_byte(c, &f->sub, false) != 0 || !number_put(f, c)) return -1;
+            if (num_byte(c, &f->sub, false) != 0 || !number_put(v, c)) return -1;
             return 0;
         case SN_OBJ:
         case SN_MAP:
@@ -2459,10 +2462,10 @@ static int feed_byte(sval *v, uint8_t c) {
         int r = num_byte(c, &f->sub, false);
         if (r < 0) return -1;
         if (r == 1) {
-            if (!number_in_bounds(n, f)) return -1;
+            if (!number_in_bounds(v, n, f)) return -1;
             frame_done(v); return 1;
         }
-        if (!number_put(f, c)) return -1;
+        if (!number_put(v, c)) return -1;
         return 0;
     }
 
@@ -2899,14 +2902,14 @@ int sval_close(sval *v, char *out, int cap) {
         case P_NUM:
             if (n->kind == SN_INT) close_integer(&q, n, f);
             else if (!num_complete(f->sub)) {
-                if (f->num_len == 0 && (n->has_real_min || n->has_real_max)) {
+                if (v->num_len == 0 && (n->has_real_min || n->has_real_max)) {
                     // an untouched bounded number closes to an in-bounds
                     // value, not a blind zero
-                    double v = 0.0;
-                    if (n->has_real_min && v < n->real_min) v = n->real_min;
-                    if (n->has_real_max && v > n->real_max) v = n->real_max;
+                    double fill = 0.0;
+                    if (n->has_real_min && fill < n->real_min) fill = n->real_min;
+                    if (n->has_real_max && fill > n->real_max) fill = n->real_max;
                     char b[40];
-                    snprintf(b, sizeof(b), "%.17g", v);
+                    snprintf(b, sizeof(b), "%.17g", fill);
                     eq_put(&q, b);
                 } else {
                     eq_putc(&q, '0');

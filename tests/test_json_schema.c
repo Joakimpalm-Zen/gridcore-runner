@@ -793,6 +793,53 @@ static void test_schema_number_bounds_are_enforced(void) {
     jv_free(schema_json);
 }
 
+// The validator state is COPIED once per candidate token by the engine's
+// constraint layer (constraint_token_ok makes a shallow engine copy, and sval
+// is the bulk of it), so its size is a decode-speed property, not an
+// implementation detail. Only one frame at a time can be parsing a number --
+// a number frame never pushes a child -- so the spelling buffer is shared by
+// the whole stack rather than replicated 48 times.
+static void test_sval_state_is_small(void) {
+    assert(sizeof(sval) <= 2560);
+}
+
+// The shared number-spelling buffer must still be exact per value: sibling
+// numbers in one array, and numbers at different depths, each get their own
+// bounds check with no residue from the previous one.
+static void test_schema_number_bounds_across_frames(void) {
+    const char *src = "{\"type\":\"object\",\"properties\":{"
+        "\"xs\":{\"type\":\"array\",\"items\":"
+            "{\"type\":\"number\",\"minimum\":0,\"maximum\":100}},"
+        "\"inner\":{\"type\":\"object\",\"properties\":{"
+            "\"y\":{\"type\":\"number\",\"minimum\":0,\"maximum\":9}},"
+            "\"required\":[\"y\"]}},"
+        "\"required\":[\"xs\",\"inner\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    const char *good = "{\"xs\":[1.5,99.25,0],\"inner\":{\"y\":8.5}}";
+    sval v; sval_init(&v, schema);
+    assert(sval_feed(&v, good, (int)strlen(good)));
+    assert(v.done);
+
+    // the SECOND element of the array is the one out of bounds: a stale
+    // spelling from the first would hide it
+    const char *bad_sibling = "{\"xs\":[1.5,100.5]";
+    sval b; sval_init(&b, schema);
+    assert(!sval_feed(&b, bad_sibling, (int)strlen(bad_sibling)));
+
+    // and a deeper frame's bound is not the outer one's
+    const char *bad_nested = "{\"xs\":[50],\"inner\":{\"y\":50}";
+    sval d; sval_init(&d, schema);
+    assert(!sval_feed(&d, bad_nested, (int)strlen(bad_nested)));
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 // The other half of the invariant: keywords that are pure annotations carry
 // no constraint, so ignoring them ignores nothing. Real OpenAI tool payloads
 // are full of them and must keep compiling.
@@ -1518,6 +1565,8 @@ int main(void) {
     test_schema_integer_bounds_are_enforced();
     test_schema_integer_bounds_complete_truncation();
     test_schema_number_bounds_are_enforced();
+    test_schema_number_bounds_across_frames();
+    test_sval_state_is_small();
     test_schema_additional_properties();
     test_schema_empty_closed_object();
     test_schema_rejects_required_without_properties();
