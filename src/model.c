@@ -1617,7 +1617,8 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             if (m->l_head_dim[i] < 1 || m->l_head_kv[i] < 1 ||
                 m->n_head < 1 || m->l_head_kv[i] > m->n_head ||
                 m->n_head % m->l_head_kv[i] != 0 ||
-                m->l_rope_dim[i] < 0 || m->l_rope_dim[i] > m->l_head_dim[i]) {
+                m->l_rope_dim[i] < 0 || m->l_rope_dim[i] > m->l_head_dim[i] ||
+                (int64_t)m->n_head * m->l_head_dim[i] > MDL_DIM_MAX) {
                 fprintf(stderr, "error: invalid gemma4 per-layer geometry at "
                         "blk.%d (head_dim=%d head_count_kv=%d rope_dim=%d, "
                         "n_head=%d)\n",
@@ -1855,6 +1856,15 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     }
     if (m->n_layer <= 0 || m->n_embd <= 0 || m->n_head <= 0 || m->n_ff <= 0) {
         fprintf(stderr, "error: missing model hyperparameters for arch '%s'\n", arch);
+        return false;
+    }
+    // context_length is read as a u32 into an int, so anything above INT_MAX
+    // arrives NEGATIVE — and it caps the default window, sizes the cache, and
+    // seeds the YaRN extension ratio. The load did fail, but with "cannot
+    // allocate buffers", which describes the machine rather than the file.
+    if (m->n_ctx_train < 1) {
+        fprintf(stderr, "error: '%s' declares an unusable context_length "
+                "(%u)\n", arch, gguf_get_u32(g, AK("context_length"), 0));
         return false;
     }
     // Everything above is only checked for presence (> 0). These fields come

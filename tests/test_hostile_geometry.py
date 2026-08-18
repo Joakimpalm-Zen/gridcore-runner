@@ -278,3 +278,50 @@ def test_absurd_shared_expert_count_is_refused(runner_bin, tmp_path):
     assert proc.returncode > 0, "an out-of-range expert width must be refused"
     err = proc.stderr.decode(errors="replace")
     assert "shared-expert FFN width" in err
+
+
+def test_per_layer_head_dim_beyond_the_ceiling_is_refused(runner_bin, tmp_path):
+    """attention.key_length_swa escaped the per-axis ceiling entirely.
+
+    The general gate bounds attention.key_length and n_head, and (since the
+    expert-width fix) their product. gemma4's sliding layers take their head
+    dim from key_length_swa instead, which nothing bounded: with 2^30 there,
+    model_q_dim's n_head * head_dim overflowed — UBSan, "signed integer
+    overflow: 4 * 1073741824 cannot be represented in type 'int'", at
+    model.h:374 — and every buffer sized from it followed a wrapped value.
+    """
+    good = tmp_path / "g4h.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--gemma4-hetero", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    bad = _patch_u32(good, tmp_path / "g4h-hd.gguf",
+                     "gemma4.attention.key_length_swa", 1 << 30)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "a per-layer head dim past the ceiling must be refused"
+    err = proc.stderr.decode(errors="replace")
+    assert "invalid gemma4 per-layer geometry" in err
+
+
+def test_absurd_training_context_is_refused(runner_bin, tmp_path):
+    """context_length above INT_MAX became a NEGATIVE training context.
+
+    It is read as a u32 and stored in an int, so 2^31 arrives as
+    -2147483648: it then sizes the KV cache and the activation buffers (as a
+    huge size_t), seeds the YaRN factor as a negative ratio, and caps the
+    default window. The load did fail — with "cannot allocate buffers", which
+    describes the machine rather than the file.
+    """
+    good = tmp_path / "m.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    bad = _patch_u32(good, tmp_path / "m-ctx.gguf", "llama.context_length", 1 << 31)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "an unusable training context must be refused"
+    err = proc.stderr.decode(errors="replace")
+    assert "context_length" in err
