@@ -148,6 +148,14 @@ int sample_pick(sampler *s, float *logits, int n_vocab, sample_ok_fn ok, void *u
     if (s->temp > 0 && s->repeat_penalty != 1.0f) {
         for (int i = 0; i < s->n_recent; i++) {
             int tok = s->recent[i];
+            // The window is filled from the token stream, whose ids are bounded
+            // by the TOKENIZER's vocabulary (or a draft model's) rather than by
+            // the length of this logits array. The penalty below writes through
+            // `tok`, so an id the logits cannot hold is dropped here — this is
+            // the only place recent[] is used as an index, which is why the
+            // bound lives at the indexing site instead of in sampler_accept,
+            // where n_vocab is not known.
+            if (tok < 0 || tok >= n_vocab) continue;
             bool exempt = false;
             for (int k = 0; k < s->n_no_penalty; k++)
                 if (s->no_penalty[k] == tok) { exempt = true; break; }

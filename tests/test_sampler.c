@@ -217,6 +217,32 @@ static void test_stop_tokens_stay_exempt(void) {
     assert(sample_pick(&s, logits, 4, NULL, NULL) == 0);
 }
 
+// The penalty window holds token ids, and nothing that fills it is bounded by
+// the vocabulary the LOGITS were sized with: the tokenizer's n_vocab comes
+// from tokenizer.ggml.tokens while the logits array is sized by tok_embd's
+// rows, and speculative decoding accepts ids drafted from a second model's
+// vocabulary. `logits[tok] /= repeat_penalty` is a read-modify-write, so an id
+// outside [0, n_vocab) writes past the array — a scaled float at an index the
+// model file chose. The padding either side of the logits is the canary.
+static void test_penalty_window_ignores_ids_outside_the_vocabulary(void) {
+    enum { PAD = 8, V = 4 };
+    float *block = malloc(sizeof(float) * (PAD + V + PAD));
+    assert(block);
+    for (int i = 0; i < PAD + V + PAD; i++) block[i] = 100.0f + (float)i;
+    float *logits = block + PAD;
+    logits[0] = 10.0f; logits[1] = 9.0f; logits[2] = 1.0f; logits[3] = 0.5f;
+
+    sampler s = { .temp = 0.01f, .repeat_penalty = 2.0f, .top_p = 1.0f, .rng = 7 };
+    sampler_reset(&s);
+    sampler_accept(&s, V + 3);   // past the end
+    sampler_accept(&s, -2);      // and before the start
+    assert(sample_pick(&s, logits, V, NULL, NULL) == 0);
+    for (int i = 0; i < PAD; i++) assert(EQ(block[i], 100.0f + (float)i));
+    for (int i = PAD + V; i < PAD + V + PAD; i++)
+        assert(EQ(block[i], 100.0f + (float)i));
+    free(block);
+}
+
 // Greedy with a validity filter stays greedy-over-valid-tokens, and still
 // without the penalty.
 static bool reject_zero(void *ud, int token) { (void)ud; return token != 0; }
@@ -340,6 +366,7 @@ int main(void) {
     test_greedy_ignores_repeat_penalty();
     test_sampling_applies_repeat_penalty();
     test_stop_tokens_stay_exempt();
+    test_penalty_window_ignores_ids_outside_the_vocabulary();
     test_greedy_constrained();
     test_no_filter_sampling_is_deterministic_and_unbiased();
     puts("sampler tests ok");
