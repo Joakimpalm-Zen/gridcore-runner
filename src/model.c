@@ -1759,6 +1759,15 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     // above pinned them (muse-glimmer's fixed 1e-8); resolve the default after
     // every block that can still change rms_eps has run.
     if (m->post_norm_eps <= 0.0f) m->post_norm_eps = m->rms_eps;
+    // "This layer slides" and "the window is 0" cannot both hold, and the
+    // forward pass cannot express the pair: a sliding layer selects the local
+    // rope table, which rope_setup only builds when there IS a window (NULL,
+    // dereferenced on the first token), and its attended range starts one past
+    // its last position. The pattern and the window are separate keys and the
+    // arch blocks above read them in several different orders, so resolve it
+    // here, once, for all of them: no window means no sliding layers.
+    if (m->l_is_swa && m->swa_window <= 0)
+        for (int i = 0; i < m->n_layer; i++) m->l_is_swa[i] = false;
     // Llama-4 attention knobs, off unless the GGUF asks for them.
     m->no_rope_layer_step   = (int)gguf_get_u32(g, AK("attention.no_rope_layer_step"), 0);
     // afmoe's GGUF carries no no_rope key; llama.cpp defaults the step to the

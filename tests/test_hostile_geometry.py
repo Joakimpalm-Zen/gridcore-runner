@@ -429,3 +429,30 @@ def test_suppress_list_is_clean_under_the_sanitizers(tmp_path):
     err = proc.stderr.decode(errors="replace")
     assert "runtime error" not in err, err[:600]
     assert "AddressSanitizer" not in err, err[:600]
+
+
+def test_sliding_layers_without_a_window_do_not_crash(runner_bin, tmp_path):
+    """"This layer slides" and "the window is 0" cannot both be true.
+
+    The sliding-window PATTERN is a per-layer bool array while the window
+    itself is a separate scalar, and the arch blocks that read the array form
+    did not all gate it on the window being real. A layer marked sliding with
+    no window then selected the local rope table, which rope_setup only
+    allocates when there IS a window: NULL, dereferenced on the first token
+    (UBSan "load of null pointer of type 'const float'"; the release build
+    segfaulted, rc 139). Its attention window was empty too — first attended
+    position past the last one.
+    """
+    good = tmp_path / "muse.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--muse-glimmer", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    bad = _patch_u32(good, tmp_path / "muse-nowin.gguf",
+                     "muse-glimmer.attention.sliding_window", 0)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    # No window means no sliding layers, which is a runnable model, not an
+    # error: the file is contradictory, not unusable.
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")[-400:]
