@@ -303,6 +303,48 @@ static void test_refusal_line_priority_format_is_exact(void) {
     assert(strstr(err, want) && "refusal line format must match exactly");
 }
 
+// The refusal must not contradict itself in consecutive lines.
+//
+// `holders` counts OTHER runners by design, but the listing prints every
+// non-waiter entry, this process's own included. So a runner blocked by its
+// own earlier claim was told "No other runner is registered on this GPU — the
+// memory is held by something outside runner's accounting", directly above a
+// line naming its own pid as the holder of exactly that memory. Both cannot be
+// true, and it is the sentence that is wrong: the memory is inside runner's
+// accounting; it is simply ours. The sentence belongs to the case it was
+// written for — a shortfall with nobody at all in the ledger.
+static void test_refusal_does_not_blame_an_outsider_it_just_named(void) {
+    scratch_dir();
+    uint64_t free_all = 24 * GB;
+
+    // (a) our own pending claim is what does not leave room
+    const char *gpu = "self-holder-test";
+    vram_lease *first = vram_claim(gpu, "/models/first.gguf", 20 * GB, 0,
+                                   fixed_free, &free_all, 0, NULL, NULL, NULL, 0);
+    assert(first);
+
+    char err[1024] = {0};
+    vram_status st = {0};
+    assert(!vram_claim(gpu, "/models/second.gguf", 10 * GB, 0, fixed_free,
+                       &free_all, 0, NULL, &st, err, sizeof(err)));
+    assert(st.holders == 0 && "our own claim is not another runner");
+    char pidstr[40];
+    snprintf(pidstr, sizeof(pidstr), "pid %ld holding", (long)getpid());
+    assert(strstr(err, pidstr) && "the listing still names who holds it");
+    assert(!strstr(err, "outside runner's accounting") &&
+           "a holder the same message names is not an outsider");
+    vram_release(first);
+
+    // (b) the sentence's real case is untouched: an empty ledger and a
+    // shortfall the registry genuinely cannot explain
+    uint64_t little = 1 * GB;
+    char err2[1024] = {0};
+    assert(!vram_claim("empty-ledger-test", "/models/big.gguf", 20 * GB, 0,
+                       fixed_free, &little, 0, NULL, NULL, err2, sizeof(err2)));
+    assert(strstr(err2, "outside runner's accounting") &&
+           "an unattributable shortfall must still say so");
+}
+
 // err_cap is the caller's choice, and the module has to survive every value of
 // it. The refusal message was assembled with unguarded `off += snprintf(...)`
 // steps: snprintf returns what it WOULD have written, so a buffer too small
@@ -868,6 +910,7 @@ int main(void) {
     test_unreadable_registry_is_not_truncated();
     test_legacy_record_without_priority_reads_as_zero();
     test_refusal_line_priority_format_is_exact();
+    test_refusal_does_not_blame_an_outsider_it_just_named();
     test_small_error_buffer_is_not_overrun();
     test_yield_flag_lifecycle();
 #ifndef _WIN32

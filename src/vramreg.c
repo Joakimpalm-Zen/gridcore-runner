@@ -281,17 +281,16 @@ static char *claim_rmw(const char *in, size_t in_len, void *ud) {
     uint64_t freeb = c->free_fn ? c->free_fn(c->free_ud) : 0;
     uint64_t avail = freeb > pending ? freeb - pending : 0;
 
-    int holder_count = 0;
     if (c->st) {
         c->st->holders = 0;
         c->st->held_bytes = 0;
         c->st->available = avail;
-    }
-    for (int i = 0; i < n; i++) {
-        if (e[i].state == 'W') continue;    // a waiter holds nothing yet
-        if (e[i].pid == c->pid) continue;   // our own other models
-        holder_count++;
-        if (c->st) { c->st->holders++; c->st->held_bytes += e[i].bytes; }
+        for (int i = 0; i < n; i++) {
+            if (e[i].state == 'W') continue;    // a waiter holds nothing yet
+            if (e[i].pid == c->pid) continue;   // our own other models
+            c->st->holders++;
+            c->st->held_bytes += e[i].bytes;
+        }
     }
 
     // Advisory ordering among --wait-for-vram waiters (see vram_claim's
@@ -356,7 +355,16 @@ static char *claim_rmw(const char *in, size_t in_len, void *ud) {
                           " (%s free, %s claimed but not yet allocated)",
                           have, p);
         }
-        if (holder_count == 0)
+        // Keyed on what the listing below will actually print, NOT on
+        // holder_count. holder_count excludes THIS process's own claims by
+        // design (they are not "another runner"), while the listing prints
+        // every non-waiter entry — so a runner blocked by its own earlier
+        // claim was told the memory was held by something outside runner's
+        // accounting, one line above its own pid being named as holding it.
+        int listed = 0;
+        for (int i = 0; i < n; i++)
+            if (e[i].state != 'W') listed++;
+        if (listed == 0)
             off = err_add(c->err, c->err_cap, off,
                 ".\n  No other runner is registered on this GPU — the memory is "
                 "held by something outside runner's accounting.");
