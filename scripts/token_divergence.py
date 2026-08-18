@@ -9,7 +9,10 @@ reports the logprob gap between the two contenders on each side.
 
 A divergence whose gap is under a few hundredths of a nat is quantisation
 noise around a tie — llama.cpp flips on those itself depending on whether the
-prompt was cached. A divergence at a wide gap is a real arithmetic bug.
+prompt was cached. A divergence at a wide gap is a real arithmetic bug. A
+shared prefix where one engine simply stopped earlier is `length_mismatch`: a
+real divergence with no contending pair to measure, so it is never forgiven as
+a tie.
 
 Both engines are driven through /v1/completions with prompt caching disabled
 so the reference takes the same cold path every time.
@@ -132,11 +135,49 @@ def gap(top, chosen, other):
     return abs(top[chosen] - top[other])
 
 
+def classify(rows, tie_nats):
+    """Split the non-identical rows into near-ties and real divergences.
+
+    A gap is either a measured number or None ("the other engine's pick is not
+    in this engine's top-k", which is the opposite of a tie). `x or 9e9` cannot
+    tell those apart: it promotes a measured gap of exactly 0.0 -- the most
+    tie-like divergence there is, and reachable because logprobs are serialized
+    at %.6f so two contenders within 5e-7 parse to the same float -- into a
+    real arithmetic fault and fails the gate on it.
+
+    A length mismatch is a real divergence with no contending pair to measure,
+    so it is never forgiven as a tie.
+    """
+    def measured(value):
+        return 9e9 if value is None else value
+
+    diverged = [r for r in rows if r["status"] == "diverged"]
+    ties = [r for r in diverged
+            if measured(r["reference_gap_nats"]) <= tie_nats
+            and measured(r["runner_gap_nats"]) <= tie_nats]
+    real = [r for r in rows
+            if r["status"] == "length_mismatch"
+            or (r["status"] == "diverged" and r not in ties)]
+    return ties, real
+
+
 def compare(prompt, runner_url, ref_url, tokens):
     body = {"prompt": prompt, "max_tokens": tokens, "temperature": 0,
             "logprobs": 5, "cache_prompt": False}
     a = normalise(post(f"{runner_url}/v1/completions", dict(body, model="runner")))
     b = normalise(post(f"{ref_url}/v1/completions", body))
+    return score(prompt, a, b)
+
+
+def score(prompt, a, b):
+    """Judge one prompt from the two engines' normalised rows.
+
+    A shared prefix followed by one engine stopping early is NOT identical: the
+    greedy paths did part company, at the position where only one of them still
+    had a token. Scoring it "identical" is the direction that hurts, because
+    the identical-out-of-16 count is what a sensitivity floor is read from, and
+    an earlier EOS under a lossy KV cache is exactly the failure being measured.
+    """
     n = min(len(a), len(b))
     for i in range(n):
         if a[i][0] != b[i][0]:
@@ -150,9 +191,13 @@ def compare(prompt, runner_url, ref_url, tokens):
                 "max_logprob_delta": max(
                     (abs(a[j][2] - b[j][2]) for j in range(i)), default=0.0),
             }
+    delta = max((abs(a[j][2] - b[j][2]) for j in range(n)), default=0.0)
+    if len(a) != len(b):
+        return {"prompt": prompt, "status": "length_mismatch", "position": n,
+                "matched_tokens": n, "runner_tokens": len(a),
+                "reference_tokens": len(b), "max_logprob_delta": delta}
     return {"prompt": prompt, "status": "identical", "matched_tokens": n,
-            "max_logprob_delta": max(
-                (abs(a[j][2] - b[j][2]) for j in range(n)), default=0.0)}
+            "max_logprob_delta": delta}
 
 
 def main():
@@ -196,11 +241,8 @@ def main():
                 p.kill()
 
     identical = [r for r in rows if r["status"] == "identical"]
-    diverged = [r for r in rows if r["status"] == "diverged"]
-    ties = [r for r in diverged
-            if (r["reference_gap_nats"] or 9e9) <= args.tie_nats
-            and (r["runner_gap_nats"] or 9e9) <= args.tie_nats]
-    real = [r for r in diverged if r not in ties]
+    lengths = [r for r in rows if r["status"] == "length_mismatch"]
+    ties, real = classify(rows, args.tie_nats)
     report = {
         "schema_version": "xyntetik.runner.token-divergence.v1",
         "model": args.model,
@@ -210,6 +252,7 @@ def main():
         "totals": {
             "prompts": len(rows),
             "identical": len(identical),
+            "length_mismatch": len(lengths),
             "diverged_at_a_tie": len(ties),
             "diverged_for_real": len(real),
             "max_logprob_delta": max(
