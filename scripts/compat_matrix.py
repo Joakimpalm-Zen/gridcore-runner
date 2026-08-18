@@ -65,6 +65,11 @@ def run_cpu_cuda(runner, model, params, timeout):
     env = dict(os.environ)
     env.update({k: str(v) for k, v in (params.get("pins") or {}).items()})
     cmd = [sys.executable, str(script), str(model),
+           # Forwarded, never left to the sibling's default: cpu_cuda_check.py
+           # falls back to the repo root's ./runner, so a ledger run against a
+           # candidate binary would certify whichever build happens to be
+           # sitting there instead.
+           "--runner", str(runner),
            # 128, not 64: the decided certification length (owner 2026-08-08)
            # and cpu_cuda_check.py's own default. A row that declares nothing
            # must not silently certify at half the contract.
@@ -140,7 +145,10 @@ def run_tool(runner, model, params, timeout):
     if not script or not script.is_file():
         return {"status": "not_executed",
                 "reason": f"tool_matrix_not_available:{matrix}"}
-    cmd = [sys.executable, str(script), "--model", str(model)]
+    # --runner forwarded for the same reason as run_cpu_cuda: agent-torture.py
+    # otherwise resolves one with find_runner() out of the repo root.
+    cmd = [sys.executable, str(script), "--runner", str(runner),
+           "--model", str(model)]
     if params.get("cases"):
         cmd += ["--cases", str(params["cases"])]
     started = time.time()

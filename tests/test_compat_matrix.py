@@ -348,3 +348,46 @@ def test_v1_manifests_still_load(tmp_path):
                       "--out", str(out)])
     assert rc == 0
     assert json.loads(out.read_text())["models"][0]["file_status"] == "pass"
+
+
+# The ledger is a claim about ONE binary. run_cpu_cuda and run_tool shell out
+# to sibling scripts whose --runner defaults to the repo root's ./runner, so a
+# runner argument they do not forward certifies whichever binary happens to be
+# lying there instead of the one under test.
+
+def _captured_run(recorded):
+    class Completed:
+        returncode = 0
+        stdout = "9/9 identical\n"
+        stderr = ""
+
+    def run(cmd, **kwargs):
+        recorded.append(cmd)
+        return Completed()
+    return run
+
+
+def test_cpu_cuda_check_is_run_against_the_binary_under_test(monkeypatch, tmp_path):
+    module = load_module()
+    recorded = []
+    monkeypatch.setattr(module.subprocess, "run", _captured_run(recorded))
+
+    module.run_cpu_cuda(tmp_path / "runner-candidate", tmp_path / "m.gguf",
+                        {"tokens": 128}, 60)
+
+    assert "--runner" in recorded[0]
+    assert recorded[0][recorded[0].index("--runner") + 1] == \
+        str(tmp_path / "runner-candidate")
+
+
+def test_tool_matrix_is_run_against_the_binary_under_test(monkeypatch, tmp_path):
+    module = load_module()
+    recorded = []
+    monkeypatch.setattr(module.subprocess, "run", _captured_run(recorded))
+
+    module.run_tool(tmp_path / "runner-candidate", tmp_path / "m.gguf",
+                    {"scenario_matrix": "agent-torture"}, 60)
+
+    assert "--runner" in recorded[0]
+    assert recorded[0][recorded[0].index("--runner") + 1] == \
+        str(tmp_path / "runner-candidate")
