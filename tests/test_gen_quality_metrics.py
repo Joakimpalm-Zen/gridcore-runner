@@ -141,20 +141,15 @@ def test_script_with_files():
             capture_output=True, text=True
         )
 
-        if result.returncode != 0:
-            print(f"script error: {result.stderr}", file=sys.stderr)
-            return False
+        assert result.returncode == 0, result.stderr
 
         output_file = tmpdir / "out.json"
-        if output_file.exists():
-            output = json.loads(output_file.read_text())
-            assert "per_sample" in output
-            assert "aggregate" in output
-            assert len(output["per_sample"]) == 1
-            assert output["aggregate"]["count"] == 1
-            return True
-
-    return False
+        assert output_file.exists(), result.stderr
+        output = json.loads(output_file.read_text())
+        assert "per_sample" in output
+        assert "aggregate" in output
+        assert len(output["per_sample"]) == 1
+        assert output["aggregate"]["count"] == 1
 
 
 def main():
