@@ -369,6 +369,44 @@ int main(void) {
         printf("ok: Q3_K plan round-trips exactly and preserves unselected bytes\n");
     }
 
+    // A type plan naming a K-quant for a row the K-quant cannot describe.
+    // should_quantize only demands ne[0] % 32 == 0, but Q3_K's super-block is
+    // 256 wide: a 288-wide row has no whole number of Q3_K blocks, so the
+    // writer would emit one block (256 values, 32 dropped) under a header that
+    // still says 288 -- and gguf.c rejects ne[0] % block_size != 0 at load, so
+    // the requant "succeeds" and produces a file nothing can open. Such a
+    // tensor must keep its own type instead.
+    {
+        const char *win = "q_width_in.gguf", *wout = "q_width_out.gguf";
+        const char *plan = "q_width_plan.json";
+        enum { W_N = 288 };                 // 9 * 32, not a multiple of 256
+        static float wide[W_N], narrow[256];
+        for (int i = 0; i < W_N; i++) wide[i] = 0.25f * (float)((i % 8) - 4);
+        for (int i = 0; i < 256; i++) narrow[i] = 0.25f * (float)((i % 8) - 4);
+        tdesc wts[2] = {
+            { "blk.0.ffn_down_exps.weight", {W_N, 1}, 2, wide, W_N },
+            { "blk.1.ffn_down_exps.weight", {256, 1}, 2, narrow, 256 },
+        };
+        write_gguf(win, wts, 2, 0);
+        FILE *pf = fopen(plan, "wb");
+        assert(pf);
+        const char plan_json[] =
+            "{\"default\":\"keep\",\"rules\":[{\"match\":\"_exps.weight\",\"type\":\"q3_k\"}]}";
+        assert(fwrite(plan_json, 1, sizeof(plan_json) - 1, pf) == sizeof(plan_json) - 1);
+        fclose(pf);
+        assert(quantize_gguf_plan(win, wout, T_KEEP, NULL, plan) == 0);
+        gguf_file g;
+        assert(gguf_open(&g, wout));        // the whole point: it must load
+        gguf_tensor *w288 = gguf_find_tensor(&g, "blk.0.ffn_down_exps.weight");
+        gguf_tensor *w256 = gguf_find_tensor(&g, "blk.1.ffn_down_exps.weight");
+        assert(w288 && w288->type == T_F32);
+        assert(memcmp(w288->data, wide, sizeof(wide)) == 0);
+        assert(w256 && w256->type == T_Q3_K);   // the representable row still converts
+        gguf_close(&g);
+        remove(win); remove(wout); remove(plan);
+        printf("ok: a row too narrow for the plan's block keeps its own type\n");
+    }
+
     // RNR-015: in-place requant must not truncate its own input
     const char *inplace = "q_inplace.gguf";
     cp(in, inplace);

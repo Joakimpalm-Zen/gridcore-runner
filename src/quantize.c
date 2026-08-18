@@ -612,6 +612,16 @@ static bool should_quantize(const gguf_tensor *t) {
     return true;
 }
 
+// A quantized row must divide into a whole number of blocks. should_quantize
+// only clears ne[0] % 32, which is the block width of q8_0/q4_0 but not of the
+// 256-wide K-quants a --type-plan can name: writing a 288-wide row as Q3_K
+// emits one block (256 values, 32 silently dropped) under a header that still
+// says 288, and gguf.c refuses ne[0] % block_size != 0 at open — so the requant
+// would report success and produce a file nothing can load.
+static bool type_fits_row(int type, int64_t n) {
+    return n % ggml_block_size(type) == 0;
+}
+
 static bool quantize_install_injected(void) {
     const char *inject = getenv("RUNNER_QUANTIZE_INSTALL_FAIL");
     return inject && *inject && strcmp(inject, "0");
@@ -811,17 +821,22 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
     // result is visible in the log, not just in a header field.
     int *out_type = malloc(sizeof(int) * g.n_tensors);
     if (g.n_tensors > 0 && !out_type) w.ok = false;
+    uint64_t declined_width = 0;
     for (uint64_t i = 0; w.ok && i < g.n_tensors; i++) {
         gguf_tensor *t = &g.tensors[i];
         if (type_plan_path) {
             // The plan decides per tensor. T_KEEP leaves the tensor byte for
-            // byte; anything else goes through the same should_quantize and
-            // never-grow guards as a whole-file target, so a plan cannot make
-            // a tensor bigger or quantize something that must stay f32.
+            // byte; anything else goes through the same should_quantize,
+            // block-width and never-grow guards as a whole-file target, so a
+            // plan cannot make a tensor bigger, quantize something that must
+            // stay f32, or write a row the target type cannot describe.
             int want = type_plan_pick(&tplan, t->name);
             if (want == T_KEEP || !should_quantize(t)) {
                 out_type[i] = should_quantize(t) ? t->type
                             : (t->type == T_F16 ? T_F16 : T_F32);
+            } else if (!type_fits_row(want, t->ne[0])) {
+                out_type[i] = t->type;
+                declined_width++;
             } else if (ggml_row_size(t->type, t->ne[0]) <=
                        ggml_row_size(want, t->ne[0])) {
                 out_type[i] = t->type;   // never grow
@@ -835,7 +850,11 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
             bool filtered = only && *only && !strstr(t->name, only);
             if (filtered)
                 out_type[i] = t->type;
-            else
+            else if (should_quantize(t) && !type_fits_row(target, t->ne[0])) {
+                out_type[i] = t->type;
+                filtered = true;          // and skip the never-grow rule below
+                declined_width++;
+            } else
                 out_type[i] = should_quantize(t) ? target
                             : (t->type == T_F16 ? T_F16 : T_F32);
             // never grow a tensor that is already smaller than the target —
@@ -847,6 +866,10 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
                 out_type[i] = t->type;
         }
     }
+    if (w.ok && declined_width)
+        fprintf(stderr, "quantize: %llu tensor(s) kept their own type — the "
+                "requested type's block does not divide their row width\n",
+                (unsigned long long)declined_width);
     uint32_t ftype_out = 0;
     if (w.ok && g.n_tensors > 0) {
         // dominant non-f32 output type -> its MOSTLY_* code. The K-quant

@@ -192,7 +192,8 @@ Repack weight matrices to `q8_0`, `q4_0`, or `f16`:
 ```
 
 Norms, biases, and rope factors stay f32; tensors already smaller than the
-target are retained. Metadata is copied.
+target are retained, as are rows the target type cannot describe (`q3_k` needs
+a row width divisible by 256, `q8_0`/`q4_0` by 32). Metadata is copied.
 
 A `q4_0` repack is **lossless where the source is already on the q4_0 grid**,
 which is the case for quantization-aware-trained checkpoints: every value is
