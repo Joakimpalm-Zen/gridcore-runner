@@ -609,8 +609,12 @@ typedef struct {
     // construction instead of by review.
     const char *output_json; size_t output_n;
     const char *output_text; size_t output_text_n;
-    const char *call_name;   // non-NULL when this turn was a tool call
-    const char *call_args;
+    // The turn's tool calls, in the chat dialect's canonical shape (a J_ARR of
+    // {id,type,function:{name,arguments}}). One extraction, three renderings:
+    // the chat body splices the same list into `tool_calls`, and a turn that
+    // called several tools must not lose the extras on the way to a surface
+    // whose vocabulary happens to spell them differently.
+    jv         *calls;
     const char *text;   size_t text_n;
     const char *reason; size_t reason_n;
     bool        with_usage;
@@ -684,7 +688,32 @@ static void resp_echo(sbuf *r, jv *req, const char *key, const char *dflt) {
     else jv_dump(v, r);
 }
 
+// The chat dialect's `tool_calls` array is where a turn's calls are extracted
+// once; the Responses and Anthropic bodies render that same list in their own
+// vocabulary. `tc` holds the entries comma-separated, because that is how the
+// chat body splices them into its array -- so the parse must be over the ARRAY
+// they form. Parsing `tc` on its own stops after the first entry and json_parse
+// then refuses the rest as trailing garbage, which returned NULL for every
+// multi-call turn and dropped the whole thing.
+static jv *tool_calls_array(const sbuf *tc, int n_tc) {
+    if (n_tc <= 0 || !tc->s || tc->n == 0) return NULL;
+    sbuf a = {0};
+    sb_lit(&a, "[");
+    sb_put(&a, tc->s, tc->n);
+    sb_lit(&a, "]");
+    jv *v = a.failed ? NULL : json_parse(a.s, a.n);
+    free(a.s);
+    if (v && v->type != J_ARR) { jv_free(v); v = NULL; }
+    return v;
+}
+
+static const char *call_field(const jv *calls, int i, const char *key,
+                              const char *dflt) {
+    return jv_str(jv_get(jv_get(calls->items[i], "function"), key), dflt);
+}
+
 static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
+    int n_calls = d->calls ? d->calls->n : 0;
     sb_fmt(r, "{\"id\":\"%s\",\"object\":\"response\",\"created_at\":%ld,"
               "\"status\":\"%s\",\"error\":null,\"incomplete_details\":",
            g->id, g->created, d->status);
@@ -705,18 +734,22 @@ static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
             sb_lit(r, "\"}]}");
             idx++;
         }
-        if (d->call_name) {
-            // a tool call replaces the assistant message rather than
-            // accompanying it, matching finish_reason "tool_calls"
-            if (idx) sb_lit(r, ",");
-            sb_fmt(r, "{\"id\":\"fc_%d\",\"type\":\"function_call\","
-                      "\"status\":\"completed\",\"call_id\":\"call_0\","
-                      "\"name\":\"", idx);
-            sb_esc(r, d->call_name, strlen(d->call_name));
-            sb_lit(r, "\",\"arguments\":\"");
-            sb_esc(r, d->call_args ? d->call_args : "{}",
-                   strlen(d->call_args ? d->call_args : "{}"));
-            sb_lit(r, "\"}");
+        if (n_calls) {
+            // calls replace the assistant message rather than accompanying it,
+            // matching finish_reason "tool_calls"
+            for (int i = 0; i < n_calls; i++) {
+                const char *name = call_field(d->calls, i, "name", "");
+                const char *args = call_field(d->calls, i, "arguments", "{}");
+                if (idx) sb_lit(r, ",");
+                sb_fmt(r, "{\"id\":\"fc_%d\",\"type\":\"function_call\","
+                          "\"status\":\"completed\",\"call_id\":\"call_%d\","
+                          "\"name\":\"", idx, i);
+                sb_esc(r, name, strlen(name));
+                sb_lit(r, "\",\"arguments\":\"");
+                sb_esc(r, args, strlen(args));
+                sb_lit(r, "\"}");
+                idx++;
+            }
         } else {
             if (idx) sb_lit(r, ",");
             sb_fmt(r, "{\"id\":\"msg_%d\",\"type\":\"message\","
@@ -732,7 +765,7 @@ static void responses_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
     // text only, empty when the turn produced a call instead
     if (d->output_json) sb_esc(r, d->output_text ? d->output_text : "",
                                d->output_text_n);
-    else if (d->with_output && !d->call_name)
+    else if (d->with_output && !n_calls)
         sb_esc(r, d->text ? d->text : "", d->text_n);
     sb_lit(r, "\"");
     // request echo: a Responses client reads these back off the object rather
@@ -965,6 +998,7 @@ static int anth_delta(gen_ctx *g, const char *kind, const char *bytes, int n) {
 // for the same reason the Responses surface hands its items over verbatim:
 // the streamed and buffered documents stay identical by construction.
 static void anth_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
+    int n_calls = d->calls ? d->calls->n : 0;
     sb_fmt(r, "{\"id\":\"%s\",\"type\":\"message\",\"role\":\"assistant\","
               "\"model\":\"", g->id);
     sb_esc(r, SV.model_name, strlen(SV.model_name));
@@ -979,26 +1013,29 @@ static void anth_body(sbuf *r, gen_ctx *g, const resp_doc *d) {
             sb_lit(r, "\",\"signature\":\"\"}");
             idx++;
         }
-        if (d->call_name) {
-            if (idx++) sb_lit(r, ",");
-            sb_fmt(r, "{\"type\":\"tool_use\",\"id\":\"toolu_%d\",\"name\":\"",
-                   g->tool_index);
-            sb_esc(r, d->call_name, strlen(d->call_name));
-            // Anthropic carries the arguments as a JSON *object*, where OpenAI
-            // carries the same document as a string. That difference is
-            // load-bearing: a string can hold anything, an inlined object
-            // cannot. Under the strict envelope the document is guaranteed to
-            // parse, but a call recovered from free text is only
-            // brace-matched, so it can be balanced and still invalid —
-            // inlining that verbatim would emit a body no client can read.
-            // Re-dumping through the parser is what makes this total.
-            sb_lit(r, "\",\"input\":");
-            const char *args = d->call_args ? d->call_args : "{}";
-            jv *parsed = json_parse(args, strlen(args));
-            if (parsed && parsed->type == J_OBJ) jv_dump(parsed, r);
-            else                                 sb_lit(r, "{}");
-            jv_free(parsed);
-            sb_lit(r, "}");
+        if (n_calls) {
+            for (int i = 0; i < n_calls; i++) {
+                const char *name = call_field(d->calls, i, "name", "");
+                const char *args = call_field(d->calls, i, "arguments", "{}");
+                if (idx++) sb_lit(r, ",");
+                sb_fmt(r, "{\"type\":\"tool_use\",\"id\":\"toolu_%d\","
+                          "\"name\":\"", i);
+                sb_esc(r, name, strlen(name));
+                // Anthropic carries the arguments as a JSON *object*, where
+                // OpenAI carries the same document as a string. That difference
+                // is load-bearing: a string can hold anything, an inlined
+                // object cannot. Under the strict envelope the document is
+                // guaranteed to parse, but a call recovered from free text is
+                // only brace-matched, so it can be balanced and still invalid —
+                // inlining that verbatim would emit a body no client can read.
+                // Re-dumping through the parser is what makes this total.
+                sb_lit(r, "\",\"input\":");
+                jv *parsed = json_parse(args, strlen(args));
+                if (parsed && parsed->type == J_OBJ) jv_dump(parsed, r);
+                else                                 sb_lit(r, "{}");
+                jv_free(parsed);
+                sb_lit(r, "}");
+            }
         } else if (d->text_n || !idx) {
             // an empty text block is still emitted when it is the only thing
             // the turn produced: content[] must never be empty
@@ -2126,16 +2163,15 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                 goto done;
             }
             // Same canonical mapping the Responses branch below uses: the
-            // chat dialect's tool_calls item is where a call is extracted
-            // once, and each surface only renders it in its own vocabulary.
-            jv *call = n_tc ? json_parse(tc.s, tc.n) : NULL;
-            jv *fn = jv_get(call, "function");
+            // chat dialect's tool_calls array is where a turn's calls are
+            // extracted once, and each surface only renders them in its own
+            // vocabulary.
+            jv *call = tool_calls_array(&tc, n_tc);
             resp_doc d = { .with_output = true,
                            .stop_reason = anth_stop_reason(finish,
                                                            g.stop_hit != NULL),
                            .stop_seq = g.stop_hit,
-                           .call_name = jv_str(jv_get(fn, "name"), NULL),
-                           .call_args = jv_str(jv_get(fn, "arguments"), "{}"),
+                           .calls = call,
                            .text = g.out.s, .text_n = g.out.n,
                            .reason = g.reason.s, .reason_n = g.reason.n,
                            .with_usage = true,
@@ -2154,11 +2190,10 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
             goto done;
         }
         if (api == API_RESPONSES) {
-            // The chat dialect's tool_calls item is the canonical mapping, so
-            // the Responses item is derived from it rather than re-extracted
+            // The chat dialect's tool_calls array is the canonical mapping, so
+            // the Responses items are derived from it rather than re-extracted
             // from the envelope: one mapping, two renderings.
-            jv *call = n_tc ? json_parse(tc.s, tc.n) : NULL;
-            jv *fn = jv_get(call, "function");
+            jv *call = tool_calls_array(&tc, n_tc);
             bool cut    = strcmp(finish, "length") == 0;
             // the streamed branch above reports the same fault the same way:
             // a turn whose document could not be mapped did not complete, and
@@ -2170,8 +2205,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            .incomplete = failed ? "envelope_unmapped"
                                        : cut   ? "max_output_tokens" : NULL,
                            .with_output = true,
-                           .call_name = jv_str(jv_get(fn, "name"), NULL),
-                           .call_args = jv_str(jv_get(fn, "arguments"), "{}"),
+                           .calls = call,
                            .text = g.out.s, .text_n = g.out.n,
                            .reason = g.reason.s, .reason_n = g.reason.n,
                            .with_usage = true,

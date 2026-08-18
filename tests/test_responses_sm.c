@@ -586,8 +586,77 @@ static void test_unmappable_envelope_is_not_served_as_content(void) {
     jv_free(tools);
 }
 
+// A turn can call SEVERAL tools. The chat dialect splices them into one
+// `tool_calls` array and tool_calls_parse emits one entry per call it finds in
+// the model's output, so a two-call turn is ordinary traffic rather than an
+// exotic mode — and the Responses and Anthropic bodies render that SAME list in
+// their own vocabulary.
+//
+// Deriving it from a parse of the comma-separated entries alone lost the whole
+// turn: json_parse refuses trailing garbage, so anything past the first entry
+// made it return NULL, and both surfaces then served a turn with a
+// tool_calls/tool_use terminal reason and not one call in it — the client is
+// told a tool was called and given nothing to execute.
+static void test_every_tool_call_reaches_the_typed_surfaces(void) {
+    static const char TWO[] =
+        "{\"id\":\"call_0\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}},"
+        "{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"get_time\",\"arguments\":\"{\\\"tz\\\":\\\"UTC\\\"}\"}}";
+    sbuf tc = {0};
+    sb_put(&tc, TWO, sizeof(TWO) - 1);
+    jv *calls = tool_calls_array(&tc, 2);
+    ck(calls && calls->type == J_ARR && calls->n == 2,
+       "both calls of a two-call turn are extracted");
+
+    SV.model_name = "test-multi-call";
+    gen_ctx g;
+    memset(&g, 0, sizeof(g));
+    snprintf(g.id, sizeof(g.id), "resp_multi");
+    resp_doc d = { .status = "completed", .with_output = true, .calls = calls };
+
+    sbuf r = {0};
+    responses_body(&r, &g, &d);
+    ck(r.s && strstr(r.s, "\"name\":\"get_weather\"") &&
+       strstr(r.s, "\"name\":\"get_time\""),
+       "a Responses body carries every function_call item");
+    ck(r.s && strstr(r.s, "\"call_id\":\"call_1\""),
+       "and the second call keeps its own call_id");
+    ck(r.s && !strstr(r.s, "\"type\":\"message\""),
+       "with no assistant message invented alongside them");
+    free(r.s);
+
+    sbuf a = {0};
+    anth_body(&a, &g, &d);
+    ck(a.s && strstr(a.s, "\"name\":\"get_weather\"") &&
+       strstr(a.s, "\"name\":\"get_time\""),
+       "an Anthropic body carries every tool_use block");
+    ck(a.s && strstr(a.s, "\"id\":\"toolu_1\""),
+       "and the second block keeps its own id");
+    ck(a.s && strstr(a.s, "\"input\":{\"city\":\"Oslo\"}"),
+       "arguments are re-dumped as the object this surface carries");
+    free(a.s);
+
+    // a one-call turn is unchanged: the ids it always emitted are index 0
+    jv_free(calls);
+    tc.n = 0;
+    sb_put(&tc, TWO, (size_t)(strstr(TWO, "},{") - TWO) + 1);
+    calls = tool_calls_array(&tc, 1);
+    ck(calls && calls->n == 1, "a one-call turn still extracts one call");
+    d.calls = calls;
+    r = (sbuf){0};
+    responses_body(&r, &g, &d);
+    ck(r.s && strstr(r.s, "\"id\":\"fc_0\"") &&
+       strstr(r.s, "\"call_id\":\"call_0\""),
+       "a single function_call keeps the ids it always had");
+    free(r.s);
+    jv_free(calls);
+    free(tc.s);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) g_model_path = argv[1];
+    test_every_tool_call_reaches_the_typed_surfaces();
     test_utf8_tail_is_held_until_the_character_completes();
     test_message_item_order();
     test_event_names_agree();
