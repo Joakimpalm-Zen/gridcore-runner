@@ -28,9 +28,14 @@ typedef struct {
     hmap     vocab;         // token string -> id
     hmap     merges;        // "left right" -> rank (BPE)
     char    *merges_buf;    // owned storage for merge keys
-    // special (control/user-defined) tokens, sorted by length desc
+    // Special (control/user-defined) tokens, grouped by first byte: group b is
+    // special_ids[sb_off[b] .. sb_off[b+1]), and within a group they stay in
+    // length-descending order so the longest match still wins. tok_encode
+    // probes at every byte offset, so the grouping is what keeps that scan off
+    // the whole list (gemma-3 ships 6,414 of these).
     int     *special_ids;
     int      n_special;
+    int      sb_off[257];
     int      b2u[256];      // BPE byte -> codepoint
     int      u2b[512];      // BPE codepoint -> byte (-1 = none)
     // Set by an encode helper when it drops a text segment because a temporary

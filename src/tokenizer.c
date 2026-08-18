@@ -115,6 +115,30 @@ static void sort_specials(tokenizer *t) {
     }
 }
 
+// Regroup the sorted special list by first byte, in place of an n_vocab-sized
+// array that tok_encode had to walk end to end at EVERY input byte. A match
+// requires all of a token's bytes to be equal, so a candidate whose first byte
+// differs could never have matched: the grouping removes work, not candidates,
+// and a counting sort keeps each group in the length-descending order that
+// decides which of several matches wins.
+static bool bucket_specials(tokenizer *t) {
+    int *out = malloc(sizeof(int) * (size_t)(t->n_special > 0 ? t->n_special : 1));
+    if (!out) return false;
+    int pos[256];
+    memset(t->sb_off, 0, sizeof(t->sb_off));
+    for (int i = 0; i < t->n_special; i++)
+        t->sb_off[(uint8_t)t->tokens[t->special_ids[i]].s[0] + 1]++;
+    for (int b = 0; b < 256; b++) {
+        t->sb_off[b + 1] += t->sb_off[b];
+        pos[b] = t->sb_off[b];
+    }
+    for (int i = 0; i < t->n_special; i++)
+        out[pos[(uint8_t)t->tokens[t->special_ids[i]].s[0]]++] = t->special_ids[i];
+    free(t->special_ids);
+    t->special_ids = out;
+    return true;
+}
+
 // All-zero scores carry no ordering, so the merge loop in spm_encode would
 // just take the leftmost candidate every round.
 static bool spm_scores_degenerate(const tokenizer *t) {
@@ -261,6 +285,7 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
             t->special_ids[t->n_special++] = i;
     }
     sort_specials(t);
+    if (!bucket_specials(t)) return false;
 
     if (t->model == TOK_BPE || t->model == TOK_BPE_SPM) {
         // GPT-2 byte <-> unicode mapping (unused by BPE_SPM, harmless)
@@ -1161,7 +1186,8 @@ int tok_encode(tokenizer *t, const char *text, int32_t *out, int cap,
     for (size_t i = 0; i < n; ) {
         int matched = -1;
         if (parse_special) {
-            for (int s = 0; s < t->n_special; s++) {
+            int b0 = (uint8_t)text[i];
+            for (int s = t->sb_off[b0]; s < t->sb_off[b0 + 1]; s++) {
                 gg_str *tok = &t->tokens[t->special_ids[s]];
                 if (tok->n <= n - i && memcmp(text + i, tok->s, tok->n) == 0) {
                     matched = t->special_ids[s];

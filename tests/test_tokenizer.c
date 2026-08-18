@@ -294,7 +294,132 @@ static void run_bpe_spm_fixture(const char *path) {
     gguf_close(&g);
 }
 
+// ------------------------------------------------- special-token matching
+//
+// tok_encode probes for a special token at every byte offset of the input, and
+// the committed vocabulary fixtures carry two or three specials that all begin
+// with '<' — so nothing here covered a special that starts with a tab, a
+// space, a letter, or one special that is a prefix of another. Real vocabs do:
+// gemma-3 ships 6,414 (HTML tags, <unusedNNN>, and whitespace runs of every
+// length from 1 to 31, which begin with ' ', '\t' and '\n').
+//
+// The vocabulary is assembled here rather than committed, because what is
+// being checked is the matching rule, not any real model's pieces.
+typedef struct { unsigned char *b; size_t n, cap; } gbuf;
+static void gput(gbuf *w, const void *p, size_t n) {
+    if (w->n + n > w->cap) {
+        w->cap = (w->n + n) * 2 + 64;
+        w->b = realloc(w->b, w->cap);
+        assert(w->b);
+    }
+    memcpy(w->b + w->n, p, n);
+    w->n += n;
+}
+static void gu32(gbuf *w, uint32_t v) { gput(w, &v, 4); }
+static void gu64(gbuf *w, uint64_t v) { gput(w, &v, 8); }
+static void gstr(gbuf *w, const char *s) { gu64(w, strlen(s)); gput(w, s, strlen(s)); }
+static void gkey(gbuf *w, const char *k, uint32_t type) { gstr(w, k); gu32(w, type); }
+
+// Specials spanning six different first bytes, plus "ABC"/"ABCD" sharing one:
+// the longer must win, which is the rule the ordering inside a first-byte
+// group exists to preserve.
+static const char *const SPECIALS[] = {
+    "<|im_start|>", "<|im_end|>", "[INST]", "\t\t", "\n\n", "   ", "ABC", "ABCD",
+};
+#define N_SPECIALS ((int)(sizeof(SPECIALS) / sizeof(*SPECIALS)))
+static const char *const PIECES[] = { "h", "o", "A", "B", "C", "D" };
+#define N_PIECES ((int)(sizeof(PIECES) / sizeof(*PIECES)))
+
+static void write_special_fixture(const char *path) {
+    gbuf kv = {0};
+    uint64_t nkv = 0;
+    gkey(&kv, "general.architecture", GGUF_T_STR); gstr(&kv, "llama"); nkv++;
+    gkey(&kv, "tokenizer.ggml.model", GGUF_T_STR); gstr(&kv, "llama"); nkv++;
+
+    int n_tok = 1 + N_PIECES + N_SPECIALS;
+    gkey(&kv, "tokenizer.ggml.tokens", GGUF_T_ARR);
+    gu32(&kv, GGUF_T_STR); gu64(&kv, (uint64_t)n_tok);
+    gstr(&kv, "<unk>");
+    for (int i = 0; i < N_PIECES; i++) gstr(&kv, PIECES[i]);
+    for (int i = 0; i < N_SPECIALS; i++) gstr(&kv, SPECIALS[i]);
+    nkv++;
+
+    gkey(&kv, "tokenizer.ggml.token_type", GGUF_T_ARR);
+    gu32(&kv, GGUF_T_I32); gu64(&kv, (uint64_t)n_tok);
+    gu32(&kv, 2);                                            // <unk>
+    for (int i = 0; i < N_PIECES; i++) gu32(&kv, 1);         // normal
+    for (int i = 0; i < N_SPECIALS; i++) gu32(&kv, 4);       // user-defined
+    nkv++;
+
+    gkey(&kv, "tokenizer.ggml.scores", GGUF_T_ARR);
+    gu32(&kv, GGUF_T_F32); gu64(&kv, (uint64_t)n_tok);
+    for (int i = 0; i < n_tok; i++) { float z = 0.0f; gput(&kv, &z, 4); }
+    nkv++;
+
+    gkey(&kv, "tokenizer.ggml.unknown_token_id", GGUF_T_U32); gu32(&kv, 0); nkv++;
+    gkey(&kv, "tokenizer.ggml.bos_token_id", GGUF_T_U32); gu32(&kv, 0); nkv++;
+    gkey(&kv, "tokenizer.ggml.eos_token_id", GGUF_T_U32); gu32(&kv, 0); nkv++;
+    gkey(&kv, "tokenizer.ggml.add_bos_token", GGUF_T_BOOL);
+    { unsigned char f = 0; gput(&kv, &f, 1); } nkv++;
+    gkey(&kv, "tokenizer.ggml.add_space_prefix", GGUF_T_BOOL);
+    { unsigned char f = 0; gput(&kv, &f, 1); } nkv++;
+
+    gbuf w = {0};
+    gu32(&w, 0x46554747); gu32(&w, 3); gu64(&w, 0); gu64(&w, nkv);
+    gput(&w, kv.b, kv.n);
+    while (w.n % 32) { unsigned char z = 0; gput(&w, &z, 1); }
+    FILE *f = fopen(path, "wb");
+    assert(f);
+    assert(fwrite(w.b, 1, w.n, f) == w.n);
+    fclose(f);
+    free(kv.b); free(w.b);
+}
+
+static void test_special_matching_across_first_bytes(void) {
+    const char *path = "tok-specials.gguf";
+    write_special_fixture(path);
+    current = path;
+    gguf_file g;
+    assert(gguf_open(&g, path));
+    tokenizer t;
+    assert(tokenizer_init(&t, &g));
+    assert(t.n_special == N_SPECIALS);
+
+    int32_t ids[32];
+    for (int i = 0; i < N_SPECIALS; i++) {
+        int want = tok_find(&t, SPECIALS[i]);
+        assert(want >= 0);
+        // alone
+        int n = tok_encode(&t, SPECIALS[i], ids, 32, false, true);
+        if (n != 1 || ids[0] != want) {
+            fprintf(stderr, "%s: encode(\"%s\") gave %d ids, first %d, want 1 x %d\n",
+                    current, SPECIALS[i], n, n > 0 ? ids[0] : -1, want);
+            abort();
+        }
+        // between ordinary pieces, and twice in a row
+        char text[64];
+        snprintf(text, sizeof(text), "h%s%so", SPECIALS[i], SPECIALS[i]);
+        n = tok_encode(&t, text, ids, 32, false, true);
+        assert(n == 4);
+        assert(ids[0] == tok_find(&t, "h") && ids[1] == want && ids[2] == want &&
+               ids[3] == tok_find(&t, "o"));
+    }
+
+    // "ABCD" must beat "ABC": both live in the same first-byte group, and the
+    // longest match wins wherever the group is scanned from.
+    int n = tok_encode(&t, "ABCD", ids, 32, false, true);
+    assert(n == 1 && ids[0] == tok_find(&t, "ABCD"));
+    n = tok_encode(&t, "ABCB", ids, 32, false, true);
+    assert(n == 2 && ids[0] == tok_find(&t, "ABC") && ids[1] == tok_find(&t, "B"));
+
+    tokenizer_free(&t);
+    gguf_close(&g);
+    remove(path);
+}
+
 int main(void) {
+    test_special_matching_across_first_bytes();
+
     for (size_t i = 0; i < sizeof(fixtures) / sizeof(*fixtures); i++) {
         current = fixtures[i];
 
