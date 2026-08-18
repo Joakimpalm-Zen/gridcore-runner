@@ -50,6 +50,8 @@ test-moe-tol
 test-moe-tol.exe
 test-moe-fixture.*.gguf
 test-shared-asan-bin
+test-swap-race-bin
+test-swap-race-bin.dSYM/
 test-batch
 test-batch.exe
 test-kv-tol

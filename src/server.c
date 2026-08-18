@@ -671,6 +671,21 @@ static void send_prefix_cache(sock_t fd) {
 
 static void send_capabilities(sock_t fd) {
     sbuf r = {0};
+    // Unlike /health and /v1/models, this route reports on the RESIDENT MODEL
+    // -- its agent profile, its MTP declaration, the sampling preset resolved
+    // for it -- and every one of those is freed by unload_resident() the moment
+    // a request names a different model, /unload arrives, or --ttl expires.
+    // Answering it from the accept thread with nothing held is a read of freed
+    // memory: ASan catches it inside a second of one client alternating models
+    // while another polls here (tests/test_swap_race.c).
+    //
+    // swap_mu is the lock those three writers already take, and it is by design
+    // never held across a load (swap_to drops it) or across generation, so the
+    // accept loop cannot be parked behind inference here. It exists only once
+    // the registry is joined, which is also the only configuration in which a
+    // model can go away under a request.
+    bool guarded = SV.n_reg > 0;
+    if (guarded) pthread_mutex_lock(&SV.swap_mu);
     int res = resident_load();
     sb_lit(&r, "{\"object\":\"runner.capabilities\",\"swap\":");
     sb_lit(&r, SV.n_reg > 0 && !SV.single ? "true" : "false");
@@ -751,6 +766,10 @@ static void send_capabilities(sock_t fd) {
                "\"forkable_prefixes\":true,"
                "\"repeat_penalty\":true,"
                "\"family_sampling_presets\":true}}");
+    // The lock ends here and not one line later: send_built() is a blocking
+    // socket write bounded only by SO_SNDTIMEO, and holding swap_mu across it
+    // would let one slow reader stall every swap and /unload (RNS-1).
+    if (guarded) pthread_mutex_unlock(&SV.swap_mu);
     send_built(fd, &r);
     free(r.s);
 }

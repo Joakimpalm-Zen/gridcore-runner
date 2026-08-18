@@ -446,6 +446,12 @@ jobs:
             ASAN_OPTIONS=detect_leaks=1 ./runner-debug -m test.gguf \
               -p "hello" -n 8 --temp 0 --gpu off
           fi
+      - name: sanitized server race gate
+        # The CLI run above never starts a server, so nothing sanitized ever
+        # exercised the accept thread against a slot thread. This one does:
+        # /v1/capabilities is answered on the accept loop while another client
+        # swaps the model out from under it.
+        run: make test-swap-race
 
   # libFuzzer harnesses for the hand-written parsers that eat untrusted input.
   # Bounded by design: this is a regression gate that has to finish in a couple

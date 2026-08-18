@@ -633,6 +633,23 @@ TEST_RESTART_SRC = tests/test_server_restart.c src/gguf.c src/compat.c \
 $(TEST_RESTART): $(TEST_RESTART_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_RESTART_SRC) -o $@ $(LDFLAGS)
 
+# /v1/capabilities is answered on the accept thread and dereferences the
+# resident model; a slot thread frees that model on any swap. Only ASan makes
+# the read of freed bytes loud, so this gate is BUILT sanitized rather than
+# added to `make test` -- same shape as test-shared-asan above. Kept out of the
+# default run because it starts a real server and drives it for a few seconds.
+TEST_SWAP_RACE_SRC = tests/test_swap_race.c src/gguf.c src/compat.c \
+                     src/quants.c src/tokenizer.c src/model.c src/sample.c \
+                     src/jsonmode.c src/schema.c src/json.c src/engine.c \
+                     src/template.c src/vramreg.c src/http.c src/registry.c \
+                     src/scheduler.c src/completion.c src/api_responses.c \
+                     src/api_anthropic.c src/server.c $(GPU_SRC)
+test-swap-race: $(TEST_SWAP_RACE_SRC) $(HDR) test.gguf
+	$(CC) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+	    -fno-fast-math -std=gnu11 -Wall -I src $(TEST_SWAP_RACE_SRC) \
+	    -o test-swap-race-bin $(LDFLAGS)
+	ASAN_OPTIONS=detect_leaks=0 ./test-swap-race-bin test.gguf
+
 # the weight-residency platform layer: mlock, mincore, major faults, available
 # RAM. compat.c only -- these are platform shims, not engine code.
 TEST_RESIDENCY = $(TEST_BATCH:test-batch%=test-residency%)
@@ -1294,7 +1311,7 @@ clean:
 	      $(TEST_FILE_ID) test-file-identity.tmp \
 	      $(TEST_BUDGET) $(TEST_ATTRIB) $(TEST_STOP_CONSTRAINT) \
 	      $(TMPL_CONF_RENDER) \
-	      $(TEST_SPLIT_GUARD) split-guard.out
+	      $(TEST_SPLIT_GUARD) split-guard.out test-swap-race-bin
 	rm -rf test-attn
 	rm -rf .build
 	rm -f shared-noid.out
@@ -1350,4 +1367,4 @@ test-makefile-sane:
 
 
 .PHONY: template-conformance template-conformance-refresh template-conformance-baseline template-conformance-harmony-oracle
-.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard
+.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
