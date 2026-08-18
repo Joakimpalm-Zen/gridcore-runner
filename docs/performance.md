@@ -355,10 +355,29 @@ i.e. all five now sit at or past what the compiler managed with fast-math, and
 what remains is the scalar block decode. Decode tok/s, `--gpu off`:
 tinyllama Q2_K 2.80 -> **6.5**, SmolLM2-135M Q2_K 53.5 -> **77.7**.
 
-Left on the table on aarch64: NEON block dequant for Q2_K, Q3_K, Q4_1, Q5_0
-and Q5_1, worth roughly the residual above. Their per-value arithmetic is
-exact, so those decode kernels can be bit-identical; the dot they feed
-reassociates either way.
+### And the residual: Q2_K / Q3_K block decode
+
+With the sum vectorized, what was left in those five rows is the scalar block
+decode. Q2_K and Q3_K are the two worth a kernel — they are the sub-4-bit
+formats this project actually ships — and both pack four 2-bit planes per byte,
+so the plane shift is an immediate and the loop unrolls into four macro
+expansions. ns per 4096-element `vec_dot` row:
+
+| | serial sum | + vectorized sum | + NEON decode | `-ffast-math` ceiling |
+|---|---:|---:|---:|---:|
+| Q2_K | 4963 | 1647 | **1013** | 1674 |
+| Q3_K | 5610 | 2150 | **672** | 2182 |
+
+Decode tok/s, `--gpu off`, across the three passes:
+
+| model | start | + vectorized sum | + NEON decode |
+|---|---:|---:|---:|
+| tinyllama Q2_K | 2.80 | 6.8 | **19.0** |
+| t360 Q2_K | — | 37.3 | **52.2** |
+| SmolLM2-135M Q2_K | 53.5 | 77.9 | **98.5** |
+
+Left on the table on aarch64: NEON block dequant for Q4_1, Q5_0 and Q5_1 —
+legacy formats no shelf model uses, which is why they are last.
 
 ## The levers that remain (bigger, and deliberately not rushed)
 

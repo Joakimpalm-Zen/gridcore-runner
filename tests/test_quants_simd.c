@@ -3,7 +3,7 @@
 // vec_dot dispatches to AVX2 or NEON kernels depending on the build; this
 // test checks every supported format against a double-precision dot over
 // dequantized weights. For the formats whose *block dequant* also has a SIMD
-// path (Q4_0, Q8_0, Q4_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4), the reference decode is
+// path (Q4_0, Q8_0, Q2_K, Q3_K, Q4_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4), the reference decode is
 // reimplemented here from the format spec so the test does not trust the code
 // under test.
 // q8_quant_row must be byte-identical to the scalar definition on every
@@ -257,6 +257,53 @@ static void ref_dq_mxfp4(const block_mxfp4 *b, double *y) {
     }
 }
 
+static void ref_dq_q2_K(const block_q2_K *b, double *y) {
+    double d = f16_to_f32(b->d), dmin = f16_to_f32(b->dmin);
+    const uint8_t *q = b->qs;
+    int is = 0;
+    for (int n = 0; n < QK_K; n += 128) {
+        int shift = 0;
+        for (int j = 0; j < 4; j++) {
+            uint8_t sc = b->scales[is++];
+            double dl = d * (sc & 0xF), ml = dmin * (sc >> 4);
+            for (int l = 0; l < 16; l++) *y++ = dl * ((q[l] >> shift) & 3) - ml;
+            sc = b->scales[is++];
+            dl = d * (sc & 0xF); ml = dmin * (sc >> 4);
+            for (int l = 0; l < 16; l++) *y++ = dl * ((q[l + 16] >> shift) & 3) - ml;
+            shift += 2;
+        }
+        q += 32;
+    }
+}
+
+static void ref_dq_q3_K(const block_q3_K *b, double *y) {
+    // the six-bit group scales are split across scales[0..7] (low nibbles) and
+    // scales[8..11] (two high bits each), biased by 32
+    int8_t sc[16];
+    for (int j = 0; j < 16; j++) {
+        int lo = j < 8 ? (b->scales[j] & 0xF) : (b->scales[j - 8] >> 4);
+        int hi = (b->scales[8 + j % 4] >> (2 * (j / 4))) & 3;
+        sc[j] = (int8_t)(lo | (hi << 4));
+    }
+    double d_all = f16_to_f32(b->d);
+    const uint8_t *q = b->qs, *hm = b->hmask;
+    uint8_t m = 1;
+    int is = 0;
+    for (int n = 0; n < QK_K; n += 128) {
+        int shift = 0;
+        for (int j = 0; j < 4; j++) {
+            double dl = d_all * (sc[is++] - 32);
+            for (int l = 0; l < 16; l++)
+                *y++ = dl * (((q[l] >> shift) & 3) - ((hm[l] & m) ? 0 : 4));
+            dl = d_all * (sc[is++] - 32);
+            for (int l = 0; l < 16; l++)
+                *y++ = dl * (((q[l + 16] >> shift) & 3) - ((hm[l + 16] & m) ? 0 : 4));
+            shift += 2; m <<= 1;
+        }
+        q += 32;
+    }
+}
+
 static void ref_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
     if (j < 4) {
         *d = q[j] & 63;
@@ -379,6 +426,12 @@ static void ref_weights(int type, const uint8_t *row, double *w, int n) {
             return;
         case T_IQ4_XS:
             for (int i = 0; i < n; i += bs) ref_dq_iq4_xs((const block_iq4_xs *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_Q2_K:
+            for (int i = 0; i < n; i += bs) ref_dq_q2_K((const block_q2_K *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_Q3_K:
+            for (int i = 0; i < n; i += bs) ref_dq_q3_K((const block_q3_K *)(row + (i / bs) * ts), w + i);
             return;
         case T_Q4_K:
             for (int i = 0; i < n; i += bs) ref_dq_q4_K((const block_q4_K *)(row + (i / bs) * ts), w + i);
@@ -907,6 +960,8 @@ int main(void) {
     test_dequant_exact(T_Q4_0, 4096);
     test_dequant_exact(T_IQ4_NL, 4096);
     test_dequant_exact(T_IQ4_XS, 4096);
+    test_dequant(T_Q2_K, 4096);
+    test_dequant(T_Q3_K, 4096);
     test_dequant(T_Q4_K, 4096);
     test_dequant(T_Q6_K, 4096);
     test_dequant(T_MXFP4, 4096);

@@ -948,6 +948,76 @@ static void dq_q4_K_neon(const block_q4_K *b, float *y) {
     }
 }
 
+// Q2_K / Q3_K pack four 2-bit planes into one byte, so the plane shift is an
+// immediate and the j loop has to be unrolled; the macro takes the already-
+// shifted vectors. Both keep the scalar code's own operand order.
+static void dq_q2_K_neon(const block_q2_K *b, float *y) {
+    const uint8x16_t m3 = vdupq_n_u8(3);
+    float d = f16_to_f32(b->d), dmin = f16_to_f32(b->dmin);
+    const uint8_t *q = b->qs;
+    int is = 0;
+    for (int n = 0; n < QK_K; n += 128) {
+        uint8x16_t q0 = vld1q_u8(q), q1 = vld1q_u8(q + 16);
+#define Q2K_PLANE(V0, V1) do {                                    \
+            float32x4_t f[4];                                     \
+            uint8_t sc = b->scales[is++];                         \
+            u8_to_f32x4(vandq_u8(V0, m3), f);                     \
+            st16fm(y, f, d * (sc & 0xF), dmin * (sc >> 4));       \
+            sc = b->scales[is++];                                 \
+            u8_to_f32x4(vandq_u8(V1, m3), f);                     \
+            st16fm(y + 16, f, d * (sc & 0xF), dmin * (sc >> 4));  \
+            y += 32;                                              \
+        } while (0)
+        Q2K_PLANE(q0, q1);
+        Q2K_PLANE(vshrq_n_u8(q0, 2), vshrq_n_u8(q1, 2));
+        Q2K_PLANE(vshrq_n_u8(q0, 4), vshrq_n_u8(q1, 4));
+        Q2K_PLANE(vshrq_n_u8(q0, 6), vshrq_n_u8(q1, 6));
+#undef Q2K_PLANE
+        q += 32;
+    }
+}
+
+static void dq_q3_K_neon(const block_q3_K *b, float *y) {
+    const uint32_t kmask1 = 0x03030303, kmask2 = 0x0f0f0f0f;
+    uint32_t aux[4];
+    const int8_t *scales = (const int8_t *)aux;
+    memcpy(aux, b->scales, 12);
+    uint32_t tmp = aux[2];
+    aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+    aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+    aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+    aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+
+    const uint8x16_t m3 = vdupq_n_u8(3), m4 = vdupq_n_u8(4);
+    float d_all = f16_to_f32(b->d);
+    const uint8_t *q = b->qs;
+    // the high-bit plane is one 32-byte mask for the whole super-block, walked
+    // by the bit `m` rather than by a pointer
+    uint8x16_t h0 = vld1q_u8(b->hmask), h1 = vld1q_u8(b->hmask + 16);
+    uint8_t m = 1;
+    int is = 0;
+    for (int n = 0; n < QK_K; n += 128) {
+        uint8x16_t q0 = vld1q_u8(q), q1 = vld1q_u8(q + 16);
+#define Q3K_PLANE(V0, V1) do {                                                 \
+            uint8x16_t mv = vdupq_n_u8(m);                                     \
+            float32x4_t f[4];                                                  \
+            int8x16_t v0 = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(V0, m3)),     \
+                vreinterpretq_s8_u8(vandq_u8(vmvnq_u8(vtstq_u8(h0, mv)), m4)));\
+            int8x16_t v1 = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(V1, m3)),     \
+                vreinterpretq_s8_u8(vandq_u8(vmvnq_u8(vtstq_u8(h1, mv)), m4)));\
+            i8_to_f32x4(v0, f); st16f(y, f, d_all * (scales[is++] - 32));       \
+            i8_to_f32x4(v1, f); st16f(y + 16, f, d_all * (scales[is++] - 32));  \
+            y += 32; m <<= 1;                                                  \
+        } while (0)
+        Q3K_PLANE(q0, q1);
+        Q3K_PLANE(vshrq_n_u8(q0, 2), vshrq_n_u8(q1, 2));
+        Q3K_PLANE(vshrq_n_u8(q0, 4), vshrq_n_u8(q1, 4));
+        Q3K_PLANE(vshrq_n_u8(q0, 6), vshrq_n_u8(q1, 6));
+#undef Q3K_PLANE
+        q += 32;
+    }
+}
+
 static void dq_q6_K_neon(const block_q6_K *b, float *y) {
     const uint8x16_t mF = vdupq_n_u8(0xF), m3 = vdupq_n_u8(3);
     const int8x16_t m32 = vdupq_n_s8(32);
@@ -1183,6 +1253,8 @@ static void dequant_block(int type, const void *src, float *dst) {
     switch (type) {
         case T_Q4_0:  dq_q4_0_neon(src, dst); return;
         case T_Q8_0:  dq_q8_0_neon(src, dst); return;
+        case T_Q2_K:  dq_q2_K_neon(src, dst); return;
+        case T_Q3_K:  dq_q3_K_neon(src, dst); return;
         case T_Q4_K:  dq_q4_K_neon(src, dst); return;
         case T_Q6_K:  dq_q6_K_neon(src, dst); return;
         case T_IQ4_NL: dq_iq4_nl_neon(src, dst); return;
