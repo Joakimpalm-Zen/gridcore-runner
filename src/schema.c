@@ -2961,8 +2961,17 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
             eq_put(q, "{}");
             break;
         case SN_SEQ:
-            for (int i = 0; i < n->n_props; i++)
+            for (int i = 0; i < n->n_props; i++) {
                 emit_min_choice(q, n->props[i], depth + 1, choice);
+                // A discriminator emitted HERE comes out as lits[0], so the
+                // conditional after it must follow alternative 0 rather than
+                // whatever the enclosing sequence chose. Without this an
+                // inner tool name (get_weather) was emitted with the outer
+                // channel's index, pairing it with a different tool's
+                // arguments. Same reasoning as the SN_OBJ arm above.
+                if (n->props[i]->kind == SN_ENUM && n->props[i]->min_items)
+                    choice = 0;
+            }
             break;
         case SN_RAW:
             eq_put(q, n->sentinel);
@@ -3054,12 +3063,18 @@ int sval_close(sval *v, char *out, int cap) {
             }
             if (pick < 0) break;
             eq_put(&q, lits[pick] + f->lit_pos);
-            // finishing a discriminator literal decides the parent's choice —
-            // the args emitted next must come from the same alternative
+            // Finishing a discriminator literal decides the parent's choice —
+            // the args emitted next must come from the same alternative. Both
+            // shapes frame_done() recognises are recognised here, or a turn
+            // truncated inside the tool NAME closes with a different tool's
+            // parameters: the object/args pair, and the ENUM+COND sequence
+            // every native grammar (atem, Harmony, gemma4) is built from.
             if (n->kind == SN_ENUM && v->depth >= 2) {
                 sframe *pf = &v->stack[v->depth - 2];
                 if (pf->node->kind == SN_OBJ && pf->sub < pf->node->n_props &&
                     !strcmp(pf->node->keys[pf->sub], "tool"))
+                    pf->disc = (uint16_t)(pick + 1);
+                else if (pf->node->kind == SN_SEQ && n->min_items)
                     pf->disc = (uint16_t)(pick + 1);
             }
             break;

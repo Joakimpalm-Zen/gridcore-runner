@@ -139,6 +139,42 @@ static void test_atem_truncation_closes_started_call(void) {
     jv_free(tools);
 }
 
+// Truncation INSIDE the tool name is the interesting one: the name is the
+// discriminator, and the argument block that follows is chosen by it. The
+// closer finishes the name from the surviving candidate, so it also has to
+// record which one it picked -- otherwise the completed turn names one tool
+// and carries another's parameters, and the validator that produced it
+// refuses to read it back.
+static void test_atem_truncation_inside_a_tool_name_picks_its_own_args(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}},"
+        "{\"type\":\"function\",\"function\":{\"name\":\"add\",\"parameters\":"
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},"
+        "\"b\":{\"type\":\"integer\"}},\"required\":[\"a\",\"b\"]}}}]");
+    char err[192];
+    snode *root = schema_compile_atem_tools(tools, err, sizeof(err));
+    assert(root != NULL);
+    // "a" can only become "add" -- the second declared tool, not the first
+    const char *prefix = "<atem:function_calls>\n<atem:invoke name=\"a";
+    sval partial;
+    sval_init(&partial, root);
+    assert(sval_feed(&partial, prefix, (int)strlen(prefix)));
+    char tail[512];
+    int tail_n = sval_close(&partial, tail, sizeof(tail));
+    assert(tail_n > 0);
+    char full[1024];
+    snprintf(full, sizeof(full), "%s%s", prefix, tail);
+    if (!accepts(root, full)) fprintf(stderr, "closed turn: %s\n", full);
+    assert(accepts(root, full));
+    assert(strstr(full, "name=\"add\"") != NULL);
+    assert(strstr(full, "name=\"a\"") != NULL);   // the parameter block's own
+    assert(strstr(full, "name=\"city\"") == NULL);
+    schema_free(root);
+    jv_free(tools);
+}
+
 static void test_atem_buffered_maps_reasoning_and_multiple_calls(void) {
     tool_envelope e = {0};
     e.atem = true;
@@ -1329,6 +1365,56 @@ static void test_harmony_native_turn_constrains_channels_recipients_and_args(voi
     jv_free(tools);
 }
 
+// The same truncation on Harmony, where the discriminators NEST: the channel
+// name selects a branch, and the tool name inside it selects another. A
+// minimal completion emits the inner name as the first candidate, so the
+// arguments after it belong to that one -- not to whatever the outer channel
+// happened to choose.
+static void test_harmony_truncation_pairs_the_name_it_emits(void) {
+    jv *tools = parse(TOOLS);
+    char err[192];
+    snode *root = schema_compile_harmony_turn(
+        tools, true, NULL, NULL, true, err, sizeof(err));
+    assert(root != NULL);
+    const char *cuts[] = {
+        "<|channel|>",                               // no channel yet
+        "<|channel|>commentar",                      // inside the CHANNEL name:
+                                                     // the whole call after it
+                                                     // is synthesized
+        "<|channel|>analysi",
+        "<|channel|>commentary to=functions.",       // no tool name yet
+        "<|channel|>commentary to=functions.a",      // only "add" survives
+        "<|channel|>commentary to=functions.get_weather<|constrain|>json"
+            "<|message|>{",
+    };
+    for (size_t i = 0; i < sizeof(cuts) / sizeof(*cuts); i++) {
+        sval v;
+        sval_init(&v, root);
+        assert(sval_feed(&v, cuts[i], (int)strlen(cuts[i])));
+        char tail[512];
+        int n = sval_close(&v, tail, sizeof(tail));
+        assert(n > 0);
+        char full[1024];
+        snprintf(full, sizeof(full), "%s%s", cuts[i], tail);
+        if (!accepts(root, full)) fprintf(stderr, "closed turn: %s\n", full);
+        assert(accepts(root, full));
+    }
+    // the name the closer completes decides the arguments that follow it
+    sval v;
+    sval_init(&v, root);
+    const char *cut = "<|channel|>commentary to=functions.a";
+    assert(sval_feed(&v, cut, (int)strlen(cut)));
+    char tail[512];
+    assert(sval_close(&v, tail, sizeof(tail)) > 0);
+    char full[1024];
+    snprintf(full, sizeof(full), "%s%s", cut, tail);
+    assert(strstr(full, "functions.add") != NULL);
+    assert(strstr(full, "\"a\":") != NULL && strstr(full, "\"b\":") != NULL);
+    assert(strstr(full, "\"city\"") == NULL);
+    schema_free(root);
+    jv_free(tools);
+}
+
 static void test_harmony_native_mapping_and_stream_boundaries(void) {
     jv *tools = parse(TOOLS);
     tool_envelope e;
@@ -1728,6 +1814,7 @@ int main(void) {
     test_atem_structured_tool_automaton();
     test_atem_scalar_is_raw_until_parameter_close();
     test_atem_truncation_closes_started_call();
+    test_atem_truncation_inside_a_tool_name_picks_its_own_args();
     test_atem_buffered_maps_reasoning_and_multiple_calls();
     test_atem_buffered_mapper_honors_nonterminated_length();
     test_atem_header_discriminates_matching_invoke();
@@ -1761,6 +1848,7 @@ int main(void) {
     test_default_envelope_is_unchanged();
     test_system_turn_teaches_the_envelope();
     test_harmony_native_turn_constrains_channels_recipients_and_args();
+    test_harmony_truncation_pairs_the_name_it_emits();
     test_harmony_native_mapping_and_stream_boundaries();
     test_gemma4_native_turn_constrains_names_and_arguments();
     test_gemma4_thought_block_precedes_either_branch();
