@@ -1336,6 +1336,8 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         // gemma3 ropes global layers at 1M; some exports omit the key
         m->rope_base   = gguf_get_f32(g, AK("rope.freq_base"), 1000000.0f);
         int pattern    = (int)gguf_get_u32(g, AK("attention.sliding_window_pattern"), 6);
+        if (pattern < 1) pattern = 6;   // it is a divisor below (every other
+                                        // arch block clamps its own period)
         m->l_is_swa    = calloc(m->n_layer, sizeof(bool));
         if (!m->l_is_swa) return false;
         if (!swa_pattern_array(g, AK("attention.sliding_window_pattern"),
@@ -1545,8 +1547,17 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             return false;
         }
         int shared_kv = (int)gguf_get_u32(g, AK("attention.shared_kv_layers"), 0);
-        int ple_dim   = (int)gguf_get_u32(g, AK("embedding_length_per_layer_input"), 0);
-        m->n_embd_ple    = ple_dim;
+        // Same rule as expert_count: above INT_MAX this lands negative, and a
+        // negative width reads as "no per-layer embeddings" — the E-series
+        // branch is skipped, its tensors are ignored, and the model answers as
+        // a different architecture without saying so.
+        uint32_t ple_raw = gguf_get_u32(g, AK("embedding_length_per_layer_input"), 0);
+        if (ple_raw > MDL_DIM_MAX) {
+            fprintf(stderr, "error: gemma4 per-layer embedding size %u is out "
+                    "of range\n", ple_raw);
+            return false;
+        }
+        m->n_embd_ple    = (int)ple_raw;
         m->kv_from_start = m->n_layer;
         if (shared_kv > 0) {
             // llama-model.cpp's reuse callback: layers at or past
@@ -1783,7 +1794,17 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         fprintf(stderr, "error: negative no_rope_layer_step\n");
         return false;
     }
-    m->n_expert = (int)gguf_get_u32(g, AK("expert_count"), 0);
+    // Bounded as a u32, before the cast: above INT_MAX this lands negative,
+    // and a negative count is neither "> 0" (so the MoE block is skipped) nor
+    // "== 0" (so the dense FFN is skipped too) — the layer then loaded no FFN
+    // at all and the forward pass ran a matvec on a NULL tensor.
+    uint32_t n_expert_raw = gguf_get_u32(g, AK("expert_count"), 0);
+    if (n_expert_raw > 256) {
+        fprintf(stderr, "error: expert_count %u is out of range (max 256)\n",
+                n_expert_raw);
+        return false;
+    }
+    m->n_expert = (int)n_expert_raw;
     if (m->n_expert > 0) {
         // sparse-MoE (Mixtral / Qwen3-MoE): softmax-over-all router, top-k
         // selection, renormalized weights, per-expert SwiGLU, weighted sum.

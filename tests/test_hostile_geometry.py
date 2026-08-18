@@ -456,3 +456,71 @@ def test_sliding_layers_without_a_window_do_not_crash(runner_bin, tmp_path):
     # No window means no sliding layers, which is a runnable model, not an
     # error: the file is contradictory, not unusable.
     assert proc.returncode == 0, proc.stderr.decode(errors="replace")[-400:]
+
+
+def test_expert_count_above_int_max_is_refused(runner_bin, tmp_path):
+    """A count that cannot be an int must not quietly become "not a MoE".
+
+    expert_count is read as a u32 into an int, so 2^31 arrives negative and
+    `if (m->n_expert > 0)` skips the whole MoE block — while the LAYER loop
+    tests `m->n_expert == 0` for the dense branch, which a negative count also
+    fails. The layer then loaded neither the experts nor the dense FFN and the
+    forward pass ran a matvec on a NULL tensor (UBSan: "member access within
+    null pointer of type 'const gguf_tensor'"; release build rc 139).
+    """
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-moe.py", str(tmp_path / "moe")],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    good = tmp_path / "moe.gemma4-moe-hetero.gguf"
+    bad = _patch_u32(good, tmp_path / "moe-ec.gguf", "gemma4.expert_count", 1 << 31)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "an out-of-range expert_count must be refused"
+    assert "expert_count" in proc.stderr.decode(errors="replace")
+
+
+def test_per_layer_embedding_width_above_int_max_is_refused(runner_bin, tmp_path):
+    """Same shape, worse outcome: it silently downgraded the architecture.
+
+    embedding_length_per_layer_input above INT_MAX arrives negative, so
+    `n_embd_ple > 0` is false and the E-series branch never runs: the model
+    loads, ignores its per-layer embedding tensors entirely, and answers
+    without them. No crash, no message — just a different model.
+    """
+    good = tmp_path / "es.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--eseries", "2,16", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    bad = _patch_u32(good, tmp_path / "es-ple.gguf",
+                     "gemma4.embedding_length_per_layer_input", 1 << 31)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "an out-of-range per-layer embedding must be refused"
+    assert "per-layer embedding" in proc.stderr.decode(errors="replace")
+
+
+def test_gemma3_sliding_pattern_of_zero_is_not_a_divisor(runner_bin, tmp_path):
+    """Every other architecture clamps this period; gemma3's copy did not.
+
+    The pattern is used as `(i + 1) % pattern`, so 0 is a division by zero —
+    UBSan says so, ARM silently yields 0, and x86 raises SIGFPE, which is the
+    platform CI runs.
+    """
+    good = tmp_path / "g3.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--arch", "gemma3", "--swa", "32,6", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    bad = _patch_u32(good, tmp_path / "g3-p0.gguf",
+                     "gemma3.attention.sliding_window_pattern", 0)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    assert _run(runner_bin, bad).returncode == 0, "a zero period is not fatal"
+    debug_bin = ROOT / "runner-debug"
+    if not debug_bin.exists():
+        pytest.skip("sanitizer build not present (make debug)")
+    err = _run(debug_bin, bad).stderr.decode(errors="replace")
+    assert "division by zero" not in err, err[:400]
