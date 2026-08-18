@@ -378,6 +378,52 @@ static void test_schema_rejects_unenforceable_keywords(void) {
     }
 }
 
+// A keyword the compiler DOES implement, written with the wrong JSON type, is
+// the same failure wearing a different hat: reinterpreting it silently
+// enforces something other than what was declared, and the two below both
+// used to compile.
+static void test_schema_rejects_misspelled_keyword_types(void) {
+    static const struct { const char *src; const char *want; } bad[] = {
+        // an object-valued enum used to be read as a one-member list of its
+        // VALUES, so this compiled to the literal `1`
+        { "{\"enum\":{\"a\":1}}", "enum" },
+        { "{\"enum\":\"a\"}", "enum" },
+        // and a non-object `properties` fell through to the open-object
+        // machine, which accepts any object at all -- the one outcome this
+        // compiler exists to prevent
+        { "{\"type\":\"object\",\"properties\":[{\"a\":1}]}", "properties" },
+        { "{\"type\":\"object\",\"properties\":\"a\"}", "properties" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        jv *schema_json = json_parse(bad[i].src, strlen(bad[i].src));
+        assert(schema_json != NULL);
+        char err[128];
+        err[0] = 0;
+        snode *schema = schema_compile(schema_json, err, sizeof(err));
+        assert(schema == NULL);
+        assert(strstr(err, bad[i].want) != NULL);
+        jv_free(schema_json);
+    }
+    // the well-formed spellings still compile
+    static const char *const good[] = {
+        "{\"enum\":[\"a\",\"b\"]}",
+        "{\"const\":\"a\"}",
+        "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}}}",
+        "{\"type\":\"object\",\"properties\":{}}",
+    };
+    for (size_t i = 0; i < sizeof(good) / sizeof(*good); i++) {
+        jv *schema_json = json_parse(good[i], strlen(good[i]));
+        assert(schema_json != NULL);
+        char err[128];
+        err[0] = 0;
+        snode *schema = schema_compile(schema_json, err, sizeof(err));
+        if (!schema) fprintf(stderr, "%s: %s\n", good[i], err);
+        assert(schema != NULL);
+        schema_free(schema);
+        jv_free(schema_json);
+    }
+}
+
 // Bounded repetition: {n} and {n,m}. The unbounded forms (`+`, `{n,}`) only
 // ever needed a floor, so nothing enforced a ceiling; these do, and the ceiling
 // has to be enforced during decoding rather than at the closing quote, or the
@@ -1617,6 +1663,7 @@ int main(void) {
     test_schema_rejects_non_integer_or_huge_bounds();
     test_schema_rejects_escaped_keys();
     test_schema_rejects_unenforceable_keywords();
+    test_schema_rejects_misspelled_keyword_types();
     test_schema_bounded_repetition();
     test_schema_multi_segment_pattern();
     test_schema_agent_id_pattern_is_enforced();

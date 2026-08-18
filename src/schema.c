@@ -139,6 +139,15 @@ static bool check_keywords(jv *s, char *err, int errcap) {
 // and must be rejected rather than silently narrowed or weakened.
 static bool check_object_rules(jv *s, char *err, int errcap) {
     jv *props = jv_get(s, "properties");
+    if (props && props->type != J_OBJ) {
+        // Everything below reads `properties` as a member map. A `properties`
+        // that is not one used to fall through to the open-object machine,
+        // which accepts any object at all -- a declared constraint quietly
+        // becoming no constraint, which is the outcome this compiler exists
+        // to prevent.
+        snprintf(err, errcap, "properties must be an object");
+        return false;
+    }
     bool has_props = props && props->type == J_OBJ && props->n > 0;
     bool no_declared = !props || (props->type == J_OBJ && props->n == 0);
     jv *ap = jv_get(s, "additionalProperties");
@@ -949,6 +958,13 @@ static snode *compile_node(jv *s, char *err, int errcap, int depth) {
     jv *en = jv_get(s, "enum");
     jv *cn = jv_get(s, "const");
     if (en || cn) {
+        if (en && en->type != J_ARR) {
+            // an object-valued enum was read as a list of its VALUES, so
+            // {"enum":{"a":1}} compiled to the literal 1 -- a constraint the
+            // caller never wrote
+            snprintf(err, errcap, "enum must be an array");
+            return NULL;
+        }
         snode *n = sn_new(SN_ENUM);
         if (!n) return NULL;
         int cnt = en ? en->n : 1;
