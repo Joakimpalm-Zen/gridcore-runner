@@ -354,3 +354,27 @@ def test_per_layer_embedding_width_overflow_is_caught_before_it_happens(
     proc = _run(debug_bin, bad)
     err = proc.stderr.decode(errors="replace")
     assert "runtime error" not in err, err[:400]
+
+
+def test_absurd_block_count_is_refused_with_a_reason(runner_bin, tmp_path):
+    """block_count sizes per-layer arrays before the geometry gate sees it.
+
+    Several architecture blocks allocate n_layer-length arrays (the SWA
+    pattern, per-layer head geometry, the xIELU parameters) while the general
+    gate that bounds n_layer runs after all of them. Read as a u32 into an int,
+    2^31 arrives negative, and calloc(negative, ...) asks for ~2^64 bytes:
+    ASan flagged the request, and the release build exited 1 having printed
+    NOTHING — a load that fails must say why.
+    """
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-moe.py", str(tmp_path / "moe")],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    good = tmp_path / "moe.gptoss-mxfp4.gguf"
+    bad = _patch_u32(good, tmp_path / "moe-blocks.gguf",
+                     "gpt-oss.block_count", 1 << 31)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "an out-of-range block_count must be refused"
+    err = proc.stderr.decode(errors="replace")
+    assert "block_count" in err

@@ -1278,6 +1278,17 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     #define AK(fmt) (snprintf(key, sizeof(key), "%s." fmt, arch), key)
 
     m->n_layer     = (int)gguf_get_u32(g, AK("block_count"), 0);
+    // Bounded HERE, not at the general geometry gate below: the architecture
+    // blocks between the two allocate n_layer-length arrays (SWA patterns,
+    // per-layer head geometry, the xIELU parameters), so the gate is too late
+    // to keep a hostile count out of a size. Read as a u32 into an int, 2^31
+    // arrives negative and calloc(negative, ...) asked for ~2^64 bytes — the
+    // load then failed with no message at all.
+    if (m->n_layer < 1 || m->n_layer > 100000) {
+        fprintf(stderr, "error: '%s' declares an unusable block_count (%u)\n",
+                arch, gguf_get_u32(g, AK("block_count"), 0));
+        return false;
+    }
     // "every layer owns its KV" is the default; only gemma4 E-series lowers it
     m->kv_from_start = m->n_layer;
     m->n_embd      = (int)gguf_get_u32(g, AK("embedding_length"), 0);
