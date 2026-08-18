@@ -49,6 +49,8 @@ typedef struct {
     uint64_t      wbuf_end[METAL_MAX_WBUF];    // one past its last file offset
     int           n_wbuf;
     bool          weights_copied;
+    // Sticky: a weight range no wrap holds ends the offload for this model.
+    bool          bind_failed;
     id<MTLBuffer> kc, vc;
     id<MTLBuffer> x, xb, xb2, q, kt, vt, hb, hb2, att, logits;
     id<MTLBuffer> agate;             // [n][q_dim] attention output gate scratch
@@ -782,23 +784,45 @@ static id<MTLBuffer> metal_wbuf_for(gpu_t *g, uint64_t off, uint64_t len,
     return nil;
 }
 
+// RUNNER_METAL_INJECT_BIND_FAILURE=1: make the next weight binding
+// unresolvable. The situation is otherwise unreachable by construction — a
+// split GGUF is refused at load and a single-file wrap is checked at init —
+// so without a hook the recovery path below could only be reasoned about, not
+// run. Same argument as the command-buffer hook in docs/metal-fallback.md.
+static bool metal_bind_inject(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *v = getenv("RUNNER_METAL_INJECT_BIND_FAILURE");
+        on = v && *v && strcmp(v, "0") ? 1 : 0;
+    }
+    return on > 0;
+}
+
 // Bind helper for the three sites that address the weight mmap. Keeps the
 // fallback in ONE place: with a single wrap the resolver always succeeds, so
 // this degrades to exactly the old behaviour and the diagnostic can never fire.
+//
+// When it does fire, the offload ENDS. This used to bind buffer 0 at the
+// unresolvable offset, announce that "results from this model are not
+// trustworthy", and compute — which is what a split GGUF got for as long as
+// that path existed. A range no wrap holds cannot be read, and an internal bug
+// is the last place to keep going: the flag is sticky, gpu_forward_native_batch
+// discards the forward, and the caller finishes on the CPU. The encoder still
+// needs a well-formed binding, so buffer 0 at offset 0 goes in and the result
+// is thrown away rather than an out-of-range offset being handed to a kernel.
 static uint64_t metal_bind_weights(gpu_t *g, id<MTLComputeCommandEncoder> e,
                                    uint64_t off, uint64_t len) {
     uint64_t within = 0;
     id<MTLBuffer> wb = metal_wbuf_for(g, off, len, &within);
-    if (!wb) {
-        static bool told;
-        if (!told) {
-            told = true;
-            fprintf(stderr, "gpu: internal — no weight wrap holds [%llu,+%llu); "
-                    "results from this model are not trustworthy\n",
+    if (!wb || metal_bind_inject()) {
+        if (!g->bind_failed) {
+            g->bind_failed = true;
+            fprintf(stderr, "gpu: no weight wrap holds [%llu,+%llu) — "
+                    "falling back to CPU\n",
                     (unsigned long long)off, (unsigned long long)len);
         }
         wb = g->wbuf[0];
-        within = off;
+        within = 0;
     }
     [e setBuffer:wb offset:0 atIndex:0];
     return within;
@@ -2235,6 +2259,9 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
         fprintf(stderr, "gpu: command buffer failed — falling back to CPU\n");
         return NULL;
     }
+    // A binding this encoder could not place makes every number it produced
+    // meaningless, including the ones written before the bad dispatch.
+    if (g->bind_failed) return NULL;
     if (metal_env_on("RUNNER_METAL_STATS")) {
         unsigned long tot = g_disp.mm + g_disp.mv + g_disp.mvf +
                             g_disp.rmsnorm + g_disp.qknorm + g_disp.headnorm +

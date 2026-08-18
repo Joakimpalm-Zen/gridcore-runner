@@ -23,6 +23,13 @@ CI coverage:
   model with `RUNNER_METAL_INJECT_FAILURE=once` plus macOS malloc checking
   (`MallocScribble=1`, `MallocGuardEdges=1`) and compares fallback output to
   `--gpu off`.
+- `make test-metal-bind-failure` (in `make test`) covers the second runtime
+  failure: a weight range no zero-copy wrap holds. That used to print "results
+  from this model are not trustworthy" and compute anyway — which is what a
+  split GGUF got before `gpu_init()` learned to decline one. It now ends the
+  offload for the model, and `RUNNER_METAL_INJECT_BIND_FAILURE=1` is the hook
+  that makes the path reachable, for the same reason the command-buffer hook
+  above exists.
 
 Remaining hardware-only validation: induce a real
 `MTLCommandBufferStatusError` on Apple Silicon and run the same fallback and

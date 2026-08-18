@@ -968,6 +968,41 @@ else
 	@echo "metal split GGUF smoke skipped: macOS-only backend"
 endif
 
+# A weight range no wrap holds must END the offload, not decorate it.
+#
+# metal_bind_weights() used to print "results from this model are not
+# trustworthy", bind buffer 0 at the unresolvable offset and let the forward
+# run — which is how a split GGUF produced numbers for as long as that path
+# existed. The split case is refused at load now, so the remaining ways in are
+# internal, and an internal bug is the LAST place to keep computing. This is
+# the shape every other failure here already has: fail, fall back, be loud.
+#
+# RUNNER_METAL_INJECT_BIND_FAILURE is the only way to reach it deterministically
+# — the same deliberate-hook approach docs/metal-fallback.md documents for the
+# command-buffer failure it cannot induce on real hardware.
+test-metal-bind-failure: runner test.gguf
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		./$(RUNNER_EXE) -m test.gguf -p "hello" -n 12 --temp 0 --gpu off > metal-bind-cpu.out 2>/dev/null; \
+		env RUNNER_METAL_INJECT_BIND_FAILURE=1 ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 12 \
+			--temp 0 --gpu auto > metal-bind-gpu.out 2> metal-bind-gpu.err; \
+		grep -q "falling back to CPU" metal-bind-gpu.err || { \
+			echo "FAIL: an unresolvable weight binding did not end the offload"; \
+			cat metal-bind-gpu.err; exit 1; }; \
+		if grep -q "not trustworthy" metal-bind-gpu.err; then \
+			echo "FAIL: the backend announced untrustworthy results instead of failing"; \
+			exit 1; fi; \
+		cmp -s metal-bind-cpu.out metal-bind-gpu.out || { \
+			echo "FAIL: the fallback result differs from --gpu off"; exit 1; }; \
+		echo "metal bind failure ok (offload ends, run completes on the CPU)"; \
+	else \
+		echo "metal bind failure smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal bind failure smoke skipped: macOS-only backend"
+endif
+
 test-metal-kv-q8: runner $(TEST_KV_TOL)
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
@@ -1254,6 +1289,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(MAKE) --no-print-directory test-metal-kquant
 	$(MAKE) --no-print-directory test-metal-decode-only
 	$(MAKE) --no-print-directory test-metal-split
+	$(MAKE) --no-print-directory test-metal-bind-failure
 	$(MAKE) --no-print-directory test-metal-multibuf
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
@@ -1457,6 +1493,7 @@ clean:
 	rm -f metal-decode1-cpu.out metal-decode1-gpu.out metal-decode1-gpu.err
 	rm -f metal-split-cpu.out metal-split-gpu.out metal-split-gpu.err
 	rm -f metal-split-whole.out metal-split-whole.err
+	rm -f metal-bind-cpu.out metal-bind-gpu.out metal-bind-gpu.err
 	rm -f metal-kv-q8.err metal-moe-dense.out metal-moe1.out metal-moe1.err
 	rm -f metal-moe2.out metal-moe2.err
 	rm -f metal-gptoss-moe-cpu.out metal-gptoss-moe-gpu.out metal-gptoss-moe-gpu.err
@@ -1507,4 +1544,4 @@ test-makefile-sane:
 
 .PHONY: template-conformance template-conformance-refresh template-conformance-baseline template-conformance-harmony-oracle
 .PHONY: test-gpu-stub
-.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-split test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
+.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-split test-metal-bind-failure test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
