@@ -434,25 +434,33 @@ def collect_distributions(endpoint, model_name, words, max_positions, stride,
 
 
 def compare_distributions(ref_positions, var_positions):
-    """Pairs reference/variant distributions by list order (both were
-    walked over the identical corpus+stride, so position i in each list is
-    the same prefix) and aggregates exactly like kld-compare-raw.py's own
-    summary — same fields, so results are directly comparable."""
-    n = min(len(ref_positions), len(var_positions))
+    """Pairs reference/variant distributions by CORPUS INDEX and aggregates
+    exactly like kld-compare-raw.py's own summary — same fields, so results are
+    directly comparable.
+
+    Not by list position: collect_distributions drops a failed probe without a
+    placeholder, so one lane failing a position the other scored slides every
+    later entry by one and pairs the reference after "The" against the variant
+    after "The lighthouse keeper". Each entry already carries the index it was
+    walked at; a position only one lane scored is not comparable and is left
+    out of the count rather than mispaired.
+    """
+    ref_by_index = {p["index"]: p["dist"] for p in ref_positions}
+    pairs = [(p["dist"], ref_by_index[p["index"]])
+             for p in var_positions if p["index"] in ref_by_index]
     klds, top1s, overlaps = [], [], []
-    for i in range(n):
+    for var_dist, ref_dist in pairs:
         # (variant, reference), the order kld-compare-raw.score_pair documents
         # and every published number was measured in. KLD is asymmetric and the
         # missing-token floor is applied to whichever side comes first, so the
         # reversed call answers a different question at a materially smaller
         # value -- and cannot be checked against the adopted bound.
-        kld, agree, overlap8 = KLD_RAW.kld_and_agreement(
-            var_positions[i]["dist"], ref_positions[i]["dist"])
+        kld, agree, overlap8 = KLD_RAW.kld_and_agreement(var_dist, ref_dist)
         klds.append(kld)
         top1s.append(agree)
         overlaps.append(overlap8)
     return {
-        "positions_scored": n,
+        "positions_scored": len(pairs),
         "mean_kld": sum(klds) / len(klds) if klds else None,
         "top1_agreement_pct": 100.0 * sum(top1s) / len(top1s) if top1s else None,
         "mean_top8_overlap": sum(overlaps) / len(overlaps) if overlaps else None,

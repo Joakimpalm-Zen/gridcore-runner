@@ -764,3 +764,25 @@ def test_compare_distributions_scores_the_variant_against_the_reference():
 
     assert summary["mean_kld"] == pytest.approx(
         MOD.KLD_RAW.score_pair(var, ref)[0])
+
+
+def test_compare_distributions_pairs_by_corpus_index_not_list_position():
+    """collect_distributions drops a failed probe without a placeholder, so the
+    two lanes' lists slide relative to each other the moment one of them fails
+    a position the other scored. Pairing by list position then compares the
+    reference after one prefix against the variant after a longer one, and the
+    resulting mean_kld measures two different prompts."""
+    same = {"a": -0.1, "b": -2.0}
+    other = {"b": -0.1, "a": -2.0}
+    # the variant timed out on corpus index 1 and kept walking (the documented
+    # behaviour of collect_distributions), so its list is [0, 2, 3]
+    ref = [{"index": 0, "dist": same}, {"index": 1, "dist": other},
+           {"index": 2, "dist": same}]
+    var = [{"index": 0, "dist": same}, {"index": 2, "dist": same},
+           {"index": 3, "dist": other}]
+
+    summary = MOD.compare_distributions(ref, var)
+
+    assert summary["positions_scored"] == 2      # indices 0 and 2 are shared
+    assert summary["mean_kld"] == 0.0            # and both agree exactly
+    assert summary["top1_agreement_pct"] == 100.0
