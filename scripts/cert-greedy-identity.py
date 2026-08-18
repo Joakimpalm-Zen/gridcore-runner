@@ -47,6 +47,18 @@ def runner_completion(runner, model, prompt, n):
         [runner, "-m", model, "-p", prompt, "-n", str(n), "--temp", "0", "--gpu", "off"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600)
     out = p.stdout.decode("utf-8", "replace")
+    # src/main.c echoes the prompt BEFORE engine_generate, so a death after
+    # that point (OOM killer, SIGKILL, a backend abort) still leaves a
+    # well-formed prefix and clears the echo guard below. The truncated
+    # completion would then be compared against the reference's full one and
+    # published as a first_divergent_byte -- a killed process recorded as a
+    # model divergence in a certification row. The opposite misattribution is
+    # equally available: a crash at the reference's own stop point scores as
+    # identical.
+    if p.returncode != 0:
+        raise SystemExit(
+            f"runner exited {p.returncode} on {prompt!r}; a crash is not a "
+            f"divergence:\n{p.stderr.decode('utf-8', 'replace')[-2000:]}")
     if not out.startswith(prompt):
         raise SystemExit(f"runner stdout did not echo the prompt: {out[:120]!r}")
     return out[len(prompt):]
