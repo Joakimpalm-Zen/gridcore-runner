@@ -255,6 +255,13 @@ def main(argv):
     if args.out:
         with open(args.out, "w") as f:
             json.dump(result, f, indent=2)
+    if not klds:
+        # Every field above is null. kld-compare.py refuses this state; the v2
+        # that publishes the adopted criterion must too, or a dead endpoint or
+        # a --model-name the server 404s reads as a clean run. The report is
+        # still written first, so --out records what actually happened.
+        print(f"error: no positions scored ({n_failed} failed)", file=sys.stderr)
+        return 1
     return 0
 
 

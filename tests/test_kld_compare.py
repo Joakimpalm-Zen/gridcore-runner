@@ -122,3 +122,28 @@ def test_endpoint_mode_reuses_an_already_running_server(runner_bin, small_model,
     finally:
         proc.kill()
         proc.wait()
+
+
+# kld-compare.py refuses a run in which nothing was scored ("error: no
+# positions scored", exit 1). kld-compare-raw.py -- the v2 that publishes the
+# ADOPTED margin-qualified criterion -- did not, so a dead endpoint, a wrong
+# --model-name (the server 404s those) or a reference that reports no logprobs
+# produced an all-null report and a clean exit code.
+
+RAW_SCRIPT = ROOT / "scripts" / "kld-compare-raw.py"
+
+
+def test_kld_compare_raw_refuses_a_run_that_scored_no_positions(corpus):
+    proc = subprocess.run(
+        [sys.executable, str(RAW_SCRIPT),
+         "--endpoint-a", "http://127.0.0.1:1", "--model-name-a", "m",
+         "--endpoint-b", "http://127.0.0.1:2", "--model-name-b", "m",
+         "--corpus", str(corpus), "--max-positions", "4"],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=180)
+
+    result = json.loads(proc.stdout)
+    assert result["positions_scored"] == 0
+    assert result["positions_failed"] > 0
+    # the evidence is still emitted, so --out records the failed run honestly
+    assert proc.returncode == 1, proc.stdout
