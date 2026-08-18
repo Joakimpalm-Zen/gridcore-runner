@@ -122,6 +122,29 @@ def test_torture_extraction():
     assert text == "extracted text"
 
 
+def test_torture_extraction_of_a_streamed_case():
+    """agent-torture.py writes the SSE body base64-encoded under the same
+    `response.encoding == "base64"` key it uses for buffered replies, and puts
+    the assembled text in `normalized`. Decoding that body as a completion
+    object raises, and the raise must not cost the record its `normalized`
+    text: the two streaming families are a quarter of the matrix, and losing
+    them silently shrinks the sample set the aggregate is computed over."""
+    import base64
+    sse = (b'data: {"choices":[{"delta":{"content":"streamed answer"}}]}\n\n'
+           b'data: [DONE]\n\n')
+    line = json.dumps({
+        "id": "runner-004-stream_normalization",
+        "category": "stream_normalization",
+        "response": {"encoding": "base64",
+                     "media_type": "text/event-stream",
+                     "body": base64.b64encode(sse).decode()},
+        "normalized": {"text": "streamed answer", "saw_done": True,
+                       "finish_reason": "stop", "tool_calls": []},
+    })
+
+    assert extract_text_from_torture(line) == "streamed answer"
+
+
 def test_script_with_files():
     """Integration test: run the script with files."""
     import subprocess
@@ -153,18 +176,14 @@ def test_script_with_files():
 
 
 def main():
-    """Run all tests."""
-    tests = [
-        ("clean_text", test_clean_text),
-        ("looping_text", test_looping_text),
-        ("blank_collapse_text", test_blank_collapse_text),
-        ("empty_text", test_empty_text),
-        ("single_word_repetition", test_single_word_repetition),
-        ("aggregate_metrics", test_aggregate_metrics),
-        ("aggregate_collapse_flag", test_aggregate_collapse_flag),
-        ("torture_extraction", test_torture_extraction),
-        ("script_with_files", test_script_with_files),
-    ]
+    """Run all tests.
+
+    Discovered, not listed: a hand-maintained roster silently drops any test
+    added to this file, so the two ways of running it would disagree about
+    what the suite is.
+    """
+    tests = sorted((name[len("test_"):], fn) for name, fn in globals().items()
+                   if name.startswith("test_") and callable(fn))
 
     failed = []
     for name, test in tests:

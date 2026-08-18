@@ -19,23 +19,30 @@ from typing import Any
 
 
 def extract_text_from_torture(line: str) -> str | None:
-    """Extract the decoded text from a torture raw.jsonl line."""
+    """Extract the decoded text from a torture raw.jsonl line.
+
+    A streamed case carries its SSE body under the SAME base64 encoding key as
+    a buffered reply, so decoding it as a completion object raises. That must
+    fall through to the assembled `normalized` text rather than discard the
+    record: the two streaming families are a quarter of the matrix.
+    """
     try:
         obj = json.loads(line)
-        response = obj.get("response", {})
-        body_b64 = response.get("body", "")
-        if response.get("encoding") == "base64":
-            decoded = base64.b64decode(body_b64).decode("utf-8")
-            resp_obj = json.loads(decoded)
-            choices = resp_obj.get("choices", [])
-            if choices:
-                message = choices[0].get("message", {})
-                return message.get("content", "")
-        elif "normalized" in obj:
-            normalized = obj.get("normalized", {})
-            return normalized.get("text", "")
-    except Exception:
-        pass
+    except ValueError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    response = obj.get("response") or {}
+    if response.get("encoding") == "base64":
+        try:
+            decoded = base64.b64decode(response.get("body", "")).decode("utf-8")
+            choices = json.loads(decoded).get("choices", [])
+        except Exception:                                       # noqa: BLE001
+            choices = []
+        if choices:
+            return choices[0].get("message", {}).get("content", "")
+    if "normalized" in obj:
+        return (obj.get("normalized") or {}).get("text", "")
     return None
 
 
