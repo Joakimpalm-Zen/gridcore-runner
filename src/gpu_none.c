@@ -17,6 +17,14 @@ bool gpu_mem_info(size_t *free_bytes, size_t *total_bytes) {
     return false;
 }
 
+// No device, so no device-side fit ceiling distinct from ordinary RAM. main.c
+// calls this on the --caps path, so its absence was not a cosmetic gap: this
+// file could not link a runner at all.
+bool gpu_max_working_set(size_t *bytes) {
+    (void)bytes;
+    return false;
+}
+
 const char *gpu_shader_source_sha(void) { return NULL; }   // no shaders here
 
 bool gpu_kv_q8_ok(void) {
@@ -28,8 +36,9 @@ bool gpu_quant_ok(int type) {
     return false;   // no kernels at all, so --caps advertises an empty GPU list
 }
 
-// No GPU, so no tensor-core GEMM was ever dispatched. Present so the TC
-// tolerance gate links against a CPU-only build.
+// No GPU, so no tensor-core GEMM to force and none ever dispatched. Present so
+// the TC tolerance gate links against a CPU-only build.
+void gpu_tc_force(int on) { (void)on; }
 unsigned long gpu_tc_dispatches(void) { return 0; }
 
 // Same, for the fast decode matvec: the mv tolerance gate links here and
@@ -40,6 +49,9 @@ unsigned long gpu_mv_dispatches(void) { return 0; }
 // Metal-only lever; present so the gate links and reports 'never here'.
 void gpu_attn_coop_force(int on) { (void)on; }
 unsigned long gpu_attn_coop_dispatches(void) { return 0; }
+
+// Same, for the fused-vs-eager MoE routing gate.
+void gpu_moe_eager_force(int on) { (void)on; }
 
 bool gpu_moe_ok(void) {
     return false;   // no backend here at all

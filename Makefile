@@ -724,6 +724,22 @@ TEST_MODEL_LOAD_FAILURE_SRC = tests/test_model_load_failure.c src/gguf.c \
 $(TEST_MODEL_LOAD_FAILURE): $(TEST_MODEL_LOAD_FAILURE_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MODEL_LOAD_FAILURE_SRC) -o $@ $(LDFLAGS)
 
+# The CPU-only backend stub must be able to STAND IN for a real backend --
+# that is the entire claim in its own header comment ("CUDA (cuda.c) and Metal
+# (metal.m) implement this same interface"). It could not: gpu_max_working_set,
+# gpu_tc_force and gpu_moe_eager_force are declared in gpu.h and were missing
+# from it, so a link with this file in place of $(GPU_SRC) failed outright.
+#
+# Nothing in the Makefile builds src/gpu_none.c -- every platform branch picks
+# cuda.c or metal.m -- which is exactly how it rotted, so the gate has to be
+# the link itself. -O0 because what is under test is the interface, not the
+# code generation, and this is the one build in the tree nobody else pays for.
+CPU_STUB_SRC = $(filter-out $(GPU_SRC),$(SRC)) src/gpu_none.c
+test-gpu-stub: $(CPU_STUB_SRC) $(HDR)
+	$(CC) -O0 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -I src \
+	    $(CPU_STUB_SRC) -o runner-gpu-stub $(LDFLAGS)
+	@./runner-gpu-stub --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); assert d.get('gpu') is None, d.get('gpu'); print('cpu-only backend stub ok (links a runner, and --caps reports no GPU)')"
+
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
@@ -1184,6 +1200,8 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_INSTANCES_OOM)
 	./$(TEST_METAL_ADMISSION)
 	./$(TEST_TRAY_CORE)
+	@# the CPU-only backend stub, which no platform branch ever builds
+	$(MAKE) --no-print-directory test-gpu-stub
 	@# The split guard was absent from this list entirely, which is how a
 	@# target-name collision kept it unbuilt and unnoticed. It self-skips
 	@# without CUDA, so it costs a Mac nothing and actually fires on the boxes
@@ -1428,7 +1446,8 @@ clean:
 	      $(TEST_FILE_ID) test-file-identity.tmp \
 	      $(TEST_BUDGET) $(TEST_ATTRIB) $(TEST_MSG_OOM) $(TEST_STOP_CONSTRAINT) \
 	      $(TMPL_CONF_RENDER) \
-	      $(TEST_SPLIT_GUARD) split-guard.out test-swap-race-bin
+	      $(TEST_SPLIT_GUARD) split-guard.out test-swap-race-bin \
+	      runner-gpu-stub
 	rm -rf test-attn
 	rm -rf .build
 	rm -f shared-noid.out
@@ -1487,4 +1506,5 @@ test-makefile-sane:
 
 
 .PHONY: template-conformance template-conformance-refresh template-conformance-baseline template-conformance-harmony-oracle
+.PHONY: test-gpu-stub
 .PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-split test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
