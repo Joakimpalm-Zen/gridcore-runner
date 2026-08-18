@@ -2152,7 +2152,12 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
             case SN_NUM: case SN_INT:
                 if (c == '-' || (c >= '0' && c <= '9')) return a;
                 break;
-            case SN_ANY:  return a;
+            // The generic machine holds any value, which makes it the union's
+            // catch-all -- but an OBJECT-rooted one (compile_typed's open
+            // object) only ever starts at '{'. Dispatching every byte to it
+            // made every later alternative unreachable, so
+            // `{"type":["object","null"]}` refused `null`.
+            case SN_ANY:  if (a->min_items && c != '{') break; return a;
             case SN_RAW:  return a;   // catch-all; see union_start_bytes
             default: break;
         }

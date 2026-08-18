@@ -449,6 +449,60 @@ static void test_schema_rejects_unenforceable_keywords(void) {
     }
 }
 
+// `{"type":["object","null"]}` -- a nullable structured parameter, and one of
+// the most common shapes in a real tool payload. An open object compiles to
+// the generic any-value machine, which the union dispatcher treated as a
+// catch-all because it can hold any value; but an OBJECT-rooted one only ever
+// starts at '{', so it swallowed the dispatch and then refused the byte.
+// Every alternative after it was unreachable, whatever it was.
+static void test_schema_type_array_with_open_object(void) {
+    // wrapped in a property so a bare number has a terminator to complete on
+    static const struct { const char *types; const char *value; } cases[] = {
+        { "[\"object\",\"null\"]",    "null" },
+        { "[\"object\",\"null\"]",    "{}" },
+        { "[\"object\",\"null\"]",    "{\"a\":1}" },
+        { "[\"null\",\"object\"]",    "null" },
+        { "[\"object\",\"string\"]",  "\"x\"" },
+        { "[\"object\",\"array\"]",   "[]" },
+        { "[\"object\",\"integer\"]", "5" },
+        { "[\"object\",\"boolean\"]", "true" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        char src[192], doc[64];
+        snprintf(src, sizeof(src),
+                 "{\"type\":\"object\",\"properties\":{\"v\":{\"type\":%s}},"
+                 "\"required\":[\"v\"]}", cases[i].types);
+        snprintf(doc, sizeof(doc), "{\"v\":%s}", cases[i].value);
+        jv *schema_json = json_parse(src, strlen(src));
+        assert(schema_json != NULL);
+        char err[128];
+        snode *schema = schema_compile(schema_json, err, sizeof(err));
+        assert(schema != NULL);
+        sval v; sval_init(&v, schema);
+        if (!sval_feed(&v, doc, (int)strlen(doc)) || !v.done)
+            fprintf(stderr, "type %s rejects %s\n", cases[i].types, doc);
+        assert(v.done);
+        schema_free(schema);
+        jv_free(schema_json);
+    }
+    // and what the union must still refuse
+    const char *src = "{\"type\":\"object\",\"properties\":"
+                      "{\"v\":{\"type\":[\"object\",\"null\"]}},"
+                      "\"required\":[\"v\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+    const char *bad[] = { "{\"v\":\"x\"}", "{\"v\":5}", "{\"v\":true}",
+                          "{\"v\":[]}" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        sval v; sval_init(&v, schema);
+        assert(!sval_feed(&v, bad[i], (int)strlen(bad[i])) || !v.done);
+    }
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 // A keyword the compiler DOES implement, written with the wrong JSON type, is
 // the same failure wearing a different hat: reinterpreting it silently
 // enforces something other than what was declared, and the two below both
@@ -1791,6 +1845,7 @@ int main(void) {
     test_schema_rejects_escaped_keys();
     test_schema_rejects_unenforceable_keywords();
     test_schema_rejects_misspelled_keyword_types();
+    test_schema_type_array_with_open_object();
     test_schema_bounded_repetition();
     test_schema_multi_segment_pattern();
     test_schema_agent_id_pattern_is_enforced();
