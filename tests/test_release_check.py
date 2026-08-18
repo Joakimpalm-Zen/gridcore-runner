@@ -150,3 +150,17 @@ def test_release_check_skips_the_report_gate_when_no_directory_is_given(
         check_release, "binary_version", lambda _: "runner 0.1.3-alpha"
     )
     assert check_release.check(args)
+
+
+def test_release_check_fails_when_the_named_report_directory_is_missing(
+        monkeypatch, tmp_path, capsys):
+    """Passing None means "do not ask for a report". Naming a directory that
+    does not exist means the reports moved or were deleted — and a gate that
+    answers "fine" to that has checked nothing at all."""
+    args = good_args(tmp_path)
+    args.compat_reports = tmp_path / "compat-reports-renamed"
+    monkeypatch.setattr(
+        check_release, "binary_version", lambda _: "runner 0.1.3-alpha"
+    )
+    assert not check_release.check(args)
+    assert "compat report" in capsys.readouterr().err

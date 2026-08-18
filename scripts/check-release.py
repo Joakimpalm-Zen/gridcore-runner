@@ -114,10 +114,16 @@ def check(args):
     # asks that a dated report for THIS version exists — what it contains is
     # the manifest's business, and a report whose checks did not run says so
     # itself (RNR-007).
-    if args.compat_reports and args.compat_reports.is_dir():
+    # Not passing a directory at all means "do not ask for a report" and
+    # releases fine. Naming one that is not there means the ledger moved or
+    # was deleted, which is the one answer this gate must never give quietly:
+    # skipping on a missing directory turns the check into no check.
+    if args.compat_reports:
         stem = f"{version}-"
+        reports = (sorted(args.compat_reports.iterdir())
+                   if args.compat_reports.is_dir() else [])
         if not any(p.name.startswith(stem) and p.suffix == ".json"
-                   for p in args.compat_reports.iterdir()):
+                   for p in reports):
             ok &= fail(
                 f"no compat report for {version} in {args.compat_reports} "
                 f"(expected {stem}<date>.json — run scripts/compat_matrix.py "
