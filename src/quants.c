@@ -871,6 +871,52 @@ static void dq_q8_0_neon(const block_q8_0 *b, float *y) {
     i8_to_f32x4(vld1q_s8(b->qs + 16), f); st16f(y + 16, f, d);
 }
 
+// Bit-identical to the scalar dq_q4_0 / dq_iq4_nl / dq_iq4_xs below, not
+// merely close: each value is one multiply of an f16-derived scale (11
+// significant bits) by a small integer code (<= 7 bits for the IQ4 codebook,
+// 4 for a q4_0 nibble), so the product needs at most 24 bits and is exact in
+// f32 whichever way it is grouped. That is what lets these join the dispatch
+// without touching the CPU==GPU identity gate; test_dequant_exact pins it.
+static void dq_q4_0_neon(const block_q4_0 *b, float *y) {
+    const uint8x16_t mF = vdupq_n_u8(0xF);
+    const int8x16_t m8 = vdupq_n_s8(8);
+    float d = f16_to_f32(b->d);
+    uint8x16_t q = vld1q_u8(b->qs);
+    float32x4_t f[4];
+    i8_to_f32x4(vsubq_s8(vreinterpretq_s8_u8(vandq_u8(q, mF)), m8), f);
+    st16f(y, f, d);
+    i8_to_f32x4(vsubq_s8(vreinterpretq_s8_u8(vshrq_n_u8(q, 4)), m8), f);
+    st16f(y + 16, f, d);
+}
+
+// IQ4: the nibble indexes a 16-entry codebook, which is one tbl lookup.
+static void dq_iq4_nl_neon(const block_iq4_nl *b, float *y) {
+    const int8x16_t tbl = vld1q_s8(kvalues_iq4nl);
+    const uint8x16_t mF = vdupq_n_u8(0xF);
+    float d = f16_to_f32(b->d);
+    uint8x16_t q = vld1q_u8(b->qs);
+    float32x4_t f[4];
+    i8_to_f32x4(vqtbl1q_s8(tbl, vandq_u8(q, mF)), f);  st16f(y, f, d);
+    i8_to_f32x4(vqtbl1q_s8(tbl, vshrq_n_u8(q, 4)), f); st16f(y + 16, f, d);
+}
+
+static void dq_iq4_xs_neon(const block_iq4_xs *b, float *y) {
+    const int8x16_t tbl = vld1q_s8(kvalues_iq4nl);
+    const uint8x16_t mF = vdupq_n_u8(0xF);
+    float d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs;
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        int ls = ((b->scales_l[ib / 2] >> 4 * (ib % 2)) & 0xF) |
+                 (((b->scales_h >> 2 * ib) & 3) << 4);
+        float dl = d * (ls - 32);
+        uint8x16_t q = vld1q_u8(qs);
+        float32x4_t f[4];
+        i8_to_f32x4(vqtbl1q_s8(tbl, vandq_u8(q, mF)), f);  st16f(y, f, dl);
+        i8_to_f32x4(vqtbl1q_s8(tbl, vshrq_n_u8(q, 4)), f); st16f(y + 16, f, dl);
+        qs += 16; y += 32;
+    }
+}
+
 static void dq_mxfp4_neon(const block_mxfp4 *b, float *y) {
     const int8x16_t tbl = vld1q_s8(kvalues_mxfp4_i8);
     const uint8x16_t mF = vdupq_n_u8(0xF);
@@ -1135,9 +1181,12 @@ static void dequant_block(int type, const void *src, float *dst) {
     }
 #elif RUNNER_NEON
     switch (type) {
+        case T_Q4_0:  dq_q4_0_neon(src, dst); return;
         case T_Q8_0:  dq_q8_0_neon(src, dst); return;
         case T_Q4_K:  dq_q4_K_neon(src, dst); return;
         case T_Q6_K:  dq_q6_K_neon(src, dst); return;
+        case T_IQ4_NL: dq_iq4_nl_neon(src, dst); return;
+        case T_IQ4_XS: dq_iq4_xs_neon(src, dst); return;
         case T_MXFP4: dq_mxfp4_neon(src, dst); return;
         case T_IQ2_XXS: dq_iq2_xxs_neon(src, dst); return;
         case T_IQ2_XS: dq_iq2_xs_neon(src, dst); return;

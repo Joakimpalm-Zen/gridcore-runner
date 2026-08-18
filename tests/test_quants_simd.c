@@ -3,8 +3,9 @@
 // vec_dot dispatches to AVX2 or NEON kernels depending on the build; this
 // test checks every supported format against a double-precision dot over
 // dequantized weights. For the formats whose *block dequant* also has a SIMD
-// path (Q8_0, Q4_K, Q6_K, MXFP4), the reference decode is reimplemented here
-// from the format spec so the test does not trust the code under test.
+// path (Q4_0, Q8_0, Q4_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4), the reference decode is
+// reimplemented here from the format spec so the test does not trust the code
+// under test.
 // q8_quant_row must be byte-identical to the scalar definition on every
 // platform (the KV cache is compared across runs), so that one is exact.
 #include "quants.h"
@@ -213,6 +214,41 @@ static void ref_dq_q8_0(const block_q8_0 *b, double *y) {
     for (int j = 0; j < QK; j++) y[j] = d * b->qs[j];
 }
 
+static const double kv_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+};
+
+static void ref_dq_q4_0(const block_q4_0 *b, double *y) {
+    double d = f16_to_f32(b->d);
+    for (int j = 0; j < 16; j++) {
+        y[j]      = ((b->qs[j] & 0xF) - 8) * d;
+        y[j + 16] = ((b->qs[j] >> 4)  - 8) * d;
+    }
+}
+
+static void ref_dq_iq4_nl(const block_iq4_nl *b, double *y) {
+    double d = f16_to_f32(b->d);
+    for (int j = 0; j < 16; j++) {
+        y[j]      = d * kv_iq4nl[b->qs[j] & 0xF];
+        y[j + 16] = d * kv_iq4nl[b->qs[j] >> 4];
+    }
+}
+
+static void ref_dq_iq4_xs(const block_iq4_xs *b, double *y) {
+    double d = f16_to_f32(b->d);
+    const uint8_t *qs = b->qs;
+    for (int ib = 0; ib < QK_K / 32; ib++) {
+        int ls = ((b->scales_l[ib / 2] >> 4 * (ib % 2)) & 0xF) |
+                 (((b->scales_h >> 2 * ib) & 3) << 4);
+        double dl = d * (ls - 32);
+        for (int j = 0; j < 16; j++) {
+            y[j]      = dl * kv_iq4nl[qs[j] & 0xF];
+            y[j + 16] = dl * kv_iq4nl[qs[j] >> 4];
+        }
+        qs += 16; y += 32;
+    }
+}
+
 static void ref_dq_mxfp4(const block_mxfp4 *b, double *y) {
     double d = ldexp(1.0, (int)b->e - 127);
     for (int j = 0; j < 16; j++) {
@@ -335,6 +371,15 @@ static void ref_weights(int type, const uint8_t *row, double *w, int n) {
         case T_Q8_0:
             for (int i = 0; i < n; i += bs) ref_dq_q8_0((const block_q8_0 *)(row + (i / bs) * ts), w + i);
             return;
+        case T_Q4_0:
+            for (int i = 0; i < n; i += bs) ref_dq_q4_0((const block_q4_0 *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ4_NL:
+            for (int i = 0; i < n; i += bs) ref_dq_iq4_nl((const block_iq4_nl *)(row + (i / bs) * ts), w + i);
+            return;
+        case T_IQ4_XS:
+            for (int i = 0; i < n; i += bs) ref_dq_iq4_xs((const block_iq4_xs *)(row + (i / bs) * ts), w + i);
+            return;
         case T_Q4_K:
             for (int i = 0; i < n; i += bs) ref_dq_q4_K((const block_q4_K *)(row + (i / bs) * ts), w + i);
             return;
@@ -413,6 +458,72 @@ static void test_dequant(int type, int n) {
         }
     }
     free(row); free(got); free(ref);
+}
+
+// Q4_0 / IQ4_NL / IQ4_XS dequantize to the SAME BITS through the SIMD kernels
+// as through the scalar formulas, which is stronger than the tolerance above
+// and is what the CPU==GPU identity gate rests on: those three do one multiply
+// per value with the same operands, so a widen-then-scale kernel has no licence
+// to differ at all. The scalar formulas are transcribed here in float (the
+// double references cannot express "same bits").
+static void ref_exact_q4_0(const uint8_t *row, float *y, int n) {
+    for (int i = 0; i < n / QK; i++, y += QK) {
+        const block_q4_0 *b = (const block_q4_0 *)(row + (size_t)i * sizeof(*b));
+        float d = f16_to_f32(b->d);
+        for (int j = 0; j < 16; j++) {
+            y[j]      = ((b->qs[j] & 0xF) - 8) * d;
+            y[j + 16] = ((b->qs[j] >> 4)  - 8) * d;
+        }
+    }
+}
+static void ref_exact_iq4_nl(const uint8_t *row, float *y, int n) {
+    for (int i = 0; i < n / QK; i++, y += QK) {
+        const block_iq4_nl *b = (const block_iq4_nl *)(row + (size_t)i * sizeof(*b));
+        float d = f16_to_f32(b->d);
+        for (int j = 0; j < 16; j++) {
+            y[j]      = d * (float)kv_iq4nl[b->qs[j] & 0xF];
+            y[j + 16] = d * (float)kv_iq4nl[b->qs[j] >> 4];
+        }
+    }
+}
+static void ref_exact_iq4_xs(const uint8_t *row, float *y, int n) {
+    for (int i = 0; i < n / QK_K; i++) {
+        const block_iq4_xs *b = (const block_iq4_xs *)(row + (size_t)i * sizeof(*b));
+        float d = f16_to_f32(b->d);
+        const uint8_t *qs = b->qs;
+        for (int ib = 0; ib < QK_K / 32; ib++) {
+            int ls = ((b->scales_l[ib / 2] >> 4 * (ib % 2)) & 0xF) |
+                     (((b->scales_h >> 2 * ib) & 3) << 4);
+            float dl = d * (ls - 32);
+            for (int j = 0; j < 16; j++) {
+                y[j]      = dl * (float)kv_iq4nl[qs[j] & 0xF];
+                y[j + 16] = dl * (float)kv_iq4nl[qs[j] >> 4];
+            }
+            qs += 16; y += 32;
+        }
+    }
+}
+
+static void test_dequant_exact(int type, int n) {
+    size_t rowsz = ggml_row_size(type, n);
+    uint8_t *row = malloc(rowsz);
+    float *got = malloc((size_t)n * sizeof(float));
+    float *want = malloc((size_t)n * sizeof(float));
+    for (int trial = 0; trial < 32; trial++) {
+        make_row(type, row, n);
+        dequant_row(type, row, got, n);
+        switch (type) {
+            case T_Q4_0:   ref_exact_q4_0(row, want, n); break;
+            case T_IQ4_NL: ref_exact_iq4_nl(row, want, n); break;
+            case T_IQ4_XS: ref_exact_iq4_xs(row, want, n); break;
+            default: CHECK(0, "no exact reference for %s", ggml_type_name(type)); return;
+        }
+        CHECK(memcmp(got, want, (size_t)n * sizeof(float)) == 0,
+              "dequant %s trial=%d: SIMD block dequant is not bit-identical to "
+              "the scalar formula", ggml_type_name(type), trial);
+        if (g_fail > 20) break;
+    }
+    free(row); free(got); free(want);
 }
 
 // scalar q8_quant_row, verbatim semantics — the SIMD path must match exactly
@@ -790,6 +901,12 @@ int main(void) {
         test_vec_dot(types[t], 256);   // single K-block / few 32-blocks
     }
     test_dequant(T_Q8_0, 4096);
+    test_dequant(T_Q4_0, 4096);
+    test_dequant(T_IQ4_NL, 4096);
+    test_dequant(T_IQ4_XS, 4096);
+    test_dequant_exact(T_Q4_0, 4096);
+    test_dequant_exact(T_IQ4_NL, 4096);
+    test_dequant_exact(T_IQ4_XS, 4096);
     test_dequant(T_Q4_K, 4096);
     test_dequant(T_Q6_K, 4096);
     test_dequant(T_MXFP4, 4096);
