@@ -24,6 +24,12 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+// Generous per-axis ceiling for geometry read out of an untrusted GGUF: real
+// models are orders of magnitude smaller, and every axis below this bound
+// keeps the int products the loader and forward pass compute from it
+// (n_head*head_dim, 2*n_ff_exp, batch*width) far inside their type.
+#define MDL_DIM_MAX 1048576   /* 2^20 elements per axis */
+
 // ---------------------------------------------------------------- helpers
 
 static int64_t stat_mtime_ns(const struct stat *st) {
@@ -1755,7 +1761,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         // Mixtral omits expert_feed_forward_length and uses feed_forward_length
         m->n_ff_exp = (int)gguf_get_u32(g, AK("expert_feed_forward_length"), m->n_ff);
         if (m->n_expert_used < 1 || m->n_expert_used > m->n_expert ||
-            m->n_ff_exp <= 0 || m->n_expert > 256) {
+            m->n_ff_exp <= 0 || m->n_ff_exp > MDL_DIM_MAX || m->n_expert > 256) {
             fprintf(stderr, "error: invalid MoE geometry (experts=%d used=%d ff_exp=%d)\n",
                     m->n_expert, m->n_expert_used, m->n_ff_exp);
             return false;
@@ -1809,9 +1815,19 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             if (nsh < 1) nsh = 1;
             // afmoe publishes no shexp width key: the shared expert is
             // expert_shared_count routed-expert widths wide, per llama.cpp.
+            // Both factors come from the file, so the product is computed wide
+            // — as int it overflowed (UBSan: "signed integer overflow: 64 *
+            // 1073741824") before the width could be judged out of range.
+            int64_t dflt = (int64_t)m->n_ff_exp * nsh;
+            if (dflt > MDL_DIM_MAX) dflt = MDL_DIM_MAX + 1;   // refused below
             m->n_ff_shexp = (int)gguf_get_u32(
-                g, AK("expert_shared_feed_forward_length"),
-                m->n_ff_exp * nsh);
+                g, AK("expert_shared_feed_forward_length"), (uint32_t)dflt);
+            if (m->n_ff_shexp > MDL_DIM_MAX) {
+                fprintf(stderr, "error: shared-expert FFN width %d is out of "
+                        "range (expert_shared_count=%d, expert width=%d)\n",
+                        m->n_ff_shexp, nsh, m->n_ff_exp);
+                return false;
+            }
         }
         else if (gguf_get_u32(g, AK("expert_shared_count"), 0) > 0) {
             fprintf(stderr, "error: expert_shared_count is set but the shared "
@@ -1849,13 +1865,13 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     // n_head_kv == 0 would divide-by-zero on the first token (kv_dim / hd and
     // n_head / n_head_kv); n_head_kv > n_head makes kv_mul == 0; an oversized
     // dim would overflow the byte products below. This gate closes those.
-    #define MDL_DIM_MAX 1048576   /* 2^20 elements per axis */
     if (m->head_dim < 1        || m->head_dim > MDL_DIM_MAX ||
         m->n_embd   > MDL_DIM_MAX || m->n_ff  > MDL_DIM_MAX ||
         m->n_head   > MDL_DIM_MAX || m->n_layer > 100000 ||
         m->rope_dim < 0        || m->rope_dim > m->head_dim ||
         m->n_head_kv < 1       || m->n_head_kv > m->n_head ||
-        m->n_head % m->n_head_kv != 0) {
+        m->n_head % m->n_head_kv != 0 ||
+        (int64_t)m->n_head * m->head_dim > MDL_DIM_MAX) {
         fprintf(stderr, "error: invalid model geometry for arch '%s' "
                 "(head_dim=%d rope_dim=%d n_head=%d n_head_kv=%d "
                 "n_embd=%d n_ff=%d n_layer=%d)\n",
@@ -1863,7 +1879,6 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 m->n_embd, m->n_ff, m->n_layer);
         return false;
     }
-    #undef MDL_DIM_MAX
 
     bool ok = true;
     m->tok_embd = need_tensor(g, "token_embd.weight", 0, &ok);

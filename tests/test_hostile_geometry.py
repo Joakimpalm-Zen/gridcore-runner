@@ -35,6 +35,18 @@ def _patch_u32(src, dst, key, value):
     return dst
 
 
+def _rename_key(src, dst, key, new_key):
+    """Rename a metadata key in place. Same length, so nothing else moves."""
+    assert len(key) == len(new_key)
+    b = bytearray(src.read_bytes())
+    k = struct.pack("<Q", len(key)) + key.encode()
+    i = b.find(k)
+    assert i >= 0, f"{key} not found in {src}"
+    b[i + 8:i + 8 + len(key)] = new_key.encode()
+    dst.write_bytes(bytes(b))
+    return dst
+
+
 def _patch_tensor_type(src, dst, name, value):
     """Rewrite one tensor descriptor's ggml type, leaving its shape and data."""
     b = bytearray(src.read_bytes())
@@ -236,3 +248,33 @@ def test_gemma4_moe_dense_branch_width_beyond_its_tensor_is_refused(runner_bin, 
                                 "refused at load, not crash mid-forward"
     err = proc.stderr.decode(errors="replace")
     assert "ffn_gate" in err
+
+
+def test_absurd_shared_expert_count_is_refused(runner_bin, tmp_path):
+    """expert_shared_count multiplies the routed width in plain int arithmetic.
+
+    Without expert_shared_feed_forward_length the shared branch is
+    expert_shared_count routed widths wide, and that product was computed as
+    int * int straight from the file. UBSan on the shexp fixture with the width
+    key renamed away and the count set to 2^30: "signed integer overflow: 64 *
+    1073741824 cannot be represented in type 'int'". The wrapped result was 0,
+    which reads as "this model has no shared expert" — so the branch was
+    silently dropped and the model answered without it.
+    """
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-moe.py", str(tmp_path / "moe")],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    good = tmp_path / "moe.shexp.gguf"
+    # rename the explicit width key so the count-times-width default is what
+    # decides the shared branch's width (the afmoe shape)
+    noff = _rename_key(good, tmp_path / "moe-nowidth.gguf",
+                       "llama.expert_shared_feed_forward_length",
+                       "llama.expert_shared_feed_forward_lengtX")
+    bad = _patch_u32(noff, tmp_path / "moe-nsh.gguf",
+                     "llama.expert_shared_count", 1 << 30)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "an out-of-range expert width must be refused"
+    err = proc.stderr.decode(errors="replace")
+    assert "shared-expert FFN width" in err
