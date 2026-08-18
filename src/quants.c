@@ -1175,8 +1175,15 @@ static void dequant_block(int type, const void *src, float *dst) {
 void dequant_row(int type, const void *src, float *dst, int n) {
     if (type == T_F32) { memcpy(dst, src, (size_t)n * 4); return; }
     if (type == T_F16) {
+        // f16_load, not the g_f16_table lookup f16_to_f32 does: this loop runs
+        // per weight row in the batched prefill path, and on aarch64 f16_load
+        // is an fcvtl the compiler vectorizes, where the table is a gather
+        // into 256 KB (twice this core's L1D). Same values either way — the
+        // table decode and fcvt agree on all 65536 encodings except the quiet
+        // bit of a signalling NaN. Measured on M1, s135-f16, --gpu off:
+        // prefill 271 -> 294 tok/s, decode unchanged (it takes vec_dot).
         const f16_t *h = src;
-        for (int i = 0; i < n; i++) dst[i] = f16_to_f32(h[i]);
+        for (int i = 0; i < n; i++) dst[i] = f16_load(h + i);
         return;
     }
     if (type == T_BF16) {

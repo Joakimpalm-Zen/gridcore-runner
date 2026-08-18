@@ -592,6 +592,51 @@ static void test_i8_dot(int type, int n) {
     free(row); free(x); free(w); free(xq); free(xr);
 }
 
+// ------------------------------------------------------------ f16 -> f32
+//
+// dequant_row(T_F16) is the batched prefill path's weight decode and does not
+// go through dequant_block, so nothing above covers it. Every one of the 65536
+// encodings is checked, not a sample: the subnormal run and the exponent-0
+// boundary are where a decode goes wrong and neither shows up in random
+// weights. Only NaN is allowed to differ in the quiet bit — aarch64's fcvt
+// quiets a signalling NaN and a table decode does not, and no finite value is
+// affected by that.
+static float ref_f16_decode(uint16_t h) {
+    uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+    uint32_t exp = (h >> 10) & 0x1F, mant = h & 0x3FF, f;
+    if (exp == 0 && mant == 0) f = sign;
+    else if (exp == 0) {                                  // subnormal
+        uint32_t e = 113;
+        while (!(mant & 0x400)) { mant <<= 1; e--; }
+        f = sign | (e << 23) | ((mant & 0x3FF) << 13);
+    } else if (exp == 31) f = sign | 0x7F800000u | (mant << 13);
+    else f = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+    float v;
+    memcpy(&v, &f, 4);
+    return v;
+}
+
+static void test_f16_decode(void) {
+    static f16_t row[65536];
+    static float got[65536];
+    for (uint32_t h = 0; h < 65536; h++) row[h] = (f16_t)h;
+    dequant_row(T_F16, row, got, 65536);
+    for (uint32_t h = 0; h < 65536; h++) {
+        float want = ref_f16_decode((uint16_t)h);
+        if (isnan(want)) {
+            CHECK(isnan(got[h]), "dequant_row f16 %04x: %g is not a NaN",
+                  h, (double)got[h]);
+            continue;
+        }
+        uint32_t a, b;
+        memcpy(&a, &got[h], 4);
+        memcpy(&b, &want, 4);
+        CHECK(a == b, "dequant_row f16 %04x: got %08x (%g) want %08x (%g)",
+              h, a, (double)got[h], b, (double)want);
+        if (g_fail > 20) return;
+    }
+}
+
 // ------------------------------------------------------------ f32 -> f16
 //
 // Both f32_to_f16 implementations (aarch64 fcvt, portable integer math) must
@@ -757,6 +802,7 @@ int main(void) {
     test_dequant(T_IQ1_M, 4096);
     test_q8_kv(512);
     test_multi();
+    test_f16_decode();
     test_f32_to_f16();
 
     test_i8_quant_act();
