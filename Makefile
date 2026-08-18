@@ -131,7 +131,7 @@ TEST_RESP_SM_RUN = @echo "skip: test-responses-sm (POSIX socketpair; covered by 
 TEST_ATTRIB_DEP =
 TEST_ATTRIB_RUN = @echo "skip: test-tool-attribution (POSIX socketpair; covered by Linux CI)"
 TEST_MSG_OOM_DEP =
-TEST_MSG_OOM_RUN = @echo "skip: test-messages-oom (POSIX socketpair; covered by Linux CI)"
+TEST_MSG_OOM_RUN = @echo "skip: test-prompt-oom (POSIX socketpair; covered by Linux CI)"
 else
 TEST_RESP_SM_DEP = $(TEST_RESP_SM)
 TEST_RESP_SM_RUN = ./$(TEST_RESP_SM)
@@ -612,13 +612,16 @@ TEST_ATTRIB_SRC = tests/test_tool_attribution.c src/gguf.c src/compat.c \
 $(TEST_ATTRIB): $(TEST_ATTRIB_SRC) src/server.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_ATTRIB_SRC) -o $@ $(LDFLAGS)
 
-# The same inbound translation under injected allocation failure. Same source
-# set minus src/api_anthropic.c, which is compiled INTO the test with
-# substituted allocators so only its own allocations are failed.
-TEST_MSG_OOM = $(TEST_BATCH:test-batch%=test-messages-oom%)
-TEST_MSG_OOM_SRC = tests/test_messages_oom.c \
-                   $(filter-out src/api_anthropic.c,$(TEST_ATTRIB_SRC:tests/test_tool_attribution.c=))
-$(TEST_MSG_OOM): $(TEST_MSG_OOM_SRC) src/server.c src/api_anthropic.c $(HDR)
+# The same inbound translations under injected allocation failure. Same source
+# set minus the three files that DO the translating -- server.c, api_responses.c
+# and api_anthropic.c are compiled INTO the test with substituted allocators.
+TEST_MSG_OOM = $(TEST_BATCH:test-batch%=test-prompt-oom%)
+TEST_MSG_OOM_SRC = tests/test_prompt_oom.c \
+                   $(filter-out src/api_anthropic.c src/api_responses.c \
+                                src/json.c,\
+                     $(TEST_ATTRIB_SRC:tests/test_tool_attribution.c=))
+$(TEST_MSG_OOM): $(TEST_MSG_OOM_SRC) src/server.c src/api_anthropic.c \
+                 src/api_responses.c src/json.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_MSG_OOM_SRC) -o $@ $(LDFLAGS)
 
 # The runner side of the template-conformance gate. Same recipe as the two

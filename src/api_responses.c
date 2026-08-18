@@ -19,7 +19,7 @@
 // compiler a second shape (and risk the chat path with it), the flat form is
 // re-serialised into the nested one and re-parsed. Returns an owned jv the
 // caller frees, or NULL with err set.
-static jv *responses_tools(jv *tools, char *err, int errcap) {
+static jv *responses_tools(jv *tools, char *err, int errcap, bool *oom) {
     if (!tools || tools->type == J_NULL) return NULL;
     if (tools->type != J_ARR) {
         snprintf(err, errcap, "tools must be an array");
@@ -96,6 +96,7 @@ static jv *responses_tools(jv *tools, char *err, int errcap) {
     sb_lit(&b, "]");
     if (b.failed || !b.s) {
         snprintf(err, errcap, "out of memory translating tools");
+        *oom = true;
         free(b.s);
         return NULL;
     }
@@ -106,7 +107,7 @@ static jv *responses_tools(jv *tools, char *err, int errcap) {
 }
 
 // tool_choice, likewise: the named form is flat here and nested in chat.
-static jv *responses_tool_choice(jv *tc, char *err, int errcap) {
+static jv *responses_tool_choice(jv *tc, char *err, int errcap, bool *oom) {
     if (!tc || tc->type != J_OBJ) return NULL; // strings pass through unchanged
     const char *name = jv_str(jv_get(tc, "name"), NULL);
     if (!name) {
@@ -120,7 +121,13 @@ static jv *responses_tool_choice(jv *tc, char *err, int errcap) {
     sb_lit(&b, "\"}}");
     jv *out = b.failed || !b.s ? NULL : json_parse(b.s, b.n);
     free(b.s);
-    if (!out) snprintf(err, errcap, "out of memory translating tool_choice");
+    // The buffer this re-parses is one this function serialised from a single
+    // escaped name, so it round-trips by construction: a NULL here is the
+    // allocator, not the caller's tool_choice.
+    if (!out) {
+        snprintf(err, errcap, "out of memory translating tool_choice");
+        *oom = true;
+    }
     return out;
 }
 
@@ -170,8 +177,12 @@ static jv *responses_schema(jv *req, bool *bad, char *err, int errcap) {
 // refused. It is resolved out there rather than in here because Harmony needs
 // the same name on the turn itself, and because a name this function cannot
 // find is a reason to answer 400, not to return NULL and be skipped.
+// *oom separates the two NULLs. An item that carries nothing renderable is
+// skipped by the caller, which is right; an item whose text could not be
+// ASSEMBLED used to take the same exit, so an allocation failure dropped a turn
+// out of the conversation and the request still answered 200.
 static char *responses_item_text(jv *item, const char **role,
-                                 const char *call_name) {
+                                 const char *call_name, bool *oom) {
     const char *type = jv_str(jv_get(item, "type"), NULL);
     sbuf b = {0};
     // a tool result the caller is feeding back: this is the tool loop
@@ -180,7 +191,11 @@ static char *responses_item_text(jv *item, const char **role,
         jv *out = jv_get(item, "output");
         if (out && out->type == J_STR) sb_put(&b, out->str, strlen(out->str));
         else if (out) jv_dump(out, &b);
-        return b.s ? b.s : strdup("");
+        if (b.failed) { free(b.s); *oom = true; return NULL; }
+        if (b.s) return b.s;
+        char *empty = strdup("");
+        if (!empty) *oom = true;
+        return empty;
     }
     // the assistant's own earlier call, replayed: rendered in runner's call
     // syntax so the history reads like what the model actually emitted
@@ -188,6 +203,7 @@ static char *responses_item_text(jv *item, const char **role,
         *role = "assistant";
         const char *args = jv_str(jv_get(item, "arguments"), "{}");
         sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", call_name, args);
+        if (b.failed) { free(b.s); *oom = true; return NULL; }
         return b.s;
     }
     *role = jv_str(jv_get(item, "role"), "user");
@@ -212,6 +228,7 @@ static char *responses_item_text(jv *item, const char **role,
             sb_put(&b, txt, strlen(txt));
         }
     }
+    if (b.failed) { free(b.s); *oom = true; return NULL; }
     return b.s;
 }
 
@@ -316,20 +333,29 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
     }
 
     char terr[224];
+    // Set where the refusal is the SERVER running out of memory rather than
+    // the request being wrong; a 400 invalid_request_error there tells the
+    // caller to fix something they did not get wrong.
+    bool oom = false;
     bool bad_fmt = false;
     jv *final_schema = responses_schema(req, &bad_fmt, terr, sizeof(terr));
     if (bad_fmt) { send_error(fd, 400, terr); return; }
 
-    jv *tools = responses_tools(jv_get(req, "tools"), terr, sizeof(terr));
+    jv *tools = responses_tools(jv_get(req, "tools"), terr, sizeof(terr), &oom);
     if (jv_get(req, "tools") && jv_get(req, "tools")->type != J_NULL && !tools) {
-        send_error(fd, 400, terr);
+        send_error(fd, oom ? 500 : 400, terr);
         return;
     }
     jv *choice_raw = jv_get(req, "tool_choice");
     jv *choice_owned = NULL;
     if (choice_raw && choice_raw->type == J_OBJ) {
-        choice_owned = responses_tool_choice(choice_raw, terr, sizeof(terr));
-        if (!choice_owned) { jv_free(tools); send_error(fd, 400, terr); return; }
+        choice_owned = responses_tool_choice(choice_raw, terr, sizeof(terr),
+                                             &oom);
+        if (!choice_owned) {
+            jv_free(tools);
+            send_error(fd, oom ? 500 : 400, terr);
+            return;
+        }
     }
 
     tool_envelope env = {0};
@@ -374,8 +400,11 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
         sb_put(&ts, env.system_turn, strlen(env.system_turn));
     else if (!env.harmony)
         tools_render(tools, &ts);
-    chat_msg *cm = malloc(sizeof(chat_msg) * (size_t)(n_items + 2));
-    char **owned = malloc(sizeof(char *) * (size_t)n_items);
+    // The tool turn is content too: a builder that ran out here left `ts` short
+    // or empty and the prompt would go out without the declarations the caller
+    // sent, asking the model to call tools it was never shown.
+    chat_msg *cm = ts.failed ? NULL : malloc(sizeof(chat_msg) * (size_t)(n_items + 2));
+    char **owned = ts.failed ? NULL : malloc(sizeof(char *) * (size_t)n_items);
     // client-controlled size: a NULL here would be indexed below. Fail cleanly.
     if (!cm || !owned) {
         free(cm); free(owned); free(ts.s);
@@ -435,13 +464,24 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
                     return;
                 }
             }
-            char *text = responses_item_text(input->items[i], &role, call_name);
-            if (!text) continue;
-            if (env.harmony && is_call) {
+            bool oom = false;
+            char *text = responses_item_text(input->items[i], &role, call_name,
+                                             &oom);
+            if (env.harmony && is_call && text) {
                 free(text);
                 text = strdup(jv_str(jv_get(input->items[i], "arguments"), "{}"));
-                if (!text) continue;
+                if (!text) oom = true;
             }
+            if (oom) {
+                for (int k = 0; k < n_own; k++) free(owned[k]);
+                free(owned); free(cm); free(ts.s);
+                tool_envelope_free(&env);
+                jv_free(tools);
+                jv_free(choice_owned);
+                send_error(fd, 500, "out of memory building responses prompt");
+                return;
+            }
+            if (!text) continue;
             owned[n_own++] = text;
             const char *name = NULL;
             if (env.harmony && is_call)

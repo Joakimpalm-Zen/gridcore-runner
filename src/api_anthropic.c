@@ -77,6 +77,11 @@ static char *anth_tool_result_text(jv *b) {
     } else if (c && c->type != J_NULL) {
         jv_dump(c, &r);
     }
+    // A builder that ran out returns NULL, not the empty string it would
+    // otherwise be indistinguishable from: an empty tool result is a result the
+    // caller sent, and reporting one they did not is a wrong answer with a 200
+    // on it. The caller turns this NULL into a refusal.
+    if (r.failed) { free(r.s); return NULL; }
     return r.s ? r.s : strdup("");
 }
 
@@ -105,7 +110,7 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
                         turnbuf *t, char *err, int errcap) {
     jv *content = jv_get(msg, "content");
     if (content && content->type == J_STR) {
-        turn_add(t, role, strdup(content->str));
+        turn_add(t, role, strdup(content->str));  // NULL sets t->failed
         return true;
     }
     if (!content || content->type != J_ARR) {
@@ -143,6 +148,7 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
             }
             jv *input = jv_get(b, "input");
             if (harmony) {
+                if (body.failed) { free(body.s); t->failed = true; return true; }
                 if (body.n) {
                     turn_add_native(t, role, body.s, NULL, "commentary");
                     body = (sbuf){0};
@@ -150,6 +156,7 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
                 sbuf args = {0};
                 if (input && input->type != J_NULL) jv_dump(input, &args);
                 else sb_lit(&args, "{}");
+                if (args.failed) { free(args.s); t->failed = true; return true; }
                 turn_add_native(t, "assistant", args.s, name, NULL);
                 continue;
             }
@@ -162,6 +169,7 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
             // vocabulary, so it is emitted ahead of whatever text accompanies
             // it in the same Anthropic message
             char *result = anth_tool_result_text(b);
+            if (!result) { free(body.s); t->failed = true; return true; }
             if (harmony) {
                 const char *id = jv_str(jv_get(b, "tool_use_id"), NULL);
                 const char *name = anth_call_name(messages, message_index, id);
@@ -200,6 +208,7 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
             return false;
         }
     }
+    if (body.failed) { free(body.s); t->failed = true; return true; }
     if (body.n) turn_add(t, role, body.s);
     else        free(body.s);
     return true;
@@ -245,7 +254,7 @@ static char *anth_system_text(jv *system, char *err, int errcap, bool *oom) {
 // teach the envelope compiler a third shape (and risk the two paths already
 // using it), the Anthropic form is re-serialised into the nested one and
 // re-parsed — exactly what responses_tools does. Returns an owned jv.
-static jv *anth_tools(jv *tools, char *err, int errcap) {
+static jv *anth_tools(jv *tools, char *err, int errcap, bool *oom) {
     if (!tools || tools->type == J_NULL) return NULL;
     if (tools->type != J_ARR) {
         snprintf(err, errcap, "tools must be an array");
@@ -285,6 +294,7 @@ static jv *anth_tools(jv *tools, char *err, int errcap) {
     sb_lit(&b, "]");
     if (b.failed || !b.s) {
         snprintf(err, errcap, "out of memory translating tools");
+        *oom = true;
         free(b.s);
         return NULL;
     }
@@ -296,7 +306,7 @@ static jv *anth_tools(jv *tools, char *err, int errcap) {
 
 // tool_choice is an object in every Anthropic form; chat spells three of the
 // four as bare strings. Returns an owned jv, or NULL with err set.
-static jv *anth_tool_choice(jv *tc, char *err, int errcap) {
+static jv *anth_tool_choice(jv *tc, char *err, int errcap, bool *oom) {
     if (!tc || tc->type == J_NULL) return NULL;
     if (tc->type != J_OBJ) {
         snprintf(err, errcap, "tool_choice must be an object");
@@ -352,7 +362,13 @@ static jv *anth_tool_choice(jv *tc, char *err, int errcap) {
     }
     jv *out = b.failed || !b.s ? NULL : json_parse(b.s, b.n);
     free(b.s);
-    if (!out) snprintf(err, errcap, "out of memory translating tool_choice");
+    // The buffer this re-parses is one this function serialised from a single
+    // escaped name, so it round-trips by construction: a NULL here is the
+    // allocator, not the caller's tool_choice.
+    if (!out) {
+        snprintf(err, errcap, "out of memory translating tool_choice");
+        *oom = true;
+    }
     return out;
 }
 
@@ -435,17 +451,18 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
         return NULL;
     }
 
-    jv *tools = anth_tools(jv_get(req, "tools"), terr, sizeof(terr));
+    jv *tools = anth_tools(jv_get(req, "tools"), terr, sizeof(terr), &oom);
     jv *raw_tools = jv_get(req, "tools");
     if (raw_tools && raw_tools->type != J_NULL && !tools) {
-        send_error(fd, 400, terr);
+        send_error(fd, oom ? 500 : 400, terr);
         return NULL;
     }
-    jv *choice = anth_tool_choice(jv_get(req, "tool_choice"), terr, sizeof(terr));
+    jv *choice = anth_tool_choice(jv_get(req, "tool_choice"), terr,
+                                  sizeof(terr), &oom);
     jv *raw_choice = jv_get(req, "tool_choice");
     if (raw_choice && raw_choice->type != J_NULL && !choice) {
         jv_free(tools);
-        send_error(fd, 400, terr);
+        send_error(fd, oom ? 500 : 400, terr);
         return NULL;
     }
 
