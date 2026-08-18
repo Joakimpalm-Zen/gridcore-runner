@@ -1326,8 +1326,11 @@ static int grammar_forced_bytes(const engine *e, bool schema,
         for (int c = 1; c < 256; c++) {          // NUL is never a legal byte
             char b = (char)c;
             bool ok;
-            if (schema) { sval  t = sv; ok = sval_feed(&t, &b, 1); }
-            else        { jsonv t = jv; ok = jsonv_feed(&t, &b, 1); }
+            // 255 trials per pinned byte, so the trial API's short copy is
+            // what keeps this affordable: a full sval copy here was 2240
+            // bytes against roughly 300.
+            if (schema) { sval  t; ok = sval_trial(&sv, &t, &b, 1); }
+            else        { jsonv t; ok = jsonv_trial(&jv, &t, &b, 1); }
             if (!ok) continue;
             if (legal >= 0) return n;            // a real choice: stop here
             legal = c;
