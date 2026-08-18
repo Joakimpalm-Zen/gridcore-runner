@@ -246,6 +246,18 @@ static const char *cu_err(CUresult r) {
 // they are not using are 3 (runs 4-wide) and 5..7 (run 8-wide).
 enum { BW_4 = 0, BW_8 = 1, BW_N = 2 };
 static inline int batch_width_class(int n) { return n <= 4 ? BW_4 : BW_8; }
+// The widest microbatch those kernels actually COMPUTE. Every width class
+// stops at its own column count (`t < a.batch && t < NC`), so a call wider
+// than the widest class does not fail — it leaves columns NC.. holding
+// whatever was in the logits buffer, and the sequences owning them get a
+// previous step's answer. The f_mvb fallback is worse: its accumulator is a
+// fixed MVT-element register array indexed by a.batch, so past 16 it is out
+// of bounds. gpu_batch_decode enforces this, and the assertion below keeps
+// model.c's own ceiling from drifting past it.
+#define BATCH_MAX_COLS 8
+_Static_assert(MODEL_BATCH_MAX <= BATCH_MAX_COLS,
+               "MODEL_BATCH_MAX exceeds the widest CUDA microbatch kernel: "
+               "add wider f_gemvb width classes before raising it");
 
 typedef struct {
     uint64_t    file_off;
@@ -3464,7 +3476,7 @@ static bool stage_x_batch(gpu_batch *B, model_t *m, const int32_t *tok, int n) {
 
 bool gpu_batch_decode(gpu_batch *b, const int *idx, const int32_t *tok,
                       const int *pos, int n, float **out) {
-    if (!b || n < 1 || n > MVB) return false;
+    if (!b || n < 1 || n > BATCH_MAX_COLS) return false;
     // idx[] is caller-supplied and selects members of b->seqs[0, b->n): a bogus
     // index would dereference a wild model_t* below. Reject the whole batch
     // rather than launch against garbage — the caller then decodes sequentially.
