@@ -33,21 +33,53 @@ SCHEMA_VERSIONS = ("xyntetik.runner.model-compat.v1",
 
 
 
-def _kill_group(exc):
-    """Kill the timed-out child's whole process group, servers included."""
-    pid = getattr(getattr(exc, "process", None), "pid", None)
-    if pid is None:
-        return
+def _kill_group(pid, grace=2.0):
+    """Kill one process GROUP, servers included."""
+    if os.name == "nt":
+        return                       # no process groups; Popen.kill is all there is
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(os.getpgid(pid), sig)
-        except (ProcessLookupError, PermissionError, OSError):
+        except OSError:
             return
-        time.sleep(2)
+        time.sleep(grace)
         try:
             os.killpg(os.getpgid(pid), 0)
         except OSError:
             return
+
+
+def run_group(cmd, timeout, grace=2.0, **kwargs):
+    """subprocess.run, but a timeout kills the child's whole process group.
+
+    subprocess.run's own timeout kills the DIRECT child only. The check
+    scripts below spawn `runner --serve` grandchildren, and start_new_session
+    puts the child in its own group, so those grandchildren outlive the kill:
+    the 2026-08-15 ledger run left a 32B and a 30B server resident after two
+    cpu_cuda timeouts, and a ledger that leaks a server per timeout eventually
+    eats the box it is measuring.
+
+    The fix written then read the group leader off `exc.process`.
+    TimeoutExpired carries cmd/timeout/output/stderr and no process at all, so
+    that lookup was always None and the kill never ran. Owning the Popen is
+    what makes the pid available.
+    """
+    if kwargs.pop("capture_output", False):
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
+    stdin_text = kwargs.pop("stdin_text", None)
+    if stdin_text is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    with subprocess.Popen(cmd, start_new_session=True, **kwargs) as proc:
+        try:
+            out, err = proc.communicate(stdin_text, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc.pid, grace)
+            proc.kill()
+            out, err = proc.communicate()
+            raise subprocess.TimeoutExpired(cmd, timeout, output=out,
+                                            stderr=err) from None
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 # ---------------------------------------------- parameterised check runners
@@ -75,17 +107,10 @@ def run_cpu_cuda(runner, model, params, timeout):
            # must not silently certify at half the contract.
            "--tokens", str(params.get("tokens", 128))]
     started = time.time()
-    # Own process group, and kill the GROUP on timeout. cpu_cuda_check.py
-    # spawns runner servers of its own; subprocess.run's timeout only kills the
-    # direct child, so the 2026-08-15 ledger run left a 32B and a 30B server
-    # resident after two cpu_cuda timeouts. A ledger that leaks a server per
-    # timeout eventually eats the box it is measuring.
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, env=env, cwd=str(ROOT),
-                              start_new_session=True)
-    except subprocess.TimeoutExpired as e:
-        _kill_group(e)
+        proc = run_group(cmd, timeout, capture_output=True, text=True,
+                         env=env, cwd=str(ROOT))
+    except subprocess.TimeoutExpired:
         return {"status": "not_executed", "reason": "cpu_cuda_timeout"}
     out = (proc.stdout or "") + (proc.stderr or "")
     # Capture WHICH prompts diverged, not just how many. The 2026-08-15 run
@@ -112,11 +137,9 @@ def run_chat(runner, model, params, timeout):
            str(params.get("max_tokens", 200)), "--wait-for-vram", "300"]
     started = time.time()
     try:
-        proc = subprocess.run(cmd, input=f"{prompt}\n/exit\n", capture_output=True,
-                              text=True, timeout=timeout, cwd=str(ROOT),
-                              start_new_session=True)
-    except subprocess.TimeoutExpired as e:
-        _kill_group(e)
+        proc = run_group(cmd, timeout, stdin_text=f"{prompt}\n/exit\n",
+                         capture_output=True, text=True, cwd=str(ROOT))
+    except subprocess.TimeoutExpired:
         return {"status": "not_executed", "reason": "chat_timeout"}
     out = proc.stdout or ""
     reasons = []
@@ -153,11 +176,9 @@ def run_tool(runner, model, params, timeout):
         cmd += ["--cases", str(params["cases"])]
     started = time.time()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, cwd=str(ROOT),
-                              start_new_session=True)
-    except subprocess.TimeoutExpired as e:
-        _kill_group(e)
+        proc = run_group(cmd, timeout, capture_output=True, text=True,
+                         cwd=str(ROOT))
+    except subprocess.TimeoutExpired:
         return {"status": "not_executed", "reason": "tool_timeout"}
     return {"status": "pass" if proc.returncode == 0 else "fail",
             "returncode": proc.returncode,

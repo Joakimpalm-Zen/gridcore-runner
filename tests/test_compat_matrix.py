@@ -361,7 +361,7 @@ def _captured_run(recorded):
         stdout = "9/9 identical\n"
         stderr = ""
 
-    def run(cmd, **kwargs):
+    def run(cmd, timeout, **kwargs):
         recorded.append(cmd)
         return Completed()
     return run
@@ -370,7 +370,7 @@ def _captured_run(recorded):
 def test_cpu_cuda_check_is_run_against_the_binary_under_test(monkeypatch, tmp_path):
     module = load_module()
     recorded = []
-    monkeypatch.setattr(module.subprocess, "run", _captured_run(recorded))
+    monkeypatch.setattr(module, "run_group", _captured_run(recorded))
 
     module.run_cpu_cuda(tmp_path / "runner-candidate", tmp_path / "m.gguf",
                         {"tokens": 128}, 60)
@@ -383,7 +383,7 @@ def test_cpu_cuda_check_is_run_against_the_binary_under_test(monkeypatch, tmp_pa
 def test_tool_matrix_is_run_against_the_binary_under_test(monkeypatch, tmp_path):
     module = load_module()
     recorded = []
-    monkeypatch.setattr(module.subprocess, "run", _captured_run(recorded))
+    monkeypatch.setattr(module, "run_group", _captured_run(recorded))
 
     module.run_tool(tmp_path / "runner-candidate", tmp_path / "m.gguf",
                     {"scenario_matrix": "agent-torture"}, 60)
@@ -391,3 +391,43 @@ def test_tool_matrix_is_run_against_the_binary_under_test(monkeypatch, tmp_path)
     assert "--runner" in recorded[0]
     assert recorded[0][recorded[0].index("--runner") + 1] == \
         str(tmp_path / "runner-candidate")
+
+
+def test_a_timeout_kills_the_grandchildren_too(tmp_path):
+    """The check scripts spawn `runner --serve` of their own. subprocess.run's
+    timeout kills the direct child only, and the fix written for that read the
+    group leader off TimeoutExpired.process -- an attribute the exception does
+    not have, so it always killed nothing."""
+    import os
+    import signal
+    import subprocess
+    import time
+
+    import pytest
+
+    if os.name == "nt":
+        pytest.skip("no process groups on Windows")
+
+    module = load_module()
+    marker = tmp_path / "grandchild.pid"
+    script = tmp_path / "spawner.sh"
+    script.write_text("#!/bin/sh\n"
+                      "sleep 120 &\n"
+                      f"echo $! > {marker}\n"
+                      "sleep 120\n")
+    script.chmod(0o755)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        module.run_group([str(script)], 1.0, grace=0.2, capture_output=True,
+                         text=True)
+
+    grandchild = int(marker.read_text())
+    for _ in range(50):
+        try:
+            os.kill(grandchild, 0)
+        except OSError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(grandchild, signal.SIGKILL)
+        pytest.fail(f"grandchild {grandchild} outlived the timeout")
