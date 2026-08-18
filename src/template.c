@@ -2547,7 +2547,16 @@ static int harmony_map(const tool_envelope *e, const char *doc, size_t n,
 // scan past the end would read whatever the allocator left there.
 static const char G4_Q[] = "<|\"|>";
 
-static bool g4_json_value(const char **pp, const char *end, sbuf *out);
+// Nesting bound, the same 128 json.c refuses past. This reader recurses once
+// per level over text the MODEL produced, and on the unconstrained path
+// (declarations rendered natively, no envelope built) nothing bounds that
+// text: a generation that opens one bracket per token would recurse once per
+// token and run the thread's stack out. A document deeper than this is not a
+// call; the bytes stay content.
+#define G4_MAX_DEPTH 128
+
+static bool g4_json_value(const char **pp, const char *end, sbuf *out,
+                          int depth);
 
 static bool g4_json_string(const char **pp, const char *end, sbuf *out) {
     const char *p = *pp + sizeof(G4_Q) - 1;
@@ -2560,7 +2569,9 @@ static bool g4_json_string(const char **pp, const char *end, sbuf *out) {
     return true;
 }
 
-static bool g4_json_object(const char **pp, const char *end, sbuf *out) {
+static bool g4_json_object(const char **pp, const char *end, sbuf *out,
+                           int depth) {
+    if (depth >= G4_MAX_DEPTH) return false;
     const char *p = *pp + 1;                       // past '{'
     sb_lit(out, "{");
     bool first = true;
@@ -2578,7 +2589,7 @@ static bool g4_json_object(const char **pp, const char *end, sbuf *out) {
         sb_esc(out, p, (size_t)(colon - p));
         sb_lit(out, "\":");
         p = colon + 1;
-        if (!g4_json_value(&p, end, out)) return false;
+        if (!g4_json_value(&p, end, out, depth + 1)) return false;
     }
     if (p >= end) return false;
     sb_lit(out, "}");
@@ -2586,7 +2597,9 @@ static bool g4_json_object(const char **pp, const char *end, sbuf *out) {
     return true;
 }
 
-static bool g4_json_array(const char **pp, const char *end, sbuf *out) {
+static bool g4_json_array(const char **pp, const char *end, sbuf *out,
+                          int depth) {
+    if (depth >= G4_MAX_DEPTH) return false;
     const char *p = *pp + 1;                       // past '['
     sb_lit(out, "[");
     bool first = true;
@@ -2597,7 +2610,7 @@ static bool g4_json_array(const char **pp, const char *end, sbuf *out) {
             sb_lit(out, ",");
         }
         first = false;
-        if (!g4_json_value(&p, end, out)) return false;
+        if (!g4_json_value(&p, end, out, depth + 1)) return false;
     }
     if (p >= end) return false;
     sb_lit(out, "]");
@@ -2605,14 +2618,15 @@ static bool g4_json_array(const char **pp, const char *end, sbuf *out) {
     return true;
 }
 
-static bool g4_json_value(const char **pp, const char *end, sbuf *out) {
+static bool g4_json_value(const char **pp, const char *end, sbuf *out,
+                          int depth) {
     const char *p = *pp;
     if (p >= end) return false;
     if ((size_t)(end - p) >= sizeof(G4_Q) - 1 &&
         !memcmp(p, G4_Q, sizeof(G4_Q) - 1))
         return g4_json_string(pp, end, out);
-    if (*p == '{') return g4_json_object(pp, end, out);
-    if (*p == '[') return g4_json_array(pp, end, out);
+    if (*p == '{') return g4_json_object(pp, end, out, depth);
+    if (*p == '[') return g4_json_array(pp, end, out, depth);
     static const char *const words[] = { "true", "false", "null" };
     for (size_t i = 0; i < sizeof(words) / sizeof(*words); i++) {
         size_t wn = strlen(words[i]);
@@ -2645,7 +2659,7 @@ static bool g4_one_call(const char **pp, const char *end, int index, sbuf *tc) {
     if (brace >= end || brace == p) return false;
     const char *args_at = brace;
     sbuf args = {0};
-    if (!g4_json_object(&args_at, end, &args) || args.failed) {
+    if (!g4_json_object(&args_at, end, &args, 0) || args.failed) {
         free(args.s);
         return false;
     }

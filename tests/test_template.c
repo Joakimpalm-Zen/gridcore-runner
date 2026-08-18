@@ -1841,6 +1841,33 @@ static void test_gemma4_unconstrained_call_still_yields_json_arguments(void) {
     free(content.s); free(tc.s);
 }
 
+// The gemma4 native-argument reader is a recursive descent over MODEL OUTPUT,
+// and on the unconstrained path (tools declared, tool_choice "none") that
+// output is not grammar-bounded at all: a generation that opens one bracket
+// per token nests as deep as the token budget allows, and each level was
+// another C stack frame. json.c caps its own parser at 128 levels for exactly
+// this reason. This one had no cap.
+static void test_gemma4_argument_nesting_is_bounded(void) {
+    for (int n = 100; n <= 200; n += 100) {
+        sbuf doc = {0}, content = {0}, tc = {0};
+        sb_lit(&doc, "<|tool_call>call:x{a:");
+        for (int i = 0; i < n; i++) sb_lit(&doc, "[");
+        for (int i = 0; i < n; i++) sb_lit(&doc, "]");
+        sb_lit(&doc, "}<tool_call|>");
+        assert(doc.s != NULL);
+        sb_put(&content, doc.s, doc.n);
+        int calls = tool_calls_parse_for(TMPL_GEMMA4, &content, &tc);
+        if (n == 100) {
+            assert(calls == 1);          // inside the limit: an ordinary call
+        } else {
+            // past it: not a call, and the bytes stay content untouched
+            assert(calls == 0);
+            assert(content.n == doc.n && !memcmp(content.s, doc.s, doc.n));
+        }
+        free(doc.s); free(content.s); free(tc.s);
+    }
+}
+
 // A marker the generic parser decides is NOT a call must leave the answer
 // exactly as it was. It did not: the scan compacts `content` in place as it
 // goes and publishes the new length only when it found at least one call, so
@@ -2083,6 +2110,7 @@ int main(void) {
     test_llama2_bos_per_turn_and_the_fallback_that_must_not_get_it();
     test_gemma4_unconstrained_call_still_yields_json_arguments();
     test_a_marker_that_is_not_a_call_leaves_content_intact();
+    test_gemma4_argument_nesting_is_bounded();
     test_gemma4_tool_history_uses_the_reference_argument_syntax();
     test_muse_parallel_tool_history_has_native_turn_boundaries();
     test_muse_tool_history_skips_bad_calls_without_leading_boundary();
