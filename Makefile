@@ -130,11 +130,15 @@ TEST_RESP_SM_DEP =
 TEST_RESP_SM_RUN = @echo "skip: test-responses-sm (POSIX socketpair; covered by Linux CI)"
 TEST_ATTRIB_DEP =
 TEST_ATTRIB_RUN = @echo "skip: test-tool-attribution (POSIX socketpair; covered by Linux CI)"
+TEST_MSG_OOM_DEP =
+TEST_MSG_OOM_RUN = @echo "skip: test-messages-oom (POSIX socketpair; covered by Linux CI)"
 else
 TEST_RESP_SM_DEP = $(TEST_RESP_SM)
 TEST_RESP_SM_RUN = ./$(TEST_RESP_SM)
 TEST_ATTRIB_DEP = $(TEST_ATTRIB)
 TEST_ATTRIB_RUN = ./$(TEST_ATTRIB)
+TEST_MSG_OOM_DEP = $(TEST_MSG_OOM)
+TEST_MSG_OOM_RUN = ./$(TEST_MSG_OOM)
 endif
 TEST_QUANTIZE = $(TEST_BATCH:test-batch%=test-quantize%)
 TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
@@ -608,6 +612,15 @@ TEST_ATTRIB_SRC = tests/test_tool_attribution.c src/gguf.c src/compat.c \
 $(TEST_ATTRIB): $(TEST_ATTRIB_SRC) src/server.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_ATTRIB_SRC) -o $@ $(LDFLAGS)
 
+# The same inbound translation under injected allocation failure. Same source
+# set minus src/api_anthropic.c, which is compiled INTO the test with
+# substituted allocators so only its own allocations are failed.
+TEST_MSG_OOM = $(TEST_BATCH:test-batch%=test-messages-oom%)
+TEST_MSG_OOM_SRC = tests/test_messages_oom.c \
+                   $(filter-out src/api_anthropic.c,$(TEST_ATTRIB_SRC:tests/test_tool_attribution.c=))
+$(TEST_MSG_OOM): $(TEST_MSG_OOM_SRC) src/server.c src/api_anthropic.c $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_MSG_OOM_SRC) -o $@ $(LDFLAGS)
+
 # The runner side of the template-conformance gate. Same recipe as the two
 # tests above, and for the same reason: the flattening from an OpenAI request
 # to the renderer's flat turns is handle_chat's, it is static in server.c, and
@@ -1049,7 +1062,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
-      $(TEST_STOP_CONSTRAINT) runner test.gguf
+      $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) runner test.gguf
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)
@@ -1069,6 +1082,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TOOLS)
 	./$(TEST_BUDGET)
 	$(TEST_ATTRIB_RUN)
+	$(TEST_MSG_OOM_RUN)
 	./$(TEST_SHARED)
 	./$(TEST_FILE_ID)
 	./$(TEST_BATCH)
@@ -1317,7 +1331,7 @@ clean:
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \
-	      $(TEST_BUDGET) $(TEST_ATTRIB) $(TEST_STOP_CONSTRAINT) \
+	      $(TEST_BUDGET) $(TEST_ATTRIB) $(TEST_MSG_OOM) $(TEST_STOP_CONSTRAINT) \
 	      $(TMPL_CONF_RENDER) \
 	      $(TEST_SPLIT_GUARD) split-guard.out test-swap-race-bin
 	rm -rf test-attn

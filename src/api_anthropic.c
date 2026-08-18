@@ -207,10 +207,19 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
 
 // `system` is a string or a list of text blocks. Returns an owned string, or
 // NULL when there is no system content (which is not an error).
-static char *anth_system_text(jv *system, char *err, int errcap) {
+//
+// *oom separates the two NULLs. Without it a failed allocation was
+// indistinguishable from "no system content", so the turn was dropped and the
+// request answered 200 -- the model then reads a conversation whose system
+// prompt the caller believes it was given.
+static char *anth_system_text(jv *system, char *err, int errcap, bool *oom) {
     if (!system || system->type == J_NULL) return NULL;
-    if (system->type == J_STR)
-        return system->str[0] ? strdup(system->str) : NULL;
+    if (system->type == J_STR) {
+        if (!system->str[0]) return NULL;
+        char *s = strdup(system->str);
+        if (!s) *oom = true;
+        return s;
+    }
     if (system->type != J_ARR) {
         snprintf(err, errcap,
                  "system must be a string or an array of text blocks");
@@ -222,6 +231,11 @@ static char *anth_system_text(jv *system, char *err, int errcap) {
         if (!txt) continue;
         if (b.n) sb_lit(&b, "\n");
         sb_put(&b, txt, strlen(txt));
+    }
+    if (b.failed) {
+        free(b.s);
+        *oom = true;
+        return NULL;
     }
     return b.s;
 }
@@ -402,7 +416,16 @@ static bool anth_reject_unsupported(slot_t *s, sock_t fd, jv *req) {
 // NULL having already answered `fd` with the error.
 static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
                              bool *strict) {
-    char terr[224];
+    // Initialised, because the tail below reads terr[0] to choose between a
+    // caller-fixable 400 and a server 5xx. An allocation failure reaches that
+    // tail without anything having written here, and an indeterminate first
+    // byte meant the refusal was assembled -- and sent -- out of whatever the
+    // stack happened to hold.
+    char terr[224] = {0};
+    // Set at every site where the refusal is the SERVER running out of memory
+    // rather than the request being wrong. Kept separate from terr because
+    // "the message is empty" is not the same fact.
+    bool oom = false;
     *strict = false;
     memset(env, 0, sizeof(*env));
 
@@ -459,26 +482,16 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
     turnbuf t = { .cm = malloc(sizeof(chat_msg) * (size_t)cap),
                   .owned = malloc(sizeof(char *) * (size_t)cap),
                   .cap = cap, .total = ts.n + 128 };
-    if (!t.cm || !t.owned) t.failed = true;
-
-    char *sys = NULL;
-    if (!t.failed) {
-        if (ts.n) turn_add_borrowed(&t, "system", ts.s);
-        terr[0] = 0;
-        sys = anth_system_text(jv_get(req, "system"), terr, sizeof(terr));
-        if (terr[0]) {
-            turnbuf_free(&t);
-            free(ts.s);
-            if (!env->owns_tools) jv_free(tools);
-            tool_envelope_free(env);
-            jv_free(choice);
-            send_error(fd, 400, terr);
-            return NULL;
-        }
-        if (sys) turn_add(&t, "system", sys);
-    }
+    if (!t.cm || !t.owned) { t.failed = true; oom = true; }
 
     bool ok = !t.failed;
+    if (ok) {
+        if (ts.n) turn_add_borrowed(&t, "system", ts.s);
+        char *sys = anth_system_text(jv_get(req, "system"), terr, sizeof(terr),
+                                     &oom);
+        if (terr[0] || oom) ok = false;   // sys is NULL on both
+        else if (sys) turn_add(&t, "system", sys);
+    }
     for (int i = 0; ok && i < msgs->n; i++) {
         jv *msg = msgs->items[i];
         const char *role = jv_str(jv_get(msg, "role"), NULL);
@@ -493,10 +506,10 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
         ok = anth_blocks(msgs, i, msg, role, env->harmony,
                          sole_tool_name(tools), &t, terr, sizeof(terr));
     }
-    if (ok && t.failed) {
-        snprintf(terr, sizeof(terr), "out of memory building the prompt");
-        ok = false;
-    }
+    // t.failed is the turn buffer refusing an append: an allocation that did
+    // not happen, or the cap the turn count is bounded by. Either way it is the
+    // server's fault, not the request's.
+    if (ok && t.failed) { oom = true; ok = false; }
     if (ok && t.n == 0) {
         snprintf(terr, sizeof(terr), "no message content");
         ok = false;
@@ -509,7 +522,7 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
                                      req_thinking_mode(req),
                                      env->harmony ? env->tools : NULL,
                                      t.total + 256);
-        if (!prompt) ok = false;
+        if (!prompt) { oom = true; ok = false; }
     }
     turnbuf_free(&t);
     free(ts.s);
@@ -518,7 +531,12 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
     if (!ok) {
         tool_envelope_free(env);
         free(prompt);
-        send_error(fd, 400, terr[0] ? terr : "cannot build prompt");
+        // Out of memory is a 5xx and says so. It used to answer 400
+        // invalid_request_error, which tells the caller to fix a request that
+        // was never wrong -- and the chat and Responses surfaces already
+        // answer 500 for the identical failure.
+        if (oom) send_error(fd, 500, "out of memory building the prompt");
+        else send_error(fd, 400, terr[0] ? terr : "cannot build prompt");
         return NULL;
     }
     return prompt;

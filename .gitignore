@@ -181,3 +181,5 @@ test-attn-tol
 test-attn-tol.exe
 test-instances-oom
 test-instances-oom.exe
+test-messages-oom
+test-messages-oom.exe
