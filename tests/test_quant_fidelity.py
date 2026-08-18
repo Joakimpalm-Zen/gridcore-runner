@@ -748,3 +748,19 @@ def test_two_declined_calls_with_identical_prose_agree_end_to_end():
                id="c0", category="nested_arguments")
 
     assert MOD.compare_case(ref, var)["argument_exact_match"] is True
+
+
+# ------------------------------------------------------- KLD direction/pairing
+
+def test_compare_distributions_scores_the_variant_against_the_reference():
+    """kld-compare-raw.score_pair's contract is (variant, reference), and KLD is
+    asymmetric: passing them the other way round publishes a materially smaller
+    number under a bound measured in the documented direction."""
+    ref = {"a": -0.05, "b": -3.0, "c": -5.0}
+    var = {"a": -0.7, "x": -0.9, "y": -1.5}
+
+    summary = MOD.compare_distributions([{"index": 0, "dist": ref}],
+                                        [{"index": 0, "dist": var}])
+
+    assert summary["mean_kld"] == pytest.approx(
+        MOD.KLD_RAW.score_pair(var, ref)[0])

@@ -441,8 +441,13 @@ def compare_distributions(ref_positions, var_positions):
     n = min(len(ref_positions), len(var_positions))
     klds, top1s, overlaps = [], [], []
     for i in range(n):
+        # (variant, reference), the order kld-compare-raw.score_pair documents
+        # and every published number was measured in. KLD is asymmetric and the
+        # missing-token floor is applied to whichever side comes first, so the
+        # reversed call answers a different question at a materially smaller
+        # value -- and cannot be checked against the adopted bound.
         kld, agree, overlap8 = KLD_RAW.kld_and_agreement(
-            ref_positions[i]["dist"], var_positions[i]["dist"])
+            var_positions[i]["dist"], ref_positions[i]["dist"])
         klds.append(kld)
         top1s.append(agree)
         overlaps.append(overlap8)
