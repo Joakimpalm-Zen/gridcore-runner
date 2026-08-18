@@ -965,9 +965,18 @@ bool gpu_init(model_t *m) {
                     m->arch);
             return false;
         }
+        // EVERY tensor this layer will hand to enc_mv_n, because that indexes
+        // g->p_mv[] / g->p_mm[] by the tensor's type: an unadmitted type is a
+        // nil pipeline at best and an out-of-range read of the table at worst.
+        // ple_gate and ple_proj (the gemma-4 E-series per-layer embedding
+        // projections) were missing, so an E-series file quantizing them
+        // outside this list reached the dispatch instead of the refusal.
+        // Bound off the array, not a literal 8 — that literal is the same kind
+        // of hand-kept second fact the list itself is.
         gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
-                              ly->w_gate, ly->w_up, ly->w_down, ly->wq_gate };
-        for (int i = 0; i < 8; i++)
+                              ly->w_gate, ly->w_up, ly->w_down, ly->wq_gate,
+                              ly->ple_gate, ly->ple_proj };
+        for (size_t i = 0; i < sizeof(ws) / sizeof(*ws); i++)
             if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
     }
 
