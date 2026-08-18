@@ -409,6 +409,7 @@ int main(int argc, char **argv) {
     const char *draft_path = NULL;
     int draft_k = 4;
     bool interactive = false, verbose = false, no_bos = false;
+    bool seed_given = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
     const char *fit_path = NULL;
     bool no_tray = false;
@@ -447,7 +448,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-c")) mp.n_ctx = (int)int_arg(a, NEXT, 0, INT_MAX);
         else if (!strcmp(a, "-b")) mp.n_batch = (int)int_arg(a, NEXT, 0, INT_MAX);
         else if (!strcmp(a, "-t")) n_threads = (int)int_arg(a, NEXT, 0, INT_MAX);
-        else if (!strcmp(a, "-s")) smp.rng = u64_arg(a, NEXT);
+        else if (!strcmp(a, "-s")) { smp.rng = u64_arg(a, NEXT); seed_given = true; }
         else if (!strcmp(a, "-i")) interactive = true;
         else if (!strcmp(a, "-v")) verbose = true;
         else if (!strcmp(a, "--serve")) serve = true;
@@ -742,7 +743,19 @@ int main(int argc, char **argv) {
     (void)no_tray;
 #endif
 
-    if (smp.rng == 0) smp.rng = (uint64_t)time(NULL) ^ 0x9E3779B97F4A7C15ull;
+    // The sampler's xorshift64 has a fixed point at state 0: it stays 0 and
+    // every draw comes back 0.0. So 0 is not a usable seed — but the old
+    // `if (rng == 0) rng = time(...)` said that by silently substituting the
+    // clock, which turned `-s 0`, a request for a REPRODUCIBLE run, into a
+    // random one with nothing on stderr. Only an absent -s takes the clock
+    // now; an explicit 0 is refused, because the one thing that must not
+    // happen is running it as if it had been honoured.
+    if (seed_given && smp.rng == 0) {
+        fprintf(stderr, "error: -s 0 is not a usable seed — the sampler's RNG "
+                        "state 0 is a fixed point. Use any other value.\n");
+        return 1;
+    }
+    if (!seed_given) smp.rng = (uint64_t)time(NULL) ^ 0x9E3779B97F4A7C15ull;
 
     if (n_threads <= 0) {
         // Default to a physical-core proxy (nc/2 under the near-universal 2-way

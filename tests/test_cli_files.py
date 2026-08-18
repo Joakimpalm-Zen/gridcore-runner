@@ -11,6 +11,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -173,3 +174,36 @@ def test_quantize_still_accepts_all_three(runner_bin, model, tmp_path):
     proc = _run(runner_bin, model, "--quantize", str(out), "--quant", "q8_0")
     assert proc.returncode == 0, proc.stderr[-400:]
     assert out.exists()
+
+
+def _sampled(runner_bin, model, seed):
+    return subprocess.run([runner_bin, "-m", model, "--gpu", "off",
+                           "-p", "hello", "-n", "12", "-s", str(seed),
+                           "--temp", "1.0"],
+                          cwd=ROOT, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, timeout=60)
+
+
+def test_seed_zero_is_refused_rather_than_silently_randomised(runner_bin, model):
+    """`-s 0` must not run as if it had been honoured.
+
+    The sampler's xorshift64 has a fixed point at state 0 -- it stays 0 and
+    every draw comes back 0.0 -- so 0 genuinely cannot be used as a seed. The
+    old code said that by replacing it with time(NULL), which turned a request
+    for a REPRODUCIBLE run into a random one with nothing on stderr: measured
+    on the fixture, three `-s 0` runs a second apart produced three different
+    completions while `-s 7` reproduced exactly.
+
+    The sleep is what makes this able to fail. time(NULL) is whole seconds, so
+    two runs inside the same second agreed by accident and hid the bug.
+    """
+    zero = _sampled(runner_bin, model, 0)
+    assert zero.returncode != 0
+    assert b"not a usable seed" in zero.stderr, zero.stderr[-200:]
+
+    # every other seed is untouched and still reproduces across the same gap
+    a = _sampled(runner_bin, model, 7)
+    time.sleep(1.2)
+    b = _sampled(runner_bin, model, 7)
+    assert a.returncode == 0 and a.stdout == b.stdout
+    assert a.stdout != _sampled(runner_bin, model, 8).stdout

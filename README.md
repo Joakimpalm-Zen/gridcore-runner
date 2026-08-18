@@ -300,7 +300,7 @@ flags into unrelated feature sections.
 | `-c N` | Context length; default is the smaller of model maximum and 4096. `0` auto-fits with a reservation. |
 | `-b N` | Prompt batch size, default `64`. With `--gpu auto`/`on` and enough free RAM, the default scales up to `256` or `512` instead, so the tiled prefill GEMM gets more columns per dispatch (measured on Metal/M1: +9% prompt tok/s at 512 over the flat 64 default); `-b` always overrides. |
 | `-t N` | Worker threads; defaults to physical cores and is capped at `64`. |
-| `-s N` | RNG seed; default is time-based. |
+| `-s N` | RNG seed; default is time-based. `0` is refused: it is the sampler RNG's fixed point, so it cannot produce a stream. |
 | `--think` / `--no-think` | Request the model family's thinking or non-thinking prompt shape. With neither flag, Runner renders whatever that family's own reference template renders, which is not the same answer for every family. Families without a distinct thinking prompt accept the flag and ignore it rather than approximate one. |
 | `--temp F` | Temperature; `0` is greedy and disables repeat penalty. |
 | `--top-k N` | Top-k sampling; `0` disables it. |
