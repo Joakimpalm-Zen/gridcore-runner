@@ -101,6 +101,77 @@ static void test_json_rejects_duplicate_object_keys(void) {
     jv_free(v);
 }
 
+// A `\uXXXX` escape is the one place a truncated string cannot be finished
+// with arbitrary filler: `\u0000` and an unpaired surrogate are both refused
+// by this file's own parser, so padding the missing digits with zeros
+// force-closes a document that then does not parse. Every truncation point
+// inside an escape has to close to something readable -- and the two
+// validators have to agree with the parser about which escapes exist at all,
+// or a model can generate a document runner cannot read back.
+static void test_escapes_are_paired_and_closable(void) {
+    // json_mode: every prefix of a document with a surrogate pair in it
+    const char *doc = "{\"a\":\"x\\uD83D\\uDE00y\"}";
+    for (size_t cut = 1; cut <= strlen(doc); cut++) {
+        jsonv v;
+        jsonv_init(&v);
+        assert(jsonv_feed(&v, doc, (int)cut));
+        if (v.done) continue;
+        char tail[64];
+        int n = jsonv_close(&v, tail, sizeof(tail));
+        assert(n > 0);
+        char full[128];
+        snprintf(full, sizeof(full), "%.*s%s", (int)cut, doc, tail);
+        jv *parsed = json_parse(full, strlen(full));
+        if (!parsed) fprintf(stderr, "json_mode cut %zu: %s\n", cut, full);
+        assert(parsed != NULL);
+        jv_free(parsed);
+    }
+    // and the escapes this parser refuses are refused by the validator too,
+    // rather than generated and then found unreadable
+    const char *bad[] = { "{\"a\":\"\\u0000", "{\"a\":\"\\uDC00\"}",
+                          "{\"a\":\"\\uD800\"}", "{\"a\":\"\\uD800\\n\"}" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        jsonv v;
+        jsonv_init(&v);
+        assert(!jsonv_feed(&v, bad[i], (int)strlen(bad[i])));
+    }
+
+    // the same two properties through the schema validator
+    const char *src = "{\"type\":\"object\",\"properties\":"
+                      "{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+    for (size_t cut = 1; cut <= strlen(doc); cut++) {
+        sval v; sval_init(&v, schema);
+        assert(sval_feed(&v, doc, (int)cut));
+        if (v.done) continue;
+        char tail[64];
+        int n = sval_close(&v, tail, sizeof(tail));
+        assert(n > 0);
+        char full[128];
+        snprintf(full, sizeof(full), "%.*s%s", (int)cut, doc, tail);
+        jv *parsed = json_parse(full, strlen(full));
+        if (!parsed) fprintf(stderr, "schema cut %zu: %s\n", cut, full);
+        assert(parsed != NULL);
+        jv_free(parsed);
+        sval chk; sval_init(&chk, schema);
+        assert(sval_feed(&chk, full, (int)strlen(full)) && chk.done);
+    }
+    for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+        sval v; sval_init(&v, schema);
+        assert(!sval_feed(&v, bad[i], (int)strlen(bad[i])));
+    }
+    // a well-formed pair still passes, and counts as one character
+    const char *good = "{\"a\":\"\\uD83D\\uDE00\"}";
+    sval ok; sval_init(&ok, schema);
+    assert(sval_feed(&ok, good, (int)strlen(good)) && ok.done);
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 static void test_json_close_partial_string(void) {
     jsonv v;
     jsonv_init(&v);
@@ -1707,6 +1778,7 @@ int main(void) {
     test_json_rejects_ill_formed_raw_utf8();
     test_json_rejects_embedded_nul();
     test_json_rejects_duplicate_object_keys();
+    test_escapes_are_paired_and_closable();
     test_json_close_partial_string();
     test_schema_required_close();
     test_leading_whitespace_is_refused_but_interior_is_kept();

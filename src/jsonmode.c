@@ -29,11 +29,71 @@ enum {
 
 static const char *LITS[3] = { "true", "false", "null" };
 
+// See jsonmode.h. The rejections are as early as the digits allow -- a second
+// digit that makes DC..DF cannot become anything but an unpaired low
+// surrogate -- because a rejection at the FOURTH digit would leave a
+// constrained model with all sixteen continuations masked.
+bool json_escape_hex(uint8_t *sub, uint16_t *esc, uint8_t c) {
+    int d;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    else return false;
+    bool low = *sub >= 8;                     // the low half of a pair
+    int nth = (int)(*sub - (low ? 8 : 2));    // 0..3
+    uint16_t val = (uint16_t)((nth ? *esc : 0) * 16 + d);
+    if (low) {
+        if (nth == 0 && d != 0xD) return false;
+        if (nth == 1 && (val < 0xDC || val > 0xDF)) return false;
+    } else if (nth == 1 && val >= 0xDC && val <= 0xDF) {
+        return false;                         // a low surrogate with no high half
+    }
+    *esc = val;
+    if (nth < 3) { (*sub)++; return true; }
+    // jv strings are NUL-terminated and carry no length, so U+0000 would make
+    // every consumer see a truncated value -- json.c rejects it and so must
+    // anything that generates it
+    if (!low && val == 0) return false;
+    *sub = (!low && val >= 0xD800 && val <= 0xDBFF) ? 6 : 0;
+    return true;
+}
+
+int json_escape_close(uint8_t *sub, uint16_t *esc, char *out, int cap) {
+    int m = 0;
+    #define ESC_PUT(ch) do { if (m < cap) out[m++] = (char)(ch); } while (0)
+    if (*sub == 1) { ESC_PUT('n'); *sub = 0; return m; }  // dangling backslash
+    if (*sub >= 2 && *sub <= 5) {
+        int nth = *sub - 2;                     // digits already written
+        uint16_t cp = (uint16_t)((nth ? *esc : 0) << (4 * (4 - nth)));
+        if (cp == 0) {                          // zeros would spell U+0000
+            for (int i = nth; i < 3; i++) ESC_PUT('0');
+            ESC_PUT('1');
+            cp = 1;
+        } else {
+            for (int i = nth; i < 4; i++) ESC_PUT('0');
+        }
+        *sub = (cp >= 0xD800 && cp <= 0xDBFF) ? 6 : 0;
+    }
+    if (*sub == 6) { ESC_PUT('\\'); *sub = 7; }
+    if (*sub == 7) { ESC_PUT('u');  *sub = 8; }
+    if (*sub >= 8 && *sub <= 11) {
+        // the smallest low surrogate consistent with what is already written;
+        // json_escape_hex has pinned digit 1 to D and digit 2 to C..F, so
+        // zeros are safe from the third digit on
+        static const char LOW[4] = { 'D', 'C', '0', '0' };
+        for (int i = *sub - 8; i < 4; i++) ESC_PUT(LOW[i]);
+        *sub = 0;
+    }
+    #undef ESC_PUT
+    return m;
+}
+
 void jsonv_init(jsonv *v) {
     v->depth = 0;
     v->st = S_START;
     v->sub = 0;
     v->lit = 0;
+    v->esc = 0;
     v->done = false;
 }
 
@@ -121,14 +181,9 @@ static bool feed_byte(jsonv *v, uint8_t c, bool *reconsume) {
             if (c == 'u') { v->sub = 2; return true; }
             return false;
         }
-        if (v->sub >= 2) { // \uXXXX hex digits (sub 2..5)
-            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-                (c >= 'A' && c <= 'F')) {
-                v->sub = v->sub == 5 ? 0 : v->sub + 1;
-                return true;
-            }
-            return false;
-        }
+        if (v->sub == 6) { if (c != '\\') return false; v->sub = 7; return true; }
+        if (v->sub == 7) { if (c != 'u')  return false; v->sub = 8; return true; }
+        if (v->sub >= 2) return json_escape_hex(&v->sub, &v->esc, c);
         if (c == '"') {
             if (key) v->st = S_COLON;
             else value_done(v);
@@ -209,11 +264,9 @@ int jsonv_close(jsonv *v, char *out, int cap) {
     #define EMIT(c) do { if (m < cap - 1) out[m++] = (c); } while (0)
     // unfinished string escapes
     if (v->st == S_KEY || v->st == S_STRING) {
-        if (v->sub == 1) { EMIT('n'); v->sub = 0; }        // dangling backslash
-        while (v->sub >= 2) {                              // partial \uXXXX
-            EMIT('0');
-            v->sub = v->sub == 5 ? 0 : v->sub + 1;
-        }
+        char esc[12];
+        int en = json_escape_close(&v->sub, &v->esc, esc, (int)sizeof(esc));
+        for (int i = 0; i < en; i++) EMIT(esc[i]);
         EMIT('"');
         if (v->st == S_KEY) v->st = S_COLON;
         else value_done(v);
@@ -275,6 +328,7 @@ void jsonv_snapshot(jsonv *dst, const jsonv *src) {
     dst->sub = src->sub;
     dst->lit = src->lit;
     dst->done = src->done;
+    dst->esc = src->esc;
 }
 
 bool jsonv_trial(const jsonv *v, jsonv *scratch, const char *s, int n) {

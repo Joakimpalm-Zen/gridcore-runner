@@ -2158,23 +2158,19 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
     return NULL;
 }
 
-// string content byte (frame->sub tracks escapes); returns -1 invalid,
+// string content byte (frame->sub/esc track escapes, with the pairing rules
+// shared with json_mode -- see json_escape_hex); returns -1 invalid,
 // 0 continue, 1 string closed
-static int str_byte(uint8_t c, uint8_t *sub) {
+static int str_byte(uint8_t c, uint8_t *sub, uint16_t *esc) {
     if (*sub == 1) { // after backslash
         if (c == '"' || c == '\\' || c == '/' || c == 'b' || c == 'f' ||
             c == 'n' || c == 'r' || c == 't') { *sub = 0; return 0; }
         if (c == 'u') { *sub = 2; return 0; }
         return -1;
     }
-    if (*sub >= 2) { // \uXXXX
-        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-            (c >= 'A' && c <= 'F')) {
-            *sub = *sub == 5 ? 0 : *sub + 1;
-            return 0;
-        }
-        return -1;
-    }
+    if (*sub == 6) { if (c != '\\') return -1; *sub = 7; return 0; }
+    if (*sub == 7) { if (c != 'u')  return -1; *sub = 8; return 0; }
+    if (*sub >= 2) return json_escape_hex(sub, esc, c) ? 0 : -1;
     if (c == '"') return 1;
     if (c == '\\') { *sub = 1; return 0; }
     return c >= 0x20 ? 0 : -1;
@@ -2450,7 +2446,7 @@ static int feed_byte(sval *v, uint8_t c) {
         if (f->sub == 0 && c == '\\' &&
             n->max_items >= 0 && f->lit_pos >= n->max_items)
             return -1;
-        int r = str_byte(c, &f->sub);
+        int r = str_byte(c, &f->sub, &f->esc);
         if (r < 0) return -1;
         if (r == 1) {
             if (f->lit_pos < n->min_items ||
@@ -2544,7 +2540,7 @@ static int feed_byte(sval *v, uint8_t c) {
 
     case P_OBJ_INKEY: {
         if (n->kind == SN_MAP) {
-            int r = str_byte(c, &f->sub);
+            int r = str_byte(c, &f->sub, &f->esc);
             if (r < 0) return -1;
             if (r == 1) f->phase = P_OBJ_COLON;
             else if (f->sub == 0) f->lit_pos++;
@@ -2769,6 +2765,15 @@ static void eq_putc(emitq *q, char c) {
 // declared bound, and minItems:2000000000 (nested, worse) spins for minutes
 // while a slot is held.
 static bool eq_full(const emitq *q) { return q->n >= q->cap - 1; }
+
+// Finish the string escape generation stopped inside, if any. Shared with
+// json_mode's closer so the two cannot disagree about what a partial escape
+// completes to -- see json_escape_close.
+static void eq_escape(emitq *q, sframe *f) {
+    char esc[12];
+    int n = json_escape_close(&f->sub, &f->esc, esc, (int)sizeof(esc));
+    for (int i = 0; i < n; i++) eq_putc(q, esc[i]);
+}
 
 static int64_t integer_minimal_value(const snode *n) {
     if ((!n->has_num_min || n->num_min <= 0) &&
@@ -3017,9 +3022,7 @@ int sval_close(sval *v, char *out, int cap) {
             emit_min_choice(&q, n, 0, choice);
             break;
         case P_STR:
-            if (f->sub == 1) eq_putc(&q, 'n');           // dangling backslash
-            while (f->sub >= 2) { eq_putc(&q, '0');       // partial \uXXXX
-                                  f->sub = f->sub == 5 ? 0 : f->sub + 1; }
+            eq_escape(&q, f);   // a dangling backslash or a partial \uXXXX
             int string_min = n->min_items;
             if (n->n_pat && string_min < pat_min_len(n))
                 string_min = pat_min_len(n);
@@ -3073,11 +3076,7 @@ int sval_close(sval *v, char *out, int cap) {
             break;
         case P_OBJ_INKEY: {
             if (n->kind == SN_MAP) {
-                if (f->sub == 1) eq_putc(&q, 'n');
-                while (f->sub >= 2) {
-                    eq_putc(&q, '0');
-                    f->sub = f->sub == 5 ? 0 : f->sub + 1;
-                }
+                eq_escape(&q, f);
                 eq_put(&q, "\":");
                 emit_min_choice(&q, n->items, 0, choice);
                 eq_putc(&q, '}');

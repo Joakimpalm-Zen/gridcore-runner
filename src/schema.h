@@ -101,6 +101,7 @@ typedef struct {
                         // silently drop maxItems enforcement past 32767)
     int32_t  lit_pos;   // string chars / literal bytes seen (int32: file-sized strings)
     uint16_t disc;      // this object's discriminator choice + 1; 0 = not chosen yet
+    uint16_t esc;       // \uXXXX value accumulated so far (see json_escape_hex)
     uint64_t alive;
     uint64_t num_abs;  // integer magnitude accumulated so far
 } sframe;
