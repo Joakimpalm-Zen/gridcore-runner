@@ -12,6 +12,7 @@
 #include "fp16.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -692,6 +693,43 @@ static void test_i8_quant_act(void) {
     free(x); free(got); free(ref);
 }
 
+// The dispatch counter i8_dot_dispatches() reports is incremented inside
+// i8_quant_act, and its comment claimed the increment happens "on the calling
+// thread only, so no atomics". That is true of the per-ROW loop and false of
+// the process: `runner --serve --parallel N` runs N slot threads, each calling
+// matvec_b for its own request, so a plain ++ on a shared global is a data
+// race — undefined behaviour, and observably a count that is simply wrong.
+//
+// Four threads, 200k increments each. Lost updates are near-certain with a
+// non-atomic counter and impossible with a relaxed atomic one.
+enum { I8_RACE_THREADS = 4, I8_RACE_CALLS = 200000 };
+
+static void *i8_dispatch_hammer(void *unused) {
+    (void)unused;
+    float x[I8_REF_QK];
+    ref_block_i8a scratch;
+    for (int i = 0; i < I8_REF_QK; i++) x[i] = (float)i;
+    for (int i = 0; i < I8_RACE_CALLS; i++)
+        i8_quant_act(x, &scratch, I8_REF_QK);
+    return NULL;
+}
+
+static void test_i8_dispatch_count_survives_parallel_slots(void) {
+    unsigned long before = i8_dot_dispatches();
+    pthread_t th[I8_RACE_THREADS];
+    int started = 0;
+    for (int i = 0; i < I8_RACE_THREADS; i++)
+        if (pthread_create(&th[i], NULL, i8_dispatch_hammer, NULL) == 0) started++;
+        else break;
+    for (int i = 0; i < started; i++) pthread_join(th[i], NULL);
+    CHECK(started == I8_RACE_THREADS, "could not start %d hammer threads",
+          I8_RACE_THREADS);
+    unsigned long want = (unsigned long)started * I8_RACE_CALLS;
+    CHECK(i8_dot_dispatches() - before == want,
+          "i8 dispatch count is %lu after %lu concurrent quantizations",
+          i8_dot_dispatches() - before, want);
+}
+
 static int g_i8_checked = 0;   // guards against a vacuous pass (see main)
 
 static void test_i8_dot(int type, int n) {
@@ -978,6 +1016,7 @@ int main(void) {
     test_f32_to_f16();
 
     test_i8_quant_act();
+    test_i8_dispatch_count_survives_parallel_slots();
     // The fused int8 route: promoted formats at a full row and at one block,
     // plus the formats it must decline (i8_dot_ok false => test_i8_dot returns)
     for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {

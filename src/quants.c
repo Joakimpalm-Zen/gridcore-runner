@@ -2291,10 +2291,15 @@ bool i8_dot_enabled(void) {
 
 void i8_dot_force(int on) { g_i8_force = on < 0 ? -1 : (on != 0); }
 
-// Counted where the activations are quantized: once per matvec, on the
-// calling thread only, so no atomics in the per-row hot loop.
-static unsigned long g_i8_dispatches = 0;
-unsigned long i8_dot_dispatches(void) { return g_i8_dispatches; }
+// Counted where the activations are quantized: once per matvec, never in the
+// per-row hot loop. It is still shared across threads — `--parallel N` runs N
+// slot threads and each calls matvec_b for its own request — so the increment
+// is atomic. Relaxed: nothing orders anything against this counter, it is read
+// once by the tolerance gate to prove the fused route was actually taken.
+static _Atomic unsigned long g_i8_dispatches = 0;
+unsigned long i8_dot_dispatches(void) {
+    return atomic_load_explicit(&g_i8_dispatches, memory_order_relaxed);
+}
 
 // Quantize an activation row into 16-element int8 blocks, carrying each
 // block's quant sum. The rounding is defined as
@@ -2307,7 +2312,7 @@ unsigned long i8_dot_dispatches(void) { return g_i8_dispatches; }
 // the build's vector width would not be reproducible.
 void i8_quant_act(const float *x, void *dst, int n) {
     block_i8a *b = dst;
-    g_i8_dispatches++;
+    atomic_fetch_add_explicit(&g_i8_dispatches, 1, memory_order_relaxed);
 #if RUNNER_AVX2
     // trunc(v + copysign(0.5, v)) is round-half-away-from-zero — the exact
     // semantics of the scalar roundf below, ties included, so the two paths
