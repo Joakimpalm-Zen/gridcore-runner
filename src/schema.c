@@ -2233,13 +2233,20 @@ static bool number_put(sval *v, uint8_t c) {
     return true;
 }
 
-static bool number_in_bounds(const sval *v, const snode *n, const sframe *f) {
-    if (!num_complete(f->sub) || !v->num_len) return false;
+// Does this complete number SPELLING satisfy the node's interval? Taken as
+// text rather than as an accumulated value so the closer can ask the same
+// question about a spelling it is only considering.
+static bool number_text_in_bounds(const snode *n, const char *s) {
     char *end = NULL;
-    double x = strtod(v->num_text, &end);
+    double x = strtod(s, &end);
     if (!end || *end || !isfinite(x)) return false;
     return (!n->has_real_min || x >= n->real_min) &&
            (!n->has_real_max || x <= n->real_max);
+}
+
+static bool number_in_bounds(const sval *v, const snode *n, const sframe *f) {
+    if (!num_complete(f->sub) || !v->num_len) return false;
+    return number_text_in_bounds(n, v->num_text);
 }
 
 static bool integer_value(const sframe *f, int64_t *out) {
@@ -2809,6 +2816,67 @@ static void close_integer(emitq *q, const snode *n, const sframe *f) {
     }
 }
 
+// Finish a real number the model has already started, inside its interval.
+//
+// The digits are gone -- the client has them -- so the only lever left is the
+// suffix, and JSON gives a decisive one: an exponent scales the value by any
+// power of ten. That is also why the validator accepts these prefixes in the
+// first place (`843584921` is a legal start for a value in [-3,9], via
+// `843584921e-9`), so a close that stopped at the digits emitted a document
+// which parsed and then violated the schema it was generated under. The
+// caller cannot detect that; a bounded field is the one place it is entitled
+// not to check.
+//
+// The exponent is SEARCHED and evaluated, not derived: every candidate is the
+// exact text that will be emitted, run through the same bounds test the
+// validator uses, so the emitted value is checked rather than argued.
+static void close_number(emitq *q, const sval *v, const snode *n,
+                         const sframe *f) {
+    char spell[sizeof(v->num_text) + 8];
+    int emitted = v->num_len;
+    memcpy(spell, v->num_text, (size_t)emitted);
+    spell[emitted] = 0;
+    if (!emitted) {
+        // nothing was generated: a bounded number closes to an in-bounds
+        // value, not a blind zero
+        double fill = 0.0;
+        if (n->has_real_min && fill < n->real_min) fill = n->real_min;
+        if (n->has_real_max && fill > n->real_max) fill = n->real_max;
+        char b[40];
+        snprintf(b, sizeof(b), "%.17g", fill);
+        eq_put(q, b);
+        return;
+    }
+    int len = emitted;
+    if (!num_complete(f->sub)) {   // `-`, `1.`, `1e`, `1e+`: one digit finishes it
+        spell[len++] = '0';
+        spell[len] = 0;
+    }
+    if (number_text_in_bounds(n, spell)) { eq_put(q, spell + emitted); return; }
+    // An exponent can only be spelled once, so a prefix that already has one
+    // has no lever left; everything else can be scaled.
+    // Smallest |exponent| first, and up before down: the completion closest in
+    // magnitude to the number the model actually wrote. Taking the first hit
+    // of an ascending scan instead lands on a subnormal (`...e-330`), which
+    // is in bounds, which json_parse then refuses for ERANGE.
+    if (f->sub != N_EXP0 && f->sub != N_EXP1 && f->sub != N_EXP) {
+        for (int mag = 1; mag <= 330; mag++) {
+            for (int sign = 1; sign >= -1; sign -= 2) {
+                char cand[sizeof(spell) + 8];
+                int cn = snprintf(cand, sizeof(cand), "%se%d", spell,
+                                  sign * mag);
+                // the completed spelling must be one this validator would
+                // accept back: number_put holds num_text minus its terminator
+                if (cn < 0 || cn >= (int)sizeof(v->num_text)) continue;
+                if (!number_text_in_bounds(n, cand)) continue;
+                eq_put(q, cand + emitted);
+                return;
+            }
+        }
+    }
+    eq_put(q, spell + emitted);   // no completion exists: keep it parseable
+}
+
 // minimal complete value for a schema node
 static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
     if (depth > 24) { eq_put(q, "null"); return; }
@@ -2988,20 +3056,7 @@ int sval_close(sval *v, char *out, int cap) {
         }
         case P_NUM:
             if (n->kind == SN_INT) close_integer(&q, n, f);
-            else if (!num_complete(f->sub)) {
-                if (v->num_len == 0 && (n->has_real_min || n->has_real_max)) {
-                    // an untouched bounded number closes to an in-bounds
-                    // value, not a blind zero
-                    double fill = 0.0;
-                    if (n->has_real_min && fill < n->real_min) fill = n->real_min;
-                    if (n->has_real_max && fill > n->real_max) fill = n->real_max;
-                    char b[40];
-                    snprintf(b, sizeof(b), "%.17g", fill);
-                    eq_put(&q, b);
-                } else {
-                    eq_putc(&q, '0');
-                }
-            }
+            else close_number(&q, v, n, f);
             break;
         case P_OBJ_KEY1:
             if (n->kind == SN_MAP) eq_putc(&q, '}');

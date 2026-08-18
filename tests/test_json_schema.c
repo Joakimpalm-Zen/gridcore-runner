@@ -810,6 +810,61 @@ static void test_schema_integer_bounds_complete_truncation(void) {
     jv_free(schema_json);
 }
 
+// A bounded number the model has ALREADY started out of range. Nothing can
+// take those bytes back, but JSON's exponent can still finish them inside the
+// interval -- and the alternative is a force-closed document that parses and
+// then violates the schema it was generated under, which is the one outcome a
+// caller cannot detect. Found by a legal-byte random walk against sval_close.
+static void test_schema_number_close_rescues_an_out_of_range_prefix(void) {
+    const char *src = "{\"type\":\"object\",\"properties\":{"
+        "\"b\":{\"type\":\"number\",\"minimum\":-3,\"maximum\":9}},"
+        "\"required\":[\"b\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    // every one of these is a prefix the validator accepts (an exponent could
+    // still rescue it), so every one of them can be where the budget runs out
+    const char *starts[] = {
+        "{\"b\":843584921",     // complete spelling, far too large
+        "{\"b\":8435.",         // fraction opened, not yet a value
+        "{\"b\":-40000",        // far too small
+        "{\"b\":7",             // already in bounds: must not be touched
+    };
+    for (size_t i = 0; i < sizeof(starts) / sizeof(*starts); i++) {
+        sval v; sval_init(&v, schema);
+        assert(sval_feed(&v, starts[i], (int)strlen(starts[i])));
+        char suffix[128];
+        int n = sval_close(&v, suffix, sizeof(suffix));
+        assert(n > 0);
+        char full[256];
+        snprintf(full, sizeof(full), "%s%s", starts[i], suffix);
+        // the closed document is a valid instance of the schema it was
+        // generated under -- both by the validator and by the parser
+        sval chk; sval_init(&chk, schema);
+        if (!sval_feed(&chk, full, (int)strlen(full)) || !chk.done)
+            fprintf(stderr, "closed document not accepted: %s\n", full);
+        assert(sval_feed(&chk, "", 0) && chk.done);
+        jv *parsed = json_parse(full, strlen(full));
+        assert(parsed != NULL);
+        jv *b = jv_get(parsed, "b");
+        assert(b != NULL && b->type == J_NUM);
+        assert(b->num >= -3.0 && b->num <= 9.0);
+        jv_free(parsed);
+    }
+    // an in-bounds prefix is completed with nothing at all
+    sval keep; sval_init(&keep, schema);
+    assert(sval_feed(&keep, "{\"b\":7", 6));
+    char suffix[64];
+    assert(sval_close(&keep, suffix, sizeof(suffix)) == 1 &&
+           !strcmp(suffix, "}"));
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 static void test_schema_number_bounds_are_enforced(void) {
     const char *src = "{\"type\":\"object\",\"properties\":{"
         "\"timeout\":{\"type\":\"number\",\"minimum\":0,"
@@ -1673,6 +1728,7 @@ int main(void) {
     test_schema_merges_enum_and_const_anyof();
     test_schema_integer_bounds_are_enforced();
     test_schema_integer_bounds_complete_truncation();
+    test_schema_number_close_rescues_an_out_of_range_prefix();
     test_schema_number_bounds_are_enforced();
     test_schema_number_bounds_across_frames();
     test_sval_state_is_small();
