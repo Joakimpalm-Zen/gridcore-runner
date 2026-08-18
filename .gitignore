@@ -179,3 +179,5 @@ test-gpu-identity
 test-gpu-identity.exe
 test-attn-tol
 test-attn-tol.exe
+test-instances-oom
+test-instances-oom.exe

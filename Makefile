@@ -465,6 +465,13 @@ TEST_INSTANCES_SRC = tests/test_instances.c src/instances.c src/json.c
 $(TEST_INSTANCES): $(TEST_INSTANCES_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_INSTANCES_SRC) -o $@ -lm
 
+# the same registry under injected allocation failure. instances.c is compiled
+# INTO the test (macro-substituted allocators), so it is deliberately absent
+# from the source list here.
+TEST_INSTANCES_OOM = $(TEST_BATCH:test-batch%=test-instances-oom%)
+$(TEST_INSTANCES_OOM): tests/test_instances_oom.c src/instances.c src/json.c $(HDR)
+	$(CC) $(CFLAGS) -I src tests/test_instances_oom.c src/json.c -o $@ -lm
+
 # Pure policy seam: simulates a Mac whose model is larger than one MTLBuffer
 # but still inside the aggregate Metal working set.
 $(TEST_METAL_ADMISSION): tests/test_metal_admission.c src/metal_admission.h
@@ -1036,7 +1043,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TEMPLATE_OOM) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_ATTN_TOL) $(TEST_GPU_ID) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
-      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_METAL_ADMISSION) $(TEST_TRAY_CORE) \
+      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_INSTANCES_OOM) $(TEST_METAL_ADMISSION) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
       $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_GGUF_SPLIT) $(TEST_PARSE) \
       $(TEST_THREAD_DEFAULT) \
@@ -1077,6 +1084,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_GPU_ID)
 	./$(TEST_QUANTS_SIMD)
 	./$(TEST_INSTANCES)
+	./$(TEST_INSTANCES_OOM)
 	./$(TEST_METAL_ADMISSION)
 	./$(TEST_TRAY_CORE)
 	@# The split guard was absent from this list entirely, which is how a
@@ -1305,7 +1313,7 @@ clean:
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \
 	      $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_ATTN_TOL) $(TEST_GPU_ID) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM) $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_TOOLS) $(DIFFTOK) \
-	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_METAL_ADMISSION) $(TEST_TRAY_CORE) \
+	      $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_INSTANCES_OOM) $(TEST_METAL_ADMISSION) $(TEST_TRAY_CORE) \
 	      $(TEST_QUANTIZE) $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) \
 	      $(TEST_PARSE) $(TEST_THREAD_DEFAULT) $(TEST_METAL_OWNERSHIP) $(TEST_METAL_SHADERS) $(TEST_METAL_KQUANTS) $(TEST_MODEL_LOAD_FAILURE) \
 	      $(TEST_FILE_ID) test-file-identity.tmp \

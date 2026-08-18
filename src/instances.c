@@ -242,12 +242,19 @@ void instances_unregister(void) {
 
 static void rec_free_members(instance_rec *r);
 
+// Grow to fit one more record. Returns NULL only when the array could not
+// grow, and then WITHOUT disturbing the caller's array: `arr = realloc(arr, n)`
+// loses the original pointer, and the old code both leaked it and handed the
+// caller a NULL that instances_list still reported a count for.
 static instance_rec *push_rec(instance_rec *arr, int *n, int *cap) {
     if (*n == *cap) {
-        *cap = *cap ? *cap * 2 : 8;
-        arr = realloc(arr, sizeof(instance_rec) * (size_t)*cap);
+        int want = *cap ? *cap * 2 : 8;
+        instance_rec *grown = realloc(arr, sizeof(instance_rec) * (size_t)want);
+        if (!grown) return NULL;
+        arr = grown;
+        *cap = want;
     }
-    if (arr) memset(&arr[*n], 0, sizeof(instance_rec));
+    memset(&arr[*n], 0, sizeof(instance_rec));
     return arr;
 }
 
@@ -309,8 +316,13 @@ instance_rec *instances_list(int *n_out) {
         instance_rec r = {0};
         bool ok = parse_rec(path, &r);
         if (ok && instance_pid_alive(r.pid)) {
-            arr = push_rec(arr, &n, &cap);
-            if (!arr) { rec_free_members(&r); break; }
+            // Out of memory stops the enumeration; it does not discard what has
+            // already been read. A short list is a true answer, and the record
+            // files are left alone -- this is not a reason to sweep a live
+            // process away.
+            instance_rec *grown = push_rec(arr, &n, &cap);
+            if (!grown) { rec_free_members(&r); break; }
+            arr = grown;
             arr[n++] = r;
         } else {
             // stale (crash leftover) or unreadable: sweep it
