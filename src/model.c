@@ -1950,12 +1950,45 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             // GGUFs use `ssm_dt.bias`. They carry the same per-head vector.
             gguf_tensor *dt = opt_tensor(g, "blk.%d.ssm_dt.bias", i);
             if (!dt) dt = need_tensor(g, "blk.%d.ssm_dt", i, &ok);
-            l->ssm_dt    = tensor_to_f32(dt, &ok);
-            l->ssm_a     = tensor_to_f32(need_tensor(g, "blk.%d.ssm_a", i, &ok), &ok);
-            l->ssm_norm_w = tensor_to_f32(need_tensor(g, "blk.%d.ssm_norm.weight", i, &ok), &ok);
+            gguf_tensor *sa = need_tensor(g, "blk.%d.ssm_a", i, &ok);
+            gguf_tensor *sn = need_tensor(g, "blk.%d.ssm_norm.weight", i, &ok);
             l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
             l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
             l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
+            if (!ok) return false;
+            // The DeltaNet geometry keys index every tensor above, and until
+            // this check nothing tied the two together: ssm.inner_size,
+            // state_size, group_count and time_step_rank passed only an
+            // internal ratio test, so a file could declare a wider
+            // convolution or more heads than its own tensors hold and the
+            // recurrence would read past them.
+            {
+                int keydim  = m->ssm_state * m->ssm_groups;
+                int convdim = 2 * keydim + m->ssm_inner;
+                int hv      = m->ssm_inner / m->ssm_v_heads;
+                if (!check_shape(l->wqkv, m->n_embd, convdim, "attn_qkv", i) ||
+                    !check_shape(l->wq_gate, m->n_embd, m->ssm_inner,
+                                 "attn_gate", i) ||
+                    // read as convdim rows of conv_kernel, one per channel
+                    !check_shape(l->ssm_conv, m->ssm_conv_kernel, convdim,
+                                 "ssm_conv1d", i) ||
+                    !check_shape(l->ssm_beta, m->n_embd, m->ssm_v_heads,
+                                 "ssm_beta", i) ||
+                    !check_shape(l->ssm_alpha, m->n_embd, m->ssm_v_heads,
+                                 "ssm_alpha", i) ||
+                    !check_shape(l->ssm_out, m->ssm_inner, m->n_embd,
+                                 "ssm_out", i) ||
+                    !check_shape(dt, m->ssm_v_heads, 1, "ssm_dt", i) ||
+                    !check_shape(sa, m->ssm_v_heads, 1, "ssm_a", i) ||
+                    !check_shape(sn, hv, 1, "ssm_norm", i) ||
+                    !check_shape(l->w_gate, m->n_embd, l->n_ff, "ffn_gate", i) ||
+                    !check_shape(l->w_up, m->n_embd, l->n_ff, "ffn_up", i) ||
+                    !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
+                    return false;
+            }
+            l->ssm_dt     = tensor_to_f32(dt, &ok);
+            l->ssm_a      = tensor_to_f32(sa, &ok);
+            l->ssm_norm_w = tensor_to_f32(sn, &ok);
             if (!ok) return false;
             l->attn_norm_w = tensor_to_f32(an, &ok);
             l->ffn_norm_w = tensor_to_f32(fn, &ok);
@@ -2116,6 +2149,14 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                      !check_shape(l->w_up,   m->n_embd, l->n_ff, "ffn_up",   i)))
                     return false;
             }
+            // qwen35's full-attention layers are the same layout with Q and its
+            // output gate fused into one tensor of 2*q_dim rows — a different
+            // width, not an unvalidated one.
+            if (m->qwen35 &&
+                (!check_shape(l->wq, m->n_embd, 2 * qd, "attn_q", i) ||
+                 !check_shape(l->wk, m->n_embd, kd, "attn_k", i) ||
+                 !check_shape(l->wv, m->n_embd, kd, "attn_v", i)))
+                return false;
             if (!l->is_moe &&
                 !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
                 return false;
@@ -2476,7 +2517,11 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
     if (m->qwen35) {
         int conv_dim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
         int hv = m->ssm_inner / m->ssm_v_heads;
-        m->q_gate = malloc(sizeof(float) * (size_t)B * q_dim);
+        // q_gate is shared the same way ssm_qkv is below: full-attention layers
+        // write q_dim floats per token (the attention output gate), recurrent
+        // ones write ssm_v_heads (the DeltaNet beta). Nothing relates the two.
+        int gate_dim = q_dim > m->ssm_v_heads ? q_dim : m->ssm_v_heads;
+        m->q_gate = malloc(sizeof(float) * (size_t)B * gate_dim);
         // ssm_qkv is shared by two uses: recurrent layers write conv_dim floats
         // per token, but full-attention layers write the fused Q/gate with stride
         // 2*q_dim (model.c qwen35 attention path). Nothing relates conv_dim to

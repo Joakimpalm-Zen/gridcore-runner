@@ -140,3 +140,32 @@ def test_weight_of_an_unsupported_type_is_refused(runner_bin, tmp_path):
     assert proc.returncode != 0, "a weight of an undecodable type must be refused"
     err = proc.stderr.decode(errors="replace")
     assert "unsupported type" in err
+
+
+def test_qwen35_recurrent_geometry_beyond_its_tensors_is_refused(runner_bin, tmp_path):
+    """The Gated DeltaNet geometry keys index tensors nothing checked.
+
+    ssm.inner_size / state_size / group_count / time_step_rank decide the
+    convolution width, the per-head fan-out and how many entries of ssm_dt and
+    ssm_a the recurrence reads — and the qwen35 layer path deliberately skips
+    the llama-family shape checks (its Q is fused with a gate), which left its
+    tensors validated by nothing at all. Doubling the inner size and the head
+    count (a pair that still satisfies the internal ratio check) read past
+    ssm_dt's converted buffer: ASan heap-buffer-overflow in qwen35_linear,
+    0 bytes after a 16-byte region.
+    """
+    good = tmp_path / "orn.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-ornith.py", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    wide = _patch_u32(good, tmp_path / "orn-inner.gguf",
+                      "qwen35.ssm.inner_size", 64)
+    bad = _patch_u32(wide, tmp_path / "orn-heads.gguf",
+                     "qwen35.ssm.time_step_rank", 8)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "recurrent geometry past its tensors must be " \
+                                "refused at load, not read past them mid-forward"
+    err = proc.stderr.decode(errors="replace")
+    assert "attn_qkv" in err
