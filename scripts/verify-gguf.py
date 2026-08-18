@@ -37,8 +37,8 @@ GGML_TYPES = {
     17: (256, 74),  # IQ2_XS
     18: (256, 98),  # IQ3_XXS
     19: (256, 50),  # IQ1_S
-    20: (32, 16),   # IQ4_NL
-    21: (256, 82),  # IQ3_S
+    20: (32, 18),   # IQ4_NL
+    21: (256, 110), # IQ3_S
     22: (256, 82),  # IQ2_S
     23: (256, 136), # IQ4_XS
     24: (1, 1),     # I8
@@ -48,6 +48,12 @@ GGML_TYPES = {
     28: (1, 8),     # F64
     29: (256, 56),  # IQ1_M
     30: (1, 2),     # BF16
+    # MXFP4 is sizeof(block_mxfp4) in src/quants.c. TQ1_0/TQ2_0 are named
+    # below but deliberately absent here: the runner implements no block
+    # struct for them, so there is nothing in this tree to check a size
+    # against, and a guessed size that under-counts would call a short
+    # file COMPLETE. Unknown is reported as "cannot verify" (exit 2).
+    39: (32, 17),   # MXFP4
 }
 
 TYPE_NAMES = {
@@ -56,7 +62,7 @@ TYPE_NAMES = {
     14: "Q6_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS",
     19: "IQ1_S", 20: "IQ4_NL", 21: "IQ3_S", 22: "IQ2_S", 23: "IQ4_XS",
     24: "I8", 25: "I16", 26: "I32", 27: "I64", 28: "F64", 29: "IQ1_M",
-    30: "BF16",
+    30: "BF16", 34: "TQ1_0", 35: "TQ2_0", 39: "MXFP4",
 }
 
 
