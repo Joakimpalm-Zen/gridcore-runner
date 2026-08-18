@@ -171,6 +171,18 @@ const char *template_name(int t) {
 
 static size_t emit(char *out, size_t cap, size_t off, const char *fmt,
                    const char *a, const char *b) {
+    // The family preambles are assembled in an sbuf and then formatted through
+    // here, and an sbuf whose allocation failed carries a NULL `s`. "%s" of a
+    // null pointer is undefined behavior, and on the libcs where it does not
+    // crash it writes the four characters "(null)" — which the model then
+    // reads as its system prompt. The renderer has no way to REPORT a failed
+    // allocation (its return value is a length the caller grows a buffer to),
+    // so the contract is that a lost section is missing rather than forged.
+    // One test per call site would be one test per call site; this is the one
+    // place every one of them passes through. Unused arguments are NULL too,
+    // and substituting "" for those changes nothing.
+    if (!a) a = "";
+    if (!b) b = "";
     if (off >= cap) return off;
     int n = snprintf(out + off, cap - off, fmt, a, b);
     return n > 0 ? off + (size_t)n : off;

@@ -41,6 +41,7 @@ TEST_TEMPLATE = test-template.exe
 TEST_TOOLS = test-tools.exe
 TEST_JSON_OOM = test-json-oom.exe
 TEST_TOKENIZER_OOM = test-tokenizer-oom.exe
+TEST_TEMPLATE_OOM = test-template-oom.exe
 TEST_SCHEMA_OOM = test-schema-oom.exe
 TEST_SAMPLER = test-sampler.exe
 TEST_SHARED = test-shared-weights.exe
@@ -63,6 +64,7 @@ TEST_TEMPLATE = test-template
 TEST_TOOLS = test-tools
 TEST_JSON_OOM = test-json-oom
 TEST_TOKENIZER_OOM = test-tokenizer-oom
+TEST_TEMPLATE_OOM = test-template-oom
 TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
 TEST_SHARED = test-shared-weights
@@ -81,6 +83,7 @@ TEST_TEMPLATE = test-template
 TEST_TOOLS = test-tools
 TEST_JSON_OOM = test-json-oom
 TEST_TOKENIZER_OOM = test-tokenizer-oom
+TEST_TEMPLATE_OOM = test-template-oom
 TEST_SCHEMA_OOM = test-schema-oom
 TEST_SAMPLER = test-sampler
 TEST_SHARED = test-shared-weights
@@ -247,6 +250,13 @@ $(TEST_JSON_OOM): tests/test_json_oom.c src/json.c src/json.h
 TEST_TOK_OOM_SRC = tests/test_tokenizer_oom.c src/gguf.c src/compat.c $(QUANTS_OBJ)
 $(TEST_TOKENIZER_OOM): $(TEST_TOK_OOM_SRC) src/tokenizer.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TOK_OOM_SRC) -o $@ -lm
+
+# same shape for the renderer: json.c and template.c are compiled into the test
+# with instrumented allocators, tokenizer.c/gguf.c link normally
+TEST_TMPL_OOM_SRC = tests/test_template_oom.c src/tokenizer.c src/gguf.c \
+                    src/compat.c $(QUANTS_OBJ)
+$(TEST_TEMPLATE_OOM): $(TEST_TMPL_OOM_SRC) src/template.c src/json.c $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_TMPL_OOM_SRC) -o $@ -lm
 
 # schema.c and json.c both compile into the test: enum/const literals are
 # serialised through jv_dump, so builder failures are schema failure paths
@@ -1006,6 +1016,7 @@ endif
 
 test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
+      $(TEST_TEMPLATE_OOM) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_ATTN_TOL) $(TEST_GPU_ID) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_METAL_ADMISSION) $(TEST_TRAY_CORE) \
@@ -1030,6 +1041,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_TOK_MERGE)
 	./$(TEST_TOKENIZER_OOM)
 	./$(TEST_TEMPLATE)
+	./$(TEST_TEMPLATE_OOM)
 	./$(TEST_TOOLS)
 	./$(TEST_BUDGET)
 	$(TEST_ATTRIB_RUN)
@@ -1271,6 +1283,7 @@ fuzz:
 
 clean:
 	rm -f test-moe-fixture.*.gguf runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
+		$(TEST_TEMPLATE_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \
 	      $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) $(TEST_VRAMREG) test-shared-asan-bin \

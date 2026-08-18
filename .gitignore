@@ -30,6 +30,8 @@ test-schema-oom
 test-schema-oom.exe
 test-tokenizer-oom
 test-tokenizer-oom.exe
+test-template-oom
+test-template-oom.exe
 test-sampler
 test-sampler.exe
 test-shared-weights
