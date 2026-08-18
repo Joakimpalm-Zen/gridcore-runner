@@ -177,7 +177,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     free(g->bq); free(g->bk); free(g->bv); free(g->bo);
     free(g->qn); free(g->kn);
     free(g->sinks); free(g->gib); free(g->geb); free(g->ueb); free(g->deb);
-    free(g->pan); free(g->pfn);
+    free(g->ppn); free(g->pan); free(g->pfn);
     free(g->gpn1); free(g->gprn2); free(g->gpn2); free(g->ggis); free(g->gdsc);
     [g->p_attn_coop release]; [g->p_attn_chunk_coop release];
     for (int i = 0; i < g->n_wbuf; i++) [g->wbuf[i] release];
