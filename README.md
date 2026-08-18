@@ -298,7 +298,7 @@ flags into unrelated feature sections.
 |---|---|
 | `-n N` | Maximum generated tokens, default `256`; `-1` runs until EOS. |
 | `-c N` | Context length; default is the smaller of model maximum and 4096. `0` auto-fits with a reservation. |
-| `-b N` | Prompt batch size, default `64`. With `--gpu auto`/`on` and enough free RAM, the default scales up to `256` or `512` instead, so the tiled prefill GEMM gets more columns per dispatch (measured on Metal/M1: +9% prompt tok/s at 512 over the flat 64 default); `-b` always overrides. |
+| `-b N` | Prompt batch size, default `64`. Unless `--gpu off` was given, the default is sized from free RAM instead: `512` above 4 GB free, `256` above 1.5 GB, `64` below that, so the tiled prefill GEMM gets more columns per dispatch (measured on Metal/M1: +9% prompt tok/s at 512 over the flat 64 default). `-b` always overrides. |
 | `-t N` | Worker threads; defaults to physical cores and is capped at `64`. |
 | `-s N` | RNG seed; default is time-based. `0` is refused: it is the sampler RNG's fixed point, so it cannot produce a stream. |
 | `--think` / `--no-think` | Request the model family's thinking or non-thinking prompt shape. With neither flag, Runner renders whatever that family's own reference template renders, which is not the same answer for every family. Families without a distinct thinking prompt accept the flag and ignore it rather than approximate one. |
@@ -319,7 +319,7 @@ flags into unrelated feature sections.
 | Option | Purpose |
 |---|---|
 | `--gpu auto\|off` | Auto-detect offload, or force CPU. |
-| `--gpu-layers N` | Force the first `N` layers onto the GPU; `0` means no GPU. Omit for auto-fit. |
+| `--gpu-layers N` | Force the first `N` layers onto the GPU; `0` means no GPU. Omit for auto-fit. On Metal it also overrides the residency veto: a model larger than available RAM is refused for auto-selected partial offload, because nothing pinned can be held resident and the measured result was 8-35x slower decode, but an explicit `--gpu-layers N` splits it anyway. |
 | `--cpu-moe [N\|auto]` | CUDA hybrid placement: keep all, the deepest `N`, or an auto-fit set of expert FFNs in system RAM. |
 | `--wait-for-vram [S]` | Wait for another registered runner to release VRAM, default `300` seconds, instead of failing immediately. |
 | `--vram-priority N` | Advisory priority tag on this claim, default `0` (also `RUNNER_VRAM_PRIORITY`). See [VRAM registry: priority and cooperative yield](#vram-registry-priority-and-cooperative-yield). |
@@ -607,7 +607,7 @@ non-loopback authorities.
 | `GET /v1/runner/prefix-cache` | Prefix-cache size, limits, and counters. |
 | `POST /v1/runner/prefix-cache/clear` | Release cached prefixes without unloading the model. |
 | `GET /health` | Server and resident-model health, plus this process's `rss_bytes`/`peak_rss_bytes` and cumulative `tokens_prompt`, `tokens_generated`, `generate_seconds`, `batch_steps` and `batch_sequences`. |
-| `POST /unload` | Release resident model and draft memory; the next request reloads on demand. |
+| `POST /unload` | Release resident model, draft and prefix-cache memory; the next request reloads on demand. Deferred to the next safe point while a load or generation is in flight (the reply says `"deferred":true`). Needs the registry — see the residency note below. |
 
 `GET /unload` is deliberately refused with `405`; unloading is a state change.
 
@@ -615,6 +615,21 @@ Buffered generation responses include `runner_telemetry` with prompt tokens
 reused/evaluated, generation timing, paging counters, and structured or
 speculative mode flags. Set request field `"cache_prompt": false` to bypass
 prefix reuse. Streaming clients that disconnect cancel generation.
+
+Every generating endpoint also accepts a per-request `"timeout"` in seconds
+(`0`–`86400`), which overrides `RUNNER_REQUEST_TIMEOUT` for that request; `0`
+means no limit and an out-of-range value is a `400`. Expiry is a truncation,
+not an error: generation ends, `finish_reason` is `"length"`, and constrained
+output is closed to a legal document exactly as a token-ceiling hit would be.
+
+Prefix reuse lives in this process only. The cache is host RAM bounded by
+`RUNNER_PREFIX_CACHE_MB`, and it is released by `POST /unload`, by
+`POST /v1/runner/prefix-cache/clear`, by a `keep_alive: 0` request, and at
+exit. A model swap deliberately keeps it — surviving a swap is the point of
+snapshotting a prefix rather than holding a slot — and every entry is bound to
+the model, geometry, tokenizer, context length and KV element type it was
+taken from, so another model cannot install one. There is no on-disk warm
+start: a restarted server prefills from cold.
 
 `--parallel N` creates independent KV caches and thread pools while sharing
 mapped weights. Threads are divided across slots. Multi-model swap mode uses
@@ -626,9 +641,17 @@ registered models:
   --serve --ttl 300
 ```
 
-Each request selects the registered name in its `model` field. `keep_alive`
-can override swap residency per request. `POST /unload` works in both single-
-and multi-model modes.
+Each request selects the registered name in its `model` field.
+
+Residency control — `--ttl`, `POST /unload`, and the per-request `keep_alive`
+(seconds; `0` unloads at the next safe point, negative pins the model) — needs
+the model registry, which is not the same line as "swap mode": a single model
+served with the default `--parallel 1` joins the registry as a one-entry set,
+so all three work there exactly as they do for a swap set. The exception is a
+multi-slot single-model server (`--parallel N` with `N > 1`): its slots hold
+the model directly, with no registry to unload it from, so `keep_alive` is
+range-checked and then ignored and `POST /unload` releases only the prefix
+cache.
 
 ### Server environment
 
@@ -642,6 +665,18 @@ switches:
 | `RUNNER_PREFIX_CACHE_MB` | `512` | Host-RAM budget for shared prompt prefixes; `0` disables storage. |
 | `RUNNER_PREFIX_CACHE_TTL` | `600` | Prefix idle lifetime in seconds. |
 | `RUNNER_MOE_PREFETCH` | per-machine auto | Compatibility fallback for `--moe-prefetch`; the CLI flag has precedence. `0`/`off` disables it and other non-empty values enable it. |
+| `RUNNER_ALLOW_UNKNOWN_ARCH` | unset | Admit a GGUF whose `general.architecture` this binary does not implement, running it through llama-style math. Unset, such a file is refused at load. Set, the load is attempted and a warning says the output may be silently wrong. Experimental, not a supported configuration. |
+| `RUNNER_VRAM_PRIORITY` | `0` | Baseline for `--vram-priority`; the flag overrides it. |
+
+Beyond these, the binary reads a number of development switches —
+`RUNNER_DEBUG_TOKENS`, `RUNNER_DEBUG_ACT`, `RUNNER_MOE_TRACE`,
+`RUNNER_LAYER_SIM`, `RUNNER_GRAMMAR_TRACE`, `RUNNER_SCHEMA_TRACE`, the
+`RUNNER_METAL_*`/`RUNNER_CUDA_*` kernel knobs and failure injectors. They print
+or dump internals for the tools under `scripts/` (`moe-prune-plan.py` consumes
+`RUNNER_MOE_TRACE`, `classify-grammar-trace.py` consumes
+`RUNNER_GRAMMAR_TRACE`) and are read at first use. They are instrumentation,
+not interface: names, formats and defaults change without notice, and nothing
+outside this repository should depend on them.
 
 GGUF exports may opt into the versioned `gridcore.agent.*` profile. Runner
 validates its protocol/tokenizer versions, schema identity, digest, and
@@ -654,7 +689,7 @@ fail closed. `GET /v1/capabilities` returns the admitted profile. See
 Chat supports buffered and SSE responses, part-array content, assistant
 `tool_calls` history, `role:"tool"` results, `stream_options.include_usage`,
 `logprobs`/`top_logprobs`, `min_p`, `repeat_penalty`, up to four stop strings,
-and `keep_alive` in swap mode. Tool declarations are rendered into the model
+and `keep_alive` on a registry-backed server. Tool declarations are rendered into the model
 prompt and constrained back into well-formed `tool_calls`.
 
 Stop strings and tool declarations cannot be combined: a request carrying both
@@ -1056,7 +1091,9 @@ Runner provides two sampler-level guarantees:
   parameter schemas compile to a streaming conformance validator.
 
 The supported schema subset covers objects, arrays, strings, numbers,
-integers, booleans, null, enums, const, type unions, integer bounds, string
+integers, booleans, null, enums, const, type unions, numeric bounds on both
+`integer` and `number` (`minimum`/`maximum` and their exclusive forms, with a
+forced close completing the value inside the declared range), string
 lengths and supported anchored patterns, array item/count constraints,
 scalar-const `oneOf`/`anyOf`, and the tool-discriminated object union used by
 agent clients. Required properties are present, unknown properties are blocked
