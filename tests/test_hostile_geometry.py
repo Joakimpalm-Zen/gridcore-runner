@@ -325,3 +325,32 @@ def test_absurd_training_context_is_refused(runner_bin, tmp_path):
     assert proc.returncode > 0, "an unusable training context must be refused"
     err = proc.stderr.decode(errors="replace")
     assert "context_length" in err
+
+
+def test_per_layer_embedding_width_overflow_is_caught_before_it_happens(
+        runner_bin, tmp_path):
+    """The E-series overflow guard ran one line after the multiplication.
+
+    `int per_tok = n_layer * n_embd_ple;` came first and the
+    `n_embd_ple > INT_MAX / n_layer` test second, so the overflow the test
+    exists to prevent had already happened. The file was refused either way,
+    which is why this asserts against the SANITIZER build: the defect is the
+    undefined behavior, not the verdict.
+    """
+    good = tmp_path / "es.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--eseries", "2,16", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    bad = _patch_u32(good, tmp_path / "es-ple.gguf",
+                     "gemma4.embedding_length_per_layer_input", 1 << 30)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    assert _run(runner_bin, bad).returncode > 0, "the width must be refused"
+
+    debug_bin = ROOT / "runner-debug"
+    if not debug_bin.exists():
+        pytest.skip("sanitizer build not present (make debug)")
+    proc = _run(debug_bin, bad)
+    err = proc.stderr.decode(errors="replace")
+    assert "runtime error" not in err, err[:400]

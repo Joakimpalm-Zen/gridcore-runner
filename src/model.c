@@ -1930,11 +1930,16 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     if (m->n_embd_ple > 0) {
         // Gemma-4 E-series per-layer embeddings. The table holds one
         // n_embd_ple slice per layer per token, concatenated along ne[0].
-        int per_tok = m->n_layer * m->n_embd_ple;
-        if (m->n_embd_ple > INT_MAX / m->n_layer) {
-            fprintf(stderr, "error: gemma4 per-layer embedding size overflows\n");
+        // The bound comes FIRST: it used to sit one line below the
+        // multiplication it guards, so the overflow had already happened by
+        // the time it was tested (UBSan caught the int product).
+        if (m->n_embd_ple > MDL_DIM_MAX ||
+            m->n_embd_ple > INT_MAX / m->n_layer) {
+            fprintf(stderr, "error: gemma4 per-layer embedding size (%d x %d "
+                    "layers) is out of range\n", m->n_embd_ple, m->n_layer);
             return false;
         }
+        int per_tok = m->n_layer * m->n_embd_ple;
         m->ple_tok_embd   = need_tensor(g, "per_layer_token_embd.weight", 0, &ok);
         m->ple_model_proj = need_tensor(g, "per_layer_model_proj.weight", 0, &ok);
         gguf_tensor *pn   = need_tensor(g, "per_layer_proj_norm.weight", 0, &ok);
