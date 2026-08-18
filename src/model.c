@@ -98,12 +98,21 @@ static void model_record_file_id(model_t *m, const char *path) {
     }
 }
 
-// Materialize a tensor into a freshly-allocated f32 buffer. Returns NULL when
-// t is absent (a legitimate result for optional tensors). If t is present but
-// the allocation fails, sets *ok = false and returns NULL, so an out-of-memory
-// condition is never silently mistaken for an absent optional tensor (which
-// would change the forward-pass math without any error).
-static float *tensor_to_f32(gguf_tensor *t, bool *ok) {
+// Materialize a tensor into a freshly-allocated f32 buffer holding at least
+// `need` elements. Returns NULL when t is absent (a legitimate result for
+// optional tensors). If t is present but the allocation fails, sets *ok =
+// false and returns NULL, so an out-of-memory condition is never silently
+// mistaken for an absent optional tensor (which would change the forward-pass
+// math without any error).
+//
+// `need` is what the FORWARD PASS will index this vector with, and it is
+// mandatory because the two are otherwise unrelated: every consumer of these
+// buffers (norms over n_embd or a head, biases over q_dim/kv_dim, sinks over
+// n_head, expert scales over n_expert) reads a count derived from geometry
+// metadata, never from the tensor's own length. A file whose vector is
+// shorter than the geometry that indexes it read past the buffer — so the
+// count is stated here, once, at the point the buffer is created.
+static float *tensor_to_f32(gguf_tensor *t, int64_t need, bool *ok) {
     if (!t) return NULL;
     // The element count comes from untrusted GGUF dimensions. Compute it with
     // overflow checks (a raw ne[0]*ne[1]*ne[2]*ne[3] can wrap) and make sure the
@@ -121,6 +130,12 @@ static float *tensor_to_f32(gguf_tensor *t, bool *ok) {
     size_t rs = ggml_row_size(t->type, (int64_t)t->ne[0]);
     rows = n64 / t->ne[0];
     if (rs == 0 || rows > t->nbytes / rs) { *ok = false; return NULL; }
+    if (need > 0 && n64 < (uint64_t)need) {
+        fprintf(stderr, "error: tensor %s holds %llu values but this model "
+                "geometry indexes %lld of them\n", t->name,
+                (unsigned long long)n64, (long long)need);
+        *ok = false; return NULL;
+    }
     int64_t n = (int64_t)n64;
     float *out = malloc(sizeof(float) * (size_t)n);
     if (!out) { *ok = false; return NULL; }
@@ -1869,7 +1884,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
 
     gguf_tensor *out_norm = need_tensor(g, "output_norm.weight", 0, &ok);
     if (!ok) return false;
-    m->out_norm_w = tensor_to_f32(out_norm, &ok);
+    m->out_norm_w = tensor_to_f32(out_norm, m->n_embd, &ok);
     if (!ok) return false;
 
     m->output = gguf_find_tensor(g, "output.weight");
@@ -1905,7 +1920,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                          "per_layer_model_proj.weight", 0) ||
             !check_shape(pn, m->n_embd_ple, 1, "per_layer_proj_norm.weight", 0))
             return false;
-        m->ple_proj_norm = tensor_to_f32(pn, &ok);
+        m->ple_proj_norm = tensor_to_f32(pn, m->n_embd_ple, &ok);
         if (!ok) return false;
     }
 
@@ -1937,7 +1952,8 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             : need_tensor(g, "blk.%d.ffn_norm.weight", i, &ok);
         if (m->gptoss)
             l->attn_sinks = tensor_to_f32(
-                need_tensor(g, "blk.%d.attn_sinks.weight", i, &ok), &ok);
+                need_tensor(g, "blk.%d.attn_sinks.weight", i, &ok),
+                m->n_head, &ok);
         l->recurrent = m->qwen35 && ((i + 1) % m->full_attn_interval != 0);
         if (l->recurrent) {
             l->wqkv      = need_tensor(g, "blk.%d.attn_qkv.weight", i, &ok);
@@ -1986,12 +2002,12 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                     !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
                     return false;
             }
-            l->ssm_dt     = tensor_to_f32(dt, &ok);
-            l->ssm_a      = tensor_to_f32(sa, &ok);
-            l->ssm_norm_w = tensor_to_f32(sn, &ok);
+            l->ssm_dt     = tensor_to_f32(dt, m->ssm_v_heads, &ok);
+            l->ssm_a      = tensor_to_f32(sa, m->ssm_v_heads, &ok);
+            l->ssm_norm_w = tensor_to_f32(sn, m->ssm_inner / m->ssm_v_heads, &ok);
             if (!ok) return false;
-            l->attn_norm_w = tensor_to_f32(an, &ok);
-            l->ffn_norm_w = tensor_to_f32(fn, &ok);
+            l->attn_norm_w = tensor_to_f32(an, m->n_embd, &ok);
+            l->ffn_norm_w = tensor_to_f32(fn, m->n_embd, &ok);
             if (!ok) return false;
             l->out_scale = 1.0f;
             continue;
@@ -2062,14 +2078,33 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                     opt_tensor(g, "blk.%d.ffn_gate_inp_shexp.weight", i);
             }
             l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
-            // Optional selection-only bias; absent on every arch certified so far.
-            {
-                // DeepSeek exports name this .weight; afmoe's converter
-                // renames expert_bias so the GGUF carries a .bias suffix.
-                gguf_tensor *epb = opt_tensor(g, "blk.%d.exp_probs_b.weight", i);
-                if (!epb) epb = opt_tensor(g, "blk.%d.exp_probs_b.bias", i);
-                l->exp_probs_b = tensor_to_f32(epb, &ok);
+            if (!ok) return false;
+            // THIS layer's expert count, resolved here because every
+            // per-expert vector below is indexed with it and must therefore
+            // state it. It comes from the layer's own router rather than the
+            // model-wide expert_count: --prune-experts writes a shorter router
+            // (and shorter expert tensors) for a pruned layer — same names,
+            // same widths, fewer blocks.
+            if ((int64_t)l->ffn_gate_inp->ne[0] != m->n_embd) {
+                fprintf(stderr, "error: ffn_gate_inp in blk.%d has ne[0]=%llu, "
+                        "expected %d\n", i,
+                        (unsigned long long)l->ffn_gate_inp->ne[0], m->n_embd);
+                return false;
             }
+            l->n_expert = (int)l->ffn_gate_inp->ne[1];
+            if (l->n_expert < m->n_expert_used || l->n_expert > m->n_expert) {
+                fprintf(stderr, "error: blk.%d declares %d experts via "
+                        "ffn_gate_inp, outside [n_expert_used=%d, "
+                        "expert_count=%d]\n", i, l->n_expert,
+                        m->n_expert_used, m->n_expert);
+                return false;
+            }
+            // Optional selection-only bias; absent on every arch certified so
+            // far. DeepSeek exports name it .weight; afmoe's converter renames
+            // expert_bias so the GGUF carries a .bias suffix.
+            gguf_tensor *epb = opt_tensor(g, "blk.%d.exp_probs_b.weight", i);
+            if (!epb) epb = opt_tensor(g, "blk.%d.exp_probs_b.bias", i);
+            l->exp_probs_b = tensor_to_f32(epb, l->n_expert, &ok);
             l->ffn_gate_up_exps = opt_tensor(g, "blk.%d.ffn_gate_up_exps.weight", i);
             if (l->ffn_gate_up_exps) {
                 // gemma-4 dual-branch MoE: gate+up fused in one 3D tensor, a
@@ -2078,32 +2113,52 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 l->moe_gemma = true;
                 m->moe_gemma = true;   // dual-branch: dense shared FFN + routed experts
                 l->ffn_down_exps   = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
-                l->down_exps_scale = tensor_to_f32(opt_tensor(g, "blk.%d.ffn_down_exps.scale", i), &ok);
-                l->gate_inp_scale  = tensor_to_f32(opt_tensor(g, "blk.%d.ffn_gate_inp.scale", i), &ok);
+                l->down_exps_scale = tensor_to_f32(opt_tensor(g, "blk.%d.ffn_down_exps.scale", i),
+                                                   l->n_expert, &ok);
+                l->gate_inp_scale  = tensor_to_f32(opt_tensor(g, "blk.%d.ffn_gate_inp.scale", i),
+                                                   m->n_embd, &ok);
                 l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
                 l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight",   i, &ok);
                 l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
-                l->ffn_post_norm1_w = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm_1.weight", i), &ok);
-                l->ffn_pre_norm2_w  = tensor_to_f32(opt_tensor(g, "blk.%d.pre_ffw_norm_2.weight",  i), &ok);
-                l->ffn_post_norm2_w = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm_2.weight", i), &ok);
+                l->ffn_post_norm1_w = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm_1.weight", i),
+                                                    m->n_embd, &ok);
+                l->ffn_pre_norm2_w  = tensor_to_f32(opt_tensor(g, "blk.%d.pre_ffw_norm_2.weight",  i),
+                                                    m->n_embd, &ok);
+                l->ffn_post_norm2_w = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm_2.weight", i),
+                                                    m->n_embd, &ok);
             } else if ((l->ffn_gate_exps = opt_tensor(g, "blk.%d.ffn_gate_exps.weight", i))) {
                 // modern fused 3D expert tensors
                 l->ffn_up_exps   = need_tensor(g, "blk.%d.ffn_up_exps.weight", i, &ok);
                 l->ffn_down_exps = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
                 if (m->gptoss) {
-                    // gpt-oss router + per-expert FFN biases (all F32)
+                    // gpt-oss router + per-expert FFN biases (all F32). The
+                    // expert biases are indexed as [expert][width], so they
+                    // must cover the whole rectangle, not just one expert.
+                    int64_t ne_l = l->n_expert;
                     l->ffn_gate_inp_b  = tensor_to_f32(
-                        need_tensor(g, "blk.%d.ffn_gate_inp.bias", i, &ok), &ok);
+                        need_tensor(g, "blk.%d.ffn_gate_inp.bias", i, &ok),
+                        ne_l, &ok);
                     l->ffn_gate_exps_b = tensor_to_f32(
-                        need_tensor(g, "blk.%d.ffn_gate_exps.bias", i, &ok), &ok);
+                        need_tensor(g, "blk.%d.ffn_gate_exps.bias", i, &ok),
+                        ne_l * m->n_ff_exp, &ok);
                     l->ffn_up_exps_b   = tensor_to_f32(
-                        need_tensor(g, "blk.%d.ffn_up_exps.bias", i, &ok), &ok);
+                        need_tensor(g, "blk.%d.ffn_up_exps.bias", i, &ok),
+                        ne_l * m->n_ff_exp, &ok);
                     l->ffn_down_exps_b = tensor_to_f32(
-                        need_tensor(g, "blk.%d.ffn_down_exps.bias", i, &ok), &ok);
+                        need_tensor(g, "blk.%d.ffn_down_exps.bias", i, &ok),
+                        ne_l * m->n_embd, &ok);
                 }
             } else {
                 // legacy split layout: one 2D tensor per expert (older Mixtral)
                 l->moe_split = true;
+                // This layout has no pruned form: the loop below wires exactly
+                // expert_count tensors, so the router must have that many rows.
+                if (l->n_expert != m->n_expert) {
+                    fprintf(stderr, "error: blk.%d has the split expert layout "
+                            "with a %d-row router, but expert_count is %d\n",
+                            i, l->n_expert, m->n_expert);
+                    return false;
+                }
                 l->moe_g = calloc((size_t)m->n_expert, sizeof(gguf_tensor *));
                 l->moe_u = calloc((size_t)m->n_expert, sizeof(gguf_tensor *));
                 l->moe_d = calloc((size_t)m->n_expert, sizeof(gguf_tensor *));
@@ -2169,29 +2224,14 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 // length n_embd; each expert's gate/up is {n_embd, n_ff_exp}
                 // and down is {n_ff_exp, n_embd}.
                 //
-                // l->n_expert is THIS layer's real count, read from its own
-                // router tensor rather than assumed to equal the model-wide
-                // m->n_expert: --prune-experts writes a shorter router (and
-                // shorter fused expert tensors) for a pruned layer, same
-                // names, same n_embd/n_ff_exp, fewer expert blocks. Every
-                // expert tensor in the layer must agree on this count exactly
-                // (check_shape3 below requires ne[2] == l->n_expert, not
-                // merely >=) — moe_split (the legacy per-expert-tensor
-                // layout) does not support pruning and keeps m->n_expert.
-                if (!l->ffn_gate_inp || (int64_t)l->ffn_gate_inp->ne[0] != m->n_embd) {
-                    fprintf(stderr, "error: ffn_gate_inp in blk.%d has ne[0]=%llu, "
-                            "expected %d\n", i, l->ffn_gate_inp ?
-                            (unsigned long long)l->ffn_gate_inp->ne[0] : 0, m->n_embd);
-                    return false;
-                }
-                l->n_expert = l->moe_split ? m->n_expert : (int)l->ffn_gate_inp->ne[1];
-                if (l->n_expert < m->n_expert_used || l->n_expert > m->n_expert) {
-                    fprintf(stderr, "error: blk.%d declares %d experts via "
-                            "ffn_gate_inp, outside [n_expert_used=%d, "
-                            "expert_count=%d]\n", i, l->n_expert,
-                            m->n_expert_used, m->n_expert);
-                    return false;
-                }
+                // l->n_expert is THIS layer's real count, resolved from its own
+                // router tensor when it was loaded (above) rather than assumed
+                // to equal the model-wide m->n_expert: --prune-experts writes a
+                // shorter router (and shorter fused expert tensors) for a
+                // pruned layer, same names, same n_embd/n_ff_exp, fewer expert
+                // blocks. Every expert tensor in the layer must agree on this
+                // count exactly (check_shape3 below requires ne[2] ==
+                // l->n_expert, not merely >=).
                 // The always-on shared branch is driven by n_ff_shexp, which
                 // is metadata (expert_shared_feed_forward_length, else the
                 // routed width times expert_shared_count) and decides how many
@@ -2237,14 +2277,23 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 }
             }
         }
-        l->attn_norm_w = tensor_to_f32(an, &ok);
-        l->ffn_norm_w  = tensor_to_f32(fn, &ok);
-        l->bq = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q.bias", i), &ok);
-        l->bk = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k.bias", i), &ok);
-        l->bv = tensor_to_f32(opt_tensor(g, "blk.%d.attn_v.bias", i), &ok);
-        l->bo = tensor_to_f32(opt_tensor(g, "blk.%d.attn_output.bias", i), &ok);
-        l->qnorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q_norm.weight", i), &ok);
-        l->knorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k_norm.weight", i), &ok);
+        // Each of these is read at a count the geometry fixes, not at its
+        // own length: the norms over n_embd or one head, the projection biases
+        // over the rows of the matvec they ride (qwen35's Q bias covers the
+        // fused Q+gate, so 2*q_dim).
+        int qd_l = model_q_dim(m, i), kd_l = model_kv_dim(m, i);
+        l->attn_norm_w = tensor_to_f32(an, m->n_embd, &ok);
+        l->ffn_norm_w  = tensor_to_f32(fn, m->n_embd, &ok);
+        l->bq = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q.bias", i),
+                              m->qwen35 ? 2 * (int64_t)qd_l : qd_l, &ok);
+        l->bk = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k.bias", i), kd_l, &ok);
+        l->bv = tensor_to_f32(opt_tensor(g, "blk.%d.attn_v.bias", i), kd_l, &ok);
+        l->bo = tensor_to_f32(opt_tensor(g, "blk.%d.attn_output.bias", i),
+                              m->n_embd, &ok);
+        l->qnorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_q_norm.weight", i),
+                                   model_head_dim(m, i), &ok);
+        l->knorm_w = tensor_to_f32(opt_tensor(g, "blk.%d.attn_k_norm.weight", i),
+                                   model_head_dim(m, i), &ok);
         // Qwen3.5's post_attention_norm is the FFN input norm (loaded as
         // ffn_norm_w above), not a sandwich norm on the attention projection.
         // qwen35 AND gpt-oss already consumed post_attention_norm as the FFN
@@ -2252,8 +2301,10 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         // to the attention output (the gemma-style placement) and quietly
         // corrupt every layer.
         l->post_attn_norm_w = (m->qwen35 || m->gptoss) ? NULL
-            : tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i), &ok);
-        l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i), &ok);
+            : tensor_to_f32(opt_tensor(g, "blk.%d.post_attention_norm.weight", i),
+                            m->n_embd, &ok);
+        l->post_ffn_norm_w  = tensor_to_f32(opt_tensor(g, "blk.%d.post_ffw_norm.weight", i),
+                                            m->n_embd, &ok);
         if (m->n_embd_ple > 0) {
             // blk.N.post_norm is the PLE branch's own norm — attention and FFN
             // carry post_attention_norm / post_ffw_norm separately.
@@ -2267,7 +2318,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                              "blk.%d.proj.weight", i) ||
                 !check_shape(pn, m->n_embd, 1, "blk.%d.post_norm.weight", i))
                 return false;
-            l->ple_post_norm = tensor_to_f32(pn, &ok);
+            l->ple_post_norm = tensor_to_f32(pn, m->n_embd, &ok);
             if (!ok) return false;
         }
         l->out_scale = 1.0f;

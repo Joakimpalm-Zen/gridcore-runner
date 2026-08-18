@@ -49,6 +49,20 @@ def _patch_tensor_type(src, dst, name, value):
     return dst
 
 
+def _patch_ne(src, dst, name, dim, value):
+    """Rewrite one dimension of a tensor descriptor, leaving its bytes alone."""
+    b = bytearray(src.read_bytes())
+    k = struct.pack("<Q", len(name)) + name.encode()
+    i = b.find(k)
+    assert i >= 0, f"{name} not found in {src}"
+    j = i + len(k)
+    n_dims = struct.unpack_from("<I", b, j)[0]
+    assert dim < n_dims
+    struct.pack_into("<Q", b, j + 4 + 8 * dim, value)
+    dst.write_bytes(bytes(b))
+    return dst
+
+
 @pytest.fixture(scope="module")
 def runner_bin():
     exe = ROOT / ("runner.exe" if sys.platform == "win32" else "runner")
@@ -169,3 +183,30 @@ def test_qwen35_recurrent_geometry_beyond_its_tensors_is_refused(runner_bin, tmp
                                 "refused at load, not read past them mid-forward"
     err = proc.stderr.decode(errors="replace")
     assert "attn_qkv" in err
+
+
+def test_a_norm_vector_shorter_than_its_head_is_refused(runner_bin, tmp_path):
+    """Converted f32 vectors are indexed by geometry, not by their own length.
+
+    attn_q_norm is one head_dim vector applied per head; the norm/bias vectors
+    around it are read at n_embd, q_dim, kv_dim, n_head or n_expert. All of
+    them were materialized with tensor_to_f32, which took whatever the file
+    declared and never compared it with the count the forward pass would
+    index. Declaring blk.0.attn_q_norm.weight as 4 elements instead of 16 read
+    12 floats past its buffer: ASan heap-buffer-overflow in rmsnorm, from
+    qk_norm.
+    """
+    good = tmp_path / "g4h.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--gemma4-hetero", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    bad = _patch_ne(good, tmp_path / "g4h-qnorm.gguf",
+                    "blk.0.attn_q_norm.weight", 0, 4)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "a norm vector shorter than the head it norms " \
+                                "must be refused at load"
+    err = proc.stderr.decode(errors="replace")
+    assert "attn_q_norm" in err
