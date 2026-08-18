@@ -25,7 +25,7 @@ typedef struct {
     id<MTLComputePipelineState> p_rmsnorm, p_qknorm, p_headnorm, p_rope, p_store, p_attn;
     id<MTLComputePipelineState> p_attn_chunk, p_attn_comb;
     id<MTLComputePipelineState> p_attn_coop, p_attn_chunk_coop;  // cooperative KV score read
-    id<MTLComputePipelineState> p_silu, p_gelu, p_add, p_scale, p_head_transform;
+    id<MTLComputePipelineState> p_silu, p_gelu, p_add, p_scale;
     id<MTLComputePipelineState> p_sigmul;   // attention output gate (x *= sigmoid(g))
     id<MTLComputePipelineState> p_moe_route, p_moe_actmul, p_moe_sum;
     id<MTLComputePipelineState> p_mv[METAL_TYPE_SLOTS];       // indexed by ggml type
@@ -82,8 +82,8 @@ typedef struct { int head_dim, n_heads, half_dim, pos, neox; float mscale; int s
 typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale; int q8, window, has_sinks;
                  int q_stride, att_stride, out_stride; } attn_args;
 typedef struct { int head_dim, n_head, n_head_kv, n_ctx, pos; uint64_t l_off; float scale;
-                 int q8, window, chunk, n_chunks, q_stride, att_stride; } attn_chunk_args;
-typedef struct { int head_dim, n_head, n_chunks, has_sinks, out_stride; } attn_comb_args;
+                 int q8, window, chunk, n_chunks; } attn_chunk_args;
+typedef struct { int head_dim, n_head, n_chunks, has_sinks; } attn_comb_args;
 
 // Chunked decode attention. The split is chosen from the HEAD COUNT, not a
 // fixed span: the point of chunking is to fill the GPU, so what matters is
@@ -201,7 +201,7 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     [g->p_attn_chunk release]; [g->p_attn_comb release];
     [g->p_silu release]; [g->p_gelu release]; [g->p_add release];
     [g->p_sigmul release];
-    [g->p_scale release]; [g->p_head_transform release];
+    [g->p_scale release];
     [g->p_moe_route release]; [g->p_moe_actmul release];
     [g->p_moe_sum release];
     [g->queue release];
@@ -1009,7 +1009,6 @@ bool gpu_init(model_t *m) {
     g->p_add          = mk_pipeline(dev, lib, @"k_add");
     g->p_sigmul       = mk_pipeline(dev, lib, @"k_sigmoid_mul");
     g->p_scale        = mk_pipeline(dev, lib, @"k_scale");
-    g->p_head_transform = mk_pipeline(dev, lib, @"k_head_transform");
     g->p_moe_route    = mk_pipeline(dev, lib, @"k_moe_route");
     g->p_moe_actmul   = mk_pipeline(dev, lib, @"k_moe_actmul");
     g->p_moe_sum      = mk_pipeline(dev, lib, @"k_moe_sum");
@@ -1061,7 +1060,7 @@ bool gpu_init(model_t *m) {
     if (!g->p_rmsnorm || !g->p_rope || !g->p_store || !g->p_attn ||
         !g->p_attn_chunk || !g->p_attn_comb ||
         !g->p_silu || !g->p_gelu || !g->p_add || !g->p_scale || !g->p_sigmul ||
-        !g->p_head_transform || !g->queue || !g->p_qknorm || !g->p_headnorm ||
+        !g->queue || !g->p_qknorm || !g->p_headnorm ||
         !g->p_moe_route || !g->p_moe_actmul || !g->p_moe_sum ||
         !g->p_mv[T_F32] || !g->p_mv[T_F16] || !g->p_mv[T_Q8_0] ||
         !g->p_mv[T_Q4_0] || !g->p_mv[T_Q4_1] ||
@@ -2090,8 +2089,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                 attn_chunk_args ca = { hd, m->n_head, n_kv, m->n_ctx, pos,
                                        (uint64_t)model_kv_byte_off(m, l),
                                        model_attn_scale(m, l), q8, window,
-                                       a_chunk, a_nch, q_dim,
-                                       m->n_head * m->n_ctx };
+                                       a_chunk, a_nch };
                 bool coopc = metal_attn_coop_on() && g->p_attn_chunk_coop;
                 if (coopc) g_coop_dispatches++;
                 [e setComputePipelineState:coopc ? g->p_attn_chunk_coop
@@ -2108,7 +2106,7 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                   threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
                 attn_comb_args cb = { hd, m->n_head, a_nch,
-                                      g->sinks[l] != nil, xdim };
+                                      g->sinks[l] != nil };
                 [e setComputePipelineState:g->p_attn_comb];
                 [e setBuffer:g->att_acc offset:0 atIndex:0];
                 [e setBuffer:g->att_ms  offset:0 atIndex:1];

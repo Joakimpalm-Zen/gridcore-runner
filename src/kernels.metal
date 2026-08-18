@@ -1462,7 +1462,9 @@ struct attn_chunk_args {
     int   window;
     int   chunk;       // positions per chunk
     int   n_chunks;
-    int   q_stride, att_stride;
+    // No column strides: the host takes this path at n == 1 only (see the
+    // n == 1 guard on the chunk dispatch in metal.m), so q, att and the
+    // partials are all indexed from column zero.
 };
 
 /* Shared halves of the chunked attention kernel; the two variants below
@@ -1576,7 +1578,7 @@ kernel void k_attn_chunk_coop(device const float *q_all   [[buffer(0)]],
     ATTNC_EPILOGUE
 }
 
-struct attn_comb_args { int head_dim, n_head, n_chunks, has_sinks, out_stride; };
+struct attn_comb_args { int head_dim, n_head, n_chunks, has_sinks; };
 
 kernel void k_attn_combine(device const float *acc_all [[buffer(0)]],
                            device const float *ms_all  [[buffer(1)]],
@@ -1689,20 +1691,6 @@ kernel void k_scale(device float       *x [[buffer(0)]],
                     constant int       &xs [[buffer(3)]],
                     uint2 gid [[thread_position_in_grid]]) {
     if ((int)gid.x < n) x[(ulong)gid.y * xs + gid.x] *= s;
-}
-
-kernel void k_head_transform(device float     *logits [[buffer(0)]],
-                             device const int *suppress [[buffer(1)]],
-                             constant int     &nv [[buffer(2)]],
-                             constant float   &softcap [[buffer(3)]],
-                             constant int     &ns [[buffer(4)]],
-                             uint i [[thread_position_in_grid]]) {
-    if ((int)i < nv && softcap > 0.0f)
-        logits[i] = softcap * tanh(logits[i] / softcap);
-    if ((int)i < ns) {
-        int tok = suppress[i];
-        if (tok >= 0 && tok < nv) logits[tok] = -1e30f;
-    }
 }
 
 // -------------------------------------------------------------- sparse MoE
