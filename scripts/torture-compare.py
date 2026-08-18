@@ -56,10 +56,18 @@ def category_counts(data):
 
 
 def build_rows(reports):
-    """Rows of the table, best total pass rate first."""
+    """Rows of the table, best total pass RATE first.
+
+    Rate, not the raw passed count: runs can be made with different --cases,
+    and ranking on the absolute number puts a runtime that failed three
+    quarters of a 200-case matrix above one that passed all 40 of a smaller
+    one. This ordering is the published leaderboard. Ties on rate go to the
+    larger matrix, which is the more evidence for the same result.
+    """
     def rate(r):
         t = r["data"].get("totals", {})
-        return (t.get("passed", 0), -t.get("requests", 0))
+        requests = t.get("requests", 0)
+        return (t.get("passed", 0) / requests if requests else 0.0, requests)
     return sorted(reports, key=rate, reverse=True)
 
 
