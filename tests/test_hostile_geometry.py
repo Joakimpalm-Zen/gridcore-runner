@@ -35,6 +35,20 @@ def _patch_u32(src, dst, key, value):
     return dst
 
 
+def _patch_tensor_type(src, dst, name, value):
+    """Rewrite one tensor descriptor's ggml type, leaving its shape and data."""
+    b = bytearray(src.read_bytes())
+    k = struct.pack("<Q", len(name)) + name.encode()
+    i = b.find(k)
+    assert i >= 0, f"{name} not found in {src}"
+    j = i + len(k)
+    n_dims = struct.unpack_from("<I", b, j)[0]
+    j += 4 + 8 * n_dims
+    struct.pack_into("<I", b, j, value)
+    dst.write_bytes(bytes(b))
+    return dst
+
+
 @pytest.fixture(scope="module")
 def runner_bin():
     exe = ROOT / ("runner.exe" if sys.platform == "win32" else "runner")
@@ -98,3 +112,31 @@ def test_shared_expert_width_beyond_its_tensor_is_refused(runner_bin, tmp_path):
                                 "refused at load, not crash mid-forward"
     err = proc.stderr.decode(errors="replace")
     assert "ffn_gate_shexp" in err
+
+
+def test_weight_of_an_unsupported_type_is_refused(runner_bin, tmp_path):
+    """A weight the engine cannot decode must refuse, not read stale stack.
+
+    gguf_open leaves an unsupported tensor type for its user to check ("checked
+    at use time"), and need_tensor does check it — but the OPTIONAL weights
+    (gemma4's V, apertus's ffn_gate, the fused expert banks) come through
+    opt_tensor, which does not. dequant_block ignores a type it does not know,
+    so such a weight dequantized to whatever the scratch buffer already held
+    and the model produced fluent output from uninitialized memory: the exact
+    "plausible but silently wrong" outcome the architecture allowlist exists
+    to prevent.
+    """
+    good = tmp_path / "g4h.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--gemma4-hetero", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    # blk.0 is a sliding layer, so it carries the optional attn_v tensor.
+    bad = _patch_tensor_type(good, tmp_path / "g4h-type.gguf",
+                             "blk.0.attn_v.weight", 44)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode != 0, "a weight of an undecodable type must be refused"
+    err = proc.stderr.decode(errors="replace")
+    assert "unsupported type" in err

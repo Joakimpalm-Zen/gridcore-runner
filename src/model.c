@@ -148,6 +148,21 @@ static gguf_tensor *need_tensor(gguf_file *g, const char *fmt, int i, bool *ok) 
     return t;
 }
 
+// A weight whose ggml type this build cannot decode. need_tensor already
+// refuses one; the OPTIONAL weights (gemma4's V, apertus's ffn_gate, the fused
+// expert banks) arrive through opt_tensor, which cannot report and must not
+// silently drop a tensor that IS present. dequant_block ignores a type it does
+// not know, so an unchecked one leaves the scratch buffer at whatever it
+// already held and the model runs on uninitialized memory — plausible output,
+// silently wrong. Every weight the forward pass drives goes through the shape
+// checks below, so the type check belongs with them.
+static bool check_type(const gguf_tensor *t, const char *what, int layer) {
+    if (!t || ggml_type_supported(t->type)) return true;
+    fprintf(stderr, "error: tensor %s in blk.%d has unsupported type %d (%s)\n",
+            what, layer, t->type, ggml_type_name(t->type));
+    return false;
+}
+
 // Reject a weight tensor whose dimensions do not match the geometry the forward
 // pass will drive it with. matvec reads n_out rows of n_in elements each, at a
 // stride derived from n_in, so ne[0] must equal n_in exactly (a wrong row length
@@ -157,6 +172,7 @@ static gguf_tensor *need_tensor(gguf_file *g, const char *fmt, int i, bool *ok) 
 static bool check_shape(gguf_tensor *t, int n_in, int n_out,
                         const char *what, int layer) {
     if (!t) return true;
+    if (!check_type(t, what, layer)) return false;
     if ((int64_t)t->ne[0] != n_in || (int64_t)t->ne[1] < n_out) {
         fprintf(stderr, "error: tensor %s in blk.%d has shape [%llu,%llu], "
                 "expected [%d,>=%d] for this model geometry\n",
@@ -182,6 +198,7 @@ static bool check_shape(gguf_tensor *t, int n_in, int n_out,
 static bool check_shape3(gguf_tensor *t, int ne0, int ne1, int n_expert,
                          const char *what, int layer) {
     if (!t) return true;
+    if (!check_type(t, what, layer)) return false;
     if ((int64_t)t->ne[0] != ne0 || (int64_t)t->ne[1] != ne1 ||
         (int64_t)t->ne[2] != n_expert) {
         fprintf(stderr, "error: MoE tensor %s in blk.%d has shape "
