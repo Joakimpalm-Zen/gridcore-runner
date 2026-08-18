@@ -89,6 +89,17 @@ def probe(runner, model, ctx, timeout, extra=()):
     m = CTX_RE.search(err or "")
     kv = KV_RE.search(err or "")
     tail = (err or "").strip().splitlines()
+    notes = notes_from(err)
+    # Scored over the engine's OWN explanation lines, never the whole stream.
+    # `-v` is always passed above, and every successful load prints "context N
+    # (train M)", "kv cache N MB" and a banner ending "| ctx N |" before
+    # anything downstream can go wrong -- so a raw-stderr match made
+    # explains_itself true for every model that reached the engine at all, and
+    # the probe's headline finding ("refused without saying why") could not
+    # fire on any post-load failure however opaque.
+    explained = any(k in " ".join(notes).lower()
+                    for k in ("context", "ctx", "kv", "fit", "reserve",
+                              "too large", "capped", "reduc"))
     return {
         "requested_ctx": ctx,
         "rc": rc,
@@ -96,11 +107,8 @@ def probe(runner, model, ctx, timeout, extra=()):
         "kv_mb": float(kv.group(1)) if kv else None,
         "generated": (out or "").strip()[:60],
         "last_stderr": tail[-1][:200] if tail else "",
-        "notes": notes_from(err),
-        "explains_itself": any(
-            k in (err or "").lower()
-            for k in ("context", "ctx", "kv", "fit", "reserve", "too large",
-                      "capped", "reduc")),
+        "notes": notes,
+        "explains_itself": explained,
     }
 
 

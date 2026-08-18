@@ -75,3 +75,59 @@ def test_the_kv_pressure_note_is_captured():
     assert any("ran out of room because of it" in n for n in notes)
     assert any(n.startswith("warning:") for n in notes)
     assert not any(n.startswith("prompt:") for n in notes)
+
+
+# The probe's headline contract is "refuse-or-cap WITH A REASON". Scoring that
+# over the whole of stderr cannot answer it: `-v` is always passed, and every
+# successful load prints "context N (train M)", "kv cache N MB" and a banner
+# ending "| ctx N |" before anything can go wrong afterwards.
+
+REAL_VERBOSE_LOAD = (
+    "heads                    9 (3 kv)\n"
+    "context                  4096 (train 8192)\n"
+    "kv cache                 94.4 MB (fp16)\n"
+    "loaded m.gguf | llama | 30 layers | ctx 4096 | 4 threads | 0.07s\n"
+)
+
+
+def _stub_runner(tmp_path, stderr_text, exit_code):
+    import os
+    import sys as _sys
+    script = tmp_path / "stub_runner.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.stderr.write({stderr_text!r})\n"
+        f"sys.exit({exit_code})\n")
+    if os.name == "nt":
+        launcher = tmp_path / "runner.cmd"
+        launcher.write_text(f'@"{_sys.executable}" "{script}" %*\r\n')
+    else:
+        launcher = tmp_path / "runner"
+        launcher.write_text(f'#!/bin/sh\nexec "{_sys.executable}" "{script}" "$@"\n')
+        launcher.chmod(0o755)
+    return launcher
+
+
+def test_an_opaque_refusal_after_a_healthy_load_is_still_unexplained(tmp_path):
+    runner = _stub_runner(tmp_path, REAL_VERBOSE_LOAD + "error: kaboom\n", 1)
+
+    probe = sc.probe(runner, tmp_path / "m.gguf", 1000000, 60)
+
+    assert probe["rc"] == 1
+    assert probe["explains_itself"] is False
+    assert sc.findings_for([probe, probe, probe]) == [
+        "refused a too-large context without saying why",
+        "--ctx 0 (auto-fit) did not run",
+    ]
+
+
+def test_a_refusal_that_names_the_context_cost_is_explained(tmp_path):
+    runner = _stub_runner(
+        tmp_path,
+        REAL_VERBOSE_LOAD +
+        "error: cannot allocate buffers (ctx 1000000 needs 23040.0 MB KV cache)\n",
+        1)
+
+    probe = sc.probe(runner, tmp_path / "m.gguf", 1000000, 60)
+
+    assert probe["explains_itself"] is True

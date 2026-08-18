@@ -1301,7 +1301,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		set -e; \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
-		$(PYTHON) -m pytest -q tests/test_fit_check.py tests/test_apertus.py tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_hostile_geometry.py tests/test_cli_files.py tests/test_chat_template_flag.py tests/test_split_gguf.py tests/test_metal_coverage.py tests/test_caps.py tests/test_bench_json.py tests/test_mtp_admission.py tests/test_compare_llamacpp.py tests/test_release_check.py tests/test_eseries.py tests/test_stress_models.py tests/test_moe_prune_plan.py tests/test_kld_compare.py tests/test_quant_fidelity.py tests/test_token_divergence.py tests/test_verify_gguf.py; \
+		$(PYTHON) -m pytest -q tests/test_fit_check.py tests/test_apertus.py tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_hostile_geometry.py tests/test_cli_files.py tests/test_chat_template_flag.py tests/test_split_gguf.py tests/test_metal_coverage.py tests/test_caps.py tests/test_bench_json.py tests/test_mtp_admission.py tests/test_compare_llamacpp.py tests/test_release_check.py tests/test_eseries.py tests/test_stress_models.py tests/test_moe_prune_plan.py tests/test_kld_compare.py tests/test_quant_fidelity.py tests/test_token_divergence.py tests/test_verify_gguf.py tests/test_stress_context.py; \
 		$(MAKE) --no-print-directory test-moe PYTHON="$(PYTHON)"; \
 		$(MAKE) --no-print-directory test-prune-experts PYTHON="$(PYTHON)"; \
 	else \
