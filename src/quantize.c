@@ -843,11 +843,14 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
             // plan cannot make a tensor bigger, quantize something that must
             // stay f32, or write a row the target type cannot describe.
             int want = type_plan_pick(&tplan, t->name);
-            if (keep_source_type(t)) {
+            if (keep_source_type(t) || want == T_KEEP) {
+                // "keep" means exactly that, for every tensor. Falling through
+                // to the whole-file rule below pushed a non-f16 tensor (a bf16
+                // norm) to F32 — a converted, grown tensor in a plan whose
+                // whole instruction was to convert nothing.
                 out_type[i] = t->type;
-            } else if (want == T_KEEP || !should_quantize(t)) {
-                out_type[i] = should_quantize(t) ? t->type
-                            : (t->type == T_F16 ? T_F16 : T_F32);
+            } else if (!should_quantize(t)) {
+                out_type[i] = t->type == T_F16 ? T_F16 : T_F32;
             } else if (!type_fits_row(want, t->ne[0])) {
                 out_type[i] = t->type;
                 declined_width++;

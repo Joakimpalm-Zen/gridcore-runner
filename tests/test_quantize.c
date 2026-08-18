@@ -42,18 +42,26 @@ static void bpad(buf *w, size_t align) {
     while (w->n % align) { uint8_t z = 0; bput(w, &z, 1); }
 }
 
-typedef struct { const char *name; uint64_t ne[2]; int n_dims; float *data; uint64_t n_elem; } tdesc;
+// `type` is T_F32 (0) unless set; T_BF16 stores the top 16 bits of each float,
+// which is exactly what a bf16 conversion does and is all this writer needs to
+// build a fixture with a type that is neither f32 nor f16.
+typedef struct { const char *name; uint64_t ne[2]; int n_dims; float *data;
+                 uint64_t n_elem; int type; } tdesc;
 
-// Write a GGUF v3 with one general.alignment=ALIGN KV and the given F32 tensors,
+static size_t tdesc_bytes(const tdesc *t) {
+    return (size_t)t->n_elem * (t->type == T_BF16 ? 2 : sizeof(float));
+}
+
+// Write a GGUF v3 with one general.alignment=ALIGN KV and the given tensors,
 // laid out at ALIGN. If bad_type is set, tensor 0's stored type is corrupted to
 // an unsupported value to exercise the pre-write rejection path.
 static void write_gguf(const char *path, tdesc *ts, int nt, int bad_type) {
-    // offsets: cumulative F32 sizes, ALIGN-padded
+    // offsets: cumulative payload sizes, ALIGN-padded
     uint64_t *off = calloc(nt, sizeof(uint64_t));
     uint64_t cur = 0;
     for (int i = 0; i < nt; i++) {
         off[i] = cur;
-        cur += ts[i].n_elem * sizeof(float);
+        cur += tdesc_bytes(&ts[i]);
         cur = (cur + (ALIGN - 1)) & ~(uint64_t)(ALIGN - 1);
     }
     buf w = {0};
@@ -64,14 +72,23 @@ static void write_gguf(const char *path, tdesc *ts, int nt, int bad_type) {
         bstr(&w, ts[i].name);
         bu32(&w, ts[i].n_dims);
         for (int d = 0; d < ts[i].n_dims; d++) bu64(&w, ts[i].ne[d]);
-        bu32(&w, (i == 0 && bad_type) ? 999u : (uint32_t)T_F32);
+        bu32(&w, (i == 0 && bad_type) ? 999u : (uint32_t)ts[i].type);
         bu64(&w, off[i]);
     }
     bpad(&w, ALIGN);
     for (int i = 0; i < nt; i++) {
         // pad the data region so each tensor lands exactly at header_pad+off[i]
         // (header is already ALIGN-padded, and off[] is ALIGN-cumulative)
-        bput(&w, ts[i].data, ts[i].n_elem * sizeof(float));
+        if (ts[i].type == T_BF16) {
+            for (uint64_t j = 0; j < ts[i].n_elem; j++) {
+                uint32_t u;
+                memcpy(&u, &ts[i].data[j], 4);
+                uint16_t h = (uint16_t)(u >> 16);
+                bput(&w, &h, 2);
+            }
+        } else {
+            bput(&w, ts[i].data, (size_t)ts[i].n_elem * sizeof(float));
+        }
         bpad(&w, ALIGN);
     }
     FILE *f = fopen(path, "wb");
@@ -91,9 +108,9 @@ static void make_fixture(const char *path, int bad_type) {
     for (uint64_t i = 0; i < 64 * 32; i++) t1[i] = ramp(i);
     for (uint64_t i = 0; i < 64 * 16; i++) t2[i] = ramp(i);
     tdesc ts[3] = {
-        { "output_norm.weight",  {8, 1},     1, t0, 8 },
-        { "blk.0.attn_q.weight", {64, 32},   2, t1, 64 * 32 },
-        { "blk.0.ffn_gate.weight", {64, 16}, 2, t2, 64 * 16 },
+        { "output_norm.weight",  {8, 1},     1, t0, 8, T_F32 },
+        { "blk.0.attn_q.weight", {64, 32},   2, t1, 64 * 32, T_F32 },
+        { "blk.0.ffn_gate.weight", {64, 16}, 2, t2, 64 * 16, T_F32 },
     };
     write_gguf(path, ts, 3, bad_type);
 }
@@ -331,8 +348,8 @@ int main(void) {
         fill_qat_grid(qw, QAT_BLOCKS);
         for (int i = 0; i < 8; i++) qn[i] = 1.0f;
         tdesc qts[2] = {
-            { "output_norm.weight",  {8, 1},  1, qn, 8 },
-            { "blk.0.attn_q.weight", {32, QAT_BLOCKS}, 2, qw, QAT_N },
+            { "output_norm.weight",  {8, 1},  1, qn, 8, T_F32 },
+            { "blk.0.attn_q.weight", {32, QAT_BLOCKS}, 2, qw, QAT_N, T_F32 },
         };
         write_gguf(qat, qts, 2, 0);
         assert(quantize_gguf(qat, qat_out, T_Q4_0, NULL) == 0);
@@ -353,8 +370,8 @@ int main(void) {
             attention[i] = (float)i * 0.001f + 1.0f;
         }
         tdesc q3ts[2] = {
-            { "blk.0.ffn_down_exps.weight", {Q3_N, 1}, 2, expert, Q3_N },
-            { "blk.0.attn_q.weight",        {Q3_N, 1}, 2, attention, Q3_N },
+            { "blk.0.ffn_down_exps.weight", {Q3_N, 1}, 2, expert, Q3_N, T_F32 },
+            { "blk.0.attn_q.weight",        {Q3_N, 1}, 2, attention, Q3_N, T_F32 },
         };
         write_gguf(q3in, q3ts, 2, 0);
         FILE *pf = fopen(plan, "wb");
@@ -384,8 +401,8 @@ int main(void) {
         for (int i = 0; i < W_N; i++) wide[i] = 0.25f * (float)((i % 8) - 4);
         for (int i = 0; i < 256; i++) narrow[i] = 0.25f * (float)((i % 8) - 4);
         tdesc wts[2] = {
-            { "blk.0.ffn_down_exps.weight", {W_N, 1}, 2, wide, W_N },
-            { "blk.1.ffn_down_exps.weight", {256, 1}, 2, narrow, 256 },
+            { "blk.0.ffn_down_exps.weight", {W_N, 1}, 2, wide, W_N, T_F32 },
+            { "blk.1.ffn_down_exps.weight", {256, 1}, 2, narrow, 256, T_F32 },
         };
         write_gguf(win, wts, 2, 0);
         FILE *pf = fopen(plan, "wb");
@@ -421,10 +438,10 @@ int main(void) {
         for (int i = 0; i < R_EMB * R_FF * R_EXP; i++) experts[i] = ramp((uint64_t)i);
         tdesc rts[3] = {
             { "blk.0.ffn_gate_inp.weight",       {R_EMB, R_EXP}, 2, router,
-              R_EMB * R_EXP },
-            { "blk.0.ffn_gate_inp_shexp.weight", {R_EMB, 1},     2, shexp, R_EMB },
+              R_EMB * R_EXP, T_F32 },
+            { "blk.0.ffn_gate_inp_shexp.weight", {R_EMB, 1},     2, shexp, R_EMB, T_F32 },
             { "blk.0.ffn_gate_exps.weight",      {R_EMB, R_FF * R_EXP}, 2, experts,
-              R_EMB * R_FF * R_EXP },
+              R_EMB * R_FF * R_EXP, T_F32 },
         };
         write_gguf(rin, rts, 3, 0);
         assert(quantize_gguf(rin, rout, T_Q4_0, NULL) == 0);
@@ -439,6 +456,39 @@ int main(void) {
         gguf_close(&g);
         remove(rin); remove(rout);
         printf("ok: the MoE router survives a q4_0 requant untouched\n");
+    }
+
+    // "keep" in a --type-plan is documented (quants.h) as "leave this tensor
+    // exactly as it is". It did that only for tensors should_quantize accepts;
+    // everything else fell through to the whole-file rule that pushes a
+    // non-f16 tensor to F32, so a bf16 norm under {"default":"keep"} came out
+    // F32 -- a converted, grown tensor in a plan that converts nothing.
+    {
+        const char *kin = "q_keeptype_in.gguf", *kout = "q_keeptype_out.gguf";
+        const char *plan = "q_keeptype_plan.json";
+        static float norm[8], wgt[64 * 4];
+        for (int i = 0; i < 8; i++) norm[i] = 0.5f + (float)i;
+        for (int i = 0; i < 64 * 4; i++) wgt[i] = ramp((uint64_t)i);
+        tdesc kts[2] = {
+            { "output_norm.weight",  {8, 1},   1, norm, 8, T_BF16 },
+            { "blk.0.attn_q.weight", {64, 4},  2, wgt, 64 * 4, T_BF16 },
+        };
+        write_gguf(kin, kts, 2, 0);
+        FILE *pf = fopen(plan, "wb");
+        assert(pf);
+        const char plan_json[] = "{\"default\":\"keep\"}";
+        assert(fwrite(plan_json, 1, sizeof(plan_json) - 1, pf) == sizeof(plan_json) - 1);
+        fclose(pf);
+        assert(quantize_gguf_plan(kin, kout, T_KEEP, NULL, plan) == 0);
+        gguf_file g;
+        assert(gguf_open(&g, kout));
+        gguf_tensor *n1 = gguf_find_tensor(&g, "output_norm.weight");
+        gguf_tensor *w1 = gguf_find_tensor(&g, "blk.0.attn_q.weight");
+        assert(n1 && n1->type == T_BF16 && n1->nbytes == 8 * 2);
+        assert(w1 && w1->type == T_BF16);
+        gguf_close(&g);
+        remove(kin); remove(kout); remove(plan);
+        printf("ok: a type plan's \"keep\" keeps a type this tool cannot write\n");
     }
 
     // RNR-015: in-place requant must not truncate its own input
