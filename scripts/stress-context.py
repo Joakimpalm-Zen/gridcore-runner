@@ -21,6 +21,7 @@ this probe only asks whether the engine's context accounting is honest.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -112,23 +113,51 @@ def probe(runner, model, ctx, timeout, extra=()):
     }
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models-dir", default="C:/ProjectGrid/models")
-    ap.add_argument("--runner", default=str(ROOT / "runner.exe"))
+    # The repo's own models/, and the binary this repo builds. Both defaults
+    # used to be one machine's Windows paths, which on any other host matched
+    # nothing at all -- the same portability trap stress-models.py already
+    # fixed in its own main().
+    ap.add_argument("--models-dir", default=str(ROOT / "models"))
+    ap.add_argument("--runner",
+                    default=str(ROOT / ("runner.exe" if os.name == "nt"
+                                        else "runner")))
     ap.add_argument("--out", default=str(ROOT / "tests/compatibility/out/stress-context.json"))
     ap.add_argument("--only")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--max-gb", type=float, default=9.0,
                     help="skip files larger than this; the edges are the same "
                          "code path and a 18 GB load costs minutes per probe")
-    args = ap.parse_args()
+    return ap
 
-    models = sorted(Path(args.models_dir).glob("*.gguf"),
-                    key=lambda p: p.stat().st_size)
+
+def main(argv=None):
+    ap = build_parser()
+    args = ap.parse_args(argv)
+
+    shelf = Path(args.models_dir)
+    found = sorted(shelf.glob("*.gguf"), key=lambda p: p.stat().st_size)
+    models = found
     if args.only:
         models = [m for m in models if args.only.lower() in m.name.lower()]
     models = [m for m in models if m.stat().st_size / 1e9 <= args.max_gb]
+
+    # Zero models is a FAILURE, not a fast pass: a report over nothing is
+    # byte-identical in shape to a clean report over the whole shelf, and the
+    # exit code was the same too.
+    if not models:
+        if not shelf.is_dir():
+            print(f"error: no model shelf at {shelf}", file=sys.stderr)
+        elif not found:
+            print(f"error: no .gguf files under {shelf}", file=sys.stderr)
+        elif args.only:
+            print(f"error: --only {args.only!r} matched none of the "
+                  f"{len(found)} models under {shelf}", file=sys.stderr)
+        else:
+            print(f"error: every model under {shelf} is larger than "
+                  f"--max-gb {args.max_gb}", file=sys.stderr)
+        return 2
 
     report = {"generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "models": []}

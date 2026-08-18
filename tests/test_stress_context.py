@@ -131,3 +131,29 @@ def test_a_refusal_that_names_the_context_cost_is_explained(tmp_path):
     probe = sc.probe(runner, tmp_path / "m.gguf", 1000000, 60)
 
     assert probe["explains_itself"] is True
+
+
+def test_a_shelf_with_no_models_is_a_failure_not_a_fast_pass(tmp_path, capsys):
+    """stress-models.py fixed exactly this in its own main() -- "a pass over
+    nothing was indistinguishable from a pass over everything". Its sibling
+    kept the Windows-only default, so on any other host the glob matched
+    nothing, the loop never ran, and the script wrote {"models": []} and
+    exited 0."""
+    out = tmp_path / "report.json"
+
+    code = sc.main(["--models-dir", str(tmp_path / "empty"),
+                    "--out", str(out)])
+
+    assert code == 2
+    assert not out.exists()
+
+
+def test_the_defaults_name_paths_that_exist_on_this_host():
+    import argparse
+    import os
+    parser = sc.build_parser()
+    defaults = {a.dest: a.default for a in parser._actions
+                if isinstance(a, argparse.Action)}
+    assert defaults["models_dir"] == str(ROOT / "models")
+    assert defaults["runner"] == str(
+        ROOT / ("runner.exe" if os.name == "nt" else "runner"))
