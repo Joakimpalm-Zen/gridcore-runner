@@ -6,6 +6,9 @@
 #include "compat.h"
 #include "json.h"
 #include "server.h"
+// for render_prompt_alloc: chat mode renders the same prompts the chat route
+// does, so it uses the same measured-size renderer rather than a second one
+#include "api.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1026,7 +1029,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "chat mode (template: %s) — Ctrl-D or /exit to quit\n\n",
             template_name(tmpl));
 
-    char line[8192], rendered[16384];
+    char line[8192];
     bool first_turn = true;
     for (;;) {
         fprintf(stderr, "> ");
@@ -1042,10 +1045,20 @@ int main(int argc, char **argv) {
                 .role = "system", .content = system_prompt,
             };
         msgs[n_msgs++] = (chat_msg){ .role = "user", .content = line };
-        render_messages(tmpl, msgs, n_msgs, true, thinking,
-                        rendered, sizeof(rendered));
+        // Measured, never estimated — the same rule the server holds itself
+        // to. render_messages truncates the TAIL, so a fixed buffer that a
+        // long --system overruns does not fail the turn, it deletes the
+        // question and the generation header and asks something else.
+        char *rendered = render_prompt_alloc(tmpl, msgs, n_msgs, true, thinking,
+                                             NULL, strlen(line) +
+                                             strlen(system_prompt) + 1024);
+        if (!rendered) {
+            fprintf(stderr, "[out of memory rendering the prompt — turn skipped]\n");
+            continue;
+        }
         n_prompt = tok_encode(&tok, rendered, toks, (int)tok_cap,
                               first_turn && !no_bos, true);
+        free(rendered);
         first_turn = false;
 
         if (n_prompt < 0) {

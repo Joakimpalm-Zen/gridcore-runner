@@ -62,3 +62,38 @@ def test_gpu_off_also_applies_to_speculative_draft(runner_bin, model):
     assert "draft:" in stderr
     assert "gpu-split:" not in stderr
     assert "gpu: CUDA backend" not in stderr
+
+
+def _chat(runner_bin, model, system, n_ctx):
+    return subprocess.run([runner_bin, "-m", model, "--gpu", "off", "-i",
+                           "--system", system, "-c", str(n_ctx), "-n", "1",
+                           "--temp", "0"],
+                          input=b"hello\n/exit\n", cwd=ROOT,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=300)
+
+
+def test_interactive_prompt_is_rendered_whole_or_refused(runner_bin, model):
+    """A long --system must never be silently shortened (carry-over from the
+    server's own render_prompt_alloc rule).
+
+    Interactive chat rendered into a fixed char rendered[16384] and threw away
+    the renderer's needed-size return. render_messages truncates the TAIL, so a
+    30 KB system prompt did not fail the turn -- it deleted the user's question
+    and the generation header and asked the model something else, at a size the
+    context check then reported as comfortably fitting.
+
+    The fixture's byte-fallback vocabulary runs ~1.4 tokens per byte, so the
+    two cases below are far apart: a 30000-byte system prompt is ~42k tokens
+    and cannot fit -c 30000, while the 16 KB truncation is ~23k tokens and fits
+    with room to spare. Before the fix the first case ran silently; the whole
+    point is that it now says so.
+    """
+    big = _chat(runner_bin, model, "word " * 6000, 30000)
+    assert b"context full" in big.stderr, big.stderr[-400:]
+
+    # and the complement, so the fix cannot be "always refuse": a system
+    # prompt that does fit still runs the turn
+    ok = _chat(runner_bin, model, "word " * 200, 30000)
+    assert ok.returncode == 0, ok.stderr[-400:]
+    assert b"context full" not in ok.stderr
