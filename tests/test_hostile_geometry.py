@@ -517,6 +517,32 @@ def test_per_layer_embedding_width_above_int_max_is_refused(runner_bin, tmp_path
     assert "per-layer embedding" in proc.stderr.decode(errors="replace")
 
 
+@pytest.mark.parametrize("key", ["tokenizer.ggml.bos_token_id",
+                                 "tokenizer.ggml.eos_token_id"])
+def test_special_token_id_outside_the_vocabulary_is_refused(runner_bin, tmp_path,
+                                                            key):
+    """These are not labels; they are indices the engine writes through.
+
+    bos is emitted into the token stream, the stream seeds the sampler's
+    penalty window, and the penalty is `logits[tok] /= repeat_penalty` — a
+    read-modify-write at an id the file chose. With bos_token_id rewritten to
+    4096 against a 256-token vocabulary that lands 10 KB past the logits
+    buffer (ASan: heap-buffer-overflow in sample_pick). eos travels the same
+    metadata path into the stop list and the penalty exemptions.
+    """
+    good = tmp_path / "g4h.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--gemma4-hetero", str(good)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    bad = _patch_u32(good, tmp_path / "g4h-specialid.gguf", key, 4096)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "a token id past the vocabulary must be refused"
+    assert key in proc.stderr.decode(errors="replace")
+
+
 def test_gemma3_sliding_pattern_of_zero_is_not_a_divisor(runner_bin, tmp_path):
     """Every other architecture clamps this period; gemma3's copy did not.
 

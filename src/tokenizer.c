@@ -160,6 +160,19 @@ static bool spm_scores_from_merges(tokenizer *t, gguf_file *g) {
     return true;
 }
 
+// bos/eos/unk are not labels: they are indices the engine writes through. bos
+// is emitted into the token stream, the stream seeds the sampler's penalty
+// window, and the penalty is `logits[tok] /= repeat_penalty` — a
+// read-modify-write at whatever index the file named. 0xFFFFFFFF is the
+// conventional "this model has none" and stays legal; anything else outside
+// [0, n_vocab) is a broken file, and a broken file fails closed at load.
+static bool special_id_ok(const tokenizer *t, const char *key, int id) {
+    if (id == -1 || (id >= 0 && id < t->n_vocab)) return true;
+    fprintf(stderr, "error: %s is %d, outside the %d-token vocabulary\n",
+            key, id, t->n_vocab);
+    return false;
+}
+
 bool tokenizer_init(tokenizer *t, gguf_file *g) {
     memset(t, 0, sizeof(*t));
 
@@ -220,6 +233,10 @@ bool tokenizer_init(tokenizer *t, gguf_file *g) {
     t->bos_id = (int)gguf_get_u32(g, "tokenizer.ggml.bos_token_id", 1);
     t->eos_id = (int)gguf_get_u32(g, "tokenizer.ggml.eos_token_id", 2);
     t->unk_id = (int)gguf_get_u32(g, "tokenizer.ggml.unknown_token_id", -1u);
+    if (!special_id_ok(t, "tokenizer.ggml.bos_token_id", t->bos_id) ||
+        !special_id_ok(t, "tokenizer.ggml.eos_token_id", t->eos_id) ||
+        !special_id_ok(t, "tokenizer.ggml.unknown_token_id", t->unk_id))
+        return false;
     t->add_bos = gguf_get_bool(g, "tokenizer.ggml.add_bos_token", t->model == TOK_SPM);
     t->add_space_prefix = gguf_get_bool(g, "tokenizer.ggml.add_space_prefix", true);
 
