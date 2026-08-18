@@ -612,6 +612,18 @@ static bool should_quantize(const gguf_tensor *t) {
     return true;
 }
 
+// Tensors that leave a requant with their on-disk type untouched, whatever
+// the target or the plan says. The MoE router picks WHICH expert runs: an
+// error there swaps a whole FFN instead of perturbing one output, and it is
+// the one weight matrix whose cost of staying exact is negligible
+// (n_embd x n_expert — 0.3% of a 30B-A3B checkpoint). That is why llama.cpp
+// excludes ffn_gate_inp from quantization and why every reference MoE GGUF
+// ships it at F32 beside 4-bit experts. `ffn_gate_inp_shexp` is the same
+// decision for the shared expert, so the substring covers both.
+static bool keep_source_type(const gguf_tensor *t) {
+    return strstr(t->name, "ffn_gate_inp") != NULL;
+}
+
 // A quantized row must divide into a whole number of blocks. should_quantize
 // only clears ne[0] % 32, which is the block width of q8_0/q4_0 but not of the
 // 256-wide K-quants a --type-plan can name: writing a 288-wide row as Q3_K
@@ -831,7 +843,9 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
             // plan cannot make a tensor bigger, quantize something that must
             // stay f32, or write a row the target type cannot describe.
             int want = type_plan_pick(&tplan, t->name);
-            if (want == T_KEEP || !should_quantize(t)) {
+            if (keep_source_type(t)) {
+                out_type[i] = t->type;
+            } else if (want == T_KEEP || !should_quantize(t)) {
                 out_type[i] = should_quantize(t) ? t->type
                             : (t->type == T_F16 ? T_F16 : T_F32);
             } else if (!type_fits_row(want, t->ne[0])) {
@@ -847,7 +861,8 @@ int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
             out_type[i] = t->type;
         } else {
             const char *only = getenv("RUNNER_REQUANT_ONLY");
-            bool filtered = only && *only && !strstr(t->name, only);
+            bool filtered = keep_source_type(t) ||
+                            (only && *only && !strstr(t->name, only));
             if (filtered)
                 out_type[i] = t->type;
             else if (should_quantize(t) && !type_fits_row(target, t->ne[0])) {

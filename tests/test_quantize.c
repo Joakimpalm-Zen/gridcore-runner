@@ -407,6 +407,40 @@ int main(void) {
         printf("ok: a row too narrow for the plan's block keeps its own type\n");
     }
 
+    // The MoE router decides WHICH expert runs. Quantizing it turns a small
+    // weight error into a swapped FFN, and it is the one weight matrix whose
+    // cost of staying exact is negligible -- which is why every reference MoE
+    // GGUF ships ffn_gate_inp.weight at F32 beside 4-bit experts. A whole-file
+    // --quant must leave it alone; the experts beside it must still convert.
+    {
+        const char *rin = "q_router_in.gguf", *rout = "q_router_out.gguf";
+        enum { R_EMB = 32, R_EXP = 4, R_FF = 64 };
+        static float router[R_EMB * R_EXP], shexp[R_EMB], experts[R_EMB * R_FF * R_EXP];
+        for (int i = 0; i < R_EMB * R_EXP; i++) router[i] = ramp((uint64_t)i);
+        for (int i = 0; i < R_EMB; i++) shexp[i] = ramp((uint64_t)i + 7);
+        for (int i = 0; i < R_EMB * R_FF * R_EXP; i++) experts[i] = ramp((uint64_t)i);
+        tdesc rts[3] = {
+            { "blk.0.ffn_gate_inp.weight",       {R_EMB, R_EXP}, 2, router,
+              R_EMB * R_EXP },
+            { "blk.0.ffn_gate_inp_shexp.weight", {R_EMB, 1},     2, shexp, R_EMB },
+            { "blk.0.ffn_gate_exps.weight",      {R_EMB, R_FF * R_EXP}, 2, experts,
+              R_EMB * R_FF * R_EXP },
+        };
+        write_gguf(rin, rts, 3, 0);
+        assert(quantize_gguf(rin, rout, T_Q4_0, NULL) == 0);
+        gguf_file g;
+        assert(gguf_open(&g, rout));
+        gguf_tensor *r = gguf_find_tensor(&g, "blk.0.ffn_gate_inp.weight");
+        gguf_tensor *s = gguf_find_tensor(&g, "blk.0.ffn_gate_inp_shexp.weight");
+        gguf_tensor *e = gguf_find_tensor(&g, "blk.0.ffn_gate_exps.weight");
+        assert(r && r->type == T_F32 && memcmp(r->data, router, sizeof(router)) == 0);
+        assert(s && s->type == T_F32 && memcmp(s->data, shexp, sizeof(shexp)) == 0);
+        assert(e && e->type == T_Q4_0);
+        gguf_close(&g);
+        remove(rin); remove(rout);
+        printf("ok: the MoE router survives a q4_0 requant untouched\n");
+    }
+
     // RNR-015: in-place requant must not truncate its own input
     const char *inplace = "q_inplace.gguf";
     cp(in, inplace);
