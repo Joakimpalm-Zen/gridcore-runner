@@ -50,11 +50,19 @@ static void *t_realloc(void *p, size_t n) {
 
 // strdup must be instrumented too, not merely for the failure injection: its
 // blocks are released through schema_free's (substituted) free, so leaving it
-// alone would unbalance the counter and hide real leaks.
+// alone would unbalance the counter and hide real leaks. strndup is the same
+// story -- compile_ascii_pattern owns its segment prefixes through it.
 static char *t_strdup(const char *s) {
     size_t n = strlen(s) + 1;
     char *p = t_malloc(n);
     if (p) memcpy(p, s, n);
+    return p;
+}
+
+static char *t_strndup(const char *s, size_t cap) {
+    size_t n = strnlen(s, cap);
+    char *p = t_malloc(n + 1);
+    if (p) { memcpy(p, s, n); p[n] = 0; }
     return p;
 }
 
@@ -67,6 +75,7 @@ static void t_free(void *p) {
 #define calloc  t_calloc
 #define realloc t_realloc
 #define strdup  t_strdup
+#define strndup t_strndup
 #define free    t_free
 #include "../src/json.c"
 #include "../src/schema.c"
@@ -74,6 +83,7 @@ static void t_free(void *p) {
 #undef calloc
 #undef realloc
 #undef strdup
+#undef strndup
 #undef free
 
 // One schema per compile path: plain object with required keys, arrays with
@@ -155,8 +165,131 @@ static void test_compile_survives_allocation_failure(void) {
     }
 }
 
+// The NATIVE compilers reach the same allocator from the same untrusted
+// request -- tools[] out of a chat request, response_format out of the same
+// body -- but they build their trees by hand instead of through compile_node,
+// with an unwind label per function. That is exactly the code an
+// allocation-failure sweep is for, and it was never swept: it turned up a
+// leaked raw-value node and two rejections that came back with no reason at
+// all for a caller to print.
+static const char *const NATIVE_TOOLS =
+    "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+      "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"city\":{\"type\":\"string\"},"
+        "\"units\":{\"type\":\"string\",\"enum\":[\"c\",\"f\"]},"
+        "\"days\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":7},"
+        "\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
+                  "\"maxItems\":3}},"
+      "\"required\":[\"city\"]}}},"
+     "{\"type\":\"function\",\"function\":{\"name\":\"add\",\"parameters\":"
+      "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},"
+      "\"b\":{\"type\":\"integer\"}},\"required\":[\"a\",\"b\"]}}}]";
+static const char *const NATIVE_FINAL =
+    "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},"
+    "\"required\":[\"answer\"]}";
+
+typedef snode *(*native_fn)(jv *tools, jv *final, char *err, int errcap);
+
+static snode *n_atem_tools(jv *t, jv *f, char *e, int c) {
+    (void)f; return schema_compile_atem_tools(t, e, c);
+}
+static snode *n_atem_turn(jv *t, jv *f, char *e, int c) {
+    return schema_compile_atem_turn(t, true, NULL, f, ATEM_TURN_EITHER, e, c);
+}
+static snode *n_atem_named(jv *t, jv *f, char *e, int c) {
+    (void)f;
+    return schema_compile_atem_turn(t, false, "add", NULL, ATEM_TURN_DIRECT, e, c);
+}
+static snode *n_atem_parallel(jv *t, jv *f, char *e, int c) {
+    (void)f; return schema_compile_atem_parallel(t, NULL, e, c);
+}
+static snode *n_muse_user(jv *t, jv *f, char *e, int c) {
+    (void)t; return schema_compile_muse_user_payload(f, e, c);
+}
+static snode *n_harmony(jv *t, jv *f, char *e, int c) {
+    return schema_compile_harmony_turn(t, true, NULL, f, true, e, c);
+}
+static snode *n_harmony_required(jv *t, jv *f, char *e, int c) {
+    (void)f; return schema_compile_harmony_turn(t, false, NULL, NULL, true, e, c);
+}
+static snode *n_gemma4(jv *t, jv *f, char *e, int c) {
+    return schema_compile_gemma4_turn(t, true, NULL, f, true, false, e, c);
+}
+static snode *n_gemma4_primed(jv *t, jv *f, char *e, int c) {
+    (void)f;
+    return schema_compile_gemma4_turn(t, true, NULL, NULL, true, true, e, c);
+}
+static snode *n_gemma4_parallel(jv *t, jv *f, char *e, int c) {
+    (void)f; return schema_compile_gemma4_parallel(t, NULL, e, c);
+}
+
+static const struct { const char *name; native_fn fn; } NATIVE[] = {
+    { "atem_tools",       n_atem_tools },
+    { "atem_turn",        n_atem_turn },
+    { "atem_turn_named",  n_atem_named },
+    { "atem_parallel",    n_atem_parallel },
+    { "muse_user",        n_muse_user },
+    { "harmony",          n_harmony },
+    { "harmony_required", n_harmony_required },
+    { "gemma4",           n_gemma4 },
+    { "gemma4_primed",    n_gemma4_primed },
+    { "gemma4_parallel",  n_gemma4_parallel },
+};
+
+static void test_native_compilers_survive_allocation_failure(void) {
+    for (size_t i = 0; i < sizeof(NATIVE) / sizeof(*NATIVE); i++) {
+        fail_at = -1;
+        alloc_calls = 0;
+        alloc_live = 0;
+        jv *tools = json_parse(NATIVE_TOOLS, strlen(NATIVE_TOOLS));
+        jv *final = json_parse(NATIVE_FINAL, strlen(NATIVE_FINAL));
+        assert(tools != NULL && final != NULL);
+        long base_live = alloc_live;
+
+        char err[256];
+        err[0] = 0;
+        alloc_calls = 0;
+        snode *n = NATIVE[i].fn(tools, final, err, sizeof(err));
+        if (!n) {
+            fprintf(stderr, "%s does not compile cleanly: %s\n",
+                    NATIVE[i].name, err);
+            abort();
+        }
+        long total = alloc_calls;
+        assert(total > 0);
+        schema_free(n);
+        assert(alloc_live == base_live);
+
+        for (long k = 0; k < total; k++) {
+            fail_at = k;
+            alloc_calls = 0;
+            err[0] = 0;
+            snode *r = NATIVE[i].fn(tools, final, err, sizeof(err));
+            if (!r && err[0] == 0) {
+                fprintf(stderr, "%s, failing allocation %ld of %ld: rejected "
+                                "with an empty error message\n",
+                        NATIVE[i].name, k, total);
+                abort();
+            }
+            schema_free(r);
+            if (alloc_live != base_live) {
+                fprintf(stderr, "%s, failing allocation %ld of %ld: "
+                                "%ld block(s) leaked\n",
+                        NATIVE[i].name, k, total, alloc_live - base_live);
+                abort();
+            }
+        }
+        fail_at = -1;
+
+        jv_free(tools);
+        jv_free(final);
+        assert(alloc_live == 0);
+    }
+}
+
 int main(void) {
     test_compile_survives_allocation_failure();
+    test_native_compilers_survive_allocation_failure();
     puts("schema oom tests ok");
     return 0;
 }

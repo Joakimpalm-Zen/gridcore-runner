@@ -1095,7 +1095,7 @@ static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
     }
     int count = 2 + (props ? props->n * 4 : 0);
     snode *seq = atem_seq(count);
-    if (!seq) return NULL;
+    if (!seq) goto oom;   // NOT a bare return: the caller prints this message
     if (!atem_seq_add(seq, atem_lit("\">\n"))) goto oom;
     for (int i = 0; props && i < props->n; i++) {
         jv *ty = jv_get(props->items[i], "type");
@@ -1137,14 +1137,14 @@ snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap) {
     snode *root = atem_seq(3);
     snode *names = sn_new(SN_ENUM);
     snode *choice = sn_new(SN_COND);
-    if (!root || !names || !choice) goto oom;
+    if (!root || !names || !choice) goto fail;
     names->lits = calloc((size_t)tools->n, sizeof(*names->lits));
     choice->alts = calloc((size_t)tools->n, sizeof(*choice->alts));
-    if (!names->lits || !choice->alts) goto oom;
+    if (!names->lits || !choice->alts) goto fail;
     names->min_items = 1; // this enum selects the following conditional tail
     names->whitespace_significant = true;
     if (!atem_seq_add(root,
-            atem_lit("<atem:function_calls>\n<atem:invoke name=\""))) goto oom;
+            atem_lit("<atem:function_calls>\n<atem:invoke name=\""))) goto fail;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function");
         if (!fn) fn = tools->items[i];
@@ -1154,20 +1154,22 @@ snode *schema_compile_atem_tools(struct jv *tools, char *err, int errcap) {
             goto fail;
         }
         names->lits[names->n_lits] = strdup(name);
-        if (!names->lits[names->n_lits]) goto oom;
+        if (!names->lits[names->n_lits]) goto fail;
         names->n_lits++;
         choice->alts[choice->n_alts] = atem_tool_tail(tools->items[i], err, errcap);
         if (!choice->alts[choice->n_alts]) goto fail;
         choice->n_alts++;
     }
-    if (!atem_seq_add(root, names)) goto oom;
+    if (!atem_seq_add(root, names)) goto fail;
     names = NULL;
-    if (!atem_seq_add(root, choice)) goto oom;
+    if (!atem_seq_add(root, choice)) goto fail;
     choice = NULL;
     return root;
-oom:
-    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem tools");
 fail:
+    // one unwind label, and it supplies a reason when nobody else did:
+    // both callers print this string, and a NULL with an empty message
+    // reports a rejected request with no explanation at all
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem tools");
     schema_free(names); schema_free(choice); schema_free(root);
     return NULL;
 }
@@ -1184,7 +1186,7 @@ static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
     }
     snode *root = atem_seq(prefix[0] ? 3 : 2);
     snode *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
-    if (!root || !names || !choice) goto oom;
+    if (!root || !names || !choice) goto fail;
     root->whitespace_significant = prefix[0] == ' ';
     int selected = 0;
     for (int i = 0; i < tools->n; i++) {
@@ -1196,11 +1198,11 @@ static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
     int branches = selected + (allow_user ? 1 : 0);
     names->lits = calloc((size_t)branches, sizeof(*names->lits));
     choice->alts = calloc((size_t)branches, sizeof(*choice->alts));
-    if (!names->lits || !choice->alts) goto oom;
+    if (!names->lits || !choice->alts) goto fail;
     names->min_items = 1;
     names->whitespace_significant = true;
     choice->whitespace_significant = true;
-    if (prefix[0] && !atem_seq_add(root, atem_lit(prefix))) goto oom;
+    if (prefix[0] && !atem_seq_add(root, atem_lit(prefix))) goto fail;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function");
         if (!fn) fn = tools->items[i];
@@ -1227,18 +1229,17 @@ static snode *schema_compile_atem_turn_prefix(struct jv *tools, bool allow_user,
             !atem_seq_add(answer, atem_lit("<|message|>")) ||
             !atem_seq_add(answer, answer_value)) {
             schema_free(answer_value);
-            schema_free(answer); goto oom;
+            schema_free(answer); goto fail;
         }
         choice->alts[choice->n_alts++] = answer;
     }
-    if (!atem_seq_add(root, names)) goto oom;
+    if (!atem_seq_add(root, names)) goto fail;
     names = NULL;
-    if (!atem_seq_add(root, choice)) goto oom;
+    if (!atem_seq_add(root, choice)) goto fail;
     choice = NULL;
     return root;
-oom:
-    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem turn");
 fail:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling atem turn");
     schema_free(names); schema_free(choice); schema_free(root);
     return NULL;
 }
@@ -1350,20 +1351,20 @@ static snode *harmony_call_select(jv *tools, const char *only_tool,
     }
     snode *root = atem_seq(prefix ? 3 : 2);
     snode *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
-    if (!root || !names || !choice) goto oom;
+    if (!root || !names || !choice) goto fail;
     names->lits = calloc((size_t)selected, sizeof(*names->lits));
     choice->alts = calloc((size_t)selected, sizeof(*choice->alts));
-    if (!names->lits || !choice->alts) goto oom;
+    if (!names->lits || !choice->alts) goto fail;
     names->min_items = 1;
     names->whitespace_significant = true;
     choice->whitespace_significant = true;
-    if (prefix && !atem_seq_add(root, atem_lit(prefix))) goto oom;
+    if (prefix && !atem_seq_add(root, atem_lit(prefix))) goto fail;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function");
         const char *name = jv_str(jv_get(fn, "name"), NULL);
         if (!name || (only_tool && strcmp(name, only_tool))) continue;
         names->lits[names->n_lits] = strdup(name);
-        if (!names->lits[names->n_lits]) goto oom;
+        if (!names->lits[names->n_lits]) goto fail;
         names->n_lits++;
         snode *tail = atem_seq(2);
         jv *params = jv_get(fn, "parameters");
@@ -1375,20 +1376,19 @@ static snode *harmony_call_select(jv *tools, const char *only_tool,
             !atem_seq_add(tail, args)) {
             schema_free(args); schema_free(tail);
             if (err[0]) goto fail;
-            goto oom;
+            goto fail;
         }
         tail->whitespace_significant = true;
         choice->alts[choice->n_alts++] = tail;
     }
-    if (!atem_seq_add(root, names)) goto oom;
+    if (!atem_seq_add(root, names)) goto fail;
     names = NULL;
-    if (!atem_seq_add(root, choice)) goto oom;
+    if (!atem_seq_add(root, choice)) goto fail;
     choice = NULL;
     root->whitespace_significant = true;
     return root;
-oom:
-    if (!err[0]) snprintf(err, errcap, "out of memory compiling Harmony call");
 fail:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling Harmony call");
     schema_free(names); schema_free(choice); schema_free(root);
     return NULL;
 }
@@ -1762,7 +1762,11 @@ static snode *g4_value(jv *schema, const char *what, int depth, int *budget,
         // two needs no escaping and is raw bytes up to the closer.
         double dmax = jv_num(jv_get(schema, "maxLength"), -1);
         snode *seq = atem_seq(2);
-        snode *body = dmax > 0 ? atem_raw_bounded("<|\"|>", (int)dmax)
+        // built only once there is a sequence to own it: the cleanup below
+        // frees it through `seq`, so a body with no sequence is a leak (the
+        // two other sites with this shape already guard it the same way)
+        snode *body = !seq ? NULL
+                    : dmax > 0 ? atem_raw_bounded("<|\"|>", (int)dmax)
                                : atem_raw("<|\"|>");
         if (!seq || !body || !atem_seq_add(seq, atem_lit("<|\"|>")) ||
             !atem_seq_add(seq, body)) {
@@ -1857,15 +1861,15 @@ static snode *g4_call(jv *tools, const char *only_tool, bool lead,
     }
     snode *root = atem_seq(lead ? 3 : 2);
     snode *names = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
-    if (!root || !names || !choice) goto oom;
+    if (!root || !names || !choice) goto fail;
     names->lits = calloc((size_t)selected, sizeof(*names->lits));
     choice->alts = calloc((size_t)selected, sizeof(*choice->alts));
-    if (!names->lits || !choice->alts) goto oom;
+    if (!names->lits || !choice->alts) goto fail;
     names->min_items = 1;            // this enum selects the following SN_COND
     names->whitespace_significant = true;
     choice->whitespace_significant = true;
     root->whitespace_significant = true;
-    if (lead && !atem_seq_add(root, atem_lit("<|tool_call>call:"))) goto oom;
+    if (lead && !atem_seq_add(root, atem_lit("<|tool_call>call:"))) goto fail;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function");
         if (!fn) fn = tools->items[i];
@@ -1876,21 +1880,20 @@ static snode *g4_call(jv *tools, const char *only_tool, bool lead,
         }
         if (only_tool && strcmp(name, only_tool)) continue;
         names->lits[names->n_lits] = strdup(name);
-        if (!names->lits[names->n_lits]) goto oom;
+        if (!names->lits[names->n_lits]) goto fail;
         names->n_lits++;
         choice->alts[choice->n_alts] = g4_call_tail(tools->items[i], budget,
                                                     err, errcap);
         if (!choice->alts[choice->n_alts]) goto fail;
         choice->n_alts++;
     }
-    if (!atem_seq_add(root, names)) goto oom;
+    if (!atem_seq_add(root, names)) goto fail;
     names = NULL;
-    if (!atem_seq_add(root, choice)) goto oom;
+    if (!atem_seq_add(root, choice)) goto fail;
     choice = NULL;
     return root;
-oom:
-    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 call");
 fail:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 call");
     schema_free(names); schema_free(choice); schema_free(root);
     return NULL;
 }
@@ -1967,17 +1970,17 @@ snode *schema_compile_gemma4_turn(jv *tools, bool allow_final,
     snode *marked = atem_seq(2);
     snode *disc = sn_new(SN_ENUM), *choice = sn_new(SN_COND);
     snode *thought = NULL, *call = NULL;
-    if (!marked || !disc || !choice) goto oom;
+    if (!marked || !disc || !choice) goto fail;
     disc->lits = calloc(2, sizeof(*disc->lits));
     choice->alts = calloc(2, sizeof(*choice->alts));
-    if (!disc->lits || !choice->alts) goto oom;
+    if (!disc->lits || !choice->alts) goto fail;
     disc->min_items = 1;
     disc->whitespace_significant = true;
     choice->whitespace_significant = true;
     marked->whitespace_significant = true;
     disc->lits[disc->n_lits++] = strdup("<|channel>thought\n");
     disc->lits[disc->n_lits++] = strdup("<|tool_call>call:");
-    if (!disc->lits[0] || !disc->lits[1]) goto oom;
+    if (!disc->lits[0] || !disc->lits[1]) goto fail;
     thought = atem_seq(2);
     snode *after = thought ? g4_body(tools, allow_final, only_tool,
                                      final_schema, &budget, err, errcap) : NULL;
@@ -1985,31 +1988,30 @@ snode *schema_compile_gemma4_turn(jv *tools, bool allow_final,
         !atem_seq_add(thought, atem_raw("<channel|>")) ||
         !atem_seq_add(thought, after)) {
         if (thought && thought->n_props < 2) schema_free(after);
-        goto oom;
+        goto fail;
     }
     thought->whitespace_significant = true;
     call = g4_call(tools, only_tool, false, &budget, err, errcap);
     if (!call) goto fail;
     choice->alts[choice->n_alts++] = thought; thought = NULL;
     choice->alts[choice->n_alts++] = call;    call = NULL;
-    if (!atem_seq_add(marked, disc)) goto oom;
+    if (!atem_seq_add(marked, disc)) goto fail;
     disc = NULL;
-    if (!atem_seq_add(marked, choice)) goto oom;
+    if (!atem_seq_add(marked, choice)) goto fail;
     choice = NULL;
     if (!allow_final) return marked;
     snode *fin = g4_final(final_schema, err, errcap);
     snode *u = fin ? sn_new(SN_UNION) : NULL;
     if (u) u->alts = calloc(2, sizeof(*u->alts));
     if (!u || !u->alts) {
-        schema_free(fin); schema_free(u); goto oom;
+        schema_free(fin); schema_free(u); goto fail;
     }
     u->whitespace_significant = true;
     u->alts[u->n_alts++] = marked;
     u->alts[u->n_alts++] = fin;
     return u;
-oom:
-    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 turn");
 fail:
+    if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 turn");
     schema_free(thought); schema_free(call);
     schema_free(disc); schema_free(choice); schema_free(marked);
     return NULL;
