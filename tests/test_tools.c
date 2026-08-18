@@ -1629,6 +1629,77 @@ static void test_gemma4_untyped_parameter_is_refused_not_guessed(void) {
     jv_free(tools);
 }
 
+// A gemma4 array is compiled by REPLICATING the element grammar once per
+// admissible position, so nesting multiplies: with the default 24-item bound
+// three levels is 14k element expansions, four is 346k, and six -- which
+// G4_MAX_DEPTH admits -- is past 10^8. tools[] is request data, so an
+// unbounded expansion there is the client choosing how much of the server's
+// memory to take. It has to be refused, and the message has to say what the
+// caller can do about it.
+static jv *g4_nested_array_tool(int levels) {
+    char inner[512];
+    snprintf(inner, sizeof(inner), "{\"type\":\"integer\"}");
+    for (int i = 0; i < levels; i++) {
+        char wrapped[512];
+        snprintf(wrapped, sizeof(wrapped),
+                 "{\"type\":\"array\",\"items\":%s}", inner);
+        snprintf(inner, sizeof(inner), "%s", wrapped);
+    }
+    char src[1024];
+    snprintf(src, sizeof(src),
+             "[{\"type\":\"function\",\"function\":{\"name\":\"f\","
+             "\"parameters\":{\"type\":\"object\",\"properties\":"
+             "{\"x\":%s}}}}]", inner);
+    return parse(src);
+}
+
+static void test_gemma4_nested_arrays_are_bounded_not_expanded(void) {
+    char err[192];
+    for (int levels = 4; levels <= 6; levels++) {
+        jv *tools = g4_nested_array_tool(levels);
+        err[0] = 0;
+        snode *root = schema_compile_gemma4_turn(tools, false, NULL, NULL,
+                                                 false, false,
+                                                 err, sizeof(err));
+        assert(root == NULL);
+        // six levels trips the depth ceiling first -- the innermost value sits
+        // one level past G4_MAX_DEPTH -- so only four and five reach the
+        // expansion ceiling. Both are refusals; the reason differs.
+        assert(strstr(err, levels == 6 ? "nests deeper" : "maxItems"));
+        jv_free(tools);
+    }
+    // what the caller does about it: bounding the arrays makes the same shape
+    // compile, and it still constrains
+    jv *bounded = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"f\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"x\":{\"type\":\"array\",\"maxItems\":2,\"items\":"
+          "{\"type\":\"array\",\"maxItems\":2,\"items\":"
+            "{\"type\":\"array\",\"maxItems\":2,\"items\":"
+              "{\"type\":\"array\",\"maxItems\":2,\"items\":"
+                "{\"type\":\"integer\"}}}}}}}}}]");
+    err[0] = 0;
+    snode *root = schema_compile_gemma4_turn(bounded, false, NULL, NULL, false,
+                                             false, err, sizeof(err));
+    if (!root) fprintf(stderr, "bounded gemma4 nesting: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root, "<|tool_call>call:f{x:[[[[1,2],[3]],[[4]]]]}"
+                         "<tool_call|>"));
+    schema_free(root);
+    jv_free(bounded);
+
+    // and the ordinary two-level case every real tool uses stays legal
+    jv *ordinary = g4_nested_array_tool(2);
+    err[0] = 0;
+    root = schema_compile_gemma4_turn(ordinary, false, NULL, NULL, false, false,
+                                      err, sizeof(err));
+    if (!root) fprintf(stderr, "two-level gemma4 nesting: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root, "<|tool_call>call:f{x:[[1,2],[3]]}<tool_call|>"));
+    schema_free(root);
+    jv_free(ordinary);
+}
+
 static void test_buffered_mapper_rejects_invalid_arguments(void) {
     tool_envelope e = {0};
     sbuf content = {0}, calls = {0};
@@ -1685,6 +1756,7 @@ int main(void) {
     test_gemma4_native_mapping_and_stream_boundaries();
     test_gemma4_structured_arguments_round_trip();
     test_gemma4_untyped_parameter_is_refused_not_guessed();
+    test_gemma4_nested_arrays_are_bounded_not_expanded();
     puts("tool envelope tests ok");
     return 0;
 }

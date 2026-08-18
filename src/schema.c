@@ -1571,8 +1571,18 @@ snode *schema_compile_harmony_turn(jv *tools, bool allow_final,
 #define G4_MAX_ITEMS 24      // bounded array: an unbounded one under a token
                              // budget is a truncation waiting to happen
 #define G4_MAX_DEPTH 6
+// An array here is compiled by REPLICATING the element grammar once per
+// admissible position, so nested arrays multiply: with the 24-item default,
+// three levels is 14,425 element expansions, four is 346,201, and six --
+// which G4_MAX_DEPTH admits -- is 2*10^8, roughly 160 GB of snodes. tools[]
+// is request data, so that is a client choosing how much of this process's
+// memory to take, and it has to be refused rather than attempted. At about
+// 1.1 kB of grammar per expansion this ceiling caps one compile near 55 MB,
+// which still admits three unbounded levels for a tool; past it the error
+// names maxItems, which is what a caller does about it.
+#define G4_MAX_EXPANSIONS 50000
 
-static snode *g4_value(jv *schema, const char *what, int depth,
+static snode *g4_value(jv *schema, const char *what, int depth, int *budget,
                        char *err, int errcap);
 
 // `[` VALUE ( `,` VALUE ){0,G4_MAX_ITEMS-1} `]`, built tail-first so every
@@ -1580,7 +1590,7 @@ static snode *g4_value(jv *schema, const char *what, int depth,
 // `]`. That is what makes it decidable: pick_alt resolves a union on the
 // first byte, so the closing bracket and the next element must never share
 // one.
-static snode *g4_array(jv *schema, const char *what, int depth,
+static snode *g4_array(jv *schema, const char *what, int depth, int *budget,
                        char *err, int errcap) {
     jv *items = jv_get(schema, "items");
     if (!items || items->type != J_OBJ) {
@@ -1597,7 +1607,7 @@ static snode *g4_array(jv *schema, const char *what, int depth,
     if (!tail) return NULL;
     for (int i = max; i >= 1; i--) {
         // element i: `,`+value+tail when i > 1, bare value+tail when i == 1
-        snode *value = g4_value(items, what, depth + 1, err, errcap);
+        snode *value = g4_value(items, what, depth + 1, budget, err, errcap);
         snode *seq = atem_seq(3);
         if (!value || !seq) { schema_free(value); schema_free(seq); goto oom; }
         seq->whitespace_significant = true;
@@ -1636,7 +1646,7 @@ oom:
 
 // `{` key `:` VALUE ( `,` key `:` VALUE )* `}` -- keys UNQUOTED and in
 // jinja dictsort order, which is what format_argument writes.
-static snode *g4_object(jv *props, const char *what, int depth,
+static snode *g4_object(jv *props, const char *what, int depth, int *budget,
                         char *err, int errcap) {
     if (props->n == 0) return atem_lit("{}");
     int *order = malloc(sizeof(int) * (size_t)(props->n > 0 ? props->n : 1));
@@ -1658,7 +1668,7 @@ static snode *g4_object(jv *props, const char *what, int depth,
         char what2[96];
         snprintf(what2, sizeof(what2), "%s.%s", what, key);
         snode *value = g4_value(props->items[order[i]], what2, depth + 1,
-                                err, errcap);
+                                budget, err, errcap);
         if (!value || !atem_seq_add(seq, value)) {
             schema_free(value); free(order); schema_free(seq);
             return NULL;
@@ -1672,11 +1682,21 @@ oom:
     return NULL;
 }
 
-static snode *g4_value(jv *schema, const char *what, int depth,
+static snode *g4_value(jv *schema, const char *what, int depth, int *budget,
                        char *err, int errcap) {
     if (depth > G4_MAX_DEPTH) {
         snprintf(err, errcap, "gemma4 %s nests deeper than %d levels",
                  what, G4_MAX_DEPTH);
+        return NULL;
+    }
+    // one expansion is one value slot in the compiled grammar; see
+    // G4_MAX_EXPANSIONS for why the count is bounded rather than trusted
+    if (--*budget < 0) {
+        snprintf(err, errcap,
+                 "gemma4 %s expands past %d value slots: this family's native "
+                 "call syntax needs one compiled slot per admissible array "
+                 "element, so nested arrays multiply -- declare maxItems on "
+                 "them", what, G4_MAX_EXPANSIONS);
         return NULL;
     }
     jv *ty = jv_get(schema, "type");
@@ -1756,7 +1776,8 @@ static snode *g4_value(jv *schema, const char *what, int depth,
         // minimum/maximum enforcement, which a raw run would drop.
         return compile_node(schema, err, errcap, 0);
     }
-    if (!strcmp(type, "array")) return g4_array(schema, what, depth, err, errcap);
+    if (!strcmp(type, "array"))
+        return g4_array(schema, what, depth, budget, err, errcap);
     if (!strcmp(type, "object")) {
         jv *props = jv_get(schema, "properties");
         if (!props || props->type != J_OBJ) {
@@ -1765,7 +1786,7 @@ static snode *g4_value(jv *schema, const char *what, int depth,
                      what);
             return NULL;
         }
-        return g4_object(props, what, depth, err, errcap);
+        return g4_object(props, what, depth, budget, err, errcap);
     }
     snprintf(err, errcap, "gemma4 %s has unsupported type \"%s\"", what, type);
     return NULL;
@@ -1773,7 +1794,7 @@ static snode *g4_value(jv *schema, const char *what, int depth,
 
 // `{args}<tool_call|>` for ONE declared tool: the arguments object plus the
 // block close, which is the tail the name ENUM selects.
-static snode *g4_call_tail(jv *tool, char *err, int errcap) {
+static snode *g4_call_tail(jv *tool, int *budget, char *err, int errcap) {
     jv *fn = jv_get(tool, "function");
     if (!fn) fn = tool;
     const char *name = jv_str(jv_get(fn, "name"), "tool");
@@ -1788,7 +1809,7 @@ static snode *g4_call_tail(jv *tool, char *err, int errcap) {
     if (!seq) goto oom;
     seq->whitespace_significant = true;
     snode *args = props && props->n
-                ? g4_object(props, name, 0, err, errcap)
+                ? g4_object(props, name, 0, budget, err, errcap)
                 : atem_lit("{}");
     if (!args || !atem_seq_add(seq, args)) {
         schema_free(args); schema_free(seq);
@@ -1806,7 +1827,7 @@ oom:
 // opener, which the caller has already consumed when the turn's discriminator
 // covered it.
 static snode *g4_call(jv *tools, const char *only_tool, bool lead,
-                      char *err, int errcap) {
+                      int *budget, char *err, int errcap) {
     int selected = 0;
     for (int i = 0; i < tools->n; i++) {
         jv *fn = jv_get(tools->items[i], "function");
@@ -1841,7 +1862,8 @@ static snode *g4_call(jv *tools, const char *only_tool, bool lead,
         names->lits[names->n_lits] = strdup(name);
         if (!names->lits[names->n_lits]) goto oom;
         names->n_lits++;
-        choice->alts[choice->n_alts] = g4_call_tail(tools->items[i], err, errcap);
+        choice->alts[choice->n_alts] = g4_call_tail(tools->items[i], budget,
+                                                    err, errcap);
         if (!choice->alts[choice->n_alts]) goto fail;
         choice->n_alts++;
     }
@@ -1868,8 +1890,8 @@ static snode *g4_final(jv *final_schema, char *err, int errcap) {
 }
 
 static snode *g4_body(jv *tools, bool allow_final, const char *only_tool,
-                      jv *final_schema, char *err, int errcap) {
-    snode *call = g4_call(tools, only_tool, true, err, errcap);
+                      jv *final_schema, int *budget, char *err, int errcap) {
+    snode *call = g4_call(tools, only_tool, true, budget, err, errcap);
     if (!call || !allow_final) return call;
     snode *fin = g4_final(final_schema, err, errcap);
     snode *u = fin ? sn_new(SN_UNION) : NULL;
@@ -1897,6 +1919,10 @@ snode *schema_compile_gemma4_turn(jv *tools, bool allow_final,
                  "gemma4 tools must be a non-empty array of at most 60 tools");
         return NULL;
     }
+    // One budget for the whole turn, not one per tool or per branch: a turn
+    // that admits reasoning compiles the call grammar twice, and the ceiling
+    // is on what this request costs, not on what each piece of it costs.
+    int budget = G4_MAX_EXPANSIONS;
     // The prompt already opened `<|channel>thought\n` (a tool-result
     // continuation with thinking on -- template.c's g4_prev == 2 branch), so
     // the turn starts INSIDE the thought and the only question is where it
@@ -1904,7 +1930,7 @@ snode *schema_compile_gemma4_turn(jv *tools, bool allow_final,
     if (primed_reasoning) {
         snode *seq = atem_seq(2);
         snode *rest = seq ? g4_body(tools, allow_final, only_tool, final_schema,
-                                    err, errcap) : NULL;
+                                    &budget, err, errcap) : NULL;
         if (!seq || !rest || !atem_seq_add(seq, atem_raw("<channel|>")) ||
             !atem_seq_add(seq, rest)) {
             if (seq && seq->n_props < 2) schema_free(rest);
@@ -1916,7 +1942,8 @@ snode *schema_compile_gemma4_turn(jv *tools, bool allow_final,
         return seq;
     }
     if (!allow_reasoning)
-        return g4_body(tools, allow_final, only_tool, final_schema, err, errcap);
+        return g4_body(tools, allow_final, only_tool, final_schema, &budget,
+                       err, errcap);
     // Thought and call blocks BOTH open with '<', so they cannot be two
     // alternatives of a union -- pick_alt would resolve on that byte and the
     // second would be unreachable. One ENUM discriminates them instead, and
@@ -1937,7 +1964,7 @@ snode *schema_compile_gemma4_turn(jv *tools, bool allow_final,
     if (!disc->lits[0] || !disc->lits[1]) goto oom;
     thought = atem_seq(2);
     snode *after = thought ? g4_body(tools, allow_final, only_tool,
-                                     final_schema, err, errcap) : NULL;
+                                     final_schema, &budget, err, errcap) : NULL;
     if (!thought || !after ||
         !atem_seq_add(thought, atem_raw("<channel|>")) ||
         !atem_seq_add(thought, after)) {
@@ -1945,7 +1972,7 @@ snode *schema_compile_gemma4_turn(jv *tools, bool allow_final,
         goto oom;
     }
     thought->whitespace_significant = true;
-    call = g4_call(tools, only_tool, false, err, errcap);
+    call = g4_call(tools, only_tool, false, &budget, err, errcap);
     if (!call) goto fail;
     choice->alts[choice->n_alts++] = thought; thought = NULL;
     choice->alts[choice->n_alts++] = call;    call = NULL;
@@ -1977,8 +2004,10 @@ fail:
 snode *schema_compile_gemma4_parallel(jv *tools, const char *only_tool,
                                       char *err, int errcap) {
     snode *root = atem_seq(2);
-    snode *first = g4_call(tools, only_tool, true, err, errcap);
-    snode *second = first ? g4_call(tools, only_tool, true, err, errcap) : NULL;
+    int budget = G4_MAX_EXPANSIONS;
+    snode *first = g4_call(tools, only_tool, true, &budget, err, errcap);
+    snode *second = first ? g4_call(tools, only_tool, true, &budget, err, errcap)
+                          : NULL;
     if (!root || !first || !second) {
         schema_free(first); schema_free(second); schema_free(root);
         if (!err[0]) snprintf(err, errcap,
