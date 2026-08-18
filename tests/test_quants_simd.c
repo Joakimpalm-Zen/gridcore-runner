@@ -592,6 +592,98 @@ static void test_i8_dot(int type, int n) {
     free(row); free(x); free(w); free(xq); free(xr);
 }
 
+// ------------------------------------------------------------ f32 -> f16
+//
+// Both f32_to_f16 implementations (aarch64 fcvt, portable integer math) must
+// be THE correctly-rounded conversion: nearest, ties to even. A block scale or
+// an f16 KV entry that depends on the build's ISA is not reproducible, and
+// llama.cpp rounds ties to even, so a different rule also drifts the files this
+// quantizer writes away from the reference.
+//
+// The reference here is the definition, not a third implementation: search the
+// f16 decode table for the encoding closest to |f|, break ties toward the even
+// encoding. It shares no arithmetic with either path under test.
+static f16_t ref_f32_to_f16(float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    uint32_t sign = (u >> 16) & 0x8000, m32 = u & 0x7FFFFF;
+    if (((u >> 23) & 0xFF) == 0xFF)                       // inf / nan
+        return (f16_t)(m32 ? (sign | 0x7C00 | (m32 >> 13) | 0x0200)
+                           : (sign | 0x7C00));
+    double a = fabs((double)f);
+    if (a >= 65520.0) return (f16_t)(sign | 0x7C00);      // rounds up to inf
+    uint32_t lo = 0, hi = 0x7BFF;                         // monotone in the encoding
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        if ((double)f16_to_f32((f16_t)mid) < a) lo = mid + 1; else hi = mid;
+    }
+    if (lo == 0) return (f16_t)sign;
+    double dhi = (double)f16_to_f32((f16_t)lo) - a;
+    double dlo = a - (double)f16_to_f32((f16_t)(lo - 1));
+    uint32_t pick = dhi < dlo ? lo : dlo < dhi ? lo - 1 : (lo & 1 ? lo - 1 : lo);
+    return (f16_t)(sign | pick);
+}
+
+static void check_f16(float f, const char *what) {
+    f16_t want = ref_f32_to_f16(f);
+    uint32_t bits;
+    memcpy(&bits, &f, 4);
+    CHECK(f32_to_f16(f) == want, "f32_to_f16(%s %a / %08x) = %04x, want %04x",
+          what, (double)f, bits, f32_to_f16(f), want);
+    CHECK(f32_to_f16_soft(f) == want,
+          "f32_to_f16_soft(%s %a / %08x) = %04x, want %04x",
+          what, (double)f, bits, f32_to_f16_soft(f), want);
+}
+
+static void test_f32_to_f16(void) {
+    // every f16 value must survive the round trip unchanged
+    for (uint32_t h = 0; h < 65536; h++) {
+        float f = f16_to_f32((f16_t)h);
+        if (isnan(f) || isinf(f)) continue;
+        f16_t got = f32_to_f16(f);
+        CHECK(got == (f16_t)h || (f == 0.0f && (got & 0x7FFF) == 0),
+              "round trip f16 %04x -> %a -> %04x", h, (double)f, got);
+        if (g_fail > 20) return;
+    }
+    // the exact midpoint between neighbouring f16 values, and the two f32
+    // neighbours of that midpoint: this is the whole tie-breaking surface, and
+    // 0x1p-25 (the tie between zero and the smallest subnormal) is in it
+    for (uint32_t h = 0; h < 0x7BFF; h++) {
+        double lo = f16_to_f32((f16_t)h), hi = f16_to_f32((f16_t)(h + 1));
+        float mid = (float)((lo + hi) / 2);
+        if ((double)mid * 2.0 != lo + hi) continue;   // not exactly representable
+        uint32_t b;
+        memcpy(&b, &mid, 4);
+        for (int k = -1; k <= 1; k++) {
+            uint32_t bk = b + (uint32_t)k;
+            float f;
+            memcpy(&f, &bk, 4);
+            check_f16(f, "tie");
+            memcpy(&f, &bk, 4);
+            f = -f;
+            check_f16(f, "-tie");
+        }
+        if (g_fail > 20) return;
+    }
+    // the boundaries where the format changes shape
+    static const float edge[] = {
+        0.0f, -0.0f, 6.09755516e-05f, 6.10351562e-05f,   // subnormal <-> normal
+        5.96046448e-08f, 2.98023224e-08f,                // 2^-24, 2^-25
+        65504.0f, 65519.0f, 65520.0f, 65536.0f, -65520.0f,
+        1.0f, -1.0f, 1e-30f, 1e30f, 3.4028235e38f,
+    };
+    for (size_t i = 0; i < sizeof(edge) / sizeof(edge[0]); i++)
+        check_f16(edge[i], "edge");
+    // a wide random sweep over the whole 32-bit pattern space
+    for (int i = 0; i < 400000; i++) {
+        uint32_t b = rnd32();
+        float f;
+        memcpy(&f, &b, 4);
+        check_f16(f, "random");
+        if (g_fail > 20) return;
+    }
+}
+
 static void test_multi(void) {
     // nb=7 exercises the 4-column block and the remainder; odd stride and
     // n not a multiple of the vector width exercise the tails
@@ -665,6 +757,7 @@ int main(void) {
     test_dequant(T_IQ1_M, 4096);
     test_q8_kv(512);
     test_multi();
+    test_f32_to_f16();
 
     test_i8_quant_act();
     // The fused int8 route: promoted formats at a full row and at one block,
