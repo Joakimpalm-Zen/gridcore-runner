@@ -277,7 +277,13 @@ static bool metal_ensure_batch(gpu_t *g, model_t *m, int n) {
     id<MTLBuffer> x      = new_f32_scratch(g->dev, nb * (size_t)m->n_embd);
     id<MTLBuffer> xb     = new_f32_scratch(g->dev, nb * (size_t)xdim);
     id<MTLBuffer> xb2    = new_f32_scratch(g->dev, nb * (size_t)xdim);
-    id<MTLBuffer> q      = new_f32_scratch(g->dev, nb * (size_t)q_dim);
+    // xdim, not q_dim: the gemma-4 MoE branch reuses q as its routed-branch
+    // scratch and writes n_embd floats at offset 0 (enc_gemma_moe_ffn), and
+    // gemma geometries decouple head_dim from n_embd in the direction that
+    // makes q the SMALLER of the two -- gemma-3-4b is n_embd 2560 against
+    // n_head 8 x head_dim 256 = 2048. At decode (nb == 1) the difference is
+    // written straight past the end of the buffer.
+    id<MTLBuffer> q      = new_f32_scratch(g->dev, nb * (size_t)xdim);
     id<MTLBuffer> kt     = new_f32_scratch(g->dev, nb * (size_t)kv_dim);
     id<MTLBuffer> vt     = new_f32_scratch(g->dev, nb * (size_t)kv_dim);
     id<MTLBuffer> hb     = new_f32_scratch(g->dev, nb * (size_t)m->n_ff);
