@@ -1557,19 +1557,34 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                        ? ((const uint8_t *)swa_arr->arr_raw)[i] != 0 : false;
             m->l_is_swa[i]   = swa && m->swa_window > 0;
             m->l_head_dim[i] = swa ? hd_swa : m->head_dim;
-            m->l_rope_dim[i] = swa ? m->rope_dim_local : m->rope_dim;
+            // The rotated-dim count must come from the SAME choice that picks
+            // the frequency table: rope_apply reads rope_inv_freq_local only
+            // for a layer model_is_swa() says is sliding, and that predicate
+            // is window-gated. Selecting on the raw pattern bit instead would
+            // pair the local dim count with the global table on a file that
+            // declares a sliding pattern and no window.
+            m->l_rope_dim[i] = m->l_is_swa[i] ? m->rope_dim_local : m->rope_dim;
             m->l_head_kv[i]  = kv_arr && kv_arr->arr_raw && (uint64_t)i < kv_arr->arr_n
                                ? (int)((const uint32_t *)kv_arr->arr_raw)[i] : m->n_head_kv;
-            // Per-layer kv-head / head-dim come from untrusted per-layer arrays
-            // and feed the same attention divisors as the scalar path (kv_dim /
-            // hd and n_head / n_head_kv). A zero or non-dividing value would
-            // divide-by-zero on the first token — reject at load instead.
+            // Per-layer kv-head / head-dim / rope-dim come from untrusted
+            // per-layer keys and feed the same attention divisors and index
+            // arithmetic as the scalar path (kv_dim / hd, n_head / n_head_kv,
+            // and the pair index inside a head). A zero or non-dividing value
+            // would divide-by-zero on the first token; rope rotates
+            // rope_dim/2 PAIRS inside each head, so a rope dim wider than the
+            // head runs off the end of the last head's q/k row (the scalar
+            // gate below bounds rope_dim against head_dim, but never saw
+            // rope.dimension_count_swa against key_length_swa) — reject at
+            // load instead.
             if (m->l_head_dim[i] < 1 || m->l_head_kv[i] < 1 ||
                 m->n_head < 1 || m->l_head_kv[i] > m->n_head ||
-                m->n_head % m->l_head_kv[i] != 0) {
+                m->n_head % m->l_head_kv[i] != 0 ||
+                m->l_rope_dim[i] < 0 || m->l_rope_dim[i] > m->l_head_dim[i]) {
                 fprintf(stderr, "error: invalid gemma4 per-layer geometry at "
-                        "blk.%d (head_dim=%d head_count_kv=%d, n_head=%d)\n",
-                        i, m->l_head_dim[i], m->l_head_kv[i], m->n_head);
+                        "blk.%d (head_dim=%d head_count_kv=%d rope_dim=%d, "
+                        "n_head=%d)\n",
+                        i, m->l_head_dim[i], m->l_head_kv[i], m->l_rope_dim[i],
+                        m->n_head);
                 return false;
             }
         }
