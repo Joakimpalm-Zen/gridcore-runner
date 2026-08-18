@@ -480,3 +480,47 @@ def test_unload_rejects_get_so_a_web_page_cannot_free_the_model():
         with urllib.request.urlopen(srv.base_url + "/unload", data=b"",
                                     timeout=5) as r:
             assert json.load(r) == {"status": "ok"}
+
+
+def _prefix_cache(base_url):
+    with urllib.request.urlopen(base_url + "/v1/runner/prefix-cache",
+                                timeout=5) as r:
+        return json.load(r)
+
+
+def test_keep_alive_zero_releases_what_unload_releases():
+    """`keep_alive: 0` is "unload now", so it must give back the same memory.
+
+    POST /unload frees the draft and the resident model AND drops the KV
+    prefix snapshots, because a snapshot outliving its model is memory nobody
+    asked to keep. The keep_alive path did only the middle one: the model went
+    away and the shared prefix cache -- up to RUNNER_PREFIX_CACHE_MB, 512 MB by
+    default -- stayed resident until something else evicted it. An operator
+    reclaiming memory through the request body got a fraction of what the same
+    operator got through /unload.
+    """
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))
+    long_prompt = "prefix cache filler sentence number %d. " * 8
+    with RunnerServer(find_runner(root), model, ctx=1024, parallel=1,
+                      extra_args=["--gpu", "off"]) as srv:
+        body = json.dumps({
+            "messages": [{"role": "user",
+                          "content": long_prompt % tuple(range(8))}],
+            "max_tokens": 4, "temperature": 0}).encode()
+        req = urllib.request.Request(srv.base_url + "/v1/chat/completions",
+                                     data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            json.load(r)
+        before = _prefix_cache(srv.base_url)
+        assert before["entries"] >= 1 and before["bytes"] > 0, before
+
+        _chat(srv.base_url, keep_alive=0)
+
+        with urllib.request.urlopen(srv.base_url + "/v1/capabilities",
+                                    timeout=5) as r:
+            caps = json.load(r)
+        assert caps["resident"] is None and caps["context"] == 0, caps
+        after = _prefix_cache(srv.base_url)
+        assert after["entries"] == 0 and after["bytes"] == 0, after

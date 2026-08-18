@@ -943,10 +943,22 @@ static void handle_conn(slot_t *s, sock_t fd) {
                 else if (strcmp(path, "/v1/embeddings") == 0) handle_embeddings(s, fd, req);
                 else handle_completion(s, fd, req);
                 // Ollama-style keep_alive: seconds of idle before the model
-                // unloads (swap mode) — 0 unloads now, negative pins forever
+                // unloads (swap mode) — 0 unloads now, negative pins forever.
+                //
+                // 0 records the wish rather than acting on it, so it is
+                // honoured by the ONE piece of code that knows what "unload
+                // now" costs -- the safe-point block below, which is also what
+                // POST /unload defers to. Calling unload_resident() here was a
+                // second, shorter copy of that: it freed the model and left the
+                // draft loaded and every KV prefix snapshot resident (up to
+                // RUNNER_PREFIX_CACHE_MB, 512 MB by default), so the same
+                // operator got different amounts of memory back depending on
+                // which spelling they used. It also ran with this request still
+                // counted active, which is the state the safe point exists to
+                // wait out.
                 if (has_keep_alive && SV.n_reg > 0) {
                     pthread_mutex_lock(&SV.swap_mu);
-                    if (keep_alive == 0) unload_resident();
+                    if (keep_alive == 0) SV.pending_unload = true;
                     else SV.ttl = keep_alive < 0 ? 0 : keep_alive;
                     pthread_mutex_unlock(&SV.swap_mu);
                 }
