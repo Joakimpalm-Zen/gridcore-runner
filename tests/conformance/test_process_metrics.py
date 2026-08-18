@@ -75,3 +75,33 @@ def test_health_does_not_count_itself(client):
     assert b["tokens_generated"] == a["tokens_generated"]
     assert b["tokens_prompt"] == a["tokens_prompt"]
     assert b["generate_seconds"] == a["generate_seconds"]
+
+
+def test_batch_counters_report_the_work_the_scheduler_did(client):
+    """How much batching actually happened, in the same raw-counter form.
+
+    The scheduler counts microbatch steps and the sequences cut into them. That
+    pair is the only wire-visible answer to "is continuous batching earning its
+    thread on this box": `batch_sequences / batch_steps` is the mean batch size
+    over any window a dashboard cares to difference, and a single-slot or
+    non-batched server reports a flat zero rather than a misleading one.
+
+    Kept raw for the same reason `generate_seconds` is: the ratio needs a
+    window, and the runner has no business choosing one.
+    """
+    before = health(client)
+    for key in ("batch_steps", "batch_sequences"):
+        assert key in before, (key, before)
+        assert before[key] >= 0, (key, before[key])
+
+    body = {"model": "test",
+            "messages": [{"role": "user", "content": "count to three"}],
+            "temperature": 0, "max_tokens": 8, "cache_prompt": False}
+    client.chat(body, name="batch-metrics-chat").expect_status(200)
+    after = health(client)
+
+    # this suite's server runs two slots, so batching is on (the banner says
+    # "continuous batching") and a generation must move the step counter
+    assert after["batch_steps"] > before["batch_steps"], (before, after)
+    # every step batches at least the one sequence that woke it
+    assert after["batch_sequences"] >= after["batch_steps"], after

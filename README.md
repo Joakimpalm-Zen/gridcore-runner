@@ -593,7 +593,7 @@ non-loopback authorities.
 | `GET /v1/capabilities` | Active model, sampling preset, and optional Xyntetik agent profile. |
 | `GET /v1/runner/prefix-cache` | Prefix-cache size, limits, and counters. |
 | `POST /v1/runner/prefix-cache/clear` | Release cached prefixes without unloading the model. |
-| `GET /health` | Server and resident-model health, plus this process's `rss_bytes`/`peak_rss_bytes` and cumulative `tokens_prompt`, `tokens_generated` and `generate_seconds`. |
+| `GET /health` | Server and resident-model health, plus this process's `rss_bytes`/`peak_rss_bytes` and cumulative `tokens_prompt`, `tokens_generated`, `generate_seconds`, `batch_steps` and `batch_sequences`. |
 | `POST /unload` | Release resident model and draft memory; the next request reloads on demand. |
 
 `GET /unload` is deliberately refused with `405`; unloading is a state change.
@@ -1006,7 +1006,10 @@ cache, activations and allocator overhead together — which is the number a
 machine is sized against and which no per-mapping measure accounts for;
 `peak_rss_bytes` is its high-water mark. `tokens_prompt`, `tokens_generated`
 and `generate_seconds` are cumulative monotonic totals across every API
-surface.
+surface. `batch_steps` and `batch_sequences` count the scheduler's microbatch
+steps and the sequences cut into them, so `batch_sequences / batch_steps` is
+the mean batch size over your own window; both stay `0` on a server that never
+started continuous batching (a single slot, or swap mode).
 
 Those are deliberately raw counters rather than a tokens-per-second field: a
 rate needs an averaging window, and the runner has no business choosing one for

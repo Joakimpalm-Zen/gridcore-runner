@@ -126,6 +126,17 @@ static void dev_give(void) {
 
 bool sched_on(void) { return SCH.running; }
 
+void sched_batch_totals(unsigned long long *steps, unsigned long long *seqs) {
+    // relaxed: these are counters for a dashboard, not a synchronisation edge,
+    // and the two are read one after the other by definition
+    if (steps)
+        *steps = (unsigned long long)atomic_load_explicit(&SCH.steps,
+                                                          memory_order_relaxed);
+    if (seqs)
+        *seqs = (unsigned long long)atomic_load_explicit(&SCH.seqs_batched,
+                                                         memory_order_relaxed);
+}
+
 // Absolute deadline for pthread_cond_timedwait, which measures against
 // CLOCK_REALTIME — deliberately not now_s(), which is monotonic.
 static void ts_in(struct timespec *ts, double secs) {

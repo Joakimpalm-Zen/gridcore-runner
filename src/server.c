@@ -93,7 +93,13 @@ static bool message_has_text(const jv *content) {
     return false;
 }
 
-static char *message_text(jv *msg, int tmpl) {
+// *oom separates the two NULLs this can return. A message that carries nothing
+// renderable is skipped by the caller, which is right; a message whose text
+// could not be ASSEMBLED used to take the same exit, so an allocation failure
+// dropped a turn out of the conversation and the request still answered 200.
+// The model then answers a different question than the one it was asked, and
+// nothing in the response says so.
+static char *message_text(jv *msg, int tmpl, bool *oom) {
     jv *content = jv_get(msg, "content");
     bool has_text = message_has_text(content);
     sbuf b = {0};
@@ -156,6 +162,7 @@ static char *message_text(jv *msg, int tmpl) {
         free(b.s);
         b = wrapped;
     }
+    if (b.failed) { free(b.s); *oom = true; return NULL; }
     return b.s;
 }
 
@@ -275,6 +282,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
                        (s->tmpl == TMPL_MUSE && env.atem) ||
                        s->tmpl == TMPL_HARMONY;
     sbuf ts = {0};
+    bool oom = false;
     if (strict && !native_decl)
         sb_put(&ts, env.system_turn, strlen(env.system_turn));
     else if (!native_decl && s->tmpl != TMPL_MUSE)
@@ -282,13 +290,22 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     bool ornith_merged_system = false;
     if (s->tmpl == TMPL_ORNITH && ts.n && msgs->n > 0 &&
         !strcmp(jv_str(jv_get(msgs->items[0], "role"), ""), "system")) {
-        char *system = message_text(msgs->items[0], s->tmpl);
+        char *system = message_text(msgs->items[0], s->tmpl, &oom);
         if (system && system[0]) {
             sb_lit(&ts, "\n\n");
             sb_put(&ts, system, strlen(system));
         }
         free(system);
         ornith_merged_system = true;
+    }
+    // The tool turn is content too. A builder that ran out here left `ts`
+    // short or empty and the prompt went out without the declarations the
+    // caller sent -- the model is then asked to call tools it was never shown.
+    if (ts.failed || oom) {
+        free(ts.s);
+        tool_envelope_free(&env);
+        send_error(fd, 500, "out of memory building chat prompt");
+        return;
     }
     size_t cm_cap = (size_t)msgs->n + 1;
     if (s->tmpl == TMPL_HARMONY) {
@@ -367,7 +384,8 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
                                         .channel = "analysis" };
                 total += strlen(reason) + 64;
             }
-            char *visible = message_text(msgs->items[i], s->tmpl);
+            char *visible = message_text(msgs->items[i], s->tmpl, &oom);
+            if (oom) break;
             jv *calls = jv_get(msgs->items[i], "tool_calls");
             bool have_calls = calls && calls->type == J_ARR && calls->n;
             if (visible && visible[0]) {
@@ -391,7 +409,8 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
             }
             continue;
         }
-        char *content = message_text(msgs->items[i], s->tmpl);
+        char *content = message_text(msgs->items[i], s->tmpl, &oom);
+        if (oom) break;
         if (!content) continue;
         owned[n_own++] = content;
         if (s->tmpl == TMPL_ORNITH && !strcmp(role, "tool")) role = "user";
@@ -400,12 +419,14 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         };
         total += strlen(role) + strlen(content) + 64;
     }
-    if (n_cm == 0) {
+    if (oom || n_cm == 0) {
+        for (int i = 0; i < n_own; i++) free(owned[i]);
         free(owned);
         free(cm);
         free(ts.s);
         tool_envelope_free(&env);
-        send_error(fd, 400, "no message content");
+        if (oom) send_error(fd, 500, "out of memory building chat prompt");
+        else     send_error(fd, 400, "no message content");
         return;
     }
     // Native templates render the declarations themselves -- muse's JSON
@@ -583,7 +604,7 @@ static void handle_embeddings(slot_t *s, sock_t fd, jv *req) {
 // /health and /v1/models read only startup-immutable strings plus an atomic
 // resident snapshot, so they are safe to answer from the accept thread with no lock
 static void send_health(sock_t fd) {
-    char b[640];
+    char b[1024];
     int n, res = resident_load();
     // Inference requests in flight. "A model is loaded" and "the model is
     // working" look identical from outside the process, and the tray needs to
@@ -600,14 +621,24 @@ static void send_health(sock_t fd) {
     // are monotonic so a dashboard can difference them over its own window.
     unsigned long long wp, wg; double ws;
     server_work_totals(&wp, &wg, &ws);
-    char m[256];
+    // How much of that work was batched. The scheduler already counts its
+    // microbatch steps and the sequences cut into them; batch_sequences over
+    // batch_steps is the mean batch size, and it is the only wire-visible
+    // answer to whether continuous batching is earning its decode thread on
+    // this box. Reported as the same kind of raw monotonic pair as the token
+    // totals, for the same reason: the averaging window belongs to whoever is
+    // asking. Both stay 0 on a server that never started the scheduler.
+    unsigned long long bs = 0, bq = 0;
+    sched_batch_totals(&bs, &bq);
+    char m[384];
     snprintf(m, sizeof(m),
              ",\"rss_bytes\":%llu,\"peak_rss_bytes\":%llu,"
              "\"tokens_prompt\":%llu,\"tokens_generated\":%llu,"
-             "\"generate_seconds\":%.6f",
+             "\"generate_seconds\":%.6f,"
+             "\"batch_steps\":%llu,\"batch_sequences\":%llu",
              (unsigned long long)plat_proc_rss_bytes(),
              (unsigned long long)plat_proc_peak_rss_bytes(),
-             wp, wg, ws);
+             wp, wg, ws, bs, bq);
 
     if (SV.n_reg > 0 && res >= 0) {
         char esc[192];

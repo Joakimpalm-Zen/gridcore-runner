@@ -12,6 +12,12 @@
 
 // Is batching running at all? A single-slot server never starts it.
 bool sched_on(void);
+// Cumulative microbatch steps and the sequences cut into them, monotonic for
+// the life of the process. The ratio is the mean batch size, which is the only
+// answer to "is batching earning its thread here" -- but the window belongs to
+// whoever is asking, so this reports the two totals and not a rate. Zero on a
+// server that never started the scheduler.
+void sched_batch_totals(unsigned long long *steps, unsigned long long *seqs);
 // Start / tear down the decode thread. sched_start allocates every buffer the
 // worker will need, so the worker itself can never fail (RNR-005).
 bool sched_start(void);
