@@ -430,7 +430,10 @@ is implemented on that backend.
 **Metal:** Apple Silicon uses zero-copy mapped weights and unified-memory KV.
 Metal supports f16 and q8 KV, dense and selected MoE layouts, and tiled prefill
 GEMMs. Metal is all-or-nothing rather than layer-split; a file above
-`gpu.max_working_set_bytes` in `--caps` falls back to CPU. The embedded shader
+`gpu.max_working_set_bytes` in `--caps` falls back to CPU. Multi-part (split)
+GGUF sets also run on the CPU: the zero-copy wrap addresses one mapping and a
+split set has one per part, so the backend declines the model at load rather
+than binding weights it cannot place. The embedded shader
 gate compiles the library and verifies all 52 backend-referenced kernels.
 
 **CUDA:** Linux and Windows use the dynamically loaded driver API and embedded

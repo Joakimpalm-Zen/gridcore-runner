@@ -910,6 +910,48 @@ else
 	@echo "metal decode-only smoke skipped: macOS-only backend"
 endif
 
+# A split GGUF is mapped one region PER PART, and gguf.h is explicit that
+# `map`/`map_size` describe the FIRST part only. Every weight binding in
+# metal.m is a byte offset into that one mapping, and the zero-copy wrap covers
+# one contiguous range, so a tensor living in part two onwards has an offset
+# this backend cannot resolve. It used to notice at dispatch time, print
+# "results from this model are not trustworthy", bind buffer 0 anyway and
+# compute — on a real multi-GB split the bound bytes are somebody else's.
+#
+# The gate is that the refusal happens at LOAD and the run lands on the CPU.
+# The single-file control in the same target is what stops the refusal from
+# quietly widening to every model.
+test-metal-split: runner
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		mkdir -p test-gguf-split; \
+		$(PYTHON) scripts/make-test-model.py test-gguf-split/whole.gguf; \
+		$(PYTHON) scripts/gguf-split.py test-gguf-split/whole.gguf test-gguf-split/part 3; \
+		part=test-gguf-split/part-00001-of-00003.gguf; \
+		./$(RUNNER_EXE) -m $$part -p "hello" -n 12 --temp 0 --gpu off > metal-split-cpu.out 2>/dev/null; \
+		./$(RUNNER_EXE) -m $$part -p "hello" -n 12 --temp 0 --gpu auto > metal-split-gpu.out 2> metal-split-gpu.err; \
+		if grep -q "not trustworthy" metal-split-gpu.err; then \
+			echo "FAIL: the backend addressed weights it has not wrapped and computed anyway"; \
+			cat metal-split-gpu.err; exit 1; fi; \
+		grep -q "split GGUF" metal-split-gpu.err || { \
+			echo "FAIL: a split GGUF was accepted by the Metal backend without a refusal"; \
+			cat metal-split-gpu.err; exit 1; }; \
+		cmp -s metal-split-cpu.out metal-split-gpu.out || { \
+			echo "FAIL: the CPU fallback for a split GGUF does not match --gpu off"; exit 1; }; \
+		./$(RUNNER_EXE) -m test-gguf-split/whole.gguf -p "hello" -n 12 --temp 0 --gpu auto \
+			> metal-split-whole.out 2> metal-split-whole.err; \
+		grep -q "Metal backend" metal-split-whole.err || { \
+			echo "FAIL: the refusal also caught the single-file model"; \
+			cat metal-split-whole.err; exit 1; }; \
+		echo "metal split GGUF ok (refused at load, ran on the CPU; single file still offloads)"; \
+	else \
+		echo "metal split GGUF smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal split GGUF smoke skipped: macOS-only backend"
+endif
+
 test-metal-kv-q8: runner $(TEST_KV_TOL)
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
@@ -1193,6 +1235,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(MAKE) --no-print-directory test-metal-shader-gate
 	$(MAKE) --no-print-directory test-metal-kquant
 	$(MAKE) --no-print-directory test-metal-decode-only
+	$(MAKE) --no-print-directory test-metal-split
 	$(MAKE) --no-print-directory test-metal-multibuf
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
@@ -1393,6 +1436,8 @@ clean:
 	rm -f metal-init-fallback.out metal-init-fallback.err
 	rm -f metal-prefill-loop.out metal-prefill-native.out metal-prefill-native.err
 	rm -f metal-decode1-cpu.out metal-decode1-gpu.out metal-decode1-gpu.err
+	rm -f metal-split-cpu.out metal-split-gpu.out metal-split-gpu.err
+	rm -f metal-split-whole.out metal-split-whole.err
 	rm -f metal-kv-q8.err metal-moe-dense.out metal-moe1.out metal-moe1.err
 	rm -f metal-moe2.out metal-moe2.err
 	rm -f metal-gptoss-moe-cpu.out metal-gptoss-moe-gpu.out metal-gptoss-moe-gpu.err
@@ -1442,4 +1487,4 @@ test-makefile-sane:
 
 
 .PHONY: template-conformance template-conformance-refresh template-conformance-baseline template-conformance-harmony-oracle
-.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
+.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-split test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race

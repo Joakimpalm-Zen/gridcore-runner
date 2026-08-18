@@ -889,6 +889,19 @@ static int metal_fit_layers(model_t *m, uint64_t budget, int cap,
 }
 
 bool gpu_init(model_t *m) {
+    if (m->gf.n_maps > 1) {
+        // Every weight binding below is a byte offset into m->gf.map, and that
+        // is the FIRST part's mapping only (gguf.h says so). A tensor in part
+        // two onwards sits at an offset no wrap here can resolve, and a
+        // zero-copy wrap covers one contiguous range by construction. Until
+        // the bindings are keyed by host address instead of file offset, this
+        // has to fail closed: metal_bind_weights() otherwise reports that it
+        // cannot place the range, binds buffer 0 anyway and computes on
+        // whatever those bytes happen to be.
+        fprintf(stderr, "gpu: split GGUF (%u parts) is not on the metal "
+                "backend yet — using CPU\n", m->gf.n_maps);
+        return false;
+    }
     if (m->qwen35) {
         fprintf(stderr, "gpu: qwen35 hybrid path is not on the metal backend yet — using CPU\n");
         return false;
