@@ -139,11 +139,15 @@ void sched_batch_totals(unsigned long long *steps, unsigned long long *seqs) {
 
 // Absolute deadline for pthread_cond_timedwait, which measures against
 // CLOCK_REALTIME — deliberately not now_s(), which is monotonic.
+// long long, not long: `long` is 32 bits on the Windows build, and this sum
+// starts at up to 1e9 from tv_nsec, so a caller asking for ~1.15 s or more
+// wrapped to a negative nanosecond count and produced a deadline in the PAST —
+// a timedwait that returns instantly, forever. No caller asks for that today.
 static void ts_in(struct timespec *ts, double secs) {
     timespec_get(ts, TIME_UTC);
-    long ns = ts->tv_nsec + (long)(secs * 1e9);
-    ts->tv_sec  += ns / 1000000000L;
-    ts->tv_nsec  = ns % 1000000000L;
+    long long ns = (long long)ts->tv_nsec + (long long)(secs * 1e9);
+    ts->tv_sec  += (time_t)(ns / 1000000000LL);
+    ts->tv_nsec  = (long)(ns % 1000000000LL);
 }
 
 static void *decode_worker(void *unused) {

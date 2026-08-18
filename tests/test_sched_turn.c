@@ -47,7 +47,43 @@ static void *waiter(void *unused) {
     return NULL;
 }
 
+// ts_in builds the absolute CLOCK_REALTIME deadline every timedwait in this
+// file uses. It accumulated the nanoseconds in a `long`, which is 32 bits on
+// the Windows build the CI matrix covers: 2.147e9 ns of headroom against a sum
+// that already starts at up to 1e9 from tv_nsec. A caller asking for ~1.15 s
+// or more wrapped to a NEGATIVE nanosecond count, and the deadline landed in
+// the past — a "wait" that returns instantly, every time, forever.
+//
+// No caller does that today (SCHED_GATHER_S is 2 ms and the other is 0.5 s),
+// which is exactly why this is worth pinning: nothing would report it, and the
+// next timeout somebody adds is the one that finds out.
+static int test_ts_in_deadlines(void) {
+    static const double waits[] = { 0.002, 0.5, 1.147, 3.0, 60.0, 3600.0 };
+    for (size_t i = 0; i < sizeof waits / sizeof *waits; i++) {
+        struct timespec now, ts;
+        timespec_get(&now, TIME_UTC);
+        ts_in(&ts, waits[i]);
+        if (ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000L) {
+            fprintf(stderr, "FAIL: ts_in(%.3f) produced tv_nsec %ld\n",
+                    waits[i], (long)ts.tv_nsec);
+            return 1;
+        }
+        double delta = (double)(ts.tv_sec - now.tv_sec) +
+                       (double)(ts.tv_nsec - now.tv_nsec) * 1e-9;
+        // generous: the point is "in the future by about what was asked for",
+        // not a clock-accuracy measurement
+        if (delta < waits[i] - 0.5 || delta > waits[i] + 0.5) {
+            fprintf(stderr, "FAIL: ts_in(%.3f) is %.3f s away\n",
+                    waits[i], delta);
+            return 1;
+        }
+    }
+    puts("ok: ts_in deadlines land in the future for every wait length");
+    return 0;
+}
+
 int main(void) {
+    if (test_ts_in_deadlines()) return 1;
     if (pthread_mutex_init(&SCH.dev_mu, NULL) != 0) return 77;
     if (pthread_cond_init(&SCH.dev_cv, NULL) != 0) return 77;
     SCH.dev_next = SCH.dev_serving = 0;
