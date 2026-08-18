@@ -503,6 +503,106 @@ static void test_schema_type_array_with_open_object(void) {
     jv_free(schema_json);
 }
 
+// "Truncated output still parses" is a correctness gate (CONTRIBUTING.md) and
+// every test of it picks a truncation point by hand. This picks them by
+// walking only the bytes the validator still admits -- documents a constrained
+// model could actually have reached -- stopping at a random one and requiring
+// the force-closed result to be a valid instance of the schema it was
+// generated under, by the validator AND by the parser. Deterministic: one
+// fixed seed, so a failure is reproducible rather than a flake.
+//
+// THREE shapes are deliberately outside it, each a known defect recorded in
+// the review rather than papered over in the machine: the walk never spells an
+// exponent (one that overflows to infinity, or that leaves a bounded value out
+// of range, is a live prefix with no valid completion), and no schema here is a
+// homogeneous map (its synthesized closing key can collide with one the model
+// already used).
+static unsigned long walk_rnd(void) {
+    static unsigned long s = 0x9E3779B97F4A7C15UL;
+    s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+    return s;
+}
+
+static void test_truncation_closes_to_a_valid_instance(void) {
+    static const char *const schemas[] = {
+        "{\"type\":\"object\",\"properties\":{"
+            "\"a\":{\"type\":\"string\",\"maxLength\":4},"
+            "\"b\":{\"type\":\"number\"},"
+            "\"c\":{\"type\":\"array\",\"items\":{\"type\":\"integer\","
+                   "\"minimum\":2,\"maximum\":77},\"minItems\":1,"
+                   "\"maxItems\":3},"
+            "\"d\":{\"enum\":[\"x\",\"yy\",\"yyy\"]},"
+            "\"g\":{\"type\":\"object\"},"
+            "\"h\":{\"type\":\"string\",\"pattern\":\"^id-[0-9]{2,4}$\"}},"
+        "\"required\":[\"a\",\"b\",\"c\",\"d\",\"g\",\"h\"]}",
+        "{\"type\":\"object\",\"properties\":{"
+            "\"a\":{\"type\":\"string\",\"minLength\":3},"
+            "\"o\":{\"type\":\"object\",\"properties\":{"
+                "\"n\":{\"type\":\"integer\",\"minimum\":5}},"
+                "\"required\":[\"n\"]}},"
+        "\"required\":[\"a\"]}",
+        "{\"type\":\"object\",\"properties\":{"
+            "\"p\":{\"type\":\"string\",\"pattern\":\"^[A-Z]{3}[0-9]{4}$\"},"
+            "\"u\":{\"type\":[\"string\",\"null\"]},"
+            "\"q\":{\"type\":\"array\",\"items\":{\"type\":\"array\","
+                   "\"items\":{\"type\":\"boolean\"},\"minItems\":2},"
+                   "\"minItems\":2,\"maxItems\":2}},"
+        "\"required\":[\"p\",\"u\",\"q\"]}",
+    };
+    int closed = 0;
+    for (size_t s = 0; s < sizeof(schemas) / sizeof(*schemas); s++) {
+        jv *schema_json = json_parse(schemas[s], strlen(schemas[s]));
+        assert(schema_json != NULL);
+        char err[192];
+        snode *schema = schema_compile(schema_json, err, sizeof(err));
+        if (!schema) fprintf(stderr, "walk schema %zu: %s\n", s, err);
+        assert(schema != NULL);
+        for (int iter = 0; iter < 200; iter++) {
+            sval v; sval_init(&v, schema);
+            char doc[1024];
+            int n = 0;
+            int steps = (int)(walk_rnd() % 70);
+            for (int k = 0; k < steps && n < 600; k++) {
+                // ASCII only: the validator is a byte machine and takes raw
+                // UTF-8 bytes inside a string, json_parse checks them
+                unsigned char legal[128];
+                int nl = 0;
+                for (int c = 1; c < 0x80; c++) {
+                    if (c == 'e' || c == 'E') continue;   // see the note above
+                    char b = (char)c;
+                    sval t;
+                    if (sval_trial(&v, &t, &b, 1)) legal[nl++] = (unsigned char)c;
+                }
+                if (!nl) break;
+                char b = (char)legal[walk_rnd() % (unsigned)nl];
+                assert(sval_feed(&v, &b, 1));   // a legal byte must be accepted
+                doc[n++] = b;
+                if (v.done) break;
+            }
+            if (v.done) continue;
+            char tail[512];
+            int tn = sval_close(&v, tail, sizeof(tail));
+            if (tn <= 0) continue;              // nothing was started
+            assert(n + tn < (int)sizeof(doc));
+            memcpy(doc + n, tail, (size_t)tn);
+            n += tn;
+            doc[n] = 0;
+            closed++;
+            sval chk; sval_init(&chk, schema);
+            if (!sval_feed(&chk, doc, n) || !chk.done)
+                fprintf(stderr, "closed document not a valid instance: %s\n", doc);
+            assert(sval_feed(&chk, "", 0) && chk.done);
+            jv *parsed = json_parse(doc, (size_t)n);
+            if (!parsed) fprintf(stderr, "closed document is not JSON: %s\n", doc);
+            assert(parsed != NULL);
+            jv_free(parsed);
+        }
+        schema_free(schema);
+        jv_free(schema_json);
+    }
+    assert(closed > 100);   // the walk actually reached truncation points
+}
+
 // A keyword the compiler DOES implement, written with the wrong JSON type, is
 // the same failure wearing a different hat: reinterpreting it silently
 // enforces something other than what was declared, and the two below both
@@ -1846,6 +1946,7 @@ int main(void) {
     test_schema_rejects_unenforceable_keywords();
     test_schema_rejects_misspelled_keyword_types();
     test_schema_type_array_with_open_object();
+    test_truncation_closes_to_a_valid_instance();
     test_schema_bounded_repetition();
     test_schema_multi_segment_pattern();
     test_schema_agent_id_pattern_is_enforced();

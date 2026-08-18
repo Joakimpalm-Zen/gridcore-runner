@@ -1384,8 +1384,7 @@ static void test_harmony_truncation_pairs_the_name_it_emits(void) {
         "<|channel|>analysi",
         "<|channel|>commentary to=functions.",       // no tool name yet
         "<|channel|>commentary to=functions.a",      // only "add" survives
-        "<|channel|>commentary to=functions.get_weather<|constrain|>json"
-            "<|message|>{",
+        "<|channel|>commentary to=functions.get_weather<|constrain|>json<|message|>{",
     };
     for (size_t i = 0; i < sizeof(cuts) / sizeof(*cuts); i++) {
         sval v;
@@ -1798,6 +1797,78 @@ static void test_gemma4_nested_arrays_are_bounded_not_expanded(void) {
     jv_free(ordinary);
 }
 
+// The same truncation property as tests/test_json_schema.c states for plain
+// schemas, over the NATIVE grammars: walk only the bytes the validator still
+// admits, stop at a random one, and require the force-closed turn to be one
+// the same validator reads back to completion. Hand-picked truncation points
+// test what someone thought of; this reaches the ones nobody did -- it is what
+// turned up the wrong-tool's-arguments pair above. Deterministic seed.
+static unsigned long turn_rnd(void) {
+    static unsigned long s = 0xDEADBEEF12345UL;
+    s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+    return s;
+}
+
+static void test_native_truncation_closes_to_a_legal_turn(void) {
+    jv *tools = parse(TOOLS);
+    char err[192];
+    struct { const char *name; snode *root; } G[] = {
+        { "atem_tools",  schema_compile_atem_tools(tools, err, sizeof(err)) },
+        { "atem_turn",   schema_compile_atem_turn(tools, true, NULL, NULL,
+                             ATEM_TURN_DIRECT, err, sizeof(err)) },
+        { "harmony",     schema_compile_harmony_turn(tools, true, NULL, NULL,
+                             true, err, sizeof(err)) },
+        { "harmony_req", schema_compile_harmony_turn(tools, false, NULL, NULL,
+                             false, err, sizeof(err)) },
+        { "gemma4",      schema_compile_gemma4_turn(tools, true, NULL, NULL,
+                             true, false, err, sizeof(err)) },
+        { "gemma4_par",  schema_compile_gemma4_parallel(tools, NULL, err,
+                             sizeof(err)) },
+    };
+    int closed = 0;
+    for (size_t g = 0; g < sizeof(G) / sizeof(*G); g++) {
+        if (!G[g].root) fprintf(stderr, "%s did not compile: %s\n", G[g].name, err);
+        assert(G[g].root != NULL);
+        for (int iter = 0; iter < 120; iter++) {
+            sval v;
+            sval_init(&v, G[g].root);
+            char doc[4096];
+            int n = 0;
+            int steps = (int)(turn_rnd() % 90);
+            for (int k = 0; k < steps && n < 1500; k++) {
+                unsigned char legal[128];
+                int nl = 0;
+                for (int c = 1; c < 0x80; c++) {
+                    char b = (char)c;
+                    sval t;
+                    if (sval_trial(&v, &t, &b, 1)) legal[nl++] = (unsigned char)c;
+                }
+                if (!nl) break;
+                char b = (char)legal[turn_rnd() % (unsigned)nl];
+                assert(sval_feed(&v, &b, 1));
+                doc[n++] = b;
+                if (v.done) break;
+            }
+            if (v.done) continue;
+            char tail[2048];
+            int tn = sval_close(&v, tail, sizeof(tail));
+            if (tn <= 0) continue;
+            assert(n + tn < (int)sizeof(doc));
+            memcpy(doc + n, tail, (size_t)tn);
+            n += tn;
+            doc[n] = 0;
+            closed++;
+            if (!accepts(G[g].root, doc))
+                fprintf(stderr, "%s closed turn not re-accepted:\n%s\n",
+                        G[g].name, doc);
+            assert(accepts(G[g].root, doc));
+        }
+        schema_free(G[g].root);
+    }
+    assert(closed > 100);
+    jv_free(tools);
+}
+
 static void test_buffered_mapper_rejects_invalid_arguments(void) {
     tool_envelope e = {0};
     sbuf content = {0}, calls = {0};
@@ -1857,6 +1928,7 @@ int main(void) {
     test_gemma4_structured_arguments_round_trip();
     test_gemma4_untyped_parameter_is_refused_not_guessed();
     test_gemma4_nested_arrays_are_bounded_not_expanded();
+    test_native_truncation_closes_to_a_legal_turn();
     puts("tool envelope tests ok");
     return 0;
 }
