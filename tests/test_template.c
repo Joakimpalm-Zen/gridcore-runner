@@ -1841,6 +1841,39 @@ static void test_gemma4_unconstrained_call_still_yields_json_arguments(void) {
     free(content.s); free(tc.s);
 }
 
+// A marker the generic parser decides is NOT a call must leave the answer
+// exactly as it was. It did not: the scan compacts `content` in place as it
+// goes and publishes the new length only when it found at least one call, so
+// the two "not a call" exits -- a marker in prose, and a call whose arguments
+// were cut off by the token budget -- moved the read cursor past the 17-byte
+// marker without copying it. Every byte after that was written 17 to the left
+// while content->n stayed put, so the reply came back with 17 bytes of its own
+// tail repeated at the end. The truncated case is the realistic one, and the
+// code comment there says "leave as content", which is precisely what it did
+// not do.
+static void test_a_marker_that_is_not_a_call_leaves_content_intact(void) {
+    static const char *const docs[] = {
+        // truncated arguments: no closing brace before the end
+        "before <|tool_call>call:get_weather{\"city\": \"Oslo\" "
+        "and the answer continues past it",
+        // the marker spelled out in prose, with no argument object after it
+        "reply with <|tool_call>call:NAME and the arguments to call a tool, "
+        "which is what the syntax looks like",
+    };
+    for (size_t i = 0; i < sizeof(docs) / sizeof(*docs); i++) {
+        sbuf content = {0}, tc = {0};
+        sb_put(&content, docs[i], strlen(docs[i]));
+        int n = tool_calls_parse(&content, &tc);
+        if (n != 0 || content.n != strlen(docs[i]) ||
+            memcmp(content.s, docs[i], content.n)) {
+            fprintf(stderr, "tool_calls_parse(\"%s\") = %d, content now "
+                    "\"%.*s\"\n", docs[i], n, (int)content.n, content.s);
+            abort();
+        }
+        free(content.s); free(tc.s);
+    }
+}
+
 static void test_ornith_first_call_is_framed_by_whether_the_turn_spoke(void) {
     // ornith.jinja:106-114 — the FIRST call opens with "\n\n" when the turn
     // carried visible text and with nothing when it did not; every later call
@@ -2049,6 +2082,7 @@ int main(void) {
     test_ornith_first_call_is_framed_by_whether_the_turn_spoke();
     test_llama2_bos_per_turn_and_the_fallback_that_must_not_get_it();
     test_gemma4_unconstrained_call_still_yields_json_arguments();
+    test_a_marker_that_is_not_a_call_leaves_content_intact();
     test_gemma4_tool_history_uses_the_reference_argument_syntax();
     test_muse_parallel_tool_history_has_native_turn_boundaries();
     test_muse_tool_history_skips_bad_calls_without_leading_boundary();

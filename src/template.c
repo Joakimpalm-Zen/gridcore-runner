@@ -3372,20 +3372,33 @@ int tool_calls_parse(sbuf *content, sbuf *tc) {
         const char *brace = name;
         while (brace < end && *brace != '{' && *brace != '<' && brace - name < 128)
             brace++;
-        if (brace >= end || *brace != '{') { p = name; continue; } // not a call
         // brace-match the args object (string- and escape-aware)
         const char *q = brace;
         int depth = 0;
         bool in_str = false;
-        for (; q < end; q++) {
-            if (in_str) {
-                if (*q == '\\') q++;
-                else if (*q == '"') in_str = false;
-            } else if (*q == '"') in_str = true;
-            else if (*q == '{') depth++;
-            else if (*q == '}' && --depth == 0) { q++; break; }
+        if (brace < end && *brace == '{') {
+            for (; q < end; q++) {
+                if (in_str) {
+                    if (*q == '\\') q++;
+                    else if (*q == '"') in_str = false;
+                } else if (*q == '"') in_str = true;
+                else if (*q == '{') depth++;
+                else if (*q == '}' && --depth == 0) { q++; break; }
+            }
         }
-        if (depth != 0) { p = name; continue; } // truncated: leave as content
+        // Not a call: the marker stands in ordinary prose, or the token budget
+        // cut the arguments off before their closing brace. Either way the
+        // bytes are content and the MARKER IS PART OF THEM. Skipping it here
+        // moved the read cursor 17 bytes past the write cursor while the scan
+        // publishes a new length only when it found a call, so a document with
+        // no call at all came back at its original length with 17 bytes of its
+        // own tail repeated on the end.
+        if (brace >= end || *brace != '{' || depth != 0) {
+            memmove(w, o, (size_t)(name - o));
+            w += name - o;
+            p = name;
+            continue;
+        }
         sb_fmt(tc, "%s{\"id\":\"call_%d\",\"type\":\"function\",\"function\":"
                    "{\"name\":\"", n_calls ? "," : "", n_calls);
         sb_esc(tc, name, (int)(brace - name));
