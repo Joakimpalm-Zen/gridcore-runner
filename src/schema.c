@@ -2612,10 +2612,26 @@ static int feed_byte(sval *v, uint8_t c) {
             f->lit_pos = pos;
             return 0;
         }
-        int added = pos + (c == (uint8_t)sentinel[0] ? 0 : 1);
+        // The match broke on `c`. What was seen is sentinel[0..pos-1] then c,
+        // and a SHORTER prefix of the sentinel can still end there: feed
+        // `<|end|><|start|>assistant<|channel|>` the bytes `<|end|><|end|>`
+        // and the tenth byte breaks a nine-byte match while leaving `<|e`
+        // live. Falling back to "1 if c starts the sentinel, else 0" steps
+        // over that occurrence entirely, and the raw value then runs past the
+        // terminator every plain search for those bytes would stop at.
+        //
+        // k is the longest prefix of the sentinel that is a suffix of what
+        // was seen; the bytes before it are content. For a sentinel with no
+        // repeated prefix this is exactly the old 1-or-0.
+        int k = pos;
+        while (k > 0 &&
+               !(sentinel[k - 1] == (char)c &&
+                 !memcmp(sentinel, sentinel + pos + 1 - k, (size_t)(k - 1))))
+            k--;
+        int added = pos + 1 - k;
         if (n->max_items >= 0 && f->idx + added > n->max_items) return -1;
         f->idx += added;
-        f->lit_pos = c == (uint8_t)sentinel[0] ? 1 : 0;
+        f->lit_pos = k;
         return 0;
     }
     }

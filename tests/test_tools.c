@@ -1297,6 +1297,18 @@ static void test_harmony_native_turn_constrains_channels_recipients_and_args(voi
     bounded[strlen(open) + 192] = 'x';
     memcpy(bounded + strlen(open) + 193, close, strlen(close) + 1);
     assert(!accepts(root, bounded));
+
+    // The reasoning block ends at the FIRST occurrence of its terminator, and
+    // that terminator begins with `<|end|>` -- so reasoning that itself ends
+    // with `<|end|>` puts the scanner nine bytes into a match that the tenth
+    // byte breaks, with a live three-byte match (`<|e`) left behind it.
+    // Restarting from zero instead steps over the real occurrence entirely,
+    // and the validator then disagrees with every plain search for the same
+    // bytes about where the reasoning stopped.
+    assert(accepts(root,
+        "<|channel|>analysis<|message|>Need arithmetic.<|end|>"
+        "<|end|><|start|>assistant<|channel|>commentary to=functions.add"
+        "<|constrain|>json<|message|>{\"a\":1,\"b\":2}"));
     schema_free(root);
 
     root = schema_compile_harmony_turn(
