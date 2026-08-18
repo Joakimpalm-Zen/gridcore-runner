@@ -32,6 +32,17 @@ static void constraint_reset(engine *e) {
     e->constraint_close_match = 0;
 }
 
+// Admit one stop token by its vocabulary spelling. Silent on a token this
+// model does not have, on a duplicate, and on a full list — each is a reason
+// this spelling contributes nothing, not a reason to fail an engine.
+static void stop_add(engine *e, tokenizer *tok, const char *spelling) {
+    int id = tok_find(tok, spelling);
+    int cap = (int)(sizeof(e->stop_ids) / sizeof(*e->stop_ids));
+    if (id < 0 || e->n_stop >= cap) return;
+    for (int j = 0; j < e->n_stop; j++) if (e->stop_ids[j] == id) return;
+    e->stop_ids[e->n_stop++] = id;
+}
+
 bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     free(e->hist); // slot engines are re-inited on model swap; e must be zeroed
     free(e->cdoc);
@@ -66,23 +77,12 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     bool harmony = strcmp(m->arch, "gpt-oss") == 0;
     for (size_t i = 0; i < sizeof(stops) / sizeof(*stops); i++) {
         if (harmony && !strcmp(stops[i], "<|end|>")) continue;
-        int id = tok_find(tok, stops[i]);
-        if (id < 0 || e->n_stop >= (int)(sizeof(e->stop_ids) / sizeof(*e->stop_ids)))
-            continue;
-        bool dup = false;
-        for (int j = 0; j < e->n_stop; j++) if (e->stop_ids[j] == id) dup = true;
-        if (!dup) e->stop_ids[e->n_stop++] = id;
+        stop_add(e, tok, stops[i]);
     }
     if (harmony) {
         static const char *hstops[] = { "<|return|>", "<|call|>" };
-        for (size_t i = 0; i < sizeof(hstops) / sizeof(*hstops); i++) {
-            int id = tok_find(tok, hstops[i]);
-            if (id < 0 || e->n_stop >= (int)(sizeof(e->stop_ids) / sizeof(*e->stop_ids)))
-                continue;
-            bool dup = false;
-            for (int j = 0; j < e->n_stop; j++) if (e->stop_ids[j] == id) dup = true;
-            if (!dup) e->stop_ids[e->n_stop++] = id;
-        }
+        for (size_t i = 0; i < sizeof(hstops) / sizeof(*hstops); i++)
+            stop_add(e, tok, hstops[i]);
     }
     if (!strcmp(m->arch, "muse-glimmer"))
         e->think_end_id = tok_find(tok, "<|eom|>");
