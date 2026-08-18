@@ -1013,6 +1013,15 @@ static bool accept_fastpath(sock_t fd) {
     // timeout and cap the total drain time; if a client dribbles bytes too
     // slowly to finish the header in the budget, answer anyway (these GETs
     // are tiny and read-only, so a reply is always correct) and move on.
+    //
+    // Drop the PEEKED bytes first. MSG_PEEK leaves them in the receive buffer,
+    // so a header that already ended inside the peek left the loop below with
+    // nothing to do -- and the request unread -- and the close then sent RST
+    // instead of FIN, discarding the reply the client had not collected yet.
+    // Every whole request short enough to fit the peek was answered that way:
+    // `GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n` is
+    // one. The routing above has already read what it needs out of hdr.
+    hdr[0] = 0;
     double deadline = now_s() + 0.5;
     size_t got = 0;
     while (got < sizeof(hdr) - 1 && !strstr(hdr, "\r\n\r\n")) {

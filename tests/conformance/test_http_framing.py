@@ -107,6 +107,37 @@ def test_fastpath_also_rejects_invalid_framing(server):
     assert status(raw_request(server, request)) == 400
 
 
+@pytest.mark.parametrize("request_bytes", [
+    b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    b"GET /v1/models HTTP/1.1\r\nHost: [::1]\r\n\r\n",
+    b"GET /v1/capabilities HTTP/1.1\r\nHost: localhost\r\n\r\n",
+])
+def test_compact_fastpath_request_closes_cleanly(server, request_bytes):
+    """A whole request that fits inside the accept loop's peek must still be
+    CONSUMED before the socket is closed.
+
+    The accept fastpath peeks the first bytes to route, then drains the header
+    with real reads. A peek leaves the bytes in the receive buffer, so when the
+    peek alone already contains the blank line the drain loop never runs and the
+    socket is closed with the request still unread — which sends RST instead of
+    FIN. The reply is then discarded by the client's stack: the caller sees
+    ECONNRESET having read nothing at all. The sleep is what makes it
+    deterministic rather than a race the client sometimes wins.
+    """
+    with contextlib.closing(socket.create_connection(
+            ("127.0.0.1", server.port), timeout=5)) as sock:
+        sock.settimeout(5)
+        sock.sendall(request_bytes)
+        time.sleep(0.2)
+        response = bytearray()
+        while True:
+            part = sock.recv(65536)  # a reset propagates and fails the test
+            if not part:
+                break
+            response += part
+    assert status(bytes(response)) == 200
+
+
 def test_503_status_line_uses_service_unavailable_reason():
     model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(ROOT, "test.gguf"))
     old_queue = os.environ.get("RUNNER_MAX_QUEUE")
