@@ -3,6 +3,8 @@
 // top-level JSON object; sets `done` once that object closes.
 #include "jsonmode.h"
 
+#include <string.h>
+
 #if defined(__GNUC__) || defined(__clang__)
 #define FALLTHROUGH __attribute__((fallthrough))
 #else
@@ -256,4 +258,26 @@ bool jsonv_feed(jsonv *v, const char *s, int n) {
         if (re && !feed_byte(v, (uint8_t)s[i], &re)) return false;
     }
     return true;
+}
+
+// The machine reads stack[0 .. depth-1] and nothing above it: push() writes
+// stack[depth] before depth names it, and every reader indexes depth-1 or
+// less. So a snapshot only has to carry that prefix. Anything added here that
+// reads a slot above `depth` breaks this — and jsonv_trial's test poisons the
+// scratch, so it breaks loudly.
+void jsonv_snapshot(jsonv *dst, const jsonv *src) {
+    int d = src->depth;
+    if (d < 0) d = 0;
+    else if (d > (int)sizeof(src->stack)) d = (int)sizeof(src->stack);
+    memcpy(dst->stack, src->stack, (size_t)d);
+    dst->depth = src->depth;
+    dst->st = src->st;
+    dst->sub = src->sub;
+    dst->lit = src->lit;
+    dst->done = src->done;
+}
+
+bool jsonv_trial(const jsonv *v, jsonv *scratch, const char *s, int n) {
+    jsonv_snapshot(scratch, v);
+    return jsonv_feed(scratch, s, n);
 }

@@ -124,6 +124,16 @@ typedef struct {
 
 void sval_init (sval *v, const snode *root);
 bool sval_feed (sval *v, const char *s, int n);
+// Would `s` keep the validator alive? Answers without touching `v`, running
+// the trial in caller-owned `scratch` whose previous contents are irrelevant.
+//
+// This is the candidate-token oracle. Constrained sampling asks it once per
+// probed token -- with top_k off, once per vocabulary entry, per token -- so
+// what it copies is a decode-speed property rather than an implementation
+// detail: it carries only the live stack frames and the live number spelling,
+// not the whole 2 KB struct. See sval_trial() in schema.c for the invariant
+// that makes the short copy sound.
+bool sval_trial(const sval *v, sval *scratch, const char *s, int n);
 // True when whitespace at the current position is string CONTENT, not an
 // insignificant separator. Callers suppress separator whitespace to stop a
 // constrained model burning its budget on blank runs; see schema.c.

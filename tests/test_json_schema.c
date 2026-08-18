@@ -840,6 +840,68 @@ static void test_schema_number_bounds_across_frames(void) {
     jv_free(schema_json);
 }
 
+// sval_trial() is the candidate-token probe: it must answer exactly what a
+// full struct copy fed the same bytes would answer, from every reachable
+// state, while touching only the live part of the validator. The scratch is
+// POISONED before every call — an implementation that reads a stack frame
+// above `depth`, or the tail of the number buffer, sees 0xA5 there and the
+// two answers diverge.
+static void trial_matches_full_copy(const snode *schema, const char *doc) {
+    sval v; sval_init(&v, schema);
+    for (int i = 0; doc[i]; i++) {
+        for (int c = 1; c < 256; c++) {
+            char b = (char)c;
+            sval full = v;
+            bool want = sval_feed(&full, &b, 1);
+            sval scratch;
+            memset(&scratch, 0xA5, sizeof(scratch));
+            bool got = sval_trial(&v, &scratch, &b, 1);
+            assert(got == want);
+            if (want) {
+                assert(scratch.done == full.done);
+                assert(scratch.depth == full.depth);
+            }
+        }
+        // the probe must leave the real validator untouched
+        sval before = v;
+        char b = doc[i];
+        sval scratch;
+        memset(&scratch, 0xA5, sizeof(scratch));
+        (void)sval_trial(&v, &scratch, &b, 1);
+        assert(!memcmp(&before, &v, sizeof(v)));
+        assert(sval_feed(&v, &b, 1));
+    }
+    assert(v.done);
+}
+
+static void test_sval_trial_matches_full_copy(void) {
+    // covers: nested objects and arrays (stack depth), an in-progress number
+    // (the shared spelling buffer), a string, an enum literal, and an open
+    // `{}` node (the generic jsonv submachine inside the sval)
+    const char *src = "{\"type\":\"object\",\"properties\":{"
+        "\"name\":{\"type\":\"string\"},"
+        "\"mode\":{\"enum\":[\"fast\",\"slow\"]},"
+        "\"vals\":{\"type\":\"array\",\"items\":"
+            "{\"type\":\"number\",\"minimum\":-5,\"maximum\":1000}},"
+        "\"deep\":{\"type\":\"object\",\"properties\":{"
+            "\"n\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":99}},"
+            "\"required\":[\"n\"]},"
+        "\"free\":{\"type\":\"object\"}},"
+        "\"required\":[\"name\",\"mode\",\"vals\",\"deep\",\"free\"]}";
+    jv *schema_json = json_parse(src, strlen(src));
+    assert(schema_json != NULL);
+    char err[128];
+    snode *schema = schema_compile(schema_json, err, sizeof(err));
+    assert(schema != NULL);
+
+    trial_matches_full_copy(schema,
+        "{\"name\":\"a b\",\"mode\":\"slow\",\"vals\":[1,-2.5,999],"
+        "\"deep\":{\"n\":42},\"free\":{\"x\":[1,{\"y\":null}]}}");
+
+    schema_free(schema);
+    jv_free(schema_json);
+}
+
 // The other half of the invariant: keywords that are pure annotations carry
 // no constraint, so ignoring them ignores nothing. Real OpenAI tool payloads
 // are full of them and must keep compiling.
@@ -1567,6 +1629,7 @@ int main(void) {
     test_schema_number_bounds_are_enforced();
     test_schema_number_bounds_across_frames();
     test_sval_state_is_small();
+    test_sval_trial_matches_full_copy();
     test_schema_additional_properties();
     test_schema_empty_closed_object();
     test_schema_rejects_required_without_properties();

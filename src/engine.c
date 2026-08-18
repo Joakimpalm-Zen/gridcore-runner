@@ -902,6 +902,26 @@ static bool constraint_payload_feed(engine *e, bool schema,
     return true;
 }
 
+// Would these bytes survive the payload validator? Same question
+// constraint_payload_feed answers, asked without changing anything.
+//
+// The engine copy above is what a caller needs to feed a THROWAWAY engine;
+// probing a candidate token needs no such thing, only a scratch validator, and
+// the trial APIs carry just the live part of one. Measured on
+// SmolLM2-135M-Instruct-Q8_0 with --top-k 0 (the whole-vocabulary walk, where
+// this runs once per vocabulary entry per token), the engine copy this
+// replaces was 2928 bytes against roughly 300 here.
+static bool constraint_payload_trial(const engine *e, bool schema,
+                                     const char *bytes, int n) {
+    if (schema) {
+        if (all_insignificant_ws(&e->sv, bytes, n)) return false;
+        sval scratch;
+        return sval_trial(&e->sv, &scratch, bytes, n);
+    }
+    jsonv scratch;
+    return jsonv_trial(&e->jv, &scratch, bytes, n);
+}
+
 static void constraint_payload_reset(engine *e, bool schema) {
     if (schema) sval_init(&e->sv, e->schema);
     else        jsonv_init(&e->jv);
@@ -1024,11 +1044,9 @@ static bool constraint_spelling_ok(engine *e, int id, bool schema) {
     if (sval_ws_is_content(&e->sv)) return false;
     const char *sp = tok_raw(e->tok, id);
     if (!sp || !*sp) return false;
-    engine tmp = *e;
-    tmp.cdoc_rec = false;   // shallow copy: it must not touch e's recording
-    tmp.constraint_scratch = true;  // ...and may be fed in place, being one
-    int visible;
-    return constraint_feed(&tmp, true, sp, (int)strlen(sp), &visible);
+    // CP_OUTPUT is guaranteed by the first line, so this is exactly what
+    // constraint_feed would do with these bytes.
+    return constraint_payload_trial(e, true, sp, (int)strlen(sp));
 }
 
 // validity filter for constrained mode. Before a declared thinking block
@@ -1065,6 +1083,12 @@ static bool constraint_token_ok(engine *e, int id, bool schema) {
         return e->constraint_phase == CP_THINK ||
                constraint_done(e, schema) ||
                constraint_spelling_ok(e, id, schema);
+    // Inside the payload -- every step of an ordinary constrained generation
+    // -- constraint_feed is exactly one payload feed, so ask that directly.
+    // The engine copy below exists for the prelude phases, which have engine
+    // state (tag match, phase) to advance; the payload phase has none.
+    if (e->constraint_phase == CP_OUTPUT)
+        return constraint_payload_trial(e, schema, buf, n);
     engine tmp = *e;
     tmp.cdoc_rec = false;   // shallow copy: it must not touch e's recording
     tmp.constraint_scratch = true;  // ...and may be fed in place, being one
