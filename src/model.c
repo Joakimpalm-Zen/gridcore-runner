@@ -2134,6 +2134,22 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                             m->n_expert_used, m->n_expert);
                     return false;
                 }
+                // The always-on shared branch is driven by n_ff_shexp, which
+                // is metadata (expert_shared_feed_forward_length, else the
+                // routed width times expert_shared_count) and decides how many
+                // rows of gate/up the FFN reads and how long a down row is.
+                // Nothing tied it to the tensors it indexes, so a width past
+                // them read off the end of the mapping.
+                if (m->n_ff_shexp > 0 &&
+                    (!check_shape(l->w_gate_shexp, m->n_embd, m->n_ff_shexp,
+                                  "ffn_gate_shexp", i) ||
+                     !check_shape(l->w_up_shexp, m->n_embd, m->n_ff_shexp,
+                                  "ffn_up_shexp", i) ||
+                     !check_shape(l->w_down_shexp, m->n_ff_shexp, m->n_embd,
+                                  "ffn_down_shexp", i) ||
+                     !check_shape(l->ffn_gate_inp_shexp, m->n_embd, 1,
+                                  "ffn_gate_inp_shexp", i)))
+                    return false;
                 if (l->moe_gemma) {
                     // gate and up are fused: {n_embd, 2*n_ff_exp, n_expert}
                     if (!check_shape3(l->ffn_gate_up_exps, m->n_embd,
