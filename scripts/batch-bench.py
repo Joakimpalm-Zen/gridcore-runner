@@ -139,6 +139,28 @@ def solo_latency(srv, prompt, max_tokens, reps):
     return best
 
 
+def identity_rows(prompts, batched_texts, solo):
+    """(slot, prompt, solo_text, batched_text) for EVERY concurrent response.
+
+    Per slot, not per distinct prompt. PROMPTS holds 8 entries and
+    --concurrency runs up to the 16 that src/main.c caps --parallel at, so
+    above 8 the slots repeat. Deduplicating the prompts and then taking
+    `prompts.index(p)` only ever looked at the FIRST slot holding each, which
+    left the reused slots -- the interesting case for a batching scheduler --
+    unchecked while the docstring promised every response was compared.
+
+    ``solo`` is called once per DISTINCT prompt: the extra requests would only
+    re-measure an answer already in hand.
+    """
+    solo_text: dict[str, str] = {}
+    rows = []
+    for slot, prompt in enumerate(prompts):
+        if prompt not in solo_text:
+            solo_text[prompt] = solo(prompt)
+        rows.append((slot, prompt, solo_text[prompt], batched_texts[slot]))
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidate", required=True)
@@ -165,14 +187,14 @@ def main() -> int:
 
         # identity: the same prompt, alone, on the same server
         print("  identity (concurrent vs solo on the same server):")
-        for i, p in enumerate(dict.fromkeys(prompts)):
-            solo_text, _ = srv.chat(p, args.max_tokens)
-            batched = cand_texts[prompts.index(p)]
+        for slot, p, solo_text, batched in identity_rows(
+                prompts, cand_texts,
+                lambda q: srv.chat(q, args.max_tokens)[0]):
             if solo_text == batched:
-                print(f"    ok   {p!r}")
+                print(f"    ok   slot {slot} {p!r}")
             else:
                 fail += 1
-                print(f"    FAIL {p!r}\n      solo:    {solo_text!r}\n"
+                print(f"    FAIL slot {slot} {p!r}\n      solo:    {solo_text!r}\n"
                       f"      batched: {batched!r}")
 
     if args.baseline:
