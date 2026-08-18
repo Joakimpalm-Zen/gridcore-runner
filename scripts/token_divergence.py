@@ -46,12 +46,35 @@ PROMPTS = [
 ]
 
 
+class _Object(dict):
+    """A JSON object that also remembers its values in wire order.
+
+    dict() collapses duplicate keys, and the runner's `top_logprobs` map can
+    carry them: src/completion.c decodes each top-k id to a string and emits
+    that string as the KEY without dedup, while `top_token_ids` is a positional
+    parallel array in the same order. Two byte-fallback ids decode to the same
+    replacement character, so the collapsed map is shorter than the id array
+    and zipping the two shifts every later logprob onto the wrong token.
+    """
+
+    __slots__ = ("values_in_order",)
+
+    def __init__(self, pairs):
+        super().__init__(pairs)
+        self.values_in_order = [value for _key, value in pairs]
+
+
+def loads(text):
+    """Parse a response body preserving duplicate object keys. See _Object."""
+    return json.loads(text, object_pairs_hook=_Object)
+
+
 def post(url, payload, timeout=600):
     request = urllib.request.Request(
         url, data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.load(response)
+        return loads(response.read())
 
 
 def wait_ready(port, probe, deadline_s):
@@ -91,9 +114,14 @@ def normalise(entry):
     top_ids = logprobs.get("top_token_ids") or []
     rows = []
     for i, tid in enumerate(ids):
-        pairs = list(tops[i].values()) if i < len(tops) else []
+        values = tops[i].values_in_order if i < len(tops) else []
         keys = top_ids[i] if i < len(top_ids) else []
-        rows.append((tid, texts[i], lps[i], dict(zip(keys, pairs))))
+        if len(values) != len(keys):
+            raise SystemExit(
+                f"runner's top_logprobs[{i}] has {len(values)} entries and "
+                f"top_token_ids[{i}] has {len(keys)}; the two are supposed to "
+                "be parallel, so nothing here can be attributed to a token")
+        rows.append((tid, texts[i], lps[i], dict(zip(keys, values))))
     return rows
 
 
