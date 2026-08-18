@@ -378,3 +378,54 @@ def test_absurd_block_count_is_refused_with_a_reason(runner_bin, tmp_path):
     assert proc.returncode > 0, "an out-of-range block_count must be refused"
     err = proc.stderr.decode(errors="replace")
     assert "block_count" in err
+
+
+# The other half of the same property: a VALID file must not provoke any of
+# this either. The committed fixtures cover the architectures whose per-layer
+# metadata is read as arrays, and the sanitizer build is where a misaligned
+# load or an overflow shows up — `make debug` builds it but runs nothing, so
+# without this nothing ever pointed it at a model.
+SANITIZER_FIXTURES = [
+    "test-moe-fixture.gemma4-moe-hetero.gguf",
+    "test-moe-fixture.gemma4-moe.gguf",
+    "test-moe-fixture.gptoss-mxfp4.gguf",
+    "test-moe-fixture.shexpg.gguf",
+    "test-g4h.gguf",
+    "test-es.gguf",
+]
+
+
+@pytest.mark.parametrize("name", SANITIZER_FIXTURES)
+def test_valid_fixtures_are_clean_under_the_sanitizers(name, tmp_path):
+    debug_bin = ROOT / "runner-debug"
+    if not debug_bin.exists():
+        pytest.skip("sanitizer build not present (make debug)")
+    model = ROOT / name
+    if not model.exists():
+        pytest.skip(f"{name} not generated (make test builds it)")
+    proc = _run(debug_bin, model)
+    err = proc.stderr.decode(errors="replace")
+    assert "runtime error" not in err, err[:600]
+    assert "AddressSanitizer" not in err, err[:600]
+
+
+def test_suppress_list_is_clean_under_the_sanitizers(tmp_path):
+    """tokenizer.ggml.suppress_tokens is an I32 array read element by element.
+
+    Same alignment rule as the per-layer arrays: UBSan reported "load of
+    misaligned address ... for type 'const int32_t'" three times per entry on
+    the --suppress-all-but-eos fixture, which no sanitizer run had ever been
+    pointed at.
+    """
+    debug_bin = ROOT / "runner-debug"
+    if not debug_bin.exists():
+        pytest.skip("sanitizer build not present (make debug)")
+    model = tmp_path / "sup.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py",
+         "--suppress-all-but-eos", str(model)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    proc = _run(debug_bin, model)
+    err = proc.stderr.decode(errors="replace")
+    assert "runtime error" not in err, err[:600]
+    assert "AddressSanitizer" not in err, err[:600]

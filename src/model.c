@@ -1499,9 +1499,11 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             float scalar = gguf_get_f32(g, XK[k].key, XK[k].dflt);
             for (int i = 0; i < m->n_layer; i++) {
                 float v = scalar;
+                // same alignment rule as every other array read here: the
+                // elements are packed at the file's offset, not the type's
                 if (a && a->arr_raw && a->arr_type == GGUF_T_F32 &&
                     (uint64_t)i < a->arr_n)
-                    v = ((const float *)a->arr_raw)[i];
+                    memcpy(&v, (const uint8_t *)a->arr_raw + (size_t)i * 4, 4);
                 dst[XK[k].off][i] = v;
             }
         }
@@ -1593,14 +1595,13 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         if (!m->l_is_swa || !m->l_head_kv || !m->l_head_dim || !m->l_rope_dim)
             return false;
         gguf_kv *swa_arr = gguf_get(g, AK("attention.sliding_window_pattern"));
-        gguf_kv *kv_arr  = gguf_get(g, AK("attention.head_count_kv"));
         // per-layer arrays must have the element width we index with — a
-        // converter that writes e.g. I32 booleans would misparse every layer
+        // converter that writes e.g. I32 booleans would misparse every layer.
+        // (head_count_kv goes through gguf_get_u32_idx below, which does its
+        // own type validation and reads elements without assuming alignment.)
         if (swa_arr && swa_arr->arr_type != GGUF_T_BOOL &&
             swa_arr->arr_type != GGUF_T_U8 && swa_arr->arr_type != GGUF_T_I8)
             swa_arr = NULL;
-        if (kv_arr && kv_arr->arr_type != GGUF_T_U32 && kv_arr->arr_type != GGUF_T_I32)
-            kv_arr = NULL;
         for (int i = 0; i < m->n_layer; i++) {
             bool swa = swa_arr && swa_arr->arr_raw && (uint64_t)i < swa_arr->arr_n
                        ? ((const uint8_t *)swa_arr->arr_raw)[i] != 0 : false;
@@ -1613,8 +1614,16 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             // pair the local dim count with the global table on a file that
             // declares a sliding pattern and no window.
             m->l_rope_dim[i] = m->l_is_swa[i] ? m->rope_dim_local : m->rope_dim;
-            m->l_head_kv[i]  = kv_arr && kv_arr->arr_raw && (uint64_t)i < kv_arr->arr_n
-                               ? (int)((const uint32_t *)kv_arr->arr_raw)[i] : m->n_head_kv;
+            // A GGUF array is packed at whatever offset it landed on, so it
+            // is NOT aligned for the element type: casting arr_raw to
+            // uint32_t* and indexing it is a misaligned load (UBSan flagged
+            // exactly this on the committed gemma4-hetero fixture). The
+            // per-index getter reads elements with memcpy and validates the
+            // element type and range in one place, which is where that
+            // knowledge belongs.
+            m->l_head_kv[i]  = (int)gguf_get_u32_idx(
+                g, AK("attention.head_count_kv"), (uint64_t)i,
+                (uint32_t)m->n_head_kv);
             // Per-layer kv-head / head-dim / rope-dim come from untrusted
             // per-layer keys and feed the same attention divisors and index
             // arithmetic as the scalar path (kv_dim / hd, n_head / n_head_kv,
@@ -2386,15 +2395,20 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     // their logits are forced to -inf after every forward pass
     gguf_kv *sup = gguf_get(g, "tokenizer.ggml.suppress_tokens");
     if (sup && sup->arr_raw && sup->arr_type == GGUF_T_I32 && sup->arr_n > 0) {
-        const int32_t *ids = (const int32_t *)sup->arr_raw;
+        // memcpy per element: a GGUF array sits at whatever offset it landed
+        // on, so indexing arr_raw as int32_t* is a misaligned load (UBSan
+        // flagged it on the --suppress-all-but-eos fixture).
+        const uint8_t *raw = sup->arr_raw;
         // A failed suppress list is not optional to skip: these ids are tokens
         // the checkpoint must never emit, so run without it would be silently
         // wrong. Fail the load instead.
         m->suppress = malloc(sizeof(int32_t) * sup->arr_n);
         if (!m->suppress) return false;
-        for (uint64_t i = 0; i < sup->arr_n; i++)
-            if (ids[i] >= 0 && ids[i] < m->n_vocab)
-                m->suppress[m->n_suppress++] = ids[i];
+        for (uint64_t i = 0; i < sup->arr_n; i++) {
+            int32_t id;
+            memcpy(&id, raw + i * sizeof(int32_t), sizeof id);
+            if (id >= 0 && id < m->n_vocab) m->suppress[m->n_suppress++] = id;
+        }
     }
 
     // KV storage format. q8_0 halves the cache again and is supported by both
