@@ -872,6 +872,44 @@ else
 	@echo "metal prompt batch smoke skipped: macOS-only backend"
 endif
 
+# A session in which EVERY forward is a single token. metal_ensure_batch()
+# short-circuits at n <= batch_cap and gpu_init leaves batch_cap at 1, so such
+# a session never enters it -- and any device buffer allocated only there stays
+# nil for the whole run while the kernels that read it still dispatch. Every
+# other Metal gate here prefills a multi-token batch and therefore cannot see
+# that state. -b 1 is the smallest way to hold a real run in it; a single-token
+# prompt or a prefix-cache hit that leaves one new token reaches it too.
+#
+# The generation is long enough to cross METAL_ATTN_MIN_CHUNK so the chunked
+# decode attention -- the one path whose scratch lives only in ensure_batch --
+# actually engages: test.gguf is ctx 256 with 4 heads, so the split starts at
+# position 128 and the census must report attn_chunk > 0 or this gate is
+# passing on a path it never took.
+test-metal-decode-only: runner test.gguf
+ifeq ($(shell uname -s),Darwin)
+	@set -e; \
+	if ./$(RUNNER_EXE) --caps | $(PYTHON) -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get('gpu') or {}).get('backend') == 'metal' else 1)"; then \
+		./$(RUNNER_EXE) -m test.gguf -p "hello" -n 200 -b 1 --temp 0 --gpu off > metal-decode1-cpu.out 2>/dev/null; \
+		env RUNNER_METAL_STATS=1 ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 200 -b 1 --temp 0 --gpu auto > metal-decode1-gpu.out 2> metal-decode1-gpu.err; \
+		grep -q "Metal backend" metal-decode1-gpu.err || { \
+			echo "FAIL: Metal never engaged — this would compare the CPU with itself"; exit 1; }; \
+		nch=$$(grep -oE "attn_chunk=[0-9]+" metal-decode1-gpu.err | grep -oE "[0-9]+" | tail -1); \
+		[ -n "$$nch" ] && [ "$$nch" -gt 0 ] || { \
+			echo "FAIL: chunked decode attention never dispatched (attn_chunk=$${nch:-none})"; \
+			echo "      the gate would pass without exercising the path it exists for"; exit 1; }; \
+		cmp -s metal-decode1-cpu.out metal-decode1-gpu.out || { \
+			echo "FAIL: batch-1-only Metal output differs from CPU"; \
+			echo "  cpu: "; head -c 300 metal-decode1-cpu.out; echo; \
+			echo "  gpu: "; head -c 300 metal-decode1-gpu.out; echo; \
+			exit 1; }; \
+		echo "metal decode-only ok (every forward n=1, $$nch chunked dispatches, byte-identical)"; \
+	else \
+		echo "metal decode-only smoke skipped: no Metal device reported by --caps"; \
+	fi
+else
+	@echo "metal decode-only smoke skipped: macOS-only backend"
+endif
+
 test-metal-kv-q8: runner $(TEST_KV_TOL)
 ifeq ($(shell uname -s),Darwin)
 	@set -e; \
@@ -1149,6 +1187,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(MAKE) --no-print-directory test-shader-embed
 	$(MAKE) --no-print-directory test-metal-shader-gate
 	$(MAKE) --no-print-directory test-metal-kquant
+	$(MAKE) --no-print-directory test-metal-decode-only
 	$(MAKE) --no-print-directory test-metal-multibuf
 	$(PYTHON) scripts/check-generated.py
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
@@ -1348,6 +1387,7 @@ clean:
 	rm -f metal-cpu.out metal-fallback.out metal-fallback.err
 	rm -f metal-init-fallback.out metal-init-fallback.err
 	rm -f metal-prefill-loop.out metal-prefill-native.out metal-prefill-native.err
+	rm -f metal-decode1-cpu.out metal-decode1-gpu.out metal-decode1-gpu.err
 	rm -f metal-kv-q8.err metal-moe-dense.out metal-moe1.out metal-moe1.err
 	rm -f metal-moe2.out metal-moe2.err
 	rm -f metal-gptoss-moe-cpu.out metal-gptoss-moe-gpu.out metal-gptoss-moe-gpu.err
@@ -1397,4 +1437,4 @@ test-makefile-sane:
 
 
 .PHONY: template-conformance template-conformance-refresh template-conformance-baseline template-conformance-harmony-oracle
-.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
+.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race

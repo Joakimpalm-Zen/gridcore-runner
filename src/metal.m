@@ -183,7 +183,8 @@ static void gpu_release_state(gpu_t *g, int n_layer) {
     for (int i = 0; i < g->n_wbuf; i++) [g->wbuf[i] release];
     id<MTLBuffer> bufs[] = { g->kc, g->vc, g->x, g->xb, g->xb2,
                              g->q, g->kt, g->vt, g->hb, g->hb2, g->att,
-                             g->logits, g->moe_logits, g->moe_sel, g->moe_selw,
+                             g->logits, g->att_acc, g->att_ms,
+                             g->moe_logits, g->moe_sel, g->moe_selw,
                              g->moe_hb, g->moe_hb2, g->moe_eout,
                              g->inv_freq, g->inv_freq_local, g->out_norm,
                              g->dummy, g->suppress, g->ple, g->ple_tmp,
@@ -277,14 +278,6 @@ static bool metal_ensure_batch(model_t *m, int n) {
     id<MTLBuffer> att    = new_f32_scratch(g->dev, nb * (size_t)m->n_head *
                                                    (size_t)m->n_ctx);
     id<MTLBuffer> logits = new_f32_scratch(g->dev, nb * (size_t)m->n_vocab);
-    // Chunked decode attention partials: one (max, sum, hd-vector) per
-    // (head, chunk). Decode only, so no batch dimension -- n_col > 1 already
-    // has grid.y parallelism and keeps the single-pass kernel.
-    id<MTLBuffer> att_acc = new_f32_scratch(g->dev, (size_t)m->n_head *
-                                            METAL_ATTN_MAX_CHUNKS *
-                                            (size_t)model_head_dim(m, 0));
-    id<MTLBuffer> att_ms  = new_f32_scratch(g->dev, (size_t)m->n_head *
-                                            METAL_ATTN_MAX_CHUNKS * 2);
     int P = m->n_embd_ple;
     id<MTLBuffer> ple = nil, ple_tmp = nil;
     if (P > 0) {
@@ -298,13 +291,11 @@ static bool metal_ensure_batch(model_t *m, int n) {
         !metal_buffer_ok(q) || !metal_buffer_ok(kt) || !metal_buffer_ok(vt) ||
         !metal_buffer_ok(hb) || !metal_buffer_ok(hb2) || !metal_buffer_ok(att) ||
         !metal_buffer_ok(logits) ||
-        !metal_buffer_ok(att_acc) || !metal_buffer_ok(att_ms) ||
         (P > 0 && (!metal_buffer_ok(ple) || !metal_buffer_ok(ple_tmp))) ||
         (m->attn_out_gate && !metal_buffer_ok(agate))) {
         release_buf(x); release_buf(xb); release_buf(xb2); release_buf(q);
         release_buf(kt); release_buf(vt); release_buf(hb); release_buf(hb2);
         release_buf(att); release_buf(logits);
-        release_buf(att_acc); release_buf(att_ms);
         release_buf(ple); release_buf(ple_tmp); release_buf(agate);
         return false;
     }
@@ -312,10 +303,9 @@ static bool metal_ensure_batch(model_t *m, int n) {
     release_buf(g->x); release_buf(g->xb); release_buf(g->xb2);
     release_buf(g->q); release_buf(g->kt); release_buf(g->vt);
     release_buf(g->hb); release_buf(g->hb2); release_buf(g->att);
-    release_buf(g->logits); release_buf(g->att_acc); release_buf(g->att_ms);
+    release_buf(g->logits);
     g->x = x; g->xb = xb; g->xb2 = xb2; g->q = q; g->kt = kt; g->vt = vt;
     g->hb = hb; g->hb2 = hb2; g->att = att; g->logits = logits;
-    g->att_acc = att_acc; g->att_ms = att_ms;
     if (P > 0) {
         release_buf(g->ple); release_buf(g->ple_tmp);
         g->ple = ple; g->ple_tmp = ple_tmp;
@@ -1185,6 +1175,19 @@ bool gpu_init(model_t *m) {
     g->att    = NEWBUF(sizeof(float) * (size_t)m->n_head * m->n_ctx);
     g->logits = NEWBUF(sizeof(float) * m->n_vocab);
     g->dummy  = NEWBUF(4);
+    // Chunked decode attention partials: one (max, sum, hd-vector) per
+    // (head, chunk). They carry NO batch dimension -- the split is taken only
+    // at n == 1 -- so they are sized once here rather than in
+    // metal_ensure_batch(). Sizing them there left them nil for the whole run
+    // of a session whose every forward is a single token, because
+    // metal_ensure_batch returns early at n <= batch_cap and batch_cap starts
+    // at 1: the chunked kernels then wrote their partials through a nil
+    // binding and decode produced garbage past the chunk threshold, silently
+    // (`make test-metal-decode-only`).
+    g->att_acc = NEWBUF(sizeof(float) * (size_t)m->n_head *
+                        METAL_ATTN_MAX_CHUNKS * (size_t)model_head_dim(m, 0));
+    g->att_ms  = NEWBUF(sizeof(float) * (size_t)m->n_head *
+                        METAL_ATTN_MAX_CHUNKS * 2);
     if (m->n_expert > 0) {
         size_t used = (size_t)m->n_expert_used;
         size_t moe_ff = (size_t)m->n_ff_exp * (m->moe_gemma ? 2u : 1u);
@@ -1203,6 +1206,7 @@ bool gpu_init(model_t *m) {
         !metal_buffer_ok(g->hb) || !metal_buffer_ok(g->hb2) ||
         !metal_buffer_ok(g->att) || !metal_buffer_ok(g->logits) ||
         !metal_buffer_ok(g->dummy) ||
+        !metal_buffer_ok(g->att_acc) || !metal_buffer_ok(g->att_ms) ||
         (m->n_expert > 0 && (!metal_buffer_ok(g->moe_logits) ||
                              !metal_buffer_ok(g->moe_sel) ||
                              !metal_buffer_ok(g->moe_selw) ||
