@@ -2249,12 +2249,19 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                                   "ffn_gate_inp_shexp", i)))
                     return false;
                 if (l->moe_gemma) {
-                    // gate and up are fused: {n_embd, 2*n_ff_exp, n_expert}
+                    // gate and up are fused: {n_embd, 2*n_ff_exp, n_expert}.
+                    // The dual branch also runs an ORDINARY dense FFN at this
+                    // layer's feed_forward_length, and the dense shape checks
+                    // below are guarded by !is_moe — which this layer is not —
+                    // so its three tensors state their geometry here instead.
                     if (!check_shape3(l->ffn_gate_up_exps, m->n_embd,
                                       2 * m->n_ff_exp, l->n_expert,
                                       "ffn_gate_up_exps", i) ||
                         !check_shape3(l->ffn_down_exps, m->n_ff_exp, m->n_embd,
-                                      l->n_expert, "ffn_down_exps", i))
+                                      l->n_expert, "ffn_down_exps", i) ||
+                        !check_shape(l->w_gate, m->n_embd, l->n_ff, "ffn_gate", i) ||
+                        !check_shape(l->w_up, m->n_embd, l->n_ff, "ffn_up", i) ||
+                        !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
                         return false;
                 } else if (l->moe_split) {
                     for (int e = 0; e < m->n_expert; e++) {

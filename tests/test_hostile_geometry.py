@@ -210,3 +210,29 @@ def test_a_norm_vector_shorter_than_its_head_is_refused(runner_bin, tmp_path):
                                 "must be refused at load"
     err = proc.stderr.decode(errors="replace")
     assert "attn_q_norm" in err
+
+
+def test_gemma4_moe_dense_branch_width_beyond_its_tensor_is_refused(runner_bin, tmp_path):
+    """gemma-4 MoE layers run a dense FFN too, and it was validated by nothing.
+
+    A gemma-4 MoE layer is dual-branch: routed experts PLUS a dense GELU FFN
+    over the same input. The dense half's gate/up/down are the ordinary
+    ffn_*.weight tensors driven at feed_forward_length — but the shape checks
+    for those are guarded by `!l->is_moe`, which a gemma-4 MoE layer is not, and
+    the MoE branch only validated the expert banks. A wider declared width read
+    off the end of the mapping (ASan: BUS in vec_dot, from gemma_moe_ffn's
+    dense matvec).
+    """
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-moe.py", str(tmp_path / "moe")],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    good = tmp_path / "moe.gemma4-moe.gguf"
+    bad = _patch_u32(good, tmp_path / "moe-g4-ff.gguf",
+                     "gemma4.feed_forward_length", 65536)
+
+    assert _run(runner_bin, good).returncode == 0, "the unmodified fixture must run"
+    proc = _run(runner_bin, bad)
+    assert proc.returncode > 0, "a dense-branch width past its tensor must be " \
+                                "refused at load, not crash mid-forward"
+    err = proc.stderr.decode(errors="replace")
+    assert "ffn_gate" in err
