@@ -253,8 +253,15 @@ static void release_buf(id<MTLBuffer> b) {
     [b release];
 }
 
-static bool metal_ensure_batch(model_t *m, int n) {
-    gpu_t *g = (gpu_t *)m->gpu;
+// The ONE place per-column scratch is sized. gpu_init calls it for n = 1 and
+// gpu_forward_batch for every larger batch, so a buffer added here is covered
+// in both directions. It used to be sized twice — a hand-rolled n = 1 block in
+// gpu_init and this — and the two lists drifted: g->att_acc, g->att_ms and
+// g->agate existed only here, so a session whose every forward is a single
+// token (batch_cap starts at 1, this returns early) ran with them nil and the
+// kernels dereferenced a nil binding. That produced garbage decode past the
+// chunk threshold; see `make test-metal-decode-only`.
+static bool metal_ensure_batch(gpu_t *g, model_t *m, int n) {
     if (!g || n <= g->batch_cap) return true;
     // eligibility keeps heterogeneous models off this path, but size off the
     // per-layer maxima anyway so the two sizing sites cannot drift apart
@@ -1137,15 +1144,12 @@ bool gpu_init(model_t *m) {
         }
     }
 
-    // scratch sizes off the per-layer MAXIMA: gemma4 varies q/kv widths per
-    // layer, and a global-scalar size would overrun on the widest layer
-    int q_dim  = m->n_head * m->head_dim;
-    int kv_dim = m->n_head_kv * m->head_dim;
-    for (int l = 0; l < m->n_layer; l++) {
-        if (model_q_dim(m, l)  > q_dim)  q_dim  = model_q_dim(m, l);
-        if (model_kv_dim(m, l) > kv_dim) kv_dim = model_kv_dim(m, l);
-    }
-    int xdim   = q_dim > m->n_embd ? q_dim : m->n_embd;
+    // Q-bias width off the per-layer MAXIMUM: gemma4 varies q width per layer,
+    // and a global-scalar size would overrun on the widest one. The per-column
+    // scratch takes the same maxima inside metal_ensure_batch().
+    int q_dim = m->n_head * m->head_dim;
+    for (int l = 0; l < m->n_layer; l++)
+        if (model_q_dim(m, l) > q_dim) q_dim = model_q_dim(m, l);
     size_t kv_bytes = model_kv_byte_off(m, m->n_layer);
 
     #define NEWBUF(n) [dev newBufferWithLength:(n) options:MTLResourceStorageModeShared]
@@ -1158,22 +1162,12 @@ bool gpu_init(model_t *m) {
     if (metal_init_injected("after-kv"))
         return gpu_init_fail(m, g, lib, "injected post-KV allocation failure");
 
-    g->x      = NEWBUF(sizeof(float) * m->n_embd);
-    g->xb     = NEWBUF(sizeof(float) * xdim);
-    g->xb2    = NEWBUF(sizeof(float) * xdim);
-    g->q      = NEWBUF(sizeof(float) * q_dim);
-    g->kt     = NEWBUF(sizeof(float) * kv_dim);
-    g->vt     = NEWBUF(sizeof(float) * kv_dim);
-    if (m->n_embd_ple > 0) {
-        g->ple     = NEWBUF(sizeof(float) * (size_t)m->n_layer * m->n_embd_ple);
-        g->ple_tmp = NEWBUF(sizeof(float) * (size_t)m->n_embd_ple);
-        if (!metal_buffer_ok(g->ple) || !metal_buffer_ok(g->ple_tmp))
-            return gpu_init_fail(m, g, lib, "PLE scratch allocation");
-    }
-    g->hb     = NEWBUF(sizeof(float) * m->n_ff);
-    g->hb2    = NEWBUF(sizeof(float) * m->n_ff);
-    g->att    = NEWBUF(sizeof(float) * (size_t)m->n_head * m->n_ctx);
-    g->logits = NEWBUF(sizeof(float) * m->n_vocab);
+    // Per-column scratch (x, xb, xb2, q, kt, vt, hb, hb2, att, logits, the
+    // E-series PLE slices and the attention output gate) through the same
+    // function a prompt batch widens it with, so the two cannot list different
+    // buffers. g->batch_cap is still 0 from the calloc, so this allocates.
+    if (!metal_ensure_batch(g, m, 1))
+        return gpu_init_fail(m, g, lib, "batch scratch allocation");
     g->dummy  = NEWBUF(4);
     // Chunked decode attention partials: one (max, sum, hd-vector) per
     // (head, chunk). They carry NO batch dimension -- the split is taken only
@@ -1198,14 +1192,8 @@ bool gpu_init(model_t *m) {
         g->moe_hb2    = NEWBUF(sizeof(float) * used * moe_ff);
         g->moe_eout   = NEWBUF(sizeof(float) * used * (size_t)m->n_embd);
     }
-    g->batch_cap = 1;
     #undef NEWBUF
-    if (!metal_buffer_ok(g->x) || !metal_buffer_ok(g->xb) ||
-        !metal_buffer_ok(g->xb2) || !metal_buffer_ok(g->q) ||
-        !metal_buffer_ok(g->kt) || !metal_buffer_ok(g->vt) ||
-        !metal_buffer_ok(g->hb) || !metal_buffer_ok(g->hb2) ||
-        !metal_buffer_ok(g->att) || !metal_buffer_ok(g->logits) ||
-        !metal_buffer_ok(g->dummy) ||
+    if (!metal_buffer_ok(g->dummy) ||
         !metal_buffer_ok(g->att_acc) || !metal_buffer_ok(g->att_ms) ||
         (m->n_expert > 0 && (!metal_buffer_ok(g->moe_logits) ||
                              !metal_buffer_ok(g->moe_sel) ||
@@ -1742,7 +1730,7 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     // eligibility check, a double-applied logit softcap, and wrong output on
     // real gemma-4 E2B weights) before it was removed. A scratch allocation
     // failure now falls back to the CPU loudly instead of to a second path.
-    if (!metal_ensure_batch(m, n)) {
+    if (!metal_ensure_batch((gpu_t *)m->gpu, m, n)) {
         fprintf(stderr, "gpu: Metal batch scratch allocation failed — "
                 "releasing the backend, continuing on CPU\n");
         return false;

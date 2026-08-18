@@ -26,6 +26,7 @@
 //
 //     ./test-gpu-identity test-attn/k_temp_live.gguf
 //     ./test-gpu-identity models/granite-4.1-8b-Q4_0.gguf 8   # 8 GPU layers
+//     ./test-gpu-identity test-muse.gguf 0 1   # every forward a single token
 //
 // Skips (never passes quietly) when there is no GPU on the machine, or when
 // the model fell back to the CPU -- comparing the CPU against itself is the
@@ -38,6 +39,13 @@
 #include <string.h>
 
 enum { STEPS = 24, MAX_TOK = 96, N_BATCH = 32 };
+
+// Prefill batch. Settable because "every forward this backend ever sees is a
+// single token" is a distinct backend STATE, not just a slower schedule: a
+// backend that sizes scratch lazily on the first multi-token batch is in a
+// different configuration for the whole run, and at N_BATCH = 32 nothing in
+// this tree ever looks at it. Two Metal buffers were reached nil that way.
+static int g_n_batch = N_BATCH;
 
 // Mean |dlogit| as a fraction of the mean logit range. Measured residue:
 // Metal/M1 2.3e-8 (F32 toy), 1.9e-7 (llama-4 temperature fixture), 5.4e-5
@@ -67,7 +75,7 @@ static float *run(const char *path, int gpu_mode, int *n_vocab_out,
     memset(&p, 0, sizeof(p));
     p.gpu_mode = gpu_mode;
     p.n_ctx    = n_tok + 8;
-    p.n_batch  = N_BATCH;
+    p.n_batch  = g_n_batch;
     p.gpu_layers_override = gpu_mode == GPU_OFF ? 0 : g_gpu_layers;
 
     if (!model_load(&m, path, &p)) {
@@ -82,8 +90,8 @@ static float *run(const char *path, int gpu_mode, int *n_vocab_out,
 
     int prefill = n_tok - STEPS;
     float *lg = NULL;
-    for (int off = 0; off < prefill; off += N_BATCH) {
-        int n = prefill - off < N_BATCH ? prefill - off : N_BATCH;
+    for (int off = 0; off < prefill; off += g_n_batch) {
+        int n = prefill - off < g_n_batch ? prefill - off : g_n_batch;
         lg = model_forward_batch(&m, toks + off, n, off, off + n == prefill);
     }
     if (!lg) { model_free(&m); free(out); return NULL; }
@@ -102,6 +110,7 @@ static float *run(const char *path, int gpu_mode, int *n_vocab_out,
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "test.gguf";
     if (argc > 2) g_gpu_layers = atoi(argv[2]);
+    if (argc > 3) g_n_batch = atoi(argv[3]) > 0 ? atoi(argv[3]) : N_BATCH;
 
     f16_init();
     // Pin the identity route. The tiled prefill GEMM (RUNNER_METAL_MM) and the
@@ -127,8 +136,8 @@ int main(int argc, char **argv) {
     for (int i = n_tok; i < MAX_TOK; i++) toks[i] = toks[i - n_tok + 1];
     n_tok = MAX_TOK;
 
-    printf("gpu-identity: %s | %d tokens, %d teacher-forced positions\n",
-           path, n_tok, STEPS);
+    printf("gpu-identity: %s | %d tokens, %d teacher-forced positions, "
+           "prefill batch %d\n", path, n_tok, STEPS, g_n_batch);
 
     int nv_cpu = 0, nv_gpu = 0;
     bool cpu_used_gpu = false, gpu_used_gpu = false;

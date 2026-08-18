@@ -1173,6 +1173,11 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_GPU_ID) test-attn/k_nope.gguf
 	./$(TEST_GPU_ID) test-attn/k_half.gguf
 	./$(TEST_GPU_ID) test-attn/k_temp_live.gguf
+	@# The same comparison with every forward a single token. That is a
+	@# backend STATE, not a slower schedule: scratch sized lazily on the first
+	@# multi-token batch stays nil for such a run, and the text gates above are
+	@# blind to what that does at fixture scale.
+	./$(TEST_GPU_ID) test.gguf 0 1
 	./$(TEST_QUANTIZE)
 	./$(TEST_VRAM_ROLLBACK)
 	./$(TEST_GGUF_GETTERS)
