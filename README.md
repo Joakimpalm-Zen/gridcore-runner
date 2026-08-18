@@ -1184,14 +1184,19 @@ error object so the two faults stay distinguishable.
 | `muse-glimmer` | Meta Muse Glimmer 30B, text path: gated attention, QK and sandwich norms, SWA with NoPE globals, softcapped logits. CPU, CUDA and Metal. Certified; evidence in `docs/muse-glimmer-cert-2026-08-11.md` and `docs/muse-atem-cert-2026-08-11.md`. No vision encoder. Native atem definitions/results, recipient-constrained generation, truncation recovery, multi-call mapping, and buffered/SSE parsing are implemented and selected automatically for tool requests. |
 | `granite` | IBM Granite dense (3.x/4.1): the four muP scalars (embedding, fixed attention, residual, divided logit). CPU, CUDA and Metal. Certified; evidence in `docs/granite-cert-2026-08-11.md`. granitemoe and granitehybrid are separate arch ids and not admitted. |
 
-Admission remains layout-specific. Shared-expert MoE, unsupported split expert
-layouts, or architecture-specific tensor arrangements can still be refused
-even when the architecture ID is listed.
+Admission remains layout-specific: an unsupported split expert layout, a
+non-SiLU MoE outside gemma-4's dual-branch form, or an architecture-specific
+tensor arrangement is refused even when the architecture ID is listed. The
+always-on shared expert (Qwen2-MoE/DeepSeek form: a dense FFN over the same
+normed input, summed with the routed output, optionally gated) is **supported**
+and is what afmoe uses; its width and tensors are shape-checked at load, and
+`expert_shared_count` set without the tensors present is an error rather than a
+silently dropped branch.
 
 | Area | Current support |
 |---|---|
 | File format | GGUF v2/v3, mmap/file-mapped host weights, including standard local multi-part sets. |
-| Tokenizers | SPM and byte-level BPE with llama, qwen2, smollm, tekken, llama4/o200k, Gemma, and GPT-2-family pre-tokenization rules. |
+| Tokenizers | SPM and byte-level BPE with llama, qwen2/qwen35, smollm, afmoe, tekken, llama4/gpt-4o, Gemma, and GPT-2-family pre-tokenization rules. |
 | Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1, IQ2 and IQ3 families are CPU-only with NEON/AVX2 dequant kernels; the CUDA and Metal backends refuse those files loudly instead of computing wrong. |
 | Transformer | RMSNorm, adjacent-pair and NeoX RoPE, grouped-query attention, SwiGLU/GELU/xIELU family paths, tied embeddings, dense and selected sparse MoE. |
 | Sampling | Greedy, temperature, top-k, top-p, min-p, repeat penalty, stop strings, JSON/schema constraints, speculative decoding. |
@@ -1199,10 +1204,12 @@ even when the architecture ID is listed.
 | Serving | Chat Completions, Responses, legacy completions, embeddings, Anthropic Messages, SSE, parallel slots, model swap, prefix reuse. |
 | Desktop | macOS menu bar and Windows notification-area controller. |
 
-Not implemented: Vulkan; TLS/auth; remote bind; remote/streamed GGUF parts;
-Qwen2-MoE/DeepSeek/Kimi shared-expert or MLA layouts; Mamba/Jamba; Gemma-4 MTP
-draft heads; IQ2/IQ3 codebook quants; full GBNF; image/document inputs; hosted
-tools; response persistence; or parallel tool calls on the Responses and
+Not implemented: Vulkan; TLS/auth; remote bind; remote/streamed GGUF parts; the
+`qwen2moe`/`deepseek2`/`kimi` architecture IDs (their shared-expert *layout* is
+implemented, as above — the architectures are not admitted) or MLA attention;
+Mamba/Jamba; MTP/NextN draft-head consumption (those tensors load and are
+skipped, so dense decoding is unchanged); full GBNF; image/document inputs;
+hosted tools; response persistence; or parallel tool calls on the Responses and
 Messages surfaces (Chat Completions supports it, buffered and streaming).
 
 ## Compatibility evidence
@@ -1264,6 +1271,15 @@ during an authenticated evidence run.
   argument constraints. Measured transcripts:
   [docs/gpt-oss-harmony-2026-08-14.md](docs/gpt-oss-harmony-2026-08-14.md).
   The CPU/CUDA identity row is untouched by this and still stands as recorded.
+  It is, however, a **re-measurement candidate**: the CUDA fused-MoE path
+  routed gpt-oss without its router bias until 2026-08-18, and that failure was
+  measured on a binary carrying the bug. The fix is real and gated
+  ([docs/cuda-gptoss-router-bias-2026-08-18.md](docs/cuda-gptoss-router-bias-2026-08-18.md)),
+  but on `gpt-oss-120b-MXFP4` it only narrowed the divergence from 0.00946 to
+  0.00245 of logit range against a 2e-3 bound, so at least one further CPU/GPU
+  difference remains and no identity claim is made for any real gpt-oss file on
+  CUDA. `gpt-oss-20b` has not been re-run at all: the file is not on the
+  measurement box.
 - Gemma-4-26B-A4B QAT's old 16-token CPU/CUDA result is not a substitute for
   the manifest's pending 128-token re-verification.
 - Numerically sensitive models may use a measured self-sensitivity floor
@@ -1285,7 +1301,7 @@ src/sample.c          sampling filters and token selection
 src/jsonmode.c        incremental JSON-prefix validation
 src/schema.c          JSON-Schema compiler and streaming validator
 src/template.c        chat templates, thinking channels, and tool syntax
-src/engine.c          prompt feeding, prefix cache, and speculative decode
+src/engine.c          prompt feeding, prefix cache, constrained sampling, speculative decode
 src/quantize.c        requantization and stacked-MoE expert pruning
 src/scheduler.c       persistent worker scheduling
 src/cuda.c            CUDA driver backend; kernels.cu becomes embedded PTX

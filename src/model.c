@@ -1845,10 +1845,6 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             return false;
         }
 
-        // Only the Mixtral/Qwen3 convention is implemented: softmax-over-all
-        // gating, top-k, renormalized weights, no shared expert. A shared-expert
-        // MoE (Qwen2-MoE / DeepSeek) would load its standard experts and
-        // silently ignore the shared expert — refuse rather than compute wrong.
         // Shared always-on expert (Qwen2-MoE / DeepSeek): a dense FFN over the
         // same normed input, summed with the routed output. Supported when the
         // tensors are present; the width falls back to the routed expert width
