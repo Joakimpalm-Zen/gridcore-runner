@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -447,6 +448,50 @@ class EndpointTests(unittest.TestCase):
         )
 
         self.assertEqual(endpoint.stream_chat({"messages": []}).text, "hi")
+
+    def test_a_non_http_squatter_reads_as_unhealthy_rather_than_raising(self):
+        """The port a runner is expected on can be held by something that is
+        not an HTTP server at all. http.client raises HTTPException there, and
+        that is neither OSError nor RuntimeError, so it escaped healthy() and
+        out of ManagedRunner.start() instead of reading as "not a runner"."""
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        self.addCleanup(listener.close)
+
+        def greet_and_hang_up():
+            connection, _ = listener.accept()
+            with connection:
+                connection.recv(4096)
+                connection.sendall(b"SSH-2.0-OpenSSH_9.0\r\n")
+
+        server = threading.Thread(target=greet_and_hang_up, daemon=True)
+        server.start()
+        self.addCleanup(server.join, 5)
+
+        endpoint = RunnerEndpoint(f"http://127.0.0.1:{listener.getsockname()[1]}")
+
+        self.assertFalse(endpoint.healthy(timeout=5))
+
+    def test_a_truncated_stream_body_raises_a_protocol_error_with_partial(self):
+        """http.client reports a body cut short mid-chunk as IncompleteRead.
+        It carries the same meaning as a malformed frame — the answer has a
+        hole in it — so it must arrive as RunnerProtocolError with the text
+        received so far, not as a raw http.client exception."""
+        class TruncatedResponse(_Response):
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n'
+                raise http.client.IncompleteRead(b"data: {\"cho")
+
+        endpoint = RunnerEndpoint(
+            "http://127.0.0.1:8080",
+            opener=lambda request, timeout: TruncatedResponse(),
+        )
+
+        with self.assertRaises(RunnerProtocolError) as caught:
+            endpoint.stream_chat({"messages": []})
+
+        self.assertEqual(caught.exception.partial, "partial")
 
 
 class ManagedRunnerOwnershipTests(unittest.TestCase):

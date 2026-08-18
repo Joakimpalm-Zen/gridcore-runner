@@ -15,3 +15,8 @@ by a later `finish_reason`; non-data SSE lines (comments, `event:`, `id:`,
 `retry:`) are ignored as the spec requires. `stall_seconds` is a watchdog over
 the time between stream events, and the raised `RunnerStallError` reports the
 measured silence. Both errors carry the text received so far in `.partial`.
+
+Transport-level breakage is translated too: a peer holding the port that is not
+speaking HTTP, or a body cut short mid-stream, raises `RunnerProtocolError`
+rather than a raw `http.client` exception — so `RunnerEndpoint.healthy()` reports
+False for a squatting service instead of raising through `ManagedRunner.start()`.

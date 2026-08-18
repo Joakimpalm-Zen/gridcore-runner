@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import socket
 import time
@@ -210,6 +211,13 @@ class RunnerEndpoint:
             ) from error
         except urllib.error.HTTPError as error:
             raise self._http_error(error) from error
+        except http.client.HTTPException as error:
+            # a body cut short, or a peer that is not speaking HTTP at all:
+            # the answer has a hole in it exactly as a malformed frame does
+            raise RunnerProtocolError(
+                f"runner stream broke below the SSE layer: {error!r}",
+                partial="".join(text_parts),
+            ) from error
         except urllib.error.URLError as error:
             if isinstance(getattr(error, "reason", None), (socket.timeout, TimeoutError)):
                 raise RunnerStallError(
@@ -345,6 +353,15 @@ class RunnerEndpoint:
                 body = response.read()
         except urllib.error.HTTPError as error:
             raise self._http_error(error) from error
+        except http.client.HTTPException as error:
+            # something is listening on the port but is not speaking HTTP (a
+            # bare greeting banner, a truncated body). urllib passes that
+            # through untranslated, and HTTPException is neither OSError nor
+            # RuntimeError, so it escaped healthy() -- and ManagedRunner.start()
+            # -- instead of reading as "not a runner"
+            raise RunnerProtocolError(
+                f"runner returned an unreadable HTTP response: {error!r}"
+            ) from error
         try:
             data = json.loads(body.decode("utf-8"))
         except ValueError as error:
