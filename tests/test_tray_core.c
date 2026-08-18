@@ -102,6 +102,44 @@ int main(int argc, char **argv) {
     CHECK(menu_has(items, n, "no runners active"), "empty state row present");
     CHECK(!menu_has(items, n, "Stop"), "no stop rows with empty registry");
 
+    // 1b. a menu that does not fit the caller's array must be a PREFIX of the
+    // one that does, and must stay inside the array.
+    //
+    // Every row's text is written by the snprintf AFTER the row, and that
+    // snprintf ran whether or not the row was placed. So a dropped row
+    // re-labelled the last row that WAS placed: the backend rendered "Quit
+    // controller" on a row whose action was Stop. At cap 0 nothing is ever
+    // placed and the same writes land on it[0] and it[-1], outside the
+    // caller's array in both directions.
+    {
+        tray_item full[128];
+        int nfull = tray_menu_build(full, 128);
+        CHECK(nfull > 3, "enough rows to truncate");
+        for (int cap2 = 1; cap2 < nfull; cap2++) {
+            tray_item guard[136];
+            memset(guard, 0x5A, sizeof guard);
+            tray_item *part = guard + 4;
+            int k = tray_menu_build(part, cap2);
+            CHECK(k == cap2, "a truncated build reports exactly cap rows");
+            for (int i = 0; i < k && i < nfull; i++)
+                if (strcmp(part[i].label, full[i].label) ||
+                    part[i].kind != full[i].kind ||
+                    part[i].action != full[i].action ||
+                    part[i].arg != full[i].arg) {
+                    CHECK(false, "truncated menu is a prefix of the full menu");
+                    break;
+                }
+        }
+        tray_item guard0[9];
+        memset(guard0, 0x5A, sizeof guard0);
+        int z = tray_menu_build(guard0 + 4, 0);
+        CHECK(z == 0, "cap 0 builds no rows");
+        bool clean = true;
+        for (size_t b = 0; b < sizeof guard0; b++)
+            if (((unsigned char *)guard0)[b] != 0x5A) clean = false;
+        CHECK(clean, "cap 0 writes nothing, above or below the array");
+    }
+
     // 2. configured model: start row is offered and START_MANAGED spawns
     // self --serve with the configured argv
     CHECK(menu_has(items, n, "Start default runner"), "configured start row");

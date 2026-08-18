@@ -452,10 +452,18 @@ static void label_copy(char *out, size_t cap, const char *text) {
 int tray_menu_build(tray_item *it, int cap) {
     cfg_load();
     int n = 0;
-#define PUT(...) do { if (n < cap) { it[n] = (tray_item){__VA_ARGS__}; n++; } } while (0)
+    // Every row's text is written by the snprintf that FOLLOWS it, so a row
+    // the caller's array cannot hold still needs somewhere to be written.
+    // Without `overflow` those writes landed on it[n-1] — re-labelling the
+    // last row that was actually placed, which is how a row reading "Quit
+    // controller" could carry a Stop action — and on it[0]/it[-1], outside
+    // the array entirely, when cap was 0.
+    tray_item overflow, *row = &overflow;
+#define PUT(...) do { row = n < cap ? &it[n++] : &overflow; \
+                      *row = (tray_item){__VA_ARGS__}; } while (0)
 
     PUT(.kind = TRAY_K_LABEL, .action = TRAY_ACT_NONE);
-    snprintf(it[0].label, sizeof it[0].label, "xyntetik-runner %s", RUNNER_VERSION);
+    snprintf(row->label, sizeof row->label, "xyntetik-runner %s", RUNNER_VERSION);
     PUT(.kind = TRAY_K_SEP);
 
     int ni = 0;
@@ -470,44 +478,44 @@ int tray_menu_build(tray_item *it, int cap) {
 
     if (shown == 0 && st != MG_STARTING && st != MG_EXITED && st != MG_MISSING) {
         PUT(.kind = TRAY_K_LABEL);
-        snprintf(it[n-1].label, sizeof it[n-1].label, "no runners active");
+        snprintf(row->label, sizeof row->label, "no runners active");
     }
     if (st == MG_MISSING) {
         PUT(.kind = TRAY_K_LABEL);
-        snprintf(it[n-1].label, sizeof it[n-1].label,
+        snprintf(row->label, sizeof row->label,
                  "⚠ model file missing: %.470s", base_name(g_cfg.last_model));
     }
     if (st == MG_STARTING) {
         PUT(.kind = TRAY_K_LABEL);
-        snprintf(it[n-1].label, sizeof it[n-1].label,
+        snprintf(row->label, sizeof row->label,
                  "● starting %.470s… (loading model)", base_name(g_cfg.last_model));
         PUT(.kind = TRAY_K_SUB_BEGIN);
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_STOP_INSTANCE,
             .arg = g_managed_pid);
-        snprintf(it[n-1].label, sizeof it[n-1].label, "Cancel start");
+        snprintf(row->label, sizeof row->label, "Cancel start");
         PUT(.kind = TRAY_K_SUB_END);
     }
     if (st == MG_EXITED) {
         PUT(.kind = TRAY_K_LABEL);
-        snprintf(it[n-1].label, sizeof it[n-1].label,
+        snprintf(row->label, sizeof row->label,
                  "⚠ default runner exited (failed start or crash)");
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_OPEN_LOG);
-        snprintf(it[n-1].label, sizeof it[n-1].label, "View log");
+        snprintf(row->label, sizeof row->label, "View log");
     }
     for (int i = 0; i < ni; i++) {
         if (strcmp(recs[i].mode, "tray") == 0) continue;
         bool managed = recs[i].pid == g_managed_pid;
         PUT(.kind = TRAY_K_LABEL);
         if (recs[i].port > 0)
-            snprintf(it[n-1].label, sizeof it[n-1].label, "%s%s  ·  :%d  ·  pid %ld",
+            snprintf(row->label, sizeof row->label, "%s%s  ·  :%d  ·  pid %ld",
                      managed ? "● " : "", recs[i].mode, recs[i].port, recs[i].pid);
         else
-            snprintf(it[n-1].label, sizeof it[n-1].label, "%s%s  ·  pid %ld",
+            snprintf(row->label, sizeof row->label, "%s%s  ·  pid %ld",
                      managed ? "● " : "", recs[i].mode, recs[i].pid);
         PUT(.kind = TRAY_K_SUB_BEGIN);
         for (int m = 0; m < recs[i].n_models; m++) {
             PUT(.kind = TRAY_K_LABEL);
-            snprintf(it[n-1].label, sizeof it[n-1].label, "%s", recs[i].model_names[m]);
+            snprintf(row->label, sizeof row->label, "%s", recs[i].model_names[m]);
         }
         if (recs[i].n_models == 0 && recs[i].port > 0) {
             // swap-mode server: registry has no static list, ask the API
@@ -515,15 +523,15 @@ int tray_menu_build(tray_item *it, int cap) {
             int ns = fetch_served_models(recs[i].port, served, 16);
             for (int m = 0; m < ns; m++) {
                 PUT(.kind = TRAY_K_LABEL);
-                label_copy(it[n-1].label, sizeof it[n-1].label, served[m]);
+                label_copy(row->label, sizeof row->label, served[m]);
             }
             if (ns == 0) {
                 PUT(.kind = TRAY_K_LABEL);
-                snprintf(it[n-1].label, sizeof it[n-1].label, "(no model resident)");
+                snprintf(row->label, sizeof row->label, "(no model resident)");
             }
         }
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_STOP_INSTANCE, .arg = recs[i].pid);
-        snprintf(it[n-1].label, sizeof it[n-1].label, "Stop");
+        snprintf(row->label, sizeof row->label, "Stop");
         PUT(.kind = TRAY_K_SUB_END);
     }
     instances_list_free(recs, ni);
@@ -533,34 +541,34 @@ int tray_menu_build(tray_item *it, int cap) {
         // the ● row above carries Stop; a live Start row here would just
         // be a silent no-op, which reads as "nothing happened"
         PUT(.kind = TRAY_K_LABEL);
-        snprintf(it[n-1].label, sizeof it[n-1].label,
+        snprintf(row->label, sizeof row->label,
                  "Default runner: running on :%d", g_cfg.port);
     } else if (st == MG_STARTING) {
         PUT(.kind = TRAY_K_LABEL);
-        snprintf(it[n-1].label, sizeof it[n-1].label, "Default runner: starting…");
+        snprintf(row->label, sizeof row->label, "Default runner: starting…");
     } else if (st == MG_MISSING) {
         // No Start row: it could only ever fail. Offer the fix instead.
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_PICK_MODEL);
-        snprintf(it[n-1].label, sizeof it[n-1].label,
+        snprintf(row->label, sizeof row->label,
                  "Choose another model… (%.470s is gone)",
                  base_name(g_cfg.last_model));
     } else if (g_cfg.last_model[0]) {
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_START_MANAGED);
-        snprintf(it[n-1].label, sizeof it[n-1].label, "%s default runner (%.470s)",
+        snprintf(row->label, sizeof row->label, "%s default runner (%.470s)",
                  st == MG_EXITED ? "Restart" : "Start",
                  base_name(g_cfg.last_model));
     } else {
         PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_PICK_MODEL);
-        snprintf(it[n-1].label, sizeof it[n-1].label, "Start… (no model configured)");
+        snprintf(row->label, sizeof row->label, "Start… (no model configured)");
     }
     PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_PICK_MODEL);
-    snprintf(it[n-1].label, sizeof it[n-1].label, "Choose model…");
+    snprintf(row->label, sizeof row->label, "Choose model…");
     PUT(.kind = TRAY_K_CHECK, .action = TRAY_ACT_TOGGLE_AUTOSTART,
         .checked = tray_platform_autostart_get());
-    snprintf(it[n-1].label, sizeof it[n-1].label, "Launch at login");
+    snprintf(row->label, sizeof row->label, "Launch at login");
     PUT(.kind = TRAY_K_SEP);
     PUT(.kind = TRAY_K_ACTION, .action = TRAY_ACT_QUIT);
-    snprintf(it[n-1].label, sizeof it[n-1].label, "Quit controller");
+    snprintf(row->label, sizeof row->label, "Quit controller");
 #undef PUT
     return n;
 }
