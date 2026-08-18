@@ -226,7 +226,17 @@ static bool gguf_open_one_x(gguf_file *g, const char *path, bool header_only) {
 
     for (uint64_t i = 0; i < g->n_tensors; i++) {
         gguf_tensor *t = &g->tensors[i];
-        if (!ggml_type_supported(t->type)) continue; // checked at use time
+        if (!ggml_type_supported(t->type)) {
+            // The descriptor stays (the loader reports an unusable type by
+            // name), but the stored offset cannot be validated without a block
+            // size this build does not have — so it must not survive as a
+            // pointer. It is an arbitrary 64-bit value out of an untrusted
+            // file; leaving it in place parks an unbounded address in a field
+            // whose every consumer treats NULL as "nothing to read here".
+            t->data = NULL;
+            t->nbytes = 0;
+            continue;   // the type itself is checked at use time
+        }
         int bs = ggml_block_size(t->type);
         uint64_t rows, row_blocks, row_bytes;
         if (t->ne[0] == 0 || t->ne[0] > INT_MAX || t->ne[0] % (uint64_t)bs != 0 ||

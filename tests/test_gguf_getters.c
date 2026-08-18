@@ -163,11 +163,40 @@ static void test_duplicate_tensor_names_rejected(void) {
     printf("ok: duplicate tensor names rejected\n");
 }
 
+// A tensor whose ggml type this build does not know keeps its descriptor (the
+// type is "checked at use time" by the loader, which reports it by name), but
+// its stored offset is never validated — computing the extent needs a block
+// size this build does not have. So the offset must not survive as a pointer:
+// it is an arbitrary 64-bit value out of an untrusted file, and every consumer
+// of a tensor already treats data == NULL as "nothing to read here".
+static void test_unsupported_type_tensor_has_no_data(void) {
+    buf ti = {0};
+    bstr(&ti, "mystery.weight");
+    bu32(&ti, 1);                       // n_dims
+    bu64(&ti, 1);                       // ne[0]
+    bu32(&ti, 44);                      // a ggml type this build cannot decode
+    bu64(&ti, 1ull << 60);              // an offset nowhere near the mapping
+    const char *path = "unsupportedtype.gguf";
+    write_gguf(path, NULL, 0, &ti, 1);
+    free(ti.b);
+
+    gguf_file g;
+    assert(gguf_open(&g, path) && "an unknown tensor type is reported by its user");
+    gguf_tensor *t = gguf_find_tensor(&g, "mystery.weight");
+    assert(t && t->type == 44);
+    assert(t->data == NULL && "an unvalidated offset must not become a pointer");
+    assert(t->nbytes == 0);
+    gguf_close(&g);
+    remove(path);
+    printf("ok: an undecodable tensor type carries no data pointer\n");
+}
+
 int main(void) {
     test_getter_validation();
     test_u32_idx_getter();
     test_duplicate_keys_rejected();
     test_duplicate_tensor_names_rejected();
+    test_unsupported_type_tensor_has_no_data();
     printf("all gguf getter tests passed\n");
     return 0;
 }
