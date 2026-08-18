@@ -4,6 +4,9 @@ runner-no-write-timeout
 runner-sigpipe-default
 runner-debug
 runner-debug.exe
+# `make debug` on macOS leaves a 2.5 MB debug bundle beside the binary; the
+# binary itself is ignored above and this is the rest of the same artifact.
+runner-debug.dSYM/
 # build scratch. Also holds .build/template-oracles/ — the upstream jinja chat
 # templates `make template-conformance` fetches to compare runner's native C
 # renderer against. They are vendor files under each model's own license, so
