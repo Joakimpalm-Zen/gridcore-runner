@@ -35,6 +35,7 @@
 #include "vramreg.h"
 #include "compat.h"
 
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +74,26 @@ static void fmt_bytes(uint64_t b, char *out, size_t cap) {
     if (b >= 1000000000ull)   snprintf(out, cap, "%.1fGB", b / 1e9);
     else if (b >= 1000000ull) snprintf(out, cap, "%.0fMB", b / 1e6);
     else                      snprintf(out, cap, "%lluB", (unsigned long long)b);
+}
+
+// Append to the refusal message, returning the new offset — saturating at
+// `cap` rather than at what the text WOULD have been.
+//
+// snprintf reports the length it would have written, so `off += snprintf(...)`
+// walks past a buffer too small to hold the sentence, and the next append then
+// writes at err + off with a length of cap - off: an unsigned subtraction that
+// underflows to a huge size and hands snprintf a licence to write anywhere.
+// err_cap belongs to the caller and nothing in the message is bounded by this
+// module — both the gpu id and the model path arrive from outside it — so the
+// guard belongs here once, not at each append.
+static size_t err_add(char *err, size_t cap, size_t off, const char *fmt, ...) {
+    if (off >= cap) return cap;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(err + off, cap - off, fmt, ap);
+    va_end(ap);
+    if (n < 0) return off;
+    return off + (size_t)n > cap ? cap : off + (size_t)n;
 }
 
 // "4h39m" is the figure that made tonight's orphans obvious at a glance; a raw
@@ -325,18 +346,18 @@ static char *claim_rmw(const char *in, size_t in_len, void *ud) {
         char want[32], have[32];
         fmt_bytes(c->need, want, sizeof(want));
         fmt_bytes(avail, have, sizeof(have));
-        size_t off = (size_t)snprintf(c->err, c->err_cap,
+        size_t off = err_add(c->err, c->err_cap, 0,
             "%s of VRAM requested on %s, but only %s is available",
             want, c->gpu_id ? c->gpu_id : "the GPU", have);
         if (pending) {
             char p[32];
             fmt_bytes(pending, p, sizeof(p));
-            off += (size_t)snprintf(c->err + off, c->err_cap - off,
-                                    " (%s free, %s claimed but not yet allocated)",
-                                    have, p);
+            off = err_add(c->err, c->err_cap, off,
+                          " (%s free, %s claimed but not yet allocated)",
+                          have, p);
         }
         if (holder_count == 0)
-            off += (size_t)snprintf(c->err + off, c->err_cap - off,
+            off = err_add(c->err, c->err_cap, off,
                 ".\n  No other runner is registered on this GPU — the memory is "
                 "held by something outside runner's accounting.");
         uint64_t now = (uint64_t)time(NULL);
@@ -346,14 +367,14 @@ static char *claim_rmw(const char *in, size_t in_len, void *ud) {
             fmt_bytes(e[i].bytes, b, sizeof(b));
             fmt_uptime(now > e[i].since ? now - e[i].since : 0, up, sizeof(up));
             model_label(e[i].model, label, sizeof(label));
-            off += (size_t)snprintf(c->err + off, c->err_cap - off,
-                                    "\n  pid %ld holding %s for %s, up %s, priority %d%s",
-                                    e[i].pid, b, label, up, e[i].priority,
-                                    e[i].state == 'P' ? " (loading)" : "");
+            off = err_add(c->err, c->err_cap, off,
+                          "\n  pid %ld holding %s for %s, up %s, priority %d%s",
+                          e[i].pid, b, label, up, e[i].priority,
+                          e[i].state == 'P' ? " (loading)" : "");
         }
         if (off + 96 < c->err_cap)
-            snprintf(c->err + off, c->err_cap - off,
-                     "\n  pass --wait-for-vram [SECONDS] to queue instead of failing");
+            err_add(c->err, c->err_cap, off,
+                    "\n  pass --wait-for-vram [SECONDS] to queue instead of failing");
     }
     // still write back: reaping dead owners is worth persisting even on refusal
     return serialise(e, n);

@@ -303,6 +303,45 @@ static void test_refusal_line_priority_format_is_exact(void) {
     assert(strstr(err, want) && "refusal line format must match exactly");
 }
 
+// err_cap is the caller's choice, and the module has to survive every value of
+// it. The refusal message was assembled with unguarded `off += snprintf(...)`
+// steps: snprintf returns what it WOULD have written, so a buffer too small
+// for the first sentence leaves off past err_cap, and the next step writes at
+// err + off with a length of err_cap - off — an unsigned subtraction that
+// underflows to a huge size. Nothing in the message is bounded by the module
+// either: the gpu id and the model path both come from outside it.
+//
+// Padding rather than a bare exact-size buffer, so this is red without needing
+// a sanitizer build: the stray write lands ~79 bytes in, and any byte of the
+// pad that changes is a write the caller never authorised.
+static void test_small_error_buffer_is_not_overrun(void) {
+    scratch_dir();
+    const char *gpu = "small-err-buffer-test";
+
+    // deliberately NOT committed: a pending claim is what puts the "claimed
+    // but not yet allocated" sentence — the first unguarded step — on the path
+    uint64_t free_all = 24 * GB;
+    vram_lease *first = vram_claim(gpu, "/models/holder.gguf", 5 * GB, 0,
+                                   fixed_free, &free_all, 0, NULL, NULL,
+                                   NULL, 0);
+    assert(first);
+
+    enum { PAD = 512 };
+    for (size_t cap = 1; cap <= 200; cap++) {
+        char *err = malloc(cap + PAD);
+        assert(err);
+        memset(err, 0x5A, cap + PAD);
+        assert(!vram_claim(gpu, "/models/too-big.gguf", 22 * GB, 0, fixed_free,
+                           &free_all, 0, NULL, NULL, err, cap));
+        for (size_t i = cap; i < cap + PAD; i++)
+            assert(err[i] == 0x5A &&
+                   "the refusal message must stay inside err_cap");
+        assert(strlen(err) < cap && "and stay NUL-terminated inside it");
+        free(err);
+    }
+    vram_release(first);
+}
+
 // The yield sentinel's lifecycle, end to end through the public API: unset
 // until requested, set once vram_request_yield names this (gpu, pid), and
 // clear again after vram_yield_clear. Also: a request aimed at a DIFFERENT
@@ -772,6 +811,7 @@ int main(void) {
     test_unreadable_registry_is_not_truncated();
     test_legacy_record_without_priority_reads_as_zero();
     test_refusal_line_priority_format_is_exact();
+    test_small_error_buffer_is_not_overrun();
     test_yield_flag_lifecycle();
 #ifndef _WIN32
     test_symlinked_registry_is_refused();
