@@ -755,7 +755,7 @@ const char *const *model_supported_archs(size_t *count) {
     static const char *const arches[] = {
         "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
         "smollm", "stablelm", "gemma3", "gemma4", "phi3", "gpt-oss",
-        "apertus", "afmoe", "muse-glimmer", "granite",
+        "apertus", "afmoe", "muse-glimmer", "granite", "granitehybrid",
     };
     if (count) *count = sizeof(arches) / sizeof(arches[0]);
     return arches;
@@ -939,6 +939,7 @@ static void model_free_weights(model_t *m) {
         free(l->ffn_up_exps_b);  free(l->ffn_down_exps_b);
         free(l->ffn_pre_norm2_w); free(l->ffn_post_norm1_w); free(l->ffn_post_norm2_w);
         free(l->ssm_dt); free(l->ssm_a); free(l->ssm_norm_w);
+        free(l->ssm_conv1d_b); free(l->ssm_d);
         free(l->moe_g); free(l->moe_u); free(l->moe_d);  // split-MoE pointer arrays
         free(l->ple_post_norm);
     }
@@ -1160,16 +1161,18 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 // DeltaNet recurrence, but Mamba-2's update (h_t = exp(dt·A)⊙h_{t-1} +
 // (dt·B)·x_t; y = C·h + D·x) is a different kernel that is not yet wired in.
 //
-// Until it is, these archs are RECOGNIZED and refused with a specific message.
-// They are never run through llama-style math (the recurrence would be silently
-// wrong) and never conflated with an unknown architecture (a refusal that reads
-// as a typo). The refusal still applies the hostile-GGUF discipline: it
-// validates the ssm.* geometry and the SSM tensor set on the first recurrent
-// layer, so a truncated or malformed hybrid fails closed naming the missing
-// field rather than deferring the surprise to the not-yet-written forward.
+// `granitehybrid` (Granite-4 h-series) now LOADS and runs — its Mamba-2 decode
+// step and the muP scaling are implemented below and gated token-identically
+// against llama.cpp b10353 (tracer 2). `nemotron_h_moe` (Nemotron-3.5
+// Lightning) is still RECOGNIZED and refused with a specific message: it shares
+// the Mamba-2 tensor set but adds a grouped scan (n_group=8) and MoE variant
+// this tracer has not certified, so it is never run through the granite path.
+// The refusal still applies the hostile-GGUF discipline: it validates the ssm.*
+// geometry and the SSM tensor set on the first recurrent layer, so a truncated
+// or malformed hybrid fails closed naming the missing field rather than
+// deferring the surprise to the not-yet-certified forward.
 static bool model_is_hybrid_ssm_arch(const char *arch) {
-    return strcmp(arch, "granitehybrid") == 0 ||
-           strcmp(arch, "nemotron_h_moe") == 0;
+    return strcmp(arch, "nemotron_h_moe") == 0;
 }
 
 static bool hybrid_ssm_admit_refuse(gguf_file *g, const char *arch) {
@@ -1797,6 +1800,105 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             return false;
         }
     }
+    if (strcmp(arch, "granitehybrid") == 0) {
+        // Granite-4 h-series (granitehybrid): Mamba-2 recurrent layers
+        // interleaved with GQA attention, per-layer typed off the
+        // attention.head_count_kv ARRAY (0 => recurrent). Reference: llama.cpp
+        // b10353 src/models/granite-hybrid.cpp + mamba-base.cpp
+        // build_mamba2_layer + ggml_ssm_scan (scalar-per-head branch). The four
+        // granite muP scalars apply exactly as the dense arch
+        // (embedding/attention/residual/logit); the MoE FFN (softmax top-k over
+        // fused experts + an always-on shared expert) is configured by the
+        // generic MoE block below. Rope is gated by rope.scaling.finetuned —
+        // NoPE when false, which the certified granite-4.0-h-small sets; when
+        // true the attention layers rope adjacent-pair like dense granite.
+        m->granite_hybrid = true;
+        m->rope_neox   = false;
+        m->embd_scale  = gguf_get_f32(g, AK("embedding_scale"), 1.0f);
+        m->attn_scale  = gguf_get_f32(g, AK("attention.scale"), 0.0f);
+        m->resid_scale = gguf_get_f32(g, AK("residual_scale"), 1.0f);
+        float ls = gguf_get_f32(g, AK("logit_scale"), 0.0f);
+        if (ls > 0.0f) m->logit_scale = 1.0f / ls;
+        // rope gate: llama.cpp builds no positions and applies no rope when
+        // rope.scaling.finetuned is false (granite-4.0-h sets it false, so its
+        // four attention layers are NoPE — position comes from the Mamba
+        // layers). Express that with the NoPE-every-layer knob; attention
+        // temperature stays off (attn_temp_scale == 0), so model_layer_ropes
+        // returning false is the whole effect. Set AFTER a value the generic
+        // Llama-4 no_rope read below would otherwise clobber (that read now
+        // defaults to the current value, preserving this — see its comment).
+        if (!gguf_get_bool(g, AK("rope.scaling.finetuned"), true))
+            m->no_rope_layer_step = 1;
+        // Mamba-2 geometry (NOT the Gated DeltaNet ratios qwen35 checks):
+        // inner = 2*n_embd = n_head * head_dim, groups partition the heads and
+        // evenly divide the inner dim.
+        m->ssm_conv_kernel = (int)gguf_get_u32(g, AK("ssm.conv_kernel"), 0);
+        m->ssm_inner       = (int)gguf_get_u32(g, AK("ssm.inner_size"), 0);
+        m->ssm_state       = (int)gguf_get_u32(g, AK("ssm.state_size"), 0);
+        m->ssm_v_heads     = (int)gguf_get_u32(g, AK("ssm.time_step_rank"), 0);
+        m->ssm_groups      = (int)gguf_get_u32(g, AK("ssm.group_count"), 0);
+        if (m->ssm_conv_kernel <= 0 || m->ssm_conv_kernel > 8 ||
+            m->ssm_inner <= 0 || m->ssm_inner > MDL_DIM_MAX ||
+            m->ssm_state <= 0 || m->ssm_state > MDL_DIM_MAX ||
+            m->ssm_v_heads <= 0 || m->ssm_groups <= 0 ||
+            m->ssm_inner % m->ssm_v_heads != 0 ||
+            m->ssm_v_heads % m->ssm_groups != 0 ||
+            m->ssm_inner % m->ssm_groups != 0 ||
+            m->ssm_inner != 2 * m->n_embd) {
+            fprintf(stderr, "error: invalid granitehybrid Mamba-2 geometry "
+                    "(conv_kernel=%d inner=%d state=%d heads=%d groups=%d, "
+                    "n_embd=%d)\n", m->ssm_conv_kernel, m->ssm_inner,
+                    m->ssm_state, m->ssm_v_heads, m->ssm_groups, m->n_embd);
+            return false;
+        }
+        // Per-layer attention typing from the head_count_kv ARRAY. Recurrent
+        // layers publish 0 (no KV rows); attention layers a real GQA count.
+        // Build the per-layer geometry the KV allocator and attention path read
+        // (identity head_dim, no shared KV), and set the scalar n_head_kv to a
+        // representative attention value so the general geometry gate (which
+        // predates the per-layer arrays) still passes.
+        size_t nl = (size_t)(unsigned)m->n_layer;
+        m->l_head_kv  = calloc(nl, sizeof(int));
+        m->l_head_dim = calloc(nl, sizeof(int));
+        m->l_rope_dim = calloc(nl, sizeof(int));
+        if (!m->l_head_kv || !m->l_head_dim || !m->l_rope_dim) return false;
+        int attn_kv = 0;
+        for (int i = 0; i < m->n_layer; i++) {
+            int kv = (int)gguf_get_u32_idx(g, AK("attention.head_count_kv"),
+                                           (uint64_t)i, 0);
+            m->l_head_kv[i]  = kv;
+            m->l_head_dim[i] = m->head_dim;
+            m->l_rope_dim[i] = m->rope_dim;
+            if (kv > 0) {
+                if (kv > m->n_head || m->n_head % kv != 0) {
+                    fprintf(stderr, "error: granitehybrid blk.%d head_count_kv "
+                            "%d does not divide n_head %d\n", i, kv, m->n_head);
+                    return false;
+                }
+                if (attn_kv == 0) attn_kv = kv;
+                else if (kv != attn_kv) {
+                    fprintf(stderr, "error: granitehybrid attention layers "
+                            "disagree on head_count_kv (%d vs %d)\n",
+                            attn_kv, kv);
+                    return false;
+                }
+            }
+        }
+        if (attn_kv == 0) {
+            fprintf(stderr, "error: granitehybrid has no attention layers "
+                    "(every attention.head_count_kv entry is 0)\n");
+            return false;
+        }
+        m->n_head_kv = attn_kv;
+        int n_attn = 0;
+        for (int i = 0; i < m->n_layer; i++) if (m->l_head_kv[i] > 0) n_attn++;
+        fprintf(stderr, "granitehybrid: Mamba-2 hybrid (%d recurrent + %d "
+                "attention layers) — greedy output verified against llama.cpp "
+                "b10353 on granite-4.0-h-small Q4_K_M: token-identical on "
+                "high-confidence prompts, diverging only at genuine near-ties "
+                "(the Q4_K noise floor)\n",
+                m->n_layer - n_attn, n_attn);
+    }
     if (strcmp(arch, "muse-glimmer") == 0) {
         // muse-glimmer (Meta Muse Glimmer 30B). Transcribed from llama.cpp
         // b10353 src/models/muse-glimmer.cpp, not inferred:
@@ -1869,8 +1971,12 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     // here, once, for all of them: no window means no sliding layers.
     if (m->l_is_swa && m->swa_window <= 0)
         for (int i = 0; i < m->n_layer; i++) m->l_is_swa[i] = false;
-    // Llama-4 attention knobs, off unless the GGUF asks for them.
-    m->no_rope_layer_step   = (int)gguf_get_u32(g, AK("attention.no_rope_layer_step"), 0);
+    // Llama-4 attention knobs, off unless the GGUF asks for them. The default
+    // preserves any value an arch block above already set (granitehybrid marks
+    // every layer NoPE via step 1 when rope.scaling.finetuned is false); every
+    // other arch leaves the field at its zero-init, so behavior is unchanged.
+    m->no_rope_layer_step   = (int)gguf_get_u32(g, AK("attention.no_rope_layer_step"),
+                                                (uint32_t)m->no_rope_layer_step);
     // afmoe's GGUF carries no no_rope key; llama.cpp defaults the step to the
     // SWA period (4) for this arch, so the global layers are the NoPE layers.
     // muse-glimmer also gates its attention but derives NoPE from the pattern
@@ -1985,7 +2091,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             return false;
         }
     }
-    if (!m->qwen35 && gguf_get(g, AK("ssm.conv_kernel"))) {
+    if (!m->qwen35 && !m->granite_hybrid && gguf_get(g, AK("ssm.conv_kernel"))) {
         fprintf(stderr, "error: '%s' is a hybrid SSM/attention architecture — "
                 "only pure-transformer llama-family models are supported\n", arch);
         return false;
@@ -2120,8 +2226,10 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             l->attn_sinks = tensor_to_f32(
                 need_tensor(g, "blk.%d.attn_sinks.weight", i, &ok),
                 m->n_head, &ok);
-        l->recurrent = m->qwen35 && ((i + 1) % m->full_attn_interval != 0);
-        if (l->recurrent) {
+        l->recurrent = m->qwen35 ? ((i + 1) % m->full_attn_interval != 0)
+                     : m->granite_hybrid ? (m->l_head_kv && m->l_head_kv[i] == 0)
+                     : false;
+        if (l->recurrent && m->qwen35) {
             l->wqkv      = need_tensor(g, "blk.%d.attn_qkv.weight", i, &ok);
             l->wq_gate   = need_tensor(g, "blk.%d.attn_gate.weight", i, &ok);
             l->ssm_conv  = need_tensor(g, "blk.%d.ssm_conv1d.weight", i, &ok);
@@ -2178,6 +2286,48 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             l->out_scale = 1.0f;
             continue;
         }
+        if (l->recurrent && m->granite_hybrid) {
+            // Granite-4 h-series Mamba-2 mixer. attn_norm (an) is bound above;
+            // ffn_norm (fn) is this layer's MoE input norm and is converted in
+            // the shared norm tail below, so this branch deliberately does NOT
+            // continue — it binds only the mixer and falls through to the
+            // shared FFN/MoE binding. Tensor shapes per llama.cpp b10353
+            // granite-hybrid.cpp::load_arch_tensors.
+            int nh = m->ssm_v_heads, ds = m->ssm_state, ng = m->ssm_groups;
+            int inner = m->ssm_inner;
+            int conv_dim  = inner + 2 * ng * ds;
+            int d_in_proj = 2 * inner + 2 * ng * ds + nh;
+            l->ssm_in   = need_tensor(g, "blk.%d.ssm_in.weight", i, &ok);
+            l->ssm_conv = need_tensor(g, "blk.%d.ssm_conv1d.weight", i, &ok);
+            gguf_tensor *sconvb = need_tensor(g, "blk.%d.ssm_conv1d.bias", i, &ok);
+            gguf_tensor *sdtb   = need_tensor(g, "blk.%d.ssm_dt.bias", i, &ok);
+            gguf_tensor *sa2    = need_tensor(g, "blk.%d.ssm_a", i, &ok);
+            gguf_tensor *sd2    = need_tensor(g, "blk.%d.ssm_d", i, &ok);
+            gguf_tensor *sn2    = need_tensor(g, "blk.%d.ssm_norm.weight", i, &ok);
+            l->ssm_out  = need_tensor(g, "blk.%d.ssm_out.weight", i, &ok);
+            if (!ok) return false;
+            // Tie every mixer tensor to the ssm.* geometry so a mislabelled or
+            // truncated hybrid fails closed here, not by reading past the map
+            // in the scan (the hostile-GGUF discipline the admission stub kept).
+            if (!check_shape(l->ssm_in, m->n_embd, d_in_proj, "ssm_in", i) ||
+                !check_shape(l->ssm_conv, m->ssm_conv_kernel, conv_dim,
+                             "ssm_conv1d", i) ||
+                !check_shape(sconvb, conv_dim, 1, "ssm_conv1d.bias", i) ||
+                !check_shape(sdtb, nh, 1, "ssm_dt.bias", i) ||
+                !check_shape(sa2, 1, nh, "ssm_a", i) ||
+                !check_shape(sd2, 1, nh, "ssm_d", i) ||
+                !check_shape(sn2, inner, 1, "ssm_norm", i) ||
+                !check_shape(l->ssm_out, inner, m->n_embd, "ssm_out", i))
+                return false;
+            l->ssm_conv1d_b = tensor_to_f32(sconvb, conv_dim, &ok);
+            l->ssm_dt       = tensor_to_f32(sdtb, nh, &ok);
+            l->ssm_a        = tensor_to_f32(sa2, nh, &ok);
+            l->ssm_d        = tensor_to_f32(sd2, nh, &ok);
+            l->ssm_norm_w   = tensor_to_f32(sn2, inner, &ok);
+            if (!ok) return false;
+            l->out_scale = 1.0f;
+        }
+        if (!l->recurrent) {
         if (fused_qkv) {
             // phi3: [Q rows | K rows | V rows] in attn_qkv, and the FFN's
             // gate and up halves stacked in ffn_up (HF's gate_up_proj)
@@ -2231,6 +2381,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 ok = false;
             }
         }
+        }  // end !l->recurrent attention binding
         if (m->n_expert > 0 && i >= m->n_dense_lead) {
             // sparse-MoE FFN: a router plus fused 3D expert tensors replace the
             // dense gate/up/down for this layer
@@ -2358,6 +2509,10 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         {
             int qd = model_q_dim(m, i);    // n_head * head_dim (per layer)
             int kd = model_kv_dim(m, i);   // n_head_kv * head_dim (per layer)
+            // Recurrent (Mamba-2) layers carry no attention projections; their
+            // mixer tensors were shape-checked at bind time. Only the MoE
+            // checks below apply to them.
+            if (!l->recurrent) {
             if (!check_shape(l->wo, qd, m->n_embd, "attn_output", i))
                 return false;
             if (!fused_qkv && !m->qwen35) {
@@ -2378,6 +2533,7 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                  !check_shape(l->wk, m->n_embd, kd, "attn_k", i) ||
                  !check_shape(l->wv, m->n_embd, kd, "attn_v", i)))
                 return false;
+            }  // end !l->recurrent attention shape checks
             if (!l->is_moe &&
                 !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
                 return false;
@@ -2773,6 +2929,29 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         // pass is single-threaded here, so one buffer suffices) — preallocated
         // so the hot path never mallocs and an OOM fails the load, not a token
         m->ssm_cw = malloc(sizeof(float) * m->ssm_conv_kernel);
+    }
+    if (m->granite_hybrid) {
+        // Mamba-2 recurrent scratch. Per token: the in_proj output zxBCdt
+        // (ssm_qkv, d_in_proj wide), the post-conv xBC (ssm_aux, conv_dim),
+        // and the gated+normed inner y (ssm_z, inner). Per layer, held across
+        // the whole sequence (no cache seam yet): the conv ring and the SSD
+        // state. ssm_cw holds one dequantized conv-kernel row.
+        int nh = m->ssm_v_heads, ds = m->ssm_state, ng = m->ssm_groups;
+        int inner = m->ssm_inner, hd = inner / nh;
+        int conv_dim  = inner + 2 * ng * ds;
+        int d_in_proj = 2 * inner + 2 * ng * ds + nh;
+        m->ssm_qkv = malloc(sizeof(float) * (size_t)B * d_in_proj);
+        m->ssm_aux = malloc(sizeof(float) * (size_t)B * conv_dim);
+        m->ssm_z   = malloc(sizeof(float) * (size_t)B * inner);
+        m->ssm_conv_state = calloc((size_t)m->n_layer *
+                                   (m->ssm_conv_kernel - 1) * conv_dim,
+                                   sizeof(float));
+        m->ssm_state_mem = calloc((size_t)m->n_layer * nh * hd * ds,
+                                  sizeof(float));
+        m->ssm_cw = malloc(sizeof(float) * m->ssm_conv_kernel);
+        if (!m->ssm_qkv || !m->ssm_aux || !m->ssm_z ||
+            !m->ssm_conv_state || !m->ssm_state_mem || !m->ssm_cw)
+            return false;
     }
     // hb/hb2 hold the dense FFN's n_ff-wide output for B token columns; gemma-4
     // MoE also reuses hb to hold one token's fused gate_up of width 2*n_ff_exp,
@@ -3362,6 +3541,125 @@ void model_embd_transform(const model_t *m, float *row) {
         for (int i = 0; i < m->n_embd; i++) row[i] *= m->embd_scale;
     if (m->embd_norm)
         rmsnorm(row, row, NULL, m->n_embd, m->rms_eps);
+}
+
+// One CPU Mamba-2 (SSD) recurrent layer for Granite-4 h-series. Transcribed
+// from llama.cpp b10353 build_mamba2_layer (mamba-base.cpp) + the scalar-per-
+// head branch of ggml_compute_forward_ssm_scan_f32 (ops.cpp), which this
+// reproduces exactly as the single-token recurrent step:
+//
+//   zxBCdt = in_proj(x)                      split z[inner], xBC[conv_dim], dt[H]
+//   xBC   = silu(conv1d(ring ++ xBC) + b)    causal depthwise conv, then split
+//                                            x[inner], B[G*S], C[G*S]
+//   per head h (group g = h/(H/G)):
+//     dt_h = softplus(dt[h] + dt_bias[h]);  dA = exp(dt_h * A[h])
+//     state[h,p,n] = state[h,p,n]*dA + B[g,n]*x[h,p]*dt_h    (in place)
+//     y[h,p]       = sum_n state[h,p,n]*C[g,n] + D[h]*x[h,p]
+//   y = silu(z) * y                          gated,
+//   y = rmsnorm(y) * ssm_norm                THEN grouped RMS norm (per group),
+//   out = out_proj(y)
+//
+// Prefill is a serial O(T) sweep of this step (tracer 2 scope; the chunked
+// scan is tracer 3). State lives in the per-model conv ring / SSD buffers and
+// is reset at pos 0, so a correct decode runs the whole sequence in order.
+//
+// Built with fast-math DISABLED (unlike the rest of the engine): the SSD
+// recurrence carries state token-to-token, so a per-step reassociation or an
+// approximate expf/division COMPOUNDS through the sequence and drifts the
+// running-count kind of state that long-range tasks depend on. ggml compiles
+// its scan with accurate math; matching it is what makes greedy decoding
+// token-identical rather than merely fluent. The grouped RMS norm below also
+// accumulates its sum-of-squares in double, exactly as ggml_compute_forward_
+// rms_norm_f32 does.
+__attribute__((optimize("no-fast-math")))
+static void mamba2_ssd_step(model_t *m, layer_t *ly, int layer, int n, int xdim) {
+    int nh = m->ssm_v_heads;                 // n_ssm_head
+    int inner = m->ssm_inner, hd = inner / nh; // head_dim = inner / n_head
+    int ds = m->ssm_state, ng = m->ssm_groups;
+    int gsz = nh / ng;                       // heads per group (repeat_interleave)
+    int conv_dim  = inner + 2 * ng * ds;
+    int d_in_proj = 2 * inner + 2 * ng * ds + nh;
+    int histn = m->ssm_conv_kernel - 1;
+
+    // in_proj: normed input (m->xb) -> zxBCdt (m->ssm_qkv)
+    matvec_b(m->tp, m->ssm_qkv, d_in_proj, ly->ssm_in,
+             m->xb, xdim, m->n_embd, d_in_proj, NULL, n);
+
+    float *convstate = m->ssm_conv_state +
+                       (size_t)layer * histn * conv_dim;
+    float *states = m->ssm_state_mem + (size_t)layer * nh * hd * ds;
+    size_t wrs = ggml_row_size(ly->ssm_conv->type, m->ssm_conv_kernel);
+    float *cw = m->ssm_cw;                    // one dequantized conv row, reused
+
+    for (int b = 0; b < n; b++) {
+        float *proj = m->ssm_qkv + (size_t)b * d_in_proj;
+        const float *z   = proj;              // gate [inner]
+        const float *xBC0 = proj + inner;     // pre-conv xBC [conv_dim]
+        const float *dtr = proj + inner + conv_dim; // dt raw [nh]
+        float *xBC = m->ssm_aux + (size_t)b * conv_dim; // post-conv [conv_dim]
+        // Causal depthwise conv over the ring (oldest..newest) + current, then
+        // bias and silu. Weight row c is [conv_kernel]; tap histn multiplies
+        // the current input (llama concats the ring BEFORE the new column).
+        for (int c = 0; c < conv_dim; c++) {
+            dequant_row(ly->ssm_conv->type,
+                        (const uint8_t *)ly->ssm_conv->data + (size_t)c * wrs,
+                        cw, m->ssm_conv_kernel);
+            float sum = ly->ssm_conv1d_b[c] + cw[histn] * xBC0[c];
+            for (int k = 0; k < histn; k++)
+                sum += cw[k] * convstate[(size_t)k * conv_dim + c];
+            xBC[c] = sum / (1.0f + expf(-sum));    // silu
+        }
+        // advance the ring: drop the oldest column, append the PRE-conv input
+        if (histn) {
+            memmove(convstate, convstate + conv_dim,
+                    sizeof(float) * (size_t)(histn - 1) * conv_dim);
+            memcpy(convstate + (size_t)(histn - 1) * conv_dim, xBC0,
+                   sizeof(float) * conv_dim);
+        }
+        const float *xh = xBC;                // x  [inner] = [head_dim, n_head]
+        const float *Bb = xBC + inner;        // B  [n_group, d_state]
+        const float *Cb = xBC + inner + ng * ds; // C [n_group, d_state]
+        float *y = m->ssm_z + (size_t)b * inner;  // gated + normed inner output
+        for (int h = 0; h < nh; h++) {
+            int g = h / gsz;
+            const float *Bg = Bb + (size_t)g * ds;
+            const float *Cg = Cb + (size_t)g * ds;
+            float dt = softplus_f32(dtr[h] + ly->ssm_dt[h]);
+            float dA = expf(dt * ly->ssm_a[h]);
+            float D  = ly->ssm_d[h];
+            float *st = states + (size_t)h * hd * ds;
+            for (int p = 0; p < hd; p++) {
+                float x_dt = xh[(size_t)h * hd + p] * dt;
+                float *sp = st + (size_t)p * ds;
+                float sumf = 0.0f;
+                for (int j = 0; j < ds; j++) {
+                    float s = sp[j] * dA + Bg[j] * x_dt;
+                    sumf += s * Cg[j];
+                    sp[j] = s;
+                }
+                y[(size_t)h * hd + p] = sumf + D * xh[(size_t)h * hd + p];
+            }
+        }
+        // gate by silu(z), then grouped RMS norm (n_group groups over inner),
+        // matching Mamba-2's RMSNormGated: normalize the GATED activations.
+        for (int i = 0; i < inner; i++) {
+            float zz = z[i];
+            y[i] *= zz / (1.0f + expf(-zz));
+        }
+        int per_g = inner / ng;
+        for (int g = 0; g < ng; g++) {
+            float *yg = y + (size_t)g * per_g;
+            const float *wg = ly->ssm_norm_w + (size_t)g * per_g;
+            double ss = 0.0;                       // double accumulation, as ggml
+            for (int i = 0; i < per_g; i++) ss += (double)(yg[i] * yg[i]);
+            float mean = (float)(ss / per_g);
+            float scale = 1.0f / sqrtf(mean + m->rms_eps);
+            for (int i = 0; i < per_g; i++) yg[i] = yg[i] * scale * wg[i];
+        }
+    }
+    // out_proj: y (m->ssm_z, stride inner) -> m->xb (stride xdim)
+    matvec_b(m->tp, m->xb, xdim, ly->ssm_out, m->ssm_z, inner,
+             inner, m->n_embd, NULL, n);
 }
 
 // One CPU Gated DeltaNet layer for Qwen3.5. State is stored transposed
@@ -4058,6 +4356,19 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         memset(m->ssm_state_mem, 0, sizeof(float) * (size_t)m->n_layer *
                m->ssm_v_heads * hv * hv);
     }
+    if (m->granite_hybrid && pos == 0) {
+        // No recurrent-state cache seam yet (tracer 4): the conv ring and SSD
+        // state are per-model and reset at the start of every sequence, so a
+        // correct decode requires running the whole sequence in order from
+        // pos 0 — exactly qwen35's constraint today.
+        int nh = m->ssm_v_heads, ds = m->ssm_state, ng = m->ssm_groups;
+        int inner = m->ssm_inner, hd = inner / nh;
+        int conv_dim = inner + 2 * ng * ds;
+        memset(m->ssm_conv_state, 0, sizeof(float) * (size_t)m->n_layer *
+               (m->ssm_conv_kernel - 1) * conv_dim);
+        memset(m->ssm_state_mem, 0, sizeof(float) * (size_t)m->n_layer *
+               nh * hd * ds);
+    }
     // GPU handles the leading gpu_layers. A full split (gpu_layers == n_layer)
     // returns logits directly; a partial split runs [0, gpu_layers) on the GPU,
     // leaves the boundary activation in the host x buffer + the offloaded
@@ -4197,7 +4508,8 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             dbg_stat("post-attn-norm", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         }
         if (ly->recurrent) {
-            qwen35_linear(m, ly, l, n, xdim);
+            if (m->granite_hybrid) mamba2_ssd_step(m, ly, l, n, xdim);
+            else                   qwen35_linear(m, ly, l, n, xdim);
         } else {
         if (m->qwen35) {
             matvec_b(m->tp, m->ssm_qkv, 2 * q_dim, ly->wq,

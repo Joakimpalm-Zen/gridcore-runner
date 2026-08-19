@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""Generate tiny Mamba-2 hybrid GGUF fixtures for the SSM admission gate.
+"""Generate tiny Mamba-2 hybrid GGUF fixtures for the SSM path.
 
-The runner recognizes the Mamba-2 hybrid families (arch `granitehybrid`,
-`nemotron_h_moe`) but does not yet implement their forward. Admission must say
-so SPECIFICALLY — "recognized, forward not yet implemented" — rather than fall
-back to the generic unknown-architecture refusal, and it must FAIL CLOSED with
-a named tensor when a required SSM tensor or metadata field is absent (the
-hostile-GGUF discipline). These fixtures exercise both branches; no real model
-download is needed. The tensor names and `*.ssm_*` keys mirror a real
-granite-4.0-h / Nemotron-3.5 GGUF (confirmed off files on the box):
+The runner now RUNS `granitehybrid` (Granite-4 h-series) — its Mamba-2 decode
+step, the granite muP scaling and the NoPE attention are implemented and gated
+token-identically against llama.cpp b10353 on the real granite-4.0-h-small
+(tracer 2). `nemotron_h_moe` (Nemotron-3.5 Lightning) shares the Mamba-2 tensor
+set but adds a grouped scan this tracer has not certified, so it is still
+RECOGNIZED and refused with a specific "forward not yet implemented" message.
 
-  ssm_in.weight   [E, 2*inner? no: inner + conv_dim + n_heads]  the in-projection
-  ssm_conv1d.{weight,bias}  causal depthwise conv over conv_dim = inner+2*g*state
-  ssm_a, ssm_d    [1, n_heads]   per-head A (log) and skip D
-  ssm_dt.bias     [n_heads]      per-head timestep bias (softplus input)
-  ssm_norm.weight [inner]        gated RMSNorm before the out-projection
-  ssm_out.weight  [inner, E]     the out-projection
+This fixture is structurally faithful to a real granite-4.0-h GGUF (confirmed
+off the file on the box): a sparse-MoE hybrid where a minority of layers are
+GQA attention (attention.head_count_kv != 0) and the rest are Mamba-2 recurrent
+mixers (head_count_kv == 0), every layer carrying a routed MoE FFN plus an
+always-on shared expert. It is small but honors the load-bearing invariants:
+
+  * ssm.inner_size == 2 * embedding_length  (the Mamba-2 expansion factor),
+  * ssm_in.weight [E, 2*inner + 2*groups*state + heads]  the zxBCdt projection,
+  * ssm_conv1d.{weight,bias} over conv_dim = inner + 2*groups*state,
+  * ssm_a, ssm_d [1, heads]; ssm_dt.bias [heads]; ssm_norm.weight [inner];
+    ssm_out.weight [inner, E],
+  * the four granite scalars (embedding/attention/residual/logit),
+  * rope.scaling.finetuned = false, so the attention layers are NoPE.
+
+`granitehybrid` loads and decodes it; `nemotron_h_moe` is refused. The
+`.missing-ssm_d` variant drops one SSM tensor so admission must FAIL CLOSED
+naming it (the hostile-GGUF discipline).
 
 Usage:  make-test-hybrid.py <out-prefix> [--arch granitehybrid]
 Writes <out>.gguf (valid) and <out>.missing-ssm_d.gguf (drops one SSM tensor).
@@ -28,17 +37,22 @@ ARCH = "granitehybrid"
 if "--arch" in sys.argv:
     ARCH = sys.argv[sys.argv.index("--arch") + 1]
 
-# tiny geometry (kept structurally faithful to Mamba-2, not to any real size)
+# tiny geometry (structurally faithful to Mamba-2, not to any real size)
 E = 32                    # embedding_length
 HEADS, KV = 4, 2          # attention head counts (attention layers only)
-FF = 64                   # dense FFN width
+HEAD_DIM = E // HEADS     # 8
 N_SSM_HEADS = 4           # ssm.time_step_rank
-SSM_INNER = 32            # ssm.inner_size (head_dim = INNER/HEADS = 8)
+SSM_INNER = 2 * E         # ssm.inner_size == 2*E (Mamba-2 expansion), = 64
 SSM_STATE = 8             # ssm.state_size
 SSM_GROUPS = 1            # ssm.group_count
 SSM_CONV = 4              # ssm.conv_kernel
-CONV_DIM = SSM_INNER + 2 * SSM_GROUPS * SSM_STATE     # x, B, C concatenated
-INPROJ = SSM_INNER + CONV_DIM + N_SSM_HEADS           # z, xBC, dt
+SSM_HDIM = SSM_INNER // N_SSM_HEADS                  # 16 (mamba head dim)
+CONV_DIM = SSM_INNER + 2 * SSM_GROUPS * SSM_STATE    # x, B, C convolved together
+INPROJ = 2 * SSM_INNER + 2 * SSM_GROUPS * SSM_STATE + N_SSM_HEADS  # z, xBC, dt
+# MoE
+N_EXPERT, N_USED = 4, 2
+FF_EXP = 16               # per-expert FFN width
+FF_SHEXP = 16            # shared-expert FFN width
 # layer types: recurrent (SSM) layers carry head_count_kv == 0, attention
 # layers a real count. blk.0 recurrent, blk.1 attention.
 LAYER_KV = [0, KV]
@@ -75,6 +89,9 @@ def rnd():
 def flist(n): return [rnd() for _ in range(n)]
 def pack(xs): return struct.pack(f"<{len(xs)}f", *xs)
 def ones(n): return pack([1.0] * n)
+# ssm_a is stored as the (negative) decay coefficient A, used directly as
+# exp(dt*A); make it plausibly negative so the recurrence is a decay.
+def negs(n): return pack([-(0.5 + abs(rnd())) for _ in range(n)])
 
 
 def meta():
@@ -82,18 +99,26 @@ def meta():
     return [
         ks("general.architecture", ARCH),
         ku(f"{p}.block_count", LAYERS), ku(f"{p}.context_length", 256),
-        ku(f"{p}.embedding_length", E), ku(f"{p}.feed_forward_length", FF),
+        ku(f"{p}.embedding_length", E), ku(f"{p}.feed_forward_length", FF_EXP),
         ku(f"{p}.attention.head_count", HEADS),
         kau(f"{p}.attention.head_count_kv", LAYER_KV),
         kf(f"{p}.attention.layer_norm_rms_epsilon", 1e-5),
+        ku(f"{p}.rope.dimension_count", HEAD_DIM),
         kf(f"{p}.rope.freq_base", 10000.0),
+        # granite-4.0-h uses rope_finetuned as an on/off switch for rope; false
+        # means the attention layers are NoPE (position comes from the mixers).
+        kb(f"{p}.rope.scaling.finetuned", False),
+        # sparse-MoE FFN with an always-on shared expert (granite MoE shared)
+        ku(f"{p}.expert_count", N_EXPERT), ku(f"{p}.expert_used_count", N_USED),
+        ku(f"{p}.expert_feed_forward_length", FF_EXP),
+        ku(f"{p}.expert_shared_feed_forward_length", FF_SHEXP),
         # Mamba-2 SSM block
         ku(f"{p}.ssm.conv_kernel", SSM_CONV),
         ku(f"{p}.ssm.inner_size", SSM_INNER),
         ku(f"{p}.ssm.state_size", SSM_STATE),
         ku(f"{p}.ssm.group_count", SSM_GROUPS),
         ku(f"{p}.ssm.time_step_rank", N_SSM_HEADS),
-        # granite scaling multipliers (present so the fixture matches the family)
+        # granite scaling multipliers (load-bearing; forward is wrong without them)
         kf(f"{p}.embedding_scale", 12.0), kf(f"{p}.logit_scale", 16.0),
         kf(f"{p}.residual_scale", 0.22), kf(f"{p}.attention.scale", 0.0078125),
         ks("tokenizer.ggml.model", "llama"), kas("tokenizer.ggml.tokens", VOCAB),
@@ -120,41 +145,46 @@ def write(path, tensors, kvs):
     print(f"wrote {path}")
 
 
+def moe(i):
+    # routed experts (fused 3D: {E, FF_EXP, N_EXPERT} etc.) + shared expert
+    return [
+        (f"blk.{i}.ffn_norm.weight", [E], ones(E)),
+        (f"blk.{i}.ffn_gate_inp.weight", [E, N_EXPERT], pack(flist(E * N_EXPERT))),
+        (f"blk.{i}.ffn_gate_exps.weight", [E, FF_EXP, N_EXPERT], pack(flist(E * FF_EXP * N_EXPERT))),
+        (f"blk.{i}.ffn_up_exps.weight", [E, FF_EXP, N_EXPERT], pack(flist(E * FF_EXP * N_EXPERT))),
+        (f"blk.{i}.ffn_down_exps.weight", [FF_EXP, E, N_EXPERT], pack(flist(FF_EXP * E * N_EXPERT))),
+        (f"blk.{i}.ffn_gate_shexp.weight", [E, FF_SHEXP], pack(flist(E * FF_SHEXP))),
+        (f"blk.{i}.ffn_up_shexp.weight", [E, FF_SHEXP], pack(flist(E * FF_SHEXP))),
+        (f"blk.{i}.ffn_down_shexp.weight", [FF_SHEXP, E], pack(flist(FF_SHEXP * E))),
+    ]
+
+
 def ssm_layer(i, drop=None):
-    kv_dim = (E // HEADS) * KV
     t = [
         (f"blk.{i}.attn_norm.weight", [E], ones(E)),
         (f"blk.{i}.ssm_in.weight", [E, INPROJ], pack(flist(E * INPROJ))),
         (f"blk.{i}.ssm_conv1d.weight", [SSM_CONV, CONV_DIM], pack(flist(SSM_CONV * CONV_DIM))),
         (f"blk.{i}.ssm_conv1d.bias", [CONV_DIM], pack(flist(CONV_DIM))),
-        (f"blk.{i}.ssm_a", [1, N_SSM_HEADS], pack(flist(N_SSM_HEADS))),
+        (f"blk.{i}.ssm_a", [1, N_SSM_HEADS], negs(N_SSM_HEADS)),
         (f"blk.{i}.ssm_d", [1, N_SSM_HEADS], pack(flist(N_SSM_HEADS))),
         (f"blk.{i}.ssm_dt.bias", [N_SSM_HEADS], pack(flist(N_SSM_HEADS))),
         (f"blk.{i}.ssm_norm.weight", [SSM_INNER], ones(SSM_INNER)),
         (f"blk.{i}.ssm_out.weight", [SSM_INNER, E], pack(flist(SSM_INNER * E))),
-        (f"blk.{i}.ffn_norm.weight", [E], ones(E)),
-        (f"blk.{i}.ffn_gate.weight", [E, FF], pack(flist(E * FF))),
-        (f"blk.{i}.ffn_up.weight", [E, FF], pack(flist(E * FF))),
-        (f"blk.{i}.ffn_down.weight", [FF, E], pack(flist(FF * E))),
-    ]
+    ] + moe(i)
     if drop:
         t = [x for x in t if not x[0].endswith("." + drop)]
     return t
 
 
 def attn_layer(i):
-    kv_dim = (E // HEADS) * KV
+    kv_dim = HEAD_DIM * KV
     return [
         (f"blk.{i}.attn_norm.weight", [E], ones(E)),
-        (f"blk.{i}.attn_q.weight", [E, E], pack(flist(E * E))),
+        (f"blk.{i}.attn_q.weight", [E, HEAD_DIM * HEADS], pack(flist(E * HEAD_DIM * HEADS))),
         (f"blk.{i}.attn_k.weight", [E, kv_dim], pack(flist(E * kv_dim))),
         (f"blk.{i}.attn_v.weight", [E, kv_dim], pack(flist(E * kv_dim))),
-        (f"blk.{i}.attn_output.weight", [E, E], pack(flist(E * E))),
-        (f"blk.{i}.ffn_norm.weight", [E], ones(E)),
-        (f"blk.{i}.ffn_gate.weight", [E, FF], pack(flist(E * FF))),
-        (f"blk.{i}.ffn_up.weight", [E, FF], pack(flist(E * FF))),
-        (f"blk.{i}.ffn_down.weight", [FF, E], pack(flist(FF * E))),
-    ]
+        (f"blk.{i}.attn_output.weight", [HEAD_DIM * HEADS, E], pack(flist(HEAD_DIM * HEADS * E))),
+    ] + moe(i)
 
 
 def build(drop=None):

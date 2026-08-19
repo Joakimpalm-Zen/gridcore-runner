@@ -1,15 +1,18 @@
-"""Mamba-2 hybrid families are RECOGNIZED before the forward exists.
+"""Mamba-2 hybrid admission and the granitehybrid decode step (tracer 2).
 
-The runner interleaves attention and recurrent layers for qwen35 (Gated
-DeltaNet) already, but the Mamba-2 hybrids — `granitehybrid` (Granite-4 h) and
-`nemotron_h_moe` (Nemotron-3.5 Lightning) — have a different recurrence whose
-forward is not yet implemented. Admission must distinguish "we know exactly
-what this is, the forward is pending" from the generic "we recognize nothing"
-refusal (which would read as an unknown-architecture typo), and it must FAIL
-CLOSED with a NAMED tensor when a required SSM tensor is absent from an
-otherwise-recognized hybrid (the hostile-GGUF discipline). No download: the
-fixtures are generated and mirror a real granite-4.0-h / Nemotron GGUF.
+`granitehybrid` (Granite-4 h-series) now RUNS: the runner interleaves GQA
+attention with a Mamba-2 selective-SSD recurrence, applies the granite muP
+scaling and treats the attention layers as NoPE, gated token-identically
+against llama.cpp b10353 on the real granite-4.0-h-small (a scripted check;
+this file is the unit level). `nemotron_h_moe` (Nemotron-3.5 Lightning) shares
+the tensor set but adds a grouped scan this tracer has not certified, so it is
+still RECOGNIZED and refused with a specific "forward not yet implemented"
+message — never the generic unknown-architecture refusal, which would read as a
+typo. Either way, a missing required SSM tensor must FAIL CLOSED naming it (the
+hostile-GGUF discipline). No download: the fixtures are generated and mirror a
+real granite-4.0-h / Nemotron GGUF (sparse-MoE, NoPE, inner == 2*embd).
 """
+import os
 import pathlib
 import subprocess
 import sys
@@ -41,24 +44,46 @@ def models(tmp_path_factory):
     return out
 
 
-def _run(runner_bin, model):
+def _run(runner_bin, model, n="1"):
     return subprocess.run(
-        [runner_bin, "-m", str(model), "-p", "hi", "-n", "1", "--gpu", "off"],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        [runner_bin, "-m", str(model), "-p", "hi", "-n", n, "--temp", "0",
+         "--gpu", "off"],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
 
 
-@pytest.mark.parametrize("arch", ["granitehybrid", "nemotron_h_moe"])
-def test_recognized_hybrid_refuses_specifically(runner_bin, models, arch):
-    good, _ = models[arch]
-    proc = _run(runner_bin, good)
-    assert proc.returncode != 0, "the forward is not implemented; it must refuse"
+def test_granitehybrid_loads_and_decodes(runner_bin, models):
+    """The forward is implemented: granitehybrid must LOAD (not refuse) and
+    decode. A build that regressed the loader back to a refusal, or that could
+    not run the Mamba-2 step at all, fails here."""
+    good, _ = models["granitehybrid"]
+    proc = _run(runner_bin, good, n="8")
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
     err = proc.stderr.decode(errors="replace")
-    # recognized, not the generic unknown-arch refusal
-    assert arch in err
+    # the load announces the hybrid layout, not a refusal
+    assert "granitehybrid" in err
+    assert "forward not yet implemented" not in err
+
+
+def test_granitehybrid_decode_is_deterministic(runner_bin, models):
+    """Greedy decode must be reproducible run to run (the property the real
+    token-identity gate builds on)."""
+    good, _ = models["granitehybrid"]
+    a = _run(runner_bin, good, n="8")
+    b = _run(runner_bin, good, n="8")
+    assert a.returncode == 0 and b.returncode == 0
+    assert a.stdout == b.stdout
+
+
+def test_nemotron_still_refuses_specifically(runner_bin, models):
+    """Nemotron's grouped scan is not certified yet: recognized, refused with
+    its own reason, and NOT conflated with an unknown-arch typo."""
+    good, _ = models["nemotron_h_moe"]
+    proc = _run(runner_bin, good)
+    assert proc.returncode != 0, "the forward is not certified; it must refuse"
+    err = proc.stderr.decode(errors="replace")
+    assert "nemotron_h_moe" in err
     assert "forward not yet implemented" in err
-    assert "refusing to run it through llama-style math" not in err, (
-        "a recognized hybrid must not fall back to the generic unknown-arch "
-        "refusal — that conflates 'known but pending' with 'unknown'")
+    assert "refusing to run it through llama-style math" not in err
 
 
 @pytest.mark.parametrize("arch", ["granitehybrid", "nemotron_h_moe"])
@@ -68,20 +93,17 @@ def test_missing_ssm_tensor_names_the_tensor(runner_bin, models, arch):
     assert proc.returncode != 0, "a missing required SSM tensor must fail closed"
     err = proc.stderr.decode(errors="replace")
     assert "ssm_d" in err, "the failure must name the absent tensor"
-    # still recognized as the hybrid, just malformed
-    assert arch in err
+    assert arch in err, "still recognized as the hybrid, just malformed"
 
 
-@pytest.mark.parametrize("arch", ["granitehybrid", "nemotron_h_moe"])
-def test_opt_in_does_not_smuggle_a_hybrid_into_llama_math(runner_bin, models, arch):
+def test_opt_in_does_not_smuggle_nemotron_into_llama_math(runner_bin, models):
     """RUNNER_ALLOW_UNKNOWN_ARCH lets an UNKNOWN arch try llama math; a
-    recognized hybrid is a different case — its recurrence is wrong under llama
-    math, so the opt-in must not turn the refusal into a silent-wrong run."""
-    good, _ = models[arch]
+    recognized-but-uncertified hybrid is a different case — the opt-in must not
+    turn its specific refusal into a silent-wrong run."""
+    good, _ = models["nemotron_h_moe"]
     proc = subprocess.run(
         [runner_bin, "-m", str(good), "-p", "hi", "-n", "1", "--gpu", "off"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
-        env={**__import__("os").environ, "RUNNER_ALLOW_UNKNOWN_ARCH": "1"})
+        env={**os.environ, "RUNNER_ALLOW_UNKNOWN_ARCH": "1"})
     assert proc.returncode != 0
-    err = proc.stderr.decode(errors="replace")
-    assert "forward not yet implemented" in err
+    assert "forward not yet implemented" in proc.stderr.decode(errors="replace")

@@ -124,6 +124,14 @@ typedef struct {
     bool         recurrent;
     gguf_tensor *wqkv, *wq_gate, *ssm_conv, *ssm_beta, *ssm_alpha, *ssm_out;
     float       *ssm_dt, *ssm_a, *ssm_norm_w;
+    // Granite-4 h-series (`granitehybrid`) Mamba-2 mixer. A DIFFERENT tensor
+    // set from Gated DeltaNet: it carries an input projection (zxBCdt), a
+    // depthwise conv1d with a bias, a per-head D skip, and reuses ssm_conv
+    // (conv1d.weight), ssm_dt (dt.bias), ssm_a (A), ssm_norm_w (gated RMS
+    // norm) and ssm_out (out_proj) above at Mamba-2 shapes.
+    gguf_tensor *ssm_in;        // in_proj [n_embd, 2*d_inner + 2*n_group*d_state + n_head]
+    float       *ssm_conv1d_b;  // conv1d bias [conv_dim = d_inner + 2*n_group*d_state]
+    float       *ssm_d;         // D skip, per head [n_ssm_head]
 } layer_t;
 
 // Return expert `e`'s weight for one MoE FFN projection (which: 0=gate, 1=up,
@@ -224,6 +232,9 @@ typedef struct {
     int       ffn_act;       // ACT_SILU (default) or ACT_GELU (gemma)
     bool      v_rmsnorm;     // weightless per-head RMS norm on V (gemma4)
     bool      qwen35;
+    bool      granite_hybrid; // granitehybrid: Mamba-2 recurrent layers interleaved
+                              // with GQA attention, per-layer typed off the
+                              // attention.head_count_kv array (0 => recurrent)
     bool      moe_gemma;     // gemma-4 dual-branch MoE (CPU-only; no GPU dual-branch kernel yet)
     bool      moe_prefetch;  // hand routed experts to the OS as whole blocks
                              // (only pays when weights exceed RAM)
