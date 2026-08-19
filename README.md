@@ -85,6 +85,7 @@ infrastructure: easy to deploy, bounded by the machine, and explicit about what
 it can prove. The one that matters most has its own section below; the rest
 follow as a list, ordered by how much difference each makes in practice.
 
+<a id="truncation"></a>
 ### Truncated tool calls that still parse: closing the JSON when `max_tokens` runs out
 
 When a tool call runs past its token budget, most engines return an empty or
