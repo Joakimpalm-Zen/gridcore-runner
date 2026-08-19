@@ -121,6 +121,23 @@ A full module-by-module code review of the tree. Behaviour changes first.
   gpt-oss-120b the divergence went 0.00946 -> 0.00245 of logit range against a
   2e-3 bound, so at least one more difference remains
   ([docs/cuda-gptoss-router-bias-2026-08-18.md](docs/cuda-gptoss-router-bias-2026-08-18.md)).
+- **The "one more difference" turned out to be the model, not the backend — no
+  kernel change.** With `gpt-oss-20b-MXFP4` now on the Blackwell box, the CUDA
+  divergence was bisected (2026-08-19). It is not a wrong op: at **full offload**
+  gpt-oss-20b passes `test-gpu-identity` at 0.000732 of range, and the bound is
+  exceeded only under partial offload (0.00356 at 1 GPU layer), where one device
+  layer's reduction-order rounding is amplified through the remaining CPU
+  layers — a divergence that is *non-monotonic* in GPU-layer count, which a
+  systematic wrong op cannot be. A routing trace shows the mechanism directly: a
+  single sub-ULP perturbation reorders two top-4 experts tied to four decimals,
+  the same discrete-routing chaos already documented for gemma-4-26b-a4b. The
+  model disagrees with itself on 3/16 prompts under a CPU-only KV-precision
+  change, so the gap is inside its own sensitivity floor. All three candidates
+  the router-bias note named (MXFP4 dequant, attention-sink softmax, per-expert
+  bias fold) are algebraically identical CPU↔CUDA. gpt-oss-120b at 4 GPU layers
+  reproduces 0.00245 as the same effect at greater amplification depth (it
+  cannot be fully offloaded on a 24 GB MIG).
+  ([docs/cuda-gptoss-divergence-2026-08-19.md](docs/cuda-gptoss-divergence-2026-08-19.md)).
 - **Tool-history replay on `/v1/responses` and `/v1/messages` now uses the
   resident model's native tool protocol, matching `/v1/chat/completions`
   byte-for-byte.** Both typed surfaces hard-coded the generic

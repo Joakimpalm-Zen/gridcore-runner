@@ -1321,16 +1321,23 @@ during an authenticated evidence run.
   uses the model's native commentary/recipient protocol and strict declared-
   argument constraints. Measured transcripts:
   [docs/gpt-oss-harmony-2026-08-14.md](docs/gpt-oss-harmony-2026-08-14.md).
-  The CPU/CUDA identity row is untouched by this and still stands as recorded.
-  It is, however, a **re-measurement candidate**: the CUDA fused-MoE path
-  routed gpt-oss without its router bias until 2026-08-18, and that failure was
-  measured on a binary carrying the bug. The fix is real and gated
-  ([docs/cuda-gptoss-router-bias-2026-08-18.md](docs/cuda-gptoss-router-bias-2026-08-18.md)),
-  but on `gpt-oss-120b-MXFP4` it only narrowed the divergence from 0.00946 to
-  0.00245 of logit range against a 2e-3 bound, so at least one further CPU/GPU
-  difference remains and no identity claim is made for any real gpt-oss file on
-  CUDA. `gpt-oss-20b` has not been re-run at all: the file is not on the
-  measurement box.
+  The CPU/CUDA identity row was **re-measured on 2026-08-19** now that the file
+  is on the Blackwell box, after the 2026-08-18 router-bias fix
+  ([docs/cuda-gptoss-router-bias-2026-08-18.md](docs/cuda-gptoss-router-bias-2026-08-18.md)).
+  `gpt-oss-20b-MXFP4` at **full offload** — the deployment configuration —
+  passes `test-gpu-identity` at 0.000732 of logit range against the 2e-3 bound.
+  The bound is exceeded only under *partial* offload (0.00356 at 1 GPU layer),
+  where a single device layer's reduction-order rounding is amplified through
+  the remaining CPU layers: the divergence is non-monotonic in GPU-layer count,
+  a shape a systematic wrong op cannot produce. The mechanism is discrete
+  top-4-of-32 expert-routing chaos (two experts tied to four decimals reorder
+  under a sub-ULP perturbation), and the model already disagrees with itself on
+  3 of 16 prompts under a CPU-only KV-precision change. No CUDA correctness
+  defect remains; gpt-oss is gated at its measured sensitivity floor, not at
+  dense-model logit identity. `gpt-oss-120b-MXFP4` (63 GB, unable to fully
+  offload on a 24 GB MIG) reproduces 0.00245 at 4 GPU layers — the same
+  amplification effect at greater depth. Full bisection:
+  [docs/cuda-gptoss-divergence-2026-08-19.md](docs/cuda-gptoss-divergence-2026-08-19.md).
 - Gemma-4-26B-A4B QAT's old 16-token CPU/CUDA result is not a substitute for
   the manifest's pending 128-token re-verification.
 - Numerically sensitive models may use a measured self-sensitivity floor
