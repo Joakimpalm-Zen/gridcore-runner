@@ -19,8 +19,8 @@ A full module-by-module code review of the tree. Behaviour changes first.
   divergence was in the last mantissa bits. Q4_0, which had been refused
   outright since 2026-08-18 because it had no twin at all, batches again at
   1.62x (Qwen3-0.6B-q4_0, N=4) instead of decoding sequentially at 1.07x. The
-  batching win is otherwise unchanged — Q8_0 1.83x -> 1.89x, Q4_K 1.57x ->
-  1.53x, Q5_K 1.51x -> 1.69x, Q6_K 2.04x -> 1.97x at N=4 — so identity cost
+  batching win is otherwise unchanged — Q8_0 1.84x -> 1.92x, Q4_K 1.57x ->
+  1.54x, Q5_K 1.50x -> 1.69x, Q6_K 2.04x -> 1.98x at N=4 — so identity cost
   nothing. `make test` runs the batch gate on a Q8_0 fixture as well as the F32
   one, because the F32 fixture cannot reach a quantized matvec and so could
   never have caught this.

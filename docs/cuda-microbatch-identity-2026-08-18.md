@@ -199,23 +199,40 @@ basic-block numbering.
 
 ### Q5_K and Q6_K were failing too
 
-The table above left them unmeasured. They were not fine — `./test-batch
-<model> 4` at `3ae5d2b`, Blackwell MIG 1g.24gb:
+The table above left them unmeasured. They were not fine. `./test-batch
+<model> 4`, Blackwell MIG 1g.24gb. Speedups are the median of three
+INTERLEAVED runs of two binaries built from one tree (pre-fix `3ae5d2b` vs
+final HEAD), proven distinct by md5 AND by the identity flip itself before any
+number was read from them; run-to-run spread was at most 0.01x except Q4_0
+(1.61-1.69):
 
 | model | quant | before | after |
 |---|---|---:|:--|
-| SmolLM2-135M-Instruct | Q8_0 | FAIL, 1.83x | **ok, 1.89x** |
-| Qwen3-4B | Q4_K_M | FAIL, 1.57x | **ok, 1.53x** |
-| Qwen3-8B | Q5_K_M | FAIL, 1.51x | **ok, 1.69x** |
-| Qwen3-8B | Q6_K | FAIL, 2.04x | **ok, 1.97x** |
+| SmolLM2-135M-Instruct | Q8_0 | FAIL, 1.84x | **ok, 1.92x** |
+| Qwen3-4B | Q4_K_M | FAIL, 1.57x | **ok, 1.54x** |
+| Qwen3-8B | Q5_K_M | FAIL, 1.50x | **ok, 1.69x** |
+| Qwen3-8B | Q6_K | FAIL, 2.04x | **ok, 1.98x** |
 | Qwen3-0.6B | Q4_0 | ok, 1.07x (refused) | **ok, 1.62x** |
 | Qwen3-1.7B | Q4_0 | ok (refused) | **ok, 1.47x** |
 | test.gguf | F32 | ok | ok |
 | test-q8.gguf | Q8_0 | **FAIL** (new gate) | **ok** |
 
-Identity therefore cost nothing measurable: two families gained throughput, two
-lost 2-4%, against the 11-13% the host-only per-column option was measured to
-cost. Q4_0 gained 48% over refusing, and beat the 1.48x per-column figure too.
+Identity therefore cost nothing measurable: Q8_0 +4% and Q5_K +13%, Q4_K -2%
+and Q6_K -3%, against the 11-13% the host-only per-column option was measured
+to cost on Q8_0/Q4_K. Q4_0 gained 51% over refusing and beat the per-column
+option's 1.48x as well.
+
+Gates at final HEAD, each an exit code rather than a summary line: `make test`
+0; `./test-batch <m> 4` 0 on all eight rows above; `test-gpu-identity` 0 on
+test.gguf, test-q8.gguf, SmolLM2-135M-Q8_0, Qwen3-4B-Q4_K_M, Qwen3-0.6B-q4_0,
+Qwen3-8B-Q5_K_M and Qwen3-8B-Q6_K; `test-tc-tol` 0 on Qwen3-4B-Q4_K_M;
+`test-moe-tol` 0 on Qwen3-30B-A3B-Q4_K_M (0/32 top-1 flips) and on
+e3b-moe-e8k2-stage1-q4_0. The prefill and MoE certs are unmoved because
+`k_mv_*_b` was not touched -- enc_mv_batch refusing is what keeps prefill out
+of this change. `scripts/check-generated.py` is 0 on both boxes, and on the
+Windows box -- where `src/kernels.ptx` exists, so the check is not skipped --
+it reports `src\kernels_ptx.h matches its source`: the committed header is
+provably the embed of the committed kernels.cu under 13.3.73.
 
 ### A third cause the note did not name
 
