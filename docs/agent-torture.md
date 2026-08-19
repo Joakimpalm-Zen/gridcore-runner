@@ -148,7 +148,17 @@ does not divide by eight, so the count moved to 8 x 15 = 120. Earlier result
 sets remain valid on their own terms and are not case-for-case comparable
 with v3.
 
-Three newer result sets use the v2 matrix (105 cases, seven categories):
+One result set uses the current v3 matrix:
+
+- [2026-08-19 — Runner vs llama.cpp vs Ollama vs vLLM, SmolLM2-1.7B, v3 matrix](../tests/torture/results/2026-08-19-smollm2-1.7b-refresh/README.md):
+  Runner 120/120, vLLM `0.27.1` (`--tool-call-parser hermes`) 80/120, llama.cpp
+  `b10488` 30/120, Ollama `0.32.14` 28/120. Refreshes the three competitor
+  runtimes to the current upstream releases (the [freshness ledger](#published-comparisons)
+  the weekly workflow checks); llama.cpp and Ollama fail every tool-call family
+  through their chat-template paths — the same mechanism finding as the small-model
+  rows above — while their non-tool families pass.
+
+Three older result sets use the v2 matrix (105 cases, seven categories):
 
 - [2026-08-03 — Runner vs vLLM, SmolLM2-1.7B, v2 matrix](../tests/torture/results/2026-08-03-smollm2-1.7b-v2/README.md):
   Runner 105/105, vLLM (`--tool-call-parser hermes`) 80/105. **This is the

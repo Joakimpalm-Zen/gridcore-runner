@@ -1,0 +1,1237 @@
+{
+  "cases": [
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-000-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-000-nested_arguments",
+      "latency_ms": 30.57,
+      "ordinal": 0,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-001-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-001-tool_selection",
+      "latency_ms": 27.51,
+      "ordinal": 1,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-002-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-002-forced_truncation",
+      "latency_ms": 27.13,
+      "ordinal": 2,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-003-stream_normalization",
+      "latency_ms": 25333.83,
+      "ordinal": 3,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-004-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-004-tool_stream_normalization",
+      "latency_ms": 31.15,
+      "ordinal": 4,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-005-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-005-large_enum_selection",
+      "latency_ms": 27.41,
+      "ordinal": 5,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-006-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-006-reasoning_then_tool",
+      "latency_ms": 27.05,
+      "ordinal": 6,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-007-structured_final",
+      "latency_ms": 279.1,
+      "ordinal": 7,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-008-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-008-nested_arguments",
+      "latency_ms": 30.85,
+      "ordinal": 8,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-009-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-009-tool_selection",
+      "latency_ms": 36.84,
+      "ordinal": 9,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-010-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-010-forced_truncation",
+      "latency_ms": 34.69,
+      "ordinal": 10,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-011-stream_normalization",
+      "latency_ms": 2699.21,
+      "ordinal": 11,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-012-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-012-tool_stream_normalization",
+      "latency_ms": 24.81,
+      "ordinal": 12,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-013-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-013-large_enum_selection",
+      "latency_ms": 23.45,
+      "ordinal": 13,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-014-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-014-reasoning_then_tool",
+      "latency_ms": 26.1,
+      "ordinal": 14,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-015-structured_final",
+      "latency_ms": 342.45,
+      "ordinal": 15,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-016-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-016-nested_arguments",
+      "latency_ms": 27.2,
+      "ordinal": 16,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-017-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-017-tool_selection",
+      "latency_ms": 28.83,
+      "ordinal": 17,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-018-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-018-forced_truncation",
+      "latency_ms": 27.29,
+      "ordinal": 18,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-019-stream_normalization",
+      "latency_ms": 68.95,
+      "ordinal": 19,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-020-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-020-tool_stream_normalization",
+      "latency_ms": 28.21,
+      "ordinal": 20,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-021-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-021-large_enum_selection",
+      "latency_ms": 28.51,
+      "ordinal": 21,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-022-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-022-reasoning_then_tool",
+      "latency_ms": 28.86,
+      "ordinal": 22,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-023-structured_final",
+      "latency_ms": 446.47,
+      "ordinal": 23,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-024-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-024-nested_arguments",
+      "latency_ms": 29.46,
+      "ordinal": 24,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-025-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-025-tool_selection",
+      "latency_ms": 28.85,
+      "ordinal": 25,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-026-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-026-forced_truncation",
+      "latency_ms": 28.93,
+      "ordinal": 26,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-027-stream_normalization",
+      "latency_ms": 76.56,
+      "ordinal": 27,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-028-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-028-tool_stream_normalization",
+      "latency_ms": 32.87,
+      "ordinal": 28,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-029-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-029-large_enum_selection",
+      "latency_ms": 36.19,
+      "ordinal": 29,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-030-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-030-reasoning_then_tool",
+      "latency_ms": 38.22,
+      "ordinal": 30,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-031-structured_final",
+      "latency_ms": 316.15,
+      "ordinal": 31,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-032-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-032-nested_arguments",
+      "latency_ms": 32.17,
+      "ordinal": 32,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-033-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-033-tool_selection",
+      "latency_ms": 38.21,
+      "ordinal": 33,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-034-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-034-forced_truncation",
+      "latency_ms": 32.86,
+      "ordinal": 34,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-035-stream_normalization",
+      "latency_ms": 81.67,
+      "ordinal": 35,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-036-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-036-tool_stream_normalization",
+      "latency_ms": 28.98,
+      "ordinal": 36,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-037-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-037-large_enum_selection",
+      "latency_ms": 27.45,
+      "ordinal": 37,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-038-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-038-reasoning_then_tool",
+      "latency_ms": 27.6,
+      "ordinal": 38,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-039-structured_final",
+      "latency_ms": 390.11,
+      "ordinal": 39,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-040-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-040-nested_arguments",
+      "latency_ms": 28.23,
+      "ordinal": 40,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-041-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-041-tool_selection",
+      "latency_ms": 28.56,
+      "ordinal": 41,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-042-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-042-forced_truncation",
+      "latency_ms": 27.13,
+      "ordinal": 42,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-043-stream_normalization",
+      "latency_ms": 66.22,
+      "ordinal": 43,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-044-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-044-tool_stream_normalization",
+      "latency_ms": 29.05,
+      "ordinal": 44,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-045-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-045-large_enum_selection",
+      "latency_ms": 28.22,
+      "ordinal": 45,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-046-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-046-reasoning_then_tool",
+      "latency_ms": 28.95,
+      "ordinal": 46,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] structured final is not JSON\n    content = '{\\n  \"summary\": \"A 35-year-old man was found dead in his home in the 100 block of East 10th Street in the city\\'s South Side. The cause of death was not immediately known. The incident occurred at 12:30'"
+      },
+      "id": "runner-047-structured_final",
+      "latency_ms": 509.88,
+      "ordinal": 47,
+      "status": "failed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-048-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-048-nested_arguments",
+      "latency_ms": 29.42,
+      "ordinal": 48,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-049-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-049-tool_selection",
+      "latency_ms": 29.4,
+      "ordinal": 49,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-050-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-050-forced_truncation",
+      "latency_ms": 28.27,
+      "ordinal": 50,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-051-stream_normalization",
+      "latency_ms": 70.39,
+      "ordinal": 51,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-052-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-052-tool_stream_normalization",
+      "latency_ms": 36.01,
+      "ordinal": 52,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-053-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-053-large_enum_selection",
+      "latency_ms": 39.62,
+      "ordinal": 53,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-054-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-054-reasoning_then_tool",
+      "latency_ms": 36.28,
+      "ordinal": 54,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-055-structured_final",
+      "latency_ms": 309.23,
+      "ordinal": 55,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-056-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-056-nested_arguments",
+      "latency_ms": 27.24,
+      "ordinal": 56,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-057-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-057-tool_selection",
+      "latency_ms": 28.09,
+      "ordinal": 57,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-058-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-058-forced_truncation",
+      "latency_ms": 28.54,
+      "ordinal": 58,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-059-stream_normalization",
+      "latency_ms": 68.94,
+      "ordinal": 59,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-060-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-060-tool_stream_normalization",
+      "latency_ms": 26.75,
+      "ordinal": 60,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-061-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-061-large_enum_selection",
+      "latency_ms": 28.83,
+      "ordinal": 61,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-062-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-062-reasoning_then_tool",
+      "latency_ms": 27.99,
+      "ordinal": 62,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-063-structured_final",
+      "latency_ms": 382.67,
+      "ordinal": 63,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-064-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-064-nested_arguments",
+      "latency_ms": 38.14,
+      "ordinal": 64,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-065-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-065-tool_selection",
+      "latency_ms": 40.17,
+      "ordinal": 65,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-066-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-066-forced_truncation",
+      "latency_ms": 35.8,
+      "ordinal": 66,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-067-stream_normalization",
+      "latency_ms": 78.32,
+      "ordinal": 67,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-068-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-068-tool_stream_normalization",
+      "latency_ms": 38.3,
+      "ordinal": 68,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-069-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-069-large_enum_selection",
+      "latency_ms": 40.76,
+      "ordinal": 69,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-070-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-070-reasoning_then_tool",
+      "latency_ms": 34.13,
+      "ordinal": 70,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-071-structured_final",
+      "latency_ms": 403.51,
+      "ordinal": 71,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-072-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-072-nested_arguments",
+      "latency_ms": 38.69,
+      "ordinal": 72,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-073-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-073-tool_selection",
+      "latency_ms": 39.09,
+      "ordinal": 73,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-074-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-074-forced_truncation",
+      "latency_ms": 34.39,
+      "ordinal": 74,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-075-stream_normalization",
+      "latency_ms": 79.57,
+      "ordinal": 75,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-076-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-076-tool_stream_normalization",
+      "latency_ms": 27.74,
+      "ordinal": 76,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-077-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-077-large_enum_selection",
+      "latency_ms": 27.86,
+      "ordinal": 77,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-078-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-078-reasoning_then_tool",
+      "latency_ms": 30.7,
+      "ordinal": 78,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-079-structured_final",
+      "latency_ms": 402.91,
+      "ordinal": 79,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-080-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-080-nested_arguments",
+      "latency_ms": 38.64,
+      "ordinal": 80,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-081-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-081-tool_selection",
+      "latency_ms": 38.11,
+      "ordinal": 81,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-082-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-082-forced_truncation",
+      "latency_ms": 36.07,
+      "ordinal": 82,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-083-stream_normalization",
+      "latency_ms": 63.64,
+      "ordinal": 83,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-084-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-084-tool_stream_normalization",
+      "latency_ms": 27.7,
+      "ordinal": 84,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-085-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-085-large_enum_selection",
+      "latency_ms": 28.77,
+      "ordinal": 85,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-086-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-086-reasoning_then_tool",
+      "latency_ms": 29.42,
+      "ordinal": 86,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-087-structured_final",
+      "latency_ms": 473.93,
+      "ordinal": 87,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-088-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-088-nested_arguments",
+      "latency_ms": 26.32,
+      "ordinal": 88,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-089-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-089-tool_selection",
+      "latency_ms": 28.7,
+      "ordinal": 89,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-090-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-090-forced_truncation",
+      "latency_ms": 30.92,
+      "ordinal": 90,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-091-stream_normalization",
+      "latency_ms": 71.34,
+      "ordinal": 91,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-092-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-092-tool_stream_normalization",
+      "latency_ms": 40.83,
+      "ordinal": 92,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-093-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-093-large_enum_selection",
+      "latency_ms": 38.28,
+      "ordinal": 93,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-094-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-094-reasoning_then_tool",
+      "latency_ms": 35.99,
+      "ordinal": 94,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] structured final is not JSON\n    content = '{\\n  \"summary\": \"A 25-year-old man was arrested after he allegedly assaulted a 22-year-old woman at a bar in downtown Chicago. The incident occurred at 12:45 AM on Saturday, August 14, 2021, at the Blu'"
+      },
+      "id": "runner-095-structured_final",
+      "latency_ms": 504.04,
+      "ordinal": 95,
+      "status": "failed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-096-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-096-nested_arguments",
+      "latency_ms": 28.32,
+      "ordinal": 96,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-097-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-097-tool_selection",
+      "latency_ms": 27.81,
+      "ordinal": 97,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-098-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-098-forced_truncation",
+      "latency_ms": 28.19,
+      "ordinal": 98,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-099-stream_normalization",
+      "latency_ms": 72.86,
+      "ordinal": 99,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-100-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-100-tool_stream_normalization",
+      "latency_ms": 28.2,
+      "ordinal": 100,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-101-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-101-large_enum_selection",
+      "latency_ms": 29.55,
+      "ordinal": 101,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-102-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-102-reasoning_then_tool",
+      "latency_ms": 25.24,
+      "ordinal": 102,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-103-structured_final",
+      "latency_ms": 393.63,
+      "ordinal": 103,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-104-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-104-nested_arguments",
+      "latency_ms": 30.1,
+      "ordinal": 104,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-105-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-105-tool_selection",
+      "latency_ms": 28.01,
+      "ordinal": 105,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-106-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-106-forced_truncation",
+      "latency_ms": 27.6,
+      "ordinal": 106,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-107-stream_normalization",
+      "latency_ms": 77.96,
+      "ordinal": 107,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-108-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-108-tool_stream_normalization",
+      "latency_ms": 37.43,
+      "ordinal": 108,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-109-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-109-large_enum_selection",
+      "latency_ms": 40.7,
+      "ordinal": 109,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-110-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-110-reasoning_then_tool",
+      "latency_ms": 35.04,
+      "ordinal": 110,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-111-structured_final",
+      "latency_ms": 372.09,
+      "ordinal": 111,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-112-nested_arguments'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-112-nested_arguments",
+      "latency_ms": 38.53,
+      "ordinal": 112,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-113-tool_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-113-tool_selection",
+      "latency_ms": 39.22,
+      "ordinal": 113,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-114-forced_truncation'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-114-forced_truncation",
+      "latency_ms": 35.75,
+      "ordinal": 114,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-115-stream_normalization",
+      "latency_ms": 79.14,
+      "ordinal": 115,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] stream did not start with 200\n    got = 400\n    request = 'runner-116-tool_stream_normalization'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-116-tool_stream_normalization",
+      "latency_ms": 27.92,
+      "ordinal": 116,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-117-large_enum_selection'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-117-large_enum_selection",
+      "latency_ms": 27.1,
+      "ordinal": 117,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected HTTP 200\n    got = 400\n    request = 'runner-118-reasoning_then_tool'\n    body = '{\"error\":{\"message\":\"registry.ollama.ai/library/smollm2-1.7b:latest does not support tools\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}\\n'"
+      },
+      "id": "runner-118-reasoning_then_tool",
+      "latency_ms": 28.2,
+      "ordinal": 118,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-119-structured_final",
+      "latency_ms": 348.43,
+      "ordinal": 119,
+      "status": "passed"
+    }
+  ],
+  "configuration": {
+    "model": "smollm2-1.7b",
+    "temperature": 0
+  },
+  "metrics": {
+    "elapsed_ms": 37687.63,
+    "valid_structured_tasks_per_second": 0.743
+  },
+  "resources": {
+    "peak_rss_kb": null,
+    "peak_rss_kind": "peak"
+  },
+  "runtime": {
+    "name": "ollama",
+    "version": "0.32.14"
+  },
+  "schema_version": "xyntetik.agent-torture.v3",
+  "totals": {
+    "failed": 92,
+    "failures_by_category": {
+      "protocol": 92
+    },
+    "passed": 28,
+    "requests": 120
+  }
+}

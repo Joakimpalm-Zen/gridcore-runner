@@ -1,0 +1,1229 @@
+{
+  "cases": [
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-000-nested_arguments",
+      "latency_ms": 620.75,
+      "ordinal": 0,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-001-tool_selection",
+      "latency_ms": 607.28,
+      "ordinal": 1,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-002-forced_truncation",
+      "latency_ms": 23.23,
+      "ordinal": 2,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-003-stream_normalization",
+      "latency_ms": 45.46,
+      "ordinal": 3,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-004-tool_stream_normalization",
+      "latency_ms": 550.63,
+      "ordinal": 4,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-005-large_enum_selection",
+      "latency_ms": 322.59,
+      "ordinal": 5,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-006-reasoning_then_tool",
+      "latency_ms": 316.57,
+      "ordinal": 6,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-007-structured_final",
+      "latency_ms": 945.45,
+      "ordinal": 7,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-008-nested_arguments",
+      "latency_ms": 599.42,
+      "ordinal": 8,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-009-tool_selection",
+      "latency_ms": 589.35,
+      "ordinal": 9,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-010-forced_truncation",
+      "latency_ms": 32.24,
+      "ordinal": 10,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-011-stream_normalization",
+      "latency_ms": 54.81,
+      "ordinal": 11,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-012-tool_stream_normalization",
+      "latency_ms": 547.55,
+      "ordinal": 12,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-013-large_enum_selection",
+      "latency_ms": 316.35,
+      "ordinal": 13,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-014-reasoning_then_tool",
+      "latency_ms": 291.45,
+      "ordinal": 14,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-015-structured_final",
+      "latency_ms": 932.29,
+      "ordinal": 15,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-016-nested_arguments",
+      "latency_ms": 590.15,
+      "ordinal": 16,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-017-tool_selection",
+      "latency_ms": 621.04,
+      "ordinal": 17,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-018-forced_truncation",
+      "latency_ms": 41.69,
+      "ordinal": 18,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-019-stream_normalization",
+      "latency_ms": 64.27,
+      "ordinal": 19,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-020-tool_stream_normalization",
+      "latency_ms": 550.97,
+      "ordinal": 20,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-021-large_enum_selection",
+      "latency_ms": 314.75,
+      "ordinal": 21,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-022-reasoning_then_tool",
+      "latency_ms": 287.02,
+      "ordinal": 22,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-023-structured_final",
+      "latency_ms": 1178.51,
+      "ordinal": 23,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-024-nested_arguments",
+      "latency_ms": 593.97,
+      "ordinal": 24,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-025-tool_selection",
+      "latency_ms": 590.55,
+      "ordinal": 25,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-026-forced_truncation",
+      "latency_ms": 59.75,
+      "ordinal": 26,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-027-stream_normalization",
+      "latency_ms": 73.6,
+      "ordinal": 27,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-028-tool_stream_normalization",
+      "latency_ms": 551.6,
+      "ordinal": 28,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-029-large_enum_selection",
+      "latency_ms": 315.46,
+      "ordinal": 29,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-030-reasoning_then_tool",
+      "latency_ms": 286.32,
+      "ordinal": 30,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-031-structured_final",
+      "latency_ms": 662.84,
+      "ordinal": 31,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-032-nested_arguments",
+      "latency_ms": 589.7,
+      "ordinal": 32,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-033-tool_selection",
+      "latency_ms": 586.77,
+      "ordinal": 33,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-034-forced_truncation",
+      "latency_ms": 86.78,
+      "ordinal": 34,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-035-stream_normalization",
+      "latency_ms": 82.89,
+      "ordinal": 35,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-036-tool_stream_normalization",
+      "latency_ms": 550.13,
+      "ordinal": 36,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-037-large_enum_selection",
+      "latency_ms": 315.67,
+      "ordinal": 37,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-038-reasoning_then_tool",
+      "latency_ms": 289.12,
+      "ordinal": 38,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-039-structured_final",
+      "latency_ms": 944.38,
+      "ordinal": 39,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-040-nested_arguments",
+      "latency_ms": 599.66,
+      "ordinal": 40,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-041-tool_selection",
+      "latency_ms": 596.72,
+      "ordinal": 41,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-042-forced_truncation",
+      "latency_ms": 22.12,
+      "ordinal": 42,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-043-stream_normalization",
+      "latency_ms": 46.72,
+      "ordinal": 43,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-044-tool_stream_normalization",
+      "latency_ms": 562.99,
+      "ordinal": 44,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-045-large_enum_selection",
+      "latency_ms": 321.09,
+      "ordinal": 45,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-046-reasoning_then_tool",
+      "latency_ms": 287.61,
+      "ordinal": 46,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-047-structured_final",
+      "latency_ms": 937.41,
+      "ordinal": 47,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-048-nested_arguments",
+      "latency_ms": 589.37,
+      "ordinal": 48,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-049-tool_selection",
+      "latency_ms": 583.54,
+      "ordinal": 49,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-050-forced_truncation",
+      "latency_ms": 32.44,
+      "ordinal": 50,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-051-stream_normalization",
+      "latency_ms": 54.9,
+      "ordinal": 51,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-052-tool_stream_normalization",
+      "latency_ms": 547.23,
+      "ordinal": 52,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-053-large_enum_selection",
+      "latency_ms": 314.17,
+      "ordinal": 53,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-054-reasoning_then_tool",
+      "latency_ms": 286.44,
+      "ordinal": 54,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-055-structured_final",
+      "latency_ms": 1109.44,
+      "ordinal": 55,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-056-nested_arguments",
+      "latency_ms": 577.63,
+      "ordinal": 56,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-057-tool_selection",
+      "latency_ms": 586.31,
+      "ordinal": 57,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-058-forced_truncation",
+      "latency_ms": 41.73,
+      "ordinal": 58,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-059-stream_normalization",
+      "latency_ms": 63.86,
+      "ordinal": 59,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-060-tool_stream_normalization",
+      "latency_ms": 549.55,
+      "ordinal": 60,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-061-large_enum_selection",
+      "latency_ms": 315.79,
+      "ordinal": 61,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-062-reasoning_then_tool",
+      "latency_ms": 290.74,
+      "ordinal": 62,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-063-structured_final",
+      "latency_ms": 654.84,
+      "ordinal": 63,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-064-nested_arguments",
+      "latency_ms": 591.84,
+      "ordinal": 64,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-065-tool_selection",
+      "latency_ms": 588.23,
+      "ordinal": 65,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-066-forced_truncation",
+      "latency_ms": 58.91,
+      "ordinal": 66,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-067-stream_normalization",
+      "latency_ms": 73.8,
+      "ordinal": 67,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-068-tool_stream_normalization",
+      "latency_ms": 550.44,
+      "ordinal": 68,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-069-large_enum_selection",
+      "latency_ms": 315.46,
+      "ordinal": 69,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-070-reasoning_then_tool",
+      "latency_ms": 294.04,
+      "ordinal": 70,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-071-structured_final",
+      "latency_ms": 666.51,
+      "ordinal": 71,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-072-nested_arguments",
+      "latency_ms": 590.18,
+      "ordinal": 72,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-073-tool_selection",
+      "latency_ms": 585.39,
+      "ordinal": 73,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-074-forced_truncation",
+      "latency_ms": 84.1,
+      "ordinal": 74,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-075-stream_normalization",
+      "latency_ms": 82.81,
+      "ordinal": 75,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-076-tool_stream_normalization",
+      "latency_ms": 550.86,
+      "ordinal": 76,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-077-large_enum_selection",
+      "latency_ms": 316.66,
+      "ordinal": 77,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-078-reasoning_then_tool",
+      "latency_ms": 289.16,
+      "ordinal": 78,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-079-structured_final",
+      "latency_ms": 852.28,
+      "ordinal": 79,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-080-nested_arguments",
+      "latency_ms": 602.12,
+      "ordinal": 80,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-081-tool_selection",
+      "latency_ms": 584.15,
+      "ordinal": 81,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-082-forced_truncation",
+      "latency_ms": 18.31,
+      "ordinal": 82,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-083-stream_normalization",
+      "latency_ms": 44.87,
+      "ordinal": 83,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-084-tool_stream_normalization",
+      "latency_ms": 549.96,
+      "ordinal": 84,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-085-large_enum_selection",
+      "latency_ms": 320.25,
+      "ordinal": 85,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-086-reasoning_then_tool",
+      "latency_ms": 294.17,
+      "ordinal": 86,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-087-structured_final",
+      "latency_ms": 742.86,
+      "ordinal": 87,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-088-nested_arguments",
+      "latency_ms": 592.0,
+      "ordinal": 88,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-089-tool_selection",
+      "latency_ms": 588.01,
+      "ordinal": 89,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-090-forced_truncation",
+      "latency_ms": 32.92,
+      "ordinal": 90,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-091-stream_normalization",
+      "latency_ms": 55.71,
+      "ordinal": 91,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-092-tool_stream_normalization",
+      "latency_ms": 556.62,
+      "ordinal": 92,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-093-large_enum_selection",
+      "latency_ms": 315.87,
+      "ordinal": 93,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-094-reasoning_then_tool",
+      "latency_ms": 287.6,
+      "ordinal": 94,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-095-structured_final",
+      "latency_ms": 624.18,
+      "ordinal": 95,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-096-nested_arguments",
+      "latency_ms": 590.97,
+      "ordinal": 96,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-097-tool_selection",
+      "latency_ms": 585.45,
+      "ordinal": 97,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-098-forced_truncation",
+      "latency_ms": 40.47,
+      "ordinal": 98,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-099-stream_normalization",
+      "latency_ms": 64.06,
+      "ordinal": 99,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-100-tool_stream_normalization",
+      "latency_ms": 548.94,
+      "ordinal": 100,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-101-large_enum_selection",
+      "latency_ms": 315.5,
+      "ordinal": 101,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-102-reasoning_then_tool",
+      "latency_ms": 287.23,
+      "ordinal": 102,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-103-structured_final",
+      "latency_ms": 786.63,
+      "ordinal": 103,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-104-nested_arguments",
+      "latency_ms": 592.62,
+      "ordinal": 104,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-105-tool_selection",
+      "latency_ms": 585.0,
+      "ordinal": 105,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-106-forced_truncation",
+      "latency_ms": 59.4,
+      "ordinal": 106,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-107-stream_normalization",
+      "latency_ms": 73.58,
+      "ordinal": 107,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-108-tool_stream_normalization",
+      "latency_ms": 553.15,
+      "ordinal": 108,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-109-large_enum_selection",
+      "latency_ms": 315.13,
+      "ordinal": 109,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-110-reasoning_then_tool",
+      "latency_ms": 286.98,
+      "ordinal": 110,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-111-structured_final",
+      "latency_ms": 740.66,
+      "ordinal": 111,
+      "status": "passed"
+    },
+    {
+      "category": "nested_arguments",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-112-nested_arguments",
+      "latency_ms": 591.82,
+      "ordinal": 112,
+      "status": "failed"
+    },
+    {
+      "category": "tool_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-113-tool_selection",
+      "latency_ms": 596.88,
+      "ordinal": 113,
+      "status": "failed"
+    },
+    {
+      "category": "forced_truncation",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-114-forced_truncation",
+      "latency_ms": 87.7,
+      "ordinal": 114,
+      "status": "failed"
+    },
+    {
+      "category": "stream_normalization",
+      "id": "runner-115-stream_normalization",
+      "latency_ms": 82.84,
+      "ordinal": 115,
+      "status": "passed"
+    },
+    {
+      "category": "tool_stream_normalization",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] SSE stream has no usable finish reason\n    got = 'stop'"
+      },
+      "id": "runner-116-tool_stream_normalization",
+      "latency_ms": 549.95,
+      "ordinal": 116,
+      "status": "failed"
+    },
+    {
+      "category": "large_enum_selection",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-117-large_enum_selection",
+      "latency_ms": 315.28,
+      "ordinal": 117,
+      "status": "failed"
+    },
+    {
+      "category": "reasoning_then_tool",
+      "failure": {
+        "category": "protocol",
+        "message": "[protocol] expected exactly one tool call\n    got = None"
+      },
+      "id": "runner-118-reasoning_then_tool",
+      "latency_ms": 287.38,
+      "ordinal": 118,
+      "status": "failed"
+    },
+    {
+      "category": "structured_final",
+      "id": "runner-119-structured_final",
+      "latency_ms": 823.38,
+      "ordinal": 119,
+      "status": "passed"
+    }
+  ],
+  "configuration": {
+    "model": "SmolLM2-1.7B-Instruct-Q4_K_M",
+    "temperature": 0
+  },
+  "metrics": {
+    "elapsed_ms": 49457.99,
+    "valid_structured_tasks_per_second": 0.607
+  },
+  "resources": {
+    "peak_rss_kb": null,
+    "peak_rss_kind": "peak"
+  },
+  "runtime": {
+    "name": "llama.cpp",
+    "version": "b10488"
+  },
+  "schema_version": "xyntetik.agent-torture.v3",
+  "totals": {
+    "failed": 90,
+    "failures_by_category": {
+      "protocol": 90
+    },
+    "passed": 30,
+    "requests": 120
+  }
+}
