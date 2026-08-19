@@ -153,3 +153,33 @@ already allocates 1024 B of.
 
 That is arithmetic, not a measurement, and it is offered as the next thing to
 test rather than the next thing to build.
+
+## The scores buffer (`ah`), measured 2026-08-19 — smaller than the estimate
+
+The open follow-up was whether the per-head attention scores buffer `ah`,
+which the decode kernel round-trips through device memory, was worth moving to
+threadgroup memory. The plan carried the arithmetic estimate "~36 MB per decode
+token at an 8k span, 28 % of the KV volume." The dispatch census now counts the
+`ah` round-trips directly (`RUNNER_METAL_STATS`, decode-only, ~4 passes per head
+over the attended span), so it is a measurement rather than arithmetic.
+
+Measured on e2b-q40 (gemma-4 E2B, 35 layers, 7 global / 28 sliding), 4,002-token
+context, `--gpu auto`:
+
+```
+metal-kv     decode-cumulative: global 57387008 B | sliding 14680064 B  (72 MB/token)
+metal-scores decode-cumulative: 5421696 B (ah round-trips) = 7.5% of KV read
+```
+
+**7.5 %, not 28 %.** The ratio is span-independent (both scale linearly with the
+attended span), so it holds at 8k too; the earlier 28 % overcounted. The KV read
+is the established decode bottleneck (1.5 GB/s, this doc); at 7.5 % of that
+traffic, staging `ah` in threadgroup memory could return at most a few percent
+of decode — and only if the kernel change were free, which it is not (a chunk's
+scores fit threadgroup memory but a long span does not, so it needs a device
+fallback above the threadgroup capacity).
+
+**Verdict: deprioritized, not built.** The measurement shrinks the lever below
+the threshold that would justify the kernel restructure ahead of the KV-read
+work itself. Recorded as measured so it is not re-estimated. The census counter
+stays (instrumentation only; Metal decode parity byte-identical).

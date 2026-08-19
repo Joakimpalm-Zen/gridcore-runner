@@ -1405,6 +1405,12 @@ static struct {
     // an underestimate that looks authoritative.
     unsigned long long kv_global, kv_swa;
     unsigned long      kv_layers_global, kv_layers_swa;
+    // `ah` (the per-head attention scores) is device memory the decode kernel
+    // round-trips ~4x per head over the attended span (write, max scan,
+    // exp-sum, weighted read). Counted here so "is the scores buffer worth
+    // moving to threadgroup memory" is a measurement, not the plan's
+    // arithmetic — same decode-only framing as the KV bytes above.
+    unsigned long long scores_bytes;
 } g_disp;
 
 static void enc_rmsnorm_n(gpu_t *g, id<MTLComputeCommandEncoder> e,
@@ -2075,6 +2081,9 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                                      * (unsigned long long)model_kv_row_bytes(m, l);
                 if (window > 0) { g_disp.kv_swa += b; g_disp.kv_layers_swa++; }
                 else            { g_disp.kv_global += b; g_disp.kv_layers_global++; }
+                // ~4 device round-trips of the scores over the span, per head.
+                g_disp.scores_bytes += 4ull * (unsigned long long)m->n_head
+                                     * (unsigned long long)a_span * sizeof(float);
             }
             int a_ov = metal_attn_chunk_override();
             int a_chunk, a_nch;
@@ -2286,6 +2295,11 @@ static float *gpu_forward_native_batch(model_t *m, const int32_t *tokens,
                     g_disp.kv_global, g_disp.kv_layers_global,
                     g_disp.kv_swa, g_disp.kv_layers_swa,
                     100.0 * (double)g_disp.kv_swa
+                        / (double)(g_disp.kv_swa + g_disp.kv_global));
+        if (g_disp.scores_bytes)
+            fprintf(stderr, "metal-scores decode-cumulative: %llu B (ah "
+                    "round-trips) = %.1f%% of KV read\n", g_disp.scores_bytes,
+                    100.0 * (double)g_disp.scores_bytes
                         / (double)(g_disp.kv_swa + g_disp.kv_global));
         fprintf(stderr, "metal-census n=%d total=%lu | mm=%lu mv=%lu mvf=%lu "
                 "rmsnorm=%lu qknorm=%lu headnorm=%lu rope=%lu store=%lu "
