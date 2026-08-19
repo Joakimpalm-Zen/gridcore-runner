@@ -23,6 +23,19 @@ A full module-by-module code review of the tree. Behaviour changes first.
   non-2xx from `/unload` as fatal will now fail on a multi-slot server where
   they previously passed while achieving nothing. Making that configuration
   genuinely unloadable is a separate, later feature.
+- **The adopted margin-qualified top-1 criterion is tighter, and its report
+  schema is now `xyntetik.runner.kld-raw.v3`.** `scripts/kld-compare-raw.py`
+  forgave a top-1 divergence whenever the REFERENCE's own #1 and #2 were within
+  the 0.5-nat tie band — a question that never mentions what the variant
+  picked, so a near-tie at the top of the reference forgave every flip beneath
+  it, including a variant confidently emitting a token the reference rates at
+  e^-12. The band is now measured from the reference's best logprob to the
+  token the variant actually picked, and a pick the reference never reported no
+  longer qualifies. Plain top-1, KLD and top-8 overlap are untouched. Numbers
+  published under the v2 rule were measured under the looser criterion and are
+  not comparable with a v3 figure without a re-run; per-position records in
+  existing v2 reports do not carry the new `pick_margin`, so a re-score off the
+  old evidence is not possible either.
 - **Files written on x86 change bytes.** The portable `f32->f16` conversion
   rounded ties AWAY from zero; aarch64 converts with `fcvt`, which rounds ties
   to even, and so do llama.cpp and ggml. 16,808,958 of the 2^32 float bit

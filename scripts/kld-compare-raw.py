@@ -95,14 +95,26 @@ def query(endpoint, model_name, prompt, top_n=20):
 # The margin is read from the REFERENCE side, never the variant's. A variant
 # that is unsure where the reference was certain has lost something real; a
 # variant that picks differently where the reference had no opinion has not.
+#
+# And the gap is measured TO THE TOKEN THE VARIANT ACTUALLY PICKED, not between
+# the reference's own #1 and #2. v2 measured the latter (2026-08-14 to
+# 2026-08-19) and the difference is not cosmetic: "were the reference's top two
+# close?" is a question about the reference alone, so a near-tie at the top
+# forgave every flip beneath it. A reference of {x: -1.0, y: -1.2, z: -12.0}
+# has a 0.2-nat top-two gap, and a variant confidently emitting z -- which the
+# reference rates at e^-12 -- scored as agreement. The band exists to forgive a
+# coin-flip between candidates the reference cannot separate, not to forgive
+# anything at all whenever a coin-flip exists somewhere in the distribution.
 DEFAULT_TIE_BAND = 0.5
 
 
 def top_two_margin(dist):
     """Reference-side gap between the best and second-best logprob.
 
-    None when the distribution has fewer than two usable entries: there is no
-    gap to measure, and inventing one would forgive a flip on no evidence.
+    Reported per position as `ref_margin` (how decided the reference was at
+    all); the qualification itself uses pick_margin() below. None when the
+    distribution has fewer than two usable entries: there is no gap to measure,
+    and inventing one would forgive a flip on no evidence.
     """
     if len(dist) < 2:
         return None
@@ -110,12 +122,30 @@ def top_two_margin(dist):
     return ordered[0] - ordered[1]
 
 
+def pick_margin(dist_ref, token):
+    """Reference-side gap between its own best logprob and `token`'s.
+
+    None when the reference never reported `token`. Both engines return a
+    truncated top-N, so the variant's argmax can simply be absent from the
+    reference's list — there is no gap to measure against it, and reading
+    "unmeasured" as "tied" would forgive exactly the divergences this
+    criterion exists to catch.
+    """
+    if token not in dist_ref:
+        return None
+    return max(dist_ref.values()) - dist_ref[token]
+
+
 def score_pair(dist_a, dist_b, tie_band=DEFAULT_TIE_BAND):
     """(kld, plain_agree, margin_qualified_agree, top8_overlap).
 
     dist_a is the variant under test, dist_b the reference. KLD direction and
     the plain-agreement and overlap definitions are unchanged from v1, so every
-    published number keeps reproducing.
+    published number for those keeps reproducing. The margin-qualified column
+    is TIGHTER in v3 than in v2 (see DEFAULT_TIE_BAND above): reports written
+    under v2 measured it against the reference's own top-two gap, which does
+    not consult the variant's pick, so a v2 margin-qualified figure can only be
+    compared with a v3 one after a re-run.
     """
     union = set(dist_a) | set(dist_b)
     floor_a = min(dist_a.values()) - 1.0 if dist_a else -20.0
@@ -131,7 +161,7 @@ def score_pair(dist_a, dist_b, tie_band=DEFAULT_TIE_BAND):
     top1_a = max(dist_a, key=dist_a.get)
     top1_b = max(dist_b, key=dist_b.get)
     agree = top1_a == top1_b
-    margin = top_two_margin(dist_b)
+    margin = pick_margin(dist_b, top1_a)
     marg_agree = agree or (margin is not None and margin <= tie_band)
     top8_a = set(sorted(dist_a, key=lambda t: -dist_a[t])[:8])
     top8_b = set(sorted(dist_b, key=lambda t: -dist_b[t])[:8])
@@ -220,8 +250,14 @@ def main(argv):
             # evidence instead of re-running every model. v1 stored summaries
             # only, which is why the 2026-08-14 both-ways re-report had to
             # re-run nine rows from scratch.
+            # pick_margin is the quantity the criterion actually tests (null
+            # when the reference never reported the variant's pick);
+            # ref_margin, how decided the reference was on its own, stays
+            # beside it because v2 reports carry it and it is what makes a v2
+            # row recognizable as a v2 row.
             positions.append({"i": i, "kld": kld, "agree": agree,
                               "margin_agree": marg,
+                              "pick_margin": pick_margin(db, max(da, key=da.get)),
                               "ref_margin": top_two_margin(db),
                               "top8": overlap8})
             n_scored += 1
@@ -235,10 +271,15 @@ def main(argv):
                 p.kill()
 
     result = {
-        # v2 (2026-08-14) ADDS the margin-qualified column and per-position
-        # records. Every v1 field keeps its name and its meaning, so published
-        # v1 numbers stay comparable and reproducible.
-        "schema_version": "xyntetik.runner.kld-raw.v2",
+        # v2 (2026-08-14) ADDED the margin-qualified column and per-position
+        # records. v3 (2026-08-19) TIGHTENS that column: the band is now
+        # measured to the token the variant picked instead of between the
+        # reference's own top two. Every v1 field keeps its name and its
+        # meaning, so published v1/plain numbers stay comparable and
+        # reproducible; the version is bumped because a margin-qualified figure
+        # is NOT comparable across it, and a report that does not say which
+        # rule produced it is the failure this field exists to prevent.
+        "schema_version": "xyntetik.runner.kld-raw.v3",
 # ADOPTED 2026-08-14 (owner decision): margin-qualified top-1 is the
 # publication criterion; plain top-1 is reported beside it forever.
         "tie_band_nats": args.tie_band,

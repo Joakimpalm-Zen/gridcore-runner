@@ -96,6 +96,49 @@ def test_single_entry_reference_has_no_margin_and_is_not_forgiven():
     assert marg is False
 
 
+def test_a_pick_outside_the_band_is_not_forgiven_however_close_the_top_two_are():
+    """The criterion must consult what the VARIANT picked, not just the gap.
+
+    Until 2026-08-19 this asked only "were the reference's #1 and #2 close?".
+    That question does not mention the variant at all, so a near-tie at the top
+    of the reference forgave EVERY flip below it -- including a variant
+    confidently emitting a token the reference rates at e^-12. The tie band is
+    supposed to forgive a coin-flip between two candidates the reference cannot
+    separate; it was forgiving anything at all as long as a coin-flip existed
+    somewhere in the distribution.
+    """
+    b = dist(x=-1.0, y=-1.2, z=-12.0)   # #1/#2 within the band, z is nowhere
+    assert kld_raw.top_two_margin(b) < BAND    # the old criterion's whole test
+    a = dist(x=-9.0, y=-9.0, z=-0.01)   # the variant is certain it is z
+    _, agree, marg, _ = kld_raw.score_pair(a, b)
+    assert agree is False
+    assert marg is False, "a pick the reference rates at e^-12 is not a near-tie"
+
+
+def test_a_pick_inside_the_band_is_still_forgiven_in_a_wider_distribution():
+    # the other half of the case above: same reference, and the variant picks
+    # the runner-up the reference genuinely could not separate from its top.
+    b = dist(x=-1.0, y=-1.2, z=-12.0)
+    a = dist(x=-9.0, y=-0.01, z=-9.0)   # variant picks y, inside the band
+    _, agree, marg, _ = kld_raw.score_pair(a, b)
+    assert agree is False
+    assert marg is True
+
+
+def test_a_pick_the_reference_never_reported_is_not_forgiven():
+    """Absent from the reference's top-N is not evidence of a near-tie.
+
+    Both sides report a truncated top-N, so a variant's argmax can simply be
+    missing from the reference's list. There is no gap to measure against it,
+    and treating "unmeasured" as "tied" would forgive exactly the divergences
+    the criterion exists to catch."""
+    b = dist(x=-1.0, y=-1.05)           # reference's own top two are tied
+    a = dist(q=-0.01, x=-9.0)           # variant picks a token b never reported
+    _, agree, marg, _ = kld_raw.score_pair(a, b)
+    assert agree is False
+    assert marg is False
+
+
 def test_band_is_documented_and_conservative():
     # tc-tol forgives a flip inside 0.02 of the logit range; on the models this
     # project measures that is 0.5-1.1 nats (see the derivation in the script).
