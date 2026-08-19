@@ -5,7 +5,10 @@
 # (libcuda.so.1, driver API) and carries its kernels as embedded PTX — run it
 # with `--gpus all` on an NVIDIA host with the NVIDIA Container Toolkit and it
 # uses the GPU. No CUDA toolkit is baked in (the driver-API path never calls
-# cudart), so a nvidia/cuda base would be pure bloat.
+# cudart), so a nvidia/cuda base would be pure bloat. Verified on an RTX 3070
+# via WSL2 (2026-08-19, Docker 29.1.3 + NVIDIA Container Toolkit 1.19.1): this
+# image with `--gpus all` reports gpu.backend "cuda" from `runner --caps` and
+# offloads to VRAM; without `--gpus` it reports gpu null and runs on CPU.
 #
 # Runner binds the server to LOOPBACK ONLY by design (there is no --host /
 # 0.0.0.0 flag; see src/server.c) — so it never exposes itself to a network,

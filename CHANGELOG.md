@@ -15,7 +15,11 @@ were written.
   on the host's `127.0.0.1` only, never the network); `-p` does not work. CPU by
   default, and GPU-capable with `--gpus all` on an NVIDIA host without a separate
   image (the binary loads the CUDA driver at runtime and carries embedded PTX,
-  so no CUDA toolkit is baked in). See the README "Container image" section.
+  so no CUDA toolkit is baked in) — verified on an RTX 3070 via WSL2 (2026-08-19,
+  Docker 29.1.3 + NVIDIA Container Toolkit 1.19.1): the same image with
+  `--gpus all` reports `gpu.backend "cuda"` and offloads to VRAM, without the
+  flag it reports `gpu null` and runs on CPU. See the README "Container image"
+  section.
 
 ## v0.1.19-alpha — 2026-08-19
 

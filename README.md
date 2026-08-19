@@ -235,10 +235,14 @@ docker run --rm --gpus all --network host -v "$PWD/models:/models" \
 ```
 
 (A `nvidia/cuda`-based image is deliberately not published — it would only add a
-CUDA runtime the driver-API path never calls. This `--gpus all` path is not yet
-verified with the image; the binary's CUDA backend itself is exercised on real
-hardware in CI-adjacent runs.) Metal cannot be containerized (Apple-Silicon
-only, no passthrough).
+CUDA runtime the driver-API path never calls.) Verified on an RTX 3070 via WSL2
+(2026-08-19, Docker 29.1.3 + NVIDIA Container Toolkit 1.19.1): the same
+distroless image run with `--gpus all` reports `"gpu":{"backend":"cuda","name":
+"NVIDIA GeForce RTX 3070",…}` from `runner --caps` and prints `gpu: CUDA backend
+on NVIDIA GeForce RTX 3070` with VRAM accounting at load; the identical image run
+without `--gpus` reports `"gpu":null` and runs on CPU (`libcuda.so.1` absent), so
+the flag is what makes the difference. Metal cannot be containerized
+(Apple-Silicon only, no passthrough).
 
 ## Models and conversion
 
