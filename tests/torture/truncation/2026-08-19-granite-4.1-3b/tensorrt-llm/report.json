@@ -1,0 +1,157 @@
+{
+  "configuration": {
+    "control_rung": 64,
+    "ladder": [
+      1,
+      2,
+      3,
+      5,
+      8,
+      16,
+      64
+    ],
+    "model": "Qwen3-1.7B",
+    "prompt": "What is the weather in Paris? Use fahrenheit.",
+    "temperature": 0,
+    "tool": {
+      "function": {
+        "description": "Get the current weather for a city.",
+        "name": "get_weather",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "units": {
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city",
+            "units"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    "tool_choice": "auto"
+  },
+  "metrics": {
+    "elapsed_ms": 625.7
+  },
+  "notes": "Substitutions from the four-engine granite-4.1-3b run, each engine-level and disclosed: (1) MODEL - granite-4.1-3b (GraniteForCausalLM) is not in TRT-LLM 1.2.1's model registry ('Unknown architecture for AutoModelForCausalLM: GraniteForCausalLM'), so Qwen3-1.7B (Qwen3ForCausalLM, a TRT-LLM-supported arch with a matching --tool_parser qwen3) was served instead; the truncation property is an engine guarantee, not model quality, so this measures TRT-LLM's behaviour, not a quality cross-compare. (2) tool_choice - TRT-LLM 1.2.1's OpenAI server rejects tool_choice:\"required\" with HTTP 400 (accepts only none/auto/named); \"auto\" is used, which with this prompt+tools forces the call at every budget (the model emits the tool call from the first token). A named tool_choice DOES force but bypasses the qwen3 parser and dumps the raw <tool_call> framing into arguments unparseably at every rung including the control, so it is not a valid truncation measurement. (3) enable_thinking=false - Qwen3 is a reasoning model; with thinking on it spends the whole budget in <think> and never reaches the JSON even at 64 (control fails), so thinking is disabled to make it a direct tool-caller comparable to granite.",
+  "rungs": [
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "<tool_call>",
+      "content_leak": true,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 1,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLWRkYTM1YjEyNDYyNjRjYjNiMjUyYTM2MzczNDE4YjA3Iiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NDYyNSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiI8dG9vbF9jYWxsPiIsInJlYXNvbmluZ19jb250ZW50IjoiIiwicmVhc29uaW5nIjpudWxsLCJ0b29sX2NhbGxzIjpbXX0sImxvZ3Byb2JzIjpudWxsLCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIiwic3RvcF9yZWFzb24iOm51bGwsIm1tX2VtYmVkZGluZ19oYW5kbGUiOm51bGwsImRpc2FnZ3JlZ2F0ZWRfcGFyYW1zIjpudWxsLCJhdmdfZGVjb2RlZF90b2tlbnNfcGVyX2l0ZXIiOjEuMH1dLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjoxOTEsInRvdGFsX3Rva2VucyI6MTkyLCJjb21wbGV0aW9uX3Rva2VucyI6MSwicHJvbXB0X3Rva2Vuc19kZXRhaWxzIjp7ImNhY2hlZF90b2tlbnMiOjE5MH19LCJwcm9tcHRfdG9rZW5faWRzIjpudWxsfQ==",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 2,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTgyMWU1Y2U1MTEyZjQzNjlhNDU3YTBhMTMxY2FlZWVjIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NDYyNSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6IiIsInJlYXNvbmluZyI6bnVsbCwidG9vbF9jYWxscyI6W119LCJsb2dwcm9icyI6bnVsbCwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCIsInN0b3BfcmVhc29uIjpudWxsLCJtbV9lbWJlZGRpbmdfaGFuZGxlIjpudWxsLCJkaXNhZ2dyZWdhdGVkX3BhcmFtcyI6bnVsbCwiYXZnX2RlY29kZWRfdG9rZW5zX3Blcl9pdGVyIjoxLjB9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTkxLCJ0b3RhbF90b2tlbnMiOjE5MywiY29tcGxldGlvbl90b2tlbnMiOjIsInByb21wdF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjoxOTB9fSwicHJvbXB0X3Rva2VuX2lkcyI6bnVsbH0=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 3,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTk4ZDdmOWQ3ZTMzYTRiMDNhM2M4NWEwYWQwMGU4NTY0Iiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NDYyNSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6IiIsInJlYXNvbmluZyI6bnVsbCwidG9vbF9jYWxscyI6W119LCJsb2dwcm9icyI6bnVsbCwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCIsInN0b3BfcmVhc29uIjpudWxsLCJtbV9lbWJlZGRpbmdfaGFuZGxlIjpudWxsLCJkaXNhZ2dyZWdhdGVkX3BhcmFtcyI6bnVsbCwiYXZnX2RlY29kZWRfdG9rZW5zX3Blcl9pdGVyIjoxLjB9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTkxLCJ0b3RhbF90b2tlbnMiOjE5NCwiY29tcGxldGlvbl90b2tlbnMiOjMsInByb21wdF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjoxOTB9fSwicHJvbXB0X3Rva2VuX2lkcyI6bnVsbH0=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 5,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTczNzEyZWNlYjJjNDRmY2FhMDIyZmM0NDAzMWM0YWI3Iiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NDYyNSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6IiIsInJlYXNvbmluZyI6bnVsbCwidG9vbF9jYWxscyI6W119LCJsb2dwcm9icyI6bnVsbCwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCIsInN0b3BfcmVhc29uIjpudWxsLCJtbV9lbWJlZGRpbmdfaGFuZGxlIjpudWxsLCJkaXNhZ2dyZWdhdGVkX3BhcmFtcyI6bnVsbCwiYXZnX2RlY29kZWRfdG9rZW5zX3Blcl9pdGVyIjoxLjB9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTkxLCJ0b3RhbF90b2tlbnMiOjE5NiwiY29tcGxldGlvbl90b2tlbnMiOjUsInByb21wdF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjoxOTB9fSwicHJvbXB0X3Rva2VuX2lkcyI6bnVsbH0=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 8,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLWJhYWJlNWQwYWM1YzQxYjg5ZTU3N2NkZDg1ODBlMTdkIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NDYyNSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6IiIsInJlYXNvbmluZyI6bnVsbCwidG9vbF9jYWxscyI6W119LCJsb2dwcm9icyI6bnVsbCwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCIsInN0b3BfcmVhc29uIjpudWxsLCJtbV9lbWJlZGRpbmdfaGFuZGxlIjpudWxsLCJkaXNhZ2dyZWdhdGVkX3BhcmFtcyI6bnVsbCwiYXZnX2RlY29kZWRfdG9rZW5zX3Blcl9pdGVyIjoxLjB9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTkxLCJ0b3RhbF90b2tlbnMiOjE5OSwiY29tcGxldGlvbl90b2tlbnMiOjgsInByb21wdF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjoxOTB9fSwicHJvbXB0X3Rva2VuX2lkcyI6bnVsbH0=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 16,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTIwYzU2MDhmOWNiZDRmNzY4YTc1MDJhNzY0YTk3YzAxIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NDYyNSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6IiIsInJlYXNvbmluZyI6bnVsbCwidG9vbF9jYWxscyI6W119LCJsb2dwcm9icyI6bnVsbCwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCIsInN0b3BfcmVhc29uIjpudWxsLCJtbV9lbWJlZGRpbmdfaGFuZGxlIjpudWxsLCJkaXNhZ2dyZWdhdGVkX3BhcmFtcyI6bnVsbCwiYXZnX2RlY29kZWRfdG9rZW5zX3Blcl9pdGVyIjoxLjB9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTkxLCJ0b3RhbF90b2tlbnMiOjIwNywiY29tcGxldGlvbl90b2tlbnMiOjE2LCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MTkwfX0sInByb21wdF90b2tlbl9pZHMiOm51bGx9",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": {
+        "city": "Paris",
+        "units": "fahrenheit"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\": \"Paris\", \"units\": \"fahrenheit\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "tool_calls",
+      "http_status": 200,
+      "max_tokens": 64,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLWQ1MDVkMGNkMTIyZDQyZDRhODNlZWRlMjhiM2YyZGJjIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NDYyNSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6IiIsInJlYXNvbmluZyI6bnVsbCwidG9vbF9jYWxscyI6W3siaWQiOiJjaGF0Y21wbC10b29sLTZkMTVhYTA5M2M3MzRkYTk5YTU2OWMzZGI3YTU4MmY1IiwidHlwZSI6ImZ1bmN0aW9uIiwiZnVuY3Rpb24iOnsibmFtZSI6ImdldF93ZWF0aGVyIiwiYXJndW1lbnRzIjoie1wiY2l0eVwiOiBcIlBhcmlzXCIsIFwidW5pdHNcIjogXCJmYWhyZW5oZWl0XCJ9In19XX0sImxvZ3Byb2JzIjpudWxsLCJmaW5pc2hfcmVhc29uIjoidG9vbF9jYWxscyIsInN0b3BfcmVhc29uIjpudWxsLCJtbV9lbWJlZGRpbmdfaGFuZGxlIjpudWxsLCJkaXNhZ2dyZWdhdGVkX3BhcmFtcyI6bnVsbCwiYXZnX2RlY29kZWRfdG9rZW5zX3Blcl9pdGVyIjoxLjB9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTkxLCJ0b3RhbF90b2tlbnMiOjIxOCwiY29tcGxldGlvbl90b2tlbnMiOjI3LCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MTkwfX0sInByb21wdF90b2tlbl9pZHMiOm51bGx9",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    }
+  ],
+  "runtime": {
+    "name": "tensorrt-llm",
+    "version": "1.2.1"
+  },
+  "schema_version": "xyntetik.truncation-benchmark.v1"
+}
