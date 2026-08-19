@@ -99,7 +99,10 @@ practice, most first.
   parse. On local models, where context is tight and generation is slow, that is
   the difference between an agent loop that finishes and one that crashes. The
   committed [agent-torture gate](docs/agent-torture.md) tests this exact failure
-  mode.
+  mode, and the head-to-head
+  [truncation benchmark](docs/truncation-benchmark.md) pins it as a per-release
+  regression gate (`make test-truncation`) with a same-box, same-model
+  comparison against a competitor runtime.
 - **A shared GPU stops being first-come, first-crash.** Run a coding agent
   beside an embeddings model beside a draft model and the usual outcome is that
   one load kills another. Runner processes on the same GPU share a VRAM

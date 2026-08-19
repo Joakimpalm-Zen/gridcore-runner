@@ -84,6 +84,11 @@ runner; several are load-bearing gates for changing it.
 - **`bench.sh`** — thin wrapper for repeated `--bench-json` runs.
 - **`agent-torture.py` / `torture-compare.py`** — the adversarial tool-call
   matrix and its cross-runtime report comparator (see `docs/agent-torture.md`).
+- **`truncation-benchmark.py`** — the token-ladder probe behind the "tool calls
+  survive the token limit" headline: spawns Runner (or targets a competitor
+  `--endpoint`) and records whether each rung yields a parseable `tool_calls`
+  entry. `make test-truncation` is the regression gate; see
+  `docs/truncation-benchmark.md`.
 - **`weight-io-bench.py`** — how this machine's storage serves large weight
   reads: mmap page faults against explicit reads, which is a property of the
   storage and the OS rather than of the model, and can change a design call.

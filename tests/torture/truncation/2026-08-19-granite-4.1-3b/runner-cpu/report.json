@@ -1,0 +1,178 @@
+{
+  "configuration": {
+    "control_rung": 64,
+    "ladder": [
+      1,
+      2,
+      3,
+      5,
+      8,
+      16,
+      64
+    ],
+    "model": "granite-4.1-3b-Q4_K_M.gguf",
+    "prompt": "What is the weather in Paris? Use fahrenheit.",
+    "temperature": 0,
+    "tool": {
+      "function": {
+        "description": "Get the current weather for a city.",
+        "name": "get_weather",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "units": {
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city",
+            "units"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    "tool_choice": "required"
+  },
+  "metrics": {
+    "elapsed_ms": 5078.65
+  },
+  "rungs": [
+    {
+      "arguments": {
+        "city": "",
+        "units": "celsius"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\":\"\",\"units\":\"celsius\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 1,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTAiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzg3MTMxODMwLCJtb2RlbCI6ImdyYW5pdGUtNC4xLTNiLVE0X0tfTS5nZ3VmIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJ0b29sX2NhbGxzIjpbeyJpZCI6ImNhbGxfMCIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJnZXRfd2VhdGhlciIsImFyZ3VtZW50cyI6IntcImNpdHlcIjpcIlwiLFwidW5pdHNcIjpcImNlbHNpdXNcIn0ifX1dfSwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTI1LCJjb21wbGV0aW9uX3Rva2VucyI6MSwidG90YWxfdG9rZW5zIjoxMjZ9LCJydW5uZXJfdGVsZW1ldHJ5Ijp7InByb21wdF9jYWNoZWRfdG9rZW5zIjowLCJwcm9tcHRfZm9ya2VkX3Rva2VucyI6MCwicHJvbXB0X2V2YWxfdG9rZW5zIjoxMjUsInByZWZpeF9jYWNoZV9zYXZlZF9zZWNvbmRzIjowLjAwMDAwMCwiZ2VuZXJhdGlvbl9zZWNvbmRzIjowLjAyMTY0MSwiZ2VuZXJhdGlvbl90b2tfcyI6NDYuMjA5LCJtYWpvcl9wYWdlX2ZhdWx0cyI6MzkwLCJqc29uX21vZGUiOmZhbHNlLCJzY2hlbWEiOnRydWUsInNwZWN1bGF0aXZlIjpmYWxzZX19",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    },
+    {
+      "arguments": {
+        "city": "",
+        "units": "celsius"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\":\"\",\"units\":\"celsius\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 2,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTEiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzg3MTMxODMwLCJtb2RlbCI6ImdyYW5pdGUtNC4xLTNiLVE0X0tfTS5nZ3VmIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJ0b29sX2NhbGxzIjpbeyJpZCI6ImNhbGxfMCIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJnZXRfd2VhdGhlciIsImFyZ3VtZW50cyI6IntcImNpdHlcIjpcIlwiLFwidW5pdHNcIjpcImNlbHNpdXNcIn0ifX1dfSwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTI1LCJjb21wbGV0aW9uX3Rva2VucyI6MiwidG90YWxfdG9rZW5zIjoxMjd9LCJydW5uZXJfdGVsZW1ldHJ5Ijp7InByb21wdF9jYWNoZWRfdG9rZW5zIjoxMjQsInByb21wdF9mb3JrZWRfdG9rZW5zIjowLCJwcm9tcHRfZXZhbF90b2tlbnMiOjEsInByZWZpeF9jYWNoZV9zYXZlZF9zZWNvbmRzIjowLjAwMDAwMCwiZ2VuZXJhdGlvbl9zZWNvbmRzIjowLjA0MTI0MSwiZ2VuZXJhdGlvbl90b2tfcyI6NDguNDk2LCJtYWpvcl9wYWdlX2ZhdWx0cyI6MCwianNvbl9tb2RlIjpmYWxzZSwic2NoZW1hIjp0cnVlLCJzcGVjdWxhdGl2ZSI6ZmFsc2V9fQ==",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    },
+    {
+      "arguments": {
+        "city": "",
+        "units": "celsius"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\":\"\",\"units\":\"celsius\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 3,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTIiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzg3MTMxODMwLCJtb2RlbCI6ImdyYW5pdGUtNC4xLTNiLVE0X0tfTS5nZ3VmIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJ0b29sX2NhbGxzIjpbeyJpZCI6ImNhbGxfMCIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJnZXRfd2VhdGhlciIsImFyZ3VtZW50cyI6IntcImNpdHlcIjpcIlwiLFwidW5pdHNcIjpcImNlbHNpdXNcIn0ifX1dfSwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTI1LCJjb21wbGV0aW9uX3Rva2VucyI6MywidG90YWxfdG9rZW5zIjoxMjh9LCJydW5uZXJfdGVsZW1ldHJ5Ijp7InByb21wdF9jYWNoZWRfdG9rZW5zIjoxMjQsInByb21wdF9mb3JrZWRfdG9rZW5zIjowLCJwcm9tcHRfZXZhbF90b2tlbnMiOjEsInByZWZpeF9jYWNoZV9zYXZlZF9zZWNvbmRzIjowLjAwMDAwMCwiZ2VuZXJhdGlvbl9zZWNvbmRzIjowLjA2MzU3OCwiZ2VuZXJhdGlvbl90b2tfcyI6NDcuMTg2LCJtYWpvcl9wYWdlX2ZhdWx0cyI6MCwianNvbl9tb2RlIjpmYWxzZSwic2NoZW1hIjp0cnVlLCJzcGVjdWxhdGl2ZSI6ZmFsc2V9fQ==",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    },
+    {
+      "arguments": {
+        "city": "",
+        "units": "celsius"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\":\"\",\"units\":\"celsius\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 5,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTMiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzg3MTMxODMwLCJtb2RlbCI6ImdyYW5pdGUtNC4xLTNiLVE0X0tfTS5nZ3VmIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJ0b29sX2NhbGxzIjpbeyJpZCI6ImNhbGxfMCIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJnZXRfd2VhdGhlciIsImFyZ3VtZW50cyI6IntcImNpdHlcIjpcIlwiLFwidW5pdHNcIjpcImNlbHNpdXNcIn0ifX1dfSwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTI1LCJjb21wbGV0aW9uX3Rva2VucyI6NSwidG90YWxfdG9rZW5zIjoxMzB9LCJydW5uZXJfdGVsZW1ldHJ5Ijp7InByb21wdF9jYWNoZWRfdG9rZW5zIjoxMjQsInByb21wdF9mb3JrZWRfdG9rZW5zIjowLCJwcm9tcHRfZXZhbF90b2tlbnMiOjEsInByZWZpeF9jYWNoZV9zYXZlZF9zZWNvbmRzIjowLjAwMDAwMCwiZ2VuZXJhdGlvbl9zZWNvbmRzIjowLjEwNTY0OCwiZ2VuZXJhdGlvbl90b2tfcyI6NDcuMzI3LCJtYWpvcl9wYWdlX2ZhdWx0cyI6MCwianNvbl9tb2RlIjpmYWxzZSwic2NoZW1hIjp0cnVlLCJzcGVjdWxhdGl2ZSI6ZmFsc2V9fQ==",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    },
+    {
+      "arguments": {
+        "city": "",
+        "units": "celsius"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\":\"\",\"units\":\"celsius\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 8,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTQiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzg3MTMxODMwLCJtb2RlbCI6ImdyYW5pdGUtNC4xLTNiLVE0X0tfTS5nZ3VmIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJ0b29sX2NhbGxzIjpbeyJpZCI6ImNhbGxfMCIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJnZXRfd2VhdGhlciIsImFyZ3VtZW50cyI6IntcImNpdHlcIjpcIlwiLFwidW5pdHNcIjpcImNlbHNpdXNcIn0ifX1dfSwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTI1LCJjb21wbGV0aW9uX3Rva2VucyI6OCwidG90YWxfdG9rZW5zIjoxMzN9LCJydW5uZXJfdGVsZW1ldHJ5Ijp7InByb21wdF9jYWNoZWRfdG9rZW5zIjoxMjQsInByb21wdF9mb3JrZWRfdG9rZW5zIjowLCJwcm9tcHRfZXZhbF90b2tlbnMiOjEsInByZWZpeF9jYWNoZV9zYXZlZF9zZWNvbmRzIjowLjAwMDAwMCwiZ2VuZXJhdGlvbl9zZWNvbmRzIjowLjE2OTMyNCwiZ2VuZXJhdGlvbl90b2tfcyI6NDcuMjQ3LCJtYWpvcl9wYWdlX2ZhdWx0cyI6MCwianNvbl9tb2RlIjpmYWxzZSwic2NoZW1hIjp0cnVlLCJzcGVjdWxhdGl2ZSI6ZmFsc2V9fQ==",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    },
+    {
+      "arguments": {
+        "city": "Paris",
+        "units": "celsius"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\":\"Paris\",\"units\":\"celsius\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 16,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTUiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzg3MTMxODMxLCJtb2RlbCI6ImdyYW5pdGUtNC4xLTNiLVE0X0tfTS5nZ3VmIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJ0b29sX2NhbGxzIjpbeyJpZCI6ImNhbGxfMCIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJnZXRfd2VhdGhlciIsImFyZ3VtZW50cyI6IntcImNpdHlcIjpcIlBhcmlzXCIsXCJ1bml0c1wiOlwiY2Vsc2l1c1wifSJ9fV19LCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIn1dLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjoxMjUsImNvbXBsZXRpb25fdG9rZW5zIjoxNiwidG90YWxfdG9rZW5zIjoxNDF9LCJydW5uZXJfdGVsZW1ldHJ5Ijp7InByb21wdF9jYWNoZWRfdG9rZW5zIjoxMjQsInByb21wdF9mb3JrZWRfdG9rZW5zIjowLCJwcm9tcHRfZXZhbF90b2tlbnMiOjEsInByZWZpeF9jYWNoZV9zYXZlZF9zZWNvbmRzIjowLjAwMDAwMCwiZ2VuZXJhdGlvbl9zZWNvbmRzIjowLjMzMzk4NCwiZ2VuZXJhdGlvbl90b2tfcyI6NDcuOTA3LCJtYWpvcl9wYWdlX2ZhdWx0cyI6MCwianNvbl9tb2RlIjpmYWxzZSwic2NoZW1hIjp0cnVlLCJzcGVjdWxhdGl2ZSI6ZmFsc2V9fQ==",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    },
+    {
+      "arguments": {
+        "city": "Paris",
+        "units": "fahrenheit"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\":\"Paris\",\"units\":\"fahrenheit\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "tool_calls",
+      "http_status": 200,
+      "max_tokens": 64,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTYiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzg3MTMxODMxLCJtb2RlbCI6ImdyYW5pdGUtNC4xLTNiLVE0X0tfTS5nZ3VmIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJ0b29sX2NhbGxzIjpbeyJpZCI6ImNhbGxfMCIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJnZXRfd2VhdGhlciIsImFyZ3VtZW50cyI6IntcImNpdHlcIjpcIlBhcmlzXCIsXCJ1bml0c1wiOlwiZmFocmVuaGVpdFwifSJ9fV19LCJmaW5pc2hfcmVhc29uIjoidG9vbF9jYWxscyJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MTI1LCJjb21wbGV0aW9uX3Rva2VucyI6MjMsInRvdGFsX3Rva2VucyI6MTQ4fSwicnVubmVyX3RlbGVtZXRyeSI6eyJwcm9tcHRfY2FjaGVkX3Rva2VucyI6MTI0LCJwcm9tcHRfZm9ya2VkX3Rva2VucyI6MCwicHJvbXB0X2V2YWxfdG9rZW5zIjoxLCJwcmVmaXhfY2FjaGVfc2F2ZWRfc2Vjb25kcyI6MC4wMDAwMDAsImdlbmVyYXRpb25fc2Vjb25kcyI6MC40NTgzMTYsImdlbmVyYXRpb25fdG9rX3MiOjUwLjE4NCwibWFqb3JfcGFnZV9mYXVsdHMiOjAsImpzb25fbW9kZSI6ZmFsc2UsInNjaGVtYSI6dHJ1ZSwic3BlY3VsYXRpdmUiOmZhbHNlfX0=",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    }
+  ],
+  "runner_property": {
+    "holds": true,
+    "violations": []
+  },
+  "runtime": {
+    "name": "runner",
+    "version": "0.1.19-alpha (c7d6c3d)"
+  },
+  "schema_version": "xyntetik.truncation-benchmark.v1"
+}
