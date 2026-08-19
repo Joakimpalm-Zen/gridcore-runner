@@ -220,8 +220,25 @@ docker run --rm --network host -v "$PWD/models:/models" \
 
 `-p 8080:8080` does not work — the port-proxy cannot reach a server bound to the
 container's own loopback; use `--network host`. There is no auth boundary, so
-keep any deployment on a trusted host. The image is CPU-only; a GPU image is not
-published.
+keep any deployment on a trusted host.
+
+The image is **CPU by default, but GPU-capable without a separate variant.** The
+binary loads the CUDA **driver** at runtime (`libcuda.so.1`, the driver API) and
+carries its kernels as embedded PTX, so it needs no CUDA toolkit baked in — run
+it on an NVIDIA host with the NVIDIA Container Toolkit and `--gpus all` and the
+runner uses the GPU:
+
+```sh
+docker run --rm --gpus all --network host -v "$PWD/models:/models" \
+  ghcr.io/joakimpalm-zen/xyntetik-runner:latest \
+  -m /models/your.gguf --serve --port 8080
+```
+
+(A `nvidia/cuda`-based image is deliberately not published — it would only add a
+CUDA runtime the driver-API path never calls. This `--gpus all` path is not yet
+verified with the image; the binary's CUDA backend itself is exercised on real
+hardware in CI-adjacent runs.) Metal cannot be containerized (Apple-Silicon
+only, no passthrough).
 
 ## Models and conversion
 

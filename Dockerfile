@@ -1,7 +1,11 @@
 # Runner as a container image: the same single C binary the release ships, on a
 # distroless glibc base. This is packaging, not a new dependency — the image
-# contains the binary and nothing else. CPU inference; a CUDA image would be a
-# separate, heavier variant and is deliberately not this one.
+# contains the binary and nothing else. CPU by default; GPU-capable WITHOUT a
+# separate variant, because the binary loads the CUDA driver at runtime
+# (libcuda.so.1, driver API) and carries its kernels as embedded PTX — run it
+# with `--gpus all` on an NVIDIA host with the NVIDIA Container Toolkit and it
+# uses the GPU. No CUDA toolkit is baked in (the driver-API path never calls
+# cudart), so a nvidia/cuda base would be pure bloat.
 #
 # Runner binds the server to LOOPBACK ONLY by design (there is no --host /
 # 0.0.0.0 flag; see src/server.c) — so it never exposes itself to a network,
@@ -40,7 +44,7 @@ RUN python3 scripts/make-test-model.py /tmp/test.gguf \
 
 FROM gcr.io/distroless/cc-debian12
 LABEL org.opencontainers.image.title="Xyntetik Runner" \
-      org.opencontainers.image.description="Single-binary local LLM inference engine (CPU); tool calls survive the token limit." \
+      org.opencontainers.image.description="Single-binary local LLM inference engine (CPU by default, GPU via --gpus all); tool calls survive the token limit." \
       org.opencontainers.image.source="https://github.com/Joakimpalm-Zen/xyntetik-runner"
 COPY --from=build /src/runner /usr/local/bin/runner
 EXPOSE 8080

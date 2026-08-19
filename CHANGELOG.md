@@ -12,8 +12,10 @@ were written.
   `ghcr.io/joakimpalm-zen/xyntetik-runner:<version>` / `:latest`; the release
   workflow builds and pushes it (private until made public). The server binds
   loopback only by design, so serve with `--network host` on Linux (reachable
-  on the host's `127.0.0.1` only, never the network); `-p` does not work. CPU
-  only; no GPU image is published. See the README "Container image" section.
+  on the host's `127.0.0.1` only, never the network); `-p` does not work. CPU by
+  default, and GPU-capable with `--gpus all` on an NVIDIA host without a separate
+  image (the binary loads the CUDA driver at runtime and carries embedded PTX,
+  so no CUDA toolkit is baked in). See the README "Container image" section.
 
 ## v0.1.19-alpha — 2026-08-19
 
