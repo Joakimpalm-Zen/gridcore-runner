@@ -699,7 +699,9 @@ Chat supports buffered and SSE responses, part-array content, assistant
 `tool_calls` history, `role:"tool"` results, `stream_options.include_usage`,
 `logprobs`/`top_logprobs`, `min_p`, `repeat_penalty`, up to four stop strings,
 and `keep_alive` on a registry-backed server. Tool declarations are rendered into the model
-prompt and constrained back into well-formed `tool_calls`.
+prompt in the resident model's native tool protocol — identically on
+`/v1/chat/completions`, `/v1/responses`, and `/v1/messages` — and constrained
+back into well-formed `tool_calls`.
 
 Stop strings and tool declarations cannot be combined: a request carrying both
 `stop` (or Anthropic's `stop_sequences`) and `tools` is refused with HTTP 400.

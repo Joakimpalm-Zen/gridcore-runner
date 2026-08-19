@@ -154,6 +154,17 @@ A full module-by-module code review of the tree. Behaviour changes first.
   way: the `input` re-serialization double-evaluated a loop counter through the
   `sb_lit` macro.) Chat, chatml, and Harmony replay bytes were already correct
   and are unchanged.
+- **Tool *declarations* on `/v1/responses` and `/v1/messages` now use the
+  model's native protocol too, matching `/v1/chat/completions`.** The
+  declaration-side twin of the replay fix above: the typed surfaces did not set
+  the family's native declaration flags, so a gemma-4 or muse model offered
+  tools through Responses or Messages was taught its declaration format in the
+  generic block rather than gemma-4's `<|tool>declaration:...<tool|>` or muse's
+  atem schema — a format it was never trained on. A single `tool_decl_native`
+  serializer now backs all three surfaces; gemma-4 and muse declaration bytes
+  change on the typed surfaces, chatml (whose native declaration is the generic
+  one) and Harmony are unchanged, and the cross-surface equivalence is pinned by
+  a per-family contract in `tests/test_tool_attribution.c`.
 - **A multi-tool-call turn no longer vanishes on `/v1/responses` and
   `/v1/messages`.** Both surfaces derived their single call by parsing the
   comma-separated call entries without the brackets that make them an array,
