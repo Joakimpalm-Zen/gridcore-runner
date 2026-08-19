@@ -268,6 +268,56 @@ def emit(name, downs_fn, extra, probs_b=None):
 
 ZEROS_FF_E = [0.0] * (FF * E)
 
+
+# --- fixture self-checks. A fixture that CANNOT distinguish the knob it names
+# is worse than no fixture: it reports a passing gate for a binary that does
+# not implement the knob at all. Each check below models the runner's selection
+# rule (src/model.c moe_route) independently and refuses to write a fixture
+# whose knob makes no difference.
+
+def _sel_topk(scores, k):
+    """top-k by score, ties to the LOWEST index (moe_route's strict >)"""
+    return sorted(range(len(scores)), key=lambda e: (-scores[e], e))[:k]
+
+
+def _sel_grouped(scores, n_group, n_group_used, k):
+    """group-limited top-k: keep the n_group_used groups with the largest sum
+    of their top-2 scores, mask the rest out, then top-k over the survivors"""
+    per = len(scores) // n_group
+    gsum = []
+    for g in range(n_group):
+        blk = sorted(scores[g * per:(g + 1) * per], reverse=True)
+        gsum.append(blk[0] + (blk[1] if per > 1 else 0.0))
+    keep = set(sorted(range(n_group), key=lambda g: (-gsum[g], g))[:n_group_used])
+    masked = [s if (e // per) in keep else -1e30 for e, s in enumerate(scores)]
+    return _sel_topk(masked, k)
+
+
+def check_group_sensitivity(probs_b, n_group, n_group_used, used, live):
+    """Refuse a group-limited fixture that grouping does not change.
+
+    The zero router gives every expert the SAME probability for every input
+    (dot(0, x) == 0), so exp_probs_b alone decides selection and both answers
+    are exact here — no probe input is needed. `live` is the set of experts
+    whose down block is non-zero: the grouped pick must stay inside it (the
+    fixture has to match the dense oracle) and the ungrouped pick must leave
+    it (the miss has to be visible in the logits).
+    """
+    p = 1.0 / len(probs_b)                 # softmax over equal logits
+    scores = [p + b for b in probs_b]
+    grouped = _sel_grouped(scores, n_group, n_group_used, used)
+    flat = _sel_topk(scores, used)
+    if grouped == flat:
+        sys.exit(f"make-test-moe: group fixture is degenerate — grouped and "
+                 f"ungrouped selection are both {grouped}; a binary with no "
+                 f"group-limited top-k would pass")
+    if not set(grouped) <= live:
+        sys.exit(f"make-test-moe: group fixture selects a zero expert "
+                 f"{grouped} (live={sorted(live)}); it cannot match dense")
+    if set(flat) <= live:
+        sys.exit(f"make-test-moe: group fixture's ungrouped selection {flat} "
+                 f"is all-live; the missed grouping would not change the logits")
+
 # --- generalized-router knobs. Every fixture is built to come out EXACTLY
 # equal to the dense oracle, so a knob that is ignored, applied twice, or
 # applied to the wrong quantity shows up as a text mismatch.
@@ -316,10 +366,20 @@ emit("gprobsb", lambda i: [ZEROS_FF_E, dn(i, 1.0)],
 # group 1 win on its top-2 sum, so selection must land on expert 2 — the only
 # non-zero one. Getting the grouping wrong selects a zero expert and the
 # output collapses.
+#
+# The bias is NOT free to be any group-1-favoring vector. The first version of
+# this fixture used [0, 0, 1, 1]: group 1 won, but plain ungrouped top-1 also
+# landed on expert 2 (same tie, same lowest-index tie-break), so a binary with
+# no group-limited top-k at all produced the dense-identical output and passed.
+# check_group_sensitivity below now proves the two selections disagree before
+# the fixture is written.
+GGROUP_PROBS_B = [0.0, 5.0, 4.0, 4.0]     # ungrouped top-1 -> expert 1 (zeros)
+check_group_sensitivity(GGROUP_PROBS_B, n_group=2, n_group_used=1, used=1,
+                        live={2})
 emit("ggroup", lambda i: [ZEROS_FF_E, ZEROS_FF_E, dn(i, 1.0), ZEROS_FF_E],
      [ku("llama.expert_count", 4), ku("llama.expert_used_count", 1),
       ku("llama.expert_group_count", 2), ku("llama.expert_group_used_count", 1)],
-     probs_b=[0.0, 0.0, 1.0, 1.0])
+     probs_b=GGROUP_PROBS_B)
 
 # --- --prune-experts oracle-equivalence fixture. A zero router makes every
 # expert's raw probability equal REGARDLESS OF INPUT (dot(0, x) == 0 for any
