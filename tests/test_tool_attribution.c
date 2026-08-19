@@ -656,8 +656,121 @@ static void test_history_serialization_contract(void) {
         ct_run_family(&fams[i]);
 }
 
+// CONTRACT: the tool DECLARATION block -- the tools the client OFFERS the model
+// -- must render in the family's model-native syntax on every surface, and
+// byte-identically across them.
+//
+// This is the declaration-side twin of the #4 history-replay contract above,
+// which deliberately scoped it out (see the muse note there: "declaration
+// rendering is a separate axis this contract does not touch"). handle_chat sets
+// env.gemma4 / env.atem and passes the structured tools to render_prompt_alloc,
+// so gemma-4 gets its `<|tool>declaration:...<tool|>` and muse its
+// `<atem:...>` schema block. The typed surfaces (/v1/messages, /v1/responses)
+// left those flags unset and handed render_prompt_alloc NULL, so they fell
+// through to the GENERIC "You have these tools available..." block -- teaching
+// gemma-4 and muse a declaration format they were never trained on. Harmony was
+// already native on all three (env.harmony was the one flag they did set);
+// chatml's native declaration IS the generic one, so it is the regression
+// guard that the shared path still produces it.
+//
+// The three logical conversations are the same CT_*_BODY the replay contract
+// uses: each declares one get_weather tool in its surface's own vocabulary, and
+// the family's declaration renderer normalises them to the same bytes.
+struct dc_family {
+    const char *label;
+    int   tmpl;
+    const char *open, *close;   // delimit the native declaration block
+    const char *generic_absent; // generic decl marker that must be gone, or NULL
+};
+
+static void dc_run_family(const struct dc_family *f) {
+    ta_tmpl = f->tmpl;
+
+    ta_run(handle_chat, CT_CHAT_BODY);
+    char *chat = ta_prompt ? strdup(ta_prompt) : NULL;
+    ta_run(handle_responses, CT_RESP_BODY);
+    char *resp = ta_prompt ? strdup(ta_prompt) : NULL;
+    ta_run(handle_messages, CT_MSG_BODY);
+    char *msg = ta_prompt ? strdup(ta_prompt) : NULL;
+
+    char what[192];
+    snprintf(what, sizeof what, "%s: chat built a prompt", f->label);
+    ck(chat != NULL, what);
+    snprintf(what, sizeof what, "%s: responses built a prompt", f->label);
+    ck(resp != NULL, what);
+    snprintf(what, sizeof what, "%s: messages built a prompt", f->label);
+    ck(msg != NULL, what);
+
+    // The reference (chat) native declaration block, tool-specific bytes and
+    // all, extracted so it can be checked byte-for-byte on the others.
+    char *decl = ct_extract(chat, f->open, f->close);
+    snprintf(what, sizeof what,
+             "%s: chat emits the native tool-DECLARATION block", f->label);
+    ck(decl != NULL, what);
+
+    snprintf(what, sizeof what,
+             "%s: /v1/responses declares tools with the SAME bytes as chat",
+             f->label);
+    ck(decl && resp && strstr(resp, decl) != NULL, what);
+    snprintf(what, sizeof what,
+             "%s: /v1/messages declares tools with the SAME bytes as chat",
+             f->label);
+    ck(decl && msg && strstr(msg, decl) != NULL, what);
+
+    // The generic declaration block, where it differs from the native one, is
+    // gone from the typed surfaces.
+    if (f->generic_absent) {
+        snprintf(what, sizeof what,
+                 "%s: /v1/responses no longer emits the generic '%s'",
+                 f->label, f->generic_absent);
+        ck(resp && strstr(resp, f->generic_absent) == NULL, what);
+        snprintf(what, sizeof what,
+                 "%s: /v1/messages no longer emits the generic '%s'",
+                 f->label, f->generic_absent);
+        ck(msg && strstr(msg, f->generic_absent) == NULL, what);
+    }
+
+    if (getenv("RUNNER_ATTR_TRACE")) {
+        fprintf(stderr, "--- %s DECL CHAT: %s\n", f->label, chat ? chat : "(null)");
+        fprintf(stderr, "--- %s DECL RESP: %s\n", f->label, resp ? resp : "(null)");
+        fprintf(stderr, "--- %s DECL MSG : %s\n", f->label, msg ? msg : "(null)");
+    }
+    free(chat); free(resp); free(msg); free(decl);
+    ta_tmpl = TMPL_HARMONY;
+}
+
+static void test_declaration_rendering_contract(void) {
+    static const struct dc_family fams[] = {
+        // NB no chatml row: with a declarable tool it takes the STRICT envelope,
+        // whose teaching turn jv_dumps each tool RAW -- so its bytes carry the
+        // surface's own request vocabulary ({"function":{...}} on chat, a flat
+        // {"name",...} on responses) and are legitimately NOT identical across
+        // surfaces. That is a property of the generic path this fix does not
+        // touch; the families below all normalise the schema before rendering,
+        // which is exactly why their declarations CAN be byte-identical.
+        // gemma4: `<|tool>declaration:NAME{...}<tool|>`. The generic block must
+        // be gone.
+        { "gemma4", TMPL_GEMMA4,
+          "<|tool>declaration:get_weather", "<tool|>",
+          "You have these tools available" },
+        // muse: the atem JSON schema block. `// Function schemas` through the
+        // trailing example pins the tool-specific bytes, not just the static
+        // preamble. The generic block must be gone.
+        { "muse", TMPL_MUSE,
+          "// Function schemas", "</atem:function_calls>",
+          "You have these tools available" },
+        // harmony: the `functions` TypeScript namespace -- already native on
+        // all three before the fix; guards it stays that way.
+        { "harmony", TMPL_HARMONY,
+          "namespace functions {", "} // namespace functions", NULL },
+    };
+    for (size_t i = 0; i < sizeof fams / sizeof fams[0]; i++)
+        dc_run_family(&fams[i]);
+}
+
 int main(void) {
     test_history_serialization_contract();
+    test_declaration_rendering_contract();
     test_responses_orphan_output_two_tools();
     test_responses_orphan_output_one_tool();
     test_responses_resolvable_is_unchanged();

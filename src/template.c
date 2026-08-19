@@ -2302,6 +2302,33 @@ void tool_envelope_free(tool_envelope *e) {
     e->schema_src = e->system_turn = e->named = NULL;
 }
 
+const jv *tool_decl_native(int tmpl, bool strict, bool atem_tool_calling,
+                           jv *tools, tool_envelope *env, bool *skip_generic) {
+    if (strict && tmpl == TMPL_MUSE) {
+        env->atem = atem_tool_calling;
+        env->muse_user_header = !atem_tool_calling;
+        env->tools = tools;
+    } else if (strict && tmpl == TMPL_HARMONY) {
+        env->harmony = true;
+        env->tools = tools;
+    } else if (strict && tmpl == TMPL_GEMMA4) {
+        env->gemma4 = true;
+        env->tools = tools;
+    }
+    // gemma4 renders its declaration whenever tools are present, strict or not:
+    // tool_choice is a concept its template lacks, so tool_choice:"none" must
+    // not fall through to the generic block -- a second, untrained protocol --
+    // for a turn that will not call anything anyway. muse and Harmony render
+    // theirs only on the strict path (env->atem / env->harmony gate them).
+    *skip_generic = tmpl == TMPL_GEMMA4 ||
+                    (tmpl == TMPL_MUSE && env->atem) ||
+                    tmpl == TMPL_HARMONY;
+    return (tmpl == TMPL_MUSE && env->atem) ||
+           (tmpl == TMPL_HARMONY && env->harmony) ||
+           tmpl == TMPL_GEMMA4
+               ? tools : NULL;
+}
+
 // Map ONE envelope entry. Shared by the single-call document and each element
 // of the parallel form so the two cannot drift in how they render a call.
 // `index` numbers the call ids; returns 1 when a call was appended, 0 for the

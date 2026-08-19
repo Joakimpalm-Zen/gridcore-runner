@@ -220,6 +220,27 @@ int  tool_envelope_build_ex(struct jv *tools, struct jv *tool_choice,
                             tool_envelope *out, char *err, int errcap);
 void tool_envelope_free(tool_envelope *e);
 
+// Select the model-native tool-DECLARATION protocol for a slot's template
+// family on `env`, so /v1/chat/completions, /v1/responses and /v1/messages all
+// teach declared tools in the format the family was trained on -- gemma4's
+// `<|tool>declaration:...`, muse's atem schema block, Harmony's `functions`
+// namespace -- rather than the generic block. Sets env's native flags
+// (atem/muse_user_header/harmony/gemma4) and its borrowed `tools` pointer for
+// the families that render their own declarations, and returns the declarations
+// to hand render_prompt_alloc (NULL when the family uses the generic block).
+// *skip_generic is set true when the caller must NOT emit its generic/strict
+// declaration turn because the family renders its own.
+//
+// `strict` is whether the strict envelope applies (tool_envelope_build returned
+// 1 and, for the chat surface, the slot is not ornith, whose native qwen3_xml
+// declaration tools_render_for already handles). `atem_tool_calling` selects
+// muse's native atem protocol over the generic to=user override; pass true for
+// the native default. The returned pointer aliases `tools` -- the caller keeps
+// ownership (env->owns_tools is not touched here).
+const struct jv *tool_decl_native(int tmpl, bool strict, bool atem_tool_calling,
+                                  struct jv *tools, tool_envelope *env,
+                                  bool *skip_generic);
+
 // Map a generated envelope document back to the OpenAI response shape.
 // Returns the NUMBER of tool_calls[] items appended to tc (1 for the ordinary
 // single-call envelope, 0..max_calls for the parallel form), 0 for the final

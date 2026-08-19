@@ -393,10 +393,15 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
         return;
     }
     bool strict = rc == 1;
-    if (strict && s->tmpl == TMPL_HARMONY) {
-        env.harmony = true;
-        env.tools = tools;
-    }
+    // Teach declared tools in the family's model-native declaration syntax --
+    // the SAME helper the chat surface uses -- instead of the generic block, so
+    // a gemma4 or muse model offered tools here sees the format it was trained
+    // on. env->tools aliases the heap `tools`, freed once at the tail after
+    // run_completion; owns_tools stays false.
+    bool native_decl = false;
+    const jv *native_tools = tool_decl_native(s->tmpl, strict,
+                                              /*atem_tool_calling=*/true, tools,
+                                              &env, &native_decl);
     if (strict) {
         bool parallel = false;
         if (!request_bool(req, "parallel_tool_calls", false, &parallel)) {
@@ -421,9 +426,9 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
     // message, then the input items in order
     int n_items = input->type == J_ARR ? input->n : 1;
     sbuf ts = {0};
-    if (strict && !env.harmony)
+    if (strict && !native_decl)
         sb_put(&ts, env.system_turn, strlen(env.system_turn));
-    else if (!env.harmony)
+    else if (!native_decl)
         tools_render(tools, &ts);
     // The tool turn is content too: a builder that ran out here left `ts` short
     // or empty and the prompt would go out without the declarations the caller
@@ -580,7 +585,7 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
     // measures the real size and grows to it.
     char *prompt = render_prompt_alloc(s->tmpl, cm, n_cm, true,
                                        req_thinking_mode(req),
-                                       env.harmony ? tools : NULL, total + 256);
+                                       native_tools, total + 256);
     if (!prompt) {
         for (int i = 0; i < n_own; i++) free(owned[i]);
         free(owned); free(cm); free(ts.s);

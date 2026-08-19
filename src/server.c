@@ -212,39 +212,24 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     // Ornith is specifically trained on qwen3_xml. Keep its native protocol
     // instead of forcing the model into runner's generic JSON envelope.
     bool strict = rc == 1 && s->tmpl != TMPL_ORNITH;
-    if (strict && s->tmpl == TMPL_MUSE) {
-        env.atem = atem_tool_calling;
-        env.muse_user_header = !atem_tool_calling;
-        env.tools = tools;
-    }
-    if (strict && s->tmpl == TMPL_HARMONY) {
-        env.harmony = true;
-        env.tools = tools;
-    }
-    if (strict && s->tmpl == TMPL_GEMMA4) {
-        env.gemma4 = true;
-        env.tools = tools;
-    }
     // When the strict envelope does not apply — no tools declared, or the
     // ornith template's native protocol — the flag is vacuous and stays
     // TOLERATED, exactly as before: ordinary OpenAI-shaped traffic sends
     // parallel_tool_calls alongside requests that will never call anything,
     // and rejecting those would break it.
-    // Families with a native declaration syntax render it themselves, from
-    // the structured `tools` passed to the renderer below. Everyone else gets
-    // the strict envelope's teaching turn, or the generic declaration block
-    // when the envelope does not apply.
     //
-    // gemma4 joined that list on 2026-08-14. Unlike muse and harmony it is
-    // listed here UNCONDITIONALLY rather than only on the strict path: its
-    // reference emits `<|tool>declaration:...<tool|>` whenever `tools` are
-    // present, `tool_choice` being a concept the template does not have, and a
-    // caller who sends tool_choice:"none" to gemma4 was previously handed the
-    // generic block -- a second, untrained tool protocol -- for a turn that
-    // must not call anything anyway.
-    bool native_decl = s->tmpl == TMPL_GEMMA4 ||
-                       (s->tmpl == TMPL_MUSE && env.atem) ||
-                       s->tmpl == TMPL_HARMONY;
+    // Families with a native declaration syntax render it themselves, from the
+    // structured `tools` handed to render_prompt_alloc below; everyone else
+    // gets the strict envelope's teaching turn, or the generic declaration
+    // block when the envelope does not apply. tool_decl_native makes that
+    // selection -- setting env's native flags and returning the declarations to
+    // render plus native_decl (skip the generic turn) -- from the SAME helper
+    // the /v1/responses and /v1/messages surfaces now use, so a declared tool
+    // is taught identically on all three.
+    bool native_decl = false;
+    const jv *native_tools = tool_decl_native(s->tmpl, strict,
+                                              atem_tool_calling, tools, &env,
+                                              &native_decl);
     sbuf ts = {0};
     bool oom = false;
     if (strict && !native_decl)
@@ -397,11 +382,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
     // block, Harmony's TypeScript namespace -- so their bytes belong in the
     // opening guess. It is only a guess: render_prompt_alloc measures the
     // real size and grows, so an under-count here costs a render pass, not a
-    // truncated prompt.
-    const jv *native_tools = (s->tmpl == TMPL_MUSE && env.atem) ||
-                             (s->tmpl == TMPL_HARMONY && env.harmony) ||
-                             s->tmpl == TMPL_GEMMA4
-                                 ? tools : NULL;
+    // truncated prompt. native_tools was chosen up front by tool_decl_native.
     sbuf tool_bytes = {0};
     if (native_tools) jv_dump(tools, &tool_bytes);
     total += tool_bytes.n + 4096;
