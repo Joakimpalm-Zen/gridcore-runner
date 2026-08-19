@@ -568,7 +568,7 @@ $(TEST_AUTOFIT): $(TEST_AUTOFIT_SRC) $(HDR)
 TEST_RESP_SM_SRC = tests/test_responses_sm.c src/gguf.c src/compat.c \
                   $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
-                  src/template.c src/vramreg.c src/http.c src/registry.c src/scheduler.c $(GPU_SRC)
+                  src/template.c src/vramreg.c src/http.c src/envelope.c src/registry.c src/scheduler.c $(GPU_SRC)
 $(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/completion.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_RESP_SM_SRC) -o $@ $(LDFLAGS)
 
@@ -579,7 +579,7 @@ $(TEST_RESP_SM): $(TEST_RESP_SM_SRC) src/completion.c $(HDR)
 TEST_STOP_CONSTRAINT_SRC = tests/test_stop_constraint.c src/gguf.c src/compat.c \
                   $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
-                  src/template.c src/vramreg.c src/http.c src/registry.c \
+                  src/template.c src/vramreg.c src/http.c src/envelope.c src/registry.c \
                   src/scheduler.c $(GPU_SRC)
 $(TEST_STOP_CONSTRAINT): $(TEST_STOP_CONSTRAINT_SRC) src/completion.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_STOP_CONSTRAINT_SRC) -o $@ $(LDFLAGS)
@@ -593,7 +593,7 @@ $(TEST_STOP_CONSTRAINT): $(TEST_STOP_CONSTRAINT_SRC) src/completion.c $(HDR)
 TEST_BUDGET_SRC = tests/test_prompt_budget.c src/gguf.c src/compat.c \
                   $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
-                  src/template.c src/vramreg.c src/http.c src/registry.c \
+                  src/template.c src/vramreg.c src/http.c src/envelope.c src/registry.c \
                   src/scheduler.c src/api_responses.c src/api_anthropic.c \
                   $(GPU_SRC)
 $(TEST_BUDGET): $(TEST_BUDGET_SRC) src/server.c $(HDR)
@@ -607,7 +607,7 @@ $(TEST_BUDGET): $(TEST_BUDGET_SRC) src/server.c $(HDR)
 TEST_ATTRIB_SRC = tests/test_tool_attribution.c src/gguf.c src/compat.c \
                   $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                   src/jsonmode.c src/schema.c src/json.c src/engine.c \
-                  src/template.c src/vramreg.c src/http.c src/registry.c \
+                  src/template.c src/vramreg.c src/http.c src/envelope.c src/registry.c \
                   src/scheduler.c src/api_responses.c src/api_anthropic.c \
                   $(GPU_SRC)
 $(TEST_ATTRIB): $(TEST_ATTRIB_SRC) src/server.c $(HDR)
@@ -641,7 +641,7 @@ TMPL_CONF_RENDER_SRC = scripts/template-conformance-render.c src/gguf.c \
                   src/compat.c $(QUANTS_OBJ) src/tokenizer.c src/model.c \
                   src/sample.c src/jsonmode.c src/schema.c src/json.c \
                   src/engine.c src/template.c src/vramreg.c src/http.c \
-                  src/registry.c src/scheduler.c $(GPU_SRC)
+                  src/envelope.c src/registry.c src/scheduler.c $(GPU_SRC)
 $(TMPL_CONF_RENDER): $(TMPL_CONF_RENDER_SRC) src/server.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TMPL_CONF_RENDER_SRC) -o $@ $(LDFLAGS)
 
@@ -651,7 +651,7 @@ TEST_RESTART = $(TEST_BATCH:test-batch%=test-server-restart%)
 TEST_RESTART_SRC = tests/test_server_restart.c src/gguf.c src/compat.c \
                    $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                    src/jsonmode.c src/schema.c src/json.c src/engine.c \
-                   src/template.c src/vramreg.c src/http.c src/registry.c \
+                   src/template.c src/vramreg.c src/http.c src/envelope.c src/registry.c \
                    src/scheduler.c src/completion.c src/api_responses.c \
                    src/api_anthropic.c src/server.c $(GPU_SRC)
 $(TEST_RESTART): $(TEST_RESTART_SRC) $(HDR)
@@ -665,7 +665,7 @@ $(TEST_RESTART): $(TEST_RESTART_SRC) $(HDR)
 TEST_SWAP_RACE_SRC = tests/test_swap_race.c src/gguf.c src/compat.c \
                      src/quants.c src/tokenizer.c src/model.c src/sample.c \
                      src/jsonmode.c src/schema.c src/json.c src/engine.c \
-                     src/template.c src/vramreg.c src/http.c src/registry.c \
+                     src/template.c src/vramreg.c src/http.c src/envelope.c src/registry.c \
                      src/scheduler.c src/completion.c src/api_responses.c \
                      src/api_anthropic.c src/server.c $(GPU_SRC)
 test-swap-race: $(TEST_SWAP_RACE_SRC) $(HDR) test.gguf
@@ -686,7 +686,7 @@ TEST_SCHED_TURN = $(TEST_BATCH:test-batch%=test-sched-turn%)
 TEST_SCHED_TURN_SRC = tests/test_sched_turn.c src/gguf.c src/compat.c \
                       $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
                       src/jsonmode.c src/schema.c src/json.c src/engine.c \
-                      src/template.c src/vramreg.c src/http.c src/registry.c $(GPU_SRC)
+                      src/template.c src/vramreg.c src/http.c src/envelope.c src/registry.c $(GPU_SRC)
 $(TEST_SCHED_TURN): $(TEST_SCHED_TURN_SRC) src/scheduler.c $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_SCHED_TURN_SRC) -o $@ $(LDFLAGS)
 
@@ -1320,7 +1320,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
 		set -e; \
 		PYTHONPATH=python/src $(PYTHON) -m pytest python/tests/test_client.py; \
-		$(PYTHON) -m pytest -q tests/test_fit_check.py tests/test_apertus.py tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_hybrid_admission.py tests/test_hostile_geometry.py tests/test_certify_envelope.py tests/test_envelope_gate.py tests/test_cli_files.py tests/test_chat_template_flag.py tests/test_split_gguf.py tests/test_metal_coverage.py tests/test_caps.py tests/test_bench_json.py tests/test_mtp_admission.py tests/test_compare_llamacpp.py tests/test_release_check.py tests/test_eseries.py tests/test_stress_models.py tests/test_moe_prune_plan.py tests/test_kld_compare.py tests/test_kld_margin.py tests/test_quant_fidelity.py tests/test_token_divergence.py tests/test_verify_gguf.py tests/test_stress_context.py tests/test_cert_greedy_identity.py tests/test_tokenizer_corpus.py tests/test_batch_bench.py; \
+		$(PYTHON) -m pytest -q tests/test_fit_check.py tests/test_apertus.py tests/test_ornith_cpu.py tests/test_ornith_reference.py tests/test_compat_matrix.py tests/test_arch_admission.py tests/test_hybrid_admission.py tests/test_hostile_geometry.py tests/test_certify_envelope.py tests/test_envelope_gate.py tests/test_envelope_swap.py tests/test_cli_files.py tests/test_chat_template_flag.py tests/test_split_gguf.py tests/test_metal_coverage.py tests/test_caps.py tests/test_bench_json.py tests/test_mtp_admission.py tests/test_compare_llamacpp.py tests/test_release_check.py tests/test_eseries.py tests/test_stress_models.py tests/test_moe_prune_plan.py tests/test_kld_compare.py tests/test_kld_margin.py tests/test_quant_fidelity.py tests/test_token_divergence.py tests/test_verify_gguf.py tests/test_stress_context.py tests/test_cert_greedy_identity.py tests/test_tokenizer_corpus.py tests/test_batch_bench.py; \
 		$(MAKE) --no-print-directory test-moe PYTHON="$(PYTHON)"; \
 		$(MAKE) --no-print-directory test-prune-experts PYTHON="$(PYTHON)"; \
 	else \

@@ -91,6 +91,13 @@ typedef struct {
     // a --ttl expiry; main.c refuses the flag with a swap set, so this is only
     // ever the single served model's own template.
     int         tmpl_override;
+    // Measured-envelope enforcement for swap-mode loads. A model swapped in on
+    // demand whose sidecar records an outside-envelope verdict for this runtime
+    // is REFUSED per-request (never a process exit — the server keeps serving
+    // its other models), unless force_uncertified was set at startup. The
+    // backend string is resolved once here so registry.c does not re-probe it.
+    bool        force_uncertified;
+    const char *env_backend;  // "metal" / "cuda" / "cpu" for the sidecar tuple
 } server_state;
 
 extern server_state SV;
@@ -115,6 +122,11 @@ void server_work_totals(unsigned long long *prompt_tokens,
 #define SWAP_UNKNOWN     (-1)
 #define SWAP_LOAD_FAILED (-2)
 #define SWAP_ABORTED     (-3)
+// The entry exists and its model loads fine, but its measured-envelope sidecar
+// records an outside-envelope verdict for this runtime -- a deliberate policy
+// refusal (409), distinct from a broken model (5xx). --force-uncertified at
+// startup suppresses it.
+#define SWAP_ENVELOPE_REFUSED (-4)
 
 // ---- residency and admission (registry.c) ----
 

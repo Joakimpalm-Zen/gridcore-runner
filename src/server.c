@@ -929,6 +929,12 @@ static void handle_conn(slot_t *s, sock_t fd) {
                     send_error(fd, 500,
                                "model failed to load (registered but broken; see server log)");
                     ok = false;
+                } else if (sw == SWAP_ENVELOPE_REFUSED) {
+                    send_error(fd, 409,
+                               "model refused: outside its measured envelope for "
+                               "this runtime (see server log); start the server "
+                               "with --force-uncertified to override");
+                    ok = false;
                 } else if (sw == SWAP_ABORTED) {
                     send_error(fd, 503,
                                "model load abandoned (unload or shutdown requested; retry)");
@@ -1217,7 +1223,7 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
                const model_params *mp, sampler defaults,
                const sampler_override *ov, int port, int parallel,
                int n_threads, int ttl, const char *draft_path, int draft_k,
-               bool ignore_eos, int tmpl_override) {
+               bool ignore_eos, int tmpl_override, bool force_uncertified) {
     sock_init();
     // The shared server state gets a lifetime, and it is this call. Everything
     // below sets fields on SV and the teardown at the bottom releases them, but
@@ -1246,6 +1252,19 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 #endif
     install_stop_handlers(); // resets the stop flag + listener on both platforms
     SV.ignore_eos = ignore_eos;
+    // Measured-envelope enforcement for swapped-in models: resolve the backend
+    // string once (same rule as `runner --caps` / the CLI load gate) so every
+    // swap reads a stable tuple. registry.c reads both fields on each load.
+    SV.force_uncertified = force_uncertified;
+    {
+        char gname[256];
+        bool has_gpu = gpu_available(gname, sizeof gname);
+#ifdef __APPLE__
+        SV.env_backend = has_gpu ? "metal" : "cpu";
+#else
+        SV.env_backend = has_gpu ? "cuda" : "cpu";
+#endif
+    }
     // Set before anything can load a model: registry.c reads it on every swap
     // and reload, so a forced template survives /unload and --ttl instead of
     // being detected away at the next request.

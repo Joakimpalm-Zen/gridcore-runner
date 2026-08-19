@@ -57,7 +57,7 @@ static void *serve_thread(void *arg) {
     memset(&ov, 0, sizeof(ov));
     sampler_resolve(&smp, c->m.arch, NULL, -1, &ov);
     c->rc = server_run(&c->m, &c->tok, g_model, &p, smp, &ov, g_port,
-                       1, 1, -1, NULL, 0, false, -1);
+                       1, 1, -1, NULL, 0, false, -1, false);
     return NULL;
 }
 

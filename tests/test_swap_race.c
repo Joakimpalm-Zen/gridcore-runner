@@ -56,7 +56,7 @@ static void *serve_thread(void *arg) {
     // ttl 0: the residency reaper never fires, so every unload in this run is
     // one a request asked for. The race is not about the reaper.
     g_rc = server_run(NULL, NULL, spec, &p, smp, &ov, g_port, 1, 1, 0,
-                      NULL, 0, false, -1);
+                      NULL, 0, false, -1, false);
     return NULL;
 }
 

@@ -9,6 +9,7 @@
 #include "server_int.h"
 #include "json.h"
 #include "compat.h"
+#include "envelope.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -167,15 +168,32 @@ int swap_to(const char *want) {
         bool model_ok = m && model_load(m, SV.reg[idx].path, &SV.mp);
         bool tok_ok = model_ok && tok && tokenizer_init(tok, &m->gf);
 
+        // Measured-envelope gate (slice 3b): a model that loads fine but whose
+        // sidecar refuses this runtime is turned away per-request, so the server
+        // keeps serving its other models -- NOT a process exit like the CLI's.
+        // The sidecar read runs here, outside swap_mu, alongside the load.
+        bool env_refused = false;
+        if (model_ok && tok_ok) {
+            char env_line[256];
+            if (!envelope_gate(SV.reg[idx].path, RUNNER_VERSION, SV.env_backend,
+                               SV.force_uncertified, env_line, sizeof env_line,
+                               NULL))
+                env_refused = true;
+            if (env_line[0]) fprintf(stderr, "%s\n", env_line);
+        }
+
         pthread_mutex_lock(&SV.swap_mu);
         SV.loading = false;
         bool discard = SV.pending_unload || atomic_load(&SV.load_cancel);
         SV.pending_unload = false;
-        if (!model_ok || !tok_ok || discard) {
+        if (!model_ok || !tok_ok || discard || env_refused) {
             if (discard)
                 fprintf(stderr, "swap: load of %s discarded (%s)\n",
                         SV.reg[idx].name, model_ok ? "unloaded while loading"
                                                    : "wait cancelled");
+            else if (env_refused)
+                fprintf(stderr, "swap: refused %s (outside its measured "
+                        "envelope for this runtime)\n", SV.reg[idx].name);
             else
                 fprintf(stderr, "swap: failed to load %s\n", SV.reg[idx].name);
             // tokenizer_init may have allocated buffers before failing (tok_ok
@@ -185,7 +203,9 @@ int swap_to(const char *want) {
             if (model_ok) model_free(m);
             free(m); free(tok);
             pthread_mutex_unlock(&SV.swap_mu);
-            return discard ? SWAP_ABORTED : SWAP_LOAD_FAILED;
+            return discard          ? SWAP_ABORTED
+                 : (!model_ok || !tok_ok) ? SWAP_LOAD_FAILED
+                 : SWAP_ENVELOPE_REFUSED;
         }
         slot_t *s = &SV.slots[0];
         s->m = m;

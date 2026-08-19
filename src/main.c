@@ -943,7 +943,8 @@ int main(int argc, char **argv) {
         }
         int rc = server_run(registry ? NULL : &m, registry ? NULL : &tok,
                             model_path, &mp, smp, &ov, port, parallel, n_threads,
-                            ttl, draft_path, draft_k, ignore_eos, tmpl_override);
+                            ttl, draft_path, draft_k, ignore_eos, tmpl_override,
+                            force_uncertified);
         free(owned_prompt);
         return rc;
     }
