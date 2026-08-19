@@ -1,0 +1,160 @@
+{
+  "configuration": {
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "control_rung": 64,
+    "ladder": [
+      1,
+      2,
+      3,
+      5,
+      8,
+      16,
+      64
+    ],
+    "model": "Qwen3-1.7B",
+    "prompt": "What is the weather in Paris? Use fahrenheit.",
+    "temperature": 0,
+    "tool": {
+      "function": {
+        "description": "Get the current weather for a city.",
+        "name": "get_weather",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "units": {
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city",
+            "units"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    "tool_choice": "required"
+  },
+  "metrics": {
+    "elapsed_ms": 4478.89
+  },
+  "notes": "Substitutions from the four-engine granite-4.1-3b run, each engine-level and disclosed. Measured on the Windows/WSL2 box: RTX 3070 (sm_86 Ampere, 8 GB, driver 596.36); SGLang 0.5.17 / torch 2.11.0+cu130 / flashinfer 0.6.15 / xgrammar 0.2.1. (1) MODEL - granite-4.1-3b is an internal IBM checkpoint whose safetensors were not obtainable on this box, so Qwen3-1.7B (Qwen3ForCausalLM, tool-call-parser qwen) was served - the same substitute model the TensorRT-LLM column used. The truncation property is an engine guarantee, not model quality, so this measures SGLang behaviour, not a quality cross-compare. (2) enable_thinking=false - Qwen3 is a reasoning model; with thinking on it spends the whole budget in <think> and never reaches the JSON even at 64 (the control would fail), so thinking is disabled via chat_template_kwargs to make it a direct tool-caller comparable to the non-reasoning granite the other engines served. (3) tool_choice - unlike TensorRT-LLM 1.2.1, SGLang ACCEPTS tool_choice:required (HTTP 200), matching the granite/vLLM/runner columns; this report is the required run. tool_choice:auto was also measured and yields byte-identical per-rung verdicts. Guided-decoding backend xgrammar; attention-backend triton with --disable-cuda-graph (CUDA-graph capture needs nvcc/CUDA_HOME on this fresh box and is irrelevant to the tool-call verdict).",
+  "rungs": [
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "<tool_call>",
+      "content_leak": true,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 1,
+      "raw_response_b64": "eyJpZCI6IjZiNWFmMDVhNzk2ZTQ1MGQ4NGY1YzhiNjYzZGIxYTUwIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NzY3MSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiI8dG9vbF9jYWxsPiIsInJlYXNvbmluZ19jb250ZW50IjpudWxsLCJ0b29sX2NhbGxzIjpudWxsfSwibG9ncHJvYnMiOm51bGwsImZpbmlzaF9yZWFzb24iOiJsZW5ndGgiLCJtYXRjaGVkX3N0b3AiOm51bGx9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MjAxLCJ0b3RhbF90b2tlbnMiOjIwMiwiY29tcGxldGlvbl90b2tlbnMiOjEsInByb21wdF90b2tlbnNfZGV0YWlscyI6bnVsbCwicmVhc29uaW5nX3Rva2VucyI6MH0sIm1ldGFkYXRhIjp7IndlaWdodF92ZXJzaW9uIjoiZGVmYXVsdCJ9fQ==",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 2,
+      "raw_response_b64": "eyJpZCI6ImJkNjEzOTQwYzlmNjQ1MGE5OTczNWY4MzMzYTk0Y2VjIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NzY3MSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6bnVsbH0sImxvZ3Byb2JzIjpudWxsLCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIiwibWF0Y2hlZF9zdG9wIjpudWxsfV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjIwMSwidG90YWxfdG9rZW5zIjoyMDMsImNvbXBsZXRpb25fdG9rZW5zIjoyLCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOm51bGwsInJlYXNvbmluZ190b2tlbnMiOjB9LCJtZXRhZGF0YSI6eyJ3ZWlnaHRfdmVyc2lvbiI6ImRlZmF1bHQifX0=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 3,
+      "raw_response_b64": "eyJpZCI6IjdjNTgyNTQ5MjMzYTQ0OTliMGVlN2QwNTIwMTY5YmNjIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NzY3MSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6bnVsbH0sImxvZ3Byb2JzIjpudWxsLCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIiwibWF0Y2hlZF9zdG9wIjpudWxsfV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjIwMSwidG90YWxfdG9rZW5zIjoyMDQsImNvbXBsZXRpb25fdG9rZW5zIjozLCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOm51bGwsInJlYXNvbmluZ190b2tlbnMiOjB9LCJtZXRhZGF0YSI6eyJ3ZWlnaHRfdmVyc2lvbiI6ImRlZmF1bHQifX0=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 5,
+      "raw_response_b64": "eyJpZCI6IjNjMjdhZmVjM2I0ODQ5OTBiZTU2ZTRkYjcyZTkzZjZlIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NzY3MSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6bnVsbH0sImxvZ3Byb2JzIjpudWxsLCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIiwibWF0Y2hlZF9zdG9wIjpudWxsfV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjIwMSwidG90YWxfdG9rZW5zIjoyMDYsImNvbXBsZXRpb25fdG9rZW5zIjo1LCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOm51bGwsInJlYXNvbmluZ190b2tlbnMiOjB9LCJtZXRhZGF0YSI6eyJ3ZWlnaHRfdmVyc2lvbiI6ImRlZmF1bHQifX0=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 8,
+      "raw_response_b64": "eyJpZCI6ImM1ZDVlMzEzZTQxNTQ4NDU4NzhiMmNhYmQ3ZGY4ZDZjIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NzY3MSwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6bnVsbH0sImxvZ3Byb2JzIjpudWxsLCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIiwibWF0Y2hlZF9zdG9wIjpudWxsfV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjIwMSwidG90YWxfdG9rZW5zIjoyMDksImNvbXBsZXRpb25fdG9rZW5zIjo4LCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOm51bGwsInJlYXNvbmluZ190b2tlbnMiOjB9LCJtZXRhZGF0YSI6eyJ3ZWlnaHRfdmVyc2lvbiI6ImRlZmF1bHQifX0=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 16,
+      "raw_response_b64": "eyJpZCI6IjUyNDA5NmNjMGZjNTQ1YmI4MmY0YWE0MDAxODE4MTQwIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NzY3MiwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6bnVsbH0sImxvZ3Byb2JzIjpudWxsLCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIiwibWF0Y2hlZF9zdG9wIjpudWxsfV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjIwMSwidG90YWxfdG9rZW5zIjoyMTcsImNvbXBsZXRpb25fdG9rZW5zIjoxNiwicHJvbXB0X3Rva2Vuc19kZXRhaWxzIjpudWxsLCJyZWFzb25pbmdfdG9rZW5zIjowfSwibWV0YWRhdGEiOnsid2VpZ2h0X3ZlcnNpb24iOiJkZWZhdWx0In19",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": {
+        "city": "Paris",
+        "units": "fahrenheit"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\": \"Paris\", \"units\": \"fahrenheit\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "tool_calls",
+      "http_status": 200,
+      "max_tokens": 64,
+      "raw_response_b64": "eyJpZCI6IjM2MDEwMzVlMGU4OTRlNTNiN2UwMDhiNzlmNzcwYjMzIiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0NzY3MiwibW9kZWwiOiJRd2VuMy0xLjdCIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIiLCJyZWFzb25pbmdfY29udGVudCI6bnVsbCwidG9vbF9jYWxscyI6W3siaWQiOiJjYWxsXzdhMTVhZmZlMGZjMDRkOTZiMjA2MGVhNSIsImluZGV4IjowLCJ0eXBlIjoiZnVuY3Rpb24iLCJmdW5jdGlvbiI6eyJuYW1lIjoiZ2V0X3dlYXRoZXIiLCJhcmd1bWVudHMiOiJ7XCJjaXR5XCI6IFwiUGFyaXNcIiwgXCJ1bml0c1wiOiBcImZhaHJlbmhlaXRcIn0ifX1dfSwibG9ncHJvYnMiOm51bGwsImZpbmlzaF9yZWFzb24iOiJ0b29sX2NhbGxzIiwibWF0Y2hlZF9zdG9wIjpudWxsfV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjIwMSwidG90YWxfdG9rZW5zIjoyMjQsImNvbXBsZXRpb25fdG9rZW5zIjoyMywicHJvbXB0X3Rva2Vuc19kZXRhaWxzIjpudWxsLCJyZWFzb25pbmdfdG9rZW5zIjowfSwibWV0YWRhdGEiOnsid2VpZ2h0X3ZlcnNpb24iOiJkZWZhdWx0In19",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    }
+  ],
+  "runtime": {
+    "name": "sglang",
+    "version": "0.5.17"
+  },
+  "schema_version": "xyntetik.truncation-benchmark.v1"
+}
