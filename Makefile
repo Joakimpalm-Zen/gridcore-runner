@@ -145,6 +145,7 @@ TEST_VRAM_ROLLBACK = $(TEST_BATCH:test-batch%=test-vram-rollback%)
 TEST_GGUF_GETTERS = $(TEST_BATCH:test-batch%=test-gguf-getters%)
 TEST_GGUF_SPLIT = $(TEST_BATCH:test-batch%=test-gguf-split-load%)
 TEST_PARSE = $(TEST_BATCH:test-batch%=test-parse%)
+TEST_ENVELOPE = $(TEST_BATCH:test-batch%=test-envelope%)
 TEST_METAL_OWNERSHIP = $(TEST_BATCH:test-batch%=test-metal-ownership%)
 TEST_METAL_SHADERS = $(TEST_BATCH:test-batch%=test-metal-shaders%)
 TEST_METAL_KQUANTS = $(TEST_BATCH:test-batch%=test-metal-kquants%)
@@ -178,7 +179,7 @@ $(QUANTS_OBJ): FORCE src/quants.c $(HDR)
 
 SRC = src/gguf.c src/compat.c $(QUANTS_OBJ) src/instances.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
-      src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/http.c src/registry.c src/scheduler.c src/completion.c src/api_responses.c src/api_anthropic.c src/server.c \
+      src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/envelope.c src/http.c src/registry.c src/scheduler.c src/completion.c src/api_responses.c src/api_anthropic.c src/server.c \
       src/main.c $(GPU_SRC) $(TRAY_SRC)
 
 # kernels_ptx.h is embedded into the binary by cuda.c — a pull that changes
@@ -713,6 +714,9 @@ $(TEST_GGUF_GETTERS): tests/test_gguf_getters.c src/gguf.c src/compat.c $(QUANTS
 $(TEST_PARSE): tests/test_parse.c src/compat.c src/compat.h
 	$(CC) $(CFLAGS) -I src tests/test_parse.c src/compat.c -o $@ $(LDFLAGS)
 
+$(TEST_ENVELOPE): tests/test_envelope.c src/envelope.c src/json.c src/envelope.h src/json.h src/runner.h
+	$(CC) $(CFLAGS) -I src tests/test_envelope.c src/envelope.c src/json.c -o $@ $(LDFLAGS)
+
 # quants.c joins for tpool_create/tpool_destroy: the test now also pins that an
 # over-large -t is clamped to TP_MAX rather than silently discarded.
 $(TEST_THREAD_DEFAULT): tests/test_thread_default.c src/compat.c src/compat.h $(QUANTS_OBJ)
@@ -1203,7 +1207,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_PREFIX) $(TEST_GRAMMAR_FF) $(TEST_VRAMREG) $(TEST_KV_TOL) $(TEST_TC_TOL) $(TEST_I8_TOL) $(TEST_MV_TOL) $(TEST_ATTN_TOL) $(TEST_GPU_ID) $(TEST_MOE_TOL) $(TEST_MOE_ROUTER) $(TEST_PAGING_WARN) $(TEST_AUTOFIT) $(TEST_RESP_SM_DEP) \
       $(TEST_QUANTS_SIMD) $(TEST_INSTANCES) $(TEST_INSTANCES_OOM) $(TEST_METAL_ADMISSION) $(TEST_TRAY_CORE) \
       $(TEST_QUANTIZE) \
-      $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_GGUF_SPLIT) $(TEST_PARSE) \
+      $(TEST_VRAM_ROLLBACK) $(TEST_GGUF_GETTERS) $(TEST_GGUF_SPLIT) $(TEST_PARSE) $(TEST_ENVELOPE) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
@@ -1301,6 +1305,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	$(PYTHON) scripts/gguf-split.py test-gguf-split/whole.gguf test-gguf-split/part 3
 	./$(TEST_GGUF_SPLIT) test-gguf-split/whole.gguf test-gguf-split/part-00001-of-00003.gguf
 	./$(TEST_PARSE)
+	./$(TEST_ENVELOPE)
 	./$(TEST_THREAD_DEFAULT)
 	./$(TEST_MODEL_LOAD_FAILURE)
 	$(MAKE) --no-print-directory test-bare-invocation

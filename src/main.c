@@ -5,6 +5,7 @@
 
 #include "compat.h"
 #include "json.h"
+#include "envelope.h"
 #include "server.h"
 // for render_prompt_alloc: chat mode renders the same prompts the chat route
 // does, so it uses the same measured-size renderer rather than a second one
@@ -860,6 +861,25 @@ int main(int argc, char **argv) {
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 load_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
+        // Measured-envelope sidecar, if one sits next to the model: report
+        // whether this runtime matches what was certified. Read + report only
+        // (no enforcement yet); silent when there is no manifest.
+        {
+            // The backend string must match what scripts/certify-envelope.py
+            // records (runner --caps gpu.backend): a present GPU is "metal" on
+            // Apple / "cuda" elsewhere, no GPU is "cpu".
+            char env_gname[256];
+            bool env_has_gpu = gpu_available(env_gname, sizeof env_gname);
+#ifdef __APPLE__
+            const char *env_backend = env_has_gpu ? "metal" : "cpu";
+#else
+            const char *env_backend = env_has_gpu ? "cuda" : "cpu";
+#endif
+            char env_line[256];
+            if (envelope_report(load_path, RUNNER_VERSION, env_backend,
+                                env_line, (int)sizeof env_line))
+                fprintf(stderr, "%s\n", env_line);
+        }
         // Discovery registry: run modes announce themselves so the tray (or
         // any controller) can list every live runner. Best-effort — failure
         // never affects the run. Utility modes (--quantize/--caps/--bench)
