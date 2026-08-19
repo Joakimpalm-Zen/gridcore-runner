@@ -164,6 +164,14 @@ HDR = $(wildcard src/*.h)
 QUANTS_OBJ = .build/quants.o
 QUANTS_CFLAGS = $(filter-out -ffast-math,$(CFLAGS)) -fno-fast-math
 
+# The offline GGUF quantizer (--quantize) is quant arithmetic too: its Q8_0
+# (and q4_0/q3_k) output must be the canonical, bit-exact ggml result, so a
+# runner-produced file is byte-identical to llama.cpp's for the same input.
+# Under -ffast-math the reciprocal id=1/d and the roundf boundary drifted,
+# tipping ~1-code-per-block differences vs ggml on identical input while the
+# fp16 block scale still matched. Build it fast-math-free, like quants.o.
+QUANTIZE_OBJ = .build/quantize.o
+
 # Rebuild on every invocation: the requested CC/CFLAGS are not encoded in the
 # object name, and reusing a native developer object in a portable release or
 # cross build would be a correctness bug.
@@ -177,9 +185,13 @@ $(QUANTS_OBJ): FORCE src/quants.c $(HDR)
 	mkdir -p $(dir $@)
 	$(CC) $(QUANTS_CFLAGS) -I src -c src/quants.c -o $@
 
+$(QUANTIZE_OBJ): FORCE src/quantize.c $(HDR)
+	mkdir -p $(dir $@)
+	$(CC) $(QUANTS_CFLAGS) -I src -c src/quantize.c -o $@
+
 SRC = src/gguf.c src/compat.c $(QUANTS_OBJ) src/instances.c src/tokenizer.c src/model.c src/sample.c \
       src/vramreg.c \
-      src/template.c src/jsonmode.c src/schema.c src/quantize.c src/engine.c src/json.c src/envelope.c src/http.c src/registry.c src/scheduler.c src/completion.c src/api_responses.c src/api_anthropic.c src/server.c \
+      src/template.c src/jsonmode.c src/schema.c $(QUANTIZE_OBJ) src/engine.c src/json.c src/envelope.c src/http.c src/registry.c src/scheduler.c src/completion.c src/api_responses.c src/api_anthropic.c src/server.c \
       src/main.c $(GPU_SRC) $(TRAY_SRC)
 
 # kernels_ptx.h is embedded into the binary by cuda.c — a pull that changes
@@ -699,7 +711,7 @@ TEST_PFX_PERSIST_SRC = tests/test_prefix_persist.c src/gguf.c src/compat.c \
 $(TEST_PFX_PERSIST): $(TEST_PFX_PERSIST_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_PFX_PERSIST_SRC) -o $@ $(LDFLAGS)
 
-TEST_QUANTIZE_SRC = tests/test_quantize.c src/quantize.c src/gguf.c \
+TEST_QUANTIZE_SRC = tests/test_quantize.c $(QUANTIZE_OBJ) src/gguf.c \
                     src/compat.c $(QUANTS_OBJ) src/json.c
 $(TEST_QUANTIZE): $(TEST_QUANTIZE_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_QUANTIZE_SRC) -o $@ $(LDFLAGS)
@@ -1574,6 +1586,10 @@ test-makefile-sane:
 	test -n "$$qline" || { echo "FAIL: quants.c is not a separate translation unit"; exit 1; }; \
 	echo "$$qline" | grep -q -- ' -fno-fast-math ' || { echo "FAIL: quants.c lacks -fno-fast-math"; exit 1; }; \
 	case "$$qline" in *" -ffast-math "*) echo "FAIL: quants.c still has -ffast-math"; exit 1;; esac; \
+	zline=$$($(MAKE) -Bn --no-print-directory runner | grep -- ' -c src/quantize.c '); \
+	test -n "$$zline" || { echo "FAIL: quantize.c is not a separate translation unit"; exit 1; }; \
+	echo "$$zline" | grep -q -- ' -fno-fast-math ' || { echo "FAIL: quantize.c lacks -fno-fast-math"; exit 1; }; \
+	case "$$zline" in *" -ffast-math "*) echo "FAIL: quantize.c still has -ffast-math"; exit 1;; esac; \
 	if grep -q 'system(' src/tray.c src/tray_*.c src/tray_*.m; then echo "FAIL: tray launches through a shell"; exit 1; fi; \
 	echo "makefile ok (no discarded recipes)"
 

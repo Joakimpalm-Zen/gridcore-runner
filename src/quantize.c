@@ -22,6 +22,35 @@
 #endif
 
 // ---------------------------------------------------------------- rows
+// ------------------------------------------------ IEEE subnormals for quant
+// ggml computes quant block scales with IEEE subnormals (it is built without
+// -ffast-math). The runner engine links crtfastmath.o (-ffast-math), which
+// sets FTZ/DAZ in MXCSR process-wide; a subnormal scale d = amax/127 then
+// flushes to zero and that block's codes come out zero. Clearing FTZ/DAZ for
+// the offline quantize makes runner's Q8_0/q4_0 bytes match ggml's exactly.
+#if defined(__x86_64__) || defined(__i386__)
+#include <xmmintrin.h>
+typedef unsigned fp_denormal_state;
+static inline fp_denormal_state fp_denormals_disable(void) {
+    unsigned csr = _mm_getcsr();
+    _mm_setcsr(csr & ~0x8040u); // clear FTZ (bit 15) and DAZ (bit 6)
+    return csr;
+}
+static inline void fp_denormals_restore(fp_denormal_state s) { _mm_setcsr(s); }
+#elif defined(__aarch64__)
+typedef unsigned long fp_denormal_state;
+static inline fp_denormal_state fp_denormals_disable(void) {
+    unsigned long fpcr; __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    __asm__ volatile("msr fpcr, %0" :: "r"(fpcr & ~(1UL << 24))); // clear FZ
+    return fpcr;
+}
+static inline void fp_denormals_restore(fp_denormal_state s) { __asm__ volatile("msr fpcr, %0" :: "r"(s)); }
+#else
+typedef int fp_denormal_state;
+static inline fp_denormal_state fp_denormals_disable(void) { return 0; }
+static inline void fp_denormals_restore(fp_denormal_state s) { (void)s; }
+#endif
+
 
 typedef struct { f16_t d; uint8_t qs[16]; } wblock_q4_0;
 typedef struct { f16_t d; int8_t qs[32]; }  wblock_q8_0;
@@ -670,7 +699,21 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
     return quantize_gguf_plan(in_path, out_path, target, prune_path, NULL);
 }
 
+static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, int target,
+                       const char *prune_path, const char *type_plan_path);
+
+// FTZ/DAZ are process-wide (set by the engine's -ffast-math startup); clear
+// them around the quantize so a subnormal block scale matches ggml, and
+// restore on exit so no later caller sees perturbed denormal handling.
 int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
+                       const char *prune_path, const char *type_plan_path) {
+    fp_denormal_state fpst = fp_denormals_disable();
+    int rc = quantize_gguf_plan_inner(in_path, out_path, target, prune_path, type_plan_path);
+    fp_denormals_restore(fpst);
+    return rc;
+}
+
+static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, int target,
                        const char *prune_path, const char *type_plan_path) {
     if (target != T_KEEP && target != T_Q8_0 && target != T_Q4_0 && target != T_F16) {
         fprintf(stderr, "error: quantize target must be q8_0, q4_0, or f16\n");
