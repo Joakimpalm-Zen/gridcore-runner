@@ -242,7 +242,7 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
                 // NULL for families that do not use it, which is what the
                 // renderer expects.
                 turn_add_native(t, "tool", result,
-                                (tmpl == TMPL_GEMMA4 || tmpl == TMPL_MUSE)
+                                (is_gemma4(tmpl) || tmpl == TMPL_MUSE)
                                     ? name : NULL, NULL);
             }
         } else if (!strcmp(bt, "thinking") || !strcmp(bt, "redacted_thinking")) {

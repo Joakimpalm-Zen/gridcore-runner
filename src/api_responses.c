@@ -529,7 +529,7 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
             // template's own fallback, matching the chat surface (which uses
             // tool_result_name and never refuses for them).
             else if (is_output &&
-                     (s->tmpl == TMPL_GEMMA4 || s->tmpl == TMPL_MUSE)) {
+                     (is_gemma4(s->tmpl) || s->tmpl == TMPL_MUSE)) {
                 const char *cid = jv_str(jv_get(input->items[i], "call_id"),
                                          NULL);
                 name = responses_call_name(input, i, cid);

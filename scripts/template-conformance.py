@@ -188,6 +188,29 @@ FAMILIES = {
         tool_family=True,
         thinking_var="enable_thinking",
         tokenizer=("e2b-q40.gguf", "e4b-q4km.gguf")),
+    # The gemma-4 MAINLINE revision (12B, 26B-A4B, 31B; chat_template sha
+    # ae53464b, byte-identical across the three). A SECOND gemma4 oracle, not
+    # a replacement: gemma4 above stays the E-series (E2B) oracle. The two
+    # templates differ token-affecting-ly at exactly one site -- the mainline
+    # pre-seeds an empty CLOSED thought block on the thinking-off generation
+    # prompt -- so both renders must be checked or that site goes unmeasured.
+    # Owner decision 2026-08-19: keep E2B as the E-series oracle, add this.
+    # The gemma-4 tokenizer vocab is byte-identical across every checkpoint
+    # (verified: 262144 tokens / 514906 merges share one hash on 12B, 26B-A4B,
+    # E2B and E4B), so the token check falls back to the E-series GGUF when a
+    # mainline GGUF is not on the shelf -- the same vocabulary, not a borrowed
+    # one; the report still names the file it used.
+    "gemma4-mainline": Family(
+        "gemma4-mainline",
+        ("gguf", "models/gemma-4-12B-it-Q4_K_M.gguf"),
+        note="mainline gemma-4 (12B/26B-A4B/31B share chat_template sha "
+             "ae53464b); differs from the E-series (gemma4) ONLY by the "
+             "pre-seeded empty thought block on the thinking-off generation "
+             "prompt",
+        tool_family=True,
+        thinking_var="enable_thinking",
+        tokenizer=("gemma-4-12B-it-Q4_K_M.gguf",
+                   "gemma-4-26B-A4B-it-Q4_0.gguf", "e2b-q40.gguf")),
     "mistral": Family("mistral", ("hf", "mistralai/Mistral-7B-Instruct-v0.3"),
                       tokenizer=("Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
                                  "Mistral-7B-Instruct-v0.3-Q8_0.gguf"),

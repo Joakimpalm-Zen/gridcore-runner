@@ -1418,6 +1418,60 @@ static void test_gemma4_generation_prompt(void) {
                        "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
 }
 
+// gemma-4 ships THREE chat-template revisions and they are NOT one renderer:
+// the mainline (12B/26B-A4B/31B) pre-seeds an empty CLOSED thought block on
+// its thinking-OFF generation prompt, the E-series (E2B/E4B) does not. This
+// pins BOTH halves of the split: the discriminator (template text -> which
+// id) and the one render divergence (mainline emits the block, E-series never
+// does). The template snippets below carry only what the discriminator reads
+// -- a `<|turn>` marker so the gemma4 branch fires, and, for mainline, the
+// closed-thought literal exactly as the jinja source spells it (a literal
+// backslash-n). The E-series snippet deliberately includes the OPEN thought
+// form and the `Published: 2026-07-09` header (which E2B really carries) to
+// prove neither of the rejected markers trips the discriminator.
+static void test_gemma4_mainline_variant(void) {
+    const char *mainline =
+        "{# Published: 2026-07-09 #}<|turn>model\n"
+        "{%- if not enable_thinking -%}"
+        "{{- '<|channel>thought\\n<channel|>' -}}{%- endif -%}";
+    const char *eseries =
+        "{# Published: 2026-07-09 #}<|turn>model\n"
+        "{{- '<|channel>thought\\n' -}}";
+    // A non-NULL meta_tmpl returns before template_detect reads the tokenizer,
+    // so NULL is safe here.
+    assert(template_detect(mainline, NULL) == TMPL_GEMMA4_MAINLINE);
+    assert(template_detect(eseries, NULL) == TMPL_GEMMA4);
+
+    const chat_msg msgs[] = { { "user", "HI" } };
+    char out[512];
+    const char *with_block =
+        "<|turn>user\nHI<turn|>\n<|turn>model\n<|channel>thought\n<channel|>";
+    const char *without_block = "<|turn>user\nHI<turn|>\n<|turn>model\n";
+
+    // Mainline: THINK_DEFAULT and THINK_OFF both pre-seed the closed block
+    // (enable_thinking defaults false), THINK_ON does not.
+    render_messages(TMPL_GEMMA4_MAINLINE, msgs, 1, true, THINK_DEFAULT, out,
+                    sizeof(out));
+    assert(strcmp(out, with_block) == 0);
+    render_messages(TMPL_GEMMA4_MAINLINE, msgs, 1, true, THINK_OFF, out,
+                    sizeof(out));
+    assert(strcmp(out, with_block) == 0);
+    render_messages(TMPL_GEMMA4_MAINLINE, msgs, 1, true, THINK_ON, out,
+                    sizeof(out));
+    // THINK_ON opens the first system turn with <|think|> and pre-seeds
+    // NOTHING at the generation prompt -- identical to the E-series THINK_ON.
+    assert(strcmp(out, "<|turn>system\n<|think|>\n<turn|>\n"
+                       "<|turn>user\nHI<turn|>\n<|turn>model\n") == 0);
+
+    // E-series: never the block, in any mode. This is the regression the split
+    // exists to prevent (emitting it here cost E2B planning 0.650 -> 0.250).
+    render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_DEFAULT, out,
+                    sizeof(out));
+    assert(strcmp(out, without_block) == 0);
+    render_messages(TMPL_GEMMA4, msgs, 1, true, THINK_OFF, out, sizeof(out));
+    assert(strcmp(out, without_block) == 0);
+}
+
 // Two adjacent assistant messages are ONE model turn in this family, not two.
 // The reference (gemma-4-E2B tokenizer.chat_template, read from the GGUF)
 // suppresses BOTH ends of the framing:
@@ -2099,6 +2153,7 @@ int main(void) {
     test_render_without_system();
     test_name_roundtrip();
     test_gemma4_generation_prompt();
+    test_gemma4_mainline_variant();
     test_gemma4_consecutive_assistant();
     test_gemma4_tool_turns();
     test_chatml_think_shape();

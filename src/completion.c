@@ -1388,7 +1388,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     size_t prompt_n = prompt ? strlen(prompt) : 0;
     static const char G4_THOUGHT_OPEN[] = "<|channel>thought\n";
     bool gemma4_primed_think =
-        chat && s->tmpl == TMPL_GEMMA4 && prompt_n >= sizeof(G4_THOUGHT_OPEN) - 1 &&
+        chat && is_gemma4(s->tmpl) && prompt_n >= sizeof(G4_THOUGHT_OPEN) - 1 &&
         !memcmp(prompt + prompt_n - (sizeof(G4_THOUGHT_OPEN) - 1),
                 G4_THOUGHT_OPEN, sizeof(G4_THOUGHT_OPEN) - 1);
     // Major faults are page-ins that went to disk, so the delta across a

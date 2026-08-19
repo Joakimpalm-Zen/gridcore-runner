@@ -50,6 +50,18 @@ enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        // that matches no Mistral checkpoint at all. It was never trying to be
        // Mistral.
        TMPL_MISTRAL_V1, TMPL_MISTRAL_NEMO,
+       // gemma-4 ships THREE chat-template revisions and they are NOT one
+       // renderer. The mainline template (12B, 26B-A4B, 31B; sha ae53464b)
+       // pre-seeds an empty CLOSED thought block '<|channel>thought\n
+       // <channel|>' on the thinking-OFF generation prompt; the E-series
+       // (E2B sha 0a2c8073, E4B sha 241c50d8) does NOT. Pre-seeding it is a
+       // measured NO-OP on mainline (byte-identical output) but CATASTROPHIC
+       // on the E-series (E2B planning 0.650 -> 0.250, reasoning-leak), so the
+       // two must render that one site differently. TMPL_GEMMA4 stays the
+       // E-series id and its every behaviour; TMPL_GEMMA4_MAINLINE differs
+       // from it ONLY at that generation-prompt site. Every other tmpl branch
+       // (tool protocol, sampler, parse) treats them the same via is_gemma4().
+       TMPL_GEMMA4_MAINLINE,
        // What template_detect returns when NOTHING matched. It renders
        // llama-2 markup, because changing what unrecognised models render is
        // a behavioural decision and not this constant's job -- but it is a
@@ -61,6 +73,17 @@ enum { TMPL_CHATML, TMPL_LLAMA2, TMPL_LLAMA3, TMPL_ZEPHYR, TMPL_GEMMA,
        // characters, which is worse than the token merely being absent.
        // Not reachable through --chat-template: you cannot ask for it.
        TMPL_LLAMA2_FALLBACK };
+
+// True for EITHER gemma-4 template family. The mainline and the E-series
+// differ at exactly one generation-prompt site (see TMPL_GEMMA4_MAINLINE
+// above); every other tmpl-dependent decision -- the native tool protocol,
+// tool-call replay, tool parsing, the primed-think probe -- is identical, so
+// those sites ask this rather than naming one id and silently breaking the
+// other. Added when the mainline id split off TMPL_GEMMA4 (2026-08-19): a
+// missed site would leave mainline tool calls speaking the generic protocol.
+static inline bool is_gemma4(int tmpl) {
+    return tmpl == TMPL_GEMMA4 || tmpl == TMPL_GEMMA4_MAINLINE;
+}
 
 // How the generation prompt should treat a thinking model.
 //
@@ -96,10 +119,16 @@ const char *template_name(int tmpl);
 //     '<think>\n\n</think>\n\n' after the assistant header. So DEFAULT and ON
 //     emit nothing extra and OFF appends the closed block.
 //
-//   TMPL_GEMMA4        gemma-4 tokenizer.chat_template (read from the GGUF)
+//   TMPL_GEMMA4        gemma-4 E-series tokenizer.chat_template (from the GGUF)
 //     The generation prompt is '<|turn>model\n' and nothing else, in EITHER
 //     mode -- there is no pre-seeded thought block. After a tool response it
 //     emits nothing at all, or an OPEN '<|channel>thought\n' when thinking.
+//     TMPL_GEMMA4_MAINLINE is byte-identical EXCEPT that its thinking-OFF
+//     generation prompt appends the empty CLOSED block '<|channel>thought\n
+//     <channel|>' after '<|turn>model\n'. That is the mainline template's own
+//     `{%- if not enable_thinking -%}` branch (enable_thinking defaults
+//     false), a MEASURED no-op there and catastrophic on the E-series, which
+//     is why the two ids exist.
 //     Thinking for this family is selected in the FIRST SYSTEM TURN, not at
 //     the generation prompt: THINK_ON injects '<|think|>\n' at the top of it,
 //     opening that turn even when the caller sent no system message, exactly

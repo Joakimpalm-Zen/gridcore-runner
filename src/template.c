@@ -42,6 +42,25 @@ static int mistral_variant(const char *meta_tmpl) {
     return TMPL_MISTRAL;
 }
 
+// gemma-4's mainline template (12B, 26B-A4B, 31B; sha ae53464b) vs its
+// E-series (E2B sha 0a2c8073, E4B sha 241c50d8). The one token-affecting
+// difference is that the mainline pre-seeds an empty CLOSED thought block on
+// its thinking-OFF generation prompt; the marker is that literal in the jinja
+// source, `<|channel>thought\n<channel|>` (a real backslash-n, the way the
+// template writes the string). It appears once in the mainline template and in
+// NEITHER E-series template -- verified against all three real GGUF templates
+// on 2026-08-19.
+//
+// The obvious-looking alternatives were REJECTED against those same templates:
+// the `Published: 2026-07-09` header comment is present in E2B too (it would
+// misfire and regress the E-series), and a bare `channel>thought` substring
+// matches the OPEN block both E-series templates emit when thinking. Only the
+// CLOSED construct is unique to the mainline.
+static int gemma4_variant(const char *meta_tmpl) {
+    return strstr(meta_tmpl, "<|channel>thought\\n<channel|>")
+               ? TMPL_GEMMA4_MAINLINE : TMPL_GEMMA4;
+}
+
 int template_detect(const char *meta_tmpl, tokenizer *tok) {
     if (meta_tmpl) {
         // apertus first: its vocabulary inherits Mistral's [INST]/[/INST]
@@ -71,7 +90,7 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
         if (strstr(meta_tmpl, "<|start_header_id|>")) return TMPL_LLAMA3;
         if (strstr(meta_tmpl, "<|user|>"))
             return strstr(meta_tmpl, "<|end|>") ? TMPL_PHI3 : TMPL_ZEPHYR;
-        if (strstr(meta_tmpl, "<|turn>"))             return TMPL_GEMMA4;
+        if (strstr(meta_tmpl, "<|turn>"))             return gemma4_variant(meta_tmpl);
         if (strstr(meta_tmpl, "<start_of_turn>"))     return TMPL_GEMMA;
         if (strstr(meta_tmpl, "[INST]"))
             return strstr(meta_tmpl, "<<SYS>>") ? TMPL_LLAMA2
@@ -93,6 +112,9 @@ int template_detect(const char *meta_tmpl, tokenizer *tok) {
     if (tok_find(tok, "<|start_header_id|>") >= 0) return TMPL_LLAMA3;
     if (tok_find(tok, "<|user|>") >= 0)
         return tok_find(tok, "<|end|>") >= 0 ? TMPL_PHI3 : TMPL_ZEPHYR;
+    // No chat-template text to read, so the mainline/E-series split cannot be
+    // told apart here; the E-series id is the safe default (its render is the
+    // one that pre-seeds NOTHING, a no-op on both).
     if (tok_find(tok, "<|turn>") >= 0)             return TMPL_GEMMA4;
     if (tok_find(tok, "<start_of_turn>") >= 0)     return TMPL_GEMMA;
     }
@@ -131,6 +153,10 @@ int template_from_name(const char *name) {
     if (!strcmp(name, "zephyr")) return TMPL_ZEPHYR;
     if (!strcmp(name, "gemma"))  return TMPL_GEMMA;
     if (!strcmp(name, "gemma4")) return TMPL_GEMMA4;
+    // The mainline revision, named for what an operator has in hand (a
+    // 12B/26B-A4B/31B GGUF). Detection places it automatically from the
+    // template text; this is the explicit override and the conformance name.
+    if (!strcmp(name, "gemma4-mainline")) return TMPL_GEMMA4_MAINLINE;
     // `mistral` is the v0.3 form. The two others are named for the checkpoints
     // that carry them rather than for their spacing, because that is what an
     // operator has in front of them when they reach for the flag: a GGUF whose
@@ -156,6 +182,7 @@ const char *template_name(int t) {
         case TMPL_LLAMA3: return "llama3";  case TMPL_ZEPHYR: return "zephyr";
         case TMPL_GEMMA:  return "gemma";
         case TMPL_GEMMA4: return "gemma4";
+        case TMPL_GEMMA4_MAINLINE: return "gemma4-mainline";
         case TMPL_MISTRAL: return "mistral";
         case TMPL_MISTRAL_V1: return "mistral-v1";
         case TMPL_MISTRAL_NEMO: return "mistral-nemo";
@@ -1344,6 +1371,7 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<|start_of_role|>assistant<|end_of_role|>",
                        NULL, NULL);
         break;
+    case TMPL_GEMMA4_MAINLINE:
     case TMPL_GEMMA4: {
         // gemma4 (reference: llama.cpp models/templates/google-gemma-4-31B-it
         // .jinja): <|turn>role\n CONTENT <turn|>\n per turn, a native system
@@ -1514,8 +1542,23 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             // reference drops those and emits the ordinary header) and no for
             // an assistant turn whose calls have no results yet (the reference
             // leaves prev_message_type == 'tool_call' and emits nothing).
-            if (g4_prev == 0)
+            if (g4_prev == 0) {
                 off = emit(out, cap, off, "<|turn>model\n", NULL, NULL);
+                // The ONE mainline/E-series divergence. The mainline template
+                // follows the header with `{%- if not enable_thinking -%}
+                // {{- '<|channel>thought\n<channel|>' -}}{%- endif -%}`, and
+                // enable_thinking defaults false -- so THINK_DEFAULT and
+                // THINK_OFF both pre-seed the empty CLOSED thought block,
+                // THINK_ON does not. The block is closed, so the model starts
+                // OUTSIDE reasoning (completion.c's primed-think probe keys on
+                // the OPEN form and correctly does not fire here). The E-series
+                // omits this entirely: emitting it there cost E2B planning
+                // 0.650 -> 0.250 (reasoning-leak), verified 2026-08-19 against
+                // all three real templates.
+                if (tmpl == TMPL_GEMMA4_MAINLINE && thinking != THINK_ON)
+                    off = emit(out, cap, off, "<|channel>thought\n<channel|>",
+                               NULL, NULL);
+            }
             else if (g4_prev == 2 && thinking == THINK_ON)
                 off = emit(out, cap, off, "<|channel>thought\n", NULL, NULL);
             // prev was a tool response and thinking is off, or a call still
@@ -1921,7 +1964,7 @@ void tool_history_render_for(int tmpl, const jv *calls,
         const char *name = jv_str(jv_get(fn, "name"), NULL);
         const char *args = jv_str(jv_get(fn, "arguments"), "{}");
         if (!name) continue;
-        if (tmpl == TMPL_GEMMA4) {
+        if (is_gemma4(tmpl)) {
             // The wire format hands runner `arguments` as a JSON STRING; the
             // reference is handed the parsed mapping and runs it through
             // format_argument. Replaying the JSON text verbatim -- which this
@@ -2034,9 +2077,9 @@ void assistant_calls_render(int tmpl, const char *text, const jv *calls,
     bool has_text = history_text_visible(text);
     bool muse_calls = tmpl == TMPL_MUSE && calls && calls->type == J_ARR &&
                       calls->n > 0;
-    if (tmpl == TMPL_GEMMA4) tool_history_render_for(tmpl, calls, has_text, out);
+    if (is_gemma4(tmpl)) tool_history_render_for(tmpl, calls, has_text, out);
     if (!muse_calls && text) sb_put(out, text, strlen(text));
-    if (tmpl != TMPL_GEMMA4) tool_history_render_for(tmpl, calls, has_text, out);
+    if (!is_gemma4(tmpl)) tool_history_render_for(tmpl, calls, has_text, out);
     if (muse_calls && turn_name) {
         jv *fn = jv_get(calls->items[0], "function");
         *turn_name = jv_str(jv_get(fn, "name"), NULL);
@@ -2310,7 +2353,7 @@ const jv *tool_decl_native(int tmpl, bool strict, bool atem_tool_calling,
     } else if (strict && tmpl == TMPL_HARMONY) {
         env->proto = TP_HARMONY;
         env->tools = tools;
-    } else if (strict && tmpl == TMPL_GEMMA4) {
+    } else if (strict && is_gemma4(tmpl)) {
         env->proto = TP_GEMMA4;
         env->tools = tools;
     }
@@ -2319,12 +2362,12 @@ const jv *tool_decl_native(int tmpl, bool strict, bool atem_tool_calling,
     // not fall through to the generic block -- a second, untrained protocol --
     // for a turn that will not call anything anyway. muse and Harmony render
     // theirs only on the strict path (env->proto gates them).
-    *skip_generic = tmpl == TMPL_GEMMA4 ||
+    *skip_generic = is_gemma4(tmpl) ||
                     (tmpl == TMPL_MUSE && env->proto == TP_ATEM) ||
                     tmpl == TMPL_HARMONY;
     return (tmpl == TMPL_MUSE && env->proto == TP_ATEM) ||
            (tmpl == TMPL_HARMONY && env->proto == TP_HARMONY) ||
-           tmpl == TMPL_GEMMA4
+           is_gemma4(tmpl)
                ? tools : NULL;
 }
 
@@ -3689,6 +3732,6 @@ static int gemma4_tool_calls_parse(sbuf *content, sbuf *tc) {
 
 int tool_calls_parse_for(int tmpl, sbuf *content, sbuf *tc) {
     return tmpl == TMPL_ORNITH ? ornith_tool_calls_parse(content, tc)
-         : tmpl == TMPL_GEMMA4 ? gemma4_tool_calls_parse(content, tc)
+         : is_gemma4(tmpl)     ? gemma4_tool_calls_parse(content, tc)
                                : tool_calls_parse(content, tc);
 }

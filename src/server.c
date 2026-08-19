@@ -287,7 +287,7 @@ static void handle_chat(slot_t *s, sock_t fd, jv *req) {
         // (`response:NAME{...}`) exactly as muse names its tool turn, so the
         // result needs the same resolution. Without it every replayed result
         // reported for the template's own `'unknown'` fallback.
-        if ((s->tmpl == TMPL_MUSE || s->tmpl == TMPL_GEMMA4) &&
+        if ((s->tmpl == TMPL_MUSE || is_gemma4(s->tmpl)) &&
             !strcmp(role, "tool"))
             turn_name = tool_result_name(msgs, i);
         if (s->tmpl == TMPL_HARMONY && !strcmp(role, "tool")) {
