@@ -3760,9 +3760,22 @@ void model_embd_transform(const model_t *m, float *row) {
 //   y = rmsnorm(y) * ssm_norm                THEN grouped RMS norm (per group),
 //   out = out_proj(y)
 //
-// Prefill is a serial O(T) sweep of this step (tracer 2 scope; the chunked
-// scan is tracer 3). State lives in the per-model conv ring / SSD buffers and
-// is reset at pos 0, so a correct decode runs the whole sequence in order.
+// Prefill (n>1) has two math-identical paths (tracer 3): a SERIAL sweep of the
+// step above (the reference, and the decode path), and a CHUNKED scan. The
+// chunked path (a) hoists the conv-weight dequant out of the token loop and
+// computes the causal conv for every token from the known pre-conv inputs, then
+// (b) tiles the token axis into chunks of SSM_PREFILL_CHUNK and, within a chunk,
+// runs the per-head SSD recurrence in PARALLEL across heads (each head an
+// independent lane), carrying the SSD state and conv ring across chunk
+// boundaries (inter-chunk recurrent). It never reassociates a reduction and
+// never changes the per-lane op order -- it only reorders INDEPENDENT lanes and
+// hoists a redundant dequant -- so it is BIT-IDENTICAL to the serial sweep, not
+// merely within tolerance. That is the tracer-3 gate: chunked == serial, pinned
+// by a test, so chunking changes speed, not output. XR_SSM_SERIAL=1 forces the
+// serial path (the gate runs the same prompt both ways); XR_SSM_CHUNK overrides
+// the chunk size. Decode (n==1) always takes the serial path. State lives in the
+// per-model conv ring / SSD buffers and is reset at pos 0, so a correct decode
+// runs the whole sequence in order.
 //
 // Built with fast-math DISABLED (unlike the rest of the engine): the SSD
 // recurrence carries state token-to-token, so a per-step reassociation or an
@@ -3772,8 +3785,36 @@ void model_embd_transform(const model_t *m, float *row) {
 // token-identical rather than merely fluent. The grouped RMS norm below also
 // accumulates its sum-of-squares in double, exactly as ggml_compute_forward_
 // rms_norm_f32 does.
+// Largest conv kernel the chunked path's per-thread dequant buffer supports
+// (Mamba-2 hybrids use 4). Above this the dispatcher falls back to serial.
+#define SSM_MAX_CONV_KERNEL 16
+// Token-chunk size for the chunked SSD prefill scan (design: ~128-256).
+#ifndef SSM_PREFILL_CHUNK
+#define SSM_PREFILL_CHUNK 256
+#endif
+
+static int ssm_prefill_chunk(void) {
+    static int c = -1;
+    if (c < 0) {
+        const char *e = getenv("XR_SSM_CHUNK");
+        c = e ? atoi(e) : SSM_PREFILL_CHUNK;
+        if (c < 1) c = SSM_PREFILL_CHUNK;
+    }
+    return c;
+}
+static int ssm_force_serial(void) {
+    static int f = -1;
+    if (f < 0) {
+        const char *e = getenv("XR_SSM_SERIAL");
+        f = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    return f;
+}
+
+// ---- serial reference core: the exact per-token sweep (also the decode path).
+// This is the ground truth the chunked path is pinned bit-identical against.
 __attribute__((optimize("no-fast-math")))
-static void mamba2_ssd_step(model_t *m, layer_t *ly, int layer, int n, int xdim) {
+static void mamba2_ssd_core_serial(model_t *m, layer_t *ly, int layer, int n) {
     int nh = m->ssm_v_heads;                 // n_ssm_head
     int inner = m->ssm_inner, hd = inner / nh; // head_dim = inner / n_head
     int ds = m->ssm_state, ng = m->ssm_groups;
@@ -3781,10 +3822,6 @@ static void mamba2_ssd_step(model_t *m, layer_t *ly, int layer, int n, int xdim)
     int conv_dim  = inner + 2 * ng * ds;
     int d_in_proj = 2 * inner + 2 * ng * ds + nh;
     int histn = m->ssm_conv_kernel - 1;
-
-    // in_proj: normed input (m->xb) -> zxBCdt (m->ssm_qkv)
-    matvec_b(m->tp, m->ssm_qkv, d_in_proj, ly->ssm_in,
-             m->xb, xdim, m->n_embd, d_in_proj, NULL, n);
 
     float *convstate = m->ssm_conv_state +
                        (size_t)layer * histn * conv_dim;
@@ -3858,6 +3895,192 @@ static void mamba2_ssd_step(model_t *m, layer_t *ly, int layer, int n, int xdim)
             for (int i = 0; i < per_g; i++) yg[i] = yg[i] * scale * wg[i];
         }
     }
+}
+
+// ---- chunked-prefill workers. Each reproduces the serial core's per-lane op
+// order EXACTLY; only independent lanes (conv rows / heads / tokens) are spread
+// across threads, so the result is bit-identical to mamba2_ssd_core_serial.
+
+// phase 1: causal depthwise conv1d for every token, one dequant per conv row.
+typedef struct {
+    const model_t *m; const layer_t *ly;
+    int n, inner, conv_dim, d_in_proj, histn, conv_kernel;
+    size_t wrs;
+    const float *convstate;   // initial conv ring (read-only here)
+} ssm_conv_job;
+
+__attribute__((optimize("no-fast-math")))
+static void ssm_conv1d_worker(void *vp, int c0, int c1) {
+    const ssm_conv_job *J = (const ssm_conv_job *)vp;
+    const model_t *m = J->m; const layer_t *ly = J->ly;
+    int n = J->n, inner = J->inner, conv_dim = J->conv_dim, d_in = J->d_in_proj;
+    int histn = J->histn;
+    for (int c = c0; c < c1; c++) {
+        float cw[SSM_MAX_CONV_KERNEL];        // per-thread dequant buffer
+        dequant_row(ly->ssm_conv->type,
+                    (const uint8_t *)ly->ssm_conv->data + (size_t)c * J->wrs,
+                    cw, J->conv_kernel);
+        float bias = ly->ssm_conv1d_b[c];
+        for (int b = 0; b < n; b++) {
+            // xBC0[t][c] = pre-conv input of token t, channel c
+            float cur = m->ssm_qkv[(size_t)b * d_in + inner + c];
+            float sum = bias + cw[histn] * cur;
+            for (int k = 0; k < histn; k++) {
+                int tau = b - histn + k;      // ring tap -> absolute token
+                float v = (tau >= 0)
+                    ? m->ssm_qkv[(size_t)tau * d_in + inner + c]
+                    : J->convstate[(size_t)(b + k) * conv_dim + c];
+                sum += cw[k] * v;
+            }
+            m->ssm_aux[(size_t)b * conv_dim + c] = sum / (1.0f + expf(-sum));
+        }
+    }
+}
+
+// phase 2: SSD scan for one token chunk [t0,t1), parallel across heads.
+typedef struct {
+    const model_t *m; const layer_t *ly;
+    int inner, hd, ds, ng, gsz, d_in_proj, conv_dim;
+    float *states;
+    int t0, t1;               // token chunk
+} ssm_scan_job;
+
+__attribute__((optimize("no-fast-math")))
+static void ssm_scan_worker(void *vp, int h0, int h1) {
+    const ssm_scan_job *J = (const ssm_scan_job *)vp;
+    const model_t *m = J->m; const layer_t *ly = J->ly;
+    int inner = J->inner, hd = J->hd, ds = J->ds, ng = J->ng, gsz = J->gsz;
+    int d_in = J->d_in_proj, conv_dim = J->conv_dim;
+    for (int h = h0; h < h1; h++) {
+        int g = h / gsz;
+        float A = ly->ssm_a[h], D = ly->ssm_d[h], dtb = ly->ssm_dt[h];
+        float *st = J->states + (size_t)h * hd * ds;
+        for (int b = J->t0; b < J->t1; b++) {
+            const float *proj = m->ssm_qkv + (size_t)b * d_in;
+            const float *xBC = m->ssm_aux + (size_t)b * conv_dim;
+            const float *Bg = xBC + inner + (size_t)g * ds;
+            const float *Cg = xBC + inner + ng * ds + (size_t)g * ds;
+            float dt = softplus_f32(proj[inner + conv_dim + h] + dtb);
+            float dA = expf(dt * A);
+            float *y = m->ssm_z + (size_t)b * inner;
+            for (int p = 0; p < hd; p++) {
+                float x = xBC[(size_t)h * hd + p];
+                float x_dt = x * dt;
+                float *sp = st + (size_t)p * ds;
+                float sumf = 0.0f;
+                for (int j = 0; j < ds; j++) {
+                    float s = sp[j] * dA + Bg[j] * x_dt;
+                    sumf += s * Cg[j];
+                    sp[j] = s;
+                }
+                y[(size_t)h * hd + p] = sumf + D * x;
+            }
+        }
+    }
+}
+
+// phase 3: gate by silu(z) then grouped RMS norm, parallel across tokens.
+typedef struct {
+    const model_t *m; const layer_t *ly;
+    int inner, ng, per_g, d_in_proj; float rms_eps;
+} ssm_norm_job;
+
+__attribute__((optimize("no-fast-math")))
+static void ssm_gate_norm_worker(void *vp, int b0, int b1) {
+    const ssm_norm_job *J = (const ssm_norm_job *)vp;
+    const model_t *m = J->m; const layer_t *ly = J->ly;
+    int inner = J->inner, ng = J->ng, per_g = J->per_g;
+    for (int b = b0; b < b1; b++) {
+        const float *z = m->ssm_qkv + (size_t)b * J->d_in_proj; // gate [inner]
+        float *y = m->ssm_z + (size_t)b * inner;
+        for (int i = 0; i < inner; i++) {
+            float zz = z[i];
+            y[i] *= zz / (1.0f + expf(-zz));
+        }
+        for (int g = 0; g < ng; g++) {
+            float *yg = y + (size_t)g * per_g;
+            const float *wg = ly->ssm_norm_w + (size_t)g * per_g;
+            double ss = 0.0;
+            for (int i = 0; i < per_g; i++) ss += (double)(yg[i] * yg[i]);
+            float mean = (float)(ss / per_g);
+            float scale = 1.0f / sqrtf(mean + J->rms_eps);
+            for (int i = 0; i < per_g; i++) yg[i] = yg[i] * scale * wg[i];
+        }
+    }
+}
+
+// ---- chunked core: intra-chunk parallel, inter-chunk recurrent. Bit-identical
+// to mamba2_ssd_core_serial (see the ssd-step comment above and the pinned gate).
+__attribute__((optimize("no-fast-math")))
+static void mamba2_ssd_core_chunked(model_t *m, layer_t *ly, int layer, int n) {
+    int nh = m->ssm_v_heads;
+    int inner = m->ssm_inner, hd = inner / nh;
+    int ds = m->ssm_state, ng = m->ssm_groups, gsz = nh / ng;
+    int conv_dim = inner + 2 * ng * ds;
+    int d_in_proj = 2 * inner + 2 * ng * ds + nh;
+    int histn = m->ssm_conv_kernel - 1;
+    float *convstate = m->ssm_conv_state + (size_t)layer * histn * conv_dim;
+    float *states = m->ssm_state_mem + (size_t)layer * nh * hd * ds;
+
+    // phase 1: conv1d for all tokens (thread over conv rows), reading the
+    // initial ring for the first histn taps of the leading tokens.
+    ssm_conv_job cj = { m, ly, n, inner, conv_dim, d_in_proj, histn,
+                        m->ssm_conv_kernel,
+                        ggml_row_size(ly->ssm_conv->type, m->ssm_conv_kernel),
+                        convstate };
+    tpool_run(m->tp, ssm_conv1d_worker, &cj, conv_dim);
+
+    // advance the conv ring to the last histn PRE-conv inputs -- the same state
+    // the per-token memmove/append leaves, so a following decode continues bit-
+    // identically.
+    if (histn) {
+        if (n >= histn) {
+            for (int r = 0; r < histn; r++)
+                memcpy(convstate + (size_t)r * conv_dim,
+                       m->ssm_qkv + (size_t)(n - histn + r) * d_in_proj + inner,
+                       sizeof(float) * conv_dim);
+        } else {
+            memmove(convstate, convstate + (size_t)n * conv_dim,
+                    sizeof(float) * (size_t)(histn - n) * conv_dim);
+            for (int r = 0; r < n; r++)
+                memcpy(convstate + (size_t)(histn - n + r) * conv_dim,
+                       m->ssm_qkv + (size_t)r * d_in_proj + inner,
+                       sizeof(float) * conv_dim);
+        }
+    }
+
+    // phase 2: chunked SSD scan -- tile tokens, run heads in parallel per chunk,
+    // carry SSD state across chunk boundaries.
+    int chunk = ssm_prefill_chunk();
+    ssm_scan_job sj = { m, ly, inner, hd, ds, ng, gsz, d_in_proj, conv_dim,
+                        states, 0, 0 };
+    for (int t0 = 0; t0 < n; t0 += chunk) {
+        sj.t0 = t0;
+        sj.t1 = (t0 + chunk < n) ? t0 + chunk : n;
+        tpool_run(m->tp, ssm_scan_worker, &sj, nh);
+    }
+
+    // phase 3: gate + grouped RMS norm (thread over tokens).
+    ssm_norm_job nj = { m, ly, inner, ng, inner / ng, d_in_proj, m->rms_eps };
+    tpool_run(m->tp, ssm_gate_norm_worker, &nj, n);
+}
+
+// Dispatcher: in_proj (batched), the mixer core (chunked prefill or serial),
+// then out_proj (batched). Decode (n==1) and XR_SSM_SERIAL take the serial core.
+static void mamba2_ssd_step(model_t *m, layer_t *ly, int layer, int n, int xdim) {
+    int nh = m->ssm_v_heads, inner = m->ssm_inner, ng = m->ssm_groups;
+    int d_in_proj = 2 * inner + 2 * ng * m->ssm_state + nh;
+
+    // in_proj: normed input (m->xb) -> zxBCdt (m->ssm_qkv)
+    matvec_b(m->tp, m->ssm_qkv, d_in_proj, ly->ssm_in,
+             m->xb, xdim, m->n_embd, d_in_proj, NULL, n);
+
+    if (n > 1 && !ssm_force_serial() &&
+        m->ssm_conv_kernel <= SSM_MAX_CONV_KERNEL)
+        mamba2_ssd_core_chunked(m, ly, layer, n);
+    else
+        mamba2_ssd_core_serial(m, ly, layer, n);
+
     // out_proj: y (m->ssm_z, stride inner) -> m->xb (stride xdim)
     matvec_b(m->tp, m->xb, xdim, ly->ssm_out, m->ssm_z, inner,
              inner, m->n_embd, NULL, n);

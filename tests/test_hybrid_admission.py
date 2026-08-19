@@ -14,6 +14,7 @@ real granite-4.0-h / Nemotron GGUF (sparse-MoE, NoPE, inner == 2*embd).
 """
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -49,6 +50,60 @@ def _run(runner_bin, model, n="1"):
         [runner_bin, "-m", str(model), "-p", "hi", "-n", n, "--temp", "0",
          "--gpu", "off"],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+
+
+# A prompt long enough that the byte-level fixture tokenizer yields > 100 tokens,
+# so XR_SSM_CHUNK=2 splits the Mamba-2 prefill into dozens of chunks and crosses
+# the inter-chunk state boundary many times.
+CHUNK_PROMPT = ("hello world this is a somewhat longer prompt used to exercise "
+                "the chunked mamba-2 prefill scan over several tokens")
+
+
+def _run_p(runner_bin, model, prompt, n, env=None):
+    e = {**os.environ, **(env or {})}
+    return subprocess.run(
+        [runner_bin, "-m", str(model), "-p", prompt, "-n", str(n), "--temp", "0",
+         "--gpu", "off"],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120,
+        env=e)
+
+
+def _act_trace(stderr: bytes) -> bytes:
+    """The RUNNER_DEBUG_ACT per-layer activation dump for the prefill pass -- a
+    numeric fingerprint (per-layer sum to 6 dp + boundary values) far more
+    sensitive than the greedy argmax, which on a tiny random fixture is too
+    robust to reveal sub-argmax prefill drift (measured: a dropped inter-chunk
+    state carry perturbs the trace but not the 16 greedy tokens)."""
+    return b"\n".join(l for l in stderr.splitlines() if l.startswith(b"ACT "))
+
+
+def _assert_chunked_equals_serial(runner_bin, model):
+    """Tracer 3 gate: the chunked-scan prefill must be BIT-IDENTICAL to the serial
+    per-token sweep -- chunking changes speed, not output. XR_SSM_SERIAL forces
+    the reference path; the default and small chunk sizes take the chunked path
+    (tiny sizes cross many inter-chunk state boundaries). Both the prefill
+    activation trace AND the greedy token stream must match, at every chunk size.
+    A regression in the chunked scan, the conv batching, or the inter-chunk
+    state/ring carry moves the activation trace here."""
+    dbg = {"RUNNER_DEBUG_ACT": "1"}
+    ref = _run_p(runner_bin, model, CHUNK_PROMPT, 16, {"XR_SSM_SERIAL": "1", **dbg})
+    assert ref.returncode == 0, ref.stderr.decode(errors="replace")
+    ref_act = _act_trace(ref.stderr)
+    assert ref_act, "no ACT trace captured; RUNNER_DEBUG_ACT not honored"
+    m = re.search(rb"prompt: (\d+) tok", ref.stderr)
+    assert m and int(m.group(1)) > 8, \
+        "prompt must tokenize to many tokens so XR_SSM_CHUNK=2/3 spans chunks"
+    for extra in ({}, {"XR_SSM_CHUNK": "2"}, {"XR_SSM_CHUNK": "3"},
+                  {"XR_SSM_CHUNK": "128"}):
+        got = _run_p(runner_bin, model, CHUNK_PROMPT, 16, {**dbg, **extra})
+        assert got.returncode == 0, got.stderr.decode(errors="replace")
+        label = extra or "default-chunk"
+        assert _act_trace(got.stderr) == ref_act, (
+            f"chunked prefill (env={label}) diverged from the serial sweep in the "
+            f"activation trace")
+        assert got.stdout == ref.stdout, (
+            f"chunked prefill (env={label}) diverged from the serial sweep in the "
+            f"token stream: {got.stdout[:200]!r} != {ref.stdout[:200]!r}")
 
 
 def test_granitehybrid_loads_and_decodes(runner_bin, models):
@@ -161,3 +216,21 @@ def test_nemotron_h_missing_ssm_tensor_fails_closed(runner_bin, nemo_model):
     err = proc.stderr.decode(errors="replace")
     assert "ssm_d" in err, "the failure must name the absent tensor"
     assert "nemotron_h" in err
+
+
+# --------------------------------------------------------------------------
+# Tracer 3 -- Mamba-2 chunked-scan prefill. The chunked path (conv batched, scan
+# tiled into chunks and run in parallel across heads, SSD state + conv ring
+# carried across chunk boundaries) is bit-identical to the serial per-token
+# sweep by construction; these pin that so a chunking regression cannot ship as
+# a silent speed-for-correctness trade. Covers n_group=1 (granite) and n_group>1
+# (nemotron) grouped scans, and tiny chunk sizes that cross many boundaries.
+# --------------------------------------------------------------------------
+def test_granitehybrid_chunked_prefill_matches_serial(runner_bin, models):
+    good, _ = models["granitehybrid"]
+    _assert_chunked_equals_serial(runner_bin, good)
+
+
+def test_nemotron_h_chunked_prefill_matches_serial(runner_bin, nemo_model):
+    good, _ = nemo_model
+    _assert_chunked_equals_serial(runner_bin, good)
