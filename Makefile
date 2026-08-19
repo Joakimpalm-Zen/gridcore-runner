@@ -1398,6 +1398,17 @@ release-check: runner
 	$(PYTHON) scripts/check-release.py --tag "$$tag" --binary ./$(RUNNER_EXE) \
 		--build-info "$$tmp" --commit "$$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 
+# Truncation-recovery regression gate. Runner's headline is that a schema-
+# constrained tool call stays a parseable tool_calls entry when the token
+# budget runs out mid-object (finish_reason "length"), and completes at the
+# 64-token control. This spawns Runner on the CPU fixture, drives the pinned
+# token ladder, and fails red if any rung loses the property. The property is
+# an engine guarantee (grammar + closer), not model quality, so the tiny
+# fixture exhibits it with no GPU or competitor. See docs/truncation-benchmark.md
+# for the full head-to-head recipe and the committed raw results.
+test-truncation: runner test.gguf
+	$(PYTHON) scripts/truncation-benchmark.py --model test.gguf --assert
+
 # Optional ecosystem gate. Install the pinned Python and Node dependencies in
 # tests/compatibility first; Runner itself remains dependency-free.
 compat-consumers: runner test.gguf
@@ -1564,4 +1575,4 @@ test-makefile-sane:
 
 .PHONY: template-conformance template-conformance-refresh template-conformance-baseline template-conformance-harmony-oracle
 .PHONY: test-gpu-stub
-.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-split test-metal-bind-failure test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
+.PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-split test-metal-bind-failure test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check test-truncation fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
