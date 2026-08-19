@@ -195,6 +195,34 @@ required.
 On Windows, install `make` and `mingw-w64-ucrt-x86_64-gcc` from an MSYS2 UCRT64
 shell, then run `make`.
 
+### Container image
+
+Each release publishes a CPU image — the same binary on a distroless glibc base,
+nothing else — to `ghcr.io/joakimpalm-zen/xyntetik-runner:<version>` (and
+`:latest`). Build it yourself with `docker build -t runner .`.
+
+The server binds **loopback only** by design (there is no `--host`/`0.0.0.0`
+flag), so it never exposes itself to a network, even in a container — which
+shapes how you run it:
+
+```sh
+# One-shot inference (no networking):
+docker run --rm -v "$PWD/models:/models" \
+  ghcr.io/joakimpalm-zen/xyntetik-runner:latest \
+  -m /models/your.gguf -p "hello" -n 128 --gpu off
+
+# Serve on the host's localhost (Linux; --network host shares the host loopback,
+# so the loopback-only server is reachable at 127.0.0.1:8080 on the host only):
+docker run --rm --network host -v "$PWD/models:/models" \
+  ghcr.io/joakimpalm-zen/xyntetik-runner:latest \
+  -m /models/your.gguf --serve --port 8080
+```
+
+`-p 8080:8080` does not work — the port-proxy cannot reach a server bound to the
+container's own loopback; use `--network host`. There is no auth boundary, so
+keep any deployment on a trusted host. The image is CPU-only; a GPU image is not
+published.
+
 ## Models and conversion
 
 Runner accepts GGUF v2/v3. Safetensors checkpoints must be converted to GGUF

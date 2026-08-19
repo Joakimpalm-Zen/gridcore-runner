@@ -1,0 +1,22 @@
+# Keep the build context small: the image builds the binary from source, so it
+# needs src/, Makefile, scripts/, and the committed headers — not models, git
+# history, test binaries, or local build output.
+.git
+.github
+models
+*.gguf
+*.tar.gz
+*.zip
+runner
+runner-debug*
+runner-*x86_64*
+runner-*arm64*
+test-*
+.build
+__pycache__
+*.o
+*.out
+*.err
+docs
+tests/torture/results
+tests/compatibility

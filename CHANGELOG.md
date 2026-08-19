@@ -7,6 +7,14 @@ were written.
 
 ## Unreleased
 
+- **A CPU container image ships with each release.** The same binary on a
+  distroless glibc base — `docker build -t runner .`, or pull
+  `ghcr.io/joakimpalm-zen/xyntetik-runner:<version>` / `:latest`; the release
+  workflow builds and pushes it (private until made public). The server binds
+  loopback only by design, so serve with `--network host` on Linux (reachable
+  on the host's `127.0.0.1` only, never the network); `-p` does not work. CPU
+  only; no GPU image is published. See the README "Container image" section.
+
 ## v0.1.19-alpha — 2026-08-19
 
 The largest release since the last public alpha: a module-by-module review of the

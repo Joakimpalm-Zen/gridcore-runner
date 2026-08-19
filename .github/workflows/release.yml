@@ -2,7 +2,9 @@ name: release
 
 # Tag a version (git tag v0.1.19-alpha && git push origin v0.1.19-alpha) and
 # this builds the three platform binaries and attaches them to a GitHub
-# Release draft — publish it after a once-over.
+# Release draft — publish it after a once-over. It also builds a CPU container
+# image (the same binary, distroless base) and pushes it to GHCR; the package
+# is private until you make it public, mirroring the draft-release once-over.
 
 on:
   push:
@@ -126,3 +128,31 @@ jobs:
             runner-macos-arm64.tar.gz
             runner-windows-x86_64.exe.zip
             SHA256SUMS
+
+  # CPU container image: the same binary on a distroless glibc base (Dockerfile
+  # builds it from source and smoke-tests it). Gated on the platform build so a
+  # broken release does not publish an image. Pushed to GHCR private-by-default.
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/joakimpalm-zen/xyntetik-runner:${{ github.ref_name }}
+            ghcr.io/joakimpalm-zen/xyntetik-runner:latest
