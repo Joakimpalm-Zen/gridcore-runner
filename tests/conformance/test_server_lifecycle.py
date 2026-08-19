@@ -303,8 +303,12 @@ def test_signal_during_startup_aborts_startup():
     # record of how far startup had got, which is most of why it could not be
     # chased afterwards. It has not been reproduced since — 960 spawns across
     # idle and loaded boxes and two builds, plus 20 whole-suite runs, all
-    # clean — and a rate cannot be established from one occurrence anyway.
-    # The next one will at least say where it was.
+    # clean, plus a 6000-spawn soak under CPU load (concurrency 12) on
+    # 2026-08-19, also clean — and a rate cannot be established from one
+    # occurrence anyway. The soak harness the plan asked for is
+    # scripts/repro-startup-signal.py (make repro-startup-signal); this ladder
+    # is the in-suite sentinel, the harness is the on-demand hunt. The next
+    # survivor in either will at least say where startup was.
     for delay in [0.0003, 0.0005, 0.0008, 0.001, 0.002, 0.005] * 2:
         proc = subprocess.Popen(
             [exe, "-m", model, "--serve", "--port", str(free_port()),
