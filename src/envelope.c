@@ -28,6 +28,80 @@ static char *read_sidecar(const char *model_path, size_t *n_out) {
     return buf;
 }
 
+// Resolve a parsed manifest against this runtime, exact-match. Writes the
+// one-line human summary and returns the state. Shared by the report path
+// (slice 2) and the enforcing gate (slice 3) so both classify identically.
+static int classify(jv *m, const char *runtime_version, const char *backend,
+                    char *out, int cap) {
+    const char *schema  = jv_str(jv_get(m, "schema_version"), "");
+    jv *runtime         = jv_get(m, "runtime");
+    const char *m_ver   = jv_str(jv_get(runtime, "version"), "");
+    const char *m_back  = jv_str(jv_get(jv_get(runtime, "kernel_set"), "backend"), "");
+    const char *verdict = jv_str(jv_get(m, "verdict"), "");
+
+    // `runner --version` prints "runner X"; the manifest records that whole
+    // string, so compare against the same shape.
+    char rv[64];
+    snprintf(rv, sizeof rv, "runner %s", runtime_version ? runtime_version : "");
+    bool ver_match  = m_ver[0]  && !strcmp(m_ver, rv);
+    bool back_match = m_back[0] && backend && !strcmp(m_back, backend);
+
+    if (strcmp(schema, "xyntetik.runner.envelope.v1") != 0) {
+        // A manifest whose schema we do not understand is not evidence for THIS
+        // runner — report it, do not trust it.
+        snprintf(out, (size_t)cap,
+                 "envelope: manifest schema %s not recognised (experimental)",
+                 schema[0] ? schema : "(missing)");
+        return ENV_EXPERIMENTAL;
+    }
+    if (ver_match && back_match) {
+        if (!strcmp(verdict, "certified")) {
+            snprintf(out, (size_t)cap,
+                     "envelope: matches a measured envelope (certified: %s / %s)",
+                     rv, backend);
+            return ENV_CERTIFIED;
+        }
+        if (!strcmp(verdict, "outside-envelope")) {
+            snprintf(out, (size_t)cap,
+                     "envelope: OUTSIDE the measured envelope for %s / %s "
+                     "(measured refusal)", rv, backend);
+            return ENV_OUTSIDE;
+        }
+        snprintf(out, (size_t)cap,
+                 "envelope: measured for %s / %s but not certified (experimental)",
+                 rv, backend);
+        return ENV_EXPERIMENTAL;
+    }
+    // Exact-match only: a manifest measured on a different version or backend
+    // does not describe this configuration.
+    snprintf(out, (size_t)cap,
+             "envelope: measured on %s / %s, not this runtime (%s / %s) "
+             "— experimental here",
+             m_ver[0] ? m_ver : "(unknown)", m_back[0] ? m_back : "(unknown)",
+             rv, backend ? backend : "(unknown)");
+    return ENV_EXPERIMENTAL;
+}
+
+// The measured reason behind an outside-envelope verdict is the set of gate
+// checks that FAILED — `quality.checks` is a {name: status} object. Fold the
+// failing names into a human phrase; fall back to a generic line if the
+// certifier recorded no per-check detail.
+static void outside_reason(jv *m, char *out, int cap) {
+    jv *checks = jv_get(jv_get(m, "quality"), "checks");
+    int written = 0;
+    if (checks && checks->type == J_OBJ) {
+        for (int i = 0; i < checks->n; i++) {
+            const char *status = jv_str(checks->items[i], "");
+            if (strcmp(status, "fail") != 0) continue;
+            written += snprintf(out + written, (size_t)(cap - written),
+                                "%s%s", written ? ", " : "", checks->keys[i]);
+            if (written >= cap - 1) break;   // out of room; stop cleanly
+        }
+    }
+    if (written == 0)
+        snprintf(out, (size_t)cap, "the configuration is outside what was measured");
+}
+
 int envelope_report(const char *model_path, const char *runtime_version,
                     const char *backend, char *out, int cap) {
     if (cap > 0) out[0] = 0;
@@ -44,56 +118,56 @@ int envelope_report(const char *model_path, const char *runtime_version,
                  "envelope: manifest present but unreadable (treated as experimental)");
         return ENV_EXPERIMENTAL;
     }
+    int state = classify(m, runtime_version, backend, out, cap);
+    jv_free(m);
+    return state;
+}
 
-    const char *schema  = jv_str(jv_get(m, "schema_version"), "");
-    jv *runtime         = jv_get(m, "runtime");
-    const char *m_ver   = jv_str(jv_get(runtime, "version"), "");
-    const char *m_back  = jv_str(jv_get(jv_get(runtime, "kernel_set"), "backend"), "");
-    const char *verdict = jv_str(jv_get(m, "verdict"), "");
+bool envelope_gate(const char *model_path, const char *runtime_version,
+                   const char *backend, bool forced,
+                   char *msg, int cap, int *out_state) {
+    if (cap > 0) msg[0] = 0;
+    if (out_state) *out_state = ENV_NONE;
+    if (!model_path) return true;
 
-    // `runner --version` prints "runner X"; the manifest records that whole
-    // string, so compare against the same shape.
-    char rv[64];
-    snprintf(rv, sizeof rv, "runner %s", runtime_version ? runtime_version : "");
-    bool ver_match  = m_ver[0]  && !strcmp(m_ver, rv);
-    bool back_match = m_back[0] && backend && !strcmp(m_back, backend);
+    size_t n = 0;
+    char *text = read_sidecar(model_path, &n);
+    if (!text) return true;                 // no manifest: nothing to enforce
 
-    int state;
-    if (strcmp(schema, "xyntetik.runner.envelope.v1") != 0) {
-        // A manifest whose schema we do not understand is not evidence for THIS
-        // runner — report it, do not trust it.
-        snprintf(out, (size_t)cap,
-                 "envelope: manifest schema %s not recognised (experimental)",
-                 schema[0] ? schema : "(missing)");
-        state = ENV_EXPERIMENTAL;
-    } else if (ver_match && back_match) {
-        if (!strcmp(verdict, "certified")) {
-            snprintf(out, (size_t)cap,
-                     "envelope: matches a measured envelope (certified: %s / %s)",
-                     rv, backend);
-            state = ENV_CERTIFIED;
-        } else if (!strcmp(verdict, "outside-envelope")) {
-            snprintf(out, (size_t)cap,
-                     "envelope: OUTSIDE the measured envelope for %s / %s "
-                     "(measured refusal; not enforced)", rv, backend);
-            state = ENV_OUTSIDE;
+    jv *m = json_parse(text, n);
+    free(text);
+    if (!m) {
+        // Fail-closed the SAFE way: an unreadable manifest is not evidence of a
+        // refusal, so it never blocks a load — it is experimental, load on.
+        snprintf(msg, (size_t)cap,
+                 "envelope: manifest present but unreadable (treated as experimental)");
+        if (out_state) *out_state = ENV_EXPERIMENTAL;
+        return true;
+    }
+
+    char summary[256];
+    int state = classify(m, runtime_version, backend, summary, sizeof summary);
+    if (out_state) *out_state = state;
+
+    bool allow = true;
+    if (state == ENV_OUTSIDE) {
+        char reason[192];
+        outside_reason(m, reason, sizeof reason);
+        if (forced) {
+            snprintf(msg, (size_t)cap,
+                     "envelope: WARNING --force-uncertified: loading despite an "
+                     "OUTSIDE-envelope verdict (%s)", reason);
         } else {
-            snprintf(out, (size_t)cap,
-                     "envelope: measured for %s / %s but not certified (experimental)",
-                     rv, backend);
-            state = ENV_EXPERIMENTAL;
+            snprintf(msg, (size_t)cap,
+                     "envelope: refusing to load — OUTSIDE the measured envelope "
+                     "(%s). Override with --force-uncertified.", reason);
+            allow = false;
         }
     } else {
-        // Exact-match only: a manifest measured on a different version or
-        // backend does not describe this configuration.
-        snprintf(out, (size_t)cap,
-                 "envelope: measured on %s / %s, not this runtime (%s / %s) "
-                 "— experimental here",
-                 m_ver[0] ? m_ver : "(unknown)", m_back[0] ? m_back : "(unknown)",
-                 rv, backend ? backend : "(unknown)");
-        state = ENV_EXPERIMENTAL;
+        // certified / experimental: informational banner (never blocks).
+        snprintf(msg, (size_t)cap, "%s", summary);
     }
 
     jv_free(m);
-    return state;
+    return allow;
 }

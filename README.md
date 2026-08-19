@@ -369,6 +369,7 @@ flags into unrelated feature sections.
 | `--port N` | Server port, default `8080`. |
 | `--parallel N` | Independent inference slots for a single-model server, default `1`. |
 | `--ttl N` | Swap-mode idle unload timeout, default `300`; `0` disables it. |
+| `--force-uncertified` | Load a model even when its measured-envelope sidecar records an `outside-envelope` verdict for this runtime (refused by default). See [Measured-envelope gate](#measured-envelope-gate). |
 | `--json` | Constrain output to one valid JSON object. |
 | `--json-schema FILE` | Constrain output to the schema in `FILE`. |
 
@@ -656,6 +657,31 @@ raw material for that layer, not the layer itself.
 None of the three needs a GPU to exercise — `tests/test_vram_registry.c`
 drives the whole surface, including priority ordering, through the same
 synthetic free-VRAM callback the rest of the registry's tests use.
+
+### Measured-envelope gate
+
+Runner already refuses to treat output as correct without a schema contract.
+The measured-envelope gate extends that one layer down, to the model itself. A
+certification run records what was actually *measured* for one artifact on one
+runtime — the CPU==GPU identity check, the fidelity gate, whether the model
+fits its memory class — into a `<model>.gguf.envelope.json` sidecar. At load
+Runner reads the sidecar sitting next to the model and resolves it against the
+runtime it is actually running (`runner --version` and the compiled backend,
+exact-match — a manifest measured on a different version or backend does not
+speak for this one):
+
+| State | Condition | Behavior |
+|---|---|---|
+| **certified** | the sidecar matches this runtime and its gate passed | loads; a banner notes the match |
+| **experimental** | no sidecar, or one measured on a different runtime/backend | loads; a banner notes the configuration is not certified |
+| **outside-envelope** | the sidecar matches this runtime and records a measured refusal (e.g. the model does not fit, or an identity check failed) | **refused** at load with the measured reason; `--force-uncertified` overrides with a loud warning |
+
+The wording is deliberate: a configuration *matches a measured envelope*, it is
+not *certified* as a standing property — the claim is scoped to that exact
+artifact, backend, and date. The gate is fail-open on doubt: an absent,
+unreadable, or unrecognized sidecar is treated as experimental and never blocks
+a load, because a wrong refusal is worse than none. Runner only ever *reads*
+this file; it is produced by the certification pipeline, never at runtime.
 
 ## Serving and APIs
 

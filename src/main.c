@@ -186,6 +186,9 @@ static void usage(const char *prog) {
         "                 loading the requested one on demand (swap mode)\n"
         "  --ttl N        swap mode: unload an idle model after N seconds\n"
         "                 (default 300, 0 = never)\n"
+        "  --force-uncertified  load a model whose measured-envelope sidecar\n"
+        "                 records an OUTSIDE-envelope verdict for this runtime\n"
+        "                 (refused by default) — loads with a loud warning\n"
         "  --json         constrain output to a single valid JSON object\n"
         "  --json-schema F constrain output to the JSON Schema in file F\n"
         "  --quantize OUT rewrite the model to OUT.gguf (see --quant) and exit\n"
@@ -414,6 +417,7 @@ int main(int argc, char **argv) {
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
     const char *fit_path = NULL;
     bool no_tray = false;
+    bool force_uncertified = false;
     int thinking = THINK_DEFAULT;
     bool bench_json = false;
     model_params mp = {0};
@@ -462,6 +466,7 @@ int main(int argc, char **argv) {
         // bare-invocation launch above and the tray that otherwise follows a
         // --serve or -i session below.
         else if (!strcmp(a, "--no-tray")) no_tray = true;
+        else if (!strcmp(a, "--force-uncertified")) force_uncertified = true;
         else if (!strcmp(a, "--port")) port = (int)int_arg(a, NEXT, 1, 65535);
         else if (!strcmp(a, "--parallel")) parallel = (int)int_arg(a, NEXT, 1, 16);
         else if (!strcmp(a, "--ttl")) ttl = (int)int_arg(a, NEXT, -1, INT_MAX);
@@ -861,9 +866,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 load_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
-        // Measured-envelope sidecar, if one sits next to the model: report
-        // whether this runtime matches what was certified. Read + report only
-        // (no enforcement yet); silent when there is no manifest.
+        // Measured-envelope sidecar, if one sits next to the model: the
+        // load-time three-state gate. Certified/experimental print a banner and
+        // load; an OUTSIDE-envelope verdict REFUSES the load with the measured
+        // reason unless --force-uncertified is given. Silent when there is no
+        // manifest.
         {
             // The backend string must match what scripts/certify-envelope.py
             // records (runner --caps gpu.backend): a present GPU is "metal" on
@@ -876,9 +883,14 @@ int main(int argc, char **argv) {
             const char *env_backend = env_has_gpu ? "cuda" : "cpu";
 #endif
             char env_line[256];
-            if (envelope_report(load_path, RUNNER_VERSION, env_backend,
-                                env_line, (int)sizeof env_line))
-                fprintf(stderr, "%s\n", env_line);
+            bool ok = envelope_gate(load_path, RUNNER_VERSION, env_backend,
+                                    force_uncertified, env_line,
+                                    (int)sizeof env_line, NULL);
+            if (env_line[0]) fprintf(stderr, "%s\n", env_line);
+            if (!ok) {
+                cli_cleanup(NULL, NULL, &tok, &m);
+                return 1;
+            }
         }
         // Discovery registry: run modes announce themselves so the tray (or
         // any controller) can list every live runner. Best-effort — failure

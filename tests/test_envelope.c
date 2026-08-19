@@ -71,6 +71,49 @@ int main(void) {
     write_manifest("{ this is not json");
     assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_EXPERIMENTAL);
 
+    // ---- slice 3: the enforcing gate ----------------------------------------
+    int st = -1;
+
+    // No manifest -> load, silent, state NONE.
+    rm_manifest();
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
+    assert(out[0] == 0 && st == ENV_NONE);
+
+    // Certified -> load, with the informational banner.
+    write_manifest(manifest(RUNNER_VERSION, "cpu", "certified"));
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
+    assert(st == ENV_CERTIFIED && strstr(out, "certified"));
+
+    // Experimental (matches nothing) -> load, banner, never a refusal.
+    write_manifest(manifest(RUNNER_VERSION, "cuda", "certified"));
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
+    assert(st == ENV_EXPERIMENTAL);
+
+    // Outside-envelope -> REFUSE (returns false), and the message tells the
+    // user how to override.
+    write_manifest(manifest(RUNNER_VERSION, "cpu", "outside-envelope"));
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == false);
+    assert(st == ENV_OUTSIDE && strstr(out, "refusing") && strstr(out, "--force-uncertified"));
+
+    // ...unless --force-uncertified is set: then it loads with a loud warning.
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", true, out, sizeof out, &st) == true);
+    assert(st == ENV_OUTSIDE && strstr(out, "WARNING") && strstr(out, "force-uncertified"));
+
+    // The refusal names the measured reason: the gate check(s) that FAILED.
+    write_manifest("{\"schema_version\":\"xyntetik.runner.envelope.v1\","
+                   "\"runtime\":{\"version\":\"runner " RUNNER_VERSION "\","
+                   "\"kernel_set\":{\"backend\":\"cpu\"}},"
+                   "\"verdict\":\"outside-envelope\","
+                   "\"quality\":{\"checks\":{\"cpu_gpu_identity\":\"pass\","
+                   "\"ram_fits\":\"fail\"}}}");
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == false);
+    assert(strstr(out, "ram_fits"));
+
+    // Fail-open: a malformed manifest never blocks a load.
+    write_manifest("{ this is not json");
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
+    assert(st == ENV_EXPERIMENTAL);
+
     rm_manifest();
     printf("test-envelope: OK\n");
     return 0;

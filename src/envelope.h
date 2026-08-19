@@ -1,6 +1,8 @@
 #ifndef RUNNER_ENVELOPE_H
 #define RUNNER_ENVELOPE_H
 
+#include <stdbool.h>
+
 // Measured-envelope manifest reader (slice 2 of the certified-envelope gate).
 //
 // scripts/certify-envelope.py emits a `<model>.envelope.json` sidecar that
@@ -31,5 +33,23 @@ enum envelope_state {
 // (<= cap, always NUL-terminated when cap > 0) and returns the state.
 int envelope_report(const char *model_path, const char *runtime_version,
                     const char *backend, char *out, int cap);
+
+// Load-time three-state ENFORCEMENT (slice 3). Resolves the state exactly as
+// envelope_report does, then decides whether the load may proceed and what the
+// caller should print. `forced` is the --force-uncertified flag; it only
+// affects the OUTSIDE state.
+//   OUTSIDE   + !forced -> returns FALSE (refuse the load); `msg` is the
+//                          measured reason and how to override.
+//   OUTSIDE   + forced  -> returns true;  `msg` is a loud override warning.
+//   CERTIFIED / EXPERIMENTAL -> returns true; `msg` is the informational banner
+//                          (the same line envelope_report would produce).
+//   NONE (no manifest)  -> returns true; `msg` is "" — a bare load stays quiet.
+// It is fail-open on doubt: an unreadable/unknown manifest is experimental and
+// never blocks a load — a wrong refusal is worse than none. `*out_state`
+// (may be NULL) receives the resolved envelope_state. `msg` is always
+// NUL-terminated when cap > 0.
+bool envelope_gate(const char *model_path, const char *runtime_version,
+                   const char *backend, bool forced,
+                   char *msg, int cap, int *out_state);
 
 #endif
