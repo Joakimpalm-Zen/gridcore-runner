@@ -39,7 +39,18 @@ from harness import (Client, ProtocolError, RunnerServer,  # noqa: E402
                      categorize, decode_events, find_runner, parse_stream,
                      rss_kind, validate_against_schema)
 
-SCHEMA_VERSION = "xyntetik.agent-torture.v3"
+SCHEMA_VERSION = "xyntetik.agent-torture.v4"
+
+
+class Declined(ProtocolError):
+    """The turn emitted NO tool call at all where one was offered — the model
+    answered in prose. This is a DIFFERENT axis from a malformed call: it is
+    "chose not to call", not "called wrongly". Every case in this matrix offers
+    the tool under a forced tool_choice, so for a runtime that enforces the
+    choice (runner) this never fires; a runtime that lets the model decline
+    under a forced choice is measured on the decline axis, not conflated with
+    one that emits a broken call. Reported separately so the two questions —
+    "did it call?" and "was the call right?" — stay distinguishable."""
 SPEC_STATS_RE = re.compile(
     r"spec: (\d+) rounds, (\d+) drafted, (\d+) accepted .*"
     r"grammar (\d+)/(\d+)")
@@ -320,6 +331,9 @@ def normalize_sse(raw, chunks=None):
 
 def _only_tool(response):
     calls = (response.choice.get("message") or {}).get("tool_calls")
+    if not calls:
+        raise Declined("no tool call emitted; the model answered in prose",
+                       got=calls)
     if not isinstance(calls, list) or len(calls) != 1:
         raise ProtocolError("expected exactly one tool call", got=calls)
     function = calls[0].get("function") or {}
@@ -409,6 +423,9 @@ def _verify_stream(stream, expect_tool=False):
         raise ProtocolError("SSE stream has no usable finish reason",
                             got=reference["finish_reason"])
     if expect_tool:
+        if not reference["tool_calls"]:
+            raise Declined("no streamed tool call; the model answered in prose",
+                           got=reference["tool_calls"])
         if len(reference["tool_calls"]) != 1:
             raise ProtocolError("expected one streamed tool call",
                                 got=reference["tool_calls"])
@@ -447,13 +464,25 @@ def make_report(results, runtime_name, version, model, elapsed_ms, peak_kb):
     failures = Counter(r["failure"]["category"] for r in results
                        if r["status"] == "failed")
     passed = sum(r["status"] == "passed" for r in results)
+    total = len(results)
+    # Two arms, reported separately (owner decision 2026-08-19): a "declined"
+    # turn emitted no call at all; the model chose prose. "Attempted" cases are
+    # the ones where a call WAS produced (passed + malformed). So call_rate is
+    # "did it call?" and attempted_pass_rate is "when it called, was it right?".
+    # Conflating them hides why a runtime scores low — see qwen3-8b answering in
+    # prose vs one that calls wrongly.
+    declined = failures.get("declined", 0)
+    attempted = total - declined
     seconds = max(elapsed_ms / 1000, 1e-9)
     return {
         "schema_version": SCHEMA_VERSION,
         "runtime": {"name": runtime_name, "version": version},
         "configuration": {"model": model, "temperature": 0},
-        "totals": {"requests": len(results), "passed": passed,
-                   "failed": len(results) - passed,
+        "totals": {"requests": total, "passed": passed,
+                   "failed": total - passed,
+                   "declined": declined, "attempted": attempted,
+                   "call_rate": round(attempted / max(total, 1), 3),
+                   "attempted_pass_rate": round(passed / max(attempted, 1), 3),
                    "failures_by_category": dict(sorted(failures.items()))},
         "metrics": {"elapsed_ms": elapsed_ms,
                     "valid_structured_tasks_per_second": round(passed / seconds, 3)},
@@ -571,7 +600,8 @@ def run(target, runtime_name, version, model_label, out, count,
                         "body": base64.b64encode(response.body).decode("ascii")}
                     _verify_buffered(case, response)
             except Exception as exc:  # verdicts belong in the report, not traceback-only
-                failure = {"category": categorize(exc), "message": str(exc)}
+                cat = "declined" if isinstance(exc, Declined) else categorize(exc)
+                failure = {"category": cat, "message": str(exc)}
                 artifact["failure"] = failure
             latency = round((time.monotonic() - t0) * 1000, 2)
             results.append(result_for(case, "failed" if failure else "passed",

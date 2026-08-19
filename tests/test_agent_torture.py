@@ -89,7 +89,7 @@ def test_large_enum_case_constrains_to_an_exact_taxonomy_member():
 
 
 def test_report_schema_and_totals(tmp_path):
-    cases = MOD.build_cases(4)
+    cases = MOD.build_cases(5)
     results = [
         MOD.result_for(cases[0], "passed", 1.25),
         MOD.result_for(cases[1], "failed", 2.5,
@@ -97,6 +97,10 @@ def test_report_schema_and_totals(tmp_path):
         MOD.result_for(cases[2], "passed", 3.0),
         MOD.result_for(cases[3], "failed", 4.0,
                        failure={"category": "protocol", "message": "bad"}),
+        # a declined turn: no call at all. It is a failure, but on the OTHER
+        # arm — "chose not to call", not "called wrongly".
+        MOD.result_for(cases[4], "failed", 5.0,
+                       failure={"category": "declined", "message": "prose"}),
     ]
     report = MOD.make_report(results, "runner", "runner test", "fixture.gguf",
                              123, 456)
@@ -104,12 +108,16 @@ def test_report_schema_and_totals(tmp_path):
     MOD.write_json(path, report)
     decoded = json.loads(path.read_text())
 
-    assert decoded["schema_version"] == "xyntetik.agent-torture.v3"
+    assert decoded["schema_version"] == "xyntetik.agent-torture.v4"
     assert decoded["runtime"] == {"name": "runner", "version": "runner test"}
     assert decoded["configuration"]["model"] == "fixture.gguf"
     assert decoded["totals"] == {
-        "requests": 4, "passed": 2, "failed": 2,
-        "failures_by_category": {"protocol": 1, "schema": 1},
+        "requests": 5, "passed": 2, "failed": 3,
+        # both arms, reported separately: declined (chose not to call) split out
+        # from the attempted cases, with the two rates.
+        "declined": 1, "attempted": 4,
+        "call_rate": 0.8, "attempted_pass_rate": 0.5,
+        "failures_by_category": {"declined": 1, "protocol": 1, "schema": 1},
     }
     assert decoded["metrics"]["valid_structured_tasks_per_second"] == 16.26
     assert decoded["resources"]["peak_rss_kb"] == 456

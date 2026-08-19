@@ -77,7 +77,16 @@ Two files under `--out` (default `tests/torture/out/`):
 - `report.json` — runtime name + version, model, per-category pass/fail
   totals, `valid_structured_tasks_per_second`, elapsed, and peak RSS (Runner
   only — a foreign process's RSS is not read). Labeled with the runtime, so
-  two runtimes' reports diff directly.
+  two runtimes' reports diff directly. `totals` reports **two arms
+  separately** (schema `v4`): a turn that emits no call at all is `declined`
+  (the model answered in prose), split out from the `attempted` cases where a
+  call was produced. `call_rate` = attempted / requests answers *did it call?*;
+  `attempted_pass_rate` = passed / attempted answers *when it called, was the
+  call right?*. Every case here offers the tool under a forced `tool_choice`,
+  so a runtime that enforces the choice (Runner) has `declined` 0; one that
+  lets the model decline is measured on the decline arm rather than conflated
+  with one that emits a broken call — a low overall score then reads as "didn't
+  call" or "called wrongly", not an undifferentiated fail.
 - `raw.jsonl` — one line per request: the exact request body, the raw response
   (base64, so nothing is lost or reinterpreted), the normalized stream where
   applicable, and the failure category on a miss. Every verdict is auditable
