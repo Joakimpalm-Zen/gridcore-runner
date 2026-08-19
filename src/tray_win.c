@@ -79,11 +79,17 @@ static void paint_glyph(HDC dc, tray_icon_state st, int S) {
 }
 
 static HICON grid_icon(tray_icon_state st) {
-    const int S = 16;
+    enum { S = 16 };
     HDC screen = GetDC(NULL);
     HDC dc = CreateCompatibleDC(screen);
     HBITMAP color = CreateCompatibleBitmap(screen, S, S);
-    HBITMAP mask = CreateBitmap(S, S, 1, 1, NULL);
+    // Explicit all-zero AND mask (opaque everywhere): CreateBitmap leaves the
+    // bits undefined when passed NULL, so relying on a zeroed mask was relying
+    // on the pages happening to come up zeroed. 1bpp rows are word-aligned:
+    // S/8 rounded up to 2 bytes, times S rows.
+    unsigned char mask_bits[((S + 15) / 16) * 2 * S];
+    memset(mask_bits, 0, sizeof mask_bits);
+    HBITMAP mask = CreateBitmap(S, S, 1, 1, mask_bits);
     ReleaseDC(NULL, screen);
 
     HGDIOBJ old = SelectObject(dc, color);
@@ -254,6 +260,16 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) {
 #define RUN_VAL "XyntetikTray"
 #define RUN_VAL_OLD "GridcoreTray"  // pre-rename value, migrated on sight
 
+// GetModuleFileNameA returns 0 on failure (leaving the buffer untouched) and
+// on truncation does not NUL-terminate before Windows 10 1607. Either way an
+// unchecked buffer is uninitialized or unterminated stack, and both call sites
+// below persist it into the autostart command — a corrupt Run value that would
+// fail every login. Refuse to write one rather than register garbage.
+static bool self_exe(char *out, DWORD cap) {
+    DWORD n = GetModuleFileNameA(NULL, out, cap);
+    return n != 0 && n < cap;
+}
+
 // One-time migration of the pre-rename autostart value (Gridcore ->
 // Xyntetik): re-register under the new value with the current executable and
 // delete the old one, so autostart survives the rename without leaving two
@@ -265,11 +281,12 @@ static void migrate_old_autostart(void) {
         return;
     if (RegQueryValueExA(k, RUN_VAL_OLD, NULL, NULL, NULL, NULL) == ERROR_SUCCESS) {
         char exe[1024], cmd[1100];
-        GetModuleFileNameA(NULL, exe, sizeof exe);
-        snprintf(cmd, sizeof cmd, "\"%s\" --tray", exe);
-        RegSetValueExA(k, RUN_VAL, 0, REG_SZ,
-                       (const BYTE *)cmd, (DWORD)strlen(cmd) + 1);
-        RegDeleteValueA(k, RUN_VAL_OLD);
+        if (self_exe(exe, sizeof exe)) {
+            snprintf(cmd, sizeof cmd, "\"%s\" --tray", exe);
+            RegSetValueExA(k, RUN_VAL, 0, REG_SZ,
+                           (const BYTE *)cmd, (DWORD)strlen(cmd) + 1);
+            RegDeleteValueA(k, RUN_VAL_OLD);
+        }
     }
     RegCloseKey(k);
 }
@@ -291,7 +308,10 @@ bool tray_platform_autostart_set(bool on) {
     bool ok;
     if (on) {
         char exe[1024], cmd[1100];
-        GetModuleFileNameA(NULL, exe, sizeof exe);
+        if (!self_exe(exe, sizeof exe)) {
+            RegCloseKey(k);
+            return false;
+        }
         snprintf(cmd, sizeof cmd, "\"%s\" --tray", exe);
         ok = RegSetValueExA(k, RUN_VAL, 0, REG_SZ,
                             (const BYTE *)cmd, (DWORD)strlen(cmd) + 1) == ERROR_SUCCESS;
