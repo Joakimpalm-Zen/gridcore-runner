@@ -186,3 +186,5 @@ test-prompt-oom
 test-prompt-oom.exe
 test-envelope
 test-envelope.exe
+test-template.dSYM/
+test-template-oom.dSYM/
