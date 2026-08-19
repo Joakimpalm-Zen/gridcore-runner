@@ -1152,6 +1152,91 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
     return true;
 }
 
+// ---------------------------------------------------------- hybrid SSM admission
+//
+// The Mamba-2 hybrid families — Granite-4 h-series (`granitehybrid`) and
+// Nemotron-3.5 Lightning (`nemotron_h_moe`) — interleave attention layers with
+// a selective SSD (state-space) recurrence. Runner already runs qwen35's Gated
+// DeltaNet recurrence, but Mamba-2's update (h_t = exp(dt·A)⊙h_{t-1} +
+// (dt·B)·x_t; y = C·h + D·x) is a different kernel that is not yet wired in.
+//
+// Until it is, these archs are RECOGNIZED and refused with a specific message.
+// They are never run through llama-style math (the recurrence would be silently
+// wrong) and never conflated with an unknown architecture (a refusal that reads
+// as a typo). The refusal still applies the hostile-GGUF discipline: it
+// validates the ssm.* geometry and the SSM tensor set on the first recurrent
+// layer, so a truncated or malformed hybrid fails closed naming the missing
+// field rather than deferring the surprise to the not-yet-written forward.
+static bool model_is_hybrid_ssm_arch(const char *arch) {
+    return strcmp(arch, "granitehybrid") == 0 ||
+           strcmp(arch, "nemotron_h_moe") == 0;
+}
+
+static bool hybrid_ssm_admit_refuse(gguf_file *g, const char *arch) {
+    char key[128];
+    #define HK(fmt) (snprintf(key, sizeof(key), "%s." fmt, arch), key)
+    int n_layer = (int)gguf_get_u32(g, HK("block_count"), 0);
+    int conv    = (int)gguf_get_u32(g, HK("ssm.conv_kernel"), 0);
+    int inner   = (int)gguf_get_u32(g, HK("ssm.inner_size"), 0);
+    int state   = (int)gguf_get_u32(g, HK("ssm.state_size"), 0);
+    int groups  = (int)gguf_get_u32(g, HK("ssm.group_count"), 0);
+    int heads   = (int)gguf_get_u32(g, HK("ssm.time_step_rank"), 0);
+    #undef HK
+    // Mamba-2: inner = n_ssm_heads · head_dim, and the SSM groups partition the
+    // heads. A zero or non-dividing field is a malformed hybrid, not a pending
+    // one.
+    if (n_layer < 1 || n_layer > 100000 || conv <= 0 || inner <= 0 ||
+        state <= 0 || groups <= 0 || heads <= 0 ||
+        inner % heads != 0 || heads % groups != 0) {
+        fprintf(stderr, "error: hybrid SSM architecture '%s' recognized but its "
+                "ssm.* geometry is missing or invalid (conv_kernel=%d "
+                "inner_size=%d state_size=%d group_count=%d time_step_rank=%d)\n",
+                arch, conv, inner, state, groups, heads);
+        return false;
+    }
+    int conv_dim = inner + 2 * groups * state;   // x, B, C concatenated
+    // The SSM tensors live on the recurrent layers only; find the first one (it
+    // carries the in-projection) and require the full Mamba-2 tensor set on it.
+    static const char *const need[] = {
+        "ssm_in.weight", "ssm_conv1d.weight", "ssm_conv1d.bias",
+        "ssm_a", "ssm_d", "ssm_dt.bias", "ssm_norm.weight", "ssm_out.weight",
+    };
+    char tn[160];
+    int rec = -1;
+    for (int i = 0; i < n_layer; i++) {
+        snprintf(tn, sizeof(tn), "blk.%d.ssm_in.weight", i);
+        if (gguf_find_tensor(g, tn)) { rec = i; break; }
+    }
+    if (rec < 0) {
+        fprintf(stderr, "error: hybrid SSM architecture '%s' recognized but no "
+                "recurrent layer carries an ssm_in.weight tensor\n", arch);
+        return false;
+    }
+    for (size_t k = 0; k < sizeof(need) / sizeof(need[0]); k++) {
+        snprintf(tn, sizeof(tn), "blk.%d.%s", rec, need[k]);
+        if (!gguf_find_tensor(g, tn)) {
+            fprintf(stderr, "error: hybrid SSM architecture '%s' recognized but "
+                    "required tensor '%s' is missing\n", arch, tn);
+            return false;
+        }
+    }
+    // One dim check the presence loop cannot make: the conv weight is
+    // [conv_kernel, conv_dim]. A mismatch is a hostile/mislabelled geometry.
+    snprintf(tn, sizeof(tn), "blk.%d.ssm_conv1d.weight", rec);
+    gguf_tensor *cw = gguf_find_tensor(g, tn);
+    if ((int)cw->ne[0] != conv || (int)cw->ne[1] != conv_dim) {
+        fprintf(stderr, "error: hybrid SSM architecture '%s': %s has shape "
+                "[%llu,%llu], expected [%d,%d] from the ssm.* metadata\n",
+                arch, tn, (unsigned long long)cw->ne[0],
+                (unsigned long long)cw->ne[1], conv, conv_dim);
+        return false;
+    }
+    fprintf(stderr, "error: hybrid SSM architecture '%s' (Mamba-2 selective "
+            "SSD) recognized; forward not yet implemented — the SSM decode/scan "
+            "kernel and recurrent-state cache seam are in progress\n", arch);
+    return false;
+}
+
 static bool model_bind_weights(model_t *m, const char *path, const model_params *p) {
     if (!gguf_open(&m->gf, path)) return false;
     gguf_file *g = &m->gf;
@@ -1247,6 +1332,14 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 "but produce incorrect output without its scaling/softcapping\n", arch);
         return false;
     }
+    // Recognized Mamba-2 hybrids are refused SPECIFICALLY (forward pending),
+    // before the allowlist check — never the generic unknown-arch refusal and
+    // never smuggled into llama-style math by RUNNER_ALLOW_UNKNOWN_ARCH. This
+    // is deliberately not in model_supported_archs: that list is the single
+    // source of truth for what --caps advertises as RUNNABLE, and these do not
+    // run yet. They graduate to the allowlist when the forward lands.
+    if (model_is_hybrid_ssm_arch(arch))
+        return hybrid_ssm_admit_refuse(g, arch);
     size_t n_arch;
     const char *const *ok_archs = model_supported_archs(&n_arch);
     bool arch_known = false;
