@@ -46,6 +46,22 @@ A full module-by-module code review of the tree. Behaviour changes first.
   non-2xx from `/unload` as fatal will now fail on a multi-slot server where
   they previously passed while achieving nothing. Making that configuration
   genuinely unloadable is a separate, later feature.
+- **BREAKING: a completion carrying `keep_alive` is now refused with `400`
+  where it cannot be honored.** The same configuration that broke `/unload` —
+  a single model on `--parallel N` for `N > 1`, with no registry — also had no
+  swap-mode idle/unload machinery for `keep_alive` to drive, so the field was
+  range-checked, accepted, and then silently dropped. A client sending
+  `keep_alive: 0` ("unload after this request") was answered as if it had
+  happened while the model stayed fully resident. It is now a `400` naming the
+  configuration, with code `keep_alive_unsupported`, matching how the surface
+  rejects other well-formed-but-unsatisfiable request fields (`timeout out of
+  range`, unsupported field semantics). `400` rather than `/unload`'s `409`
+  because this is a per-request field on a completion, not a management route
+  whose target-resource state refuses it. A completion with **no** `keep_alive`
+  field is the normal case and is entirely unaffected — only a request that
+  explicitly asks for behavior the server cannot deliver is refused. On every
+  registry-backed configuration (`--parallel 1`, swap sets) `keep_alive` works
+  as before.
 - **The adopted margin-qualified top-1 criterion is tighter, and its report
   schema is now `xyntetik.runner.kld-raw.v3`.** `scripts/kld-compare-raw.py`
   forgave a top-1 divergence whenever the REFERENCE's own #1 and #2 were within

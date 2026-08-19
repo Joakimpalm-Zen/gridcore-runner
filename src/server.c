@@ -908,6 +908,38 @@ static void handle_conn(slot_t *s, sock_t fd) {
                 free(body);
                 return;
             }
+            // A server with no registry (SV.n_reg == 0) is exactly one
+            // configuration: a single model served with --parallel N>1, whose
+            // slots hold the model directly (server.c only joins the registry
+            // when parallel == 1). keep_alive drives the swap-mode idle/unload
+            // machinery, which does not exist there -- so the field used to be
+            // range-checked, accepted, and then silently dropped below (the
+            // `SV.n_reg > 0` guard). A client sending keep_alive:0 ("unload
+            // after this request") was answered as if it happened while the
+            // model stayed resident, the same dishonesty POST /unload was
+            // taught to refuse in this configuration. 400, not 409 as /unload
+            // uses: /unload is a management route whose target-resource state
+            // refuses it, this is a per-request field on a completion that is
+            // well-formed but not satisfiable here -- the shape of the
+            // surface's other request-field rejections (timeout out of range,
+            // a field with unsupported semantics). A request with NO keep_alive
+            // is the normal case and is untouched.
+            if (has_keep_alive && SV.n_reg == 0) {
+                char msg[384];
+                snprintf(msg, sizeof(msg),
+                         "keep_alive cannot be honored: with --parallel %d and "
+                         "a single model the slots hold the model directly and "
+                         "never join the registry, so there is no idle-unload "
+                         "to schedule against and keep_alive:0 would free "
+                         "nothing. Serve with --parallel 1 for keep_alive "
+                         "support.",
+                         SV.n_slots);
+                send_error_detail(fd, 400, msg, "keep_alive",
+                                  "keep_alive_unsupported");
+                jv_free(req);
+                free(body);
+                return;
+            }
             atomic_fetch_add(&SV.active_requests, 1);
             bool ok = true;
             if (SV.n_reg > 0) {

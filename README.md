@@ -653,10 +653,14 @@ the model directly, with no registry to unload it from. There `POST /unload`
 **refuses** with `409` and an error naming the configuration — it used to
 answer `{"status":"ok"}` after freeing only the prefix cache, which told an
 operator reclaiming memory that weights and KV were gone while every byte
-stayed resident. `keep_alive` is still range-checked and then ignored in this
-configuration. `POST /v1/runner/prefix-cache/clear` works everywhere and is
-what the refusal points at; serve with `--parallel 1` if you need an
-unloadable server.
+stayed resident. A completion that carries a `keep_alive` field there is
+**refused** with `400` for the same reason: the field is well-formed but not
+satisfiable without a registry, and `keep_alive: 0` would free nothing — it
+used to be range-checked and then silently dropped. A completion with no
+`keep_alive` field is the normal case and is unaffected.
+`POST /v1/runner/prefix-cache/clear` works everywhere and is what both
+refusals point at; serve with `--parallel 1` if you need an unloadable
+server.
 
 ### Server environment
 

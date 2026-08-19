@@ -582,3 +582,55 @@ def test_keep_alive_zero_releases_what_unload_releases():
         assert caps["resident"] is None and caps["context"] == 0, caps
         after = _prefix_cache(srv.base_url)
         assert after["entries"] == 0 and after["bytes"] == 0, after
+
+
+def test_keep_alive_refuses_when_it_cannot_be_honored():
+    """A multi-slot single-model server must REFUSE keep_alive, not drop it.
+
+    `--parallel N>1` with one model never joins the registry (server.c only
+    does that for `parallel == 1`), so the swap-mode idle/unload machinery
+    keep_alive drives does not exist there. The field was range-checked,
+    accepted, and then silently ignored: a client that sent `keep_alive: 0`
+    ("unload after this request") was answered as if it would happen, and the
+    model stayed resident with nothing on the wire to say otherwise. That is
+    the same dishonesty POST /unload was taught to refuse in this
+    configuration -- truthful refusal beats partial success.
+
+    So keep_alive on this server is a 400: the field is well-formed but not
+    satisfiable in this configuration, which is exactly the shape of the
+    surface's other per-request field rejections (timeout out of range, a
+    field with unsupported semantics). A completion with NO keep_alive field
+    is the normal case and must be untouched.
+    """
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))
+    with RunnerServer(find_runner(root), model, ctx=1024, parallel=2,
+                      extra_args=["--gpu", "off"]) as srv:
+        with urllib.request.urlopen(srv.base_url + "/v1/capabilities",
+                                    timeout=5) as r:
+            before = json.load(r)
+        # both the "unload now" spelling and a positive TTL must refuse, since
+        # neither can be honored without a registry
+        for value in (0, 300, -1):
+            body = json.dumps({"messages": [{"role": "user", "content": "hi"}],
+                               "max_tokens": 8, "keep_alive": value}).encode()
+            req = urllib.request.Request(srv.base_url + "/v1/chat/completions",
+                                         data=body,
+                                         headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10):
+                    raise AssertionError(
+                        "keep_alive=%r was accepted on a server that cannot "
+                        "honor it" % value)
+            except urllib.error.HTTPError as e:
+                assert e.code == 400, f"expected 400 for keep_alive={value!r}, got {e.code}"
+                detail = json.load(e)["error"]
+                assert detail["code"] == "keep_alive_unsupported", detail
+                assert "--parallel" in detail["message"], detail
+        # the refusal is truthful: nothing was unloaded behind it
+        with urllib.request.urlopen(srv.base_url + "/v1/capabilities",
+                                    timeout=5) as r:
+            after = json.load(r)
+        assert after["resident"] == before["resident"], (before, after)
+        # the normal case -- no keep_alive field -- is untouched and still serves
+        assert _chat(srv.base_url)["choices"]
