@@ -670,18 +670,33 @@ runtime it is actually running (`runner --version` and the compiled backend,
 exact-match — a manifest measured on a different version or backend does not
 speak for this one):
 
+The states are distinguished by what Runner actually *knows* about the model,
+not just by what they do — two of them load with a banner but mean different
+things:
+
 | State | Condition | Behavior |
 |---|---|---|
 | **certified** | the sidecar matches this runtime and its gate passed | loads; a banner notes the match |
-| **experimental** | no sidecar, or one measured on a different runtime/backend | loads; a banner notes the configuration is not certified |
 | **outside-envelope** | the sidecar matches this runtime and records a measured refusal (e.g. the model does not fit, or an identity check failed) | **refused** at load with the measured reason; `--force-uncertified` overrides with a loud warning |
+| **experimental** | the sidecar matches this runtime and its verdict is literally `experimental` — a real measurement that came back inconclusive | loads; a banner notes it is not certified |
+| **indeterminate** | a sidecar *is* present but cannot be used to judge this run — unreadable, an unknown schema, or measured on a different runtime/backend | loads (fail-open); a banner notes it could not be judged |
+| **unclassified** | no sidecar at all | loads **silently** — a transitional/legacy state |
 
-The wording is deliberate: a configuration *matches a measured envelope*, it is
-not *certified* as a standing property — the claim is scoped to that exact
-artifact, backend, and date. The gate is fail-open on doubt: an absent,
-unreadable, or unrecognized sidecar is treated as experimental and never blocks
-a load, because a wrong refusal is worse than none. Runner only ever *reads*
-this file; it is produced by the certification pipeline, never at runtime.
+Two of those distinctions are load-bearing. **unclassified** ≠ *experimental*: a
+model with no sidecar predates or sits outside the certification pipeline, so
+there is nothing measured to report — not a measurement that came back
+inconclusive — and it does not warrant a banner on every load. **indeterminate**
+≠ *experimental* either: "we could not read/apply the sidecar" is not the same
+claim as "we measured this and it was inconclusive." As the pipeline's coverage
+grows, unclassified is the state that shrinks.
+
+The rest of the wording is deliberate too: a configuration *matches a measured
+envelope*, it is not *certified* as a standing property — the claim is scoped to
+that exact artifact, backend, and date. The gate is fail-open on doubt: only a
+*matching* `outside-envelope` verdict ever refuses; anything unreadable, foreign,
+or unrecognized is indeterminate and loads, because a wrong refusal is worse than
+none. Runner only ever *reads* this file; it is produced by the certification
+pipeline, never at runtime.
 
 ## Serving and APIs
 

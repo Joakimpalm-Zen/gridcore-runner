@@ -8,23 +8,35 @@
 // scripts/certify-envelope.py emits a `<model>.envelope.json` sidecar that
 // INDEXES the evidence a certification run produced for one artifact. This
 // reads the sidecar sitting next to a loaded model and reports whether the
-// CURRENT runtime (version + compiled backend) matches what was measured. It
-// is READ + REPORT ONLY — no enforcement, no refusal; a matching-tuple
-// three-state gate is the next slice. It never fails a load: an absent or
-// malformed manifest is a state, not an error.
+// CURRENT runtime (version + compiled backend) matches what was measured.
+// envelope_report is READ + REPORT ONLY; envelope_gate (slice 3) adds the
+// load-time refusal for a matching outside-envelope verdict. Reporting never
+// fails a load: an absent or malformed manifest is a state, not an error.
 //
 // Resolution is EXACT-MATCH by design (no closest-class fallback): the manifest
 // only speaks for the runtime version and backend it was measured on. H8/H10
 // wording — a configuration "matches a measured envelope", it is not "certified"
 // as a standing property.
 
+// The five states are distinguished by EPISTEMIC status, not just behavior: two
+// of them (experimental, indeterminate) both load-with-a-banner but mean
+// different things, and conflating them re-imports a semantic mismatch. What we
+// KNOW about the model, from most to least:
 enum envelope_state {
-    ENV_NONE = 0,      // no manifest beside the model
+    ENV_UNCLASSIFIED = 0, // no manifest beside the model. TRANSITIONAL / LEGACY:
+                       // the model predates or sits outside the certification
+                       // pipeline, so there is nothing measured to say — NOT a
+                       // measurement that came back inconclusive. Silent.
     ENV_CERTIFIED,     // manifest matches this version+backend and passed the gate
     ENV_OUTSIDE,       // manifest matches this version+backend, verdict outside-envelope
-    ENV_EXPERIMENTAL,  // manifest exists but was measured on a different
-                       // version/backend, or its verdict was experimental, or
-                       // it could not be parsed
+    ENV_EXPERIMENTAL,  // manifest MATCHES this version+backend and its verdict is
+                       // literally "experimental" — a real measurement that came
+                       // back inconclusive. Loads with a banner.
+    ENV_INDETERMINATE, // a sidecar IS present but cannot be used to judge this
+                       // run: unreadable/malformed, an unknown schema, or
+                       // measured on a DIFFERENT version/backend ("foreign").
+                       // We could not tell — distinct from "we measured and it
+                       // was inconclusive". Fail-open: loads with a banner.
 };
 
 // `model_path`: the loaded GGUF path (the manifest is `<model_path>.envelope.json`).
@@ -41,11 +53,14 @@ int envelope_report(const char *model_path, const char *runtime_version,
 //   OUTSIDE   + !forced -> returns FALSE (refuse the load); `msg` is the
 //                          measured reason and how to override.
 //   OUTSIDE   + forced  -> returns true;  `msg` is a loud override warning.
-//   CERTIFIED / EXPERIMENTAL -> returns true; `msg` is the informational banner
-//                          (the same line envelope_report would produce).
-//   NONE (no manifest)  -> returns true; `msg` is "" — a bare load stays quiet.
-// It is fail-open on doubt: an unreadable/unknown manifest is experimental and
-// never blocks a load — a wrong refusal is worse than none. `*out_state`
+//   CERTIFIED / EXPERIMENTAL / INDETERMINATE -> returns true; `msg` is the
+//                          informational banner (the same line envelope_report
+//                          would produce).
+//   UNCLASSIFIED (no manifest) -> returns true; `msg` is "" — a model outside
+//                          the certification pipeline loads quietly, no banner.
+// It is fail-open on doubt: an unreadable/unknown/foreign manifest is
+// INDETERMINATE and never blocks a load — a wrong refusal is worse than none.
+// Only a MATCHING outside-envelope verdict refuses. `*out_state`
 // (may be NULL) receives the resolved envelope_state. `msg` is always
 // NUL-terminated when cap > 0.
 bool envelope_gate(const char *model_path, const char *runtime_version,

@@ -38,9 +38,9 @@ static const char *manifest(const char *version, const char *backend,
 int main(void) {
     char out[256];
 
-    // No sidecar -> silent, no state.
+    // No sidecar -> silent, unclassified (transitional/legacy, not experimental).
     rm_manifest();
-    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_NONE);
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_UNCLASSIFIED);
     assert(out[0] == 0);
 
     // Exact match + certified -> certified, and it says so.
@@ -53,41 +53,53 @@ int main(void) {
     assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_OUTSIDE);
     assert(strstr(out, "OUTSIDE"));
 
+    // Exact match + verdict "experimental" -> EXPERIMENTAL: a real measurement
+    // that came back inconclusive (NOT the same as one we could not read).
+    write_manifest(manifest(RUNNER_VERSION, "cpu", "experimental"));
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_EXPERIMENTAL);
+    assert(strstr(out, "experimental"));
+
     // Exact-match only: a manifest measured on a DIFFERENT backend does not
-    // describe this configuration -> experimental.
+    // describe this configuration -> INDETERMINATE (foreign, could not judge).
     write_manifest(manifest(RUNNER_VERSION, "cpu", "certified"));
-    assert(envelope_report(MODEL, RUNNER_VERSION, "cuda", out, sizeof out) == ENV_EXPERIMENTAL);
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cuda", out, sizeof out) == ENV_INDETERMINATE);
 
     // ... nor a different runtime version.
     write_manifest(manifest("0.0.0-old", "cpu", "certified"));
-    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_EXPERIMENTAL);
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_INDETERMINATE);
 
-    // Unknown manifest schema is not trusted for this runner.
+    // Unknown manifest schema is not trusted for this runner -> indeterminate.
     write_manifest("{\"schema_version\":\"other.v9\",\"verdict\":\"certified\"}");
-    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_EXPERIMENTAL);
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_INDETERMINATE);
 
-    // A present-but-malformed sidecar is experimental, never a crash or a load
+    // A present-but-malformed sidecar is indeterminate, never a crash or a load
     // failure.
     write_manifest("{ this is not json");
-    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_EXPERIMENTAL);
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_INDETERMINATE);
 
     // ---- slice 3: the enforcing gate ----------------------------------------
     int st = -1;
 
-    // No manifest -> load, silent, state NONE.
+    // No manifest -> load, silent, unclassified.
     rm_manifest();
     assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
-    assert(out[0] == 0 && st == ENV_NONE);
+    assert(out[0] == 0 && st == ENV_UNCLASSIFIED);
 
     // Certified -> load, with the informational banner.
     write_manifest(manifest(RUNNER_VERSION, "cpu", "certified"));
     assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
     assert(st == ENV_CERTIFIED && strstr(out, "certified"));
 
-    // Experimental (matches nothing) -> load, banner, never a refusal.
+    // Matching verdict "experimental" -> load, banner, never a refusal.
+    write_manifest(manifest(RUNNER_VERSION, "cpu", "experimental"));
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
+    assert(st == ENV_EXPERIMENTAL && strstr(out, "experimental"));
+
+    // Foreign sidecar (measured on another backend) -> INDETERMINATE, loads
+    // with a banner, never a refusal.
     write_manifest(manifest(RUNNER_VERSION, "cuda", "certified"));
     assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
-    assert(st == ENV_EXPERIMENTAL);
+    assert(st == ENV_INDETERMINATE && out[0]);
 
     // Outside-envelope -> REFUSE (returns false), and the message tells the
     // user how to override.
@@ -109,10 +121,10 @@ int main(void) {
     assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == false);
     assert(strstr(out, "ram_fits"));
 
-    // Fail-open: a malformed manifest never blocks a load.
+    // Fail-open: a malformed manifest is indeterminate, never blocks a load.
     write_manifest("{ this is not json");
     assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
-    assert(st == ENV_EXPERIMENTAL);
+    assert(st == ENV_INDETERMINATE);
 
     rm_manifest();
     printf("test-envelope: OK\n");

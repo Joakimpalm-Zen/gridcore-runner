@@ -48,11 +48,12 @@ static int classify(jv *m, const char *runtime_version, const char *backend,
 
     if (strcmp(schema, "xyntetik.runner.envelope.v1") != 0) {
         // A manifest whose schema we do not understand is not evidence for THIS
-        // runner — report it, do not trust it.
+        // runner — we cannot judge it, so it is indeterminate (not the same as a
+        // measurement that came back inconclusive).
         snprintf(out, (size_t)cap,
-                 "envelope: manifest schema %s not recognised (experimental)",
+                 "envelope: manifest schema %s not recognised (indeterminate)",
                  schema[0] ? schema : "(missing)");
-        return ENV_EXPERIMENTAL;
+        return ENV_INDETERMINATE;
     }
     if (ver_match && back_match) {
         if (!strcmp(verdict, "certified")) {
@@ -67,19 +68,27 @@ static int classify(jv *m, const char *runtime_version, const char *backend,
                      "(measured refusal)", rv, backend);
             return ENV_OUTSIDE;
         }
+        if (!strcmp(verdict, "experimental")) {
+            snprintf(out, (size_t)cap,
+                     "envelope: measured for %s / %s, verdict experimental "
+                     "(not certified)", rv, backend);
+            return ENV_EXPERIMENTAL;
+        }
+        // Matching runtime but a verdict we do not recognise: we cannot judge it.
         snprintf(out, (size_t)cap,
-                 "envelope: measured for %s / %s but not certified (experimental)",
-                 rv, backend);
-        return ENV_EXPERIMENTAL;
+                 "envelope: measured for %s / %s but its verdict %s is "
+                 "unrecognised (indeterminate)", rv, backend,
+                 verdict[0] ? verdict : "(missing)");
+        return ENV_INDETERMINATE;
     }
     // Exact-match only: a manifest measured on a different version or backend
-    // does not describe this configuration.
+    // does not describe this configuration — foreign, so indeterminate here.
     snprintf(out, (size_t)cap,
              "envelope: measured on %s / %s, not this runtime (%s / %s) "
-             "— experimental here",
+             "— indeterminate here",
              m_ver[0] ? m_ver : "(unknown)", m_back[0] ? m_back : "(unknown)",
              rv, backend ? backend : "(unknown)");
-    return ENV_EXPERIMENTAL;
+    return ENV_INDETERMINATE;
 }
 
 // The measured reason behind an outside-envelope verdict is the set of gate
@@ -105,18 +114,18 @@ static void outside_reason(jv *m, char *out, int cap) {
 int envelope_report(const char *model_path, const char *runtime_version,
                     const char *backend, char *out, int cap) {
     if (cap > 0) out[0] = 0;
-    if (!model_path) return ENV_NONE;
+    if (!model_path) return ENV_UNCLASSIFIED;
 
     size_t n = 0;
     char *text = read_sidecar(model_path, &n);
-    if (!text) return ENV_NONE;
+    if (!text) return ENV_UNCLASSIFIED;
 
     jv *m = json_parse(text, n);
     free(text);
     if (!m) {
         snprintf(out, (size_t)cap,
-                 "envelope: manifest present but unreadable (treated as experimental)");
-        return ENV_EXPERIMENTAL;
+                 "envelope: manifest present but unreadable (indeterminate)");
+        return ENV_INDETERMINATE;
     }
     int state = classify(m, runtime_version, backend, out, cap);
     jv_free(m);
@@ -127,7 +136,7 @@ bool envelope_gate(const char *model_path, const char *runtime_version,
                    const char *backend, bool forced,
                    char *msg, int cap, int *out_state) {
     if (cap > 0) msg[0] = 0;
-    if (out_state) *out_state = ENV_NONE;
+    if (out_state) *out_state = ENV_UNCLASSIFIED;
     if (!model_path) return true;
 
     size_t n = 0;
@@ -137,11 +146,11 @@ bool envelope_gate(const char *model_path, const char *runtime_version,
     jv *m = json_parse(text, n);
     free(text);
     if (!m) {
-        // Fail-closed the SAFE way: an unreadable manifest is not evidence of a
-        // refusal, so it never blocks a load — it is experimental, load on.
+        // Fail-open the SAFE way: an unreadable manifest is not evidence of a
+        // refusal, so it never blocks a load — it is indeterminate, load on.
         snprintf(msg, (size_t)cap,
-                 "envelope: manifest present but unreadable (treated as experimental)");
-        if (out_state) *out_state = ENV_EXPERIMENTAL;
+                 "envelope: manifest present but unreadable (indeterminate)");
+        if (out_state) *out_state = ENV_INDETERMINATE;
         return true;
     }
 
@@ -164,7 +173,8 @@ bool envelope_gate(const char *model_path, const char *runtime_version,
             allow = false;
         }
     } else {
-        // certified / experimental: informational banner (never blocks).
+        // certified / experimental / indeterminate: informational banner
+        // (never blocks). UNCLASSIFIED already returned above with an empty msg.
         snprintf(msg, (size_t)cap, "%s", summary);
     }
 
