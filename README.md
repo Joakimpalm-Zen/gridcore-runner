@@ -1062,7 +1062,12 @@ and `generate_seconds` are cumulative monotonic totals across every API
 surface. `batch_steps` and `batch_sequences` count the scheduler's microbatch
 steps and the sequences cut into them, so `batch_sequences / batch_steps` is
 the mean batch size over your own window; both stay `0` on a server that never
-started continuous batching (a single slot, or swap mode).
+started continuous batching (a single slot, or swap mode). On CUDA they also
+stay `0` for a model whose weights use a quantization the batched path has no
+bitwise-identical kernel for — a batched step must return, per sequence, the
+bits a lone step would have, so such a model decodes its sequences one at a
+time rather than batching them into different numbers. Q8_0, Q4_0, Q4_K, Q5_K,
+Q6_K, F32 and F16 batch; the rest do not.
 
 Those are deliberately raw counters rather than a tokens-per-second field: a
 rate needs an averaging window, and the runner has no business choosing one for

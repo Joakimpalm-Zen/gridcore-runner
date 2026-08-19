@@ -1139,10 +1139,12 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             // twins of f_gemv: same per-column arithmetic, x staged in smem,
             // one instantiation per microbatch width class
             { &w->f_gemvb[BW_4][T_Q8_0], "k_gemvb_q8_0_x4" },
+            { &w->f_gemvb[BW_4][T_Q4_0], "k_gemvb_q4_0_x4" },
             { &w->f_gemvb[BW_4][T_Q4_K], "k_gemvb_q4_K_x4" },
             { &w->f_gemvb[BW_4][T_Q5_K], "k_gemvb_q5_K_x4" },
             { &w->f_gemvb[BW_4][T_Q6_K], "k_gemvb_q6_K_x4" },
             { &w->f_gemvb[BW_8][T_Q8_0], "k_gemvb_q8_0_x8" },
+            { &w->f_gemvb[BW_8][T_Q4_0], "k_gemvb_q4_0_x8" },
             { &w->f_gemvb[BW_8][T_Q4_K], "k_gemvb_q4_K_x8" },
             { &w->f_gemvb[BW_8][T_Q5_K], "k_gemvb_q5_K_x8" },
             { &w->f_gemvb[BW_8][T_Q6_K], "k_gemvb_q6_K_x8" },
@@ -2492,6 +2494,16 @@ static bool enc_moe_gemm(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
         return enc_mv(g, m, w, x, y, n_in, n_out, 0, 1, xs, ys);
     if (cnt > 8 || (tc_on(m, w->type) && g->sw->f_gemm_tc[w->type]))
         return enc_mv(g, m, w, x, y, n_in, n_out, 0, cnt, xs, ys);
+    // enc_mv_batch REFUSES a type with no width-classed twin, because the
+    // decode microbatch owes each sequence the bits a lone step would produce.
+    // Grouped expert prefill owes no such thing -- it is tolerance-gated
+    // (test-moe-tol), not identity-gated -- so here the tile kernel is still a
+    // legitimate fallback and enc_mv picks it. moe_grouped_eligible() admits
+    // only Q8_0/Q4_K/Q5_K/Q6_K today, all of which have twins, so this branch
+    // is unreachable; it exists so widening that set cannot silently turn into
+    // a hard failure at the first expert.
+    if (!g->sw->f_gemvb[batch_width_class(cnt)][w->type])
+        return enc_mv(g, m, w, x, y, n_in, n_out, 0, cnt, xs, ys);
     return enc_mv_batch(g, m, w, x, y, n_in, n_out, 0, cnt, xs, ys);
 }
 
@@ -3214,20 +3226,41 @@ struct gpu_batch {
 
 // enc_mv_batch reproduces the batch-1 result by launching the multi-column
 // TWIN of whatever kernel the batch-1 path would have used. For a type with a
-// decode GEMV but no width-classed twin there IS no such kernel, and
-// enc_mv_batch silently substitutes f_mvb — a different family, with a
-// different reduction and no shared-memory x staging. That costs both halves
-// of the bargain at once: measured on Qwen3-0.6B-q4_0 (Blackwell MIG,
-// 2026-08-18) a 4-wide microbatch ran at 0.11x of sequential decode, i.e.
-// NINE TIMES SLOWER, and its logits were not bit-identical either. Q4_0 is the
-// whole of this set today: it grew a k_gemv_q4_0 on 2026-08-13 and never got
-// the k_gemvb_q4_0_x4/x8 pair. Refuse the microbatch for such a model — the
-// caller then decodes sequentially, which is the faster path anyway.
+// decode GEMV but no width-classed twin there IS no such kernel, so refuse the
+// microbatch here, at create time, and let the caller decode those sequences
+// one at a time. enc_mv_batch refuses too, but only a drifted check gets that
+// far; this is where a model is supposed to be turned away.
+//
+// The set is EMPTY today: every type with an f_gemv (Q8_0, Q4_0, Q4_K, Q5_K,
+// Q6_K) has both width classes. It was not empty on 2026-08-18 — Q4_0 had
+// grown a k_gemv_q4_0 on 2026-08-13 with no twin, so enc_mv_batch substituted
+// f_mvb: a different reduction AND no shared-memory x staging, measured on
+// Qwen3-0.6B-q4_0 at 0.11x of sequential decode, nine times SLOWER, and not
+// bit-identical either. 8111c36 refused it; k_gemvb_q4_0_x4/_x8 (2026-08-19)
+// make it batch again at 1.62x, bit-identical. The check stays because the next
+// type to grow a decode GEMV will arrive the same way.
+// Where there is no decode GEMV the batch-1 path runs f_mv, and the question
+// becomes whether f_mvb is ITS twin. It is, but only for the types whose _b
+// kernel applies the same per-element weight in the same order — the MV_FMA
+// family, where the weight is just the loaded element: F32 and F16. Every
+// QUANTIZED _b kernel factors the block scale into each weight (it accumulates
+// Sum (d*q[j])*x[j]) while its batch-1 partner keeps it outside the block sum
+// (d * Sum q[j]*x[j]): the same values in a different association, so different
+// bits. That is cause 2 of the 2026-07-28 break, and unlike cause 1 it cannot
+// be fixed in the kernel — k_mv_*_b is also the prefill tile kernel and prefill
+// is certified as it stands. It is fixed by not reaching for it: a dense model
+// in a quantized type with no decode GEMV (Q4_1, Q5_0, Q5_1, Q3_K, IQ4_NL,
+// IQ4_XS, MXFP4) now decodes its sequences one at a time instead of batching
+// them into different numbers.
+static inline bool mvb_is_mv_twin(int type) {
+    return type == T_F32 || type == T_F16;
+}
+
 static bool batch_mv_twin_ok(const gpu_weights *sw, const gguf_tensor *t) {
     if (!t) return true;
     int type = t->type;
     if (type < 0 || type >= KT_N) return false;
-    if (!sw->f_gemv[type]) return true;   // batch-1 uses f_mv; f_mvb is its twin
+    if (!sw->f_gemv[type]) return mvb_is_mv_twin(type) && sw->f_mvb[type];
     for (int w = 0; w < BW_N; w++)
         if (!sw->f_gemvb[w][type]) return false;
     return true;
@@ -3351,7 +3384,18 @@ static bool enc_mv_batch(gpu_t *g, model_t *m, gguf_tensor *w, CUdeviceptr x,
     CUfunction f = g->sw->f_gemvb[batch_width_class(batch)][w->type];
     if (f) return launch(g, f, (n_out + GEMM_WARPS - 1) / GEMM_WARPS, 1, 1,
                          GEMM_WARPS * 32, p);
-    return launch(g, g->sw->f_mvb[w->type], (n_out + 3) / 4, 1, 1, 128, p);
+    // No width-classed twin. f_mvb is the right answer only where it really is
+    // f_mv's twin (see mvb_is_mv_twin) — for a quantized type it is a different
+    // association and therefore different bits, which is exactly what this path
+    // exists to refuse. batch_eligible() declines such a model at
+    // gpu_batch_create time and the caller decodes its sequences one at a time,
+    // so reaching here means that check has drifted: name the tensor rather
+    // than silently return different numbers.
+    if (mvb_is_mv_twin(w->type) && g->sw->f_mvb[w->type])
+        return launch(g, g->sw->f_mvb[w->type], (n_out + 3) / 4, 1, 1, 128, p);
+    gpu_first_error("tensor '%s' has no batched kernel that is bitwise the "
+                    "batch-1 kernel; refusing the microbatch", w->name);
+    return false;
 }
 
 static bool enc_rope_batch(gpu_batch *B, model_t *m, CUdeviceptr v, int n_heads,
