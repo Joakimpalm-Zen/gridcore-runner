@@ -45,7 +45,26 @@ llama.cpp b10076 are token-identical on the file; OpenLLM-France's own
 official GGUF carries the same defect — reported upstream as
 [OpenLLM-France/Lucie-Training#3](https://github.com/OpenLLM-France/Lucie-Training/issues/3)). Lucie still does NOT hold the tokenizer check, because
 the check certifies the shipped artifact against the HF reference — but the
-failure names the right culprit. Teuken renders through the llama2 fallback and its chat row shows that
+failure names the right culprit. **(Resolved upstream 2026-08-19.)**
+OpenLLM-France republished the GGUF on 2026-08-18: the conversion now rebuilds
+the merge hierarchy from `tokenizer.json`, so `tokenizer.ggml.scores` carries
+65,024 genuine, distinct merge ranks instead of the flat −1000 (the artifact
+stays SentencePiece/`llama`, the ranks are restored in the scores). Re-tested
+on the updated `OpenLLM-France/Lucie-7B-Instruct-v1.1-gguf`
+(`Lucie-7B-Instruct-v1.1-q4_k_m.gguf`, sha256
+`bec3af604bc043bb0860216b11da6ef689e01e7696e1b064c75acc3e15753433`): corpus
+divergence dropped 259/721 → **190/721**, "jumps" now segments jum+ps as the
+reference does, and every one of the 190 residual strings is the maintainer's
+normalizer class — a missing/extra leading ▁ that the HF normalizer inserts
+after line breaks and punctuation, plus `\r`-stripping and non-breaking-space
+handling; after canceling that ▁/whitespace normalization **zero** strings show
+a different segmentation (never a wrong merge). So the artifact now holds the
+tokenizer check modulo the minor normalizer-▁ residual llama.cpp does not run
+(confirmed upstream, issue #3). Note the manifest (`tests/compatibility/models.json`,
+`lucie-7b-instruct-q4_k_m`) still pins the OLD buggy file
+(sha `0d889e0…`); re-pinning to the fixed sha above is a recommended follow-up
+but must ship with a fresh reference-ids capture and a re-evidenced report, not a
+blind swap (the pin is a reproducibility anchor). Teuken renders through the llama2 fallback and its chat row shows that
 framing's artifacts, though the surface and tool calls work. (Corrected
 2026-08-14: this previously read "Teuken's chat template emits artifacts
 (`{Answer}`)". Teuken ships no chat template — its GGUF carries no
