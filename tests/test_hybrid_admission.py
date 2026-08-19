@@ -107,3 +107,57 @@ def test_opt_in_does_not_smuggle_nemotron_into_llama_math(runner_bin, models):
         env={**os.environ, "RUNNER_ALLOW_UNKNOWN_ARCH": "1"})
     assert proc.returncode != 0
     assert "forward not yet implemented" in proc.stderr.decode(errors="replace")
+
+
+# --------------------------------------------------------------------------
+# nemotron_h (Nemotron-Nano-9B-v2 family) — NON-MoE Mamba-2 / attention / MLP
+# hybrid, graduated from refuse to load+decode (SSM tracer 3). Its grouped scan
+# (ssm.group_count=2 in the fixture, 8 in the real model) is the crux Lightning
+# was refused on; certified token-identically at the noise floor vs llama.cpp
+# b10353 on the real Nemotron-Nano-9B-v2 Q8_0 (a scripted check; this is the
+# unit level). Distinct fixture generator (non-MoE, three-way layer typing,
+# gate-less squared-ReLU MLP, group_count>1, inner != 2*embd).
+# --------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def nemo_model(tmp_path_factory):
+    d = tmp_path_factory.mktemp("nemotron_h")
+    pfx = d / "nemotron_h"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-nemotron.py", str(pfx)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    return (pfx.with_suffix(".gguf"), d / "nemotron_h.missing-ssm_d.gguf")
+
+
+def test_nemotron_h_loads_and_decodes(runner_bin, nemo_model):
+    """nemotron_h (NON-MoE) RUNS: it must LOAD (not refuse) and decode the
+    grouped Mamba-2 scan. A regression to a refusal, or an inability to run the
+    n_group>1 step / the three-way (SSM|attn|MLP) block typing, fails here."""
+    good, _ = nemo_model
+    proc = _run(runner_bin, good, n="8")
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    err = proc.stderr.decode(errors="replace")
+    assert "nemotron_h" in err
+    assert "grouped scan" in err
+    assert "forward not yet implemented" not in err
+    assert "refusing to run it through llama-style math" not in err
+
+
+def test_nemotron_h_decode_is_deterministic(runner_bin, nemo_model):
+    """Greedy decode must be reproducible run to run (the property the real
+    token-identity gate builds on)."""
+    good, _ = nemo_model
+    a = _run(runner_bin, good, n="8")
+    b = _run(runner_bin, good, n="8")
+    assert a.returncode == 0 and b.returncode == 0
+    assert a.stdout == b.stdout
+
+
+def test_nemotron_h_missing_ssm_tensor_fails_closed(runner_bin, nemo_model):
+    """The hostile-GGUF discipline holds for the graduated arch too: a missing
+    required SSM tensor must FAIL CLOSED naming it, not decode past the map."""
+    _, broken = nemo_model
+    proc = _run(runner_bin, broken)
+    assert proc.returncode != 0, "a missing required SSM tensor must fail closed"
+    err = proc.stderr.decode(errors="replace")
+    assert "ssm_d" in err, "the failure must name the absent tensor"
+    assert "nemotron_h" in err

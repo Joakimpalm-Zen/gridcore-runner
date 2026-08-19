@@ -756,6 +756,7 @@ const char *const *model_supported_archs(size_t *count) {
         "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
         "smollm", "stablelm", "gemma3", "gemma4", "phi3", "gpt-oss",
         "apertus", "afmoe", "muse-glimmer", "granite", "granitehybrid",
+        "nemotron_h",
     };
     if (count) *count = sizeof(arches) / sizeof(arches[0]);
     return arches;
@@ -1238,6 +1239,94 @@ static bool hybrid_ssm_admit_refuse(gguf_file *g, const char *arch) {
             "SSD) recognized; forward not yet implemented — the SSM decode/scan "
             "kernel and recurrent-state cache seam are in progress\n", arch);
     return false;
+}
+
+// Bind one Nemotron-H block. Each block is EXACTLY ONE of {SSM, attention,
+// MLP} (mutually exclusive), typed off head_count_kv / feed_forward_length,
+// with a single pre-norm (attn_norm) and a single residual add. Fail closed on
+// any missing or mis-dimensioned tensor (the hostile-GGUF discipline). The AK
+// arch-key macro is local to model_bind_weights, so this helper spells the one
+// per-layer array key it needs in full.
+static bool nemotron_bind_layer(model_t *m, gguf_file *g, layer_t *l, int i) {
+    bool ok = true;
+    gguf_tensor *an = need_tensor(g, "blk.%d.attn_norm.weight", i, &ok);
+    if (!ok) return false;
+    l->attn_norm_w = tensor_to_f32(an, m->n_embd, &ok);
+    if (!ok) return false;
+    l->out_scale = 1.0f;
+    int kv = m->l_head_kv[i];
+    int ff = (int)gguf_get_u32_idx(g, "nemotron_h.feed_forward_length",
+                                   (uint64_t)i, 0);
+    if (kv == 0 && ff == 0) {
+        // ---- recurrent (Mamba-2) block: mixer only, no FFN ----
+        l->recurrent = true;
+        l->skip_ffn  = true;
+        int nh = m->ssm_v_heads, ds = m->ssm_state, ng = m->ssm_groups;
+        int inner = m->ssm_inner;
+        int conv_dim  = inner + 2 * ng * ds;
+        int d_in_proj = 2 * inner + 2 * ng * ds + nh;
+        l->ssm_in   = need_tensor(g, "blk.%d.ssm_in.weight", i, &ok);
+        l->ssm_conv = need_tensor(g, "blk.%d.ssm_conv1d.weight", i, &ok);
+        gguf_tensor *sconvb = need_tensor(g, "blk.%d.ssm_conv1d.bias", i, &ok);
+        gguf_tensor *sdtb   = need_tensor(g, "blk.%d.ssm_dt.bias", i, &ok);
+        gguf_tensor *sa     = need_tensor(g, "blk.%d.ssm_a", i, &ok);
+        gguf_tensor *sd     = need_tensor(g, "blk.%d.ssm_d", i, &ok);
+        gguf_tensor *sn     = need_tensor(g, "blk.%d.ssm_norm.weight", i, &ok);
+        l->ssm_out  = need_tensor(g, "blk.%d.ssm_out.weight", i, &ok);
+        if (!ok) return false;
+        // ssm_norm is [d_inner/n_group, n_group] here (granite's is 1 group);
+        // both flatten to `inner` contiguous floats the grouped RMS norm reads,
+        // group g's weights at offset g*(inner/n_group).
+        if (!check_shape(l->ssm_in, m->n_embd, d_in_proj, "ssm_in", i) ||
+            !check_shape(l->ssm_conv, m->ssm_conv_kernel, conv_dim, "ssm_conv1d", i) ||
+            !check_shape(sconvb, conv_dim, 1, "ssm_conv1d.bias", i) ||
+            !check_shape(sdtb, nh, 1, "ssm_dt.bias", i) ||
+            !check_shape(sa, 1, nh, "ssm_a", i) ||
+            !check_shape(sd, 1, nh, "ssm_d", i) ||
+            !check_shape(sn, inner / ng, ng, "ssm_norm", i) ||
+            !check_shape(l->ssm_out, inner, m->n_embd, "ssm_out", i))
+            return false;
+        l->ssm_conv1d_b = tensor_to_f32(sconvb, conv_dim, &ok);
+        l->ssm_dt       = tensor_to_f32(sdtb, nh, &ok);
+        l->ssm_a        = tensor_to_f32(sa, nh, &ok);
+        l->ssm_d        = tensor_to_f32(sd, nh, &ok);
+        l->ssm_norm_w   = tensor_to_f32(sn, inner, &ok);
+        if (!ok) return false;
+        l->n_ff = m->n_ff;   // unused (skip_ffn); kept in-range for any bound
+    } else if (kv > 0) {
+        // ---- attention block: mixer only, no FFN. NoPE, no biases, no qk-norm ----
+        l->skip_ffn = true;
+        int hd = m->head_dim;
+        l->wq = need_tensor(g, "blk.%d.attn_q.weight", i, &ok);
+        l->wk = need_tensor(g, "blk.%d.attn_k.weight", i, &ok);
+        l->wv = need_tensor(g, "blk.%d.attn_v.weight", i, &ok);
+        l->wo = need_tensor(g, "blk.%d.attn_output.weight", i, &ok);
+        if (!ok) return false;
+        if (!check_shape(l->wq, m->n_embd, m->n_head * hd, "attn_q", i) ||
+            !check_shape(l->wk, m->n_embd, kv * hd, "attn_k", i) ||
+            !check_shape(l->wv, m->n_embd, kv * hd, "attn_v", i) ||
+            !check_shape(l->wo, m->n_head * hd, m->n_embd, "attn_output", i))
+            return false;
+        l->n_ff = m->n_ff;   // unused (skip_ffn)
+    } else {
+        // ---- MLP block: no mixer, dense gate-less squared-ReLU FFN ----
+        l->skip_mixer = true;
+        l->w_gate = NULL;
+        l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
+        l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
+        if (!ok) return false;
+        l->n_ff = ff;
+        if (l->n_ff <= 0 || l->n_ff > m->n_ff ||
+            !check_shape(l->w_up, m->n_embd, l->n_ff, "ffn_up", i) ||
+            !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
+            return false;
+        // The block's single pre-norm doubles as the FFN input norm. Convert a
+        // SEPARATE copy (not an alias of attn_norm_w): model_free_weights frees
+        // both fields, so sharing one pointer would double-free.
+        l->ffn_norm_w = tensor_to_f32(an, m->n_embd, &ok);
+        if (!ok) return false;
+    }
+    return true;
 }
 
 static bool model_bind_weights(model_t *m, const char *path, const model_params *p) {
@@ -1900,6 +1989,109 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 "runner and oracle rank the same top-2 — math verified)\n",
                 m->n_layer - n_attn, n_attn);
     }
+    if (strcmp(arch, "nemotron_h") == 0) {
+        // Nemotron-H (NVIDIA Nemotron-Nano-9B-v2): a Mamba-2 / attention / MLP
+        // hybrid. Each block is EXACTLY ONE of three kinds (mutually exclusive,
+        // one pre-norm + one residual), typed off two per-layer arrays:
+        //   recurrent (SSM) : head_count_kv[i] == 0 && feed_forward_length[i] == 0
+        //   attention       : head_count_kv[i]  > 0  (feed_forward_length 0)
+        //   MLP             : feed_forward_length[i] > 0
+        // Unlike granitehybrid this family is NON-MoE (dense gate-less
+        // squared-ReLU MLP) and carries NO muP scalars — embedding/attention/
+        // residual/logit scales stay at their off defaults; attention kq_scale
+        // is the plain 1/sqrt(head_dim). Reference: llama.cpp b10353
+        // src/models/nemotron-h.cpp + mamba-base.cpp — the SAME ggml_ssm_scan
+        // the granite path certifies, here exercising the n_group>1 grouped
+        // B/C broadcast (Nano: n_group=8), which mamba2_ssd_step already
+        // implements (g = h / (n_head/n_group)).
+        m->nemotron_h = true;
+        m->ffn_relu2  = true;      // gate-less MLP: down(relu(up(x))^2)
+        m->rope_neox  = false;
+        // NoPE: nemotron-h.cpp applies no rope to its attention layers (position
+        // comes from the Mamba layers), and the export marks this with
+        // rope.scaling.finetuned=false — the SAME gate llama.cpp's granite path
+        // uses. A finetuned-rope export would rope the attention layers, a
+        // layout this tracer has not certified: refuse rather than mis-rotate.
+        if (gguf_get_bool(g, AK("rope.scaling.finetuned"), false)) {
+            fprintf(stderr, "error: nemotron_h with rope.scaling.finetuned=true "
+                    "(rope on attention layers) is not certified\n");
+            return false;
+        }
+        m->no_rope_layer_step = 1;   // NoPE every layer
+        // Mamba-2 geometry. NOTE: nemotron does NOT satisfy granite's
+        // inner==2*n_embd (Nano-9B-v2: inner=10240, n_embd=4480), so that
+        // assertion is deliberately absent here.
+        m->ssm_conv_kernel = (int)gguf_get_u32(g, AK("ssm.conv_kernel"), 0);
+        m->ssm_inner       = (int)gguf_get_u32(g, AK("ssm.inner_size"), 0);
+        m->ssm_state       = (int)gguf_get_u32(g, AK("ssm.state_size"), 0);
+        m->ssm_v_heads     = (int)gguf_get_u32(g, AK("ssm.time_step_rank"), 0);
+        m->ssm_groups      = (int)gguf_get_u32(g, AK("ssm.group_count"), 0);
+        if (m->ssm_conv_kernel <= 0 || m->ssm_conv_kernel > 8 ||
+            m->ssm_inner <= 0 || m->ssm_inner > MDL_DIM_MAX ||
+            m->ssm_state <= 0 || m->ssm_state > MDL_DIM_MAX ||
+            m->ssm_v_heads <= 0 || m->ssm_groups <= 0 ||
+            m->ssm_inner % m->ssm_v_heads != 0 ||
+            m->ssm_v_heads % m->ssm_groups != 0 ||
+            m->ssm_inner % m->ssm_groups != 0) {
+            fprintf(stderr, "error: invalid nemotron_h Mamba-2 geometry "
+                    "(conv_kernel=%d inner=%d state=%d heads=%d groups=%d)\n",
+                    m->ssm_conv_kernel, m->ssm_inner, m->ssm_state,
+                    m->ssm_v_heads, m->ssm_groups);
+            return false;
+        }
+        // Per-layer typing off the head_count_kv ARRAY (0 => not attention).
+        size_t nl = (size_t)(unsigned)m->n_layer;
+        m->l_head_kv  = calloc(nl, sizeof(int));
+        m->l_head_dim = calloc(nl, sizeof(int));
+        m->l_rope_dim = calloc(nl, sizeof(int));
+        if (!m->l_head_kv || !m->l_head_dim || !m->l_rope_dim) return false;
+        int attn_kv = 0, n_attn = 0, n_rec = 0, n_mlp = 0, max_ff = 0;
+        for (int i = 0; i < m->n_layer; i++) {
+            int kv = (int)gguf_get_u32_idx(g, AK("attention.head_count_kv"),
+                                           (uint64_t)i, 0);
+            int ff = (int)gguf_get_u32_idx(g, AK("feed_forward_length"),
+                                           (uint64_t)i, 0);
+            m->l_head_kv[i]  = kv;
+            m->l_head_dim[i] = m->head_dim;
+            m->l_rope_dim[i] = m->rope_dim;
+            if (kv > 0) {
+                if (kv > m->n_head || m->n_head % kv != 0) {
+                    fprintf(stderr, "error: nemotron_h blk.%d head_count_kv %d "
+                            "does not divide n_head %d\n", i, kv, m->n_head);
+                    return false;
+                }
+                if (attn_kv == 0) attn_kv = kv;
+                else if (kv != attn_kv) {
+                    fprintf(stderr, "error: nemotron_h attention layers disagree "
+                            "on head_count_kv (%d vs %d)\n", attn_kv, kv);
+                    return false;
+                }
+                n_attn++;
+            } else if (ff > 0) { n_mlp++; if (ff > max_ff) max_ff = ff; }
+            else n_rec++;
+        }
+        // feed_forward_length is a per-layer array with 0 on the SSM/attention
+        // blocks; the generic array-max fallback bails on any 0 entry, so set
+        // the model-wide FFN width (buffer sizing + the >0 hyperparam gate)
+        // from the max over the MLP blocks here.
+        m->n_ff = max_ff;
+        m->ffn_var = true;
+        if (attn_kv == 0) {
+            fprintf(stderr, "error: nemotron_h has no attention layers\n");
+            return false;
+        }
+        if (n_rec == 0) {
+            fprintf(stderr, "error: nemotron_h has no recurrent (Mamba-2) "
+                    "layers — not a hybrid\n");
+            return false;
+        }
+        m->n_head_kv = attn_kv;
+        fprintf(stderr, "nemotron_h: Mamba-2 hybrid (%d recurrent + %d attention "
+                "+ %d MLP layers, n_group=%d grouped scan) — NON-MoE, NoPE "
+                "attention, gate-less squared-ReLU MLP; greedy output verified "
+                "against llama.cpp b10353 on Nemotron-Nano-9B-v2 Q8_0\n",
+                n_rec, n_attn, n_mlp, m->ssm_groups);
+    }
     if (strcmp(arch, "muse-glimmer") == 0) {
         // muse-glimmer (Meta Muse Glimmer 30B). Transcribed from llama.cpp
         // b10353 src/models/muse-glimmer.cpp, not inferred:
@@ -2092,7 +2284,8 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             return false;
         }
     }
-    if (!m->qwen35 && !m->granite_hybrid && gguf_get(g, AK("ssm.conv_kernel"))) {
+    if (!m->qwen35 && !m->granite_hybrid && !m->nemotron_h &&
+        gguf_get(g, AK("ssm.conv_kernel"))) {
         fprintf(stderr, "error: '%s' is a hybrid SSM/attention architecture — "
                 "only pure-transformer llama-family models are supported\n", arch);
         return false;
@@ -2208,6 +2401,13 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
     }
     for (int i = 0; i < m->n_layer; i++) {
         layer_t *l = &m->layers[i];
+        if (m->nemotron_h) {
+            // Nemotron-H blocks are three mutually-exclusive kinds with a single
+            // norm and no ffn_norm tensor; bind each fully and skip the shared
+            // recurrent/attention/FFN binding below.
+            if (!nemotron_bind_layer(m, g, l, i)) return false;
+            continue;
+        }
         // per-layer FFN width: the ARRAY form answers per index, the scalar
         // form (every other export) answers every index with m->n_ff
         l->n_ff = (int)gguf_get_u32_idx(g, AK("feed_forward_length"),
@@ -2931,7 +3131,7 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         // so the hot path never mallocs and an OOM fails the load, not a token
         m->ssm_cw = malloc(sizeof(float) * m->ssm_conv_kernel);
     }
-    if (m->granite_hybrid) {
+    if (m->granite_hybrid || m->nemotron_h) {
         // Mamba-2 recurrent scratch. Per token: the in_proj output zxBCdt
         // (ssm_qkv, d_in_proj wide), the post-conv xBC (ssm_aux, conv_dim),
         // and the gated+normed inner y (ssm_z, inner). Per layer, held across
@@ -4508,8 +4708,10 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             fprintf(stderr, "%.4g\n", a);
             dbg_stat("post-attn-norm", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         }
+        if (ly->skip_mixer) goto nemo_ffn;   // nemotron_h MLP-only block
         if (ly->recurrent) {
-            if (m->granite_hybrid) mamba2_ssd_step(m, ly, l, n, xdim);
+            if (m->granite_hybrid || m->nemotron_h)
+                                   mamba2_ssd_step(m, ly, l, n, xdim);
             else                   qwen35_linear(m, ly, l, n, xdim);
         } else {
         if (m->qwen35) {
@@ -4638,6 +4840,8 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         // feed-forward (gated: silu for llama-family, gelu for gemma). MoE
         // layers route each token to a few experts instead of one dense FFN.
         // gemma-4 MoE is a dual branch that does its own norms off m->x directly.
+    nemo_ffn:
+        if (ly->skip_ffn) goto nemo_layer_end;   // nemotron_h SSM/attention block
         if (ly->moe_gemma) {
             gemma_moe_ffn(m, ly, n, xdim);  // reads m->x, writes dense⊕routed to m->xb
             goto ffn_done;
@@ -4657,13 +4861,22 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         {
         int nff = ly->n_ff;   // per-layer width (gemma-4 E2B varies it)
         if (!ly->w_gate) {
-            // ungated MLP (Apertus): up -> xielu -> down, no gate branch
-            int l_i = (int)(ly - m->layers);
+            // ungated MLP: up -> activation -> down, no gate branch
             matvec_b(m->tp, m->hb, nff, ly->w_up, m->xb, xdim, n_embd, nff, NULL, n);
-            float an = m->xielu_an[l_i], ap = m->xielu_ap[l_i];
-            float bb = m->xielu_b[l_i],  ep = m->xielu_eps[l_i];
-            for (size_t i = 0; i < (size_t)n * nff; i++)
-                m->hb[i] = xielu(m->hb[i], an, ap, bb, ep);
+            if (m->ffn_relu2) {
+                // nemotron_h: gate-less squared ReLU, down(relu(up(x))^2)
+                for (size_t i = 0; i < (size_t)n * nff; i++) {
+                    float r = m->hb[i] > 0.0f ? m->hb[i] : 0.0f;
+                    m->hb[i] = r * r;
+                }
+            } else {
+                // Apertus xielu
+                int l_i = (int)(ly - m->layers);
+                float an = m->xielu_an[l_i], ap = m->xielu_ap[l_i];
+                float bb = m->xielu_b[l_i],  ep = m->xielu_eps[l_i];
+                for (size_t i = 0; i < (size_t)n * nff; i++)
+                    m->hb[i] = xielu(m->hb[i], an, ap, bb, ep);
+            }
         } else {
         matvec_b(m->tp, m->hb,  nff, ly->w_gate, m->xb, xdim, n_embd, nff, NULL, n);
         matvec_b(m->tp, m->hb2, nff, ly->w_up,   m->xb, xdim, n_embd, nff, NULL, n);
@@ -4688,6 +4901,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             for (int i = 0; i < n_embd; i++)
                 m->x[(size_t)b * n_embd + i] += m->xb[(size_t)b * xdim + i];
 
+    nemo_layer_end:;   // nemotron_h SSM/attention blocks land here (no FFN)
         // Per-layer embedding branch (E-series). Runs on the post-FFN residual
         // and before the layer output scale, matching gemma4.cpp's ordering.
         // ple_tmp is free once the pre-pass is done, and xb once the FFN output

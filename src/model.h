@@ -122,6 +122,11 @@ typedef struct {
     // Qwen3.5 hybrid layers. Full-attention layers keep using the fields
     // above; recurrent layers use this compact Gated DeltaNet weight set.
     bool         recurrent;
+    // nemotron_h: each block is EXACTLY ONE of {SSM, attention, MLP} — a single
+    // pre-norm and a single residual. skip_mixer marks an MLP-only block (no
+    // attention/SSM); skip_ffn marks an SSM/attention block (no FFN). Both 0
+    // for every other arch, which always runs mixer THEN FFN.
+    bool         skip_mixer, skip_ffn;
     gguf_tensor *wqkv, *wq_gate, *ssm_conv, *ssm_beta, *ssm_alpha, *ssm_out;
     float       *ssm_dt, *ssm_a, *ssm_norm_w;
     // Granite-4 h-series (`granitehybrid`) Mamba-2 mixer. A DIFFERENT tensor
@@ -235,6 +240,10 @@ typedef struct {
     bool      granite_hybrid; // granitehybrid: Mamba-2 recurrent layers interleaved
                               // with GQA attention, per-layer typed off the
                               // attention.head_count_kv array (0 => recurrent)
+    bool      nemotron_h;    // nemotron_h (Nemotron-Nano-9B-v2): Mamba-2 / attn /
+                             // MLP hybrid, NON-MoE, grouped scan (n_group=8),
+                             // NoPE attention, gate-less squared-ReLU MLP
+    bool      ffn_relu2;     // gate-less MLP: down(relu(up(x))^2) (nemotron_h)
     bool      moe_gemma;     // gemma-4 dual-branch MoE (CPU-only; no GPU dual-branch kernel yet)
     bool      moe_prefetch;  // hand routed experts to the OS as whole blocks
                              // (only pays when weights exceed RAM)
