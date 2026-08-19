@@ -9,6 +9,20 @@ were written.
 
 A full module-by-module code review of the tree. Behaviour changes first.
 
+- **BREAKING: `POST /unload` now refuses with `409` where it cannot unload.**
+  A single model served with `--parallel N` for `N > 1` never joins the model
+  registry — its slots hold the model directly — so the endpoint freed the
+  prefix cache, left every byte of weights and KV resident, and answered
+  `{"status":"ok"}`. An operator reclaiming memory was told the model was gone
+  and had no way on the wire to find out otherwise. The refusal names the
+  configuration and points at `POST /v1/runner/prefix-cache/clear` and at
+  `--parallel 1`. `409` because the request is well-formed and the route
+  exists; what refuses it is server state that will not change on a retry.
+  Every other configuration is unaffected: single-model `--parallel 1` and
+  swap sets both join the registry and unload as before. Scripts that treat a
+  non-2xx from `/unload` as fatal will now fail on a multi-slot server where
+  they previously passed while achieving nothing. Making that configuration
+  genuinely unloadable is a separate, later feature.
 - **Files written on x86 change bytes.** The portable `f32->f16` conversion
   rounded ties AWAY from zero; aarch64 converts with `fcvt`, which rounds ties
   to even, and so do llama.cpp and ggml. 16,808,958 of the 2^32 float bit

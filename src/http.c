@@ -252,6 +252,7 @@ const char *reason_phrase(int code) {
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
         case 408: return "Request Timeout";
+        case 409: return "Conflict";
         case 500: return "Internal Server Error";
         case 503: return "Service Unavailable";
         default:  return "Internal Server Error";

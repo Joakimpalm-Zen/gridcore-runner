@@ -66,23 +66,46 @@ void unload_draft(void) {
 // caller — /unload exists so an operator can reclaim memory, and "scheduled"
 // answered now beats "done" answered after a 300s --wait-for-vram queue. An
 // in-flight load is additionally cancelled at its next wait poll.
+//
+// A server with no registry (SV.n_reg == 0) cannot honour it at all. That is
+// exactly one configuration: a single model served with --parallel N>1, whose
+// slots hold the model directly rather than through the registry (server.c
+// only joins it when parallel == 1). This used to answer {"status":"ok"} after
+// freeing nothing but the prefix cache, so an operator reclaiming memory was
+// told the weights and KV were gone while every byte stayed resident -- and
+// nothing on the wire let them find out. 409, not 200: the request is
+// well-formed and the route exists, what refuses it is the current state of
+// the server, and that state is fixed for the process's lifetime, so this is
+// not the "retry later" that a 503 would promise.
 void handle_unload(sock_t fd) {
-    bool deferred = false;
-    if (SV.n_reg > 0) {
-        pthread_mutex_lock(&SV.swap_mu);
-        if (SV.loading) {
-            SV.pending_unload = true;
-            atomic_store(&SV.load_cancel, 1);   // a queued --wait-for-vram load gives up now
-            deferred = true;
-        } else if (atomic_load(&SV.active_requests) > 0) {
-            SV.pending_unload = true;   // freed when the last request finishes
-            deferred = true;
-        } else {
-            unload_draft();
-            unload_resident();
-        }
-        pthread_mutex_unlock(&SV.swap_mu);
+    if (SV.n_reg == 0) {
+        // sized against send_error_detail's 384-byte escape buffer
+        char msg[384];
+        snprintf(msg, sizeof(msg),
+                 "cannot unload: with --parallel %d and a single model the "
+                 "slots hold the model directly and never join the registry, "
+                 "so an unload would free nothing -- the weights and every "
+                 "slot KV cache would stay resident. Serve with --parallel 1 "
+                 "for an unloadable server, or POST "
+                 "/v1/runner/prefix-cache/clear to release the prefix cache.",
+                 SV.n_slots);
+        send_error_detail(fd, 409, msg, NULL, "unload_unsupported");
+        return;
     }
+    bool deferred = false;
+    pthread_mutex_lock(&SV.swap_mu);
+    if (SV.loading) {
+        SV.pending_unload = true;
+        atomic_store(&SV.load_cancel, 1);   // a queued --wait-for-vram load gives up now
+        deferred = true;
+    } else if (atomic_load(&SV.active_requests) > 0) {
+        SV.pending_unload = true;   // freed when the last request finishes
+        deferred = true;
+    } else {
+        unload_draft();
+        unload_resident();
+    }
+    pthread_mutex_unlock(&SV.swap_mu);
     // /unload means "give the memory back now", so the snapshots go too.
     // A model *swap* deliberately keeps them: surviving a swap is the
     // whole point of snapshotting a prefix instead of holding a slot.

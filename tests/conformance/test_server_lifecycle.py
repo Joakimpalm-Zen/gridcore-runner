@@ -482,6 +482,64 @@ def test_unload_rejects_get_so_a_web_page_cannot_free_the_model():
             assert json.load(r) == {"status": "ok"}
 
 
+def test_unload_refuses_when_it_cannot_unload():
+    """A multi-slot single-model server must REFUSE /unload, not fake it.
+
+    `--parallel N>1` with one model never joins the registry (server.c only
+    does that for `parallel == 1`), so handle_unload() had nothing to free.
+    It answered `{"status":"ok"}` anyway, having dropped only the prefix
+    cache: the operator asked for the model's memory back, was told it
+    happened, and every byte of weights and KV was still resident. An
+    operator's memory-reclaim script cannot detect that, which is the whole
+    problem.
+
+    Joining the registry properly here is a real feature (the slots hold the
+    model directly; unloading means synchronizing N slot threads and teaching
+    the reload path to rebuild all of them). Until that exists the endpoint
+    tells the truth instead: 409, naming the configuration, and pointing at
+    the two things that DO work. The model stays resident either way -- the
+    only thing that changes is whether the caller is told.
+    """
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))
+    with RunnerServer(find_runner(root), model, ctx=1024, parallel=2,
+                      extra_args=["--gpu", "off"]) as srv:
+        with urllib.request.urlopen(srv.base_url + "/v1/capabilities",
+                                    timeout=5) as r:
+            before = json.load(r)
+        try:
+            with urllib.request.urlopen(srv.base_url + "/unload", data=b"",
+                                        timeout=5):
+                raise AssertionError(
+                    "/unload reported success on a server that cannot unload")
+        except urllib.error.HTTPError as e:
+            assert e.code == 409, f"expected 409, got {e.code}"
+            detail = json.load(e)["error"]
+            # the refusal has to be actionable: what configuration, and what
+            # the caller can do instead
+            assert "--parallel" in detail["message"], detail
+            assert "prefix-cache/clear" in detail["message"], detail
+        # and the refusal is truthful: nothing was freed behind it
+        with urllib.request.urlopen(srv.base_url + "/v1/capabilities",
+                                    timeout=5) as r:
+            after = json.load(r)
+        assert after["resident"] == before["resident"], (before, after)
+        assert after["context"] == before["context"], (before, after)
+        # the server keeps serving; a refused unload is not a broken server
+        assert _chat(srv.base_url)["choices"]
+
+
+def test_unload_still_works_on_a_single_slot_server():
+    """The refusal above must not spread to the configuration that can unload."""
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    model = os.environ.get("RUNNER_TEST_MODEL", os.path.join(root, "test.gguf"))
+    with RunnerServer(find_runner(root), model, ctx=1024, parallel=1,
+                      extra_args=["--gpu", "off"]) as srv:
+        with urllib.request.urlopen(srv.base_url + "/unload", data=b"",
+                                    timeout=5) as r:
+            assert json.load(r) == {"status": "ok"}
+
+
 def _prefix_cache(base_url):
     with urllib.request.urlopen(base_url + "/v1/runner/prefix-cache",
                                 timeout=5) as r:

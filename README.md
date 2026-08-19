@@ -607,7 +607,7 @@ non-loopback authorities.
 | `GET /v1/runner/prefix-cache` | Prefix-cache size, limits, and counters. |
 | `POST /v1/runner/prefix-cache/clear` | Release cached prefixes without unloading the model. |
 | `GET /health` | Server and resident-model health, plus this process's `rss_bytes`/`peak_rss_bytes` and cumulative `tokens_prompt`, `tokens_generated`, `generate_seconds`, `batch_steps` and `batch_sequences`. |
-| `POST /unload` | Release resident model, draft and prefix-cache memory; the next request reloads on demand. Deferred to the next safe point while a load or generation is in flight (the reply says `"deferred":true`). Needs the registry — see the residency note below. |
+| `POST /unload` | Release resident model, draft and prefix-cache memory; the next request reloads on demand. Deferred to the next safe point while a load or generation is in flight (the reply says `"deferred":true`). Needs the registry: a server without one refuses with `409` rather than reporting a success it cannot deliver — see the residency note below. |
 
 `GET /unload` is deliberately refused with `405`; unloading is a state change.
 
@@ -649,9 +649,14 @@ the model registry, which is not the same line as "swap mode": a single model
 served with the default `--parallel 1` joins the registry as a one-entry set,
 so all three work there exactly as they do for a swap set. The exception is a
 multi-slot single-model server (`--parallel N` with `N > 1`): its slots hold
-the model directly, with no registry to unload it from, so `keep_alive` is
-range-checked and then ignored and `POST /unload` releases only the prefix
-cache.
+the model directly, with no registry to unload it from. There `POST /unload`
+**refuses** with `409` and an error naming the configuration — it used to
+answer `{"status":"ok"}` after freeing only the prefix cache, which told an
+operator reclaiming memory that weights and KV were gone while every byte
+stayed resident. `keep_alive` is still range-checked and then ignored in this
+configuration. `POST /v1/runner/prefix-cache/clear` works everywhere and is
+what the refusal points at; serve with `--parallel 1` if you need an
+unloadable server.
 
 ### Server environment
 
