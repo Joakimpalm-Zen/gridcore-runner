@@ -60,11 +60,16 @@ after line breaks and punctuation, plus `\r`-stripping and non-breaking-space
 handling; after canceling that ▁/whitespace normalization **zero** strings show
 a different segmentation (never a wrong merge). So the artifact now holds the
 tokenizer check modulo the minor normalizer-▁ residual llama.cpp does not run
-(confirmed upstream, issue #3). Note the manifest (`tests/compatibility/models.json`,
-`lucie-7b-instruct-q4_k_m`) still pins the OLD buggy file
-(sha `0d889e0…`); re-pinning to the fixed sha above is a recommended follow-up
-but must ship with a fresh reference-ids capture and a re-evidenced report, not a
-blind swap (the pin is a reproducibility anchor). Teuken renders through the llama2 fallback and its chat row shows that
+(confirmed upstream, issue #3). The manifest (`tests/compatibility/models.json`,
+`lucie-7b-instruct-q4_k_m`) was re-pinned to the fixed file on 2026-08-19
+(sha `bec3af60…`, `models/Lucie-7B-Instruct-v1.1-q4_k_m.gguf`). The re-pin was
+not a blind sha swap: the HF reference tokenizer is unchanged by the GGUF fix, so
+the committed capture (`tokenizer-references/lucie-7b-instruct-v1.1.json`,
+revision `5242dfec`) was re-captured from an authenticated Blackwell run and
+confirmed byte-identical (HF `main` still resolves to `5242dfec`), and the fixed
+file was re-evidenced in `docs/compat-reports/0.1.19-alpha-2026-08-19-lucie-repin.json`
+— sha match, load/cpu_cuda/chat/tool pass, and the tokenizer difftok row reproduces
+**190/721** offline from the committed capture (no network). Teuken renders through the llama2 fallback and its chat row shows that
 framing's artifacts, though the surface and tool calls work. (Corrected
 2026-08-14: this previously read "Teuken's chat template emits artifacts
 (`{Answer}`)". Teuken ships no chat template — its GGUF carries no

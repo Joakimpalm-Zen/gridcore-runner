@@ -1,0 +1,108 @@
+{
+  "schema_version": "xyntetik.runner.model-compat-report.v1",
+  "generated_utc": "2026-08-19T09:09:57Z",
+  "host": {
+    "os": "Linux",
+    "machine": "x86_64"
+  },
+  "runner": {
+    "path": "runner",
+    "version": null
+  },
+  "reference": {
+    "path": "/home/lab/agent-torture-tools/llama/llama-b10076",
+    "version": null
+  },
+  "models": [
+    {
+      "id": "lucie-7b-instruct-q4_k_m",
+      "architecture": "llama",
+      "file": "models/Lucie-7B-Instruct-v1.1-q4_k_m.gguf",
+      "expected_sha256": "bec3af604bc043bb0860216b11da6ef689e01e7696e1b064c75acc3e15753433",
+      "checks": {
+        "load": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 1040.4,
+          "stderr_tail": "gpu-split: budget=25.13GB fixed=0.73GB G=32/32 full=1 used=4.97GB\ngpu: CUDA backend on NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition MIG 1g.24gb (4.1 GB weights in VRAM)\ngpu: VRAM 20.46 GB free of 25.37 GB after init (kv 0.54 GB + scratch 0.05 GB this instance)\nloaded /home/lab/workspace/models/Lucie-7B-Instruct-v1.1-gguf-fixed/Lucie-7B-Instruct-v1.1-q4_k_m.gguf | llama | 32 layers | ctx 4096 | 64 threads | 0.78s\nsampling: lucie (temp 0.00 \u2014 greedy argmax; top_p/top_k/min_p/repeat_penalty inactive)\n\nprompt: 6 tok, 49.97 tok/s | gen: 1 tok, 71.29 tok/s\n"
+        },
+        "tokenizer": {
+          "status": "fail",
+          "returncode": 1,
+          "elapsed_ms": 2092.3,
+          "stdout_tail": "--- line 25: \"\\r\"\n    runner: [300, 17]\n    ref   : []\n--- line 83: \"\\thello\"\n    runner: [300, 308, 47735]\n    ref   : [300, 308, 49315]\n--- line 84: \"\\nhello\"\n    runner: [300, 312, 47735]\n    ref   : [300, 312, 49315]\n--- line 85: \"\\r\\nhello\"\n    runner: [300, 17, 312, 47735]\n    ref   : [300, 312, 49315]\n--- line 86: \" \\t hello\"\n    runner: [301, 308, 49315]\n    ref   : [301, 308, 300, 49315]\n--- line 90: \"\\tHello world\"\n    runner: [300, 308, 354, 7352, 4550]\n    ref   : [300, 308, 28131, 4550]\n--- line 91: \"\\nHello world\"\n    runner: [300, 312, 354, 7352, 4550]\n    ref   : [300, 312, 28131, 4550]\n--- line 92: \"\\r\\nHello world\"\n    runner: [300, 17, 312, 354, 7352, 4550]\n    ref   : [300, 312, 28131, 4550]\n--- line 93: \" \\t Hello world\"\n    runner: [301, 308, 28131, 4550]\n    ref   : [301, 308, 300, 28131, 4550]\n--- line 97: \"\\t1\"\n    runner: [300, 308, 315]\n    ref   : [300, 308, 300, 315]\n--- line 98: \"\\n1\"\n    runner: [300, 312, 315]\n    ref   : [300, 312, 300, 315]\n--- line 99: \"\\r\\n1\"\n    runner: [300, 17, 312, 315]\n    ref   : [300, 312, 300, 315]\n--- line 100: \" \\t 1\"\n    runner: [301, 308, 300, 315]\n    ref   : [301, 308, 301, 315]\n--- line 106: \"\\r\\n!\"\n    runner: [300, 17, 312, 325]\n    ref   : [300, 312, 325]\n--- line 107: \" \\t !\"\n    runner: [301, 308, 2370]\n    ref   : [301, 308, 300, 2370]\n--- line 111: \"\\tthe\"\n    runner: [300, 308, 5529]\n    ref   : [300, 308, 1356]\n--- line 112: \"\\nthe\"\n    runner: [300, 312, 5529]\n    ref   : [300, 312, 1356]\n--- line 113: \"\\r\\nthe\"\n    runner: [300, 17, 312, 5529]\n    ref   : [300, 312, 1356]\n--- line 114: \" \\t the\"\n    runner: [301, 308, 1356]\n    ref   : [301, 308, 300, 1356]\n--- line 120: \"hello \\n \"\n    runner: [49315, 300, 312, 300]\n    ref   : [49315, 300, 312, 301]\n... and 170 more\n\n190/721 strings differ (36 of them begin with whitespace)\n",
+          "stderr_tail": "FAIL: expected 0\n"
+        },
+        "cpu_cuda": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 66065.72,
+          "pins": {
+            "RUNNER_CUDA_TC": "0"
+          },
+          "min_prompt_tokens": 85,
+          "identical": "9/9 identical",
+          "failed_prompts": [],
+          "output_tail": "time, in a land far away,'\nok  : 'Q: What is 17 * 23?\\nA:'\nok  : 'The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.'\nok  : 'In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction'\nok  : \"def parse_header(buf, size):\\n    if size < 8:\\n        raise ValueError('short header')\\n    magic, version = struct.unpack('<II', buf[:8])\\n    if magic != GGUF_MAGIC:\\n        raise ValueError('not a gguf file')\\n    return magic, version\\n\\n# The loader above rejects a truncated header before unpacking it, which\"\nok  : 'The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who'\n\ncpu_cuda: 9/9 identical (eager routing)\n"
+        },
+        "chat": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 1117.97,
+          "prompt": "What is 2+2?",
+          "failure_reasons": [],
+          "output_tail": " The answer to 2+2 is 4.\n"
+        },
+        "tool": {
+          "status": "pass",
+          "returncode": 0,
+          "elapsed_ms": 23157.27,
+          "scenario_matrix": "agent-torture",
+          "output_tail": "report: /home/lab/workspace/.lucie-repin-ef520cd/tests/torture/out/report.json\nraw: /home/lab/workspace/.lucie-repin-ef520cd/tests/torture/out/raw.jsonl\nruntime=runner requests=8 passed=8 failed=0\n"
+        },
+        "greedy_reference": {
+          "status": "not_executed",
+          "reason": "reference_binary_not_found"
+        },
+        "long_context": {
+          "status": "not_executed",
+          "reason": "check_class_not_executable"
+        }
+      },
+      "resolved_file": "/home/lab/workspace/models/Lucie-7B-Instruct-v1.1-gguf-fixed/Lucie-7B-Instruct-v1.1-q4_k_m.gguf",
+      "actual_sha256": "bec3af604bc043bb0860216b11da6ef689e01e7696e1b064c75acc3e15753433",
+      "file_status": "pass",
+      "complete": false
+    }
+  ],
+  "complete": false,
+  "summary": {
+    "models": 1,
+    "files": {
+      "pass": 1
+    },
+    "checks": {
+      "load": {
+        "pass": 1
+      },
+      "tokenizer": {
+        "fail": 1
+      },
+      "cpu_cuda": {
+        "pass": 1
+      },
+      "chat": {
+        "pass": 1
+      },
+      "tool": {
+        "pass": 1
+      },
+      "greedy_reference": {
+        "not_executed": 1
+      },
+      "long_context": {
+        "not_executed": 1
+      }
+    }
+  }
+}
