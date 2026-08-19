@@ -40,11 +40,18 @@ Use `make test` for the fast schema and Python client correctness checks, and
 on Linux, macOS, and Windows; new behavior lands with a smoke there (TDD: watch
 it fail first).
 
-`make test` is a local gate, not a CI one: no workflow invokes it, and the
-checks it runs reach CI only where a workflow names them individually. Anything
-it alone would catch is caught on your machine or not at all — run it before
-pushing, and when you add a check to `make test` decide deliberately whether it
-also belongs in `.github/workflows/ci.yml`.
+`make test` is also a CI gate: the `make-test` job in
+`.github/workflows/ci.yml` runs `make` and `make test` on a Linux CPU runner,
+so a check added to that target reaches CI without anyone also adding a step
+for it. That is the point of the job — the hand-written steps in the other jobs
+are a list nobody can keep complete, and a gate that only exists in `make test`
+used to run on developer machines or nowhere.
+
+The other jobs are not deduped against it and should not be: they cover macOS
+and Windows, which `make-test` does not, and they run things `make test` does
+not (the sanitizer build, the server smokes). Adding a step there is still
+worth doing when the check needs a platform or a setup the `make test` job
+lacks.
 
 ## README gate
 

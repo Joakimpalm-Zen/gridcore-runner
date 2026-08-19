@@ -17,9 +17,9 @@ jobs:
       # The committed kernels_metal.h / kernels_ptx.h are what every build
       # embeds, so an edit to kernels.metal can be reviewed and merged while
       # the shipped binary still carries the OLD shader bytes. `make test` runs
-      # this gate, but no workflow runs `make test`, so until now it never ran
-      # in CI at all. Pure Python, no Metal or CUDA toolchain, well under a
-      # second — and it needs nothing the build produces, so it goes first.
+      # this gate too (see the make-test job), but it is also named here so it
+      # runs on macOS and ahead of the build: pure Python, no Metal or CUDA
+      # toolchain, well under a second, and it needs nothing the build produces.
       - name: generated GPU header drift gate
         run: python3 scripts/check-generated.py
       - name: build
@@ -460,6 +460,43 @@ jobs:
         # /v1/capabilities is answered on the accept loop while another client
         # swaps the model out from under it.
         run: make test-swap-race
+
+  # The `make test` baseline. Deliberately boring: one Linux CPU runner, one
+  # build, one target — so that ADDING A CHECK TO `make test` IS ENOUGH TO PUT
+  # IT IN CI. Every gate above is a hand-written step, which means a check can
+  # be added to the local target and never run here; that is how the generated
+  # GPU header gate sat un-CI'd until 2026-08-18, and it is a structural gap,
+  # not an oversight anyone can be careful about.
+  #
+  # It overlaps the `unix` job on purpose and nothing is deduped: `unix` covers
+  # macOS as well and runs steps `make test` does not (the sanitizer build, the
+  # server smokes), while `make test` runs gates `unix` never names. Two lists
+  # that each catch what the other misses beats one list that has to be kept
+  # complete by hand.
+  #
+  # CPU-only by construction: the runner image has no GPU, so the Metal targets
+  # self-skip as macOS-only and the CUDA-linked tolerance gates report
+  # "skipped: no GPU" instead of failing. Nothing here downloads a model —
+  # `make test` builds its own fixtures with scripts/make-test-model.py.
+  make-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # PEP 668: keep the venv convention the `unix` job already uses, and pass
+      # it in as PYTHON= so every recipe in the target — fixture generation as
+      # well as pytest — runs against the interpreter that has pytest. Without
+      # it `make test` prints "Python client tests skipped" and passes with the
+      # whole pytest half unexecuted.
+      - name: install pytest
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --quiet pytest
+      # Separate from `make test` (which would build it as a prerequisite) so a
+      # compile failure is legible as one, matching the other jobs.
+      - name: build
+        run: make
+      - name: make test
+        run: make test PYTHON=.venv/bin/python
 
   # libFuzzer harnesses for the hand-written parsers that eat untrusted input.
   # Bounded by design: this is a regression gate that has to finish in a couple
