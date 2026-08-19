@@ -184,3 +184,5 @@ test-instances-oom
 test-instances-oom.exe
 test-prompt-oom
 test-prompt-oom.exe
+test-envelope
+test-envelope.exe
