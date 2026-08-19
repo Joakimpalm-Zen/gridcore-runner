@@ -16,6 +16,38 @@ does not pre-commit to "this sells Q8" or to "quants are basically free" —
 see the suite-wide plan's explicit warning against publishing only the
 convenient story.
 
+## Choosing a quant for tool calls (the recommendation)
+
+The measured result splits into two questions with different answers, so the
+honest guidance is a recommendation — not the bare "argument agreement falls to
+50% at Q4_0" number, which reads as "unreliable at Q4_0" when that is only half
+the story. The full per-model tables and the size threshold are below; the
+decision they support:
+
+- **If you need well-formed tool calls routed to the right function** — the
+  SHAPE and the selection, not the argument values — **any k-quant down to
+  `Q4_K_M` is fine.** Constrained decoding held schema conformance and tool
+  selection at **100%** on every model and every rung measured, including where
+  whole-model fidelity fails. Below ~8B this is the most you should lean on.
+- **If the argument VALUES matter** (dates, ids, coordinates the model fills
+  in), **`Q6_K` is the recommended floor** — the best non-reference rung on both
+  families (granite-4.1-3b 64% agreement, Hermes-4-14B 79%). `Q5_K_M` is
+  acceptable from ~8B up, where it matched `Q6_K` (79%); at 3B it already drops
+  to `Q4_K_M`'s level (57%). Treat `Q4_K_M` and below as **shape-only** for tool
+  calls — the JSON is valid and correctly targeted, but the values inside it
+  drift.
+- **For whole-model quality** (general generation, not just tool calls),
+  **4-bit k-quants are viable from about 8B up and not below** on everything
+  measured. Under 8B, use `Q5_K_M` or higher.
+- **Never legacy `Q4_0`.** It is dominated on every axis by `Q4_K_M` — 6.7x
+  worse divergence on the 14B model to save 0.46 GB — and is the one rung where
+  argument agreement collapses to 50% regardless of model size.
+
+In one line: **constrained decoding guarantees the SHAPE of a tool call at any
+k-quant; the CONTENTS need `Q6_K`+ and size.** Quantize for shape freely, hold
+at `Q6_K` (or `Q5_K_M` at 8B+) when the argument values are load-bearing, and
+skip `Q4_0` entirely.
+
 ## What it measures, per variant
 
 For each GGUF variant, Runner is spawned (one server at a time — variants
