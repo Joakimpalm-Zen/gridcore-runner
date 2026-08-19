@@ -101,8 +101,30 @@ practice, most first.
   committed [agent-torture gate](docs/agent-torture.md) tests this exact failure
   mode, and the head-to-head
   [truncation benchmark](docs/truncation-benchmark.md) pins it as a per-release
-  regression gate (`make test-truncation`) with a same-box, same-model
-  comparison against a competitor runtime.
+  regression gate (`make test-truncation`).
+
+  What each engine hands the caller when the token budget cuts a tool call
+  short — same box, same tool schema, same prompt, `tool_choice:"required"`,
+  temperature 0, budgets 1→64 (full recipe and raw responses in
+  [docs/truncation-benchmark.md](docs/truncation-benchmark.md)):
+
+  | engine | budget too small (1–16 tokens) | enough budget (64, control) |
+  |---|---|---|
+  | **Runner** | **executable `tool_calls`, arguments parse** | completes |
+  | vLLM 0.27.1 | no call; protocol framing leaks into `content` | completes |
+  | llama.cpp b10488 | no call; leak, then `tool_calls` with unparseable args | completes |
+  | Ollama 0.32.14 | no call; empty content, then HTTP 500 | completes |
+  | TensorRT-LLM 1.2.1 † | no call; `<tool_call>` leak, then empty content | completes |
+  | SGLang 0.5.17 † | no call; `<tool_call>` leak, then empty content | completes |
+
+  The control rung proves the failure is truncation, not misconfiguration:
+  every engine completes at 64. Below that, only Runner returns an executable
+  call; the others each hand back something broken or absent. This is the
+  behaviour across every OpenAI-compatible engine we have measured — not a claim
+  about engines we have not. **†** TensorRT-LLM and SGLang were measured on a
+  Qwen3-1.7B substitute (their model registries did not carry the granite-4.1-3b
+  used for the other four); truncation recovery is a property of the runtime, so
+  this measures the engine, not the model.
 - **A shared GPU stops being first-come, first-crash.** Run a coding agent
   beside an embeddings model beside a draft model and the usual outcome is that
   one load kills another. Runner processes on the same GPU share a VRAM
