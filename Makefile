@@ -1576,3 +1576,10 @@ test-makefile-sane:
 .PHONY: template-conformance template-conformance-refresh template-conformance-baseline template-conformance-harmony-oracle
 .PHONY: test-gpu-stub
 .PHONY: FORCE makefile-noop test-makefile-sane fixture-scale-note clean debug ptx test test-bare-invocation test-shader-embed test-metal-shader-gate test-apertus test-moe test-prune-experts test-metal-fallback test-metal-prefill test-metal-kquant test-metal-decode-only test-metal-split test-metal-bind-failure test-metal-kv-q8 test-metal-moe test-metal-gptoss-moe test-metal-gemma4-moe test-metal-gemma4-hetero test-metal-gelu-overflow test-metal-eseries test-metal-swa smoke release-check test-truncation fuzz fuzz-build fuzz-run test-shared-asan test-shared-noid test-split-guard test-swap-race
+
+# Soak harness for the startup/SIGTERM race (test_signal_during_startup). Not
+# in `make test` — it is a diagnostic soak (thousands of spawns), run on demand
+# or as a CI soak job. Exits 1 on a survivor, retaining its startup output.
+.PHONY: repro-startup-signal
+repro-startup-signal: runner test.gguf
+	$(PYTHON) scripts/repro-startup-signal.py --iterations 6000 --concurrency 12 --load
