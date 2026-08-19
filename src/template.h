@@ -144,6 +144,21 @@ void tools_render_for(int tmpl, const struct jv *tools, struct sbuf *out);
 // without it (ornith.jinja:106-109).
 void tool_history_render_for(int tmpl, const struct jv *calls,
                              bool turn_has_text, struct sbuf *out);
+// Build a one-element OpenAI tool_calls array from a name and its arguments
+// (a JSON string). Owned jv or NULL on OOM. The adapter the typed surfaces use
+// to reach tool_history_render_for's serializer from their own call vocabulary.
+struct jv *tool_call_synth(const char *name, const char *args_json);
+// Assemble an assistant turn's flattened content in the family's native tool
+// protocol -- the same bytes handle_chat produces for a live chat turn.
+// `text` is the turn's visible text (may be NULL), `calls` an OpenAI-shaped
+// tool_calls array; `out` must be empty (or hold only caller framing). Sets
+// *turn_name to the name the assistant chat_msg must carry (muse) or NULL.
+void assistant_calls_render(int tmpl, const char *text, const struct jv *calls,
+                            struct sbuf *out, const char **turn_name);
+// Wrap a replayed tool RESULT in the family's native protocol; returns the role
+// ("user" for ornith's <tool_response> user turn, "tool" otherwise) and writes
+// the wrapped content to `out`.
+const char *tool_result_wrap(int tmpl, const char *result, struct sbuf *out);
 // Resolve a tool result's native turn name from message.name or from its
 // tool_call_id and a preceding assistant tool_calls entry. Borrowed pointer.
 const char *tool_result_name(const struct jv *messages, int message_index);

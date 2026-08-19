@@ -68,31 +68,17 @@ char *render_prompt_alloc(int tmpl, const chat_msg *msgs, int n_msgs,
 
 // flatten one OpenAI message to plain text: string content passes through;
 // the AI-SDK part-array form (Cline et al.) concatenates its text parts;
-// assistant tool_calls render in runner's own call syntax so replayed
+// assistant tool_calls render in the family's own call syntax so replayed
 // history reads like what the model actually emitted. Returns a heap
 // string, or NULL when the message carries nothing usable.
-// Does THIS message carry visible text? Asked before anything is written,
-// because the buffer below immediately gains framing (ornith's <think> block)
-// that would make an emptiness test answer the wrong question. Whitespace-only
-// counts as no text, which is the reference's `content|trim`.
-static bool message_has_text(const jv *content) {
-    const char *s = NULL;
-    if (content && content->type == J_STR) s = content->str;
-    else if (content && content->type == J_ARR) {
-        for (int i = 0; i < content->n; i++) {
-            const char *type = jv_str(jv_get(content->items[i], "type"), "");
-            const char *text = jv_str(jv_get(content->items[i], "text"), NULL);
-            if (strcmp(type, "text") || !text) continue;
-            for (const char *p = text; *p; p++)
-                if (!strchr(" \t\n\r\f\v", *p)) return true;
-        }
-        return false;
-    }
-    for (const char *p = s; p && *p; p++)
-        if (!strchr(" \t\n\r\f\v", *p)) return true;
-    return false;
-}
-
+//
+// The tool serialization is NOT open-coded here: the assistant-call ordering
+// (gemma4 calls-first, muse's recipient turn, everyone else calls-after) lives
+// in assistant_calls_render, and the tool-result framing in tool_result_wrap,
+// and the typed /v1/responses and /v1/messages surfaces reach the SAME two
+// helpers. That is what makes a tool call replayed through any of the three
+// surfaces render byte-identically -- the contract test_tool_attribution pins.
+//
 // *oom separates the two NULLs this can return. A message that carries nothing
 // renderable is skipped by the caller, which is right; a message whose text
 // could not be ASSEMBLED used to take the same exit, so an allocation failure
@@ -101,68 +87,46 @@ static bool message_has_text(const jv *content) {
 // nothing in the response says so.
 static char *message_text(jv *msg, int tmpl, bool *oom) {
     jv *content = jv_get(msg, "content");
-    bool has_text = message_has_text(content);
-    sbuf b = {0};
     const char *role = jv_str(jv_get(msg, "role"), "user");
     const char *reason = jv_str(jv_get(msg, "reasoning_content"), NULL);
-    if (tmpl == TMPL_ORNITH && !strcmp(role, "assistant")) {
-        sb_lit(&b, "<think>\n");
-        if (reason) sb_put(&b, reason, strlen(reason));
-        sb_lit(&b, "\n</think>\n\n");
-    }
-    // gemma4 renders an assistant turn's CALLS before its visible text --
-    //   <|tool_call>...<tool_call|><|tool_response>...<tool_response|>SURE
-    // -- so the flattened turn has to carry them in that order for the
-    // renderer to place the results between the two. Every other family
-    // appends the calls after the content, which is what they have always
-    // done and what their own references expect.
     jv *calls = jv_get(msg, "tool_calls");
-    if (tmpl == TMPL_GEMMA4) tool_history_render_for(tmpl, calls, has_text, &b);
-    // Muse's reference emits NO visible text in a turn that carries calls:
-    // the turn is addressed `to=NAME` and holds only the
-    // <atem:function_calls> block, so text before it is a shape the model
-    // never saw at that position. Runner rendered it anyway until 2026-08-14,
-    // which the matrix could not see because it had no case with text AND
-    // calls in one turn.
-    //
-    // This DISCARDS something the client sent, and that is the deliberate
-    // choice rather than an oversight: a recipient turn is the model's own
-    // protocol for "I am calling this function", and prepending prose to it
-    // teaches a turn shape its training never contained. The text is not lost
-    // to the conversation -- a client that wants the model to say something
-    // before calling sends it as its own assistant turn, which renders as an
-    // ordinary `to=user` message. Ruled 2026-08-14; the alternatives
-    // considered were allowlisting the divergence and synthesising a
-    // preceding `to=user` turn, which no reference writes.
-    bool muse_calls = tmpl == TMPL_MUSE && calls && calls->type == J_ARR &&
-                      calls->n > 0;
-    if (muse_calls) { content = NULL; has_text = false; }
+
+    // Flatten the visible content into one string first: the shared assembler
+    // and the result wrapper both take flat text, and this is the single place
+    // the AI-SDK part-array's text parts are joined (with '\n' between two text
+    // parts, never in front of the first).
+    sbuf txt = {0};
     if (content && content->type == J_STR) {
-        sb_put(&b, content->str, strlen(content->str));
+        sb_put(&txt, content->str, strlen(content->str));
     } else if (content && content->type == J_ARR) {
-        // `parts` counts TEXT PARTS, not bytes already in the buffer: the
-        // separator belongs between two text parts. Testing b.n would put one
-        // in front of the first part whenever something was written ahead of
-        // the content -- ornith's <think> block, or gemma4's calls above.
         int parts = 0;
         for (int i = 0; i < content->n; i++) {
             const char *type = jv_str(jv_get(content->items[i], "type"), "");
             const char *text = jv_str(jv_get(content->items[i], "text"), NULL);
             if (strcmp(type, "text") != 0 || !text) continue; // images etc.
-            if (parts++) sb_lit(&b, "\n");
-            sb_put(&b, text, strlen(text));
+            if (parts++) sb_lit(&txt, "\n");
+            sb_put(&txt, text, strlen(text));
         }
     }
-    if (tmpl != TMPL_GEMMA4) tool_history_render_for(tmpl, calls, has_text, &b);
+
+    sbuf b = {0};
     if (tmpl == TMPL_ORNITH && !strcmp(role, "tool")) {
-        sbuf wrapped = {0};
-        sb_lit(&wrapped, "<tool_response>\n");
-        if (b.s) sb_put(&wrapped, b.s, b.n);
-        sb_lit(&wrapped, "\n</tool_response>");
-        free(b.s);
-        b = wrapped;
+        // a result is a <tool_response> block in a user turn, not a plain one
+        tool_result_wrap(tmpl, txt.s ? txt.s : "", &b);
+    } else {
+        // ornith opens an assistant turn with its (possibly empty) thought
+        // block; the calls and text follow it, which is why the block is
+        // written here and the assembler appends into the same buffer.
+        if (tmpl == TMPL_ORNITH && !strcmp(role, "assistant")) {
+            sb_lit(&b, "<think>\n");
+            if (reason) sb_put(&b, reason, strlen(reason));
+            sb_lit(&b, "\n</think>\n\n");
+        }
+        assistant_calls_render(tmpl, txt.s, calls, &b, NULL);
     }
-    if (b.failed) { free(b.s); *oom = true; return NULL; }
+    bool failed = b.failed || txt.failed;
+    free(txt.s);
+    if (failed) { free(b.s); *oom = true; return NULL; }
     return b.s;
 }
 

@@ -476,7 +476,188 @@ static void test_chat_explicit_name_is_unchanged(void) {
     ta_expect_named("chat, tool result carrying its own name", "get_time");
 }
 
+// ---------------------------------------------------------------------------
+// CONTRACT: a tool call and its result, replayed as history, must serialize
+// through the SAME model-native protocol on all three surfaces.
+//
+// This is review finding #4. Before it was fixed, /v1/chat/completions routed
+// a replayed call through the family's native serializer (gemma4's
+// format_argument, ornith's <tool_call><function=...>, muse's atem block) while
+// /v1/responses and /v1/messages hard-coded the GENERIC
+// '<|tool_call>call:NAME{json}<tool_call|>' on both surfaces -- so the SAME
+// conversation, replayed, taught gemma4/ornith/muse a tool syntax they were
+// never trained on, and tool RESULTS diverged the same way (no name, no
+// <tool_response> wrap).
+//
+// The contract, per family: the native tool-CALL block and tool-RESULT block
+// that the chat surface produces must appear BYTE-IDENTICALLY in the prompts
+// the Responses and Messages surfaces build for the same logical conversation,
+// and the generic form must be gone. The three logical conversations below are
+// the same three turns (user question, one get_weather({city:Oslo}) call, one
+// "sunny, 21C" result) written in each surface's own request vocabulary.
+
+// The same three-turn conversation, one per surface. The slot template decides
+// the protocol; the request bodies are fixed.
+#define CT_CHAT_BODY \
+    "{\"model\":\"m\",\"messages\":[" \
+    "{\"role\":\"user\",\"content\":\"weather in Oslo?\"}," \
+    "{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_1\"," \
+    "\"type\":\"function\",\"function\":{\"name\":\"get_weather\"," \
+    "\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}}]}," \
+    "{\"role\":\"tool\",\"tool_call_id\":\"call_1\"," \
+    "\"content\":\"sunny, 21C\"}]," TA_ONE_TOOL_CHAT "}"
+#define CT_RESP_BODY \
+    "{\"model\":\"m\",\"input\":[" \
+    "{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather in Oslo?\"}," \
+    "{\"type\":\"function_call\",\"call_id\":\"call_1\"," \
+    "\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Oslo\\\"}\"}," \
+    "{\"type\":\"function_call_output\",\"call_id\":\"call_1\"," \
+    "\"output\":\"sunny, 21C\"}]," TA_ONE_TOOL_RESP "}"
+#define CT_MSG_BODY \
+    "{\"model\":\"m\",\"max_tokens\":16,\"messages\":[" \
+    "{\"role\":\"user\",\"content\":\"weather in Oslo?\"}," \
+    "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\"," \
+    "\"id\":\"call_1\",\"name\":\"get_weather\",\"input\":{\"city\":\"Oslo\"}}]}," \
+    "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\"," \
+    "\"tool_use_id\":\"call_1\",\"content\":\"sunny, 21C\"}]}]," \
+    TA_ONE_TOOL_ANTH "}"
+
+// The substring of `src` from the first `open` to the end of the following
+// `close`, or NULL. This is the "protocol representation" the contract pins:
+// the native tool-call / tool-result block, extracted from the reference
+// (chat) prompt so it can be checked byte-for-byte in the others.
+static char *ct_extract(const char *src, const char *open, const char *close) {
+    if (!src) return NULL;
+    const char *a = strstr(src, open);
+    if (!a) return NULL;
+    const char *b = strstr(a, close);
+    if (!b) return NULL;
+    b += strlen(close);
+    size_t n = (size_t)(b - a);
+    char *r = malloc(n + 1);
+    if (!r) return NULL;
+    memcpy(r, a, n);
+    r[n] = 0;
+    return r;
+}
+
+struct ct_family {
+    const char *label;
+    int   tmpl;
+    const char *call_open, *call_close;   // the native tool-CALL block
+    const char *res_open, *res_close;     // the native tool-RESULT block
+    const char *generic_absent;           // must NOT survive in resp/msg, or NULL
+};
+
+static void ct_run_family(const struct ct_family *f) {
+    ta_tmpl = f->tmpl;
+
+    ta_run(handle_chat, CT_CHAT_BODY);
+    char *chat = ta_prompt ? strdup(ta_prompt) : NULL;
+    ta_run(handle_responses, CT_RESP_BODY);
+    char *resp = ta_prompt ? strdup(ta_prompt) : NULL;
+    ta_run(handle_messages, CT_MSG_BODY);
+    char *msg = ta_prompt ? strdup(ta_prompt) : NULL;
+
+    char what[192];
+    snprintf(what, sizeof what, "%s: chat built a prompt", f->label);
+    ck(chat != NULL, what);
+    snprintf(what, sizeof what, "%s: responses built a prompt", f->label);
+    ck(resp != NULL, what);
+    snprintf(what, sizeof what, "%s: messages built a prompt", f->label);
+    ck(msg != NULL, what);
+
+    // The reference (chat) native blocks.
+    char *call = ct_extract(chat, f->call_open, f->call_close);
+    char *res  = ct_extract(chat, f->res_open, f->res_close);
+    snprintf(what, sizeof what, "%s: chat emits the native tool-CALL block",
+             f->label);
+    ck(call != NULL, what);
+    snprintf(what, sizeof what, "%s: chat emits the native tool-RESULT block",
+             f->label);
+    ck(res != NULL, what);
+
+    // The contract: those exact bytes appear on the typed surfaces too.
+    snprintf(what, sizeof what,
+             "%s: /v1/responses replays the SAME tool-CALL bytes as chat",
+             f->label);
+    ck(call && resp && strstr(resp, call) != NULL, what);
+    snprintf(what, sizeof what,
+             "%s: /v1/messages replays the SAME tool-CALL bytes as chat",
+             f->label);
+    ck(call && msg && strstr(msg, call) != NULL, what);
+    snprintf(what, sizeof what,
+             "%s: /v1/responses replays the SAME tool-RESULT bytes as chat",
+             f->label);
+    ck(res && resp && strstr(resp, res) != NULL, what);
+    snprintf(what, sizeof what,
+             "%s: /v1/messages replays the SAME tool-RESULT bytes as chat",
+             f->label);
+    ck(res && msg && strstr(msg, res) != NULL, what);
+
+    // And the generic syntax, where it differs from the native one, is gone.
+    if (f->generic_absent) {
+        snprintf(what, sizeof what,
+                 "%s: /v1/responses no longer emits the generic '%s'",
+                 f->label, f->generic_absent);
+        ck(resp && strstr(resp, f->generic_absent) == NULL, what);
+        snprintf(what, sizeof what,
+                 "%s: /v1/messages no longer emits the generic '%s'",
+                 f->label, f->generic_absent);
+        ck(msg && strstr(msg, f->generic_absent) == NULL, what);
+    }
+
+    if (getenv("RUNNER_ATTR_TRACE")) {
+        fprintf(stderr, "--- %s CHAT: %s\n", f->label, chat ? chat : "(null)");
+        fprintf(stderr, "--- %s RESP: %s\n", f->label, resp ? resp : "(null)");
+        fprintf(stderr, "--- %s MSG : %s\n", f->label, msg ? msg : "(null)");
+    }
+    free(chat); free(resp); free(msg); free(call); free(res);
+    ta_tmpl = TMPL_HARMONY;
+}
+
+static void test_history_serialization_contract(void) {
+    static const struct ct_family fams[] = {
+        // chatml: the generic protocol IS the native one here -- a regression
+        // guard that the shared path still produces it identically.
+        { "chatml", TMPL_CHATML,
+          "<|tool_call>call:get_weather", "<tool_call|>",
+          "<tool_response>", "</tool_response>", NULL },
+        // gemma4: native args are format_argument, not JSON. The generic JSON
+        // args must be gone.
+        { "gemma4", TMPL_GEMMA4,
+          "<|tool_call>call:get_weather", "<tool_call|>",
+          "<|tool_response>response:", "<tool_response|>",
+          "{\"city\":\"Oslo\"}" },
+        // ornith: <tool_call><function=...> for the call, <tool_response> for
+        // the result; the generic '<|tool_call>call:' must be gone.
+        { "ornith", TMPL_ORNITH,
+          "<tool_call>\n<function=get_weather>", "</tool_call>",
+          "<tool_response>", "</tool_response>",
+          "<|tool_call>call:get_weather" },
+        // muse: the atem recipient/invoke block; result is a named tool_output.
+        // The call marker is anchored to the recipient turn header so it pins
+        // the REPLAYED call, not the identical-looking atem example inside the
+        // native declaration block (which is present only on the chat surface;
+        // declaration rendering is a separate axis this contract does not
+        // touch).
+        { "muse", TMPL_MUSE,
+          "to=get_weather<|message|><atem:function_calls>",
+          "</atem:function_calls>",
+          "<tool_output name=\"get_weather\">", "</tool_output>",
+          "<|tool_call>call:get_weather" },
+        // harmony: already native before the fix -- guards it stays that way.
+        { "harmony", TMPL_HARMONY,
+          "<|start|>assistant to=functions.get_weather", "<|call|>",
+          "<|start|>functions.get_weather to=assistant", "<|end|>",
+          "<|tool_call>call:get_weather" },
+    };
+    for (size_t i = 0; i < sizeof fams / sizeof fams[0]; i++)
+        ct_run_family(&fams[i]);
+}
+
 int main(void) {
+    test_history_serialization_contract();
     test_responses_orphan_output_two_tools();
     test_responses_orphan_output_one_tool();
     test_responses_resolvable_is_unchanged();

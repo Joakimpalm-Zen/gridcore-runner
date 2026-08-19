@@ -105,6 +105,22 @@ A full module-by-module code review of the tree. Behaviour changes first.
   gpt-oss-120b the divergence went 0.00946 -> 0.00245 of logit range against a
   2e-3 bound, so at least one more difference remains
   ([docs/cuda-gptoss-router-bias-2026-08-18.md](docs/cuda-gptoss-router-bias-2026-08-18.md)).
+- **Tool-history replay on `/v1/responses` and `/v1/messages` now uses the
+  resident model's native tool protocol, matching `/v1/chat/completions`
+  byte-for-byte.** Both typed surfaces hard-coded the generic
+  `<|tool_call>call:NAME{json}<tool_call|>` when replaying a prior assistant
+  call, and neither named a gemma-4/muse tool result nor wrapped an ornith one
+  in `<tool_response>` — so the identical conversation, replayed, taught
+  gemma-4, ornith, and muse a call syntax (and a result shape) they were never
+  trained on, while Chat Completions replayed the native one. All three surfaces
+  now route through the same serializer (`tool_history_render_for` /
+  `assistant_calls_render` / `tool_result_wrap`); a gemma-4, ornith, muse, or
+  Harmony call and its result render identically no matter which dialect carried
+  the history in. Chat's own bytes are unchanged, and the equivalence is pinned
+  by a per-family contract in `tests/test_tool_attribution.c`. (Fixed along the
+  way: the `input` re-serialization double-evaluated a loop counter through the
+  `sb_lit` macro.) Chat, chatml, and Harmony replay bytes were already correct
+  and are unchanged.
 - **A multi-tool-call turn no longer vanishes on `/v1/responses` and
   `/v1/messages`.** Both surfaces derived their single call by parsing the
   comma-separated call entries without the brackets that make them an array,

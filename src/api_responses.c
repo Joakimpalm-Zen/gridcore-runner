@@ -181,29 +181,54 @@ static jv *responses_schema(jv *req, bool *bad, char *err, int errcap) {
 // skipped by the caller, which is right; an item whose text could not be
 // ASSEMBLED used to take the same exit, so an allocation failure dropped a turn
 // out of the conversation and the request still answered 200.
-static char *responses_item_text(jv *item, const char **role,
+static char *responses_item_text(jv *item, int tmpl, const char **role,
                                  const char *call_name, bool *oom) {
     const char *type = jv_str(jv_get(item, "type"), NULL);
     sbuf b = {0};
     // a tool result the caller is feeding back: this is the tool loop
     if (type && !strcmp(type, "function_call_output")) {
-        *role = "tool";
         jv *out = jv_get(item, "output");
         if (out && out->type == J_STR) sb_put(&b, out->str, strlen(out->str));
         else if (out) jv_dump(out, &b);
         if (b.failed) { free(b.s); *oom = true; return NULL; }
+        // ornith frames a result as a <tool_response> block in a USER turn;
+        // its own render loop keys on that content prefix. Every other family
+        // carries the result plain under role "tool" (chatml wraps it in the
+        // template, gemma4/muse name it on the turn header) -- the SAME
+        // framing the chat surface produces via tool_result_wrap.
+        if (tmpl == TMPL_ORNITH) {
+            sbuf w = {0};
+            *role = tool_result_wrap(tmpl, b.s ? b.s : "", &w);
+            free(b.s);
+            if (!w.s) { *oom = true; return NULL; } // ornith wrap is non-empty
+            return w.s;
+        }
+        *role = "tool";
         if (b.s) return b.s;
         char *empty = strdup("");
         if (!empty) *oom = true;
         return empty;
     }
-    // the assistant's own earlier call, replayed: rendered in runner's call
-    // syntax so the history reads like what the model actually emitted
+    // the assistant's own earlier call, replayed: serialized in the family's
+    // native protocol -- the SAME assistant_calls_render path the chat surface
+    // takes -- so a gemma4/ornith/muse history reads like what the model was
+    // trained to emit rather than runner's generic call syntax.
     if (type && !strcmp(type, "function_call")) {
         *role = "assistant";
         const char *args = jv_str(jv_get(item, "arguments"), "{}");
-        sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", call_name, args);
-        if (b.failed) { free(b.s); *oom = true; return NULL; }
+        // Harmony's call turn is authored elsewhere (the caller replaces this
+        // text with the raw arguments and sets the recipient name), so leave a
+        // valid placeholder rather than route it through the generic serializer.
+        if (tmpl == TMPL_HARMONY) {
+            sb_fmt(&b, "<|tool_call>call:%s%s<tool_call|>", call_name, args);
+            if (b.failed) { free(b.s); *oom = true; return NULL; }
+            return b.s;
+        }
+        jv *calls = tool_call_synth(call_name, args);
+        if (!calls) { *oom = true; return NULL; }
+        assistant_calls_render(tmpl, "", calls, &b, NULL);
+        jv_free(calls);
+        if (!b.s || b.failed) { free(b.s); *oom = true; return NULL; }
         return b.s;
     }
     *role = jv_str(jv_get(item, "role"), "user");
@@ -469,8 +494,8 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
                 }
             }
             bool oom = false;
-            char *text = responses_item_text(input->items[i], &role, call_name,
-                                             &oom);
+            char *text = responses_item_text(input->items[i], s->tmpl, &role,
+                                             call_name, &oom);
             if (env.harmony && is_call && text) {
                 free(text);
                 text = strdup(jv_str(jv_get(input->items[i], "arguments"), "{}"));
@@ -488,9 +513,23 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
             if (!text) continue;
             owned[n_own++] = text;
             const char *name = NULL;
-            if (env.harmony && is_call)
+            bool is_output = !strcmp(type, "function_call_output");
+            // muse addresses its assistant call turn ` to=NAME`, exactly as
+            // harmony's recipient does, so both carry the name on the turn.
+            if (is_call && (env.harmony || s->tmpl == TMPL_MUSE))
                 name = call_name;
-            else if (env.harmony && !strcmp(type, "function_call_output")) {
+            // gemma4 and muse also NAME the RESULT on its turn header. Resolve
+            // it the same way harmony does, but do NOT refuse when it cannot be
+            // found: these families render an unresolved result under the
+            // template's own fallback, matching the chat surface (which uses
+            // tool_result_name and never refuses for them).
+            else if (is_output &&
+                     (s->tmpl == TMPL_GEMMA4 || s->tmpl == TMPL_MUSE)) {
+                const char *cid = jv_str(jv_get(input->items[i], "call_id"),
+                                         NULL);
+                name = responses_call_name(input, i, cid);
+                if (!name) name = sole_tool_name(tools);
+            } else if (env.harmony && is_output) {
                 const char *cid = jv_str(jv_get(input->items[i], "call_id"),
                                          NULL);
                 name = responses_call_name(input, i, cid);

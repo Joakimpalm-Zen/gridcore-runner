@@ -947,6 +947,18 @@ it. The item is never dropped from the history: a call that silently vanished
 left the model reading a tool result for a call it never made, with a 200 on
 the response.
 
+A replayed `function_call` and its `function_call_output` are serialized in the
+resident model's own tool protocol — the same serializer Chat Completions uses,
+not a generic one bolted onto this surface. A gemma-4 call comes back as
+`<|tool_call>call:NAME{...}<tool_call|>` with gemma-4 argument formatting and
+its result as `<|tool_response>response:NAME{...}<tool_response|>`; an ornith
+call as `<tool_call><function=NAME>…` with the result wrapped in
+`<tool_response>`; a muse call as its `<atem:invoke>` recipient turn with the
+result as a named `<tool_output>`; Harmony as its `to=functions.NAME` turns.
+The same three-turn conversation therefore renders byte-identically whether it
+arrives on `/v1/chat/completions`, `/v1/responses`, or `/v1/messages` — a
+contract pinned by goldens in `tests/test_tool_attribution.c`.
+
 ### Anthropic Messages
 
 Messages uses the same internal engine and constrained tool envelope. It
@@ -959,6 +971,13 @@ Runner refuses hosted tools, MCP/container execution, image/document blocks,
 parallel tool use, `stop_sequences` sent alongside `tools` (see Chat
 Completions above), and forced thinking on a model with no reasoning channel.
 It implements protocol translation only; it never executes a tool.
+
+A replayed `tool_use` block and its `tool_result` are serialized in the
+resident model's own tool protocol — the same serializer Chat Completions and
+Responses reach — so a gemma-4, ornith, or muse history is never handed the
+generic call syntax those models were not trained on. The result turn is named
+from the `tool_use` it answers (by `tool_use_id`, falling back to the sole
+declared tool) exactly as on the other two surfaces.
 
 A generation fault is reported as an Anthropic error object rather than a
 `Message` with a made-up `stop_reason` — HTTP 500 `api_error` buffered, the

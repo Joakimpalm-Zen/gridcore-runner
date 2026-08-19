@@ -106,8 +106,9 @@ static const char *anth_call_name(jv *messages, int before, const char *id) {
 }
 
 static bool anth_blocks(jv *messages, int message_index, jv *msg,
-                        const char *role, bool harmony, const char *sole_tool,
-                        turnbuf *t, char *err, int errcap) {
+                        const char *role, int tmpl, bool harmony,
+                        const char *sole_tool, turnbuf *t,
+                        char *err, int errcap) {
     jv *content = jv_get(msg, "content");
     if (content && content->type == J_STR) {
         turn_add(t, role, strdup(content->str));  // NULL sets t->failed
@@ -119,12 +120,23 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
         return false;
     }
     sbuf body = {0};
+    // Non-harmony assistant tool CALLS are collected into an OpenAI-shaped
+    // tool_calls array and serialized once the whole message is read, through
+    // assistant_calls_render -- the SAME serializer the chat surface reaches.
+    // Doing it here inline in a hard-coded generic syntax is exactly the bug
+    // this closes: a gemma4/ornith/muse history then rendered a call the model
+    // was never trained on. `first_call_name` is captured off the message (not
+    // the synthesized array, which is freed before the turn is added) so muse's
+    // recipient turn header can borrow a pointer that outlives it.
+    sbuf calls_json = {0};
+    int  n_calls = 0;
+    const char *first_call_name = NULL;
     for (int i = 0; i < content->n; i++) {
         jv *b = content->items[i];
         if (!b || b->type != J_OBJ) {
             snprintf(err, errcap,
                      "each messages[].content block must be an object");
-            free(body.s);
+            free(body.s); free(calls_json.s);
             return false;
         }
         const char *bt = jv_str(jv_get(b, "type"), "");
@@ -132,24 +144,23 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
             const char *txt = jv_str(jv_get(b, "text"), NULL);
             if (!txt) {
                 snprintf(err, errcap, "a text block must carry a text string");
-                free(body.s);
+                free(body.s); free(calls_json.s);
                 return false;
             }
             if (body.n) sb_lit(&body, "\n");
             sb_put(&body, txt, strlen(txt));
         } else if (!strcmp(bt, "tool_use")) {
-            // the assistant's own earlier call, replayed: rendered in runner's
-            // call syntax so the history reads like what the model emitted
+            // the assistant's own earlier call, replayed
             const char *name = jv_str(jv_get(b, "name"), NULL);
             if (!name) {
                 snprintf(err, errcap, "a tool_use block must carry a name");
-                free(body.s);
+                free(body.s); free(calls_json.s);
                 return false;
             }
             jv *input = jv_get(b, "input");
             if (harmony) {
                 if (body.failed) {
-                    free(body.s);
+                    free(body.s); free(calls_json.s);
                     t->failed = true;
                     return true;
                 }
@@ -161,27 +172,45 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
                 if (input && input->type != J_NULL) jv_dump(input, &args);
                 else sb_lit(&args, "{}");
                 if (args.failed) {
-                    free(args.s);
+                    free(args.s); free(calls_json.s);
                     t->failed = true;
                     return true;
                 }
                 turn_add_native(t, "assistant", args.s, name, NULL);
                 continue;
             }
-            sb_fmt(&body, "<|tool_call>call:%s", name);
-            if (input && input->type != J_NULL) jv_dump(input, &body);
-            else                                sb_lit(&body, "{}");
-            sb_lit(&body, "<tool_call|>");
+            // `input` (a parsed object) is dumped back to a JSON string so it
+            // reaches the serializer in the one shape tool_history_render_for
+            // reads -- identical to the Responses `arguments` string.
+            sbuf aj = {0};
+            if (input && input->type != J_NULL) jv_dump(input, &aj);
+            else sb_lit(&aj, "{}");
+            if (aj.failed) {
+                free(aj.s); free(body.s); free(calls_json.s);
+                t->failed = true;
+                return true;
+            }
+            // sb_lit evaluates its argument twice (it calls strlen on it), so
+            // the array-open decision is made here, not inline in the macro.
+            sb_lit(&calls_json, n_calls ? ",{\"function\":{\"name\":\""
+                                        : "[{\"function\":{\"name\":\"");
+            n_calls++;
+            sb_esc(&calls_json, name, strlen(name));
+            sb_lit(&calls_json, "\",\"arguments\":\"");
+            sb_esc(&calls_json, aj.s ? aj.s : "{}", aj.s ? aj.n : 2);
+            sb_lit(&calls_json, "\"}}");
+            free(aj.s);
+            if (!first_call_name) first_call_name = name;
         } else if (!strcmp(bt, "tool_result")) {
             // the tool loop closing: a result is its own turn in the chat
             // vocabulary, so it is emitted ahead of whatever text accompanies
             // it in the same Anthropic message
             char *result = anth_tool_result_text(b);
-            if (!result) { free(body.s); t->failed = true; return true; }
+            if (!result) { free(body.s); free(calls_json.s); t->failed = true; return true; }
+            const char *id = jv_str(jv_get(b, "tool_use_id"), NULL);
+            const char *name = anth_call_name(messages, message_index, id);
+            if (!name) name = sole_tool;
             if (harmony) {
-                const char *id = jv_str(jv_get(b, "tool_use_id"), NULL);
-                const char *name = anth_call_name(messages, message_index, id);
-                if (!name) name = sole_tool;
                 // Harmony authors a tool turn BY the function, so a result
                 // with no name to carry has no on-protocol rendering at all:
                 // it comes out as a turn shape the model has never seen. A
@@ -195,12 +224,27 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
                              id ? "no tool_use block in `messages` carries id "
                                   "\"" : "it carries no tool_use_id",
                              id ? id : "", id ? "\"" : "");
-                    free(result);
-                    free(body.s);
+                    free(result); free(body.s); free(calls_json.s);
                     return false;
                 }
                 turn_add_native(t, "tool", result, name, NULL);
-            } else turn_add(t, "tool", result);
+            } else if (tmpl == TMPL_ORNITH) {
+                // ornith frames a result as a <tool_response> block in a user
+                // turn; its own render loop keys on that content prefix.
+                sbuf w = {0};
+                tool_result_wrap(tmpl, result, &w);
+                free(result);
+                if (!w.s) { free(w.s); free(body.s); free(calls_json.s); t->failed = true; return true; }
+                turn_add_native(t, "user", w.s, NULL, NULL);
+            } else {
+                // gemma4/muse NAME the result on its turn header (resolved as
+                // for harmony); chatml wraps it in the template. `name` is
+                // NULL for families that do not use it, which is what the
+                // renderer expects.
+                turn_add_native(t, "tool", result,
+                                (tmpl == TMPL_GEMMA4 || tmpl == TMPL_MUSE)
+                                    ? name : NULL, NULL);
+            }
         } else if (!strcmp(bt, "thinking") || !strcmp(bt, "redacted_thinking")) {
             // Replayed reasoning. Anthropic wants it back so *it* can verify a
             // signature; there is nothing to verify locally, and it is the
@@ -212,13 +256,35 @@ static bool anth_blocks(jv *messages, int message_index, jv *msg,
                      "messages[].content block type \"%.40s\" is not supported; "
                      "this runtime renders text, tool_use and tool_result "
                      "blocks only", bt);
-            free(body.s);
+            free(body.s); free(calls_json.s);
             return false;
         }
     }
-    if (body.failed) { free(body.s); t->failed = true; return true; }
-    if (body.n) turn_add(t, role, body.s);
-    else        free(body.s);
+    if (body.failed || calls_json.failed) {
+        free(body.s); free(calls_json.s); t->failed = true; return true;
+    }
+    if (n_calls) {
+        // assemble the assistant call turn in the family's native protocol
+        sb_lit(&calls_json, "]");
+        jv *calls = calls_json.failed ? NULL : json_parse(calls_json.s, calls_json.n);
+        free(calls_json.s);
+        if (!calls) { free(body.s); t->failed = true; return true; }
+        sbuf rendered = {0};
+        assistant_calls_render(tmpl, body.s, calls, &rendered, NULL);
+        jv_free(calls);
+        free(body.s);
+        if (!rendered.s || rendered.failed) {
+            free(rendered.s); t->failed = true; return true;
+        }
+        // muse addresses its recipient turn ` to=NAME`; the name comes off the
+        // message so it outlives the (freed) synthesized array.
+        turn_add_native(t, role, rendered.s,
+                        tmpl == TMPL_MUSE ? first_call_name : NULL, NULL);
+    } else if (body.n) {
+        turn_add(t, role, body.s);
+    } else {
+        free(body.s);
+    }
     return true;
 }
 
@@ -528,7 +594,7 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
             ok = false;
             break;
         }
-        ok = anth_blocks(msgs, i, msg, role, env->harmony,
+        ok = anth_blocks(msgs, i, msg, role, s->tmpl, env->harmony,
                          sole_tool_name(tools), &t, terr, sizeof(terr));
     }
     // t.failed is the turn buffer refusing an append: an allocation that did

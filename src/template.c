@@ -1983,6 +1983,84 @@ void tool_history_render_for(int tmpl, const jv *calls,
     }
 }
 
+// True when `text` holds anything the model would read as content, i.e. a
+// non-whitespace byte. This is `message_has_text` reduced to a flat string:
+// the Anthropic/Responses surfaces have already flattened their content parts
+// by the time they reach the shared assembler below, so the array walk that
+// version does is not needed here.
+static bool history_text_visible(const char *text) {
+    for (const char *p = text; p && *p; p++)
+        if (!strchr(" \t\n\r\f\v", *p)) return true;
+    return false;
+}
+
+// Build a one-element OpenAI tool_calls array from a function name and its
+// arguments (already a JSON string, e.g. Responses `arguments` verbatim or an
+// Anthropic `input` object run through jv_dump). Returns an owned jv the caller
+// frees, or NULL on OOM. This is the adapter the typed surfaces use to reach
+// the SAME serializer the chat path does: whatever vocabulary carried the call
+// in, it becomes the one shape tool_history_render_for reads.
+jv *tool_call_synth(const char *name, const char *args_json) {
+    if (!name) return NULL;
+    if (!args_json || !args_json[0]) args_json = "{}";
+    sbuf b = {0};
+    sb_lit(&b, "[{\"function\":{\"name\":\"");
+    sb_esc(&b, name, strlen(name));
+    sb_lit(&b, "\",\"arguments\":\"");
+    sb_esc(&b, args_json, strlen(args_json));
+    sb_lit(&b, "\"}}]");
+    jv *out = b.failed || !b.s ? NULL : json_parse(b.s, b.n);
+    free(b.s);
+    return out;
+}
+
+// Assemble the flattened content of an assistant turn that carries tool CALLS,
+// in the family's native protocol -- the identical bytes handle_chat's
+// message_text produces, because it is the same ordering wrapped around the
+// same tool_history_render_for serializer. `text` is the turn's already-
+// flattened visible text (may be NULL/empty); `calls` is an OpenAI-shaped
+// tool_calls array. `out` must be empty on entry (or hold only framing the
+// caller prepended, e.g. ornith's <think> block). *turn_name is set to the name
+// the assistant chat_msg must carry (muse addresses its turn ` to=NAME`) or
+// NULL when the family needs none.
+//
+// This is the one place the CALL ordering lives -- gemma4 renders its calls
+// before the visible text, muse emits no visible text at all beside a call, and
+// every other family appends the calls after the text. message_text delegates
+// here so the chat path and the typed surfaces cannot drift.
+void assistant_calls_render(int tmpl, const char *text, const jv *calls,
+                            sbuf *out, const char **turn_name) {
+    if (turn_name) *turn_name = NULL;
+    bool has_text = history_text_visible(text);
+    bool muse_calls = tmpl == TMPL_MUSE && calls && calls->type == J_ARR &&
+                      calls->n > 0;
+    if (tmpl == TMPL_GEMMA4) tool_history_render_for(tmpl, calls, has_text, out);
+    if (!muse_calls && text) sb_put(out, text, strlen(text));
+    if (tmpl != TMPL_GEMMA4) tool_history_render_for(tmpl, calls, has_text, out);
+    if (muse_calls && turn_name) {
+        jv *fn = jv_get(calls->items[0], "function");
+        *turn_name = jv_str(jv_get(fn, "name"), NULL);
+    }
+}
+
+// Wrap a replayed tool RESULT in the family's native protocol and return the
+// role the turn files under. Ornith's reference frames a result as a
+// <tool_response> block inside a USER turn (its render loop keys on that
+// content prefix); every other family carries the result plain -- chatml wraps
+// it in the template, gemma4/muse/harmony name it on the turn header. `out` is
+// written the (possibly wrapped) content. Shared by message_text and the typed
+// surfaces so a result is framed the same way whatever surface replayed it.
+const char *tool_result_wrap(int tmpl, const char *result, sbuf *out) {
+    if (tmpl == TMPL_ORNITH) {
+        sb_lit(out, "<tool_response>\n");
+        if (result) sb_put(out, result, strlen(result));
+        sb_lit(out, "\n</tool_response>");
+        return "user";
+    }
+    if (result) sb_put(out, result, strlen(result));
+    return "tool";
+}
+
 // ------------------------------------------- strict tool-call envelope
 
 // The discriminator value of the no-call branch. It shares a namespace with
