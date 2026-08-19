@@ -1196,7 +1196,7 @@ static void test_harmony_analysis_body_may_contain_the_handoff_text(void) {
     tool_envelope e;
     char err[192];
     assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
-    e.harmony = true;
+    e.proto = TP_HARMONY;
     e.tools = tools;
 
     sbuf reason = {0}, content = {0}, calls = {0};

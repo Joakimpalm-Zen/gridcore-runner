@@ -2305,26 +2305,25 @@ void tool_envelope_free(tool_envelope *e) {
 const jv *tool_decl_native(int tmpl, bool strict, bool atem_tool_calling,
                            jv *tools, tool_envelope *env, bool *skip_generic) {
     if (strict && tmpl == TMPL_MUSE) {
-        env->atem = atem_tool_calling;
-        env->muse_user_header = !atem_tool_calling;
+        env->proto = atem_tool_calling ? TP_ATEM : TP_MUSE_USER;
         env->tools = tools;
     } else if (strict && tmpl == TMPL_HARMONY) {
-        env->harmony = true;
+        env->proto = TP_HARMONY;
         env->tools = tools;
     } else if (strict && tmpl == TMPL_GEMMA4) {
-        env->gemma4 = true;
+        env->proto = TP_GEMMA4;
         env->tools = tools;
     }
     // gemma4 renders its declaration whenever tools are present, strict or not:
     // tool_choice is a concept its template lacks, so tool_choice:"none" must
     // not fall through to the generic block -- a second, untrained protocol --
     // for a turn that will not call anything anyway. muse and Harmony render
-    // theirs only on the strict path (env->atem / env->harmony gate them).
+    // theirs only on the strict path (env->proto gates them).
     *skip_generic = tmpl == TMPL_GEMMA4 ||
-                    (tmpl == TMPL_MUSE && env->atem) ||
+                    (tmpl == TMPL_MUSE && env->proto == TP_ATEM) ||
                     tmpl == TMPL_HARMONY;
-    return (tmpl == TMPL_MUSE && env->atem) ||
-           (tmpl == TMPL_HARMONY && env->harmony) ||
+    return (tmpl == TMPL_MUSE && env->proto == TP_ATEM) ||
+           (tmpl == TMPL_HARMONY && env->proto == TP_HARMONY) ||
            tmpl == TMPL_GEMMA4
                ? tools : NULL;
 }
@@ -2833,18 +2832,18 @@ int tool_envelope_map_channels(const tool_envelope *e, const char *doc,
                                size_t n, sbuf *reasoning, sbuf *content,
                                sbuf *tc) {
     if (!e || !doc || !content || !tc) return -1;
-    if (e->harmony) return harmony_map(e, doc, n, reasoning, content, tc);
-    if (e->gemma4) return gemma4_map(e, doc, n, reasoning, content, tc);
+    if (e->proto == TP_HARMONY) return harmony_map(e, doc, n, reasoning, content, tc);
+    if (e->proto == TP_GEMMA4) return gemma4_map(e, doc, n, reasoning, content, tc);
     return tool_envelope_map(e, doc, n, content, tc);
 }
 
 int tool_envelope_map(const tool_envelope *e, const char *doc, size_t n,
                       sbuf *content, sbuf *tc) {
     if (!e || !doc || !content || !tc) return -1;
-    if (e->harmony) return harmony_map(e, doc, n, NULL, content, tc);
-    if (e->gemma4) return gemma4_map(e, doc, n, NULL, content, tc);
-    if (e->atem) return atem_map(e, doc, n, content, tc);
-    if (e->muse_user_header) {
+    if (e->proto == TP_HARMONY) return harmony_map(e, doc, n, NULL, content, tc);
+    if (e->proto == TP_GEMMA4) return gemma4_map(e, doc, n, NULL, content, tc);
+    if (e->proto == TP_ATEM) return atem_map(e, doc, n, content, tc);
+    if (e->proto == TP_MUSE_USER) {
         const char *end = doc + n;
         const char *message = atem_find(doc, end, "<|message|>");
         if (!message) return -1;
@@ -3204,10 +3203,10 @@ void tool_stream_init(tool_stream *s, const tool_envelope *e,
     memset(s, 0, sizeof(*s));
     s->env = e;
     if (sink) s->sink = *sink;
-    s->state = e && e->harmony ? TS_HARMONY
-             : e && e->gemma4 ? TS_G4_START
-             : e && e->atem ? TS_ATEM
-             : e && e->muse_plain_payload ? TS_MUSE_HEADER : TS_TOOL;
+    s->state = e && e->proto == TP_HARMONY ? TS_HARMONY
+             : e && e->proto == TP_GEMMA4 ? TS_G4_START
+             : e && e->proto == TP_ATEM ? TS_ATEM
+             : e && e->proto == TP_MUSE_PLAIN ? TS_MUSE_HEADER : TS_TOOL;
 }
 
 static int ts_muse_header(tool_stream *s, const char *bytes, int n) {

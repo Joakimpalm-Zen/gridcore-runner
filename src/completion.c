@@ -1167,7 +1167,7 @@ static int envelope_map_buffered(const tool_envelope *env, gen_ctx *g, sbuf *tc)
         g->reason = mapped_reason;
     } else free(mapped_reason.s);
     if (rc >= 1) {
-        if (env->harmony && mapped.n) {
+        if (env->proto == TP_HARMONY && mapped.n) {
             // Harmony's commentary message is intentionally visible before its
             // recipient-bearing call. OpenAI-shaped responses permit content
             // and tool_calls together, and the streaming demux already emits
@@ -1378,7 +1378,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     // is silent: the split simply never fires and the model's analysis is
     // served as content, which is what the first live run did.
     bool harmony_primed_think = chat && s->tmpl == TMPL_HARMONY &&
-                                !(env && env->harmony) &&
+                                !(env && env->proto == TP_HARMONY) &&
                                 req_thinking_mode(req) != THINK_OFF;
     // gemma4's thought block is opened BY THE PROMPT on a tool-result
     // continuation with thinking on (template.c's g4_prev == 2 branch), so the
@@ -1643,13 +1643,13 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     jv *sch = env ? NULL : request_schema(req);
     if (env) {
         char serr[128] = "envelope did not parse";
-        if (env->harmony) {
+        if (env->proto == TP_HARMONY) {
             const char *only = env->kind == TCH_NAMED ? env->named : NULL;
             schema = schema_compile_harmony_turn(
                 env->tools, env->kind == TCH_AUTO, only,
                 env->kind == TCH_AUTO ? request_schema(req) : NULL,
                 req_thinking_mode(req) != THINK_OFF, serr, sizeof(serr));
-        } else if (env->gemma4) {
+        } else if (env->proto == TP_GEMMA4) {
             const char *only = env->kind == TCH_NAMED ? env->named : NULL;
             schema = env->parallel && env->kind != TCH_AUTO
                        ? schema_compile_gemma4_parallel(env->tools, only,
@@ -1659,7 +1659,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                              env->kind == TCH_AUTO ? request_schema(req) : NULL,
                              req_thinking_mode(req) != THINK_OFF,
                              gemma4_primed_think, serr, sizeof(serr));
-        } else if (env->atem) {
+        } else if (env->proto == TP_ATEM) {
             const char *only = env->kind == TCH_NAMED ? env->named : NULL;
             jv *final = env->kind == TCH_AUTO ? request_schema(req) : NULL;
             schema = final
@@ -1680,7 +1680,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                              serr, sizeof(serr));
         } else {
             jv *ej = json_parse(env->schema_src, strlen(env->schema_src));
-            schema = ej ? (env->muse_user_header
+            schema = ej ? (env->proto == TP_MUSE_USER
                            ? schema_compile_muse_user_payload(ej, serr,
                                                               sizeof(serr))
                            : schema_compile(ej, serr, sizeof(serr))) : NULL;
@@ -1705,12 +1705,12 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         }
     }
     e->schema = schema;
-    e->constraint_includes_prelude = env && env->harmony;
+    e->constraint_includes_prelude = env && env->proto == TP_HARMONY;
     // chat responses split a thinking prelude into the reasoning channel;
     // constrained generation forwards it only when asked (raw completions
     // keep the payload-only contract)
     e->emit_think_prelude = chat && m->think_open != NULL &&
-                            !(env && env->harmony);
+                            !(env && env->proto == TP_HARMONY);
 
     size_t cap = strlen(prompt) + 16;
     int32_t *toks = malloc(sizeof(int32_t) * cap);
@@ -1851,10 +1851,10 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
                   .stop_strs = stops, .n_stop = n_stops, .eng = e,
                   .created = (long)time(NULL) };
-    tool_envelope muse_plain_env = {.muse_plain_payload = true};
+    tool_envelope muse_plain_env = {.proto = TP_MUSE_PLAIN};
     snprintf(g.id, sizeof(g.id), "%s", req_id);
     // split thinking channels out of chat responses; raw completions stay raw
-    if (env && (env->harmony || env->gemma4))
+    if (env && (env->proto == TP_HARMONY || env->proto == TP_GEMMA4))
         think_init(&g.ts, NULL, NULL);
     else if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think ||
         harmony_primed_think)

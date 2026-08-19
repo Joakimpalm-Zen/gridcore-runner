@@ -603,7 +603,7 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
             ok = false;
             break;
         }
-        ok = anth_blocks(msgs, i, msg, role, s->tmpl, env->harmony,
+        ok = anth_blocks(msgs, i, msg, role, s->tmpl, env->proto == TP_HARMONY,
                          sole_tool_name(tools), &t, terr, sizeof(terr));
     }
     // t.failed is the turn buffer refusing an append: an allocation that did

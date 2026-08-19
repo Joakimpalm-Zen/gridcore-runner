@@ -182,6 +182,19 @@ int  tool_calls_parse_for(int tmpl, struct sbuf *content, struct sbuf *tc);
 // requests that do not opt in.
 enum { TCH_AUTO, TCH_REQUIRED, TCH_NONE, TCH_NAMED };
 
+// The native tool protocol a request uses, or TP_GENERIC for the strict JSON
+// envelope. Exactly one holds per envelope: a single field makes the
+// mutually-exclusive families unrepresentable as a boolean combination (the
+// old five flags permitted states like atem+harmony that cannot exist).
+enum tool_proto {
+    TP_GENERIC = 0,   // strict JSON envelope, or no native protocol
+    TP_ATEM,          // Muse native recipient + <atem:invoke>
+    TP_MUSE_USER,     // Muse: generic JSON override after a to=user header
+    TP_HARMONY,       // gpt-oss native channels + functions recipient
+    TP_GEMMA4,        // gemma4 native <|tool_call>call:NAME{...}
+    TP_MUSE_PLAIN,    // Muse: stream a schema payload after a to=user header
+};
+
 typedef struct {
     int   kind;           // TCH_*
     char *schema_src;     // envelope JSON schema, for schema_compile (owned)
@@ -195,11 +208,7 @@ typedef struct {
     // truncation waiting to happen.
     bool  parallel;
     int   max_calls;
-    bool  atem;           // Muse native recipient + <atem:invoke> protocol
-    bool  harmony;        // gpt-oss native channels + functions recipient
-    bool  gemma4;         // gemma4 native <|tool_call>call:NAME{...} protocol
-    bool  muse_user_header; // generic JSON override follows to=user header
-    bool  muse_plain_payload; // stream a schema payload after to=user header
+    int   proto;          // enum tool_proto — the native protocol, or TP_GENERIC
     struct jv *tools;     // borrowed request declarations for native compiler
     bool  owns_tools;     // Anthropic translation survives prompt construction
     char *named;          // owned named-tool choice, when kind == TCH_NAMED

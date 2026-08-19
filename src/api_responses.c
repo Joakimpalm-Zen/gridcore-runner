@@ -501,7 +501,7 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
             bool oom = false;
             char *text = responses_item_text(input->items[i], s->tmpl, &role,
                                              call_name, &oom);
-            if (env.harmony && is_call && text) {
+            if (env.proto == TP_HARMONY && is_call && text) {
                 free(text);
                 text = strdup(jv_str(jv_get(input->items[i], "arguments"), "{}"));
                 if (!text) oom = true;
@@ -521,7 +521,7 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
             bool is_output = !strcmp(type, "function_call_output");
             // muse addresses its assistant call turn ` to=NAME`, exactly as
             // harmony's recipient does, so both carry the name on the turn.
-            if (is_call && (env.harmony || s->tmpl == TMPL_MUSE))
+            if (is_call && (env.proto == TP_HARMONY || s->tmpl == TMPL_MUSE))
                 name = call_name;
             // gemma4 and muse also NAME the RESULT on its turn header. Resolve
             // it the same way harmony does, but do NOT refuse when it cannot be
@@ -534,7 +534,7 @@ void handle_responses(slot_t *s, sock_t fd, jv *req) {
                                          NULL);
                 name = responses_call_name(input, i, cid);
                 if (!name) name = sole_tool_name(tools);
-            } else if (env.harmony && is_output) {
+            } else if (env.proto == TP_HARMONY && is_output) {
                 const char *cid = jv_str(jv_get(input->items[i], "call_id"),
                                          NULL);
                 name = responses_call_name(input, i, cid);

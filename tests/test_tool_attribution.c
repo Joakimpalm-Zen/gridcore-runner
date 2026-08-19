@@ -663,13 +663,13 @@ static void test_history_serialization_contract(void) {
 // This is the declaration-side twin of the #4 history-replay contract above,
 // which deliberately scoped it out (see the muse note there: "declaration
 // rendering is a separate axis this contract does not touch"). handle_chat sets
-// env.gemma4 / env.atem and passes the structured tools to render_prompt_alloc,
+// env->proto (gemma4/atem) and passes the structured tools to render_prompt_alloc,
 // so gemma-4 gets its `<|tool>declaration:...<tool|>` and muse its
 // `<atem:...>` schema block. The typed surfaces (/v1/messages, /v1/responses)
 // left those flags unset and handed render_prompt_alloc NULL, so they fell
 // through to the GENERIC "You have these tools available..." block -- teaching
 // gemma-4 and muse a declaration format they were never trained on. Harmony was
-// already native on all three (env.harmony was the one flag they did set);
+// already native on all three (env->proto == TP_HARMONY was the one they did set);
 // chatml's native declaration IS the generic one, so it is the regression
 // guard that the shared path still produces it.
 //

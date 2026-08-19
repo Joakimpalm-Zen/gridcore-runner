@@ -177,7 +177,7 @@ static void test_atem_truncation_inside_a_tool_name_picks_its_own_args(void) {
 
 static void test_atem_buffered_maps_reasoning_and_multiple_calls(void) {
     tool_envelope e = {0};
-    e.atem = true;
+    e.proto = TP_ATEM;
     const char *doc =
         " to=self<|message|>check both cities<|eom|><|start|>assistant"
         " to=weather.get<|message|><atem:function_calls>\n"
@@ -200,7 +200,7 @@ static void test_atem_buffered_maps_reasoning_and_multiple_calls(void) {
 }
 
 static void test_atem_buffered_mapper_honors_nonterminated_length(void) {
-    tool_envelope e = {.atem = true};
+    tool_envelope e = {.proto = TP_ATEM};
     const char *source =
         " to=ping<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"ping\">\n"
@@ -309,7 +309,7 @@ static void test_atem_declared_optional_parameters_are_constrained(void) {
         "<atem:parameter name=\"query\">muse</atem:parameter>\n"
         "<atem:parameter name=\"limit\">5</atem:parameter>\n"
         "</atem:invoke>\n</atem:function_calls>"));
-    tool_envelope e = {.atem = true, .tools = tools};
+    tool_envelope e = {.proto = TP_ATEM, .tools = tools};
     const char *doc = " to=search<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"search\">\n"
         "<atem:parameter name=\"query\">muse</atem:parameter>\n"
@@ -368,7 +368,7 @@ static void test_muse_generic_envelope_is_constrained_behind_user_recipient(void
                       "\"required\":[]}}}]");
     tool_envelope e;
     assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
-    e.muse_user_header = true;
+    e.proto = TP_MUSE_USER;
     const char *doc = " to=user<|message|>{\"tool\":\"ping\",\"args\":{}}";
     sbuf content = {0}, calls = {0};
     assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);
@@ -421,7 +421,7 @@ static void test_atem_truncated_string_enum_recovers_closest_member(void) {
         "\"label\":{\"type\":\"string\",\"enum\":[\"alpha\",\"beta\"]}},"
         "\"required\":[\"label\"]}}}]"
     );
-    tool_envelope e = {.atem = true, .tools = tools};
+    tool_envelope e = {.proto = TP_ATEM, .tools = tools};
     const char *doc = " to=classify<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"classify\">\n"
         "<atem:parameter name=\"label\">bet</atem:parameter>\n"
@@ -439,7 +439,7 @@ static void test_atem_truncated_integer_respects_declared_bounds(void) {
         "\"level\":{\"type\":\"integer\",\"minimum\":5,\"maximum\":9}},"
         "\"required\":[\"level\"]}}}]"
     );
-    tool_envelope e = {.atem = true, .tools = tools};
+    tool_envelope e = {.proto = TP_ATEM, .tools = tools};
     const char *doc = " to=set_level<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"set_level\">\n"
         "<atem:parameter name=\"level\"></atem:parameter>\n"
@@ -879,7 +879,7 @@ static void test_stream_demux_is_boundary_independent(void) {
 
 static void test_atem_stream_demux_is_boundary_independent(void) {
     tool_envelope e = {0};
-    e.atem = true;
+    e.proto = TP_ATEM;
     const char *doc =
         " to=notes.save<|message|><atem:function_calls>\n"
         "<atem:invoke name=\"notes.save\">\n"
@@ -906,7 +906,7 @@ static void test_atem_stream_demux_is_boundary_independent(void) {
 }
 
 static void test_muse_schema_payload_stream_hides_recipient_header(void) {
-    tool_envelope e = {.muse_plain_payload = true};
+    tool_envelope e = {.proto = TP_MUSE_PLAIN};
     const char *doc = " to=user<|message|>{\"summary\":\"ok\"}";
     demux_every_split(&e, doc);
     demux_log l;
@@ -1419,7 +1419,7 @@ static void test_harmony_native_mapping_and_stream_boundaries(void) {
     tool_envelope e;
     char err[192];
     assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
-    e.harmony = true;
+    e.proto = TP_HARMONY;
     e.tools = tools;
 
     sbuf reason = {0}, content = {0}, calls = {0};
@@ -1586,7 +1586,7 @@ static void test_gemma4_truncated_call_still_parses(void) {
 
     tool_envelope e = {0};
     assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
-    e.gemma4 = true;
+    e.proto = TP_GEMMA4;
     e.tools = tools;
     sbuf content = {0}, calls = {0};
     assert(tool_envelope_map(&e, doc.s, doc.n, &content, &calls) == 1);
@@ -1606,7 +1606,7 @@ static void test_gemma4_native_mapping_and_stream_boundaries(void) {
     char err[192];
     tool_envelope e;
     assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
-    e.gemma4 = true;
+    e.proto = TP_GEMMA4;
     e.tools = tools;
 
     sbuf reason = {0}, content = {0}, calls = {0};
@@ -1696,7 +1696,7 @@ static void test_gemma4_structured_arguments_round_trip(void) {
 
     tool_envelope e;
     assert(tool_envelope_build(tools, NULL, NULL, &e, err, sizeof(err)) == 1);
-    e.gemma4 = true;
+    e.proto = TP_GEMMA4;
     e.tools = tools;
     sbuf content = {0}, calls = {0};
     assert(tool_envelope_map(&e, doc, strlen(doc), &content, &calls) == 1);

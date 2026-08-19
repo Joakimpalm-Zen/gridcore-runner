@@ -366,7 +366,7 @@ static void test_unmappable_harmony_stream_still_terminates(void) {
     char err[224];
     ck(tool_envelope_build(tools, NULL, NULL, &env, err, sizeof(err)) == 1,
        "harmony envelope built");
-    env.harmony = true;
+    env.proto = TP_HARMONY;
     env.tools   = tools;
 
     // max_tokens 0 is a legal request that generates no document at all, so
@@ -432,7 +432,7 @@ static void test_anthropic_streamed_fault_is_an_error_event(void) {
     char err[224];
     ck(tool_envelope_build(tools, NULL, NULL, &env, err, sizeof(err)) == 1,
        "harmony envelope built");
-    env.harmony = true;
+    env.proto = TP_HARMONY;
     env.tools   = tools;
 
     run_request(&h, "{\"stream\":true,\"max_tokens\":0}", &env, API_MESSAGES,
@@ -492,7 +492,7 @@ static void test_anthropic_buffered_fault_is_an_error_object(void) {
     char err[224];
     ck(tool_envelope_build(tools, NULL, NULL, &env, err, sizeof(err)) == 1,
        "harmony envelope built");
-    env.harmony = true;
+    env.proto = TP_HARMONY;
     env.tools   = tools;
 
     // same deterministic fault the streaming test uses: no document at all is
@@ -558,7 +558,7 @@ static void test_stop_with_a_strict_envelope_is_refused(void) {
     tool_envelope harmony = {0};
     ck(tool_envelope_build(tools, NULL, NULL, &harmony, err, sizeof(err)) == 1,
        "harmony envelope built");
-    harmony.harmony = true;
+    harmony.proto = TP_HARMONY;
     harmony.tools   = tools;
     run_request(&h, "{\"stream\":true,\"stop\":[\"\\n\\n\"]}", &harmony,
                 API_CHAT, g_wire, sizeof(g_wire));
@@ -617,7 +617,7 @@ static void test_unmappable_envelope_is_not_served_as_content(void) {
     tool_envelope harmony = {0};
     ck(tool_envelope_build(tools, NULL, NULL, &harmony, err, sizeof(err)) == 1,
        "harmony envelope built");
-    harmony.harmony = true;
+    harmony.proto = TP_HARMONY;
     harmony.tools   = tools;
 
     gen_ctx g;
