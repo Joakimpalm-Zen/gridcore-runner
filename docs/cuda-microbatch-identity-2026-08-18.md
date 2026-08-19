@@ -1,9 +1,11 @@
 # The CUDA decode microbatch is not bit-identical on quantized models
 
-Found 2026-08-18 during the CUDA backend review. **Not fixed** — the fix is in
-`kernels.cu`, and the only CUDA box available cannot regenerate the committed
-PTX (see "Why this is deferred"). This note is so the next attempt starts from
-the diagnosis rather than the symptom.
+Found 2026-08-18 during the CUDA backend review. **FIXED 2026-08-19 — see
+"Resolved 2026-08-19" at the end.** Everything between here and that section is
+the original diagnosis, kept as written: it was right about the mechanism, and
+the two things it got wrong ("no 13.3 box exists", "Q5_K and Q6_K unmeasured")
+are worth being able to see. The deferral reason in "Why this is deferred" is
+the part that turned out to be false.
 
 ## The claim that is false
 
@@ -158,3 +160,85 @@ If a 13.3 box is not coming, take the per-column option above instead — it is
 correct today, it costs 11-13% of the batching win on Q8_0/Q4_K, and it gains
 48% on Q4_0. The one thing not worth doing is leaving the contract as written
 while the code does something else.
+
+---
+
+## Resolved 2026-08-19
+
+The kernel fix was taken, not the host-only per-column option. All four steps
+landed: `739329b` (kernels + regenerated PTX), `2ffdfb9` (cuda.c), `b943ccc`
+(the quantized batch fixture). The diagnosis above stands as written; this
+section records what it cost and what it turned out to have missed.
+
+### The 13.3 box was the Windows one
+
+`nvcc` release 13.3, V13.3.73, Build ID **CL-38244171** — the build stamped in
+the committed header — was installed on the Windows box all along. `where cl`
+comes back empty there because MSVC is not on PATH until
+`VC\Auxiliary\Build\vcvars64.bat` runs; that, and nothing else, is why the
+first attempt concluded no 13.3 box existed.
+
+Regenerating from the UNMODIFIED `kernels.cu` on that box did NOT reproduce the
+committed header byte for byte, and the difference is accounted for rather than
+waved away. Three functions of ~100 differ (`k_mv_q3_K_b`, `k_store_kv`,
+`k_store_kv_seq`), and across the WHOLE FILE the per-function multiset of
+`.f32`/`.f16`/`.f64` opcodes is identical: the only opcodes that differ anywhere
+are 64-bit integer address arithmetic (`mul.lo.s64` vs `mul.wide.s32`, a
+hoisted `neg.s64`, a sunk `cvt.s64.s32`) — strength-reduction and scheduling
+choices that cannot change a computed value. Two consecutive runs on that box
+are byte-identical to each other, so this is a host instruction-selection
+difference (MSVC vs whatever host produced the committed header), not
+run-to-run nondeterminism.
+
+The consequence is a methodological one worth keeping: **attribute a source
+change by diffing the fixed regen against a BASELINE REGEN FROM THE SAME BOX**,
+never against the committed header. Done that way, the only kernels whose
+instruction stream changed are the eight rewritten twins and the two new ones;
+every other kernel is identical after normalizing virtual-register and
+basic-block numbering.
+
+### Q5_K and Q6_K were failing too
+
+The table above left them unmeasured. They were not fine — `./test-batch
+<model> 4` at `3ae5d2b`, Blackwell MIG 1g.24gb:
+
+| model | quant | before | after |
+|---|---|---:|:--|
+| SmolLM2-135M-Instruct | Q8_0 | FAIL, 1.83x | **ok, 1.89x** |
+| Qwen3-4B | Q4_K_M | FAIL, 1.57x | **ok, 1.53x** |
+| Qwen3-8B | Q5_K_M | FAIL, 1.51x | **ok, 1.69x** |
+| Qwen3-8B | Q6_K | FAIL, 2.04x | **ok, 1.97x** |
+| Qwen3-0.6B | Q4_0 | ok, 1.07x (refused) | **ok, 1.62x** |
+| Qwen3-1.7B | Q4_0 | ok (refused) | **ok, 1.47x** |
+| test.gguf | F32 | ok | ok |
+| test-q8.gguf | Q8_0 | **FAIL** (new gate) | **ok** |
+
+Identity therefore cost nothing measurable: two families gained throughput, two
+lost 2-4%, against the 11-13% the host-only per-column option was measured to
+cost. Q4_0 gained 48% over refusing, and beat the 1.48x per-column figure too.
+
+### A third cause the note did not name
+
+`batch_mv_twin_ok` returned `true` for **any** type without a decode GEMV, on
+the comment "batch-1 uses f_mv; f_mvb is its twin". That is only true for the
+MV_FMA family, where the per-element weight is the loaded element itself: F32
+and F16. It is false for every quantized `_b` kernel, for exactly the reason
+cause 2 gives. So a dense Q4_1/Q5_0/Q5_1/Q3_K/IQ4_NL/IQ4_XS/MXFP4 model was
+being admitted to a microbatch that was not bit-identical, by the very check
+that exists to keep it out. Those now decode sequentially.
+
+The claim under that was measured rather than assumed: a probe build with
+`f_gemvb` forced to 0, so a Q8_0 microbatch takes `f_mvb` — the substitution
+being removed — exits 1 on SmolLM2-135M-Instruct-Q8_0 with the first bitwise
+difference at step 0, at 0.29x, reproducing this note's isolation table on the
+current binary. F16's twinhood is argued from the source, not measured:
+`--quantize` emits only q8_0/q4_0/f16, its f16 pass leaves a BF16 model BF16,
+and no F16 GGUF was available on the box.
+
+### What holds it down now
+
+`make test` runs `./test-batch` twice — on test.gguf (F32) and on test-q8.gguf,
+a Q8_0 fixture from `scripts/make-test-model.py --quant q8_0`. The second run
+was verified to FAIL on the pre-fix kernels (exit 1 at N=2/4/8, first bitwise
+difference at step 0) and pass on the fixed ones, so it is a gate and not
+decoration. Without it the next regression here would be equally invisible.

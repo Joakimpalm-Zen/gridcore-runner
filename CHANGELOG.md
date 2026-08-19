@@ -9,6 +9,29 @@ were written.
 
 A full module-by-module code review of the tree. Behaviour changes first.
 
+- **The CUDA decode microbatch is bit-identical to sequential decode on
+  quantized models again** (it had been silently divergent since 2026-07-28),
+  **and the batch gate now runs on a quantized fixture.** A batched step owes
+  each sequence the bits a lone step would have produced — that is what lets a
+  sequence leave a microbatch and continue solo — and on every quantized model
+  it stopped delivering them when the decode GEMVs were rewritten and their
+  multi-column twins were not. Sampled tokens matched throughout; the
+  divergence was in the last mantissa bits. Q4_0, which had been refused
+  outright since 2026-08-18 because it had no twin at all, batches again at
+  1.62x (Qwen3-0.6B-q4_0, N=4) instead of decoding sequentially at 1.07x. The
+  batching win is otherwise unchanged — Q8_0 1.83x -> 1.89x, Q4_K 1.57x ->
+  1.53x, Q5_K 1.51x -> 1.69x, Q6_K 2.04x -> 1.97x at N=4 — so identity cost
+  nothing. `make test` runs the batch gate on a Q8_0 fixture as well as the F32
+  one, because the F32 fixture cannot reach a quantized matvec and so could
+  never have caught this.
+- **CUDA: a dense model quantized Q4_1, Q5_0, Q5_1, Q3_K, IQ4_NL, IQ4_XS or
+  MXFP4 no longer joins a decode microbatch.** Those types have no decode GEMV,
+  and the tile kernel the microbatch fell back to is not their batch-1 kernel's
+  twin either — it factors the block scale into each weight where the batch-1
+  kernel keeps it outside the block sum, which is the same value in a different
+  association. Such a model now decodes its sequences one at a time rather than
+  batching them into different numbers; `batch_steps`/`batch_sequences` stay 0
+  for it. Q8_0, Q4_0, Q4_K, Q5_K, Q6_K, F32 and F16 batch as before.
 - **BREAKING: `POST /unload` now refuses with `409` where it cannot unload.**
   A single model served with `--parallel N` for `N > 1` never joins the model
   registry — its slots hold the model directly — so the endpoint freed the
