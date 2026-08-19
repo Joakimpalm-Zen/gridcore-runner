@@ -95,6 +95,7 @@ endif
 # same .exe suffix rule as every other test binary, without repeating the
 # three-way platform branch above
 TEST_PREFIX = $(TEST_BATCH:test-batch%=test-prefix%)
+TEST_RECURRENT = $(TEST_BATCH:test-batch%=test-recurrent-rewind%)
 TEST_HOST_HEADER = $(TEST_BATCH:test-batch%=test-host-header%)
 TEST_GRAMMAR_FF = $(TEST_BATCH:test-batch%=test-grammar-ff%)
 TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
@@ -440,6 +441,15 @@ TEST_PREFIX_SRC = tests/test_prefix.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
 $(TEST_PREFIX): $(TEST_PREFIX_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_PREFIX_SRC) -o $@ $(LDFLAGS)
 
+# recurrent-state cache seam (SSM tracer 4): same real-object link set as the
+# prefix gate, because the property under test is the same — bit-identical
+# logits — but on the recurrent (SSM) fold that a rewind must snapshot/restore.
+TEST_RECURRENT_SRC = tests/test_recurrent_rewind.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
+                  src/tokenizer.c src/model.c src/sample.c src/jsonmode.c \
+                  src/schema.c src/json.c src/engine.c src/vramreg.c $(GPU_SRC)
+$(TEST_RECURRENT): $(TEST_RECURRENT_SRC) $(HDR)
+	$(CC) $(CFLAGS) -I src $(TEST_RECURRENT_SRC) -o $@ $(LDFLAGS)
+
 # grammar fast-forward: same full-engine link as the prefix test — the gate
 # is byte identity of a real constrained generation with the walk on and off
 TEST_GRAMMAR_FF_SRC = tests/test_grammar_ff.c src/gguf.c src/compat.c \
@@ -758,6 +768,11 @@ test-gpu-stub: $(CPU_STUB_SRC) $(HDR)
 
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
+
+# tiny qwen35 recurrent (SSM) fixture — 3 recurrent + 1 attention layer — for
+# the recurrent-state cache-seam gate (make-test-model.py cannot emit an SSM arch)
+test-ornith.gguf: scripts/make-test-ornith.py
+	$(PYTHON) scripts/make-test-ornith.py test-ornith.gguf
 
 # The same fixture with its matmul weights stored Q8_0. test.gguf is F32, and
 # F32 is the ONE case where a backend's batched matvec is its own batch-1
@@ -1223,7 +1238,9 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
-      $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) runner test.gguf test-q8.gguf
+      $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) $(TEST_RECURRENT) \
+      runner test.gguf test-q8.gguf test-ornith.gguf
+	./$(TEST_RECURRENT)
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)

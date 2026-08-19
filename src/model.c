@@ -3126,6 +3126,13 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
                                    sizeof(float));
         m->ssm_state_mem = calloc((size_t)m->n_layer * m->ssm_v_heads *
                                   hv * hv, sizeof(float));
+        // recurrent-state snapshot (tracer 4): same shape as the live buffers
+        m->ssm_conv_snap = calloc((size_t)m->n_layer *
+                                  (m->ssm_conv_kernel - 1) * conv_dim,
+                                  sizeof(float));
+        m->ssm_state_snap = calloc((size_t)m->n_layer * m->ssm_v_heads *
+                                   hv * hv, sizeof(float));
+        m->ssm_snap_pos = -1;
         // one dequantized conv-kernel row, reused every conv step (the forward
         // pass is single-threaded here, so one buffer suffices) — preallocated
         // so the hot path never mallocs and an OOM fails the load, not a token
@@ -3149,9 +3156,17 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
                                    sizeof(float));
         m->ssm_state_mem = calloc((size_t)m->n_layer * nh * hd * ds,
                                   sizeof(float));
+        // recurrent-state snapshot (tracer 4): same shape as the live buffers
+        m->ssm_conv_snap = calloc((size_t)m->n_layer *
+                                  (m->ssm_conv_kernel - 1) * conv_dim,
+                                  sizeof(float));
+        m->ssm_state_snap = calloc((size_t)m->n_layer * nh * hd * ds,
+                                   sizeof(float));
+        m->ssm_snap_pos = -1;
         m->ssm_cw = malloc(sizeof(float) * m->ssm_conv_kernel);
         if (!m->ssm_qkv || !m->ssm_aux || !m->ssm_z ||
-            !m->ssm_conv_state || !m->ssm_state_mem || !m->ssm_cw)
+            !m->ssm_conv_state || !m->ssm_state_mem || !m->ssm_cw ||
+            !m->ssm_conv_snap || !m->ssm_state_snap)
             return false;
     }
     // hb/hb2 hold the dense FFN's n_ff-wide output for B token columns; gemma-4
@@ -3209,7 +3224,8 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
                              !m->moe_trace_norms || !m->moe_gidx || !m->moe_gw)) ||
         (m->qwen35 && (!m->q_gate || !m->ssm_qkv || !m->ssm_z ||
                        !m->ssm_aux || !m->ssm_conv_state ||
-                       !m->ssm_state_mem || !m->ssm_cw))) {
+                       !m->ssm_state_mem || !m->ssm_cw ||
+                       !m->ssm_conv_snap || !m->ssm_state_snap))) {
         fprintf(stderr, "error: cannot allocate buffers (ctx %d needs %.1f MB KV cache)\n",
                 n_ctx, 2.0 * kv_bytes / 1e6);
         return false; // model_load unwinds the partial allocation before returning
@@ -3316,6 +3332,7 @@ void model_free(model_t *m) {
     free(m->q_gate); free(m->ssm_qkv); free(m->ssm_z); free(m->ssm_aux);
     free(m->ssm_cw);
     free(m->ssm_conv_state); free(m->ssm_state_mem);
+    free(m->ssm_conv_snap); free(m->ssm_state_snap);
     free(m->hb); free(m->hb2); free(m->att); free(m->logits); free(m->all_logits);
     free(m->shexp_in); free(m->shexp_o); free(m->shexp_g); free(m->shexp_u);
     free(m->moe_logits); free(m->moe_sel_scores); free(m->moe_group_score);
@@ -4767,32 +4784,69 @@ bool model_moe_ffn_cpu(model_t *m, int layer, int n) {
     return true;
 }
 
+// ---- recurrent-state cache seam (SSM tracer 4) -------------------------
+//
+// The persistent recurrent state is two buffers, both indexed [layer][...] and
+// summed only within a layer, so the whole-buffer byte size is all a snapshot
+// needs. conv_dim is identical in value across the three arches; the SSD/
+// DeltaNet state per head differs: qwen35 keeps a [hv x hv] DeltaNet matrix,
+// Mamba-2 (granite/nemotron) keeps an [hd x ds] state (hd == hv). These match
+// the two calloc sites in model_alloc_buffers exactly.
+static size_t recurrent_conv_bytes(const model_t *m) {
+    int conv_dim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
+    return sizeof(float) * (size_t)m->n_layer *
+           (size_t)(m->ssm_conv_kernel - 1) * (size_t)conv_dim;
+}
+static size_t recurrent_state_bytes(const model_t *m) {
+    int hv = m->ssm_inner / m->ssm_v_heads;
+    size_t per_head = m->qwen35 ? (size_t)hv * (size_t)hv
+                                : (size_t)hv * (size_t)m->ssm_state;
+    return sizeof(float) * (size_t)m->n_layer *
+           (size_t)m->ssm_v_heads * per_head;
+}
+
+bool model_has_recurrent(const model_t *m) {
+    return m && (m->qwen35 || m->granite_hybrid || m->nemotron_h) &&
+           m->ssm_conv_state && m->ssm_state_mem;
+}
+
+void model_recurrent_reset(model_t *m) {
+    if (!model_has_recurrent(m)) return;
+    memset(m->ssm_conv_state, 0, recurrent_conv_bytes(m));
+    memset(m->ssm_state_mem, 0, recurrent_state_bytes(m));
+    m->ssm_snap_pos = -1;   // a fresh sequence: no earlier fold to restore
+}
+
+bool model_recurrent_snapshot(model_t *m, int pos) {
+    if (!model_has_recurrent(m) || !m->ssm_conv_snap || !m->ssm_state_snap)
+        return false;
+    memcpy(m->ssm_conv_snap, m->ssm_conv_state, recurrent_conv_bytes(m));
+    memcpy(m->ssm_state_snap, m->ssm_state_mem, recurrent_state_bytes(m));
+    m->ssm_snap_pos = pos;
+    return true;
+}
+
+bool model_recurrent_restore(model_t *m, int pos) {
+    if (!model_has_recurrent(m) || !m->ssm_conv_snap || !m->ssm_state_snap)
+        return false;
+    if (pos < 0 || m->ssm_snap_pos != pos) return false;   // fold not sliceable
+    memcpy(m->ssm_conv_state, m->ssm_conv_snap, recurrent_conv_bytes(m));
+    memcpy(m->ssm_state_mem, m->ssm_state_snap, recurrent_state_bytes(m));
+    return true;
+}
+
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
     m->fwd_pos = pos;
     m->moe_probe_depth = 0;   // the ring is scoped to one top-to-bottom layer
                               // pass, not carried across forward() calls
-    if (m->qwen35 && pos == 0) {
-        int convdim = 2 * m->ssm_state * m->ssm_groups + m->ssm_inner;
-        int hv = m->ssm_inner / m->ssm_v_heads;
-        memset(m->ssm_conv_state, 0, sizeof(float) * (size_t)m->n_layer *
-               (m->ssm_conv_kernel - 1) * convdim);
-        memset(m->ssm_state_mem, 0, sizeof(float) * (size_t)m->n_layer *
-               m->ssm_v_heads * hv * hv);
-    }
-    if (m->granite_hybrid && pos == 0) {
-        // No recurrent-state cache seam yet (tracer 4): the conv ring and SSD
-        // state are per-model and reset at the start of every sequence, so a
-        // correct decode requires running the whole sequence in order from
-        // pos 0 — exactly qwen35's constraint today.
-        int nh = m->ssm_v_heads, ds = m->ssm_state, ng = m->ssm_groups;
-        int inner = m->ssm_inner, hd = inner / nh;
-        int conv_dim = inner + 2 * ng * ds;
-        memset(m->ssm_conv_state, 0, sizeof(float) * (size_t)m->n_layer *
-               (m->ssm_conv_kernel - 1) * conv_dim);
-        memset(m->ssm_state_mem, 0, sizeof(float) * (size_t)m->n_layer *
-               nh * hd * ds);
-    }
+    // A sequence starting at pos 0 zeroes the fold. This is the ONE reset the
+    // recurrent state gets: for any pos>0 the state is carried in place from the
+    // previous forward, so a rewind to pos>0 must have restored it first (see
+    // engine_rewind / model_recurrent_restore). Centralized so all three
+    // recurrent arches — including nemotron_h, which the per-arch blocks missed
+    // — reset identically.
+    if (pos == 0) model_recurrent_reset(m);
     // GPU handles the leading gpu_layers. A full split (gpu_layers == n_layer)
     // returns logits directly; a partial split runs [0, gpu_layers) on the GPU,
     // leaves the boundary activation in the host x buffer + the offloaded

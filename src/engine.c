@@ -138,6 +138,25 @@ int engine_rewind(engine *e, const int32_t *toks, int n) {
     if (e->hist)
         while (keep < e->pos && keep < n - 1 && e->hist[keep] == toks[keep])
             keep++; // n - 1: always feed at least one token to get logits
+    // Recurrent (SSM) layers hold a FOLD over [0, e->pos), not a per-position
+    // prefix, so keeping KV rows [0, keep) does not by itself put the recurrent
+    // state at `keep` — it is still the fold as-of the old e->pos. Attention's
+    // Fact 1 does not hold here. Only act on an actual rewind (keep < e->pos):
+    //   - an exact snapshot at `keep` (the spec-decode / abandoned-step rollback
+    //     boundary) restores the fold in a memcpy — cheap and bit-identical;
+    //   - otherwise the fold cannot be sliced, so recompute from 0: keep nothing
+    //     and let the re-feed rebuild both the recurrent state (model_forward's
+    //     pos==0 reset) and the reused-anyway attention KV. That is qwen35's
+    //     pre-seam behavior — never wrong, just not reused. Reusing the KV tail
+    //     for keep>0 on the recompute path is tracer 5 (prefix-cache), which
+    //     stores the recurrent blob in the snapshot and drives this same
+    //     restore. keep == e->pos is a pure extension: the fold is already right.
+    if (model_has_recurrent(e->m) && keep < e->pos) {
+        if (!model_recurrent_restore(e->m, keep)) {
+            model_recurrent_reset(e->m);
+            keep = 0;
+        }
+    }
     e->pos = keep;
     // the draft's KV beyond the kept prefix was computed from the previous
     // request's tokens; the catch-up loop re-feeds hist[dpos..pos)
@@ -447,7 +466,14 @@ prefix_reuse engine_prefix_reuse(engine *e, const int32_t *toks, int n) {
         while (c < p->n && c < n - 1 && p->toks[c] == toks[c]) c++;
         if (c > best) { best = c; hit = p; }
     }
-    if (hit && best >= PFX_MIN_TOKENS && best > r.keep) {
+    // A shared snapshot stores KV only (Fact 1). Forking it for a recurrent
+    // model would install attention rows at `best` while leaving the recurrent
+    // fold as-of this slot's previous end — silently wrong. Storing the
+    // recurrent blob in the snapshot and restoring it on an exact hit is tracer
+    // 5; until then, recurrent models decline the shared fork and keep the
+    // self-rewind result above (which forced a correct recompute).
+    if (!model_has_recurrent(e->m) &&
+        hit && best >= PFX_MIN_TOKENS && best > r.keep) {
         // CUDA's device KV is a mirror that only resyncs when a forward's
         // position is not the previous one plus 1. A fork writes host rows
         // behind the device's back, so it has to *create* that discontinuity

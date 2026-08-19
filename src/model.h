@@ -289,6 +289,16 @@ typedef struct {
     float *ssm_qkv, *ssm_z, *ssm_aux;     // qwen35 recurrent scratch
     float *ssm_cw;                         // qwen35 dequantized conv-kernel row
     float *ssm_conv_state, *ssm_state_mem; // qwen35 per-sequence recurrent state
+    // Recurrent-state cache seam (SSM tracer 4): a fixed-size snapshot of the
+    // conv ring + SSD/DeltaNet state, keyed by the position it was taken at.
+    // Recurrent state is a fold, not a prefix — the state at pos n cannot
+    // produce the state at k<n — so a rewind/rollback that must land at an
+    // earlier position restores this blob when it holds exactly that position,
+    // else recomputes from 0. One depth (the last snapshot), which is all the
+    // spec-decode/abandoned-step rollback boundary and the CUDA q35_*_prev
+    // pattern need; per-slot because each decoding stream owns its own model_t.
+    float *ssm_conv_snap, *ssm_state_snap; // snapshot of the two buffers above
+    int    ssm_snap_pos;                   // position that snapshot is valid at, -1 = none
     float *att, *logits;
     float *all_logits;       // lazy [spec_batch][n_vocab] (speculative verify)
     int    spec_batch;       // rows all_logits can hold
@@ -603,6 +613,31 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits);
 // single-token convenience wrapper
 float *model_forward(model_t *m, int token, int pos);
+
+// ---- recurrent-state cache seam (SSM tracer 4) -------------------------
+//
+// The KV cache rests on "any prefix of a stored sequence is a valid snapshot"
+// (engine.c Fact 1). Recurrent (SSM) state has NO such property: it is a fold
+// over the whole prefix, so the state after position n cannot reproduce the
+// state after k<n. These make that state a first-class, snapshot-able object
+// so a rewind, an abandoned step, a rejected speculative draft or a warm-cache
+// fork can checkpoint and restore it instead of silently carrying the wrong
+// fold. The blob is FIXED-size (independent of context length): the conv ring
+// plus the SSD/DeltaNet state, for every recurrent layer. State lives on the
+// model_t and each decoding stream owns its own model_t, so the (slot,pos) key
+// the design names is (this model_t, pos).
+//
+// True for qwen35 / granitehybrid / nemotron_h once their state is allocated.
+bool model_has_recurrent(const model_t *m);
+// Zero the live recurrent state and invalidate any snapshot: a fresh sequence.
+void model_recurrent_reset(model_t *m);
+// Copy the live recurrent state into the snapshot, tagged with `pos`. No-op
+// (returns false) on a non-recurrent model. Depth one: replaces the last.
+bool model_recurrent_snapshot(model_t *m, int pos);
+// If a snapshot tagged exactly `pos` is held, copy it back over the live state
+// and return true; otherwise leave the live state untouched and return false —
+// the caller must then recompute the recurrent layers from position 0.
+bool model_recurrent_restore(model_t *m, int pos);
 // Internal backend bridge for tensor-role placement: apply one complete MoE
 // FFN (including its residual) to m->x on the host. CUDA uses this after its
 // attention sublayer and then resumes on-device. False rejects a non-MoE layer.

@@ -45,6 +45,8 @@ test-batch
 test-batch.exe
 test-prefix
 test-prefix.exe
+test-recurrent-rewind
+test-recurrent-rewind.exe
 test-grammar-ff
 test-grammar-ff.exe
 test-moe-tol
