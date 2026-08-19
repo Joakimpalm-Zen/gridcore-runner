@@ -82,49 +82,54 @@ Run a GGUF:
 
 Choose Runner when local inference needs to behave like dependable
 infrastructure: easy to deploy, bounded by the machine, and explicit about what
-it can prove. The list below is ordered by how much difference each one makes in
-practice, most first.
+it can prove. The one that matters most has its own section below; the rest
+follow as a list, ordered by how much difference each makes in practice.
 
-- **Tool calls survive the token limit.** And their fidelity under
-  quantization is measured, not assumed: on a full quant ladder,
-  constrained decoding held schema conformance and tool selection at 100%
-  all the way down to Q4_0 while argument agreement decayed to 50% — so
-  constrained decoding guarantees the SHAPE of a tool call at any
-  quantization, not its contents (the per-quant table and method are in
-  [docs/quant-fidelity.md](docs/quant-fidelity.md)). An agent that receives no
-  usable tool call cannot proceed; it retries from scratch, burning tokens,
-  time, and context window. The mechanism here is not ordinary JSON Schema support, it is
-  forced-truncation recovery: once a document starts, Runner emits the smallest
-  schema-legal ending when the token budget expires, so the arguments still
-  parse. On local models, where context is tight and generation is slow, that is
-  the difference between an agent loop that finishes and one that crashes. The
-  committed [agent-torture gate](docs/agent-torture.md) tests this exact failure
-  mode, and the head-to-head
-  [truncation benchmark](docs/truncation-benchmark.md) pins it as a per-release
-  regression gate (`make test-truncation`).
+### Truncated tool calls that still parse: closing the JSON when `max_tokens` runs out
 
-  What each engine hands the caller when the token budget cuts a tool call
-  short — same box, same tool schema, same prompt, `tool_choice:"required"`,
-  temperature 0, budgets 1→64 (full recipe and raw responses in
-  [docs/truncation-benchmark.md](docs/truncation-benchmark.md)):
+When a tool call runs past its token budget, most engines return an empty or
+malformed `tool_calls` — commonly `finish_reason: "length"` with nothing
+usable, or truncated JSON the caller cannot parse and has to repair or retry.
+Runner closes the call to the smallest schema-legal document instead, so the
+arguments still parse. This is **forced-truncation recovery**, not ordinary
+JSON-Schema constrained decoding: once a document starts, Runner emits a legal
+ending when the budget expires. On local models, where context is tight and
+generation is slow, it is the difference between an agent loop that finishes and
+one that retries from scratch — burning tokens, time, and context window.
 
-  | engine | budget too small (1–16 tokens) | enough budget (64, control) |
-  |---|---|---|
-  | **Runner** | **executable `tool_calls`, arguments parse** | completes |
-  | vLLM 0.27.1 | no call; protocol framing leaks into `content` | completes |
-  | llama.cpp b10488 | no call; leak, then `tool_calls` with unparseable args | completes |
-  | Ollama 0.32.14 | no call; empty content, then HTTP 500 | completes |
-  | TensorRT-LLM 1.2.1 † | no call; `<tool_call>` leak, then empty content | completes |
-  | SGLang 0.5.17 † | no call; `<tool_call>` leak, then empty content | completes |
+What each engine hands the caller when the token budget cuts a tool call short
+— same box, same tool schema, same prompt, `tool_choice:"required"`,
+temperature 0, budgets 1→64:
 
-  The control rung proves the failure is truncation, not misconfiguration:
-  every engine completes at 64. Below that, only Runner returns an executable
-  call; the others each hand back something broken or absent. This is the
-  behaviour across every OpenAI-compatible engine we have measured — not a claim
-  about engines we have not. **†** TensorRT-LLM and SGLang were measured on a
-  Qwen3-1.7B substitute (their model registries did not carry the granite-4.1-3b
-  used for the other four); truncation recovery is a property of the runtime, so
-  this measures the engine, not the model.
+| engine | budget too small (1–16 tokens) | enough budget (64, control) |
+|---|---|---|
+| **Runner** | **executable `tool_calls`, arguments parse** | completes |
+| vLLM 0.27.1 | no call; protocol framing leaks into `content` | completes |
+| llama.cpp b10488 | no call; leak, then `tool_calls` with unparseable args | completes |
+| Ollama 0.32.14 | no call; empty content, then HTTP 500 | completes |
+| TensorRT-LLM 1.2.1 † | no call; `<tool_call>` leak, then empty content | completes |
+| SGLang 0.5.17 † | no call; `<tool_call>` leak, then empty content | completes |
+
+The control rung proves the failure is truncation, not misconfiguration: every
+engine completes at 64. Below that, only Runner returns an executable call; the
+others each hand back something broken or absent. This is the behaviour across
+every OpenAI-compatible engine we have measured — not a claim about engines we
+have not. **†** TensorRT-LLM and SGLang were measured on a Qwen3-1.7B substitute
+(their model registries did not carry the granite-4.1-3b used for the other
+four); truncation recovery is a property of the runtime, so this measures the
+engine, not the model.
+
+The [truncation benchmark](docs/truncation-benchmark.md) has the full recipe and
+raw responses and pins Runner's column as a per-release regression gate
+(`make test-truncation`); the [agent-torture gate](docs/agent-torture.md) tests
+the same failure mode. Tool-call fidelity under **quantization** is measured
+too: on a full quant ladder, constrained decoding held schema conformance and
+tool selection at 100% down to Q4_0 while argument agreement decayed to 50% — it
+guarantees the SHAPE of a call at any quantization, not its contents
+([docs/quant-fidelity.md](docs/quant-fidelity.md)).
+
+The rest of what sets Runner apart, ordered by how much difference each makes:
+
 - **A shared GPU stops being first-come, first-crash.** Run a coding agent
   beside an embeddings model beside a draft model and the usual outcome is that
   one load kills another. Runner processes on the same GPU share a VRAM
