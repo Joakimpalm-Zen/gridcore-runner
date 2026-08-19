@@ -303,7 +303,7 @@ flags into unrelated feature sections.
 | `-s N` | RNG seed; default is time-based. `0` is refused: it is the sampler RNG's fixed point, so it cannot produce a stream. |
 | `--think` / `--no-think` | Request the model family's thinking or non-thinking prompt shape. With neither flag, Runner renders whatever that family's own reference template renders, which is not the same answer for every family. Families without a distinct thinking prompt accept the flag and ignore it rather than approximate one. |
 | `--temp F` | Temperature; `0` is greedy and disables repeat penalty. |
-| `--top-k N` | Top-k sampling; `0` disables it. |
+| `--top-k N` | Top-k sampling; `0` disables it. Several presets ship `0`, where setting it is a measured decode-throughput win that also changes the sampled distribution — see [`--top-k 40`](#--top-k-40-a-faster-constrained-decode-with-different-semantics). |
 | `--top-p F` | Nucleus sampling threshold. |
 | `--min-p F` | Probability floor relative to the top candidate; `0` disables it. |
 | `--repeat-penalty F` | Recent-token penalty; `1` disables it. |
@@ -1169,6 +1169,24 @@ unlike a budget truncation, which is a completion and keeps its content under
 `stop_reason: "max_tokens"`, a fault has no `stop_reason` that would not
 misstate why generation stopped. `runner_telemetry.finish_detail` rides on the
 error object so the two faults stay distinguishable.
+
+### `--top-k 40`: a faster constrained decode with different semantics
+
+Constrained decoding pays for the sampler on every step, and several shipped
+presets — SmolLM2's, llama3's, mistral's, gpt-oss's — set `top_k = 0`, which
+means no truncation and a pass over the whole vocabulary. Setting `--top-k 40`
+(or `"top_k": 40` per request) measured **12–27% higher decode throughput**
+than the same run at the preset's `top-k 0`, on an M1 with
+SmolLM2-135M-Instruct under JSON- and schema-constrained decoding.
+
+It is an option, not a default, and it is not certified. Truncating to 40
+candidates **changes the sampled distribution** — it is different semantics,
+not a cheaper route to the same tokens — so it stays outside the correctness
+gates rather than becoming a preset value. Reach for it when decode throughput
+matters more than reproducing the preset's distribution; leave it off when the
+run is being compared against a reference. At `--temp 0` the question does not
+arise: greedy argmax bypasses `top_k`, `top_p`, `min_p` and the repeat penalty
+entirely, so the certified greedy paths are unaffected either way.
 
 ## Support matrix
 
