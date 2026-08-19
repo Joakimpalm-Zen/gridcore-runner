@@ -1894,9 +1894,10 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         for (int i = 0; i < m->n_layer; i++) if (m->l_head_kv[i] > 0) n_attn++;
         fprintf(stderr, "granitehybrid: Mamba-2 hybrid (%d recurrent + %d "
                 "attention layers) — greedy output verified against llama.cpp "
-                "b10353 on granite-4.0-h-small Q4_K_M: token-identical on "
-                "high-confidence prompts, diverging only at genuine near-ties "
-                "(the Q4_K noise floor)\n",
+                "b10353 on granite-4.0-h-small at Q4_K and Q8_0: token-"
+                "identical on high-confidence prompts, diverging only at "
+                "genuine near-ties (a ~0.03-nat argmax coin-flip at Q8_0; "
+                "runner and oracle rank the same top-2 — math verified)\n",
                 m->n_layer - n_attn, n_attn);
     }
     if (strcmp(arch, "muse-glimmer") == 0) {
