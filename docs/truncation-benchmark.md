@@ -22,8 +22,8 @@ sees.
 
 ## What is pinned
 
-Everything that could move a verdict is fixed as data in the probe, so both
-engines answer the same question:
+Everything that could move a verdict is fixed as data in the probe, so every
+engine answers the same question:
 
 | Knob | Value |
 |---|---|
@@ -33,7 +33,7 @@ engines answer the same question:
 | Prompt | `What is the weather in Paris? Use fahrenheit.` |
 | `tool_choice` | `required` (forces a call at every budget) |
 | `temperature` | 0 (deterministic) |
-| Model | `granite-4.1-3b` — Q4_K_M GGUF for Runner, the HF safetensors of the same model for vLLM |
+| Model | `granite-4.1-3b` — Q4_K_M GGUF for Runner, llama.cpp and Ollama; the HF safetensors of the same model for vLLM |
 
 The property is an **engine guarantee** (grammar + closer), not model quality:
 it holds identically for the random 2-layer CI fixture and for granite-4.1-3b,
@@ -52,39 +52,64 @@ For the control rung (64): a tool call is present and parses, and it completed
 
 ## Results — granite-4.1-3b, one box, 2026-08-19
 
-Same box, same model, same schema/prompt/budgets. Runner served the Q4_K_M GGUF
-on CPU; vLLM served the HF safetensors on the GPU. The verdict is tool-call
-survival, not throughput, so the backend split does not move it — but it is a
-difference and is stated rather than buried, as the other cross-runtime results
-in this tree are.
+Same box, same model, same schema/prompt/budgets, four engines run one at a time
+on the loopback port. Runner and llama.cpp served the Q4_K_M GGUF on CPU; Ollama
+imported that same GGUF and served it on the GPU; vLLM served the HF safetensors
+on the GPU. The verdict is tool-call survival, not throughput, so the backend
+split does not move it — but it is a difference and is stated rather than buried,
+as the other cross-runtime results in this tree are.
 
-Runner at `c7d6c3d` (0.1.19-alpha); vLLM 0.27.1 + xgrammar 0.2.3.
+Runner at `c7d6c3d` (0.1.19-alpha), re-confirmed today building at `153cefa`;
+vLLM 0.27.1 + xgrammar 0.2.3; llama.cpp b10488 (`9d77fa172`); Ollama 0.32.14.
 
-| `max_tokens` | Runner `finish_reason` | Runner tool call | Runner parseable | vLLM `finish_reason` | vLLM tool call | vLLM parseable | vLLM `content` leak |
-|---:|:--|:--|:--|:--|:--|:--|:--|
-| 1  | length | yes | yes | length | **none** | no | `<tool_call>` |
-| 2  | length | yes | yes | length | **none** | no | `<tool_call>\n` |
-| 3  | length | yes | yes | length | **none** | no | `<tool_call>\n{"` |
-| 5  | length | yes | yes | length | **none** | no | `<tool_call>\n{"name":` |
-| 8  | length | yes | yes | length | **none** | no | `<tool_call>\n{"name": "get_weather` |
-| 16 | length | yes | yes | length | **none** | no | `<tool_call>\n{"name": "get_weather", "arguments": {"city": "` |
-| 64 | tool_calls | yes | yes | tool_calls | yes | yes | — |
+**Per-rung, what the client receives — is there a parseable, executable
+`tool_calls` entry?**
 
-Both engines complete normally at 64 (the control). At every smaller budget
-Runner returns a parseable `tool_calls` entry while vLLM returns an empty
-`tool_calls` list and leaks the raw hermes framing into `content`. The full
-per-rung records, including the base64 of every HTTP body, are in
-`vllm/report.json` and `runner-cpu/report.json` beside this note. (The results
-subdirectory is `runner-cpu/`, not `runner/`, because the repo's `.gitignore`
-excludes the `runner` binary and would swallow a directory of that name.)
+| `max_tokens` | Runner | vLLM | llama.cpp | Ollama |
+|---:|:--|:--|:--|:--|
+| 1  | **parses** | none; leaks `<tool_call>` into `content` | none; leaks `<tool_call>` into `content` | none; empty `content` |
+| 2  | **parses** | none; leaks `<tool_call>\n` | none; leaks `<tool_call>\n` | none; empty `content` |
+| 3  | **parses** | none; leaks `<tool_call>\n{"` | none; leaks `<tool_call>\n{"` | none; empty `content` |
+| 5  | **parses** | none; leaks `…{"name":` | none; leaks `…{"name":` | none; empty `content` |
+| 8  | **parses** | none; leaks `…{"name": "get_weather` | none; leaks `…{"name": "get_weather` | none; empty `content` |
+| 16 | **parses** | none; leaks `…{"city": "` | `tool_calls` present but `arguments` = `{"city": "` **do not parse** | **HTTP 500** (`invalid tool call arguments … unexpected end of JSON input`) |
+| 64 (control) | parses, `tool_calls` | parses, `tool_calls` | parses, `tool_calls` | parses, `tool_calls` |
 
-The competitor cell measures vLLM's `--tool-call-parser hermes` path
-specifically: the parser only produces a `tool_calls` object once the closing
-framing has been generated, so a budget that ends before that leaves the partial
-call in `content`. That is the mechanism the headline is about.
+Every measured engine completes normally at 64 (the control). At every smaller
+budget **only Runner returns a parseable `tool_calls` entry.** The three
+competitors each fail differently, and the differences rank differently for a
+caller (executable call > detectable empty/error response > protocol rendered as
+prose > a `tool_calls` object whose arguments silently fail to parse):
 
-> SGLang is not measured here; its cell is intentionally empty rather than
-> guessed.
+- **vLLM** — empty `tool_calls` list at every truncated rung; the raw hermes
+  framing leaks into `content` as assistant prose.
+- **llama.cpp** — same framing leak at 1–8; at 16 it emits a `tool_calls` object
+  whose truncated `arguments` (`{"city": "`) are not valid JSON.
+- **Ollama** — hides the framing (empty `content`, no leak) but returns no call
+  at 1–8, and at 16 its server-side hermes parser fails the unterminated JSON
+  with an HTTP 500.
+
+None of the three closes the document. The full per-rung records, including the
+base64 of every HTTP body, are in `vllm/report.json`, `llamacpp/report.json`,
+`ollama/report.json`, and `runner-cpu/report.json` beside this note. (The Runner
+results subdirectory is `runner-cpu/`, not `runner/`, because the repo's
+`.gitignore` excludes the `runner` binary and would swallow a directory of that
+name.)
+
+The vLLM and Ollama cells measure their `hermes` tool-call parser path, and
+llama.cpp's cell measures its `--jinja` template path: each only yields (or tries
+to yield) a `tool_calls` object once the closing framing has been generated, so a
+budget that ends before that leaves the call partial. That is the mechanism the
+headline is about.
+
+> SGLang is not measured here; its cell is intentionally empty. It could not be
+> kept alive on this box's MIG 1g.24gb slice — torch's caching allocator
+> NVML-asserts (`NVML_SUCCESS == r INTERNAL ASSERT FAILED`, `avail mem=2.83 GB`
+> on a 24 GB idle slice) and `PYTORCH_NO_CUDA_MEMORY_CACHING=1` clears the assert
+> but OOMs, across `--mem-fraction-static` 0.45/0.55/0.70, `--context-length`
+> 2048, `expandable_segments:True` and `SGLANG_DISABLE_NVML=1`. This is an
+> environment limitation, not a truncation result: its behaviour is unknown, so
+> the cell stays empty rather than guessed.
 
 ## Serve recipes
 
@@ -136,6 +161,37 @@ python3 scripts/truncation-benchmark.py \
 *Runner's* guarantee, and asserting it against another runtime would only encode
 that runtime's behaviour as a requirement.
 
+### llama.cpp (same Q4_K_M GGUF)
+
+The official `b10488` `ubuntu-x64` release binary (upstream publishes no Linux
+CUDA asset for this tag, so it ran CPU). Tool calls come from the model's own
+chat template via `--jinja`, which is on by default; no separate tool-call
+parser flag exists or is needed:
+
+```sh
+llama-server -m /path/to/granite-4.1-3b-Q4_K_M.gguf \
+    --host 127.0.0.1 --port 8080 --jinja -c 4096
+python3 scripts/truncation-benchmark.py \
+    --endpoint 127.0.0.1:8080 --runtime llama.cpp --runtime-version b10488 \
+    --model-name granite-4.1-3b \
+    --out tests/torture/truncation/<date>-granite-4.1-3b/llamacpp
+```
+
+### Ollama (same Q4_K_M GGUF, imported)
+
+Ollama 0.32.14. Import the *same* GGUF so the weights are identical
+(`ollama create` from a one-line `Modelfile`); the imported model auto-detects
+its template and reports the `tools` capability:
+
+```sh
+printf 'FROM %s\n' /path/to/granite-4.1-3b-Q4_K_M.gguf > Modelfile
+OLLAMA_HOST=127.0.0.1:11435 ollama create granite-4.1-3b -f Modelfile
+python3 scripts/truncation-benchmark.py \
+    --endpoint 127.0.0.1:11435 --runtime ollama --runtime-version 0.32.14 \
+    --model-name granite-4.1-3b \
+    --out tests/torture/truncation/<date>-granite-4.1-3b/ollama
+```
+
 ## The regression gate
 
 `make test-truncation` builds Runner, spawns it on the committed CPU fixture
@@ -178,8 +234,11 @@ a deliberately broken build in the tree.
   exact argument *values* at fixture scale are meaningless (the random fixture
   emits empty/`celsius` defaults) — the property is the *shape* surviving, which
   is what the checker asserts.
-- vLLM served the fp16 HF checkpoint and Runner the Q4_K_M GGUF of the same
-  model; quantisation could in principle move an argument value, but not whether
-  a parseable call is produced.
-- The runner column was produced by a runner built at HEAD (`c7d6c3d`) in an
-  isolated worktree on the same box as the vLLM run.
+- vLLM served the bf16 HF checkpoint; Runner, llama.cpp and Ollama served/
+  imported the same Q4_K_M GGUF of the same model. Quantisation could in
+  principle move an argument value, but not whether a parseable call is produced.
+- The runner column was first produced by a runner built at `c7d6c3d` on the box
+  and re-confirmed here building at `153cefa` (both 0.1.19-alpha; identical
+  per-rung verdicts), in an isolated worktree on the same box as the competitor
+  runs. The competitor rows were each measured one at a time on the loopback
+  port, since the engines contend for the GPU and the port.

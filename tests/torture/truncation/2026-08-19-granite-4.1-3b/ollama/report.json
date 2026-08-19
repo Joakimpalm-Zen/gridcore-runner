@@ -1,0 +1,156 @@
+{
+  "configuration": {
+    "control_rung": 64,
+    "ladder": [
+      1,
+      2,
+      3,
+      5,
+      8,
+      16,
+      64
+    ],
+    "model": "granite-4.1-3b",
+    "prompt": "What is the weather in Paris? Use fahrenheit.",
+    "temperature": 0,
+    "tool": {
+      "function": {
+        "description": "Get the current weather for a city.",
+        "name": "get_weather",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "units": {
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "city",
+            "units"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    "tool_choice": "required"
+  },
+  "metrics": {
+    "elapsed_ms": 9688.47
+  },
+  "rungs": [
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 1,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTkxNCIsIm9iamVjdCI6ImNoYXQuY29tcGxldGlvbiIsImNyZWF0ZWQiOjE3ODcxNDAwNzYsIm1vZGVsIjoiZ3Jhbml0ZS00LjEtM2IiLCJzeXN0ZW1fZmluZ2VycHJpbnQiOiJmcF9vbGxhbWEiLCJjaG9pY2VzIjpbeyJpbmRleCI6MCwibWVzc2FnZSI6eyJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6IiJ9LCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIn1dLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjoyMTYsImNvbXBsZXRpb25fdG9rZW5zIjoxLCJ0b3RhbF90b2tlbnMiOjIxN319Cg==",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 2,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTAiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzg3MTQwMDc2LCJtb2RlbCI6ImdyYW5pdGUtNC4xLTNiIiwic3lzdGVtX2ZpbmdlcnByaW50IjoiZnBfb2xsYW1hIiwiY2hvaWNlcyI6W3siaW5kZXgiOjAsIm1lc3NhZ2UiOnsicm9sZSI6ImFzc2lzdGFudCIsImNvbnRlbnQiOiIifSwiZmluaXNoX3JlYXNvbiI6Imxlbmd0aCJ9XSwidXNhZ2UiOnsicHJvbXB0X3Rva2VucyI6MjE2LCJjb21wbGV0aW9uX3Rva2VucyI6MiwidG90YWxfdG9rZW5zIjoyMTh9fQo=",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 3,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTUxNSIsIm9iamVjdCI6ImNoYXQuY29tcGxldGlvbiIsImNyZWF0ZWQiOjE3ODcxNDAwNzcsIm1vZGVsIjoiZ3Jhbml0ZS00LjEtM2IiLCJzeXN0ZW1fZmluZ2VycHJpbnQiOiJmcF9vbGxhbWEiLCJjaG9pY2VzIjpbeyJpbmRleCI6MCwibWVzc2FnZSI6eyJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6IiJ9LCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIn1dLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjoyMTYsImNvbXBsZXRpb25fdG9rZW5zIjozLCJ0b3RhbF90b2tlbnMiOjIxOX19Cg==",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 5,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTY2Iiwib2JqZWN0IjoiY2hhdC5jb21wbGV0aW9uIiwiY3JlYXRlZCI6MTc4NzE0MDA3NywibW9kZWwiOiJncmFuaXRlLTQuMS0zYiIsInN5c3RlbV9maW5nZXJwcmludCI6ImZwX29sbGFtYSIsImNob2ljZXMiOlt7ImluZGV4IjowLCJtZXNzYWdlIjp7InJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50IjoiIn0sImZpbmlzaF9yZWFzb24iOiJsZW5ndGgifV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjIxNiwiY29tcGxldGlvbl90b2tlbnMiOjUsInRvdGFsX3Rva2VucyI6MjIxfX0K",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "length",
+      "http_status": 200,
+      "max_tokens": 8,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTY5OCIsIm9iamVjdCI6ImNoYXQuY29tcGxldGlvbiIsImNyZWF0ZWQiOjE3ODcxNDAwNzcsIm1vZGVsIjoiZ3Jhbml0ZS00LjEtM2IiLCJzeXN0ZW1fZmluZ2VycHJpbnQiOiJmcF9vbGxhbWEiLCJjaG9pY2VzIjpbeyJpbmRleCI6MCwibWVzc2FnZSI6eyJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6IiJ9LCJmaW5pc2hfcmVhc29uIjoibGVuZ3RoIn1dLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjoyMTYsImNvbXBsZXRpb25fdG9rZW5zIjo4LCJ0b3RhbF90b2tlbnMiOjIyNH19Cg==",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": null,
+      "arguments_parseable": false,
+      "arguments_raw": null,
+      "content": null,
+      "content_leak": false,
+      "finish_reason": null,
+      "http_status": 500,
+      "max_tokens": 16,
+      "raw_response_b64": "eyJlcnJvciI6eyJtZXNzYWdlIjoibGxhbWEtc2VydmVyIHJldHVybmVkIGludmFsaWQgdG9vbCBjYWxsIGFyZ3VtZW50cyBmb3IgXCJnZXRfd2VhdGhlclwiOiB1bmV4cGVjdGVkIGVuZCBvZiBKU09OIGlucHV0IiwidHlwZSI6ImFwaV9lcnJvciIsInBhcmFtIjpudWxsLCJjb2RlIjpudWxsfX0K",
+      "tool_call_count": 0,
+      "tool_calls_present": false,
+      "tool_name": null
+    },
+    {
+      "arguments": {
+        "city": "Paris",
+        "units": "fahrenheit"
+      },
+      "arguments_parseable": true,
+      "arguments_raw": "{\"city\":\"Paris\",\"units\":\"fahrenheit\"}",
+      "content": "",
+      "content_leak": false,
+      "finish_reason": "tool_calls",
+      "http_status": 200,
+      "max_tokens": 64,
+      "raw_response_b64": "eyJpZCI6ImNoYXRjbXBsLTI4NSIsIm9iamVjdCI6ImNoYXQuY29tcGxldGlvbiIsImNyZWF0ZWQiOjE3ODcxNDAwNzcsIm1vZGVsIjoiZ3Jhbml0ZS00LjEtM2IiLCJzeXN0ZW1fZmluZ2VycHJpbnQiOiJmcF9vbGxhbWEiLCJjaG9pY2VzIjpbeyJpbmRleCI6MCwibWVzc2FnZSI6eyJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6IiIsInRvb2xfY2FsbHMiOlt7ImlkIjoiU2FvRUFJZE1xOVJNVU1ST2NSS1lUVloxRGRKRXpRYjgiLCJpbmRleCI6MCwidHlwZSI6ImZ1bmN0aW9uIiwiZnVuY3Rpb24iOnsibmFtZSI6ImdldF93ZWF0aGVyIiwiYXJndW1lbnRzIjoie1wiY2l0eVwiOlwiUGFyaXNcIixcInVuaXRzXCI6XCJmYWhyZW5oZWl0XCJ9In19XX0sImZpbmlzaF9yZWFzb24iOiJ0b29sX2NhbGxzIn1dLCJ1c2FnZSI6eyJwcm9tcHRfdG9rZW5zIjoyMTYsImNvbXBsZXRpb25fdG9rZW5zIjoyNywidG90YWxfdG9rZW5zIjoyNDN9fQo=",
+      "tool_call_count": 1,
+      "tool_calls_present": true,
+      "tool_name": "get_weather"
+    }
+  ],
+  "runtime": {
+    "name": "ollama",
+    "version": "0.32.14"
+  },
+  "schema_version": "xyntetik.truncation-benchmark.v1"
+}
