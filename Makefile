@@ -743,6 +743,17 @@ test-gpu-stub: $(CPU_STUB_SRC) $(HDR)
 test.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py test.gguf
 
+# The same fixture with its matmul weights stored Q8_0. test.gguf is F32, and
+# F32 is the ONE case where a backend's batched matvec is its own batch-1
+# kernel's twin by construction — so a batch gate run only on test.gguf proves
+# nothing about any model anyone ships. That is not hypothetical: the CUDA
+# decode microbatch stopped being bit-identical on every quantized model on
+# 2026-07-28 and `make test` stayed green for three weeks
+# (docs/cuda-microbatch-identity-2026-08-18.md). This fixture is what makes the
+# gate mean something.
+test-q8.gguf: scripts/make-test-model.py
+	$(PYTHON) scripts/make-test-model.py --quant q8_0 test-q8.gguf
+
 # Ornith/Qwen3.5 CPU tracer: a committed generator builds a tiny hybrid model
 # with three recurrent DeltaNet blocks and one full-attention block.
 test-ornith-cpu: runner
@@ -1196,7 +1207,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
-      $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) runner test.gguf
+      $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) runner test.gguf test-q8.gguf
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)
@@ -1220,6 +1231,9 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_SHARED)
 	./$(TEST_FILE_ID)
 	./$(TEST_BATCH)
+	@# and again on a QUANTIZED fixture: the F32 run above cannot reach a
+	@# quantized matvec at all, so on its own it gates nothing real
+	./$(TEST_BATCH) test-q8.gguf
 	./$(TEST_PREFIX)
 	./$(TEST_GRAMMAR_FF)
 	./$(TEST_STOP_CONSTRAINT)
@@ -1476,7 +1490,7 @@ fuzz:
 	fi
 
 clean:
-	rm -f test-moe-fixture.*.gguf runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
+	rm -f test-moe-fixture.*.gguf test-q8.gguf runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 		$(TEST_TEMPLATE_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \

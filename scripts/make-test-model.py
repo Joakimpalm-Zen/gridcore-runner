@@ -40,6 +40,7 @@ MUSE_GATE_FLAT = False  # zero the attn_gate weights (sigmoid -> flat 0.5)
 MUSE_ALL_SWA = False    # pattern array all-sliding (every layer ropes)
 GRANITE = False    # granite: four muP scalars, tied embeddings
 GRANITE_RESID = 0.5  # residual_scale for the fixture (CLI-overridable)
+QUANT = None       # --quant q8_0: store the 2-D matmul weights quantized
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -120,6 +121,17 @@ while i < len(args):
     elif a == "--granite-resid":
         i += 1
         GRANITE_RESID = float(args[i])
+    elif a == "--quant":
+        # Store the 2-D matmul weights in a block-quantized type instead of
+        # F32. An F32 fixture cannot reach a backend's quantized matvec at
+        # all, so gates run on one are silent about every kernel that matters
+        # for a real model -- see the CUDA decode-microbatch identity break,
+        # which survived three weeks of a green `make test` because the only
+        # model the batch gate ran on was F32.
+        i += 1
+        QUANT = args[i].lower()
+        if QUANT not in ("q8_0",):
+            sys.exit(f"--quant: unsupported type {QUANT!r} (have: q8_0)")
     elif a == "--gemma4-hetero":
         # the real gemma-4 26B/12B attention shape, scaled down: sliding
         # layers (i%3 != 2) rotate fewer dims on smaller heads with fewer KV
@@ -437,18 +449,59 @@ if SUPPRESS_ALL_BUT_EOS:
                                [i for i in range(N_VOCAB) if i != 2]))
 meta = b"".join(meta_kvs)
 
+# ---------------------------------------------------------------- quantization
+GGML_F32, GGML_Q8_0 = 0, 8
+
+
+def q8_0_row(vals):
+    """One row of floats -> ggml q8_0 blocks (f16 scale + 32 int8 per 32)."""
+    out = bytearray()
+    for b in range(0, len(vals), 32):
+        blk = vals[b:b + 32]
+        amax = max(abs(v) for v in blk)
+        d = amax / 127.0
+        inv = (1.0 / d) if d else 0.0
+        out += struct.pack("<e", d)
+        for v in blk:
+            q = int(round(v * inv))
+            out.append(struct.pack("<b", -128 if q < -128 else 127 if q > 127 else q)[0])
+    return bytes(out)
+
+
+def quantize(name, ne, data):
+    """(type, data) for one tensor under QUANT.
+
+    Only the 2-D matmul weights are converted, and only when the row length is
+    a whole number of blocks. token_embd stays F32 deliberately: this fixture
+    exists to reach the quantized MATVEC kernels, and the fixture arch ties the
+    lm head to the embedding, so quantizing it would drag the embedding-lookup
+    dequant into a gate that is not about it. Norms are 1-D and never eligible.
+    """
+    if QUANT is None or len(ne) != 2 or ne[0] % 32 or name == "token_embd.weight":
+        return GGML_F32, data
+    vals = struct.unpack(f"<{len(data) // 4}f", data)
+    rows = [vals[r * ne[0]:(r + 1) * ne[0]] for r in range(ne[1])]
+    return GGML_Q8_0, b"".join(q8_0_row(r) for r in rows)
+
+
+_typed = []
+for name, ne, data in tensors:
+    ttype, data = quantize(name, ne, data)
+    _typed.append((name, ne, data, ttype))
+tensors = _typed
+
 header = struct.pack("<IIQQ", 0x46554747, 3, len(tensors), len(meta_kvs))
 
 info = b""
 offset = 0
-for index, (name, ne, data) in enumerate(tensors):
+for index, (name, ne, data, ttype) in enumerate(tensors):
     if index == 0 and ZERO_FIRST_DIM:
         ne = [0, *ne[1:]]
     info += s(name) + struct.pack("<I", len(ne))
     for d in ne:
         info += struct.pack("<Q", d)
     stored_offset = (2**64 - 16) if index == 0 and WRAP_FIRST_OFFSET else offset
-    info += struct.pack("<IQ", 0, stored_offset)  # type F32
+    info += struct.pack("<IQ", ttype, stored_offset)
     offset += len(data)
     offset = (offset + 31) & ~31
 
@@ -457,7 +510,7 @@ pad = (-len(head)) % 32
 
 with open(OUT, "wb") as f:
     f.write(head + b"\0" * pad)
-    for _, _, data in tensors:
+    for _, _, data, _ in tensors:
         f.write(data)
         f.write(b"\0" * ((-len(data)) % 32))
 
