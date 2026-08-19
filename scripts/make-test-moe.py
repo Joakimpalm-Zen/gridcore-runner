@@ -20,6 +20,7 @@ the greedy output must be byte-identical.
                      renormalization summing to 1, the weighted multi-expert sum,
                      and reading BOTH expert slices (offsets 0 and 1).
 """
+import math
 import struct
 import sys
 
@@ -164,20 +165,27 @@ def moe_ffn(i, n_expert, expert1_down):
     ]
 
 
-def moe_ffn_routed(i, n_expert):
+def moe_ffn_routed(i, n_expert, router_scale=1.0):
     # A fixture that actually EXERCISES routing: a non-zero router and distinct
     # experts, so the softmax has real structure and the experts disagree.
     # Deliberately NOT dense-equivalent — this one exists for the fused-vs-eager
     # tolerance gate (test_moe_tol.c), which needs the two routing paths to have
     # something to differ about. The zero-router fixtures above are exactly
     # 0.5/0.5 either way and can only ever compare a path with itself.
+    #
+    # router_scale widens the router logits. At 1.0 they land within about
+    # +-0.2, where every gating function is close to its own linearization and
+    # the alternatives nearly agree — fine for the tolerance gate, useless for
+    # the gating-sensitivity fixtures below, which need the functions to
+    # visibly disagree (see check_gating_sensitivity).
     gate_exps, up_exps, down_exps = [], [], []
     for e in range(n_expert):
         gate_exps += [x * (1.0 + 0.25 * e) for x in ffn[i]["gate"]]
         up_exps += [x * (1.0 - 0.15 * e) for x in ffn[i]["up"]]
         down_exps += [x * (1.0 + 0.10 * e) for x in ffn[i]["down"]]
     return [
-        (f"blk.{i}.ffn_gate_inp.weight", [E, n_expert], pack(flist(E * n_expert))),
+        (f"blk.{i}.ffn_gate_inp.weight", [E, n_expert],
+         pack([v * router_scale for v in flist(E * n_expert)])),
         (f"blk.{i}.ffn_gate_exps.weight", [E, FF, n_expert], pack(gate_exps)),
         (f"blk.{i}.ffn_up_exps.weight", [E, FF, n_expert], pack(up_exps)),
         (f"blk.{i}.ffn_down_exps.weight", [FF, E, n_expert], pack(down_exps)),
@@ -318,6 +326,95 @@ def check_group_sensitivity(probs_b, n_group, n_group_used, used, live):
         sys.exit(f"make-test-moe: group fixture's ungrouped selection {flat} "
                  f"is all-live; the missed grouping would not change the logits")
 
+
+def _gate_scores(logits, gating):
+    """moe_route's logits -> selection/weight scores, per expert_gating_func"""
+    if gating == 2:                                   # sigmoid
+        return [1.0 / (1.0 + math.exp(-l)) for l in logits]
+    if gating == 4:                                   # sqrt(softplus)
+        return [math.sqrt(l if l > 20.0 else math.log1p(math.exp(l)))
+                for l in logits]
+    if gating == 3:                                   # softmax runs later, on
+        return list(logits)                           # the SELECTED weights
+    mx = max(logits)                                  # softmax
+    ex = [math.exp(l - mx) for l in logits]
+    return [e / sum(ex) for e in ex]
+
+
+def _route_weights(logits, gating, used, norm):
+    """moe_route's expert weights for one token, as {expert: weight}"""
+    probs = _gate_scores(logits, gating)
+    sel = _sel_topk(probs, used)
+    w = [probs[e] for e in sel]
+    if gating == 3:
+        mx = max(w)
+        ex = [math.exp(v - mx) for v in w]
+        w = [v / sum(ex) for v in ex]
+    elif norm:
+        w = [v / max(sum(w), 6.103515625e-5) for v in w]   # fp16 min normal
+    return dict(zip(sel, w))
+
+
+def check_gating_sensitivity(gating, routers, ne=4, used=2, probes=64,
+                             margin=1e-3):
+    """Refuse gating fixtures that a binary ignoring the knob would still pass.
+
+    Two properties, both required:
+      1. every fixture carries the SAME router bytes, so a difference the gate
+         observes can only have come from the gating metadata;
+      2. each alternative gating function produces materially different expert
+         WEIGHTS than its baseline, on router logits computed here from probe
+         hidden states — independently of the runner.
+    An unimplemented gating function falls through to plain softmax, which is
+    exactly what the baseline fixture declares, so property 2 IS "the missing
+    implementation is detectable". Both were false when this was written: the
+    fixtures had four different routers and the gate passed a binary with the
+    whole gating switch mutated to softmax.
+    """
+    tags = [g[0] for g in gating]
+    cfg = {t: (fn, norm) for t, fn, norm, _ in gating}
+    ref = routers[tags[0]]
+    for t in tags[1:]:
+        if routers[t] != ref:
+            sys.exit(f"make-test-moe: gating fixture {t} does not share "
+                     f"{tags[0]}'s router; the sensitivity gate would be "
+                     f"comparing routers, not gating functions")
+    # ffn_gate_inp is [E, ne]: ne rows of E floats. Layer 0 is representative —
+    # every layer is drawn from the same rewound stream.
+    W = [list(struct.unpack(f"<{E}f", ref[0][r * 4 * E:(r + 1) * 4 * E]))
+         for r in range(ne)]
+    st = 0x9E37           # probe-only LCG: the fixture draw stream must not move
+    def probe():
+        nonlocal st
+        st = (st * 1103515245 + 12345) & 0x7fffffff
+        return st / 0x7fffffff - 0.5
+
+    worst = {}
+    for _ in range(probes):
+        x = [probe() for _ in range(E)]
+        rms = math.sqrt(sum(v * v for v in x) / E) or 1.0
+        x = [v / rms for v in x]           # an RMSNormed hidden state's scale
+        logits = [sum(a * b for a, b in zip(row, x)) for row in W]
+        for tag, fn, norm, base in gating:
+            if base is None:
+                continue
+            got = _route_weights(logits, fn, used, norm)
+            exp = _route_weights(logits, cfg[base][0], used, cfg[base][1])
+            d = max(abs(got.get(e, 0.0) - exp.get(e, 0.0))
+                    for e in set(got) | set(exp))
+            worst[tag] = min(worst.get(tag, d), d)
+    for tag, _, _, base in gating:
+        if base is None:
+            continue
+        if worst[tag] < margin:
+            sys.exit(f"make-test-moe: gating fixture {tag} is degenerate — its "
+                     f"expert weights match {base}'s to {worst[tag]:.3g} on the "
+                     f"weakest of {probes} probes; a binary that ignores "
+                     f"expert_gating_func would pass")
+        print(f"  gating {tag:9s} vs {base:8s} min|dw| = {worst[tag]:.4g} "
+              f"over {probes} probes")
+
+
 # --- generalized-router knobs. Every fixture is built to come out EXACTLY
 # equal to the dense oracle, so a knob that is ignored, applied twice, or
 # applied to the wrong quantity shows up as a text mismatch.
@@ -405,14 +502,52 @@ emit("pruneprobe", lambda i: [flist(FF * E) for _ in range(4)],
 # a visibly different answer. They are not dense-equivalent and are compared
 # against each other, not against dense: the property is "this knob changes the
 # arithmetic", which is exactly what the oracle fixtures cannot show.
-for _tag, _fn in (("rsoft", 1), ("rsigmoid", 2), ("rsmw", 3), ("rsqrtsp", 4)):
+#
+# Every fixture here shares ONE router: _seed is rewound before each build, so
+# moe_ffn_routed draws the same ffn_gate_inp weights every time and the ONLY
+# difference between these files is the gating metadata. The first version drew
+# a fresh router per fixture, which made them differ for a reason that had
+# nothing to do with gating — a binary that ignores expert_gating_func entirely
+# passed the whole gate (verified by mutation 2026-08-19).
+#
+# rsmw pairs with rsoftnn, not rsoft, and both turn expert_weights_norm OFF.
+# Gating 3 (softmax over the SELECTED weights) with the norm ON is
+# arithmetically IDENTICAL to gating 1 plus the sum-renormalization — softmax
+# over the top-k logits IS the renormalized top-k of the full softmax — so under
+# the default norm the knob has no observable effect and no fixture can detect
+# it. With the norm off, gating 3 still normalizes (its own softmax does) and
+# gating 1 does not, which is where the knob becomes visible.
+GATING = [   # tag, expert_gating_func, expert_weights_norm, baseline tag
+    ("rsoft",    1, True,  None),
+    ("rsigmoid", 2, True,  "rsoft"),
+    ("rsqrtsp",  4, True,  "rsoft"),
+    ("rsoftnn",  1, False, None),
+    ("rsmw",     3, False, "rsoftnn"),
+]
+_gate_seed = _seed
+_gate_routers = {}
+# The unscaled router puts the logits inside about +-0.2, where all four gating
+# functions are nearly their own linearization and the weights agree to ~1e-4 —
+# below what a fixture should call a difference. 12x is the measured compromise:
+# sigmoid and sqrt-softplus separate further as the logits widen, while gating 3
+# separates LESS (a peaked softmax already has almost all its mass on the top 2,
+# so normalizing over them changes little). At 12 the weakest of the 64 probes
+# still shows >=2.8e-3 for all three; at 20 the gating-3 pair drops under the
+# margin and check_gating_sensitivity rejects it.
+GATE_ROUTER_SCALE = 12.0
+for _tag, _fn, _norm, _base in GATING:
+    _seed = _gate_seed                      # same router for every gating fixture
     _ts = list(shared)
     for _i in range(LAYERS):
-        _ts += moe_ffn_routed(_i, 4)
-    write(f"{OUT}.{_tag}.gguf", _ts,
-          base_meta("llama", [ku("llama.expert_count", 4),
-                              ku("llama.expert_used_count", 2),
-                              ku("llama.expert_gating_func", _fn)]))
+        _ts += moe_ffn_routed(_i, 4, GATE_ROUTER_SCALE)
+    _gate_routers[_tag] = [t[2] for t in _ts
+                           if t[0].endswith("ffn_gate_inp.weight")]
+    _meta = [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2),
+             ku("llama.expert_gating_func", _fn)]
+    if not _norm:
+        _meta.append(kb("llama.expert_weights_norm", False))
+    write(f"{OUT}.{_tag}.gguf", _ts, base_meta("llama", _meta))
+check_gating_sensitivity(GATING, _gate_routers)
 
 # --- shared always-on expert. The routed experts are all zeros and the SHARED
 # branch carries the dense FFN, so the routed path contributes nothing and the
