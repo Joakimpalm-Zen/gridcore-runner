@@ -535,12 +535,16 @@ static bool prune_plan_load(const char *path, prune_plan_t *plan) {
     if (root->n > 0 && !plan->layers) { jv_free(root); return false; }
     bool ok = true;
     for (int i = 0; ok && i < root->n; i++) {
-        int layer;
-        if (sscanf(root->keys[i], "layer_%d", &layer) != 1 || layer < 0) {
+        long long parsed_layer;
+        const char *key = root->keys[i];
+        if (strncmp(key, "layer_", 6) != 0 ||
+            key[6] < '0' || key[6] > '9' ||
+            !parse_i64(key + 6, 0, INT_MAX, &parsed_layer)) {
             fprintf(stderr, "error: prune-plan key \"%s\" is not \"layer_N\"\n", root->keys[i]);
             ok = false;
             break;
         }
+        int layer = (int)parsed_layer;
         jv *arr = root->items[i];
         if (arr->type != J_ARR || arr->n < 1) {
             fprintf(stderr, "error: prune-plan[\"layer_%d\"] must be a "
@@ -790,6 +794,30 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
                         quantize_plans_free(&plan, &tplan);
                         return 1;
                     }
+                // Every tensor resolve_prune() will slice must describe the
+                // same expert axis as this router. Validating ids against the
+                // router alone is insufficient: a shorter bias/bank would
+                // make the copy loop index beyond that tensor's declared
+                // data and produce an artifact that cannot load.
+                for (uint64_t j = 0; j < g.n_tensors; j++) {
+                    int tensor_layer; const char *tensor_suffix;
+                    gguf_tensor *et = &g.tensors[j];
+                    if (!parse_blk_name(et->name, &tensor_layer,
+                                        &tensor_suffix) ||
+                        tensor_layer != layer ||
+                        !is_expert_tensor_suffix(tensor_suffix))
+                        continue;
+                    int64_t tensor_n = et->ne[et->n_dims - 1];
+                    if (tensor_n != orig_n) {
+                        fprintf(stderr, "error: %s expert axis has %lld "
+                                "entries, but the blk.%d router has %lld\n",
+                                et->name, (long long)tensor_n, layer,
+                                (long long)orig_n);
+                        gguf_close(&g);
+                        quantize_plans_free(&plan, &tplan);
+                        return 1;
+                    }
+                }
                 final_count = pl->n_ids;
                 if (final_count < orig_n) any_pruned = true;
             }

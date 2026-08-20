@@ -169,6 +169,56 @@ def _tensor_ne0(path, tensor_name):
     return None
 
 
+def _patch_tensor_dim(src, dst, tensor_name, dim, value):
+    """Patch one descriptor dimension without touching its backing bytes."""
+    data = bytearray(pathlib.Path(src).read_bytes())
+    pos = 8
+    n_tensors, n_kv = struct.unpack_from("<QQ", data, pos)
+    pos += 16
+    type_sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4,
+                  7: 1, 10: 8, 11: 8, 12: 8}
+
+    def rd_str():
+        nonlocal pos
+        n = struct.unpack_from("<Q", data, pos)[0]
+        pos += 8
+        out = bytes(data[pos:pos + n]).decode()
+        pos += n
+        return out
+
+    def skip(t):
+        nonlocal pos
+        if t == 9:
+            et = struct.unpack_from("<I", data, pos)[0]
+            n = struct.unpack_from("<Q", data, pos + 4)[0]
+            pos += 12
+            for _ in range(n):
+                skip(et)
+        elif t == 8:
+            rd_str()
+        else:
+            pos += type_sizes[t]
+
+    for _ in range(n_kv):
+        rd_str()
+        t = struct.unpack_from("<I", data, pos)[0]
+        pos += 4
+        skip(t)
+    found = False
+    for _ in range(n_tensors):
+        name = rd_str()
+        nd = struct.unpack_from("<I", data, pos)[0]
+        pos += 4
+        dims_pos = pos
+        pos += 8 * nd + 12  # dimensions, type, data offset
+        if name == tensor_name:
+            assert 0 <= dim < nd
+            struct.pack_into("<Q", data, dims_pos + 8 * dim, value)
+            found = True
+    assert found, tensor_name
+    dst.write_bytes(data)
+
+
 def test_prune_slices_exp_probs_b_bias_spelling(runner_bin, pruneprobe_bias_model, tmp_path):
     """A pruned file whose selection bias still lists every original expert is
     not loadable: model.c reads `exp_probs_b` with the layer's post-prune
@@ -300,6 +350,32 @@ def test_prune_expert_id_must_fit_a_nonnegative_int(runner_bin,
     proc = _prune(runner_bin, pruneprobe_model, pruned, plan)
     assert proc.returncode != 0
     assert b"is not a non-negative integer" in proc.stderr
+    assert not pruned.exists()
+
+
+@pytest.mark.parametrize("bad_key", ["layer_0junk", "layer_2147483648"])
+def test_prune_layer_key_is_parsed_strictly(runner_bin, pruneprobe_model,
+                                             tmp_path, bad_key):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({bad_key: [0, 1]}))
+    pruned = tmp_path / "pruned.gguf"
+    proc = _prune(runner_bin, pruneprobe_model, pruned, plan)
+    assert proc.returncode != 0
+    assert b'is not "layer_N"' in proc.stderr
+    assert not pruned.exists()
+
+
+def test_prune_rejects_expert_tensor_that_disagrees_with_router(
+        runner_bin, pruneprobe_model, tmp_path):
+    malformed = tmp_path / "mismatched.gguf"
+    _patch_tensor_dim(pruneprobe_model, malformed,
+                      "blk.0.exp_probs_b.weight", 0, 2)
+    plan = tmp_path / "plan.json"
+    _write_plan(plan, {0: [0, 3]})  # 3 exists in the router, not in the bias
+    pruned = tmp_path / "pruned.gguf"
+    proc = _prune(runner_bin, malformed, pruned, plan)
+    assert proc.returncode != 0
+    assert b"expert axis" in proc.stderr
     assert not pruned.exists()
 
 
