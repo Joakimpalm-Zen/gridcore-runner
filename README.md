@@ -357,13 +357,17 @@ reported beside it).
   quantiser and verified **5/6 greedy token-identical vs llama.cpp b10353 at Q8_0**
   (the sole miss a quant-noise near-tie). NVIDIA Open Model License; the card leads
   with the tool-calling differentiator.
-- Two measurement reports over third-party ladders, no weights
-  republished, every measured file bound by SHA:
+- Measurement reports over third-party artifacts, no weights republished,
+  every measured file bound by SHA:
   [Hermes-4-14B quant fidelity](https://huggingface.co/Joakimpalm-Zen/Hermes-4-14B-quant-fidelity-report)
-  (the 4-bit size threshold and the split story) and the
+  (the 4-bit size threshold and the split story), the
   [Qwen3 speculative pair](https://huggingface.co/Joakimpalm-Zen/Qwen3-speculative-pair-report)
   (measured draft acceptance, and why the engine's printed tok/round must
-  not be tuned on).
+  not be tuned on), and the two Mamba-2 hybrid support reports —
+  [granite-4.0-h-small](https://huggingface.co/Joakimpalm-Zen/granite-4.0-h-small-runner-report)
+  (`granitehybrid`, 3/5 greedy-identity at the noise floor) and
+  [Nemotron-3.5-Lightning-30B-A3B](https://huggingface.co/Joakimpalm-Zen/Nemotron-3.5-Lightning-30B-A3B-runner-report)
+  (`nemotron_h_moe`, 4/5) — each carrying its measured-envelope manifest.
 
 ## Command-line reference
 
