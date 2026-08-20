@@ -1,0 +1,45 @@
+{
+  "schema_version": "xyntetik.runner.greedy-reference.v1",
+  "generated_utc": "2026-08-20T14:03:50Z",
+  "runner": "runner 0.1.20-alpha",
+  "reference": "version: 1 (ea12b27)",
+  "model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf",
+  "tokens": 8,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris.  \nThe capital of Germany",
+      "reference": " Paris.  \nThe capital of Germany",
+      "status": "pass"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": "\\n    if n <= 0",
+      "reference": "\\n    if n <= 0",
+      "status": "pass"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10\n- ",
+      "reference": " 9 10 11",
+      "status": "fail"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " there lived a young girl named Lily.",
+      "reference": " there lived a young girl named Lily.",
+      "status": "pass"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John\", \"age\": 3",
+      "reference": " \"John\", \"age\": 3",
+      "status": "pass"
+    }
+  ],
+  "totals": {
+    "passed": 4,
+    "failed": 1
+  }
+}

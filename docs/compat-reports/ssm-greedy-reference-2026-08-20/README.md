@@ -18,3 +18,14 @@ CPU path (the hybrids are CPU-only), 5 prompts × 32 tokens.
 
 Reproduce:
 `python3 scripts/reference_compare.py --runner ./runner --reference <llama-server> --model <hybrid>.gguf --tokens 32`
+
+## Update — nemotron_h_moe (Nemotron-3.5-Lightning-30B, Q4_0)
+
+Lightning-30B (`nemotron_h_moe`: nemotron_h with a gate-less squared-ReLU MoE —
+128 experts / 6 used + an always-on gate-less shared expert) now loads and runs,
+CPU path. Greedy vs llama.cpp `ea12b27`, 8 tokens × 5 prompts: **4/5**. Four
+prompts (factual, code, story, JSON) are byte-identical; the one divergence is
+the open-ended counting prompt (`" 9 10\n-"` vs `" 9 10 11"`), a near-tie
+continuation — the same qwen3moe/gpt-oss noise-floor envelope, not wrong math
+(the coherent `"Paris. … Berlin."` completion matches exactly). 30B on CPU is
+slow (~0.3 tok/s), so the ladder is shorter than the 9B runs above.
