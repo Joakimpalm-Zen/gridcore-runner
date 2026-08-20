@@ -3783,6 +3783,23 @@ void model_embd_transform(const model_t *m, float *row) {
 // token-identical rather than merely fluent. The grouped RMS norm below also
 // accumulates its sum-of-squares in double, exactly as ggml_compute_forward_
 // rms_norm_f32 does.
+//
+// GCC and Clang spell per-function FP control differently.  Clang accepts
+// GCC's optimize attribute only by ignoring it, which used to leave this
+// whole block under the translation unit's -ffast-math setting on macOS.
+// Keep the compiler split explicit: GCC gets its function option and Clang
+// gets the documented compound-statement precise mode.
+#if defined(__clang__)
+#define SSM_PRECISE_ATTR
+#define SSM_PRECISE_SCOPE _Pragma("float_control(precise, on)")
+#elif defined(__GNUC__)
+#define SSM_PRECISE_ATTR __attribute__((optimize("no-fast-math")))
+#define SSM_PRECISE_SCOPE
+#else
+#define SSM_PRECISE_ATTR
+#define SSM_PRECISE_SCOPE
+#endif
+
 // Largest conv kernel the chunked path's per-thread dequant buffer supports
 // (Mamba-2 hybrids use 4). Above this the dispatcher falls back to serial.
 #define SSM_MAX_CONV_KERNEL 16
@@ -3811,8 +3828,9 @@ static int ssm_force_serial(void) {
 
 // ---- serial reference core: the exact per-token sweep (also the decode path).
 // This is the ground truth the chunked path is pinned bit-identical against.
-__attribute__((optimize("no-fast-math")))
+SSM_PRECISE_ATTR
 static void mamba2_ssd_core_serial(model_t *m, layer_t *ly, int layer, int n) {
+    SSM_PRECISE_SCOPE
     int nh = m->ssm_v_heads;                 // n_ssm_head
     int inner = m->ssm_inner, hd = inner / nh; // head_dim = inner / n_head
     int ds = m->ssm_state, ng = m->ssm_groups;
@@ -3907,8 +3925,9 @@ typedef struct {
     const float *convstate;   // initial conv ring (read-only here)
 } ssm_conv_job;
 
-__attribute__((optimize("no-fast-math")))
+SSM_PRECISE_ATTR
 static void ssm_conv1d_worker(void *vp, int c0, int c1) {
+    SSM_PRECISE_SCOPE
     const ssm_conv_job *J = (const ssm_conv_job *)vp;
     const model_t *m = J->m; const layer_t *ly = J->ly;
     int n = J->n, inner = J->inner, conv_dim = J->conv_dim, d_in = J->d_in_proj;
@@ -3943,8 +3962,9 @@ typedef struct {
     int t0, t1;               // token chunk
 } ssm_scan_job;
 
-__attribute__((optimize("no-fast-math")))
+SSM_PRECISE_ATTR
 static void ssm_scan_worker(void *vp, int h0, int h1) {
+    SSM_PRECISE_SCOPE
     const ssm_scan_job *J = (const ssm_scan_job *)vp;
     const model_t *m = J->m; const layer_t *ly = J->ly;
     int inner = J->inner, hd = J->hd, ds = J->ds, ng = J->ng, gsz = J->gsz;
@@ -3983,8 +4003,9 @@ typedef struct {
     int inner, ng, per_g, d_in_proj; float rms_eps;
 } ssm_norm_job;
 
-__attribute__((optimize("no-fast-math")))
+SSM_PRECISE_ATTR
 static void ssm_gate_norm_worker(void *vp, int b0, int b1) {
+    SSM_PRECISE_SCOPE
     const ssm_norm_job *J = (const ssm_norm_job *)vp;
     const model_t *m = J->m; const layer_t *ly = J->ly;
     int inner = J->inner, ng = J->ng, per_g = J->per_g;
@@ -4009,8 +4030,9 @@ static void ssm_gate_norm_worker(void *vp, int b0, int b1) {
 
 // ---- chunked core: intra-chunk parallel, inter-chunk recurrent. Bit-identical
 // to mamba2_ssd_core_serial (see the ssd-step comment above and the pinned gate).
-__attribute__((optimize("no-fast-math")))
+SSM_PRECISE_ATTR
 static void mamba2_ssd_core_chunked(model_t *m, layer_t *ly, int layer, int n) {
+    SSM_PRECISE_SCOPE
     int nh = m->ssm_v_heads;
     int inner = m->ssm_inner, hd = inner / nh;
     int ds = m->ssm_state, ng = m->ssm_groups, gsz = nh / ng;
@@ -4062,6 +4084,9 @@ static void mamba2_ssd_core_chunked(model_t *m, layer_t *ly, int layer, int n) {
     ssm_norm_job nj = { m, ly, inner, ng, inner / ng, d_in_proj, m->rms_eps };
     tpool_run(m->tp, ssm_gate_norm_worker, &nj, n);
 }
+
+#undef SSM_PRECISE_SCOPE
+#undef SSM_PRECISE_ATTR
 
 // Dispatcher: in_proj (batched), the mixer core (chunked prefill or serial),
 // then out_proj (batched). Decode (n==1) and XR_SSM_SERIAL take the serial core.

@@ -51,7 +51,11 @@ TEST_BIND = test-bind.exe
 else ifeq ($(shell uname -s),Darwin)
 GPU_SRC  = src/metal.m
 GPU_BACKEND_DEF = -DRUNNER_GPU_METAL
-CFLAGS += -Werror=nan-infinity-disabled
+# Compiler-specific correctness annotations must not silently disappear.  The
+# Mamba-2 recurrence, in particular, relies on precise FP semantics and an
+# ignored attribute lets both sides of its identity gate agree on the wrong
+# arithmetic regime.
+CFLAGS += -Werror=nan-infinity-disabled -Werror=unknown-attributes
 LDFLAGS += -framework Metal -framework Foundation
 # AppKit only on Darwin, only for the tray backend; UniformTypeIdentifiers
 # for the non-deprecated NSOpenPanel file filter
