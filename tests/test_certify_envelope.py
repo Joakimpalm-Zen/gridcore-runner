@@ -66,10 +66,25 @@ class CertifyEnvelopeTests(unittest.TestCase):
         finally:
             os.unlink(report)
 
-    def test_failing_check_is_outside_envelope(self):
+    def test_runs_but_a_gate_fails_is_experimental(self):
+        # Sharpened semantics (2026-08-20): a model that LOADS + runs but fails a
+        # stricter gate is USABLE -> experimental, not refused. outside-envelope
+        # is reserved for won't-run (see below).
         sha = sha256_file(MODEL)
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             json.dump(fixture_report(sha, {"load": "pass", "tokenizer": "fail"}), f)
+            report = f.name
+        try:
+            m = self._run("--compat-report", report, "--reference-sha", "abc123")
+            self.assertEqual(m["verdict"], "experimental")
+        finally:
+            os.unlink(report)
+
+    def test_load_failure_is_outside_envelope(self):
+        # A model that won't LOAD should not run -> outside-envelope (refuse).
+        sha = sha256_file(MODEL)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(fixture_report(sha, {"load": "fail"}), f)
             report = f.name
         try:
             m = self._run("--compat-report", report, "--reference-sha", "abc123")

@@ -39,10 +39,14 @@ static int classify(jv *m, const char *runtime_version, const char *backend,
     const char *m_back  = jv_str(jv_get(jv_get(runtime, "kernel_set"), "backend"), "");
     const char *verdict = jv_str(jv_get(m, "verdict"), "");
 
-    // `runner --version` prints "runner X"; the manifest records that whole
-    // string, so compare against the same shape.
-    char rv[64];
-    snprintf(rv, sizeof rv, "runner %s", runtime_version ? runtime_version : "");
+    // The certifier writes runtime.version straight from `--caps`, which is the
+    // BARE version ("0.1.19-alpha") — NOT the "runner X" form `--version` prints.
+    // An earlier revision here compared against "runner %s", so EVERY real
+    // certifier-produced manifest resolved as foreign/indeterminate and never
+    // matched its own runtime (the test fixtures used the "runner X" form and
+    // masked it). Compare against the bare version, exactly what the manifest and
+    // `--caps` carry.
+    const char *rv = runtime_version ? runtime_version : "";
     bool ver_match  = m_ver[0]  && !strcmp(m_ver, rv);
     bool back_match = m_back[0] && backend && !strcmp(m_back, backend);
 

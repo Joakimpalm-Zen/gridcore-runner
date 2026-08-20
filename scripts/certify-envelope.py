@@ -114,13 +114,28 @@ def build_manifest(args):
     entry = find_model_evidence(report, sha, args.model)
     gate, checks, detail = summarize_checks(entry)
 
-    # Verdict resolution (exact-match-only, fail-closed on missing provenance):
+    # Verdict resolution — sharpened three states (owner 2026-08-20):
+    #   certified       — all cert gates pass + a reference sha.
+    #   outside-envelope — a measured reason says this config SHOULD NOT RUN
+    #                      (the model won't LOAD, or a check is an explicit refusal
+    #                      like wont_fit/load_fatal). The runner REFUSES it.
+    #   experimental    — anything else short of certified: the model LOADS and
+    #                      runs but a stricter gate fails (cpu_cuda identity, chat,
+    #                      ...), or there's no reference sha / no gate evidence. It
+    #                      is USABLE, so it loads with a banner — never refused.
+    # Reserving `outside-envelope` for won't-run keeps a serviceable model (a MoE
+    # that fails byte-identity but passes fidelity) out of the refusal path.
+    checks_raw = (entry or {}).get("checks") or {}
+    def _stat(v):
+        return v.get("status") if isinstance(v, dict) else v
+    refused = (_stat(checks_raw.get("load")) == "fail"
+               or any(_stat(v) in ("wont_fit", "load_fatal") for v in checks_raw.values())
+               or any(isinstance(v, dict) and v.get("refusal") for v in checks_raw.values()))
     if gate == "pass" and args.reference_sha:
         verdict = "certified"
-    elif gate == "fail":
+    elif refused:
         verdict = "outside-envelope"
     else:
-        # gate pass without a reference sha, or no gate evidence at all
         verdict = "experimental"
 
     return {

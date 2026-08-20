@@ -18,9 +18,12 @@ RUNNER = ROOT / ("runner.exe" if sys.platform == "win32" else "runner")
 
 
 def _runtime_version():
-    out = subprocess.run([RUNNER, "--version"], cwd=ROOT, check=True,
-                         stdout=subprocess.PIPE, text=True).stdout.strip()
-    return out  # "runner X.Y.Z-..."
+    # the BARE version from --caps — exactly what the certifier writes into a
+    # manifest and what envelope.c matches (NOT the "runner X" form --version
+    # prints).
+    caps = json.loads(subprocess.run([RUNNER, "--caps"], cwd=ROOT, check=True,
+                                     stdout=subprocess.PIPE, text=True).stdout)
+    return caps["version"]
 
 
 def _backend():

@@ -38,8 +38,11 @@ def _free_port():
 
 
 def _runtime_version():
-    return subprocess.run([RUNNER, "--version"], cwd=ROOT, check=True,
-                          stdout=subprocess.PIPE, text=True).stdout.strip()
+    # BARE --caps version (what the certifier writes + envelope.c matches), not
+    # the "runner X" form --version prints.
+    caps = json.loads(subprocess.run([RUNNER, "--caps"], cwd=ROOT, check=True,
+                                     stdout=subprocess.PIPE, text=True).stdout)
+    return caps["version"]
 
 
 def _backend():

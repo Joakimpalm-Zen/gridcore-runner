@@ -28,7 +28,7 @@ static const char *manifest(const char *version, const char *backend,
     static char buf[1024];
     snprintf(buf, sizeof buf,
              "{\"schema_version\":\"xyntetik.runner.envelope.v1\","
-             "\"runtime\":{\"version\":\"runner %s\","
+             "\"runtime\":{\"version\":\"%s\","
              "\"kernel_set\":{\"backend\":\"%s\"}},"
              "\"verdict\":\"%s\"}",
              version, backend, verdict);
@@ -113,7 +113,7 @@ int main(void) {
 
     // The refusal names the measured reason: the gate check(s) that FAILED.
     write_manifest("{\"schema_version\":\"xyntetik.runner.envelope.v1\","
-                   "\"runtime\":{\"version\":\"runner " RUNNER_VERSION "\","
+                   "\"runtime\":{\"version\":\"" RUNNER_VERSION "\","
                    "\"kernel_set\":{\"backend\":\"cpu\"}},"
                    "\"verdict\":\"outside-envelope\","
                    "\"quality\":{\"checks\":{\"cpu_gpu_identity\":\"pass\","
