@@ -5,7 +5,27 @@ is in **alpha**; the HTTP protocol and CLI may still change between alpha
 releases. Entries below the rename keep the names that were true when they
 were written.
 
-## Unreleased
+## v0.1.20-alpha — 2026-08-20
+
+A feature release on top of the review release: a new model family (Mamba-2
+hybrids), a certified-envelope gate that ships a model's measured limits beside
+it and refuses the ones that should not run, two more formats on CUDA, and a
+container image. Grouped by theme.
+
+### New architectures — Mamba-2 hybrids (granitehybrid, nemotron_h)
+
+- **Granite-4 and Nemotron-Nano hybrid SSM models now load and run.** The
+  engine gained a full Mamba-2 selective-scan path alongside attention: decode
+  (the per-token recurrence), a grouped scan for `nemotron_h`, and a
+  chunked-scan prefill so a prompt is consumed in blocks rather than one token
+  at a time. The recurrent state is snapshotted and restored across the cache
+  seam, so rewind/continuation and the server's context reuse work the same as
+  they do for a pure-attention model. Decode was re-verified math-correct at
+  Q8_0 on granitehybrid. Before this, these architectures were refused at load;
+  now an unknown Mamba-2 variant is still refused with a specific reason rather
+  than mis-run. Nemotron-Nano-9B-v2 Q8_0 is published as an artifact (below).
+
+### Backends and packaging
 
 - **BF16 and Q2_K now run on CUDA — and the GPU minimum driver rises to
   CUDA 13.0 (R580 series).** `k_mv_bf16` and `k_mv_q2_K` (plus their batch
@@ -35,6 +55,81 @@ were written.
   `--gpus all` reports `gpu.backend "cuda"` and offloads to VRAM, without the
   flag it reports `gpu null` and runs on CPU. See the README "Container image"
   section.
+
+### The certified-envelope gate
+
+- **A model can now ship its measured limits in a sidecar, and the runner
+  enforces them.** `<model>.envelope.json` is an index over evidence that
+  already exists — `scripts/certify-envelope.py` reads `runner --caps` for the
+  runtime identity, an optional compat report for the per-model quality/load
+  evidence, and the artifact's own sha, and emits one JSON sidecar; absent
+  evidence is recorded as `null`, never invented. At load the runner reads a
+  sibling manifest, matches it to its own `(version, backend)`, and reports the
+  state. The three enforced verdicts are sharpened by epistemic status:
+  **certified** (every gate passed against a named reference sha — loads with a
+  banner), **experimental** (loads and runs but a stricter gate fails, or there
+  is no reference/evidence — loads with a banner, never refused), and
+  **outside-envelope** (a measured reason says it should not run — the model
+  won't load, or a check is an explicit refusal — the runner refuses it, past
+  `--force-uncertified`). Load-time states are split five ways internally
+  (unclassified/certified/outside/experimental/indeterminate). On the swap path
+  a server refuses an outside-envelope model per request with HTTP 409 and keeps
+  serving the others, rather than exiting. The flagship selective-precision 30B
+  ships a real, measured manifest.
+- **Fixed a latent bug that made every real manifest resolve as foreign.** The
+  load-time check compared the manifest's runtime version against the
+  `runner X` display string, but the certifier writes the bare `--caps` version
+  (`0.1.20-alpha`); the two never matched, so a correctly-certified model was
+  silently treated as unclassified. It now compares the bare version, the form
+  both sides actually use.
+
+### MoE certification
+
+- **The CPU/CUDA byte-identity gate tolerates routing near-ties on MoE models,
+  and only MoE models.** A sparse mixture-of-experts model can pick a different
+  expert on CPU vs CUDA when two experts' router logits fall inside bar-v2's
+  0.5-nat tie band — a sub-noise-floor flip, not a defect — which made a
+  perfectly good MoE fail a strict byte-for-byte comparison. The gate now
+  reports `pass_margin_qualified` and surfaces the exception detail
+  (`N/M exact, K near-tie tolerated`) so a certificate never presents a clean
+  identity it did not measure. Dense models get no tolerance (fail-closed,
+  dense-strict). Measured against the flagship 30B, whose divergence was a
+  single layer-14 router flip: it is correctly held at `experimental`, not
+  waved through.
+
+### Correctness
+
+- **The offline quantizer now produces canonical, ggml-exact Q8_0 and q4_0
+  output.** `-ffast-math` with flush-to-zero was rounding block scales
+  differently from the reference, so a runner-quantized Q8_0/q4_0 file differed
+  bit-for-bit from the ggml one for the same input. The quantization path is
+  pinned so the bytes match exactly.
+
+### Templates and tool protocol
+
+- **gemma-4 mainline renders per checkpoint,** with the pre-seeded thought
+  block the mainline chat template expects.
+- **The five mutually-exclusive tool-protocol flags collapse into one enum,** so
+  an impossible combination can no longer be requested.
+
+### Measurement, benchmarks, and docs
+
+- **A truncation-recovery benchmark across six engines.** `make test-truncation`
+  gates a probe that measures how each engine behaves when generation is cut off
+  mid-structure; the README carries the six-engine table (runner, llama.cpp
+  b10488, Ollama 0.32.14, TensorRT-LLM, SGLang, vLLM) in its own `#truncation`
+  section, and `docs/truncation-benchmark.md` has the recipe and the committed
+  granite head-to-head.
+- **The quant-fidelity ladder is prescriptive, not just a decay report** — it
+  states which format to use where, rather than only reporting the drop.
+- **Metal `ah` scores-buffer traffic measured at 7.5% of KV** (not the 28% a
+  back-of-envelope suggested), settling whether it was worth eliminating.
+- **Compatibility evidence refreshed:** Lucie re-pinned to the upstream-fixed
+  GGUF with fresh tokenizer evidence (259 -> 190/721), competitor torture rows
+  refreshed to current upstream (issue #9), and the agent-torture harness reports
+  the tool-decline arm separately (schema v4).
+- **A soak harness for the startup/SIGTERM race** (`make repro-startup-signal`).
+- **Nemotron-Nano-9B-v2 Q8_0 GGUF** added to the published artifacts list.
 
 ## v0.1.19-alpha — 2026-08-19
 
