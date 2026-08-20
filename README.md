@@ -350,6 +350,13 @@ reported beside it).
   (2.63 GB) is the smoke-test artifact from the quickstart: fails the
   fidelity bar (the card carries the dual-column numbers) and remains the
   fastest way to try the runner on an 8 GB machine.
+- [NVIDIA-Nemotron-Nano-9B-v2 Q8_0](https://huggingface.co/Joakimpalm-Zen/NVIDIA-Nemotron-Nano-9B-v2-Q8_0-GGUF)
+  (8.81 GB) is not a bar-gated derivative but the first **Mamba-2 hybrid
+  (`nemotron_h`)** artifact the runner supports — a plain, near-lossless Q8_0 of
+  NVIDIA's base, quantised by the runner's own canonical (ggml-byte-identical)
+  quantiser and verified **5/6 greedy token-identical vs llama.cpp b10353 at Q8_0**
+  (the sole miss a quant-noise near-tie). NVIDIA Open Model License; the card leads
+  with the tool-calling differentiator.
 - Two measurement reports over third-party ladders, no weights
   republished, every measured file bound by SHA:
   [Hermes-4-14B quant fidelity](https://huggingface.co/Joakimpalm-Zen/Hermes-4-14B-quant-fidelity-report)
