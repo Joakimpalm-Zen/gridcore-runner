@@ -110,6 +110,111 @@ class CertifyEnvelopeTests(unittest.TestCase):
         self.assertIsNone(m["quality"]["gate"])
         self.assertEqual(m["verdict"], "experimental")
 
+    # --- tool-calling axis (reported-only) -----------------------------------
+
+    def _write(self, obj):
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(obj, f)
+        f.close()
+        return f.name
+
+    def test_tool_calling_axis_assembled_and_reported_only(self):
+        sha = sha256_file(MODEL)
+        compat = {
+            "schema_version": "xyntetik.runner.model-compat-report.v1",
+            "models": [{
+                "id": "fixture", "architecture": "llama",
+                "file": "models/fixture.gguf", "sha256": sha,
+                "checks": {
+                    "load": {"status": "pass"},
+                    "tokenizer": {"status": "pass"},
+                    "tool": {"status": "pass",
+                             "totals": {"requests": 120, "passed": 120,
+                                        "failed": 0}},
+                },
+            }],
+        }
+        trunc = {
+            "schema_version": "xyntetik.truncation-benchmark.v1",
+            "runner_property": {"holds": True, "violations": []},
+            "configuration": {"model": "granite-4.1-3b"},
+            "runtime": {"version": "0.1.20-alpha"},
+            "rungs": [
+                {"max_tokens": 1, "tool_calls_present": True,
+                 "arguments_parseable": True},
+                {"max_tokens": 8, "tool_calls_present": True,
+                 "arguments_parseable": True},
+                {"max_tokens": 64, "tool_calls_present": True,
+                 "arguments_parseable": True},   # control, excluded
+            ],
+        }
+        fidelity = {
+            "schema_version": "xyntetik.quant-fidelity.v1",
+            "model": "granite-4.1-3b",
+            "variants": [{"label": "Q4_0", "quant": "Q4_0", "tool_fidelity": {
+                "schema_conformance": {"rate": 1.0},
+                "tool_selection": {"rate": 1.0},
+                "argument_agreement": {"rate": 0.5}}}],
+        }
+        cp, tp, fp = self._write(compat), self._write(trunc), self._write(fidelity)
+        try:
+            m = self._run("--compat-report", cp, "--reference-sha", "abc123",
+                          "--truncation-report", tp, "--quant-fidelity-report", fp)
+        finally:
+            for p in (cp, tp, fp):
+                os.unlink(p)
+        tc = m["tool_calling"]
+        # two truncated rungs (1, 8) recover; the control (64) is excluded
+        self.assertEqual(tc["truncation_recovery"]["holds"], True)
+        self.assertEqual(tc["truncation_recovery"]["rungs_passed"], 2)
+        self.assertEqual(tc["truncation_recovery"]["rungs_total"], 2)
+        self.assertEqual(tc["truncation_recovery"]["measured"]["scope"], "engine")
+        self.assertEqual(tc["schema_shape"]["held_to_quant"], "Q4_0")
+        self.assertEqual(tc["schema_shape"]["schema_conformance_rate"], 1.0)
+        self.assertEqual(tc["agent_torture"]["gate"], "pass")
+        self.assertEqual(tc["agent_torture"]["passed"], 120)
+        # rollup gate is pass on the three guarantee blocks (native does not gate)
+        self.assertEqual(tc["gate"], "pass")
+        # REPORTED-ONLY: the fidelity verdict is unchanged by the axis.
+        self.assertEqual(m["quality"]["gate"], "pass")
+        self.assertEqual(m["verdict"], "certified")
+
+    def test_tool_calling_partial_when_guarantee_evidence_missing(self):
+        trunc = {
+            "schema_version": "xyntetik.truncation-benchmark.v1",
+            "runner_property": {"holds": True},
+            "rungs": [
+                {"max_tokens": 1, "tool_calls_present": True,
+                 "arguments_parseable": True},
+                {"max_tokens": 64, "tool_calls_present": True,
+                 "arguments_parseable": True},
+            ],
+        }
+        tp = self._write(trunc)
+        try:
+            m = self._run("--reference-sha", "abc123", "--truncation-report", tp)
+        finally:
+            os.unlink(tp)
+        tc = m["tool_calling"]
+        self.assertEqual(tc["truncation_recovery"]["holds"], True)
+        self.assertIsNone(tc["schema_shape"])
+        self.assertIsNone(tc["agent_torture"])
+        # a guarantee block is missing -> partial, never pass
+        self.assertEqual(tc["gate"], "partial")
+
+    def test_no_report_evidence_makes_no_guarantee_claim(self):
+        # native protocol may still be reported (it is per-model truth), but with
+        # no truncation/fidelity/tool evidence NO guarantee block may appear and
+        # the fidelity verdict must be untouched.
+        m = self._run("--reference-sha", "abc123")
+        self.assertEqual(m["verdict"], "experimental")
+        tc = m.get("tool_calling")
+        if tc is not None:
+            self.assertIsNone(tc.get("truncation_recovery"))
+            self.assertIsNone(tc.get("schema_shape"))
+            self.assertIsNone(tc.get("agent_torture"))
+            self.assertNotEqual(tc.get("gate"), "pass")
+
 
 if __name__ == "__main__":
     unittest.main()
