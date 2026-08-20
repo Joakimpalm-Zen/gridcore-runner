@@ -283,6 +283,7 @@ typedef struct gpu_weights {
     CUfunction  f_rmsnorm, f_qknorm, f_rope, f_store, f_attn, f_silu, f_gelu,
                 f_swiglu, f_xielu, f_add, f_scale;
     CUfunction  f_q35_split, f_q35_gate, f_q35_conv, f_q35_delta;
+    CUfunction  f_mamba_conv, f_mamba_ssd, f_mamba_gate_norm, f_relu2;
     CUfunction  f_attn_dec, f_attn_merge;   // flash-decoding attention (decode)
     // kernel tables indexed by ggml tensor type; sized past the largest
     // supported type id (T_MXFP4 = 39), not the count of supported types
@@ -331,6 +332,9 @@ typedef struct gpu_weights {
     CUdeviceptr *sinks;
     CUdeviceptr *gib, *geb, *ueb, *deb;
     CUdeviceptr *ssm_dt, *ssm_a, *ssm_norm;
+    // Mamba-2 (granitehybrid/nemotron_h): D skip, conv1d bias, gated RMS
+    // norm weight (length ssm_inner, unlike qwen35's ssm_norm at ssm_state)
+    CUdeviceptr *ssm_D, *ssm_conv_b, *ssm_gnorm;
 } gpu_weights;
 
 // ------------------------------------------------ per-sequence backend state
@@ -363,6 +367,10 @@ typedef struct {
     CUdeviceptr q35_mix, q35_cv, q35_z, q35_beta, q35_alpha, q35_gate;
     CUdeviceptr q35_hist, q35_state;    // persistent recurrent state per sequence
     CUdeviceptr q35_hist_prev, q35_state_prev; // pre-forward rollback snapshot
+    // Mamba-2 recurrent buffers (granitehybrid/nemotron_h)
+    CUdeviceptr mamba_proj, mamba_xBC, mamba_y;         // per-tile scratch
+    CUdeviceptr mamba_conv, mamba_state;                // persistent conv ring + SSD state
+    CUdeviceptr mamba_conv_prev, mamba_state_prev;      // pre-forward rollback snapshot
     float       *h_x, *h_logits, *h_moe_logits; // host staging
     float       *h_ple, *h_ple_tmp;             // E-series pre-pass staging
     int          last_pos;              // -2 = nothing synced yet
@@ -1105,6 +1113,10 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_q35_gate,   "k_q35_attn_gate" },
             { &w->f_q35_conv,   "k_q35_conv" },
             { &w->f_q35_delta,  "k_q35_delta" },
+            { &w->f_mamba_conv, "k_mamba2_conv" },
+            { &w->f_mamba_ssd,  "k_mamba2_ssd" },
+            { &w->f_mamba_gate_norm, "k_mamba2_gate_norm" },
+            { &w->f_relu2,      "k_relu2" },
             { &w->f_mv[T_F32],  "k_mv_f32" },    { &w->f_mv[T_F16],  "k_mv_f16" },
             { &w->f_mv[T_Q8_0], "k_mv_q8_0" },   { &w->f_mv[T_Q4_0], "k_mv_q4_0" },
             { &w->f_mv[T_Q4_1], "k_mv_q4_1" },   { &w->f_mv[T_Q5_0], "k_mv_q5_0" },
@@ -1265,6 +1277,9 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         w->ssm_dt   = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_a    = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ssm_D      = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ssm_conv_b = calloc(m->n_layer, sizeof(CUdeviceptr));
+        w->ssm_gnorm  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->sinks    = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->gib      = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->geb      = calloc(m->n_layer, sizeof(CUdeviceptr));
@@ -1274,6 +1289,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             !w->bo || !w->qn || !w->kn || !w->pan || !w->pfn ||
             !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis || !w->g_dsc ||
             !w->ssm_dt || !w->ssm_a || !w->ssm_norm ||
+            !w->ssm_D || !w->ssm_conv_b || !w->ssm_gnorm ||
             !w->sinks || !w->gib || !w->geb || !w->ueb || !w->deb)
             goto fail;
         if (moe_any_on_device(m)) {
@@ -1299,7 +1315,14 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             if (ly->recurrent) {
                 w->ssm_dt[l] = f32_dbuf(ly->ssm_dt, m->ssm_v_heads);
                 w->ssm_a[l] = f32_dbuf(ly->ssm_a, m->ssm_v_heads);
-                w->ssm_norm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_state);
+                if (m->qwen35) {
+                    w->ssm_norm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_state);
+                } else {   // Mamba-2 (granitehybrid/nemotron_h)
+                    int cd = m->ssm_inner + 2 * m->ssm_groups * m->ssm_state;
+                    w->ssm_D[l] = f32_dbuf(ly->ssm_d, m->ssm_v_heads);
+                    w->ssm_conv_b[l] = f32_dbuf(ly->ssm_conv1d_b, cd);
+                    w->ssm_gnorm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_inner);
+                }
             }
             // gpt-oss: per-head sink logits + router/per-expert bias tables
             w->sinks[l] = f32_dbuf(ly->attn_sinks, m->n_head);
@@ -1404,18 +1427,11 @@ bool gpu_init(model_t *m) {
     // top-k + renormalize with no bias input, and regenerating kernels_ptx.h
     // is the CUDA-13.3 machine's job. Refuse the backend rather than route
     // with the wrong function and produce confident, wrong output.
-    // Mamba-2 hybrids (granitehybrid, nemotron_h) have no device SSD-scan or
-    // conv1d kernel — the only recurrent device path is qwen35's Gated DeltaNet.
-    // granitehybrid also trips the shared-expert guard below, but nemotron_h is
-    // dense and would otherwise offload its attention/MLP and SILENTLY skip its
-    // recurrence (the SSD scan is m->qwen35-gated). Run the whole model on CPU
-    // until a device Mamba-2 kernel exists.
-    if (m->granite_hybrid || m->nemotron_h) {
-        fprintf(stderr, "gpu: Mamba-2 hybrid (%s) has no device SSM kernel — "
-                "running on CPU\n",
-                m->granite_hybrid ? "granitehybrid" : "nemotron_h");
-        goto unsupported;
-    }
+    // Mamba-2 hybrids (granitehybrid, nemotron_h) now have a device SSD-scan
+    // + conv1d kernel (k_mamba2_*), dispatched from gpu_mamba2_recurrent and
+    // wired through skip_mixer/skip_ffn below. nemotron_h (dense) fully
+    // offloads; granitehybrid still trips the shared-expert / MoE-router
+    // guards below and falls back there.
     if (m->n_expert > 0 && !model_moe_router_is_plain(m)) {
         fprintf(stderr, "gpu: this model's MoE router (gating=%d groups=%d "
                 "norm_w=%d scale=%g) has no device kernel — running on CPU\n",
@@ -1463,10 +1479,13 @@ bool gpu_init(model_t *m) {
         // whole model stays on the host.
         goto unsupported;
     }
-    if (m->ffn_var) {
+    if (m->ffn_var && !m->nemotron_h) {
         // gemma-4 E2B: per-layer FFN widths differ, and the device FFN path
         // sizes off one global width — computing with it would be silently
-        // wrong on every narrow layer.
+        // wrong on every narrow layer. nemotron_h is exempt: its ffn_var flag
+        // only marks the 0-width SSM/attention blocks (which skip the FFN); the
+        // MLP blocks are all one uniform width (m->n_ff), which the device sizes
+        // off correctly.
         fprintf(stderr, "gpu: per-layer FFN widths have no device path — "
                 "running on CPU\n");
         goto unsupported;
@@ -1546,6 +1565,15 @@ bool gpu_init(model_t *m) {
                                     m->ssm_state * m->ssm_state;
             act_bytes += sizeof(float) * (q35_scratch + 2 * q35_persistent);
         }
+        if (m->granite_hybrid || m->nemotron_h) {
+            int cd = m->ssm_inner + 2 * m->ssm_groups * m->ssm_state;
+            int dip = 2 * m->ssm_inner + 2 * m->ssm_groups * m->ssm_state +
+                      m->ssm_v_heads;
+            size_t scr = MVB * ((size_t)dip + cd + m->ssm_inner);
+            size_t per = (size_t)m->n_layer * (m->ssm_conv_kernel - 1) * cd +
+                         (size_t)m->n_layer * m->ssm_inner * m->ssm_state;
+            act_bytes += sizeof(float) * (scr + 2 * per);
+        }
 
         // the weights (and the CPU/GPU split they imply) come from the registry:
         // a second instance of the same file reuses the first one's upload
@@ -1613,6 +1641,25 @@ bool gpu_init(model_t *m) {
             CK(cu.MemsetD8(g->q35_state, 0, sizeof(float) * state_elems));
             CK(cu.MemsetD8(g->q35_hist_prev, 0, sizeof(float) * hist_alloc));
             CK(cu.MemsetD8(g->q35_state_prev, 0, sizeof(float) * state_elems));
+        }
+        if (m->granite_hybrid || m->nemotron_h) {
+            int cd = m->ssm_inner + 2 * m->ssm_groups * m->ssm_state;
+            int dip = 2 * m->ssm_inner + 2 * m->ssm_groups * m->ssm_state +
+                      m->ssm_v_heads;
+            size_t conv_elems = (size_t)m->n_layer * (m->ssm_conv_kernel - 1) * cd;
+            size_t conv_alloc = conv_elems ? conv_elems : 1;
+            size_t state_elems = (size_t)m->n_layer * m->ssm_inner * m->ssm_state;
+            CK(cu.MemAlloc(&g->mamba_proj,  sizeof(float) * MVB * dip));
+            CK(cu.MemAlloc(&g->mamba_xBC,   sizeof(float) * MVB * cd));
+            CK(cu.MemAlloc(&g->mamba_y,     sizeof(float) * MVB * m->ssm_inner));
+            CK(cu.MemAlloc(&g->mamba_conv,       sizeof(float) * conv_alloc));
+            CK(cu.MemAlloc(&g->mamba_state,      sizeof(float) * state_elems));
+            CK(cu.MemAlloc(&g->mamba_conv_prev,  sizeof(float) * conv_alloc));
+            CK(cu.MemAlloc(&g->mamba_state_prev, sizeof(float) * state_elems));
+            CK(cu.MemsetD8(g->mamba_conv, 0, sizeof(float) * conv_alloc));
+            CK(cu.MemsetD8(g->mamba_state, 0, sizeof(float) * state_elems));
+            CK(cu.MemsetD8(g->mamba_conv_prev, 0, sizeof(float) * conv_alloc));
+            CK(cu.MemsetD8(g->mamba_state_prev, 0, sizeof(float) * state_elems));
         }
         // gated attention without the rest of qwen35 (afmoe, muse-glimmer):
         // only the gate scratch is needed
@@ -2114,6 +2161,11 @@ static bool enc_actmul(gpu_t *g, model_t *m, CUdeviceptr a, CUdeviceptr b, int n
 // Apertus's dense FFN is ungated: up -> xIELU -> down. The four effective
 // parameters were transformed once at model load and are passed by value for
 // the current layer, matching the CPU xielu() helper without device tables.
+static bool enc_relu2(gpu_t *g, CUdeviceptr x, int n) {
+    void *p[] = { &x, &n };
+    return launch(g, g->sw->f_relu2, (n + 255) / 256, 1, 1, 256, p);
+}
+
 static bool enc_xielu(gpu_t *g, CUdeviceptr x, int n,
                       float an, float ap, float b, float eps) {
     void *p[] = { &x, &n, &an, &ap, &b, &eps };
@@ -2139,7 +2191,10 @@ static void gpu_ctx_free(model_t *m, gpu_t *g) {
                            g->g_scr, g->ple, g->ple_g,
                            g->q35_mix, g->q35_cv, g->q35_z, g->q35_beta,
                            g->q35_alpha, g->q35_gate, g->q35_hist,
-                           g->q35_state, g->q35_hist_prev, g->q35_state_prev };
+                           g->q35_state, g->q35_hist_prev, g->q35_state_prev,
+                           g->mamba_proj, g->mamba_xBC, g->mamba_y,
+                           g->mamba_conv, g->mamba_state,
+                           g->mamba_conv_prev, g->mamba_state_prev };
     for (size_t i = 0; i < sizeof(bufs) / sizeof(*bufs); i++)
         if (bufs[i]) cu.MemFree(bufs[i]);
     free(g->h_x); free(g->h_logits); free(g->h_moe_logits);
@@ -2230,6 +2285,22 @@ void gpu_disable(model_t *m) {
                               hist_layer * sizeof(float));
             cu.MemcpyDtoH(m->ssm_state_mem + (size_t)l * state_layer,
                           g->q35_state_prev + (size_t)l * state_layer * sizeof(float),
+                          state_layer * sizeof(float));
+        }
+    }
+    if (g && (m->granite_hybrid || m->nemotron_h) && g->sw && g->sw->ctx &&
+        g->mamba_state && cu.CtxSetCurrent(g->sw->ctx) == 0) {
+        int cd = m->ssm_inner + 2 * m->ssm_groups * m->ssm_state;
+        size_t conv_layer = (size_t)(m->ssm_conv_kernel - 1) * cd;
+        size_t state_layer = (size_t)m->ssm_inner * m->ssm_state;
+        for (int l = 0; l < m->gpu_layers; l++) {
+            if (!m->layers[l].recurrent) continue;
+            if (conv_layer)
+                cu.MemcpyDtoH(m->ssm_conv_state + (size_t)l * conv_layer,
+                              g->mamba_conv_prev + (size_t)l * conv_layer * sizeof(float),
+                              conv_layer * sizeof(float));
+            cu.MemcpyDtoH(m->ssm_state_mem + (size_t)l * state_layer,
+                          g->mamba_state_prev + (size_t)l * state_layer * sizeof(float),
                           state_layer * sizeof(float));
         }
     }
@@ -2989,6 +3060,54 @@ static bool gpu_q35_recurrent(gpu_t *g, model_t *m, const layer_t *ly, int l,
                   0, tn, xdim, xdim);
 }
 
+// One Mamba-2 recurrent layer (granitehybrid / nemotron_h). Mirrors the CPU
+// mamba2_ssd_step: in_proj -> per-token (conv1d+silu, SSD scan, silu-gate +
+// grouped RMSNormGated) -> out_proj. Conv ring and SSD state are persistent
+// device buffers advanced in place; tokens run in order because the state is
+// causal. Recurrent layers force graph_bad, so this always runs eagerly.
+static bool gpu_mamba2_recurrent(gpu_t *g, model_t *m, const layer_t *ly,
+                                 int l, int tn, int xdim) {
+    int nh = m->ssm_v_heads, ng = m->ssm_groups, ds = m->ssm_state;
+    int inner = m->ssm_inner, hd = inner / nh, gsz = nh / ng;
+    int conv_dim = inner + 2 * ng * ds;
+    int d_in_proj = 2 * inner + 2 * ng * ds + nh;
+    int histn = m->ssm_conv_kernel - 1, kk = m->ssm_conv_kernel;
+    int per_g = inner / ng;
+    float eps = m->rms_eps;
+    CUdeviceptr conv_base = 0; uint64_t conv_off = 0;
+    if (!binding_find(g->sw, m, ly->ssm_conv, &conv_base, &conv_off))
+        return false;
+    CUdeviceptr conv_w = conv_base + conv_off;
+    // in_proj: attn-normed input (g->xb) -> zxBCdt (g->mamba_proj)
+    if (!enc_mv(g, m, ly->ssm_in, g->xb, g->mamba_proj,
+                m->n_embd, d_in_proj, 0, tn, xdim, d_in_proj))
+        return false;
+    CUdeviceptr ring  = g->mamba_conv +
+                        (size_t)l * histn * conv_dim * sizeof(float);
+    CUdeviceptr state = g->mamba_state +
+                        (size_t)l * nh * hd * ds * sizeof(float);
+    CUdeviceptr Aw = g->sw->ssm_a[l], dtw = g->sw->ssm_dt[l];
+    CUdeviceptr Dw = g->sw->ssm_D[l], cb = g->sw->ssm_conv_b[l];
+    CUdeviceptr gn = g->sw->ssm_gnorm[l];
+    for (int t = 0; t < tn; t++) {
+        void *pc[] = { &g->mamba_proj, &g->mamba_xBC, &conv_w, &cb, &ring,
+                       &conv_dim, &inner, &d_in_proj, &kk, &histn, &t };
+        if (!launch(g, g->sw->f_mamba_conv, (conv_dim + 255) / 256, 1, 1,
+                    256, pc)) return false;
+        void *ps[] = { &g->mamba_xBC, &g->mamba_proj, &Aw, &dtw, &Dw, &state,
+                       &g->mamba_y, &inner, &hd, &ds, &ng, &gsz, &conv_dim,
+                       &d_in_proj, &t };
+        if (!launch(g, g->sw->f_mamba_ssd, nh, 1, 1, hd, ps)) return false;
+        void *pg[] = { &g->mamba_proj, &g->mamba_y, &gn, &inner, &ng, &per_g,
+                       &eps, &d_in_proj, &t };
+        if (!launch(g, g->sw->f_mamba_gate_norm, ng, 1, 1, 256, pg))
+            return false;
+    }
+    // out_proj: y (g->mamba_y, stride inner) -> g->xb (stride xdim)
+    return enc_mv(g, m, ly->ssm_out, g->mamba_y, g->xb, inner, m->n_embd,
+                  0, tn, inner, xdim);
+}
+
 static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
                      int pos, bool want_logits, int l0, int l1) {
     (void)tokens; (void)pos;
@@ -3007,11 +3126,14 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         int q_dim   = model_q_dim(m, l);
         int kv_dim  = model_kv_dim(m, l);
 
+        if (ly->skip_mixer) goto mamba_mlp;   // nemotron_h MLP-only block
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->attn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
         prof_mark(g, PH_NORM);
         if (ly->recurrent) {
-            ok = ok && gpu_q35_recurrent(g, m, ly, l, tn, xdim);
+            ok = ok && (m->qwen35
+                        ? gpu_q35_recurrent(g, m, ly, l, tn, xdim)
+                        : gpu_mamba2_recurrent(g, m, ly, l, tn, xdim));
             prof_mark(g, PH_MATVEC);
             goto attention_done;
         }
@@ -3121,6 +3243,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && enc_scale(g, g->xb, m->resid_scale, n_embd, tn, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
         prof_mark(g, PH_ELEM);
+        if (ly->skip_ffn) goto mamba_tail;   // nemotron_h SSM/attention block
 
         if (ly->is_moe && moe_on_host(m, l)) {
             // Tensor-role boundary: attention has updated the residual and KV
@@ -3144,6 +3267,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             prof_mark(g, PH_MATVEC);
             goto ffn_done;
         }
+    mamba_mlp:
         ok = ok && enc_rmsnorm(g, g->x, g->xb, g->sw->ffn_norm[l], n_embd, m->rms_eps,
                                tn, n_embd, xdim);
         prof_mark(g, PH_NORM);
@@ -3155,9 +3279,12 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
             ok = ok && enc_mv(g, m, ly->w_up, g->xb, g->hb,
                               n_embd, m->n_ff, 0, tn, xdim, m->n_ff);
             prof_mark(g, PH_MATVEC);
-            ok = ok && enc_xielu(g, g->hb, tn * m->n_ff,
-                                 m->xielu_an[l], m->xielu_ap[l],
-                                 m->xielu_b[l], m->xielu_eps[l]);
+            if (m->ffn_relu2)
+                ok = ok && enc_relu2(g, g->hb, tn * m->n_ff);
+            else
+                ok = ok && enc_xielu(g, g->hb, tn * m->n_ff,
+                                     m->xielu_an[l], m->xielu_ap[l],
+                                     m->xielu_b[l], m->xielu_eps[l]);
             prof_mark(g, PH_ELEM);
         } else {
             ok = ok && enc_mv(g, m, ly->w_gate, g->xb, g->hb,
@@ -3178,6 +3305,7 @@ static bool fwd_tile(gpu_t *g, model_t *m, const int32_t *tokens, int tn,
         if (m->resid_scale != 1.0f)
             ok = ok && enc_scale(g, g->xb, m->resid_scale, n_embd, tn, xdim);
         ok = ok && enc_add(g, g->x, g->xb, n_embd, tn, n_embd, xdim);
+    mamba_tail:
         ok = ok && enc_ple(g, m, ly, l, tn, xdim);
         if (ly->out_scale != 1.0f && ly->out_scale != 0.0f)
             // gemma4: whole-layer output scalar, applied after both residuals
@@ -3708,6 +3836,21 @@ bool gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         if ((hist_bytes && cu.MemcpyDtoD(g->q35_hist_prev, g->q35_hist,
                                         hist_bytes) != 0) ||
             cu.MemcpyDtoD(g->q35_state_prev, g->q35_state, state_bytes) != 0)
+            return false;
+    }
+    if ((m->granite_hybrid || m->nemotron_h) && g->mamba_state) {
+        int cd = m->ssm_inner + 2 * m->ssm_groups * m->ssm_state;
+        size_t conv_bytes = sizeof(float) * (size_t)m->n_layer *
+                            (m->ssm_conv_kernel - 1) * cd;
+        size_t state_bytes = sizeof(float) * (size_t)m->n_layer *
+                             m->ssm_inner * m->ssm_state;
+        if (pos == 0) {
+            if ((conv_bytes && cu.MemsetD8(g->mamba_conv, 0, conv_bytes) != 0) ||
+                cu.MemsetD8(g->mamba_state, 0, state_bytes) != 0) return false;
+        }
+        if ((conv_bytes && cu.MemcpyDtoD(g->mamba_conv_prev, g->mamba_conv,
+                                        conv_bytes) != 0) ||
+            cu.MemcpyDtoD(g->mamba_state_prev, g->mamba_state, state_bytes) != 0)
             return false;
     }
     if (prof.on && !prof.inited) prof_init();
