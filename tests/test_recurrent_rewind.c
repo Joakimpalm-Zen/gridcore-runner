@@ -210,9 +210,115 @@ static void test_prefix_cache_fold_restore_matches_cold(void) {
     slot_close(&warm); slot_close(&cold); slot_close(&forked);
 }
 
+// ---- gate 4: speculative decode rolls the fold back on divergence ----------
+//
+// The batched verify advances the recurrent fold through EVERY drafted token; a
+// partially-accepted round must roll it back to the accepted prefix (tracer 6:
+// round-start snapshot + re-fold). Two gates, honestly scoped:
+//
+//   4a (decisive, model-level): the exact rollback recipe spec_fold_sync
+//      performs — restore the round-start snapshot, re-fold the accepted
+//      prefix with a batched forward, continue — must land on logits BIT-
+//      IDENTICAL to a run that never folded the rejected drafts at all.
+//      Deterministic; no dependence on organic draft divergence.
+//
+//   4b (engine-level smoke): the full speculative walk with a draft model
+//      stays byte-identical to plain decoding. On these tiny fixtures every
+//      random model collapses to echoing its last input token, so drafts are
+//      organically all-accepted here (measured: 20/20 across seeds and even
+//      across architectures) — this smoke therefore pins the full-accept path,
+//      while the REJECTED-round engine path is exercised by the grammar-ff
+//      identity gate run against this same fixture (make test runs
+//      test-grammar-ff on test-ornith.gguf: its unconstrained draft proposals
+//      against the constrained target measured 35/67 accepted).
+typedef struct { char buf[2048]; int len; } capture;
+
+static int cap_cb(void *ud, const char *s, int n) {
+    capture *c = ud;
+    if (c->len + n >= (int)sizeof(c->buf)) return 1;
+    memcpy(c->buf + c->len, s, (size_t)n);
+    c->len += n;
+    return 0;
+}
+
+static void test_divergent_round_rollback(void) {
+    model_params p = base_params();
+    slot ref, tst;
+    if (!slot_open(&ref, &p) || !slot_open(&tst, &p)) {
+        ck(0, "load two instances for the rollback gate");
+        return;
+    }
+    const int32_t seq[6]  = { 10, 20, 30, 40, 50, 60 }; // prompt + a + b
+    const int32_t bad[2]  = { 111, 222 };               // rejected drafts
+
+    // reference: never speculated — fold the prompt, then a (50), then b (60)
+    float *rl = NULL;
+    for (int i = 0; i < 6; i++) rl = model_forward(&ref.m, seq[i], i);
+    float *ref_l = snap_logits(&ref.m, rl);
+
+    // test: fold the prompt, then run one divergent speculative round the way
+    // the spec walk + spec_fold_sync do it — snapshot, batch-verify 3 drafts
+    // [a, X, Y] (the fold now wrongly holds X and Y), accept only a: restore
+    // the snapshot, re-fold the accepted prefix batched, forward the real b.
+    for (int i = 0; i < 4; i++) model_forward(&tst.m, seq[i], i);
+    ck(model_recurrent_snapshot(&tst.m, 4), "snapshot the round-start fold");
+    int32_t drafts[3] = { seq[4], bad[0], bad[1] };
+    model_forward_batch(&tst.m, drafts, 3, 4, false);   // folds a, X, Y
+    ck(model_recurrent_restore(&tst.m, 4), "restore the round-start fold");
+    model_forward_batch(&tst.m, drafts, 1, 4, false);   // re-fold accepted a
+    float *tl = model_forward(&tst.m, seq[5], 5);        // the real token b
+    float *tst_l = snap_logits(&tst.m, tl);
+
+    int diffs = logits_differ(&ref.m, ref_l, tst_l);
+    ck(diffs == 0, "a rolled-back divergent round is bit-identical to no round");
+
+    free(ref_l); free(tst_l);
+    slot_close(&ref); slot_close(&tst);
+}
+
+static void test_spec_full_accept_identity(void) {
+    enum { NP = 4, GEN = 24 };
+    model_params p = base_params();
+    slot plain, spec;
+    if (!slot_open(&plain, &p) || !slot_open(&spec, &p)) {
+        ck(0, "load two instances for the speculative gate");
+        return;
+    }
+    model_params dp = base_params();
+    model_t *draft = malloc(sizeof(model_t));
+    if (!draft || !model_load(draft, "test-ornith-draft.gguf", &dp)) {
+        ck(0, "load the draft fixture");
+        return;
+    }
+    spec.e.dm = draft;
+    spec.e.draft_k = 4;
+
+    const int32_t prompt[NP] = { 10, 20, 30, 40 };
+    capture pc = {{0}, 0}, sc = {{0}, 0};
+
+    engine_reset(&plain.e);
+    float *pl = engine_feed(&plain.e, prompt, NP);
+    engine_generate(&plain.e, pl, GEN, cap_cb, &pc, NULL);
+
+    engine_reset(&spec.e);
+    float *sl = engine_feed(&spec.e, prompt, NP);
+    engine_generate(&spec.e, sl, GEN, cap_cb, &sc, NULL);
+
+    ck(spec.e.spec_st.drafted > 0, "the draft actually proposed tokens");
+    ck(pc.len > 0, "plain decoding produced output");
+    ck(sc.len == pc.len && memcmp(pc.buf, sc.buf, (size_t)pc.len) == 0,
+       "speculative output is byte-identical to plain decoding");
+
+    model_free(draft); free(draft);
+    spec.e.dm = NULL;
+    slot_close(&plain); slot_close(&spec);
+}
+
 int main(void) {
     test_snapshot_restore_roundtrip();
     test_rewind_divergence_matches_cold();
     test_prefix_cache_fold_restore_matches_cold();
+    test_divergent_round_rollback();
+    test_spec_full_accept_identity();
     return g_fail;
 }

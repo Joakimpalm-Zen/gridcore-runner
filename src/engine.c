@@ -105,12 +105,11 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     // parses strictly (=1/on), never by existence — the RUNNER_CUDA_TC=0
     // bug class. The structural fix is a model-canonical drafter (the
     // Syntetik half of JC-R2).
-    // Recurrent targets are excluded for the same reason spec_draft_load refuses
-    // them: the batched verify advances the running fold through every drafted
-    // token and a divergent round cannot roll it back yet (tracer 6), so the fold
-    // would desync from e->pos. Guarded until the fold checkpoint lands.
+    // Recurrent targets are safe here since the tracer-6 fold checkpoint: a
+    // partially-accepted round restores the round-start fold snapshot and
+    // re-folds the accepted prefix (spec_fold_sync in the speculative walk).
     const char *ff = getenv("RUNNER_GRAMMAR_FF");
-    e->gram_ff = model_spec_verify_ok(m) && !model_has_recurrent(m) &&
+    e->gram_ff = model_spec_verify_ok(m) &&
                  ff && (!strcmp(ff, "1") || !strcmp(ff, "on"));
     e->hist = malloc(sizeof(int32_t) * m->n_ctx);
     if (!e->hist) return false;   // no history buffer: the engine is unusable
@@ -135,6 +134,42 @@ void engine_think_started(engine *e) {
     e->constraint_tag_possible = false;
     e->constraint_tag_match = 0;
     e->constraint_close_match = 0;
+}
+
+// Rewind the DRAFT model's position. An attention-KV draft takes the cheap
+// clamp: its rows are position-addressable and the catch-up refeeds
+// hist[dpos..pos). A RECURRENT draft cannot — its fold sits at the old dpos and
+// is not sliceable back to `target` — so it goes all the way to 0: the catch-up
+// then refeeds from position 0, whose centralized reset (model_forward_batch's
+// pos==0) rebuilds the fold correctly. Costs a full draft refeed per rewind,
+// paid only by recurrent drafts.
+static void dpos_rewind(engine *e, int target) {
+    if (e->dpos <= target) return;
+    e->dpos = (e->dm && model_has_recurrent(e->dm)) ? 0 : target;
+}
+
+// Tracer 6 — recurrent-fold rollback for a partially-accepted speculative
+// round. The batched verify advanced the TARGET's fold through all `nd` drafted
+// tokens; only `acc` of them were accepted. The fold is not sliceable, so
+// restore the round-start snapshot and re-fold the accepted prefix — its KV
+// rows are rewritten with identical bytes, and only divergent rounds pay the
+// extra batched forward. If the snapshot is somehow gone, rebuild the fold from
+// position 0 out of e->hist (the accepted drafts were already recorded there):
+// never leave the fold desynced from e->pos.
+static void spec_fold_sync(engine *e, const int32_t *d, int acc, int nd,
+                           int round_pos) {
+    model_t *m = e->m;
+    if (nd <= 0 || acc >= nd || !model_has_recurrent(m)) return;
+    if (model_recurrent_restore(m, round_pos)) {
+        if (acc > 0) model_forward_batch(m, d, acc, round_pos, false);
+        return;
+    }
+    model_recurrent_reset(m);
+    for (int p = 0; p < round_pos + acc; p += m->n_batch) {
+        int c = round_pos + acc - p;
+        if (c > m->n_batch) c = m->n_batch;
+        model_forward_batch(m, e->hist + p, c, p, false);
+    }
 }
 
 int engine_rewind(engine *e, const int32_t *toks, int n) {
@@ -164,7 +199,7 @@ int engine_rewind(engine *e, const int32_t *toks, int n) {
     e->pos = keep;
     // the draft's KV beyond the kept prefix was computed from the previous
     // request's tokens; the catch-up loop re-feeds hist[dpos..pos)
-    if (e->dpos > keep) e->dpos = keep;
+    dpos_rewind(e, keep);
     e->hit_stop = false;
     sampler_reset(e->smp);
     // the kept prefix still counts toward the repeat-penalty window
@@ -765,16 +800,6 @@ model_t *spec_draft_load(const char *path, const model_t *target,
     if (target->gpu && target->gpu_layers >= target->n_layer) {
         fprintf(stderr, "draft: target is fully GPU-offloaded — speculative "
                 "decoding needs the CPU verify path, ignoring --draft\n");
-        return NULL;
-    }
-    if (model_has_recurrent(target)) {
-        // The batched verify advances the running recurrent fold (Mamba-2
-        // SSD state / qwen35 DeltaNet) through EVERY draft token; a divergent
-        // round accepts only a prefix, and there is no cheap fold rollback yet
-        // (tracer 6). Left on, a rejected draft desyncs the fold from e->pos and
-        // silently corrupts the rest of the stream. Refuse until the checkpoint.
-        fprintf(stderr, "draft: target has recurrent state not yet checkpointed "
-                "across speculative rounds — ignoring --draft\n");
         return NULL;
     }
     model_params dmp = *mp;
@@ -1621,6 +1646,12 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             st_drafted++;
             dl = model_forward(dm, best, e->dpos++);
         }
+        // Tracer 6: the batched verify below advances a recurrent TARGET's fold
+        // through every draft; snapshot the round-start fold so a partially-
+        // accepted round can roll back to the accepted prefix (spec_fold_sync).
+        int round_pos = e->pos;
+        if (nd && model_has_recurrent(m))
+            model_recurrent_snapshot(m, round_pos);
         // one batched target forward computes every draft position's hidden
         // state; row logits are pulled lazily as the walk reaches them
         if (nd && !model_forward_batch_keep(m, d, nd, e->pos))
@@ -1636,7 +1667,8 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                 if (tok == -2) e->oom = true;  // error, not a clean stop
                 e->hit_stop = true;
                 e->pos += i; // keep the accepted drafts' KV
-                if (e->dpos > e->pos) e->dpos = e->pos;
+                spec_fold_sync(e, d, i, nd, round_pos);
+                dpos_rewind(e, e->pos);
                 goto done;
             }
             sampler_accept(e->smp, tok);
@@ -1644,7 +1676,8 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             if (is_stop(e, tok) && !e->ignore_eos) {
                 e->hit_stop = true;
                 e->pos += i; // keep the accepted drafts' KV
-                if (e->dpos > e->pos) e->dpos = e->pos;
+                spec_fold_sync(e, d, i, nd, round_pos);
+                dpos_rewind(e, e->pos);
                 goto done;
             }
             int n = tok_decode(e->tok, tok, buf, sizeof(buf));
@@ -1683,7 +1716,8 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                     if (gr) gtrace_emit(e, i + 1, -1, -1, -1);
                     e->hit_stop = true;
                     e->pos += i + 1;
-                    if (e->dpos > e->pos) e->dpos = e->pos;
+                    spec_fold_sync(e, d, i + 1, nd, round_pos);
+                    dpos_rewind(e, e->pos);
                     if (gen_time) *gen_time = now_s() - t0;
                     SPEC_STATS();
                     return n_gen;
@@ -1696,9 +1730,12 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
                                 i < nd ? d[i] : -1,
                                 i < nd ? tok : -1);
             e->pos += i;
+            // roll a recurrent fold back to the accepted prefix BEFORE the real
+            // token's forward below folds on top of it
+            spec_fold_sync(e, d, i, nd, round_pos);
             if (constrained_done) {
                 e->hit_stop = true;
-                if (e->dpos > e->pos) e->dpos = e->pos;
+                dpos_rewind(e, e->pos);
                 if (gen_time) *gen_time = now_s() - t0;
                 SPEC_STATS();
                 return n_gen;
@@ -1710,7 +1747,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             // refeeds it, fixing the draft's KV for the rejected position AND
             // refreshing dl (clamping to pos left dl stale from the abandoned
             // round — acceptance collapsed to ~zero)
-            if (e->dpos > e->pos - 1) e->dpos = e->pos - 1;
+            dpos_rewind(e, e->pos - 1);
             if (rc) {
                 // An aborted callback is not only a client that left: a
                 // matched stop sequence arrives here too, and leaving by this
@@ -1726,7 +1763,8 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
         if (i >= 0) {
 rewind:
             e->pos += i > nd ? nd : i; // budget hit mid-walk: keep accepted
-            if (e->dpos > e->pos) e->dpos = e->pos;
+            spec_fold_sync(e, d, i > nd ? nd : i, nd, round_pos);
+            dpos_rewind(e, e->pos);
             if (max_new >= 0 && n_gen >= max_new) break;
         }
     }
@@ -1859,7 +1897,7 @@ int engine_gen_end(engine *e, gen_cb cb, void *ud, double *gen_time) {
     // anything reads e->pos as the extent of this sequence's cache.
     if (e->pending_pos >= 0) {
         e->pos = e->pending_pos;
-        if (e->dpos > e->pos) e->dpos = e->pos;
+        dpos_rewind(e, e->pos);
         e->pending_pos = -1;
     }
     constraint_close(e, cb, ud);

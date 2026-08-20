@@ -774,6 +774,11 @@ test.gguf: scripts/make-test-model.py
 test-ornith.gguf: scripts/make-test-ornith.py
 	$(PYTHON) scripts/make-test-ornith.py test-ornith.gguf
 
+# same geometry/vocab, different weights: a draft model that genuinely diverges
+# from the target, so the speculative fold-rollback gate exercises rejection
+test-ornith-draft.gguf: scripts/make-test-ornith.py
+	ORNITH_TEST_SEED=0x2b992ddf $(PYTHON) scripts/make-test-ornith.py test-ornith-draft.gguf
+
 # The same fixture with its matmul weights stored Q8_0. test.gguf is F32, and
 # F32 is the ONE case where a backend's batched matvec is its own batch-1
 # kernel's twin by construction — so a batch gate run only on test.gguf proves
@@ -1239,7 +1244,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
       $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) $(TEST_RECURRENT) \
-      runner test.gguf test-q8.gguf test-ornith.gguf
+      runner test.gguf test-q8.gguf test-ornith.gguf test-ornith-draft.gguf
 	./$(TEST_RECURRENT)
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
@@ -1269,6 +1274,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	./$(TEST_BATCH) test-q8.gguf
 	./$(TEST_PREFIX)
 	./$(TEST_GRAMMAR_FF)
+	./$(TEST_GRAMMAR_FF) test-ornith.gguf
 	./$(TEST_STOP_CONSTRAINT)
 	$(TEST_RESP_SM_RUN)
 	./$(TEST_KV_TOL)
