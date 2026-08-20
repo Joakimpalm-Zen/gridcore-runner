@@ -240,12 +240,17 @@ for i in range(LAYERS):
 write(f"{OUT}.moe4.gguf", moe4,
       base_meta("llama", [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2)]))
 
-def moe_ffn_n(i, downs, probs_b=None):
+def moe_ffn_n(i, downs, probs_b=None, probs_b_suffix="weight"):
     """N experts sharing the dense gate/up, each with its own `down` row block.
 
     Scaling only `down` keeps every expert a clean multiple of the dense FFN
     (down is linear, so down*k gives output*k exactly in fp32), which is what
     lets each router knob below be checked against the dense oracle.
+
+    `probs_b_suffix` selects which of the two on-disk spellings of the
+    selection-bias tensor the fixture uses. Both are real: model.c accepts
+    `exp_probs_b.weight` and `exp_probs_b.bias`, and the shipped
+    `nemotron_h_moe` GGUFs use the `.bias` spelling.
     """
     n = len(downs)
     tensors = [
@@ -255,7 +260,8 @@ def moe_ffn_n(i, downs, probs_b=None):
         (f"blk.{i}.ffn_down_exps.weight", [FF, E, n], pack(sum(downs, []))),
     ]
     if probs_b is not None:
-        tensors.append((f"blk.{i}.exp_probs_b.weight", [n], pack(probs_b)))
+        tensors.append((f"blk.{i}.exp_probs_b.{probs_b_suffix}", [n],
+                        pack(probs_b)))
     return tensors
 
 
@@ -267,10 +273,10 @@ def dn(i, k):
 ZERO = None  # placeholder replaced per layer below
 
 
-def emit(name, downs_fn, extra, probs_b=None):
+def emit(name, downs_fn, extra, probs_b=None, probs_b_suffix="weight"):
     ts = list(shared)
     for i in range(LAYERS):
-        ts += moe_ffn_n(i, downs_fn(i), probs_b)
+        ts += moe_ffn_n(i, downs_fn(i), probs_b, probs_b_suffix)
     write(f"{OUT}.{name}.gguf", ts, base_meta("llama", extra))
 
 
@@ -493,6 +499,16 @@ emit("ggroup", lambda i: [ZEROS_FF_E, ZEROS_FF_E, dn(i, 1.0), ZEROS_FF_E],
 emit("pruneprobe", lambda i: [flist(FF * E) for _ in range(4)],
      [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2)],
      probs_b=[1000.0, 500.0, 0.0, -1000.0])
+
+# The same fixture with the OTHER on-disk spelling of the selection bias.
+# `nemotron_h_moe` (NVIDIA Nemotron-3.5-Lightning-30B-A3B) ships
+# `blk.N.exp_probs_b.bias`, and a pruner that slices only the `.weight`
+# spelling leaves a 128-entry bias beside a 120-expert router — a file the
+# loader then refuses, because model.c reads the bias with the layer's
+# post-prune expert count.
+emit("pruneprobe-bias", lambda i: [flist(FF * E) for _ in range(4)],
+     [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2)],
+     probs_b=[1000.0, 500.0, 0.0, -1000.0], probs_b_suffix="bias")
 
 # --- gating-function SENSITIVITY fixtures.
 # The dense-oracle fixtures above cannot discriminate a gating function: with a

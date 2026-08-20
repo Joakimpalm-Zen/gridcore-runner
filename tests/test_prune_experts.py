@@ -47,6 +47,18 @@ def pruneprobe_model(tmp_path_factory):
     return pathlib.Path(f"{base}.pruneprobe.gguf")
 
 
+@pytest.fixture(scope="module")
+def pruneprobe_bias_model(tmp_path_factory):
+    """The same pruneprobe fixture with the OTHER on-disk spelling of the
+    selection bias: `blk.N.exp_probs_b.bias`, which is what the shipped
+    `nemotron_h_moe` GGUFs use. model.c accepts either name, so the pruner
+    has to slice either name."""
+    base = tmp_path_factory.mktemp("prune-bias") / "m"
+    subprocess.run([sys.executable, ROOT / "scripts/make-test-moe.py", str(base)],
+                   check=True, cwd=ROOT)
+    return pathlib.Path(f"{base}.pruneprobe-bias.gguf")
+
+
 def _generate(runner_bin, model):
     proc = subprocess.run(
         [runner_bin, "-m", str(model), "-p", PROMPT, "-n", str(N_GEN),
@@ -116,6 +128,68 @@ def _router_ne1(path, target_layer):
             if name == f"blk.{target_layer}.ffn_gate_inp.weight":
                 return ne[1]
     return None
+
+
+def _tensor_ne0(path, tensor_name):
+    """ne[0] of a named tensor, read straight from the GGUF header."""
+    with open(path, "rb") as f:
+        f.read(4)
+        struct.unpack("<I", f.read(4))
+        n_tensors = struct.unpack("<Q", f.read(8))[0]
+        n_kv = struct.unpack("<Q", f.read(8))[0]
+
+        def rd_str():
+            n = struct.unpack("<Q", f.read(8))[0]
+            return f.read(n).decode()
+
+        type_sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+
+        def skip(t):
+            if t == 9:
+                et = struct.unpack("<I", f.read(4))[0]
+                n = struct.unpack("<Q", f.read(8))[0]
+                for _ in range(n):
+                    skip(et)
+            elif t == 8:
+                rd_str()
+            else:
+                f.read(type_sizes[t])
+
+        for _ in range(n_kv):
+            rd_str()
+            skip(struct.unpack("<I", f.read(4))[0])
+        for _ in range(n_tensors):
+            name = rd_str()
+            nd = struct.unpack("<I", f.read(4))[0]
+            ne = [struct.unpack("<Q", f.read(8))[0] for _ in range(nd)]
+            struct.unpack("<I", f.read(4))
+            struct.unpack("<Q", f.read(8))
+            if name == tensor_name:
+                return ne[0]
+    return None
+
+
+def test_prune_slices_exp_probs_b_bias_spelling(runner_bin, pruneprobe_bias_model, tmp_path):
+    """A pruned file whose selection bias still lists every original expert is
+    not loadable: model.c reads `exp_probs_b` with the layer's post-prune
+    expert count. Nemotron-3.5-Lightning ships the `.bias` spelling, so the
+    pruner must slice that name as well as `.weight`."""
+    plan = tmp_path / "plan.json"
+    _write_plan(plan, {0: [0, 1], 1: [0, 1]})  # drop the two never-selected experts
+    pruned = tmp_path / "pruned.gguf"
+    proc = _prune(runner_bin, pruneprobe_bias_model, pruned, plan)
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    assert _router_ne1(pruned, 0) == 2
+
+    assert _tensor_ne0(pruned, "blk.0.exp_probs_b.bias") == 2, (
+        "the selection bias kept all 4 entries beside a 2-expert router")
+
+    # and the file the pruner produced has to load and run
+    base_out, _ = _generate(runner_bin, pruneprobe_bias_model)
+    pruned_out, pruned_err = _generate(runner_bin, pruned)
+    assert pruned_out == base_out, (
+        "pruning the two never-selected experts changed output\nstderr: "
+        + pruned_err.decode(errors="replace"))
 
 
 def test_pruneprobe_fixture_never_selects_2_or_3(runner_bin, pruneprobe_model, tmp_path):

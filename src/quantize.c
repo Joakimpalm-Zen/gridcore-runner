@@ -600,7 +600,12 @@ static bool is_expert_tensor_suffix(const char *suffix) {
         "ffn_down_exps.weight", "ffn_down_exps.bias",
         "ffn_gate_up_exps.weight",
         "ffn_down_exps.scale",
-        "exp_probs_b.weight",
+        // Both on-disk spellings of the selection bias: model.c reads
+        // `exp_probs_b.weight` OR `exp_probs_b.bias` with the layer's expert
+        // count, and nemotron_h_moe ships the `.bias` one. Slicing only
+        // `.weight` left a full-length bias beside a pruned router, which the
+        // loader then (correctly) refuses.
+        "exp_probs_b.weight", "exp_probs_b.bias",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (!strcmp(suffix, names[i])) return true;

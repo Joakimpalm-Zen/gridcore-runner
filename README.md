@@ -319,8 +319,12 @@ evaluation against the unpruned parent.
 
 A layer omitted from the plan keeps all experts. Invalid keys, empty lists,
 out-of-range IDs, and unsupported tensor layouts fail instead of silently
-producing a different model. `scripts/moe-prune-plan.py` can build a plan from
-calibration data.
+producing a different model. The layer's router (`ffn_gate_inp`) and its
+per-expert selection bias (`exp_probs_b`, in either on-disk spelling — the
+`.weight` of the DeepSeek-style GGUFs and the `.bias` of `nemotron_h_moe`) are
+sliced along with the expert banks, so the survivors in plan order become the
+new expert index space with no runtime remapping.
+`scripts/moe-prune-plan.py` can build a plan from calibration data.
 
 ### Published artifacts
 
@@ -367,7 +371,15 @@ reported beside it).
   [granite-4.0-h-small](https://huggingface.co/Joakimpalm-Zen/granite-4.0-h-small-runner-report)
   (`granitehybrid`, 3/5 greedy-identity at the noise floor) and
   [Nemotron-3.5-Lightning-30B-A3B](https://huggingface.co/Joakimpalm-Zen/Nemotron-3.5-Lightning-30B-A3B-runner-report)
-  (`nemotron_h_moe`, 4/5) — each carrying its measured-envelope manifest.
+  (`nemotron_h_moe`, 4/5) — each carrying its measured-envelope manifest. Two
+  frontier reports (2026-08-20, no weights republished — nothing cleared the
+  bar AND beat upstream): the
+  [Lightning-30B prune frontier](https://huggingface.co/Joakimpalm-Zen/Nemotron-3.5-Lightning-30B-A3B-prune-frontier-report)
+  (keep-126 passes at 99.50%/0.026; the plan is published, the 1.37% saving was
+  not worth an artifact) and the
+  [Muse-Glimmer-30B quant frontier](https://huggingface.co/Joakimpalm-Zen/Muse-Glimmer-30B-runner-quant-frontier-report)
+  (Meta's own Q4_K_M passes the bar; six runner plans measured, none beat it —
+  stated openly).
 
 ## Command-line reference
 

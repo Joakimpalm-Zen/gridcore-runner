@@ -134,6 +134,13 @@ Nothing here gates a merge; these are how a claim gets a number behind it.
 - **`gguf-inspect.py`** — a file's real per-tensor-class quant types rather
   than what its filename claims (an MXFP4 expert bank inside a "Q4_K_M" file is
   the normal case). Reads only the header and tensor directory.
+- **`type-plan-size.py`** — what a `--type-plan` will actually produce, from
+  the header alone: the exact output byte size, the per-type histogram the
+  quantizer will print, and every rule it will silently DECLINE (a K-quant
+  target whose 256-wide block does not divide the row, or a target that would
+  grow the tensor). A plan's rules are first-match substrings, so
+  `{"match":"output.weight"}` also claims every `attn_output.weight`; this
+  answers that before an hour of quantizing a 30B parent does.
 - **`gguf-split.py`** — split a GGUF into llama.cpp-compatible shards, for
   testing multi-part loads; layout follows upstream `gguf-split` verbatim.
 - **`gguf-depth-slice.py`** — drop whole transformer layers and keep everything
