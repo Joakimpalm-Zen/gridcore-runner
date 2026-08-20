@@ -108,6 +108,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
@@ -117,9 +118,24 @@ jobs:
         run: |
           cat ./*.sha256 > SHA256SUMS
           cat SHA256SUMS
+      - name: release notes from CHANGELOG
+        # The release body is the CHANGELOG section for this version, not the
+        # (truncated) commit subject GitHub falls back to. Fails the release if
+        # the section is missing — check-release already requires it to exist.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="## v${VERSION}" '
+            $0 ~ ("^" v) {f=1; next}
+            f && /^## v/ {f=0}
+            f {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          echo "--- release notes ---"; cat RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
           files: |
             runner-linux-x86_64
             runner-macos-arm64
