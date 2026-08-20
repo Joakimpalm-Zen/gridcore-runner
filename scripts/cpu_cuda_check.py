@@ -86,10 +86,13 @@ PROMPTS = [
 # into the token stream. Forcing the CUDA reduction to mimic host libm summation
 # order purely to pass a byte-equality gate tests floating-point EXECUTION ORDER,
 # not correctness. So a divergence is TOLERATED, and only then, when ALL hold:
-#   (1) near-tie: the first divergent token is a coin-flip the model itself could
-#       barely separate — the pick_margin (reference=CPU) to the token the OTHER
-#       side chose is within the band. Reuses bar-v2's EXACT definition
-#       (scripts/kld-compare-raw.py): band 0.5 nats, measured to the picked token.
+#   (1) near-tie: the first divergent token is a coin-flip NEITHER side could
+#       separate — the pick_margin to the OTHER side's picked token sits within
+#       the band on BOTH sides. The band + pick_margin are bar-v2's exact FUNCTION
+#       (scripts/kld-compare-raw.py, 0.5 nats, measured to the picked token);
+#       requiring it on both sides is a deliberate TIGHTENING over bar-v2's
+#       one-sided reference test — for cpu_cuda neither engine is "the reference",
+#       so a flip only qualifies when both engines were genuinely unsure.
 #   (2) fidelity: the model's independent bar-v2 fidelity gate passes (checked by
 #       certify-envelope.py, not here).
 #   (3) no systematic bias: the tolerated flips are a few INDEPENDENT near-ties,
