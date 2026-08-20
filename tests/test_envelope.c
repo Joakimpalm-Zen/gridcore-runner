@@ -105,6 +105,31 @@ int main(void) {
     write_manifest("{ this is not json");
     assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_INDETERMINATE);
 
+    // ---- tool-calling axis (reported-only): summarised in the banner --------
+    // A manifest carrying a `tool_calling` block makes envelope_report append a
+    // one-line, report-only summary of it. It NEVER changes the resolved state.
+    write_manifest("{\"schema_version\":\"xyntetik.runner.envelope.v1\","
+                   "\"runtime\":{\"version\":\"" RUNNER_VERSION "\","
+                   "\"kernel_set\":{\"backend\":\"cpu\"}},"
+                   "\"verdict\":\"certified\","
+                   "\"tool_calling\":{"
+                   "\"truncation_recovery\":{\"rungs_passed\":6,\"rungs_total\":6},"
+                   "\"schema_shape\":{\"held_to_quant\":\"Q4_0\"},"
+                   "\"agent_torture\":{\"gate\":\"pass\"},"
+                   "\"native_tool_protocol\":{\"tool_family\":\"granite\","
+                   "\"native\":true},"
+                   "\"gate\":\"pass\"}}");
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_CERTIFIED);
+    assert(strstr(out, "tool-calling gate=pass"));
+    assert(strstr(out, "truncation 6/6") && strstr(out, "schema-shape@Q4_0"));
+    assert(strstr(out, "agent-torture pass") && strstr(out, "native granite"));
+
+    // The same manifest WITHOUT a tool_calling block emits no such line
+    // (back-compat: silent for manifests that predate the axis).
+    write_manifest(manifest(RUNNER_VERSION, "cpu", "certified"));
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_CERTIFIED);
+    assert(!strstr(out, "tool-calling"));
+
     // ---- slice 3: the enforcing gate ----------------------------------------
     int st = -1;
 

@@ -274,6 +274,74 @@ static void outside_reason(jv *m, char *out, int cap) {
         snprintf(out, (size_t)cap, "the configuration is outside what was measured");
 }
 
+// REPORT-ONLY: append a one-line summary of the manifest's optional
+// `tool_calling` block (the reported-only tool-calling axis the certifier
+// emits) after whatever classify() wrote into `out`. It is surfaced for the
+// operator and NEVER influences the load/gate decision or the resolved
+// envelope_state — the load path reads only classify()'s verdict. Emits
+// nothing when the manifest carries no `tool_calling` block, or when none of
+// its sub-fields are present, so manifests that predate the axis stay silent:
+// back-compatible by construction. Only the sub-fields actually present are
+// shown; a null sub-block is simply omitted from the line.
+static void append_tool_calling(jv *m, char *out, int cap) {
+    jv *tc = jv_get(m, "tool_calling");
+    if (!tc || tc->type != J_OBJ) return;
+
+    char parts[192];
+    int p = 0;
+    const char *sep = "";
+#define TC_REM (p < (int)sizeof parts ? (int)sizeof parts - p : 0)
+
+    jv *tr = jv_get(tc, "truncation_recovery");
+    if (tr && tr->type == J_OBJ) {
+        int passed = (int)jv_num(jv_get(tr, "rungs_passed"), 0);
+        int total  = (int)jv_num(jv_get(tr, "rungs_total"), 0);
+        p += snprintf(parts + p, (size_t)TC_REM, "%struncation %d/%d",
+                      sep, passed, total);
+        sep = ", ";
+    }
+    jv *ss = jv_get(tc, "schema_shape");
+    if (ss && ss->type == J_OBJ) {
+        const char *q = jv_str(jv_get(ss, "held_to_quant"), "");
+        if (q[0]) {
+            p += snprintf(parts + p, (size_t)TC_REM, "%sschema-shape@%s", sep, q);
+            sep = ", ";
+        }
+    }
+    jv *at = jv_get(tc, "agent_torture");
+    if (at && at->type == J_OBJ) {
+        const char *g = jv_str(jv_get(at, "gate"), "");
+        if (g[0]) {
+            p += snprintf(parts + p, (size_t)TC_REM, "%sagent-torture %s", sep, g);
+            sep = ", ";
+        }
+    }
+    jv *nt = jv_get(tc, "native_tool_protocol");
+    if (nt && nt->type == J_OBJ) {
+        const char *fam = jv_str(jv_get(nt, "tool_family"), "");
+        if (fam[0]) {
+            bool native = jv_bool(jv_get(nt, "native"), false);
+            p += snprintf(parts + p, (size_t)TC_REM, "%s%s %s",
+                          sep, native ? "native" : "non-native", fam);
+            sep = ", ";
+        }
+    }
+#undef TC_REM
+    if (p == 0) return;   // block present but no usable sub-fields — stay silent
+
+    // Append as a SECOND line so it never disturbs the classify summary the
+    // gate decision is based on; the caller prints the whole buffer with one %s.
+    int len = (int)strlen(out);
+    int rem = cap > len ? cap - len : 0;
+    const char *gate = jv_str(jv_get(tc, "gate"), "");
+    if (gate[0])
+        snprintf(out + len, (size_t)rem,
+                 "\nenvelope: tool-calling gate=%s — %s", gate, parts);
+    else
+        snprintf(out + len, (size_t)rem,
+                 "\nenvelope: tool-calling — %s", parts);
+}
+
 int envelope_report(const char *model_path, const char *runtime_version,
                     const char *backend, char *out, int cap) {
     if (cap > 0) out[0] = 0;
@@ -296,6 +364,9 @@ int envelope_report(const char *model_path, const char *runtime_version,
         return ENV_INDETERMINATE;
     }
     int state = classify(m, runtime_version, backend, out, cap);
+    // Reported-only: surface the tool-calling axis when present. Never affects
+    // the returned state.
+    append_tool_calling(m, out, cap);
     jv_free(m);
     return state;
 }
@@ -354,6 +425,11 @@ bool envelope_gate(const char *model_path, const char *runtime_version,
         // (never blocks). UNCLASSIFIED already returned above with an empty msg.
         snprintf(msg, (size_t)cap, "%s", summary);
     }
+
+    // Reported-only: append the tool-calling axis summary to whatever banner
+    // was chosen above. This is surfaced for the operator and NEVER changes the
+    // load decision already made in `allow` (including the OUTSIDE refusal).
+    append_tool_calling(m, msg, cap);
 
     jv_free(m);
     return allow;
