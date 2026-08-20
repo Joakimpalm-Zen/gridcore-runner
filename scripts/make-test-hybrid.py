@@ -53,9 +53,16 @@ INPROJ = 2 * SSM_INNER + 2 * SSM_GROUPS * SSM_STATE + N_SSM_HEADS  # z, xBC, dt
 N_EXPERT, N_USED = 4, 2
 FF_EXP = 16               # per-expert FFN width
 FF_SHEXP = 16            # shared-expert FFN width
-# layer types: recurrent (SSM) layers carry head_count_kv == 0, attention
-# layers a real count. blk.0 recurrent, blk.1 attention.
-LAYER_KV = [0, KV]
+# layer types. granitehybrid: recurrent (head_count_kv==0) + attention layers,
+# each ALSO carrying an MoE FFN. nemotron_h is three-way instead — each block is
+# EXACTLY one of SSM / attention / MoE-MLP, typed off per-layer head_count_kv (0)
+# and feed_forward_length (0), with the FFN on the MLP block only.
+if ARCH == "nemotron_h_moe":
+    LAYER_KV = [0, KV, 0]        # SSM, attention, MoE-MLP
+    LAYER_FF = [0, 0, FF_EXP]    # per-layer feed_forward_length (0 on SSM/attn)
+else:
+    LAYER_KV = [0, KV]
+    LAYER_FF = None
 LAYERS = len(LAYER_KV)
 
 VOCAB = ["<unk>", "<s>", "</s>"] + [f"<0x{i:02X}>" for i in range(256)]
@@ -99,7 +106,9 @@ def meta():
     return [
         ks("general.architecture", ARCH),
         ku(f"{p}.block_count", LAYERS), ku(f"{p}.context_length", 256),
-        ku(f"{p}.embedding_length", E), ku(f"{p}.feed_forward_length", FF_EXP),
+        ku(f"{p}.embedding_length", E),
+        (kau(f"{p}.feed_forward_length", LAYER_FF) if LAYER_FF
+         else ku(f"{p}.feed_forward_length", FF_EXP)),
         ku(f"{p}.attention.head_count", HEADS),
         kau(f"{p}.attention.head_count_kv", LAYER_KV),
         kf(f"{p}.attention.layer_norm_rms_epsilon", 1e-5),
@@ -170,7 +179,7 @@ def ssm_layer(i, drop=None):
         (f"blk.{i}.ssm_dt.bias", [N_SSM_HEADS], pack(flist(N_SSM_HEADS))),
         (f"blk.{i}.ssm_norm.weight", [SSM_INNER], ones(SSM_INNER)),
         (f"blk.{i}.ssm_out.weight", [SSM_INNER, E], pack(flist(SSM_INNER * E))),
-    ] + moe(i)
+    ] + (moe(i) if LAYER_FF is None else [])
     if drop:
         t = [x for x in t if not x[0].endswith("." + drop)]
     return t
@@ -184,7 +193,12 @@ def attn_layer(i):
         (f"blk.{i}.attn_k.weight", [E, kv_dim], pack(flist(E * kv_dim))),
         (f"blk.{i}.attn_v.weight", [E, kv_dim], pack(flist(E * kv_dim))),
         (f"blk.{i}.attn_output.weight", [HEAD_DIM * HEADS, E], pack(flist(HEAD_DIM * HEADS * E))),
-    ] + moe(i)
+    ] + (moe(i) if LAYER_FF is None else [])
+
+
+def mlp_moe_layer(i):
+    # nemotron MoE-MLP block: no mixer, just the pre-norm and the MoE FFN.
+    return [(f"blk.{i}.attn_norm.weight", [E], ones(E))] + moe(i)
 
 
 def build(drop=None):
@@ -193,7 +207,15 @@ def build(drop=None):
         ("output_norm.weight", [E], ones(E)),
     ]
     for i, kv in enumerate(LAYER_KV):
-        ts += ssm_layer(i, drop) if kv == 0 else attn_layer(i)
+        if LAYER_FF is None:
+            # granitehybrid: recurrent + attention layers, each with an MoE FFN
+            ts += ssm_layer(i, drop) if kv == 0 else attn_layer(i)
+        elif kv > 0:
+            ts += attn_layer(i)
+        elif LAYER_FF[i] > 0:
+            ts += mlp_moe_layer(i)      # nemotron three-way: FFN on MLP block only
+        else:
+            ts += ssm_layer(i, drop)
     return ts
 
 

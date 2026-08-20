@@ -756,7 +756,7 @@ const char *const *model_supported_archs(size_t *count) {
         "llama", "qwen2", "qwen3", "qwen35", "qwen3moe", "mistral",
         "smollm", "stablelm", "gemma3", "gemma4", "phi3", "gpt-oss",
         "apertus", "afmoe", "muse-glimmer", "granite", "granitehybrid",
-        "nemotron_h",
+        "nemotron_h", "nemotron_h_moe",
     };
     if (count) *count = sizeof(arches) / sizeof(arches[0]);
     return arches;
@@ -1173,7 +1173,8 @@ bool model_load(model_t *m, const char *path, const model_params *p) {
 // or malformed hybrid fails closed naming the missing field rather than
 // deferring the surprise to the not-yet-certified forward.
 static bool model_is_hybrid_ssm_arch(const char *arch) {
-    return strcmp(arch, "nemotron_h_moe") == 0;
+    (void)arch;    // nemotron_h_moe now LOADS (gate-less relu² MoE hybrid) via the
+    return false;  // nemotron_h loader; no recognized hybrid is refused any more.
 }
 
 static bool hybrid_ssm_admit_refuse(gguf_file *g, const char *arch) {
@@ -1255,8 +1256,10 @@ static bool nemotron_bind_layer(model_t *m, gguf_file *g, layer_t *l, int i) {
     if (!ok) return false;
     l->out_scale = 1.0f;
     int kv = m->l_head_kv[i];
-    int ff = (int)gguf_get_u32_idx(g, "nemotron_h.feed_forward_length",
-                                   (uint64_t)i, 0);
+    char ffkey[64];
+    snprintf(ffkey, sizeof ffkey, "%s.feed_forward_length",
+             gguf_get_str(g, "general.architecture", "nemotron_h"));
+    int ff = (int)gguf_get_u32_idx(g, ffkey, (uint64_t)i, 0);
     if (kv == 0 && ff == 0) {
         // ---- recurrent (Mamba-2) block: mixer only, no FFN ----
         l->recurrent = true;
@@ -1309,22 +1312,51 @@ static bool nemotron_bind_layer(model_t *m, gguf_file *g, layer_t *l, int i) {
             return false;
         l->n_ff = m->n_ff;   // unused (skip_ffn)
     } else {
-        // ---- MLP block: no mixer, dense gate-less squared-ReLU FFN ----
+        // ---- MLP block: no mixer. Dense gate-less squared-ReLU FFN, or — for
+        //      nemotron_h_moe — a gate-less squared-ReLU MoE (router + routed
+        //      experts + an always-on gate-less shared expert). ----
         l->skip_mixer = true;
-        l->w_gate = NULL;
-        l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
-        l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
-        if (!ok) return false;
         l->n_ff = ff;
-        if (l->n_ff <= 0 || l->n_ff > m->n_ff ||
-            !check_shape(l->w_up, m->n_embd, l->n_ff, "ffn_up", i) ||
-            !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
-            return false;
         // The block's single pre-norm doubles as the FFN input norm. Convert a
         // SEPARATE copy (not an alias of attn_norm_w): model_free_weights frees
         // both fields, so sharing one pointer would double-free.
         l->ffn_norm_w = tensor_to_f32(an, m->n_embd, &ok);
         if (!ok) return false;
+        if (m->n_expert > 0) {
+            l->is_moe   = true;
+            l->n_expert = m->n_expert;
+            l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
+            l->ffn_up_exps   = need_tensor(g, "blk.%d.ffn_up_exps.weight", i, &ok);
+            l->ffn_down_exps = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
+            if (!ok) return false;
+            if ((int64_t)l->ffn_gate_inp->ne[0] != m->n_embd ||
+                (int64_t)l->ffn_gate_inp->ne[1] != m->n_expert) {
+                fprintf(stderr, "error: blk.%d ffn_gate_inp is [%lld,%lld], "
+                        "expected [%d,%d]\n", i,
+                        (long long)l->ffn_gate_inp->ne[0],
+                        (long long)l->ffn_gate_inp->ne[1], m->n_embd, m->n_expert);
+                return false;
+            }
+            if (m->n_ff_shexp > 0) {
+                l->w_up_shexp   = need_tensor(g, "blk.%d.ffn_up_shexp.weight", i, &ok);
+                l->w_down_shexp = need_tensor(g, "blk.%d.ffn_down_shexp.weight", i, &ok);
+                if (!ok) return false;
+                if (!check_shape(l->w_up_shexp, m->n_embd, m->n_ff_shexp,
+                                 "ffn_up_shexp", i) ||
+                    !check_shape(l->w_down_shexp, m->n_ff_shexp, m->n_embd,
+                                 "ffn_down_shexp", i))
+                    return false;
+            }
+        } else {
+            l->w_gate = NULL;
+            l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
+            l->w_down = need_tensor(g, "blk.%d.ffn_down.weight", i, &ok);
+            if (!ok) return false;
+            if (l->n_ff <= 0 || l->n_ff > m->n_ff ||
+                !check_shape(l->w_up, m->n_embd, l->n_ff, "ffn_up", i) ||
+                !check_shape(l->w_down, l->n_ff, m->n_embd, "ffn_down", i))
+                return false;
+        }
     }
     return true;
 }
@@ -1989,7 +2021,8 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                 "runner and oracle rank the same top-2 — math verified)\n",
                 m->n_layer - n_attn, n_attn);
     }
-    if (strcmp(arch, "nemotron_h") == 0) {
+    if (strcmp(arch, "nemotron_h") == 0 || strcmp(arch, "nemotron_h_moe") == 0) {
+        bool nh_moe = strcmp(arch, "nemotron_h_moe") == 0;
         // Nemotron-H (NVIDIA Nemotron-Nano-9B-v2): a Mamba-2 / attention / MLP
         // hybrid. Each block is EXACTLY ONE of three kinds (mutually exclusive,
         // one pre-norm + one residual), typed off two per-layer arrays:
@@ -2039,6 +2072,36 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
                     m->ssm_v_heads, m->ssm_groups);
             return false;
         }
+        // nemotron_h_moe (Nemotron-3.5 Lightning): the MLP blocks are a gate-less
+        // squared-ReLU MoE — a router, gate-less routed experts (relu(up)^2, no
+        // gate branch), and an always-on gate-less shared expert. Routing reuses
+        // the general moe_route (group/scale/norm); only the activation differs.
+        if (nh_moe) {
+            m->n_expert        = (int)gguf_get_u32(g, AK("expert_count"), 0);
+            m->n_expert_used   = (int)gguf_get_u32(g, AK("expert_used_count"), 0);
+            m->n_ff_exp        = (int)gguf_get_u32(g, AK("expert_feed_forward_length"), 0);
+            m->n_ff_shexp      = (int)gguf_get_u32(g, AK("expert_shared_feed_forward_length"), 0);
+            m->n_expert_groups = (int)gguf_get_u32(g, AK("expert_group_count"), 1);
+            m->n_group_used    = (int)gguf_get_u32(g, AK("expert_group_used_count"), 1);
+            m->expert_gating   = (int)gguf_get_u32(g, AK("expert_gating_func"),
+                                                   EXPERT_GATE_SOFTMAX);
+            if (m->expert_gating == EXPERT_GATE_NONE)
+                m->expert_gating = EXPERT_GATE_SOFTMAX;
+            m->expert_w_scale  = gguf_get_f32(g, AK("expert_weights_scale"), 1.0f);
+            m->expert_norm_w   = gguf_get_bool(g, AK("expert_weights_norm"), true);
+            if (m->n_expert <= 0 || m->n_expert > 256 ||
+                m->n_expert_used <= 0 || m->n_expert_used > m->n_expert ||
+                m->n_ff_exp <= 0 || m->n_ff_exp > MDL_DIM_MAX ||
+                m->n_ff_shexp < 0 || m->n_ff_shexp > MDL_DIM_MAX ||
+                m->expert_gating < EXPERT_GATE_NONE ||
+                m->expert_gating > EXPERT_GATE_SQRT_SOFTPLUS) {
+                fprintf(stderr, "error: invalid nemotron_h_moe expert config "
+                        "(count=%d used=%d exp_ff=%d shexp_ff=%d gating=%d)\n",
+                        m->n_expert, m->n_expert_used, m->n_ff_exp,
+                        m->n_ff_shexp, m->expert_gating);
+                return false;
+            }
+        }
         // Per-layer typing off the head_count_kv ARRAY (0 => not attention).
         size_t nl = (size_t)(unsigned)m->n_layer;
         m->l_head_kv  = calloc(nl, sizeof(int));
@@ -2086,11 +2149,18 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             return false;
         }
         m->n_head_kv = attn_kv;
-        fprintf(stderr, "nemotron_h: Mamba-2 hybrid (%d recurrent + %d attention "
-                "+ %d MLP layers, n_group=%d grouped scan) — NON-MoE, NoPE "
-                "attention, gate-less squared-ReLU MLP; greedy output verified "
-                "against llama.cpp b10353 on Nemotron-Nano-9B-v2 Q8_0\n",
-                n_rec, n_attn, n_mlp, m->ssm_groups);
+        if (nh_moe)
+            fprintf(stderr, "nemotron_h_moe: Mamba-2 hybrid (%d recurrent + %d "
+                    "attention + %d MoE layers, n_group=%d grouped scan) — %d/%d "
+                    "gate-less squared-ReLU experts + always-on shared expert, "
+                    "NoPE attention\n", n_rec, n_attn, n_mlp, m->ssm_groups,
+                    m->n_expert_used, m->n_expert);
+        else
+            fprintf(stderr, "nemotron_h: Mamba-2 hybrid (%d recurrent + %d attention "
+                    "+ %d MLP layers, n_group=%d grouped scan) — NON-MoE, NoPE "
+                    "attention, gate-less squared-ReLU MLP; greedy output verified "
+                    "against llama.cpp b10353 on Nemotron-Nano-9B-v2 Q8_0\n",
+                    n_rec, n_attn, n_mlp, m->ssm_groups);
     }
     if (strcmp(arch, "muse-glimmer") == 0) {
         // muse-glimmer (Meta Muse Glimmer 30B). Transcribed from llama.cpp
@@ -4408,12 +4478,21 @@ static inline float gated_act(int act, float g, float u) {
 // moe_ffn overwrites m->xb with its own output.
 static void shexp_add(model_t *m, const layer_t *ly, const float *in,
                       int n, int xdim) {
-    if (!ly->w_gate_shexp) return;
+    if (!ly->w_up_shexp) return;
     int ne = m->n_embd, nf = m->n_ff_shexp;
-    matvec_b(m->tp, m->shexp_g, nf, ly->w_gate_shexp, in, ne, ne, nf, NULL, n);
     matvec_b(m->tp, m->shexp_u, nf, ly->w_up_shexp,   in, ne, ne, nf, NULL, n);
-    for (size_t i = 0; i < (size_t)n * nf; i++)
-        m->shexp_g[i] = gated_act(m->ffn_act, m->shexp_g[i], m->shexp_u[i]);
+    if (m->ffn_relu2 && !ly->w_gate_shexp) {
+        // gate-less squared-ReLU shared expert (nemotron_h_moe): relu(up)^2, no
+        // gate projection and no per-branch router (always-on, unscaled).
+        for (size_t i = 0; i < (size_t)n * nf; i++) {
+            float r = m->shexp_u[i] > 0.0f ? m->shexp_u[i] : 0.0f;
+            m->shexp_g[i] = r * r;
+        }
+    } else {
+        matvec_b(m->tp, m->shexp_g, nf, ly->w_gate_shexp, in, ne, ne, nf, NULL, n);
+        for (size_t i = 0; i < (size_t)n * nf; i++)
+            m->shexp_g[i] = gated_act(m->ffn_act, m->shexp_g[i], m->shexp_u[i]);
+    }
     matvec_b(m->tp, m->shexp_o, ne, ly->w_down_shexp, m->shexp_g, nf, nf, ne, NULL, n);
     for (int b = 0; b < n; b++) {
         float gate = 1.0f;
@@ -4461,11 +4540,20 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
     for (int t = 0; t < used; t++) {
         int e = sel[t];
         float w = selw[t];
-        gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
         gguf_tensor uv = moe_expert_weight(ly, 1, e, n_embd, nff);
         gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
-        matvec_b(m->tp, m->moe_gate, nff, &gv, xin, n_embd, n_embd, nff, NULL, 1);
         matvec_b(m->tp, m->moe_up,   nff, &uv, xin, n_embd, n_embd, nff, NULL, 1);
+        if (m->ffn_relu2) {
+            // nemotron_h_moe: gate-less squared-ReLU experts, no gate branch —
+            // relu(up)^2 into moe_gate (the down-projection input), same shape
+            // the dense nemotron MLP uses.
+            for (int j = 0; j < nff; j++) {
+                float r = m->moe_up[j] > 0.0f ? m->moe_up[j] : 0.0f;
+                m->moe_gate[j] = r * r;
+            }
+        } else {
+        gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
+        matvec_b(m->tp, m->moe_gate, nff, &gv, xin, n_embd, n_embd, nff, NULL, 1);
         // gpt-oss per-expert biases: added to this expert's own gate/up before
         // the activation, and to its down output BEFORE the routing weight
         // scales it (llama.cpp adds down_exps_b, then multiplies by weights).
@@ -4477,6 +4565,7 @@ static void moe_ffn_token(model_t *m, const layer_t *ly, float *xin) {
                 m->moe_up[j] += ly->ffn_up_exps_b[(size_t)e * nff + j];
         for (int j = 0; j < nff; j++)
             m->moe_gate[j] = gated_act(m->ffn_act, m->moe_gate[j], m->moe_up[j]);
+        }
         matvec_b(m->tp, m->moe_dexp, n_embd, &dv, m->moe_gate,
                  nff, nff, n_embd, NULL, 1);
         if (ly->ffn_down_exps_b)
@@ -4561,12 +4650,26 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
             }
         }
         if (cnt == 0) continue;
-        gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
         gguf_tensor uv = moe_expert_weight(ly, 1, e, n_embd, nff);
         gguf_tensor dv = moe_expert_weight(ly, 2, e, n_embd, nff);
-        matvec_b(m->tp, m->moe_gate_b, nff, &gv, m->moe_gath,
-                 n_embd, n_embd, nff, NULL, cnt);
         matvec_b(m->tp, m->moe_up_b,   nff, &uv, m->moe_gath,
+                 n_embd, n_embd, nff, NULL, cnt);
+        const float *db = ly->ffn_down_exps_b
+                            ? ly->ffn_down_exps_b + (size_t)e * n_embd : NULL;
+        if (m->ffn_relu2) {
+            // gate-less squared-ReLU experts (nemotron_h_moe): relu(up)^2 into
+            // moe_gate_b, no gate projection or per-expert gate/up biases.
+            for (int c = 0; c < cnt; c++) {
+                float *g = m->moe_gate_b + (size_t)c * nff;
+                float *u = m->moe_up_b + (size_t)c * nff;
+                for (int j = 0; j < nff; j++) {
+                    float r = u[j] > 0.0f ? u[j] : 0.0f;
+                    g[j] = r * r;
+                }
+            }
+        } else {
+        gguf_tensor gv = moe_expert_weight(ly, 0, e, n_embd, nff);
+        matvec_b(m->tp, m->moe_gate_b, nff, &gv, m->moe_gath,
                  n_embd, n_embd, nff, NULL, cnt);
         // per-expert biases, identical ordering to the per-token path above:
         // gate/up before the activation, down before the routing weight
@@ -4574,8 +4677,6 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
                             ? ly->ffn_gate_exps_b + (size_t)e * nff : NULL;
         const float *ub = ly->ffn_up_exps_b
                             ? ly->ffn_up_exps_b + (size_t)e * nff : NULL;
-        const float *db = ly->ffn_down_exps_b
-                            ? ly->ffn_down_exps_b + (size_t)e * n_embd : NULL;
         for (int c = 0; c < cnt; c++) {
             float *g = m->moe_gate_b + (size_t)c * nff;
             float *u = m->moe_up_b + (size_t)c * nff;
@@ -4583,6 +4684,7 @@ static void moe_ffn_grouped(model_t *m, const layer_t *ly, int n, int xdim) {
             if (ub) for (int j = 0; j < nff; j++) u[j] += ub[j];
             for (int j = 0; j < nff; j++)
                 g[j] = gated_act(m->ffn_act, g[j], u[j]);
+        }
         }
         matvec_b(m->tp, m->moe_dexp_b, n_embd, &dv, m->moe_gate_b,
                  nff, nff, n_embd, NULL, cnt);
@@ -5155,7 +5257,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             rmsnorm(m->xb + (size_t)b * xdim, m->x + (size_t)b * n_embd,
                     ly->ffn_norm_w, n_embd, m->rms_eps);
         if (ly->is_moe) {
-            if (ly->w_gate_shexp)
+            if (ly->w_up_shexp)
                 for (int b = 0; b < n; b++)
                     memcpy(m->shexp_in + (size_t)b * n_embd,
                            m->xb + (size_t)b * xdim,

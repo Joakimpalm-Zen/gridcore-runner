@@ -129,16 +129,24 @@ def test_granitehybrid_decode_is_deterministic(runner_bin, models):
     assert a.stdout == b.stdout
 
 
-def test_nemotron_still_refuses_specifically(runner_bin, models):
-    """Nemotron's grouped scan is not certified yet: recognized, refused with
-    its own reason, and NOT conflated with an unknown-arch typo."""
+def test_nemotron_h_moe_loads_and_decodes(runner_bin, models):
+    """The forward is implemented: nemotron_h_moe (Nemotron-3.5 Lightning — a
+    gate-less squared-ReLU MoE hybrid with an always-on shared expert) must LOAD
+    (not refuse) and decode. A regression back to the old refusal fails here."""
     good, _ = models["nemotron_h_moe"]
-    proc = _run(runner_bin, good)
-    assert proc.returncode != 0, "the forward is not certified; it must refuse"
+    proc = _run(runner_bin, good, n="8")
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
     err = proc.stderr.decode(errors="replace")
     assert "nemotron_h_moe" in err
-    assert "forward not yet implemented" in err
-    assert "refusing to run it through llama-style math" not in err
+    assert "forward not yet implemented" not in err
+
+
+def test_nemotron_h_moe_decode_is_deterministic(runner_bin, models):
+    good, _ = models["nemotron_h_moe"]
+    a = _run(runner_bin, good, n="8")
+    b = _run(runner_bin, good, n="8")
+    assert a.returncode == 0 and b.returncode == 0
+    assert a.stdout == b.stdout
 
 
 @pytest.mark.parametrize("arch", ["granitehybrid", "nemotron_h_moe"])
@@ -151,17 +159,9 @@ def test_missing_ssm_tensor_names_the_tensor(runner_bin, models, arch):
     assert arch in err, "still recognized as the hybrid, just malformed"
 
 
-def test_opt_in_does_not_smuggle_nemotron_into_llama_math(runner_bin, models):
-    """RUNNER_ALLOW_UNKNOWN_ARCH lets an UNKNOWN arch try llama math; a
-    recognized-but-uncertified hybrid is a different case — the opt-in must not
-    turn its specific refusal into a silent-wrong run."""
-    good, _ = models["nemotron_h_moe"]
-    proc = subprocess.run(
-        [runner_bin, "-m", str(good), "-p", "hi", "-n", "1", "--gpu", "off"],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
-        env={**os.environ, "RUNNER_ALLOW_UNKNOWN_ARCH": "1"})
-    assert proc.returncode != 0
-    assert "forward not yet implemented" in proc.stderr.decode(errors="replace")
+# (nemotron_h_moe is now an admitted, implemented arch — the old
+# "RUNNER_ALLOW_UNKNOWN_ARCH must not smuggle it into llama math" test retired
+# with the refusal it guarded; the loads-and-decodes test above covers it.)
 
 
 # --------------------------------------------------------------------------
