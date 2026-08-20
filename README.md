@@ -1480,8 +1480,11 @@ credentials or model weights. `scripts/difftok.py --ref-ids CAPTURE` is the
 standalone replay path; `--capture CAPTURE --ref-revision COMMIT` creates one
 during an authenticated evidence run.
 
-- Qwen3-4B's 2026-08-03 scalar CPU/CUDA recheck passed 4 of 5 prompts at 128
-  tokens, so there is no blanket identity claim for that file.
+- Qwen3-4B's 2026-08-03 scalar CPU/CUDA recheck passed only 4 of 5 prompts;
+  **re-measured 2026-08-20 with the current gate: 9/9 prompts byte-exact at 128
+  tokens, zero near-ties** (the intervening router-bias, tensor-core-identity
+  and canonical-quantizer fixes resolved it). Per-row evidence:
+  `docs/compat-reports/cpu-cuda-128/qwen3-4b-q4km-2026-08-20.json`.
 - Canonical gpt-oss-20b passed an earlier 5-of-5, 16-token partial-offload test
   on an RTX 3070, but failed CPU/CUDA identity and chat/tokenizer gates on the
   later Blackwell full-offload matrix. Hardware and test-contract scope matter.
