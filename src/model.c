@@ -2264,9 +2264,13 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
         return false;
     }
     m->n_expert = (int)n_expert_raw;
-    if (m->n_expert > 0) {
+    if (m->n_expert > 0 && !m->nemotron_h) {
         // sparse-MoE (Mixtral / Qwen3-MoE): softmax-over-all router, top-k
         // selection, renormalized weights, per-expert SwiGLU, weighted sum.
+        // nemotron_h_moe is EXCLUDED: its gate-less squared-ReLU MoE (routed +
+        // an always-on gate-less shared expert) is configured wholly in the
+        // nemotron_h loader above; this block's ffn_gate_shexp probe and the
+        // SiLU-only guard below would wrongly reject it.
         m->n_expert_used = (int)gguf_get_u32(g, AK("expert_used_count"), 0);
         // Mixtral omits expert_feed_forward_length and uses feed_forward_length
         m->n_ff_exp = (int)gguf_get_u32(g, AK("expert_feed_forward_length"), m->n_ff);
