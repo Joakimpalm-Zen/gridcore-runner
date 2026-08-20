@@ -70,3 +70,30 @@ adopted quality bar at 17.99 GB (v2 top-1 99.50 %, mean KLD 0.0345) per the suit
   failure) is the owner's call. Verified consumable: the runner loads the model
   (qwen3moe, 48 layers, 18.0 GB in VRAM) and the load-time gate reads this
   sidecar and reports its state.
+
+### `granite-4.1-3b-Q8_0.gguf.envelope.json`
+
+The quickstart model (first-party IBM `granite-4.1-3b`, Q8_0) certified on the
+**Metal** backend — the runtime dimension the CUDA flagship above cannot show.
+Assembled on Apple Silicon (`arm64/metal`), so the runtime carries a real Metal
+shader-source sha rather than a CPU/CUDA kernel-set. It demonstrates the gate and
+the reported-only tool-calling axis end to end on a real model:
+
+- artifact sha256 `c31f09b9…`, runtime tuple: runner 0.1.20-alpha / Metal on an M1
+- **verdict: `experimental`** — no fidelity compat report was attached in this
+  run, so there is no `quality.gate` to certify against (the model does pass the
+  project's fidelity bar; that evidence simply is not indexed by this sidecar).
+- **`tool_calling` gate `partial`** (reported-only, never affects the load):
+  - `truncation_recovery` **holds, 6/6 truncated rungs recover** — `scope:"engine"`,
+    from the committed `granite-4.1-3b` truncation benchmark (the property is an
+    engine guarantee, independent of this artifact's quant/backend).
+  - `native_tool_protocol` `generic` / **non-native** — granite has no native
+    tool protocol; it uses the runner's generic constrained JSON envelope, which
+    is the honest, accurate report for this family.
+  - `schema_shape` and `agent_torture` are `null` — that evidence (a quant-fidelity
+    ladder and an agent-torture matrix for this artifact) was not gathered here,
+    so the fields are absent rather than invented, and the rollup is `partial`.
+
+Verified end to end: with this sidecar beside the model the load-time gate reports
+`envelope: measured for 0.1.20-alpha / metal, verdict experimental (not certified)`
+and `envelope: tool-calling gate=partial — truncation 6/6, non-native generic`.

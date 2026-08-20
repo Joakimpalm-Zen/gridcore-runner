@@ -1,0 +1,59 @@
+{
+  "schema_version": "xyntetik.runner.envelope.v1",
+  "artifact": {
+    "sha256": "c31f09b9fd19bc51440f100f54fe5ac3d5deb26ef79ec93c38e4a14873c42a80",
+    "path": "granite-4.1-3b-Q8_0.gguf",
+    "architecture": null,
+    "derivation": null,
+    "reference": null
+  },
+  "runtime": {
+    "version": "0.1.20-alpha",
+    "kernel_set": {
+      "backend": "metal",
+      "os": "macos",
+      "arch": "arm64",
+      "shader_source_sha256": "77fd94d5d1c81a53614e7a2fe1c37fe68448615a8ccecdc6138fb33d25fc57fd"
+    }
+  },
+  "hardware": {
+    "class": "arm64/metal/9G",
+    "cpu_cores": 8
+  },
+  "config": {
+    "gpu": "auto",
+    "threads": 0,
+    "kv": "f16",
+    "ctx_max": 4096
+  },
+  "quality": {
+    "gate": null,
+    "checks": {},
+    "reference_report": null
+  },
+  "tool_calling": {
+    "truncation_recovery": {
+      "holds": true,
+      "rungs_passed": 6,
+      "rungs_total": 6,
+      "source_schema": "xyntetik.truncation-benchmark.v1",
+      "measured": {
+        "scope": "engine",
+        "runtime_version": "0.1.19-alpha (c7d6c3d)",
+        "model": "granite-4.1-3b-Q4_K_M.gguf"
+      }
+    },
+    "schema_shape": null,
+    "agent_torture": null,
+    "native_tool_protocol": {
+      "tool_family": "generic",
+      "native": false
+    },
+    "gate": "partial"
+  },
+  "verdict": "experimental",
+  "measured": {
+    "date": "2026-08-20",
+    "source_report_schema": null
+  }
+}
