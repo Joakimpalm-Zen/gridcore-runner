@@ -1404,6 +1404,18 @@ bool gpu_init(model_t *m) {
     // top-k + renormalize with no bias input, and regenerating kernels_ptx.h
     // is the CUDA-13.3 machine's job. Refuse the backend rather than route
     // with the wrong function and produce confident, wrong output.
+    // Mamba-2 hybrids (granitehybrid, nemotron_h) have no device SSD-scan or
+    // conv1d kernel — the only recurrent device path is qwen35's Gated DeltaNet.
+    // granitehybrid also trips the shared-expert guard below, but nemotron_h is
+    // dense and would otherwise offload its attention/MLP and SILENTLY skip its
+    // recurrence (the SSD scan is m->qwen35-gated). Run the whole model on CPU
+    // until a device Mamba-2 kernel exists.
+    if (m->granite_hybrid || m->nemotron_h) {
+        fprintf(stderr, "gpu: Mamba-2 hybrid (%s) has no device SSM kernel — "
+                "running on CPU\n",
+                m->granite_hybrid ? "granitehybrid" : "nemotron_h");
+        goto unsupported;
+    }
     if (m->n_expert > 0 && !model_moe_router_is_plain(m)) {
         fprintf(stderr, "gpu: this model's MoE router (gating=%d groups=%d "
                 "norm_w=%d scale=%g) has no device kernel — running on CPU\n",
