@@ -551,14 +551,16 @@ static bool prune_plan_load(const char *path, prune_plan_t *plan) {
         int *ids = malloc(sizeof(int) * (size_t)arr->n);
         if (!ids) { ok = false; break; }
         for (int j = 0; j < arr->n; j++) {
-            if (arr->items[j]->type != J_NUM || arr->items[j]->num < 0) {
+            double id = arr->items[j]->type == J_NUM
+                      ? arr->items[j]->num : -1.0;
+            if (!isfinite(id) || id < 0 || id > INT_MAX || trunc(id) != id) {
                 fprintf(stderr, "error: prune-plan[\"layer_%d\"][%d] is not "
                         "a non-negative integer\n", layer, j);
                 free(ids);
                 ok = false;
                 break;
             }
-            ids[j] = (int)arr->items[j]->num;
+            ids[j] = (int)id;
         }
         if (!ok) break;
         for (int a = 0; ok && a < arr->n; a++)

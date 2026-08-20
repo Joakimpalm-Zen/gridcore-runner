@@ -289,6 +289,20 @@ def test_prune_out_of_range_expert_id_is_rejected(runner_bin, pruneprobe_model, 
     assert not pruned.exists()
 
 
+@pytest.mark.parametrize("bad_id", [1.5, 2147483648])
+def test_prune_expert_id_must_fit_a_nonnegative_int(runner_bin,
+                                                     pruneprobe_model,
+                                                     tmp_path, bad_id):
+    """Fractional and wider-than-int JSON numbers must not reach tensor math."""
+    plan = tmp_path / "plan.json"
+    _write_plan(plan, {0: [0, bad_id]})
+    pruned = tmp_path / "pruned.gguf"
+    proc = _prune(runner_bin, pruneprobe_model, pruned, plan)
+    assert proc.returncode != 0
+    assert b"is not a non-negative integer" in proc.stderr
+    assert not pruned.exists()
+
+
 def test_prune_plan_for_missing_model_layer_is_rejected(runner_bin, pruneprobe_model, tmp_path):
     plan = tmp_path / "plan.json"
     _write_plan(plan, {99: [0, 1]})  # this fixture only has layers 0 and 1
