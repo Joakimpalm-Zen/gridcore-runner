@@ -31,7 +31,11 @@ BLOCK = {
     6: (32, 22, "Q5_0"), 7: (32, 24, "Q5_1"), 8: (32, 34, "Q8_0"),
     10: (256, 84, "Q2_K"), 11: (256, 110, "Q3_K"), 12: (256, 144, "Q4_K"),
     13: (256, 176, "Q5_K"), 14: (256, 210, "Q6_K"), 20: (32, 18, "IQ4_NL"),
-    23: (256, 136, "IQ4_XS"), 30: (1, 2, "BF16"), 39: (32, 17, "MXFP4"),
+    16: (256, 66, "IQ2_XXS"), 17: (256, 74, "IQ2_XS"),
+    18: (256, 98, "IQ3_XXS"), 19: (256, 50, "IQ1_S"),
+    21: (256, 110, "IQ3_S"), 22: (256, 82, "IQ2_S"),
+    23: (256, 136, "IQ4_XS"), 29: (256, 56, "IQ1_M"),
+    30: (1, 2, "BF16"), 39: (32, 17, "MXFP4"),
 }
 BY_NAME = {v[2]: k for k, v in BLOCK.items()}
 FILE_TYPE_KEY = "general.file_type"
@@ -125,14 +129,20 @@ def main():
     plan = json.loads(open(a.plan).read())
 
     data, hist, declined, never_grew = 0, {}, [], []
-    for name, src, ne in tensors:
+    for index, (name, src, ne) in enumerate(tensors):
         if src not in BLOCK:
             sys.exit(f"unsupported source type {src} on {name}")
         out = src
         want = resolve(name, plan)
-        if want != "keep" and should_quantize(name, ne):
+        if want != "keep":
             if "ffn_gate_inp" in name:
                 pass                                   # keep_source_type
+            elif not should_quantize(name, ne):
+                # The writer preserves F16 here but promotes every other
+                # non-quantizable source to F32 (norms/biases stay precise).
+                # This includes BF16, so leaving `out = src` understates both
+                # the file size and the histogram for BF16 checkpoints.
+                out = 1 if src == 1 else 0
             else:
                 w = BY_NAME[PLAN_TYPE[want]]
                 if ne[0] % BLOCK[w][0]:
@@ -147,7 +157,12 @@ def main():
         for d in ne[1:]:
             rows *= d
         n = row_bytes(out, ne[0]) * rows
-        data += (n + alignment - 1) // alignment * alignment
+        data += n
+        # GGUF aligns the NEXT tensor's offset. The writer does not append
+        # padding after the final tensor, so rounding every tensor (including
+        # the last) overstates files whose last tensor is not alignment-sized.
+        if index + 1 < len(tensors):
+            data = (data + alignment - 1) // alignment * alignment
         hist[BLOCK[out][2]] = hist.get(BLOCK[out][2], 0) + 1
 
     total = data_start + data

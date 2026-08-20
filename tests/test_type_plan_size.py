@@ -12,6 +12,7 @@ histogram must equal the one the quantizer prints.
 import json
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 
@@ -58,6 +59,22 @@ def _histogram_from_log(log):
     return {k: int(v) for k, v in re.findall(r"(\w+):(\d+)", m.group(1))}
 
 
+def _write_one_tensor(path, name, ne, ttype, data_bytes):
+    name = name.encode()
+    header = (b"GGUF" + struct.pack("<IQQ", 3, 1, 0) +
+              struct.pack("<Q", len(name)) + name +
+              struct.pack("<I", len(ne)) +
+              b"".join(struct.pack("<Q", n) for n in ne) +
+              struct.pack("<IQ", ttype, 0))
+    data_start = (len(header) + 31) & ~31
+    path.write_bytes(header + bytes(data_start - len(header)) + bytes(data_bytes))
+
+
+def _write_bf16_norm(path):
+    """One non-quantizable BF16 tensor, enough to exercise type selection."""
+    _write_one_tensor(path, "output_norm.weight", [32], 30, 32 * 2)
+
+
 def test_predicted_size_and_histogram_are_exact(runner_bin, moe_model, tmp_path):
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"default": "q8_0",
@@ -98,3 +115,40 @@ def test_row_width_decline_is_reported_not_silently_applied(runner_bin, moe_mode
 
     assert pred["declined_row_width"], "a q3_k rule on sub-256 rows reported no decline"
     assert pred["predicted_bytes"] == out.stat().st_size == keep_out.stat().st_size
+
+
+def test_nonquantizable_bf16_is_predicted_as_f32(runner_bin, tmp_path):
+    """A non-keep plan promotes non-quantizable BF16 tensors to F32."""
+    model = tmp_path / "bf16-norm.gguf"
+    _write_bf16_norm(model)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"default": "q8_0", "rules": []}))
+
+    pred = _predict(model, plan)
+    out = tmp_path / "out.gguf"
+    log = _build(runner_bin, model, plan, out)
+
+    assert pred["predicted_bytes"] == out.stat().st_size
+    assert pred["histogram"] == _histogram_from_log(log) == {"F32": 1}
+
+
+@pytest.mark.parametrize("source_type,block_bytes,type_name", [
+    (16, 66, "IQ2_XXS"), (17, 74, "IQ2_XS"),
+    (18, 98, "IQ3_XXS"), (19, 50, "IQ1_S"),
+    (21, 110, "IQ3_S"), (22, 82, "IQ2_S"), (29, 56, "IQ1_M"),
+])
+def test_all_codebook_source_types_are_sized(runner_bin, tmp_path,
+                                               source_type, block_bytes, type_name):
+    """Every source type the quantizer accepts must be accepted by the sizer."""
+    model = tmp_path / f"source-{source_type}.gguf"
+    _write_one_tensor(model, "output.weight", [256, 1], source_type, block_bytes)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"default": "q8_0", "rules": []}))
+
+    pred = _predict(model, plan)
+    out = tmp_path / f"out-{source_type}.gguf"
+    log = _build(runner_bin, model, plan, out)
+
+    assert pred["predicted_bytes"] == out.stat().st_size
+    # Every codebook type is smaller than Q8_0, so the never-grow rule keeps it.
+    assert pred["histogram"] == _histogram_from_log(log) == {type_name: 1}
