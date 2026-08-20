@@ -405,6 +405,106 @@ def test_tool_matrix_is_run_against_the_binary_under_test(monkeypatch, tmp_path)
         str(tmp_path / "runner-candidate")
 
 
+# The detailed per-row/totals evidence must survive on disk and be referenced
+# from the ledger, not collapse to a 400-1200 char tail: the 2026-08-15 run
+# could not attribute three cpu_cuda failures without re-running them by hand
+# because only the tail (which held the PASSING prompts) was kept.
+
+def test_cpu_cuda_writes_and_references_a_per_row_report(monkeypatch, tmp_path):
+    module = load_module()
+
+    def run(cmd, timeout, **kwargs):
+        # mimic cpu_cuda_check.py: honour --out by writing the full per-row
+        # report there, and print the verdict line run_cpu_cuda parses.
+        out = Path(cmd[cmd.index("--out") + 1])
+        out.write_text(json.dumps({"model": "m", "tokens": 128,
+                                   "routing": "eager", "rows": [{"kind": "ok"}]}))
+
+        class Completed:
+            returncode = 0
+            stdout = "cpu_cuda: pass — 9/9 exact, 0 near-tie (eager routing)\n"
+            stderr = ""
+        return Completed()
+
+    monkeypatch.setattr(module, "run_group", run)
+
+    report_dir = tmp_path / "reports"
+    check = module.run_cpu_cuda(tmp_path / "runner", tmp_path / "m.gguf",
+                                {"tokens": 128}, 60,
+                                report_dir=report_dir, model_id="my-model")
+
+    expected = report_dir / "cpu_cuda" / "my-model.json"
+    assert check["report"] == str(expected)
+    assert expected.is_file(), "the full per-row report must be written to disk"
+    written = json.loads(expected.read_text())
+    assert written["rows"] == [{"kind": "ok"}]
+
+
+def test_tool_writes_and_references_a_totals_sidecar(monkeypatch, tmp_path):
+    module = load_module()
+
+    def run(cmd, timeout, **kwargs):
+        class Completed:
+            returncode = 0
+            stdout = ("report: /x/report.json\nraw: /x/raw.jsonl\n"
+                      "runtime=runner requests=120 passed=118 failed=2\n")
+            stderr = ""
+        return Completed()
+
+    monkeypatch.setattr(module, "run_group", run)
+
+    report_dir = tmp_path / "reports"
+    check = module.run_tool(tmp_path / "runner", tmp_path / "m.gguf",
+                            {"scenario_matrix": "agent-torture"}, 60,
+                            report_dir=report_dir, model_id="my-model")
+
+    # totals are parsed and retained inline, not lost to the tail
+    assert check["totals"] == {"requests": 120, "passed": 118, "failed": 2}
+    sidecar = report_dir / "tool" / "my-model.json"
+    assert check["report"] == str(sidecar)
+    assert sidecar.is_file(), "the tool totals must be written to a sidecar json"
+    assert json.loads(sidecar.read_text())["totals"] == {
+        "requests": 120, "passed": 118, "failed": 2}
+
+
+def test_per_row_reports_are_referenced_from_the_ledger(monkeypatch, tmp_path):
+    """A full --execute-checks run threads report_dir (args.out.parent) down to
+    the row runners, so the ledger names its own evidence files."""
+    module = load_module()
+
+    def run_cpu_cuda(runner, model, params, timeout, report_dir=None, model_id=None):
+        # the ledger must hand these through, keyed by the model's manifest id
+        assert report_dir is not None and model_id == "m"
+        path = Path(report_dir) / "cpu_cuda" / f"{model_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}")
+        return {"status": "pass", "report": str(path)}
+
+    monkeypatch.setattr(module, "run_cpu_cuda", run_cpu_cuda)
+
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"fixture model")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": "xyntetik.runner.model-compat.v2",
+        "models": [{
+            "id": "m", "architecture": "llama", "file": str(model),
+            "sha256": hashlib.sha256(model.read_bytes()).hexdigest(),
+            "checks": ["cpu_cuda"],
+            "check_params": {"cpu_cuda": {"tokens": 128, "pins": {"X": "1"},
+                                          "min_prompt_tokens": 24}},
+        }],
+    }))
+    out = tmp_path / "report.json"
+    module.main(["--manifest", str(manifest), "--models-root", str(tmp_path),
+                 "--runner", str(tmp_path / "runner"),
+                 "--verify-files", "--execute-checks", "--out", str(out)])
+
+    check = json.loads(out.read_text())["models"][0]["checks"]["cpu_cuda"]
+    assert check["report"] == str(out.parent / "cpu_cuda" / "m.json")
+    assert (out.parent / "cpu_cuda" / "m.json").is_file()
+
+
 def _process_state(pid):
     """'gone', 'zombie' or 'live' -- the question kill(pid, 0) cannot answer.
 

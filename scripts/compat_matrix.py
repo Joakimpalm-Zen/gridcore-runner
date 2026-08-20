@@ -89,7 +89,7 @@ def run_group(cmd, timeout, grace=2.0, **kwargs):
 # a manifest that declares a contract without defining it is visible rather than
 # quietly green.
 
-def run_cpu_cuda(runner, model, params, timeout):
+def run_cpu_cuda(runner, model, params, timeout, report_dir=None, model_id=None):
     """CPU vs CUDA byte identity under the pins the manifest names."""
     script = ROOT / "scripts" / "cpu_cuda_check.py"
     if not script.is_file():
@@ -106,6 +106,17 @@ def run_cpu_cuda(runner, model, params, timeout):
            # and cpu_cuda_check.py's own default. A row that declares nothing
            # must not silently certify at half the contract.
            "--tokens", str(params.get("tokens", 128))]
+    # cpu_cuda_check.py --out writes the FULL per-row report ({model, tokens,
+    # routing, rows:[...]}), which is the actual diagnostic value here — WHICH
+    # prompt diverged and by how much. Without it only a regex summary and a
+    # truncated tail survive into the ledger, and the 2026-08-15 run could not
+    # attribute three failures without re-running them by hand. Keep the report
+    # on disk under the ledger's own directory and reference it from the check.
+    report_path = None
+    if report_dir is not None and model_id is not None:
+        report_path = Path(report_dir) / "cpu_cuda" / f"{model_id}.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd += ["--out", str(report_path)]
     started = time.time()
     try:
         proc = run_group(cmd, timeout, capture_output=True, text=True,
@@ -141,6 +152,9 @@ def run_cpu_cuda(runner, model, params, timeout):
             "cpu_cuda_identity": identity,
             "identical": (identity or {}).get("exact"),
             "failed_prompts": [p[:160] for p in failed_prompts],
+            # The written per-row report is the retained evidence; the tail is a
+            # convenience for a reader who has only the ledger open.
+            "report": str(report_path) if report_path else None,
             "output_tail": out[-1200:]}
 
 
@@ -176,7 +190,7 @@ def run_chat(runner, model, params, timeout):
             "output_tail": out[-300:]}
 
 
-def run_tool(runner, model, params, timeout):
+def run_tool(runner, model, params, timeout, report_dir=None, model_id=None):
     """Tool/structured-output fidelity via the scenario matrix the manifest names."""
     matrix = params.get("scenario_matrix", "agent-torture")
     script = ROOT / "scripts" / ("agent-torture.py" if matrix == "agent-torture" else "")
@@ -189,17 +203,43 @@ def run_tool(runner, model, params, timeout):
            "--model", str(model)]
     if params.get("cases"):
         cmd += ["--cases", str(params["cases"])]
+    # Steer agent-torture's artifacts (raw.jsonl et al.) under the ledger's own
+    # directory rather than its repo-root default, so a ledger run does not
+    # scatter output into the tree it is measuring.
+    artifacts_dir = None
+    if report_dir is not None and model_id is not None:
+        artifacts_dir = Path(report_dir) / "tool" / model_id
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        cmd += ["--out", str(artifacts_dir)]
     started = time.time()
     try:
         proc = run_group(cmd, timeout, capture_output=True, text=True,
                          cwd=str(ROOT))
     except subprocess.TimeoutExpired:
         return {"status": "not_executed", "reason": "tool_timeout"}
+    out = (proc.stdout or "") + (proc.stderr or "")
+    # The pass/fail counts are the whole quantitative result of the matrix, and
+    # a 400-char tail happened to hold the wrong end of the log. Parse the
+    # totals agent-torture prints and retain them, both inline and in a sidecar
+    # json referenced from the check — the same fix run_cpu_cuda's --out got.
+    m = re.search(r"requests=(\d+) passed=(\d+) failed=(\d+)", out)
+    totals = {"requests": int(m.group(1)), "passed": int(m.group(2)),
+              "failed": int(m.group(3))} if m else None
+    report_path = None
+    if report_dir is not None and model_id is not None:
+        report_path = Path(report_dir) / "tool" / f"{model_id}.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(
+            {"model": str(model), "scenario_matrix": matrix,
+             "returncode": proc.returncode, "totals": totals,
+             "artifacts_dir": str(artifacts_dir)}, indent=2) + "\n")
     return {"status": "pass" if proc.returncode == 0 else "fail",
             "returncode": proc.returncode,
             "elapsed_ms": round((time.time() - started) * 1000, 2),
             "scenario_matrix": matrix,
-            "output_tail": ((proc.stdout or "") + (proc.stderr or ""))[-400:]}
+            "totals": totals,
+            "report": str(report_path) if report_path else None,
+            "output_tail": out[-400:]}
 
 
 def load_manifest(path):
@@ -352,6 +392,11 @@ def main(argv=None):
             f"refusing to overwrite existing evidence {args.out} "
             "(reports are append-only; write to a new name or pass --force)")
 
+    # Per-row detail (cpu_cuda rows, tool totals) is written beside the ledger,
+    # under its own directory, so the summary file and its evidence travel
+    # together. Without an --out there is nowhere durable to keep it.
+    report_dir = args.out.parent if args.out else None
+
     manifest = load_manifest(args.manifest)
     selected = [m for m in manifest["models"]
                 if not args.model or m["id"] in args.model]
@@ -426,8 +471,13 @@ def main(argv=None):
                             "status": "not_executed",
                             "reason": f"{cls}_params_not_declared"}
                         continue
+                    # cpu_cuda and tool produce a detailed per-row/totals report;
+                    # hand them the ledger's directory and this model's id so it
+                    # is written and referenced rather than truncated to a tail.
+                    extra = ({"report_dir": report_dir, "model_id": entry["id"]}
+                             if fn in (run_cpu_cuda, run_tool) else {})
                     item["checks"][cls] = fn(args.runner.resolve(), path.resolve(),
-                                             cp, args.timeout)
+                                             cp, args.timeout, **extra)
                     failed |= item["checks"][cls]["status"] == "fail"
                 if "greedy_reference" in declared:
                     if not args.reference:
