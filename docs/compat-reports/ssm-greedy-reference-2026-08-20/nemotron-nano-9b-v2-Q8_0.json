@@ -1,0 +1,45 @@
+{
+  "schema_version": "xyntetik.runner.greedy-reference.v1",
+  "generated_utc": "2026-08-20T13:11:17Z",
+  "runner": "runner 0.1.20-alpha",
+  "reference": "version: 1 (ea12b27)",
+  "model": "nvidia_NVIDIA-Nemotron-Nano-9B-v2-Q8_0.gguf",
+  "tokens": 32,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of Japan is Tokyo. The capital",
+      "reference": " Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of Germany is Berlin. The capital of Japan is Tokyo. The capital",
+      "status": "pass"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": " if n <= 0: return 0 elif n == 1: return 1 else: return fibonacci(n-1) + fibonacci(n-",
+      "reference": " if n <= 0: return 0 elif n == 1: return 1 else: return fibonacci(n-1) + fibonacci(n-",
+      "status": "pass"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10 11 12 13 14 15 16 17 18 19",
+      "reference": " 9 10 11 12 13 14 15 16 17 18 19",
+      "status": "pass"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " there was a magical kingdom called Enchantia. The kingdom was known for its beautiful landscapes, friendly inhabitants, and most importantly, its wise and powerful queen,",
+      "reference": " there was a magical kingdom called Enchantia. The kingdom was known for its beautiful landscapes, friendly inhabitants, and most importantly, its wise and powerful queen,",
+      "status": "pass"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John\", \"age\": 30, \"city\": \"New York\"}'\nprint(json_to_dict(json_str))\n``` \n\nThis function `json",
+      "reference": " \"John\", \"age\": 30, \"city\": \"New York\"}'\nprint(json_to_dict(json_str))\n``` \n\nThis function `json",
+      "status": "pass"
+    }
+  ],
+  "totals": {
+    "passed": 5,
+    "failed": 0
+  }
+}

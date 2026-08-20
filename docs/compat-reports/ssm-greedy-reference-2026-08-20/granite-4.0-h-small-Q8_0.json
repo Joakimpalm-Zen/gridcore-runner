@@ -1,0 +1,45 @@
+{
+  "schema_version": "xyntetik.runner.greedy-reference.v1",
+  "generated_utc": "2026-08-20T13:05:32Z",
+  "runner": "runner 0.1.20-alpha",
+  "reference": "version: 1 (ea12b27)",
+  "model": "granite-4.0-h-small-Q8_0.gguf",
+  "tokens": 32,
+  "comparison": "exact generated UTF-8 text from /v1/completions at temperature 0",
+  "comparisons": [
+    {
+      "prompt": "The capital of France is",
+      "runner": " Paris.",
+      "reference": " Paris.",
+      "status": "pass"
+    },
+    {
+      "prompt": "def fibonacci(n):",
+      "runner": "\" that returns the nth Fibonacci number. But the problem says \"Write a Python function to solve this problem.\" So I'll produce a function that reads input from",
+      "reference": "\" that returns the nth Fibonacci number. We'll produce code that uses memoization. We'll produce code that uses a dictionary to store computed values. We'll",
+      "status": "fail"
+    },
+    {
+      "prompt": "1 2 3 4 5 6 7 8",
+      "runner": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24",
+      "reference": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24",
+      "status": "pass"
+    },
+    {
+      "prompt": "Once upon a time, in a land far away,",
+      "runner": " there lived a young girl named Lily. She was known throughout the kingdom for her kindness and her love for animals. One day, while walking through the forest,",
+      "reference": " there lived a young girl named Lily. She was known throughout the kingdom for her kindness and her love for animals. One day, while walking through the forest,",
+      "status": "pass"
+    },
+    {
+      "prompt": "JSON example: {\"name\":",
+      "runner": " \"John Doe\", \"age\": 30, \"city\": \"New York\"}'\n    print(parse_json(example_json))\n```\n\nExplanation:\n1. The",
+      "reference": " \"John Doe\", \"age\": 30, \"city\": \"New York\"}'\n    print(parse_json(example))\n```\n\nExplanation:\n1. The function",
+      "status": "fail"
+    }
+  ],
+  "totals": {
+    "passed": 3,
+    "failed": 2
+  }
+}
