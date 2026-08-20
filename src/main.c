@@ -919,15 +919,14 @@ int main(int argc, char **argv) {
         // reason unless --force-uncertified is given. Silent when there is no
         // manifest.
         {
-            // The backend string must match what scripts/certify-envelope.py
-            // records (runner --caps gpu.backend): a present GPU is "metal" on
-            // Apple / "cuda" elsewhere, no GPU is "cpu".
-            char env_gname[256];
-            bool env_has_gpu = gpu_available(env_gname, sizeof env_gname);
+            // Resolve against the kernels this model actually loaded. A GPU
+            // may be available while --gpu off (or a model-specific fallback)
+            // leaves m.gpu NULL; classifying that CPU run as Metal/CUDA would
+            // apply a verdict measured for a backend that did no work here.
 #ifdef __APPLE__
-            const char *env_backend = env_has_gpu ? "metal" : "cpu";
+            const char *env_backend = m.gpu ? "metal" : "cpu";
 #else
-            const char *env_backend = env_has_gpu ? "cuda" : "cpu";
+            const char *env_backend = m.gpu ? "cuda" : "cpu";
 #endif
             char env_line[256];
             bool ok = envelope_gate(load_path, RUNNER_VERSION, env_backend,

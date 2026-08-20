@@ -49,10 +49,19 @@ class CertifyEnvelopeTests(unittest.TestCase):
                     "config", "quality", "verdict", "measured"):
             self.assertIn(key, m)
         self.assertEqual(m["artifact"]["sha256"], sha256_file(MODEL))
-        # runtime identity carries a kernel-set key (the shader sha on Metal,
-        # or a flagged null on a CPU-only build) — never absent.
+        # The default measurement is --gpu off, so even a GPU host records the
+        # CPU kernel set and never attaches a GPU shader identity.
         self.assertIn("kernel_set", m["runtime"])
-        self.assertIn("backend", m["runtime"]["kernel_set"])
+        self.assertEqual(m["runtime"]["kernel_set"]["backend"], "cpu")
+        self.assertNotIn("shader_source_sha256", m["runtime"]["kernel_set"])
+
+    def test_gpu_auto_uses_the_available_backend(self):
+        caps = json.loads(subprocess.run(
+            [RUNNER, "--caps"], cwd=ROOT, check=True,
+            stdout=subprocess.PIPE, text=True).stdout)
+        expected = (caps.get("gpu") or {}).get("backend", "cpu")
+        m = self._run("--gpu", "auto")
+        self.assertEqual(m["runtime"]["kernel_set"]["backend"], expected)
 
     def test_passing_evidence_plus_reference_is_certified(self):
         sha = sha256_file(MODEL)

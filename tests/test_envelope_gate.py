@@ -26,17 +26,13 @@ def _runtime_version():
     return caps["version"]
 
 
-def _backend():
-    caps = json.loads(subprocess.run([RUNNER, "--caps"], cwd=ROOT, check=True,
-                                     stdout=subprocess.PIPE, text=True).stdout)
-    return (caps.get("gpu") or {}).get("backend", "cpu")
-
-
-def _manifest(verdict, checks=None):
+def _manifest(verdict, checks=None, backend="cpu"):
     m = {
         "schema_version": "xyntetik.runner.envelope.v1",
         "runtime": {"version": _runtime_version(),
-                    "kernel_set": {"backend": _backend()}},
+                    # _run forces --gpu off, so the active kernel set is CPU
+                    # even on a host where --caps reports an available GPU.
+                    "kernel_set": {"backend": backend}},
         "verdict": verdict,
     }
     if checks is not None:
@@ -90,3 +86,17 @@ def test_no_manifest_is_silent(model):
     proc = _run(model)
     assert proc.returncode == 0, proc.stderr.decode(errors="replace")
     assert b"envelope:" not in proc.stderr
+
+
+def test_gpu_verdict_is_foreign_to_a_forced_cpu_run(model):
+    caps = json.loads(subprocess.run([RUNNER, "--caps"], cwd=ROOT, check=True,
+                                     stdout=subprocess.PIPE, text=True).stdout)
+    gpu_backend = (caps.get("gpu") or {}).get("backend")
+    if not gpu_backend:
+        pytest.skip("needs an available GPU to distinguish availability from use")
+    (model.parent / (model.name + ".envelope.json")).write_text(
+        _manifest("outside-envelope", {"gpu_load": "fail"}, gpu_backend))
+    proc = _run(model)
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    err = proc.stderr.decode(errors="replace")
+    assert "indeterminate" in err and "not this runtime" in err, err

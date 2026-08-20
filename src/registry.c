@@ -175,7 +175,12 @@ int swap_to(const char *want) {
         bool env_refused = false;
         if (model_ok && tok_ok) {
             char env_line[256];
-            if (!envelope_gate(SV.reg[idx].path, RUNNER_VERSION, SV.env_backend,
+#ifdef __APPLE__
+            const char *env_backend = m->gpu ? "metal" : "cpu";
+#else
+            const char *env_backend = m->gpu ? "cuda" : "cpu";
+#endif
+            if (!envelope_gate(SV.reg[idx].path, RUNNER_VERSION, env_backend,
                                SV.force_uncertified, env_line, sizeof env_line,
                                NULL))
                 env_refused = true;

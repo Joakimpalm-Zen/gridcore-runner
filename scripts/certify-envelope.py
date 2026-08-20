@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Assemble a measured-envelope manifest (`<model>.envelope.json`) for an artifact.
 
-Slice 1 of the certified-envelope gate (design:
-xyntetik-suite/docs/plans/envelope-manifest-design.md). This does NOT run gates
-or measure anything — it is an INDEX OVER EVIDENCE that already exists: it reads
+This does NOT run gates or measure anything — it is an INDEX OVER EVIDENCE
+that already exists: it reads
 `runner --caps` for the runtime identity, an optional compat report for the
 per-model quality/load evidence, and the artifact's own sha, and emits one JSON
 sidecar per the schema. Every field is traceable to the run that produced it,
@@ -52,18 +51,20 @@ def runner_caps(runner):
     return json.loads(proc.stdout)
 
 
-def kernel_set_identity(caps):
+def kernel_set_identity(caps, gpu_mode):
     """The envelope key for the runtime's compute kernels. On Metal the shader
     source sha is exact and automatic; the CPU kernel set is the build's ISA
     tier, which --caps does not hash, so it is recorded coarsely and flagged."""
-    gpu = caps.get("gpu") or {}
+    # --caps reports hardware availability. The envelope describes the kernels
+    # that produced the measurement: --gpu off is CPU even on a GPU host.
+    gpu = (caps.get("gpu") or {}) if gpu_mode == "auto" else {}
     backend = gpu.get("backend", "cpu")
     ident = {"backend": backend, "os": caps.get("os"), "arch": caps.get("arch")}
     if gpu.get("shader_source_sha256"):
         ident["shader_source_sha256"] = gpu["shader_source_sha256"]
     else:
-        # CPU-only build: the ISA tier decides the kernels; --caps has no hash
-        # for it, so the class carries the arch and this is marked incomplete.
+        # CPU-selected run: the ISA tier decides the kernels; --caps has no
+        # hash for it, so the class carries the arch and this is incomplete.
         ident["cpu_kernel_hash"] = None
     return ident
 
@@ -298,7 +299,7 @@ def build_manifest(args):
         },
         "runtime": {
             "version": caps.get("version"),
-            "kernel_set": kernel_set_identity(caps),
+            "kernel_set": kernel_set_identity(caps, args.gpu),
         },
         "hardware": {
             "class": f"{caps.get('arch')}/{(caps.get('gpu') or {}).get('backend','cpu')}"
@@ -339,7 +340,7 @@ def main(argv=None):
                          "against; required for a 'certified' verdict")
     ap.add_argument("--derivation", help="human derivation chain, e.g. "
                     "'keep-30 prune of <sha>, plan <sha>'")
-    ap.add_argument("--gpu", default="off")
+    ap.add_argument("--gpu", choices=("auto", "off"), default="off")
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--kv", default="f16")
     ap.add_argument("--ctx", type=int, default=4096)

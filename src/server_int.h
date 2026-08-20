@@ -94,10 +94,8 @@ typedef struct {
     // Measured-envelope enforcement for swap-mode loads. A model swapped in on
     // demand whose sidecar records an outside-envelope verdict for this runtime
     // is REFUSED per-request (never a process exit — the server keeps serving
-    // its other models), unless force_uncertified was set at startup. The
-    // backend string is resolved once here so registry.c does not re-probe it.
+    // its other models), unless force_uncertified was set at startup.
     bool        force_uncertified;
-    const char *env_backend;  // "metal" / "cuda" / "cpu" for the sidecar tuple
 } server_state;
 
 extern server_state SV;

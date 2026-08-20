@@ -703,7 +703,8 @@ certification run records what was actually *measured* for one artifact on one
 runtime — the CPU==GPU identity check, the fidelity gate, whether the model
 fits its memory class — into a `<model>.gguf.envelope.json` sidecar. At load
 Runner reads the sidecar sitting next to the model and resolves it against the
-runtime it is actually running (`runner --version` and the compiled backend,
+runtime it is actually running (`runner --version` and the model's active
+compute backend,
 exact-match — a manifest measured on a different version or backend does not
 speak for this one):
 

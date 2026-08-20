@@ -1252,19 +1252,10 @@ int server_run(model_t *base, tokenizer *tok, const char *model_path,
 #endif
     install_stop_handlers(); // resets the stop flag + listener on both platforms
     SV.ignore_eos = ignore_eos;
-    // Measured-envelope enforcement for swapped-in models: resolve the backend
-    // string once (same rule as `runner --caps` / the CLI load gate) so every
-    // swap reads a stable tuple. registry.c reads both fields on each load.
+    // Measured-envelope enforcement for swapped-in models. registry.c resolves
+    // the backend from each loaded model, since an available GPU may be unused
+    // after --gpu off or a model-specific fallback.
     SV.force_uncertified = force_uncertified;
-    {
-        char gname[256];
-        bool has_gpu = gpu_available(gname, sizeof gname);
-#ifdef __APPLE__
-        SV.env_backend = has_gpu ? "metal" : "cpu";
-#else
-        SV.env_backend = has_gpu ? "cuda" : "cpu";
-#endif
-    }
     // Set before anything can load a model: registry.c reads it on every swap
     // and reload, so a forced template survives /unload and --ttl instead of
     // being detected away at the next request.

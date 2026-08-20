@@ -45,17 +45,13 @@ def _runtime_version():
     return caps["version"]
 
 
-def _backend():
-    caps = json.loads(subprocess.run([RUNNER, "--caps"], cwd=ROOT, check=True,
-                                     stdout=subprocess.PIPE, text=True).stdout)
-    return (caps.get("gpu") or {}).get("backend", "cpu")
-
-
 def _write_outside_manifest(model_path):
     manifest = {
         "schema_version": "xyntetik.runner.envelope.v1",
         "runtime": {"version": _runtime_version(),
-                    "kernel_set": {"backend": _backend()}},
+                    # _serve forces --gpu off: certify the kernels the model
+                    # actually uses, not an idle GPU reported by --caps.
+                    "kernel_set": {"backend": "cpu"}},
         "verdict": "outside-envelope",
         "quality": {"checks": {"load": "pass", "ram_fits": "fail"}},
     }
