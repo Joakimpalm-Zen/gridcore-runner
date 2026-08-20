@@ -638,6 +638,13 @@ bool model_recurrent_snapshot(model_t *m, int pos);
 // and return true; otherwise leave the live state untouched and return false —
 // the caller must then recompute the recurrent layers from position 0.
 bool model_recurrent_restore(model_t *m, int pos);
+// Serialize the recurrent fold to / from a caller-owned byte buffer, so the
+// prefix cache can store it beside the KV and restore it on an exact full-prefix
+// hit. `model_recurrent_blob_bytes` is 0 on a non-recurrent model. The fold is
+// not sliceable, so a load is only valid at the exact position it was saved.
+size_t model_recurrent_blob_bytes(const model_t *m);
+bool model_recurrent_blob_save(const model_t *m, uint8_t *dst);
+bool model_recurrent_blob_load(model_t *m, const uint8_t *src);
 // Internal backend bridge for tensor-role placement: apply one complete MoE
 // FFN (including its residual) to m->x on the host. CUDA uses this after its
 // attention sublayer and then resumes on-device. False rejects a non-MoE layer.

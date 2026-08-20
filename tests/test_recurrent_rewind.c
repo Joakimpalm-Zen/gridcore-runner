@@ -165,8 +165,54 @@ static void test_rewind_divergence_matches_cold(void) {
     slot_close(&warm); slot_close(&cold);
 }
 
+// ---- gate 3: the SHARED prefix cache restores the fold on an exact hit -------
+//
+// A warm slot folds SHARED tokens and PUBLISHES them to the cross-request cache
+// (KV rows + the appended fold blob). A fresh forked slot reuses the exact same
+// prefix: tracer 5 forks it — installing the KV AND restoring the fold — so it
+// only feeds the tail, and its logits must equal a cold slot fed the whole
+// prompt. The fork must actually happen (keep == SHARED); without the fold blob
+// a recurrent model declines the fork (keep == 0), which is the RED state.
+static void test_prefix_cache_fold_restore_matches_cold(void) {
+    enum { SHARED = 24, TAIL = 3 };   // SHARED >= PFX_MIN_TOKENS (16)
+    model_params p = base_params();
+    slot warm, cold, forked;
+    if (!slot_open(&warm, &p) || !slot_open(&cold, &p) || !slot_open(&forked, &p)) {
+        ck(0, "load three instances for the prefix-cache gate");
+        return;
+    }
+    prefix_cache_clear();
+
+    int32_t prompt[SHARED + TAIL];
+    for (int i = 0; i < SHARED + TAIL; i++) prompt[i] = 10 + i;
+
+    // warm: fold the shared prefix and publish it (KV + fold blob at pos SHARED)
+    engine_reset(&warm.e);
+    ck(engine_feed(&warm.e, prompt, SHARED) != NULL, "warm folds the shared prefix");
+    engine_prefix_publish(&warm.e, prompt, SHARED, SHARED, 0.0);
+
+    // cold: fold the whole prompt for the reference logits
+    engine_reset(&cold.e);
+    float *cl = engine_feed(&cold.e, prompt, SHARED + TAIL);
+    float *cold_l = snap_logits(&cold.m, cl);
+
+    // forked: reuse the exact prefix (fork restores KV + fold), feed only the tail
+    engine_reset(&forked.e);
+    prefix_reuse r = engine_prefix_reuse(&forked.e, prompt, SHARED + TAIL);
+    ck(r.keep == SHARED, "the recurrent model forks the exact prefix (fold restored)");
+    float *fl = engine_feed(&forked.e, prompt + r.keep, SHARED + TAIL - r.keep);
+    float *fork_l = snap_logits(&forked.m, fl);
+
+    int diffs = logits_differ(&forked.m, fork_l, cold_l);
+    ck(diffs == 0, "a fold-restored fork matches a cold decode bit for bit");
+
+    free(cold_l); free(fork_l);
+    slot_close(&warm); slot_close(&cold); slot_close(&forked);
+}
+
 int main(void) {
     test_snapshot_restore_roundtrip();
     test_rewind_divergence_matches_cold();
+    test_prefix_cache_fold_restore_matches_cold();
     return g_fail;
 }

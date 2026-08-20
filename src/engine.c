@@ -289,9 +289,11 @@ static uint64_t model_identity(const model_t *m, const tokenizer *tok) {
     return h;
 }
 
-// Snapshots are packed per layer as { K[n][row_bytes] , V[n][row_bytes] }.
-// The n-major layout is what makes a partial restore a straight memcpy of the
-// first c rows of each block, which is Fact 1 turned into code.
+// Snapshots are packed per layer as { K[n][row_bytes] , V[n][row_bytes] },
+// then — for a recurrent model — a fixed-size fold blob appended at the end. The
+// n-major KV layout is what makes a partial restore a straight memcpy of the
+// first c rows of each block (Fact 1 turned into code); the fold blob is NOT
+// sliceable, so it is only restored on an exact full-prefix hit (tracer 5).
 size_t prefix_cache_entry_bytes(const model_t *m, int n) {
     size_t t = 0;
     for (int l = 0; l < m->n_layer; l++) {
@@ -300,6 +302,7 @@ size_t prefix_cache_entry_bytes(const model_t *m, int n) {
         if (model_kv_owner(m, l) != l) continue;
         t += 2 * (size_t)n * model_kv_row_bytes(m, l);
     }
+    t += model_recurrent_blob_bytes(m);  // 0 for a non-recurrent model
     return t;
 }
 
@@ -313,6 +316,9 @@ static void pfx_save(const model_t *m, uint8_t *dst, int n) {
         memcpy(dst + off + blk, (const uint8_t *)m->vcache + lo, blk);
         off += 2 * blk;
     }
+    // the live fold is at position n here (the slot fed exactly n tokens), so it
+    // is the fold to restore on an exact hit; no-op for a non-recurrent model.
+    model_recurrent_blob_save(m, dst + off);
 }
 
 // install the first `n` rows of a snapshot taken over `stride` rows
@@ -470,14 +476,15 @@ prefix_reuse engine_prefix_reuse(engine *e, const int32_t *toks, int n) {
         while (c < p->n && c < n - 1 && p->toks[c] == toks[c]) c++;
         if (c > best) { best = c; hit = p; }
     }
-    // A shared snapshot stores KV only (Fact 1). Forking it for a recurrent
-    // model would install attention rows at `best` while leaving the recurrent
-    // fold as-of this slot's previous end — silently wrong. Storing the
-    // recurrent blob in the snapshot and restoring it on an exact hit is tracer
-    // 5; until then, recurrent models decline the shared fork and keep the
-    // self-rewind result above (which forced a correct recompute).
-    if (!model_has_recurrent(e->m) &&
-        hit && best >= PFX_MIN_TOKENS && best > r.keep) {
+    // A shared snapshot stores KV (sliceable, Fact 1) plus — for a recurrent
+    // model — the fold blob captured at hit->n. The fold is NOT sliceable, so a
+    // recurrent model may fork ONLY an exact full-prefix hit (best == hit->n),
+    // and only on CPU: qwen35-on-GPU keeps its recurrent state on-device, out of
+    // reach of the host blob, so it declines and keeps the self-rewind recompute
+    // (tracer 5). A partial recurrent hit likewise declines above.
+    bool recur = model_has_recurrent(e->m);
+    bool recur_ok = !recur || (hit && best == hit->n && !e->m->gpu);
+    if (recur_ok && hit && best >= PFX_MIN_TOKENS && best > r.keep) {
         // CUDA's device KV is a mirror that only resyncs when a forward's
         // position is not the previous one plus 1. A fork writes host rows
         // behind the device's back, so it has to *create* that discontinuity
@@ -487,8 +494,16 @@ prefix_reuse engine_prefix_reuse(engine *e, const int32_t *toks, int n) {
         // at position 0 recomputes a row the snapshot overwrites with
         // identical bytes a moment later and leaves the mirror at position 0,
         // so the next forward at `best` (>= PFX_MIN_TOKENS) always uploads.
+        // (Recurrent forks are CPU-only, so this GPU branch never runs for them.)
         if (e->m->gpu) model_forward_batch(e->m, toks, 1, 0, false);
         pfx_load(e->m, hit->kv, hit->n, best);
+        if (recur) {
+            // exact hit: the fold blob sits right after the KV data (entry bytes
+            // for hit->n minus the fixed blob), captured at hit->n == best.
+            size_t kvb = prefix_cache_entry_bytes(e->m, hit->n)
+                       - model_recurrent_blob_bytes(e->m);
+            model_recurrent_blob_load(e->m, hit->kv + kvb);
+        }
         memcpy(e->hist, toks, sizeof(int32_t) * (size_t)best);
         e->pos = best;
         e->dpos = 0;          // the draft model's KV was not forked

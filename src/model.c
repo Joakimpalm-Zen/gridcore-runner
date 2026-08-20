@@ -4836,6 +4836,33 @@ bool model_recurrent_restore(model_t *m, int pos) {
     return true;
 }
 
+// Serialize/restore the recurrent fold to/from a caller-owned byte buffer, so
+// the prefix cache can store the fold beside the KV rows and restore it on an
+// EXACT full-prefix hit (tracer 5). The fold is a fixed-size, position-keyed
+// blob (conv ring + SSD state), not sliceable — so a caller may only load it at
+// the exact position it was saved. 0 bytes when the model has no recurrent state.
+size_t model_recurrent_blob_bytes(const model_t *m) {
+    if (!model_has_recurrent(m)) return 0;
+    return recurrent_conv_bytes(m) + recurrent_state_bytes(m);
+}
+
+bool model_recurrent_blob_save(const model_t *m, uint8_t *dst) {
+    if (!model_has_recurrent(m)) return false;
+    size_t cb = recurrent_conv_bytes(m);
+    memcpy(dst, m->ssm_conv_state, cb);
+    memcpy(dst + cb, m->ssm_state_mem, recurrent_state_bytes(m));
+    return true;
+}
+
+bool model_recurrent_blob_load(model_t *m, const uint8_t *src) {
+    if (!model_has_recurrent(m)) return false;
+    size_t cb = recurrent_conv_bytes(m);
+    memcpy(m->ssm_conv_state, src, cb);
+    memcpy(m->ssm_state_mem, src + cb, recurrent_state_bytes(m));
+    m->ssm_snap_pos = -1;   // a freshly installed fold has no earlier snapshot
+    return true;
+}
+
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
     m->fwd_pos = pos;
