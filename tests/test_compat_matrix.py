@@ -45,8 +45,19 @@ def test_model_manifest_covers_every_claimed_architecture():
     for model in models:
         assert len(model["sha256"]) == 64
         int(model["sha256"], 16)
-        assert model["reference"]["implementation"] == "llama.cpp"
-        assert model["reference"]["revision"]
+        # Every row that claims llama.cpp-derived evidence must pin the
+        # revision it was taken against. A row whose reference is not
+        # llama.cpp at all (the selective-precision flagship: its fidelity
+        # reference is its own Q8_0 source under bar v2) may omit the field,
+        # but then it must not declare llama.cpp-dependent checks, and the
+        # gap has to be explained in notes rather than passed over silently.
+        if "reference" in model:
+            assert model["reference"]["implementation"] == "llama.cpp"
+            assert model["reference"]["revision"]
+        else:
+            assert "greedy_reference" not in model["checks"], model["id"]
+            assert "tokenizer" not in model["checks"], model["id"]
+            assert model.get("notes"), model["id"]
         assert model["checks"]
         capture_path = model.get("tokenizer_reference_ids")
         if capture_path:
