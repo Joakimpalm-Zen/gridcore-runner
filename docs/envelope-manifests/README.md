@@ -24,12 +24,20 @@ adopted quality bar at 17.99 GB (v2 top-1 99.50 %, mean KLD 0.0345) per the suit
 
 - artifact sha256 `df02efa8…`, reference (Q8_0 source) sha256 `4ad960d1…`
 - runtime tuple: runner 0.1.19-alpha / CUDA on the RTX PRO 6000 Blackwell box
-- **verdict: `experimental`.** The fidelity/adopted-bar PASS is a *different* bar
-  from the compat gate this schema's `quality.gate` indexes. No compat-matrix
-  report exists for this exact sha, so the manifest fails closed to `experimental`
-  rather than inventing a `certified` verdict. Reaching `certified` needs one full
-  compat gate run (load / tokenizer / greedy_reference / cpu_cuda / chat / tool)
-  against sha `df02efa8…` — a 30B gate run that also needs a committed qwen3moe
-  tokenizer reference-ids capture and a matching reference binary, neither of which
-  exists yet. Verified consumable: the runner loads the model (qwen3moe, 48 layers,
-  18.0 GB in VRAM) and the load-time gate reads this sidecar and reports its state.
+- **verdict: `experimental`, and certification is measured-blocked.** The
+  fidelity/adopted-bar PASS is a *different* bar from the compat gate this
+  schema's `quality.gate` indexes. The `cpu_cuda` identity gate WAS run against
+  this exact sha on 2026-08-20 (runner 0.1.19-alpha, full 48/48 CUDA offload,
+  eager routing, TC=0; evidence:
+  `docs/compat-reports/cpu-cuda-128/qwen3-30b-a3b-expq4_0-attnq8_0/report.json`):
+  **8/9 prompts byte-exact**, and the ninth diverges at generated token 58
+  (`" over"` on CPU vs `" cloudy"` on CUDA). That flip was evaluated under the
+  MoE margin-qualified routing near-tie tolerance (owner-ratified 2026-08-20)
+  and **correctly rejected**: the CPU side rates the CUDA pick 0.707 nats below
+  its own best (CUDA side 0.090), outside the 0.5-nat band required on both
+  sides — the CPU is confident, so this is a real divergence, not a routing
+  coin-flip. The sidecar therefore stays un-certified rather than borrowing a
+  tolerance it does not qualify for; recording `outside-envelope` (a measured
+  failure) is the owner's call. Verified consumable: the runner loads the model
+  (qwen3moe, 48 layers, 18.0 GB in VRAM) and the load-time gate reads this
+  sidecar and reports its state.

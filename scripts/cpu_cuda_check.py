@@ -104,6 +104,39 @@ NEAR_TIE_CAP = 0.34      # tolerate near-ties in at most ~1/3 of probes (cond. 3
 TOP_N = 20               # request the model's top-N logprobs per token
 
 
+def is_moe(model_path):
+    """expert_count straight from the GGUF header (the same read as
+    scripts/stress-models.py, via verify-gguf.py's reader).
+
+    The margin-qualified tolerance exists for MoE ROUTING near-ties only — a
+    dense model has no router whose reduction order could flip a coin, so a
+    dense divergence is a real defect even when the logprob gap happens to sit
+    inside the band, and it must stay under strict byte-identity. Fail-closed:
+    an unreadable header classifies as dense, which only makes the gate
+    stricter, never looser."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "verify_gguf", ROOT / "scripts" / "verify-gguf.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with open(model_path, "rb") as f:
+            r = mod.R(f)
+            if r.raw(4) != b"GGUF":
+                return False
+            r.u32()          # version
+            r.u64()          # tensor count
+            n_kv = r.u64()
+            for _ in range(n_kv):
+                k = r.string()
+                v = r.value(r.u32())
+                if k.endswith(".expert_count"):
+                    return bool(v and int(v) > 0)
+    except Exception:
+        return False
+    return False
+
+
 def dist_at(lp, i):
     """The token->logprob distribution at position i of a runner logprobs block
     (parallel tokens / token_logprobs / top_logprobs arrays)."""
@@ -272,10 +305,20 @@ def main():
     gpu = generate_all(args.runner, args.model, "auto", args.tokens, args.ctx,
                        env, args.extra_arg, args.timeout, gpu_log)
 
+    # Dense models never get the near-tie tolerance (see is_moe): the
+    # written policy always said so, but until 2026-08-20 nothing ENFORCED it —
+    # classify_divergence itself is architecture-blind, so the downgrade to
+    # "real" happens here, where the model file is in hand.
+    moe = is_moe(args.model)
     rows = []
     exact = near_tie = real = 0
     for prompt, c, g in zip(PROMPTS, cpu, gpu):
         kind, detail = classify_divergence(c, g)
+        if kind == "near_tie" and not moe:
+            kind = "real"
+            detail["dense_strict"] = True
+            print("dense model: in-band flip is NOT a routing near-tie — "
+                  "strict identity applies", flush=True)
         exact += kind == "exact"
         near_tie += kind == "near_tie"
         real += kind == "real"
@@ -300,6 +343,7 @@ def main():
     report = {"model": str(args.model), "tokens": args.tokens,
               "context": args.ctx,
               "routing": "fused" if args.fused else "eager",
+              "moe": moe,
               "extra_args": args.extra_arg,
               "gpu_split": split,
               "cpu_cuda_identity": {"result": result, "exact": f"{exact}/{total}",

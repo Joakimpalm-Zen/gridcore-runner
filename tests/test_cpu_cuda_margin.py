@@ -50,6 +50,33 @@ def test_pick_off_top_n_is_real():
     assert cc.classify_divergence(cpu, gpu)[0] == "real"
 
 
+def _gguf_bytes(kvs):
+    """A minimal GGUF header holding just `kvs` ({key: u32 value}) and no tensors."""
+    import struct
+    out = b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) \
+        + struct.pack("<Q", len(kvs))
+    for k, v in kvs.items():
+        kb = k.encode()
+        out += struct.pack("<Q", len(kb)) + kb + struct.pack("<I", 4) \
+            + struct.pack("<I", v)  # type 4 = u32
+    return out
+
+
+def test_is_moe_reads_expert_count(tmp_path):
+    moe = tmp_path / "moe.gguf"
+    moe.write_bytes(_gguf_bytes({"llama.expert_count": 8}))
+    dense = tmp_path / "dense.gguf"
+    dense.write_bytes(_gguf_bytes({"llama.block_count": 4}))
+    assert cc.is_moe(moe) is True
+    assert cc.is_moe(dense) is False
+
+
+def test_is_moe_fails_closed():
+    # dense-strict is the safe default: unreadable/garbage input must never
+    # unlock the near-tie tolerance
+    assert cc.is_moe("/nonexistent/nowhere.gguf") is False
+
+
 def test_run_result_thresholds():
     assert cc.run_result(near_tie=0, real=0, total=9) == "pass"
     assert cc.run_result(near_tie=1, real=0, total=9) == "pass_margin_qualified"

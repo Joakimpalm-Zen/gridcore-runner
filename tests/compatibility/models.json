@@ -422,6 +422,42 @@
       }
     },
     {
+      "id": "qwen3-30b-a3b-expq4_0-attnq8_0",
+      "architecture": "qwen3moe",
+      "family": "Qwen 3 MoE",
+      "file": "models/Qwen3-30B-A3B-selprec/Qwen3-30B-A3B-expq4_0-attnq8_0.gguf",
+      "sha256": "df02efa815a74e6207f9e01f2d38272c1e2718bb23aec544709a02a2c7d5b206",
+      "tokenizer_reference": "Qwen/Qwen3-30B-A3B",
+      "checks": [
+        "load",
+        "cpu_cuda",
+        "chat"
+      ],
+      "notes": "The flagship selective-precision artifact (HF Joakimpalm-Zen): Qwen3-30B-A3B with attention + embeddings Q8_0 and expert banks Q4_0 via --type-plan, derived from the Q8_0 source sha 4ad960d1 (its fidelity reference under the adopted bar; suite exhaust-results-2026-08-15 phase 6: v2 top-1 99.50%, mean KLD 0.0345). greedy_reference is not declared: the artifact's reference is its own Q8_0 source under bar v2, not a llama.cpp revision, and no committed qwen3moe tokenizer reference-ids capture exists yet, so tokenizer is not declared either - both are honest gaps, not silent passes. Measured 2026-08-20 (runner 0.1.19-alpha, full 48/48 CUDA offload, eager routing, TC=0): cpu_cuda FAIL at 8/9 exact - the ninth prompt's first flip (' over' vs ' cloudy' at generated token 58) is NOT a qualifying near-tie: the CPU side rates the GPU's pick 0.707 nats below its own best, outside the 0.5-nat band the margin-qualified tolerance (owner-ratified 2026-08-20) requires on both sides, so the tolerance correctly rejects it. Evidence: docs/compat-reports/cpu-cuda-128/qwen3-30b-a3b-expq4_0-attnq8_0/report.json.",
+      "check_params": {
+        "cpu_cuda": {
+          "pins": {
+            "RUNNER_CUDA_TC": "0",
+            "RUNNER_MOE_EAGER": "1"
+          },
+          "prompt_set": "cpu_cuda_check.PROMPTS",
+          "min_prompt_tokens": 85,
+          "tokens": 128
+        },
+        "chat": {
+          "prompt": "What is 2+2?",
+          "max_tokens": 200,
+          "gpu": "auto",
+          "expect_stop": true,
+          "expect_nonempty_content": true,
+          "forbid_substrings": [
+            "[/INST]",
+            "<<SYS>>"
+          ]
+        }
+      }
+    },
+    {
       "id": "gemma-4-e4b-it-q4_k_m",
       "architecture": "gemma4",
       "family": "Gemma 4 E-series",

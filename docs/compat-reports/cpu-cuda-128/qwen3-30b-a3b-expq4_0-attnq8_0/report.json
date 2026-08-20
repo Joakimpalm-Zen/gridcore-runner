@@ -1,0 +1,94 @@
+{
+ "model": "/home/lab/workspace/models/Qwen3-30B-A3B-selprec/Qwen3-30B-A3B-expq4_0-attnq8_0.gguf",
+ "tokens": 128,
+ "context": 2048,
+ "routing": "eager",
+ "moe": true,
+ "extra_args": [],
+ "gpu_split": {
+  "layers_on_gpu": 48,
+  "layers_total": 48,
+  "output_weight_on_gpu": true,
+  "whole_graph": true
+ },
+ "cpu_cuda_identity": {
+  "result": "fail",
+  "exact": "8/9",
+  "near_tie_tolerated": 0,
+  "tie_band_nats": 0.5,
+  "over_cap": false
+ },
+ "identical": 8,
+ "total": 9,
+ "rows": [
+  {
+   "prompt": "The capital of France is",
+   "kind": "exact",
+   "detail": null,
+   "cpu": " Paris. The capital of the United Kingdom is London. The capital of the United States is Washington, D.C. The capital of Brazil is Bras\u00edlia. The capital of Japan is Tokyo. The capital of India is New Delhi. The capital of South Africa is Pretoria. The capital of Australia is Canberra. The capital of Canada is Ottawa. The capital of Germany is Berlin. The capital of China is Beijing. The capital of Russia is Moscow. The capital of Mexico is Mexico City. The capital of Egypt is Cairo. The capital of Nigeria is Abuja. The capital of South Korea is Seoul. The capital of Indonesia is Jakarta.",
+   "gpu": null
+  },
+  {
+   "prompt": "def fibonacci(n):",
+   "kind": "exact",
+   "detail": null,
+   "cpu": "\n    if n <= 0:\n        return 0\n    elif n == 1:\n        return 1\n    else:\n        return fibonacci(n-1) + fibonacci(n-2)\n\n# Example usage\nn = 10\nprint(f\"The {n}th Fibonacci number is:\", fibonacci(n))\n\n# This is a comment\n# Another comment\n# Third comment\n\n# This is a comment\n# Another comment\n# Third comment\n\n# This is a comment\n# Another comment\n# Third comment\n\n# This is a comment\n# Another comment\n# Third comment\n\n# This is a comment",
+   "gpu": null
+  },
+  {
+   "prompt": "1 2 3 4 5 6 7 8",
+   "kind": "exact",
+   "detail": null,
+   "cpu": " 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51",
+   "gpu": null
+  },
+  {
+   "prompt": "Once upon a time, in a land far away,",
+   "kind": "exact",
+   "detail": null,
+   "cpu": " there was a kingdom known as the Kingdom of Numbers. The kingdom was ruled by a wise king named Prime, who was known for his love of mathematics. One day, the king decided to hold a competition to find the most intelligent mathematician in the kingdom. The challenge was to solve a complex problem that had been puzzling the kingdom's scholars for years. The problem was to find the sum of all the prime numbers less than 1000 that are also palindromes. The winner of the competition would be granted a special title and a place in the royal court. Can you solve this problem and become the royal mathematic",
+   "gpu": null
+  },
+  {
+   "prompt": "Q: What is 17 * 23?\nA:",
+   "kind": "exact",
+   "detail": null,
+   "cpu": " 391\nOkay, let's see. I need to calculate 17 multiplied by 23. Hmm, I remember that multiplication can sometimes be broken down into easier steps. Maybe I can use the distributive property here. Let me think... So, 17 times 23. Maybe I can split 23 into 20 and 3? That might make it easier. \n\nSo, 17 times 20 is... Well, 17 times 2 is 34, so 17 times 20 would be 340. Then, 1",
+   "gpu": null
+  },
+  {
+   "prompt": "The lighthouse keeper recorded the weather every morning: wind direction, cloud cover, and the hour the fog lifted.",
+   "kind": "real",
+   "detail": {
+    "pos": 58,
+    "cpu_token": " over",
+    "gpu_token": " cloudy",
+    "cpu_margin_to_gpu_pick": 0.7071860000000001,
+    "gpu_margin_to_cpu_pick": 0.09025400000000006
+   },
+   "cpu": "  He noticed that the wind direction was always the same, but the cloud cover varied.  The fog lifted at 6 hours, 7 hours, or 8 hours.  The wind direction was either north or south.  The cloud cover was either clear, partly cloudy, or overcast.  The fog lifted at 6, 7, or 8.  The keeper noticed that the fog lifted at 6 hours on 20% of the days, at 7 hours on 50% of the days, and at 8 hours on 30% of the days.  The wind direction",
+   "gpu": "  He noticed that the wind direction was always the same, but the cloud cover varied.  The fog lifted at 6 hours, 7 hours, or 8 hours.  The wind direction was either north or south.  The cloud cover was either clear, partly cloudy, or cloudy.  The fog lifted at different times on different days.  The lighthouse keeper recorded the following data:\n\n- On 10 days, the fog lifted at 6 hours.\n- On 15 days, the fog lifted at 7 hours.\n- On 20 days, the fog lifted at 8 hours.\n\nHe also"
+  },
+  {
+   "prompt": "In 1929 the observatory published a revised catalogue listing 4218 objects, of which roughly one in nine turned out on later inspection to be a duplicate entry under a second designation. The correction",
+   "kind": "exact",
+   "detail": null,
+   "cpu": " of such errors was a major task for the next few decades. The original 1929 catalogue was reprinted in 1933, and a second edition was published in 1936. The 1936 edition was reprinted in 1940, and a third edition in 1947. The 1947 edition was reprinted in 1952, and a fourth edition in 1959. The 1959 edition was reprinted in 1963, and a fifth edition in 1966.",
+   "gpu": null
+  },
+  {
+   "prompt": "def parse_header(buf, size):\n    if size < 8:\n        raise ValueError('short header')\n    magic, version = struct.unpack('<II', buf[:8])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The loader above rejects a truncated header before unpacking it, which",
+   "kind": "exact",
+   "detail": null,
+   "cpu": " is correct.\n# But the code below is not checking the size before unpacking, which could lead to\n# a buffer overflow if the header is not properly aligned.\n\ndef parse_footer(buf, size):\n    if size < 8:\n        raise ValueError('short footer')\n    # The code is unpacking 8 bytes, but the size is checked to be at least 8.\n    # So this is safe.\n    magic, version = struct.unpack('<II', buf[-8:])\n    if magic != GGUF_MAGIC:\n        raise ValueError('not a gguf file')\n    return magic, version\n\n# The code is correct",
+   "gpu": null
+  },
+  {
+   "prompt": "The city of Lisbon sits on seven hills above the Tagus estuary, and its oldest quarter survived the 1755 earthquake largely intact because the bedrock there is firmer than the reclaimed ground downriver. Rebuilding the lower town took decades, and the grid of streets laid out afterwards was among the first in Europe designed with seismic loads in mind, which is why the district still reads as unusually regular to a visitor who",
+   "kind": "exact",
+   "detail": null,
+   "cpu": " has seen the maze of the Alfama. The city's architecture is a patchwork of styles, from the medieval to the modern, and the city's most famous landmark, the Jer\u00f3nimos Monastery, is a masterpiece of the Manueline style, which is a Portuguese variation of late Gothic. The city's most famous landmark, the Jer\u00f3nimos Monastery, is a masterpiece of the Manueline style, which is a Portuguese variation of late Gothic. The city's most famous landmark, the Jer\u00f3nimos Monastery, is a masterpiece of the Manueline style, which is a Portuguese variation of late Gothic. The city's most",
+   "gpu": null
+  }
+ ]
+}
