@@ -1155,6 +1155,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_attn_dec_seq,  "k_attn_dec_seq" },
             // twins of f_gemv: same per-column arithmetic, x staged in smem,
             // one instantiation per microbatch width class
+            { &w->f_gemvb[BW_4][T_BF16], "k_gemvb_bf16_x4" },
+            { &w->f_gemvb[BW_8][T_BF16], "k_gemvb_bf16_x8" },
             { &w->f_gemvb[BW_4][T_Q8_0], "k_gemvb_q8_0_x4" },
             { &w->f_gemvb[BW_4][T_Q4_0], "k_gemvb_q4_0_x4" },
             { &w->f_gemvb[BW_4][T_Q4_K], "k_gemvb_q4_K_x4" },
@@ -3397,8 +3399,28 @@ struct gpu_batch {
 // in a quantized type with no decode GEMV (Q4_1, Q5_0, Q5_1, Q3_K, IQ4_NL,
 // IQ4_XS, MXFP4) now decodes its sequences one at a time instead of batching
 // them into different numbers.
+// A type is admitted here only when its k_mv_<type>_b hands MV_FMA exactly the
+// per-term value the batch-1 k_mv_<type> accumulates, in the same iteration
+// order, with the same warp_sum tail — then each microbatch column reproduces
+// the lone-token bits. Verified per body (2026-08-20): F32/F16/BF16 decode one
+// weight per term, so their _b tiles are exact twins (BF16 additionally has
+// fast f_gemvb twins, preferred at dispatch; f_mvb stays its correct fallback).
+//
+// Q2_K and Q3_K's _b tiles are ALSO term-exact twins — but they are NOT
+// admitted, on a measurement: identity passed on a real Q3_K model, and
+// throughput came in at 0.17x (N=2) to 0.63x (N=8) of sequential decode
+// (RTX 3070, Qwen3-4B Q3_K_M) — the scattered global x-loads the Q4_0 comment
+// in kernels.cu warned about. A batched path that loses to sequential is a
+// regression, and a FAST twin for a 256-element superblock type cannot stage x
+// in k_mv's lane order within shared-memory limits — it needs a gemv-geometry
+// batch-1 kernel first, which would change those types' batch-1 bits and
+// invalidate their standing CPU==GPU verification. Sequential decode remains
+// their path until that is done deliberately.
+// Q8_0/Q4_0/Q4_1/Q5_0/Q5_1/MXFP4 are not twins at all — their mv sums a whole
+// block into t before scaling (s += d*t), while their _b folds the scale per
+// term; those either batch via f_gemvb or refuse.
 static inline bool mvb_is_mv_twin(int type) {
-    return type == T_F32 || type == T_F16;
+    return type == T_F32 || type == T_F16 || type == T_BF16;
 }
 
 static bool batch_mv_twin_ok(const gpu_weights *sw, const gguf_tensor *t) {

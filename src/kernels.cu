@@ -2576,8 +2576,55 @@ extern "C" __global__ void NAME(MV_PARAMS) {                                   \
         }                                                                      \
 }
 
+// ---- BF16: k_mv_bf16's twin (2026-08-20). bf16 decodes at batch 1 through
+// k_mv_bf16 (there is no k_gemv_bf16), whose lane l accumulates elements
+// l, l+32, l+64, ... of the row in ascending order. bf16 is element-strided —
+// no quant blocks — so a chunk of BF16_CHUNK elements (a multiple of 32)
+// preserves exactly that partition and order: lane l's elements ascend within
+// each chunk and chunks ascend, so only the x source (shared vs global)
+// differs, which changes no value. Reads are lane-consecutive per trip, so no
+// SMPAD padding is needed. Without this twin BF16 fell to f_mvb, whose
+// scattered global x-loads measured well below sequential decode (the same
+// 0.11x-class loss the Q4_0 comment above records).
+#define BF16_CHUNK 1024
+#define GEMVB_BF16(NAME, NC)                                                   \
+extern "C" __global__ void NAME(MV_PARAMS) {                                   \
+    __shared__ float xsm[NC][BF16_CHUNK];                                      \
+    unsigned warp = threadIdx.x >> 5;                                          \
+    unsigned lane = threadIdx.x & 31;                                          \
+    unsigned row  = blockIdx.x * GEMM_WARPS + warp;                            \
+    const unsigned short *rw = (const unsigned short *)(wb + a.w_off) +        \
+                      (ulong64)(row < (unsigned)a.n_out ? row : 0) * a.n_in;   \
+    float s[NC] = {0};                                                         \
+    for (int cs = 0; cs < a.n_in; cs += BF16_CHUNK) {                          \
+        int celems = a.n_in - cs < BF16_CHUNK ? a.n_in - cs : BF16_CHUNK;      \
+        _Pragma("unroll")                                                      \
+        for (int t = 0; t < NC; t++) {                                         \
+            const float *xg = x + (ulong64)t * a.xs + cs;                      \
+            for (int e = threadIdx.x; e < celems; e += blockDim.x)             \
+                xsm[t][e] = xg[e];                                             \
+        }                                                                      \
+        __syncthreads();                                                       \
+        if (row < (unsigned)a.n_out)                                           \
+            for (int i = lane; i < celems; i += 32) {                          \
+                float w = bf16f(rw[cs + i]);                                   \
+                _Pragma("unroll")                                              \
+                for (int t = 0; t < NC; t++) s[t] += w * xsm[t][i];            \
+            }                                                                  \
+        __syncthreads();                                                       \
+    }                                                                          \
+    if (row < (unsigned)a.n_out)                                               \
+        for (int t = 0; t < a.batch && t < NC; t++) {                          \
+            float r = warp_sum(s[t]);                                          \
+            if (lane == 0) y[(ulong64)t * a.ys + row] =                        \
+                a.has_bias ? r + bias[row] : r;                                \
+        }                                                                      \
+}
+
 // Widths cuda.c can pick from. Two are enough to cover 2..8 without a
 // half-empty batch paying much: a microbatch of 3 runs the 4-wide kernel.
+GEMVB_BF16(k_gemvb_bf16_x4, 4)
+GEMVB_BF16(k_gemvb_bf16_x8, 8)
 GEMVB_Q8_0(k_gemvb_q8_0_x4, 4)
 GEMVB_Q8_0(k_gemvb_q8_0_x8, 8)
 GEMVB_Q4_0(k_gemvb_q4_0_x4, 4)
