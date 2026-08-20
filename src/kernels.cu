@@ -3310,3 +3310,110 @@ extern "C" __global__ void k_gemm_q6_K_tc(MV_PARAMS) {
                 a.has_bias ? sh_c[idx] + bias[gr] : sh_c[idx];
     }
 }
+
+// ==========================================================================
+// Mamba-2 selective SSD scan (granitehybrid / nemotron_h) — decode + prefill.
+// Per-token kernels launched in sequence by gpu_mamba2_recurrent (cuda.c),
+// which loops tokens on the host. The conv ring and the SSD state are
+// persistent device buffers updated in place, so an eager decode continues
+// bit-for-bit like the CPU serial core (model.c: mamba2_ssd_core_serial):
+//   conv1d over [x,B,C] + bias + silu ; h_t = exp(dt*A)*h + (dt*B)*x_t ;
+//   y = C*h + D*x ; then silu(z) gate + grouped RMSNormGated.
+// B/C are shared across a group of n_head/n_group heads (g = h / (nh/ng)).
+// ==========================================================================
+
+// Phase 1: causal depthwise conv1d for token t, then bias + silu, then advance
+// the conv ring (drop the oldest column, append this token's PRE-conv input).
+// grid = ceil(conv_dim/256), block 256; one thread per channel c. Weight row c
+// is [conv_kernel] floats; tap histn multiplies the current input (llama concats
+// the ring BEFORE the new column). Only thread c touches ring column c.
+extern "C" __global__ void k_mamba2_conv(
+        const float *proj, float *xBC, const float *conv_w, const float *conv_b,
+        float *ring, int conv_dim, int inner, int d_in_proj,
+        int conv_kernel, int histn, int t) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= conv_dim) return;
+    const float *cw = conv_w + (size_t)c * conv_kernel;
+    float cur = proj[(size_t)t * d_in_proj + inner + c];
+    float sum = conv_b[c] + cw[histn] * cur;
+    for (int k = 0; k < histn; k++)
+        sum += cw[k] * ring[(size_t)k * conv_dim + c];
+    xBC[(size_t)t * conv_dim + c] = sum / (1.0f + expf(-sum));   // silu
+    for (int k = 0; k < histn - 1; k++)                          // shift ring left
+        ring[(size_t)k * conv_dim + c] = ring[(size_t)(k + 1) * conv_dim + c];
+    if (histn) ring[(size_t)(histn - 1) * conv_dim + c] = cur;   // append current
+}
+
+// Phase 2: SSD recurrence for token t. grid = n_head blocks (blockIdx.x = h),
+// block = head_dim threads (threadIdx.x = p). Each (h,p) sweeps d_state
+// sequentially in the SAME order as the CPU inner loop, so the float rounding
+// matches. dt/A/D are per head; B/C are per group g = h/gsz.
+extern "C" __global__ void k_mamba2_ssd(
+        const float *xBC, const float *proj, const float *A, const float *dt_b,
+        const float *D, float *state, float *y,
+        int inner, int hd, int ds, int ng, int gsz, int conv_dim,
+        int d_in_proj, int t) {
+    int h = blockIdx.x;
+    int p = threadIdx.x;
+    if (p >= hd) return;
+    int g = h / gsz;
+    float dtr = proj[(size_t)t * d_in_proj + inner + conv_dim + h] + dt_b[h];
+    float dt = dtr > 20.0f ? dtr : logf(1.0f + expf(dtr));       // softplus_f32
+    float dA = expf(dt * A[h]);
+    const float *xrow = xBC + (size_t)t * conv_dim;
+    const float *Bg = xrow + inner + (size_t)g * ds;
+    const float *Cg = xrow + inner + (size_t)ng * ds + (size_t)g * ds;
+    float x = xrow[(size_t)h * hd + p];
+    float x_dt = x * dt;
+    float *sp = state + ((size_t)h * hd + p) * ds;
+    float sumf = 0.0f;
+    for (int j = 0; j < ds; j++) {
+        float s = sp[j] * dA + Bg[j] * x_dt;
+        sumf += s * Cg[j];
+        sp[j] = s;
+    }
+    y[(size_t)t * inner + (size_t)h * hd + p] = sumf + D[h] * x;
+}
+
+// Phase 3: gate by silu(z) then grouped RMS norm (Mamba-2 RMSNormGated) for
+// token t. grid = n_group blocks (blockIdx.x = group), block 256. The group's
+// per_g = inner/n_group activations are gated then normalized together; the
+// gate is elementwise so restricting it to the group's slice is exact. Sum of
+// squares is accumulated in double, matching the CPU norm (tree order differs).
+extern "C" __global__ void k_mamba2_gate_norm(
+        const float *proj, float *y, const float *gnorm_w,
+        int inner, int ng, int per_g, float eps, int d_in_proj, int t) {
+    int gidx = blockIdx.x;
+    int tid = threadIdx.x, blk = blockDim.x;
+    const float *zg = proj + (size_t)t * d_in_proj + (size_t)gidx * per_g;
+    float *yg = y + (size_t)t * inner + (size_t)gidx * per_g;
+    const float *wg = gnorm_w + (size_t)gidx * per_g;
+    for (int i = tid; i < per_g; i += blk) {                     // gate: y *= silu(z)
+        float zz = zg[i];
+        yg[i] *= zz / (1.0f + expf(-zz));
+    }
+    __syncthreads();
+    double part = 0.0;
+    for (int i = tid; i < per_g; i += blk)
+        part += (double)yg[i] * (double)yg[i];
+    __shared__ double red[256];
+    red[tid] = part;
+    __syncthreads();
+    for (int s = blk >> 1; s > 0; s >>= 1) {
+        if (tid < s) red[tid] += red[tid + s];
+        __syncthreads();
+    }
+    float mean = (float)(red[0] / per_g);
+    float scale = 1.0f / sqrtf(mean + eps);
+    __syncthreads();
+    for (int i = tid; i < per_g; i += blk)
+        yg[i] = yg[i] * scale * wg[i];
+}
+
+// gate-less squared-ReLU FFN activation (nemotron_h): x = relu(x)^2 in place.
+extern "C" __global__ void k_relu2(float *x, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float r = x[i] > 0.0f ? x[i] : 0.0f;
+    x[i] = r * r;
+}
