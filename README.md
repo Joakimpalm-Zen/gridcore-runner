@@ -441,6 +441,7 @@ flags into unrelated feature sections.
 | `--prune-experts FILE` | Apply a per-layer MoE expert keep-list while rewriting. Requires `--quantize`. |
 | `--bench-json` | Run the built-in prompt/decode benchmark and print JSON metrics. |
 | `--caps` | Print machine, backend, quant, architecture, placement, and sampling capabilities as JSON. |
+| `--tool-info` | With `-m`, print the model's tool-call protocol as JSON (`{"tool_family":…,"native_tool_protocol":…}`) and exit. No manifest required. |
 | `--fit PATH` | Estimate whether a GGUF fits this machine and exit. Reads only the header, so a partial download answers the question. |
 | `--version` | Print the version and exit. |
 | `--parent-pid N` | Exit when process `N` dies; intended for supervisor cleanup. |
@@ -717,6 +718,28 @@ that exact artifact, backend, and date. The gate is fail-open on doubt: only a
 or unrecognized is indeterminate and loads, because a wrong refusal is worse than
 none. Runner only ever *reads* this file; it is produced by the certification
 pipeline, never at runtime.
+
+#### Tool-calling axis (reported-only)
+
+A manifest may also carry an optional `tool_calling` block: a summary of how the
+model behaves under tool use — engine truncation-recovery, whether the tool-call
+*schema shape* still holds at a low quant, an agent-torture pass/fail, and the
+model's native tool protocol. This axis is **reported-only**: it changes no
+verdict and never refuses a load. When the block is present, Runner prints one
+extra banner line at load, showing only the sub-fields that were actually
+measured, for example:
+
+```
+envelope: tool-calling gate=pass — truncation 6/6, schema-shape@Q4_0, agent-torture pass, native granite
+```
+
+A manifest with no `tool_calling` block prints nothing extra. You can also query
+a model's native tool protocol directly, without any manifest, with `runner
+--tool-info -m model.gguf`, which prints
+`{"tool_family":…,"native_tool_protocol":…}`. The full block, the evidence each
+field comes from, and the honesty caveats (notably that *schema-shape holding at
+`Q4_0`* is about the call **shape**, not the argument values) are documented in
+[docs/envelope-manifests/README.md](docs/envelope-manifests/README.md).
 
 ## Serving and APIs
 

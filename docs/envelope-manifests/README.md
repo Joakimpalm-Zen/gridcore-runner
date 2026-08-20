@@ -12,6 +12,35 @@ claim: `certified` requires a passing compat gate for the artifact's sha *and* a
 named reference sha; `outside-envelope` records a measured failure; `experimental`
 means no gate evidence exists for the artifact yet.
 
+## The `tool_calling` block (reported-only)
+
+A manifest may carry an optional, additive `tool_calling` block (the schema
+version is unchanged — `xyntetik.runner.envelope.v1` — because it only adds
+fields). It summarises how a model behaves under tool use. It is **reported-only
+by design**: the load-time gate reads *only* the top-level `verdict`, so nothing
+in this block ever certifies, refuses, or otherwise changes a load. Runner
+surfaces it as one extra banner line at load; `runner --tool-info -m <model>`
+reports the native-protocol fields alone, straight from the model, without a
+manifest.
+
+Any sub-block may be `null` when its evidence was not gathered; the banner omits
+whatever is absent. The fields:
+
+| Field | Meaning | Evidence it indexes |
+|---|---|---|
+| `truncation_recovery` | Does the engine recover a tool call when the response is cut off mid-emit? `holds`, `rungs_passed`/`rungs_total`. | A `xyntetik.truncation-benchmark.v1` report, passed to the certifier as `--truncation-report`. Scope is the **engine** (`measured.scope:"engine"`), measured on a proxy model — not a per-artifact claim. |
+| `schema_shape` | Does the tool-call **shape** still parse and select the right tool at a low quant? `held_to_quant`, `schema_conformance_rate`, `tool_selection_rate`. | A `xyntetik.quant-fidelity.v1` report, passed as `--quant-fidelity-report`; the quant row read defaults to `Q4_0` and is set with `--quant-fidelity-quant`. |
+| `agent_torture` | A pass/fail gate over an agent-style request matrix. `gate`, `requests`, `passed`, `failed`. | The certifier's agent-torture measurement (`measured`). |
+| `native_tool_protocol` | The model's tool-call family and whether it speaks a native tool protocol. `tool_family`, `native`. | Detected from the model's chat template — the same source as `runner --tool-info`. |
+| `gate` | A reported-only rollup (`pass`/`partial`/`fail`) over whatever sub-blocks are present. | Derived from the sub-blocks. **Never** changes the load decision. |
+
+**Honesty note.** `schema_shape` holding at `Q4_0` is a claim about the call
+**shape** — that a quantised model still emits a well-formed call and picks the
+right tool — **not** about the correctness of the *argument values* it fills in.
+Read it as "the envelope of the call survives the quant", nothing more. Likewise
+`truncation_recovery` is an engine property measured on a proxy model, so it is
+labelled `scope:"engine"` rather than attributed to this specific artifact.
+
 ## Manifests
 
 ### `Qwen3-30B-A3B-expq4_0-attnq8_0.gguf.envelope.json`
