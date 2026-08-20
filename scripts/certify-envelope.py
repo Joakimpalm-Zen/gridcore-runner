@@ -79,21 +79,31 @@ def find_model_evidence(report, sha, model_path):
 
 
 def summarize_checks(entry):
-    """Reduce a compat-report model entry to (gate, checks) — gate is 'pass'
-    only if every executed check passed and at least one ran."""
+    """Reduce a compat-report model entry to (gate, checks, detail) — gate is
+    'pass' only if every executed check passed and at least one ran.
+
+    `pass_margin_qualified` (owner-ratified 2026-08-20) is a PASSING status: a
+    MoE cpu_cuda run whose only divergences are routing near-ties inside bar-v2's
+    tie band (dense models never reach it). It counts as pass for the gate, and
+    its exception detail is surfaced in `detail` so the certificate REPORTS it
+    rather than presenting a clean 9/9 it did not measure."""
     if not entry:
-        return None, {}
+        return None, {}, {}
+    PASSING = ("pass", "pass_margin_qualified")
     checks = {}
+    detail = {}
     ran = passed = 0
     for name, res in (entry.get("checks") or {}).items():
         status = res.get("status") if isinstance(res, dict) else res
         checks[name] = status
-        if status in ("pass", "fail"):
+        if isinstance(res, dict) and res.get("cpu_cuda_identity"):
+            detail["cpu_cuda_identity"] = res["cpu_cuda_identity"]
+        if status in PASSING or status == "fail":
             ran += 1
-            passed += status == "pass"
+            passed += status in PASSING
     if ran == 0:
-        return "not_executed", checks
-    return ("pass" if passed == ran else "fail"), checks
+        return "not_executed", checks, detail
+    return ("pass" if passed == ran else "fail"), checks, detail
 
 
 def build_manifest(args):
@@ -102,7 +112,7 @@ def build_manifest(args):
     report = json.loads(Path(args.compat_report).read_text()) \
         if args.compat_report else None
     entry = find_model_evidence(report, sha, args.model)
-    gate, checks = summarize_checks(entry)
+    gate, checks, detail = summarize_checks(entry)
 
     # Verdict resolution (exact-match-only, fail-closed on missing provenance):
     if gate == "pass" and args.reference_sha:
@@ -138,6 +148,11 @@ def build_manifest(args):
         "quality": {
             "gate": gate,
             "checks": checks,
+            # Surface a margin-qualified cpu_cuda exception so `certified` never
+            # presents a clean identity it did not measure. Absent for a strict
+            # 9/9 pass or a non-MoE model.
+            **({"cpu_cuda_identity": detail["cpu_cuda_identity"]}
+               if detail.get("cpu_cuda_identity") else {}),
             "reference_report": Path(args.compat_report).name
             if args.compat_report else None,
         },

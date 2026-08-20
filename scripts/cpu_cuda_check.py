@@ -78,6 +78,85 @@ PROMPTS = [
 ]
 
 
+# ---- MoE margin-qualified tolerance (owner-ratified 2026-08-20) ------------
+#
+# Dense models keep strict byte-identity. But top-k MoE routing has a hard
+# ceiling: a genuine near-tie between two expert gates flips under CPU-vs-CUDA
+# reduction-order FP rounding (warp-tree vs SIMD-lane), and that flip cascades
+# into the token stream. Forcing the CUDA reduction to mimic host libm summation
+# order purely to pass a byte-equality gate tests floating-point EXECUTION ORDER,
+# not correctness. So a divergence is TOLERATED, and only then, when ALL hold:
+#   (1) near-tie: the first divergent token is a coin-flip the model itself could
+#       barely separate — the pick_margin (reference=CPU) to the token the OTHER
+#       side chose is within the band. Reuses bar-v2's EXACT definition
+#       (scripts/kld-compare-raw.py): band 0.5 nats, measured to the picked token.
+#   (2) fidelity: the model's independent bar-v2 fidelity gate passes (checked by
+#       certify-envelope.py, not here).
+#   (3) no systematic bias: the tolerated flips are a few INDEPENDENT near-ties,
+#       not a pattern — capped at NEAR_TIE_CAP of the probes; more than that reads
+#       as a real skew, not routing chaos, and FAILS.
+#   (4) exactness elsewhere: any divergence whose first flip is NOT a near-tie is
+#       a hard FAIL — a real, non-coin-flip difference.
+# The result is REPORTED, never hidden: `pass` (all exact) / `pass_margin_qualified`
+# (some near-ties tolerated) / `fail`.
+DEFAULT_TIE_BAND = 0.5   # nats; mirror of scripts/kld-compare-raw.py
+NEAR_TIE_CAP = 0.34      # tolerate near-ties in at most ~1/3 of probes (cond. 3)
+TOP_N = 20               # request the model's top-N logprobs per token
+
+
+def dist_at(lp, i):
+    """The token->logprob distribution at position i of a runner logprobs block
+    (parallel tokens / token_logprobs / top_logprobs arrays)."""
+    d = dict(lp["top_logprobs"][i])
+    d[lp["tokens"][i]] = lp["token_logprobs"][i]
+    return d
+
+
+def pick_margin(dist_ref, token):
+    """Reference-side gap between its own best logprob and `token`'s (bar-v2).
+    None when the reference never reported `token` (unmeasured != tied)."""
+    if token not in dist_ref:
+        return None
+    return max(dist_ref.values()) - dist_ref[token]
+
+
+def classify_divergence(cpu, gpu, band=DEFAULT_TIE_BAND):
+    """Compare two runner logprobs blocks token-by-token. Returns
+    (kind, detail): kind in {'exact','near_tie','real'}. A near-tie is the first
+    divergent token being a coin-flip the CPU distribution rates within `band`
+    of the GPU's pick (and vice-versa, so neither side is confidently right)."""
+    ct, gt = cpu["tokens"], gpu["tokens"]
+    n = min(len(ct), len(gt))
+    i = 0
+    while i < n and ct[i] == gt[i]:
+        i += 1
+    if i == n and len(ct) == len(gt):
+        return "exact", None
+    if i >= n:  # one ran shorter (EOS) but agreed up to there — a real length split
+        return "real", {"pos": i, "reason": "length"}
+    cd, gd = dist_at(cpu["logprobs"], i), dist_at(gpu["logprobs"], i)
+    m_cpu = pick_margin(cd, gt[i])   # how far CPU rates GPU's pick below its own best
+    m_gpu = pick_margin(gd, ct[i])   # and symmetrically
+    detail = {"pos": i, "cpu_token": ct[i], "gpu_token": gt[i],
+              "cpu_margin_to_gpu_pick": m_cpu, "gpu_margin_to_cpu_pick": m_gpu}
+    # near-tie only if BOTH sides could barely separate the two competitors —
+    # a divergence where one side is confident (or the other's pick is off its
+    # top-N list, margin None) is a real difference.
+    if m_cpu is not None and m_gpu is not None and m_cpu <= band and m_gpu <= band:
+        return "near_tie", detail
+    return "real", detail
+
+
+def run_result(near_tie, real, total):
+    """Fold per-prompt kinds into the run verdict. Any real (non-near-tie)
+    divergence fails (cond. 4); near-ties across more than NEAR_TIE_CAP of the
+    probes fail as a systematic skew (cond. 3); a handful of near-ties is a
+    margin-qualified pass; all-exact is a strict pass."""
+    if real > 0 or near_tie > max(1, int(NEAR_TIE_CAP * total)):
+        return "fail"
+    return "pass" if near_tie == 0 else "pass_margin_qualified"
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -138,10 +217,14 @@ def generate_all(runner, model, gpu, tokens, ctx, env, extra, timeout, log_path)
         out = []
         for prompt in PROMPTS:
             body = {"prompt": prompt, "max_tokens": tokens,
-                    "temperature": 0, "top_p": 1, "stream": False}
+                    "temperature": 0, "top_p": 1, "stream": False,
+                    "logprobs": TOP_N}
             resp = post(base + "/v1/completions", body, timeout)
-            out.append(resp["choices"][0]["text"])
-            print(f"  [{gpu}] {prompt!r} -> {out[-1][:48]!r}", flush=True)
+            ch = resp["choices"][0]
+            lp = ch.get("logprobs") or {}
+            out.append({"text": ch["text"], "tokens": lp.get("tokens", []),
+                        "logprobs": lp})
+            print(f"  [{gpu}] {prompt!r} -> {out[-1]['text'][:48]!r}", flush=True)
         return out
     finally:
         proc.terminate()
@@ -189,15 +272,29 @@ def main():
     gpu = generate_all(args.runner, args.model, "auto", args.tokens, args.ctx,
                        env, args.extra_arg, args.timeout, gpu_log)
 
-    rows, ok = [], True
+    rows = []
+    exact = near_tie = real = 0
     for prompt, c, g in zip(PROMPTS, cpu, gpu):
-        same = c == g
-        ok = ok and same
-        rows.append({"prompt": prompt, "identical": same,
-                     "cpu": c, "gpu": None if same else g})
-        print(f"{'ok  ' if same else 'FAIL'}: {prompt!r}", flush=True)
-        if not same:
-            print(f"  cpu: {c!r}\n  gpu: {g!r}", flush=True)
+        kind, detail = classify_divergence(c, g)
+        exact += kind == "exact"
+        near_tie += kind == "near_tie"
+        real += kind == "real"
+        rows.append({"prompt": prompt, "kind": kind, "detail": detail,
+                     "cpu": c["text"], "gpu": None if kind == "exact" else g["text"]})
+        print({"exact": "ok  ", "near_tie": "TIE ",
+               "real": "FAIL"}[kind] + f": {prompt!r}", flush=True)
+        if kind == "near_tie":
+            print(f"  near-tie flip @tok {detail['pos']}: cpu {detail['cpu_token']!r} "
+                  f"vs gpu {detail['gpu_token']!r} (margins "
+                  f"{detail['cpu_margin_to_gpu_pick']:.3f}/"
+                  f"{detail['gpu_margin_to_cpu_pick']:.3f} nats ≤ "
+                  f"{DEFAULT_TIE_BAND})", flush=True)
+        elif kind == "real":
+            print(f"  cpu: {c['text']!r}\n  gpu: {g['text']!r}", flush=True)
+
+    total = len(rows)
+    result = run_result(near_tie, real, total)
+    over_cap = result == "fail" and real == 0   # failed purely on the near-tie cap
 
     split = read_split(gpu_log)
     report = {"model": str(args.model), "tokens": args.tokens,
@@ -205,13 +302,17 @@ def main():
               "routing": "fused" if args.fused else "eager",
               "extra_args": args.extra_arg,
               "gpu_split": split,
-              "identical": sum(r["identical"] for r in rows),
-              "total": len(rows), "rows": rows}
+              "cpu_cuda_identity": {"result": result, "exact": f"{exact}/{total}",
+                                    "near_tie_tolerated": near_tie,
+                                    "tie_band_nats": DEFAULT_TIE_BAND,
+                                    "over_cap": over_cap},
+              # legacy shape kept so older readers still parse:
+              "identical": exact, "total": total, "rows": rows}
     if args.out:
         Path(args.out).write_text(json.dumps(report, indent=1))
-    print(f"\ncpu_cuda: {report['identical']}/{report['total']} identical "
-          f"({report['routing']} routing)")
-    return 0 if ok else 1
+    print(f"\ncpu_cuda: {result} — {exact}/{total} exact, {near_tie} near-tie "
+          f"tolerated ({report['routing']} routing)")
+    return 0 if result in ("pass", "pass_margin_qualified") else 1
 
 
 if __name__ == "__main__":

@@ -117,14 +117,29 @@ def run_cpu_cuda(runner, model, params, timeout):
     # recorded only a 400-character tail, which happened to hold the passing
     # prompts, and three failures could not be attributed without re-running
     # them by hand. The failing prompt is the whole diagnostic value here.
-    score = re.search(r"(\d+)/(\d+) identical", out)
+    # cpu_cuda_check.py's verdict line carries the three-way MoE result:
+    #   "cpu_cuda: <result> — <exact>/<total> exact, <near_tie> near-tie tolerated"
+    # A margin-qualified pass (a tolerated routing near-tie, owner-ratified
+    # 2026-08-20) is a passing status distinct from a strict pass, recorded so the
+    # certificate reports the exception rather than hiding it. Dense models never
+    # reach it (they hold byte-identity).
+    verdict = re.search(r"cpu_cuda: (pass_margin_qualified|pass|fail) — "
+                        r"(\d+)/(\d+) exact, (\d+) near-tie", out)
     failed_prompts = re.findall(r"^FAIL: (.+)$", out, re.M)
-    return {"status": "pass" if proc.returncode == 0 else "fail",
+    if verdict:
+        status = verdict.group(1)          # pass | pass_margin_qualified | fail
+        identity = {"result": status, "exact": f"{verdict.group(2)}/{verdict.group(3)}",
+                    "near_tie_tolerated": int(verdict.group(4))}
+    else:  # unrecognised output — fall back to the returncode, treat as opaque
+        status = "pass" if proc.returncode == 0 else "fail"
+        identity = None
+    return {"status": status,
             "returncode": proc.returncode,
             "elapsed_ms": round((time.time() - started) * 1000, 2),
             "pins": params.get("pins") or {},
             "min_prompt_tokens": params.get("min_prompt_tokens"),
-            "identical": score.group(0) if score else None,
+            "cpu_cuda_identity": identity,
+            "identical": (identity or {}).get("exact"),
             "failed_prompts": [p[:160] for p in failed_prompts],
             "output_tail": out[-1200:]}
 
