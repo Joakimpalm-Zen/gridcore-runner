@@ -4329,8 +4329,9 @@ static void moe_route(model_t *m, const layer_t *ly, const float *xin,
 // `x` is the scaled input embedding for the batch (stride n_embd) and `out`
 // receives [token][layer][n_embd_ple]. Split out from the CPU forward so the
 // CUDA path can run the same arithmetic over its own staging buffers — the
-// pre-pass reads a bf16 projection and a q5_K table that have no device
-// kernels, so it stays on the host for both backends.
+// pre-pass needs a per-token row gather+dequant from the quantized token
+// table, which has no device kernel (the projection matvec alone would not
+// be worth the round trip), so it stays on the host for both backends.
 void model_ple_prepass(model_t *m, const int32_t *tokens, int n,
                        const float *x, float *out, float *scratch) {
     int P = m->n_embd_ple, n_embd = m->n_embd;

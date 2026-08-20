@@ -20,10 +20,10 @@ METAL_QUANTS = {
     "F32", "F16", "BF16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1",
     "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS", "MXFP4",
 }
-# CUDA has neither Q2_K nor BF16 today; both are CPU-only there.
+# CUDA gained BF16 and Q2_K matvec kernels 2026-08-20; the lists now match.
 CUDA_QUANTS = {
-    "F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1",
-    "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS", "MXFP4",
+    "F32", "F16", "BF16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1",
+    "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS", "MXFP4",
 }
 
 

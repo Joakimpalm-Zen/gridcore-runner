@@ -523,6 +523,97 @@ static __device__ __forceinline__ void get_scale_min_k4(int j, const uchar *q,
     }
 }
 
+// bf16 is the top 16 bits of an f32: widening is a shift and a reinterpret,
+// with no rounding, so this matches bf16_to_f32() in fp16.h exactly. Read as
+// ushort and widened by hand rather than via __nv_bfloat16, which would pull
+// in a header the PTX build does not otherwise need.
+static __device__ __forceinline__ float bf16f(unsigned short h) {
+    return __uint_as_float((unsigned int)h << 16);
+}
+
+extern "C" __global__ void k_mv_bf16(MV_PARAMS) {
+    MV_HEAD;
+    const unsigned short *rw =
+        (const unsigned short *)(wb + a.w_off) + (ulong64)row * a.n_in;
+    float s = 0;
+    for (int i = lane; i < a.n_in; i += 32) s += bf16f(rw[i]) * x[i];
+    MV_TAIL;
+}
+
+extern "C" __global__ void k_mv_bf16_b(MV_PARAMS) {
+    MV_HEAD_B;
+    const unsigned short *rw =
+        (const unsigned short *)(wb + a.w_off) + (ulong64)row * a.n_in;
+    for (int i = lane; i < a.n_in; i += 32) MV_FMA(bf16f(rw[i]), i);
+    MV_TAIL_B;
+}
+
+// ports quants.c dq_q2_K into the warp-per-row dot. Unlike q3_K the scale byte
+// carries BOTH a scale (low nibble) and a min (high nibble), and the min is
+// subtracted from the dequantized weight rather than scaling it -- so the value
+// handed to the accumulate is (dl*q - ml), not a product.
+#define Q2K_SETUP \
+    float d = f16f(blk + 80), dmin = f16f(blk + 82); \
+    const uchar *q2scales = blk; \
+    const uchar *qbase = blk + 16;
+
+extern "C" __global__ void k_mv_q2_K(MV_PARAMS) {
+    MV_HEAD;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 84;
+    float s = 0;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 84;
+        Q2K_SETUP;
+        const float *xp = x + (ulong64)b * 256;
+        int pos = 0, is = 0; const uchar *q = qbase;
+        for (int n = 0; n < 256; n += 128) {
+            int shift = 0;
+            for (int j = 0; j < 4; j++) {
+                uchar scb = q2scales[is++];
+                float dl = d * (scb & 0xF), ml = dmin * (scb >> 4);
+                for (int l = 0; l < 16; l++)
+                    s += (dl * (float)((q[l] >> shift) & 3) - ml) * xp[pos++];
+                scb = q2scales[is++];
+                dl = d * (scb & 0xF); ml = dmin * (scb >> 4);
+                for (int l = 0; l < 16; l++)
+                    s += (dl * (float)((q[l+16] >> shift) & 3) - ml) * xp[pos++];
+                shift += 2;
+            }
+            q += 32;
+        }
+    }
+    MV_TAIL;
+}
+
+extern "C" __global__ void k_mv_q2_K_b(MV_PARAMS) {
+    MV_HEAD_B;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off + (ulong64)row * nb * 84;
+    for (int b = lane; b < nb; b += 32) {
+        const uchar *blk = rw + (ulong64)b * 84;
+        Q2K_SETUP;
+        ulong64 base = (ulong64)b * 256;
+        int pos = 0, is = 0; const uchar *q = qbase;
+        for (int n = 0; n < 256; n += 128) {
+            int shift = 0;
+            for (int j = 0; j < 4; j++) {
+                uchar scb = q2scales[is++];
+                float dl = d * (scb & 0xF), ml = dmin * (scb >> 4);
+                for (int l = 0; l < 16; l++)
+                    MV_FMA(dl * (float)((q[l] >> shift) & 3) - ml, base + pos++);
+                scb = q2scales[is++];
+                dl = d * (scb & 0xF); ml = dmin * (scb >> 4);
+                for (int l = 0; l < 16; l++)
+                    MV_FMA(dl * (float)((q[l+16] >> shift) & 3) - ml, base + pos++);
+                shift += 2;
+            }
+            q += 32;
+        }
+    }
+    MV_TAIL_B;
+}
+
 // Q3_K: 110-byte block, 256 elements. Layout: hmask[32] (one high bit per
 // weight), qs[64] (2-bit low bits), scales[12] (packed 16x 6-bit, bias -32),
 // d (f16 super-scale). Weight = d*(scale-32)*((2bit) - (highbit?0:4)). This

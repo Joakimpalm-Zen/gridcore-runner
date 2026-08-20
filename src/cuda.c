@@ -472,8 +472,9 @@ bool gpu_max_working_set(size_t *bytes) {
 
 static bool gpu_type_ok(int type) {
     switch (type) {
-        case T_F32: case T_F16: case T_Q8_0: case T_Q4_0: case T_Q4_1:
-        case T_Q5_0: case T_Q5_1: case T_Q3_K: case T_Q4_K: case T_Q5_K:
+        case T_F32: case T_F16: case T_BF16: case T_Q8_0: case T_Q4_0:
+        case T_Q4_1: case T_Q5_0: case T_Q5_1: case T_Q2_K: case T_Q3_K:
+        case T_Q4_K: case T_Q5_K:
         case T_Q6_K: case T_IQ4_NL: case T_IQ4_XS: case T_MXFP4:
             return true;
         default:
@@ -1110,6 +1111,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_mv[T_Q5_1], "k_mv_q5_1" },   { &w->f_mv[T_Q4_K], "k_mv_q4_K" },
             { &w->f_mv[T_Q5_K], "k_mv_q5_K" },   { &w->f_mv[T_Q6_K], "k_mv_q6_K" },
             { &w->f_mv[T_Q3_K], "k_mv_q3_K" },
+            { &w->f_mv[T_Q2_K], "k_mv_q2_K" },
+            { &w->f_mv[T_BF16], "k_mv_bf16" },
             { &w->f_mv[T_IQ4_NL], "k_mv_iq4_nl" }, { &w->f_mv[T_IQ4_XS], "k_mv_iq4_xs" },
             { &w->f_mv[T_MXFP4], "k_mv_mxfp4" },
             { &w->f_mvb[T_F32],  "k_mv_f32_b" },  { &w->f_mvb[T_F16],  "k_mv_f16_b" },
@@ -1118,6 +1121,8 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_mvb[T_Q5_1], "k_mv_q5_1_b" }, { &w->f_mvb[T_Q4_K], "k_mv_q4_K_b" },
             { &w->f_mvb[T_Q5_K], "k_mv_q5_K_b" }, { &w->f_mvb[T_Q6_K], "k_mv_q6_K_b" },
             { &w->f_mvb[T_Q3_K], "k_mv_q3_K_b" },
+            { &w->f_mvb[T_Q2_K], "k_mv_q2_K_b" },
+            { &w->f_mvb[T_BF16], "k_mv_bf16_b" },
             { &w->f_mvb[T_IQ4_NL], "k_mv_iq4_nl_b" }, { &w->f_mvb[T_IQ4_XS], "k_mv_iq4_xs_b" },
             { &w->f_mvb[T_MXFP4], "k_mv_mxfp4_b" },
             // prefill tiled-GEMM variants (batch>1 fast path for these formats)
@@ -1548,10 +1553,10 @@ bool gpu_init(model_t *m) {
 
         if (m->n_embd_ple > 0) {
             // [token][layer][n_embd_ple] for a whole tile, plus the per-layer
-            // gate scratch. The pre-pass itself runs on the host (it reads a
-            // bf16 projection and a q5_K table that have no device kernels),
-            // so only its result crosses the bus — once per forward, not once
-            // per layer.
+            // gate scratch. The pre-pass itself runs on the host (its
+            // per-token row gather+dequant from the quantized token table has
+            // no device kernel; see model_ple_prepass), so only its result
+            // crosses the bus — once per forward, not once per layer.
             size_t per_tok = (size_t)m->n_layer * m->n_embd_ple;
             CK(cu.MemAlloc(&g->ple,   sizeof(float) * MVB * per_tok));
             CK(cu.MemAlloc(&g->ple_g, sizeof(float) * MVB * m->n_embd_ple));
