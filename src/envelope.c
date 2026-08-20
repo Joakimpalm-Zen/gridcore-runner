@@ -2,9 +2,168 @@
 #include "json.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// ---- SHA-256 (FIPS 180-4) --------------------------------------------------
+// Used only to verify a sidecar's artifact.sha256 against the file that was
+// actually loaded (Unit 7). Kept local so this stays a leaf translation unit:
+// the C test links envelope.c + json.c and nothing else, and no other caller
+// needs a hash. It streams the file in a fixed buffer, so a large GGUF costs
+// one sequential pass and no extra memory. Runs ONLY when a sidecar carrying a
+// sha is present, so the ordinary no-manifest load never touches it.
+typedef struct {
+    uint32_t h[8];
+    uint64_t len;        // total bytes fed
+    uint8_t  buf[64];
+    size_t   n;          // bytes buffered in `buf`
+} sha256_ctx;
+
+static uint32_t sha_rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void sha256_init(sha256_ctx *c) {
+    static const uint32_t iv[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    memcpy(c->h, iv, sizeof iv);
+    c->len = 0;
+    c->n = 0;
+}
+
+static void sha256_block(sha256_ctx *c, const uint8_t *p) {
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)p[i * 4] << 24 | (uint32_t)p[i * 4 + 1] << 16 |
+               (uint32_t)p[i * 4 + 2] << 8 | (uint32_t)p[i * 4 + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = sha_rotr(w[i - 15], 7) ^ sha_rotr(w[i - 15], 18) ^
+                      (w[i - 15] >> 3);
+        uint32_t s1 = sha_rotr(w[i - 2], 17) ^ sha_rotr(w[i - 2], 19) ^
+                      (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = c->h[0], b = c->h[1], cc = c->h[2], d = c->h[3];
+    uint32_t e = c->h[4], f = c->h[5], g = c->h[6], hh = c->h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t S1 = sha_rotr(e, 6) ^ sha_rotr(e, 11) ^ sha_rotr(e, 25);
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t t1 = hh + S1 + ch + k[i] + w[i];
+        uint32_t S0 = sha_rotr(a, 2) ^ sha_rotr(a, 13) ^ sha_rotr(a, 22);
+        uint32_t maj = (a & b) ^ (a & cc) ^ (b & cc);
+        uint32_t t2 = S0 + maj;
+        hh = g; g = f; f = e; e = d + t1; d = cc; cc = b; b = a; a = t1 + t2;
+    }
+    c->h[0] += a; c->h[1] += b; c->h[2] += cc; c->h[3] += d;
+    c->h[4] += e; c->h[5] += f; c->h[6] += g; c->h[7] += hh;
+}
+
+static void sha256_update(sha256_ctx *c, const uint8_t *p, size_t n) {
+    c->len += n;
+    while (n) {
+        size_t take = 64 - c->n;
+        if (take > n) take = n;
+        memcpy(c->buf + c->n, p, take);
+        c->n += take;
+        p += take;
+        n -= take;
+        if (c->n == 64) { sha256_block(c, c->buf); c->n = 0; }
+    }
+}
+
+static void sha256_final(sha256_ctx *c, uint8_t out[32]) {
+    uint64_t bits = c->len * 8;   // captured before padding grows c->len
+    uint8_t one = 0x80, zero = 0;
+    sha256_update(c, &one, 1);
+    while (c->n != 56) sha256_update(c, &zero, 1);
+    uint8_t lenb[8];
+    for (int i = 0; i < 8; i++) lenb[i] = (uint8_t)(bits >> (56 - i * 8));
+    sha256_update(c, lenb, 8);
+    for (int i = 0; i < 8; i++) {
+        out[i * 4]     = (uint8_t)(c->h[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(c->h[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(c->h[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)(c->h[i]);
+    }
+}
+
+// Hash a whole file to lowercase hex. Returns false if it cannot be read.
+static bool file_sha256_hex(const char *path, char hex[65]) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    sha256_ctx c;
+    sha256_init(&c);
+    uint8_t buf[1 << 16];
+    size_t r;
+    while ((r = fread(buf, 1, sizeof buf, f)) > 0) sha256_update(&c, buf, r);
+    bool ok = !ferror(f);
+    fclose(f);
+    if (!ok) return false;
+    uint8_t d[32];
+    sha256_final(&c, d);
+    static const char hexd[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        hex[i * 2]     = hexd[d[i] >> 4];
+        hex[i * 2 + 1] = hexd[d[i] & 15];
+    }
+    hex[64] = 0;
+    return true;
+}
+
+// Case-insensitive hex-string equality (a manifest sha may be written in any
+// case; hashes from Python's hexdigest are lowercase).
+static bool hex_eq_ci(const char *a, const char *b) {
+    for (;; a++, b++) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'F') ca += 32;
+        if (cb >= 'A' && cb <= 'F') cb += 32;
+        if (ca != cb) return false;
+        if (!ca) return true;
+    }
+}
+
+// Trust check tying a sidecar to THE file loaded (Unit 7). A manifest resolves
+// on (runtime.version, backend) only; nothing else proves the sidecar belongs
+// beside THIS artifact, so a misplaced or stale sidecar for another model would
+// otherwise be trusted. When the manifest carries `artifact.sha256`, hash the
+// loaded file and require a match before any verdict is applied.
+//   returns true   -> no sha in the manifest (back-compat, unchanged behavior),
+//                     or it matches: proceed to classify.
+//   returns false  -> the manifest names a DIFFERENT artifact (or the file
+//                     cannot be hashed to confirm identity): the sidecar is
+//                     unusable here and must be treated as INDETERMINATE, never
+//                     enforced. `out` carries the reason.
+static bool sidecar_matches_artifact(jv *m, const char *model_path,
+                                     char *out, int cap) {
+    const char *want = jv_str(jv_get(jv_get(m, "artifact"), "sha256"), "");
+    if (!want[0]) return true;   // no sha declared: hash nothing, behave as before
+    char have[65];
+    if (!file_sha256_hex(model_path, have)) {
+        snprintf(out, (size_t)cap,
+                 "envelope: could not hash this artifact to verify the sidecar "
+                 "— ignored");
+        return false;
+    }
+    if (!hex_eq_ci(have, want)) {
+        snprintf(out, (size_t)cap,
+                 "envelope: sidecar sha does not match this artifact — ignored");
+        return false;
+    }
+    return true;
+}
 
 // Read the whole sidecar into a heap buffer. Manifests are small (a few KB);
 // cap the read so a hostile/huge sidecar cannot exhaust memory.
@@ -131,6 +290,11 @@ int envelope_report(const char *model_path, const char *runtime_version,
                  "envelope: manifest present but unreadable (indeterminate)");
         return ENV_INDETERMINATE;
     }
+    // A sidecar that names a different artifact is not evidence for this model.
+    if (!sidecar_matches_artifact(m, model_path, out, cap)) {
+        jv_free(m);
+        return ENV_INDETERMINATE;
+    }
     int state = classify(m, runtime_version, backend, out, cap);
     jv_free(m);
     return state;
@@ -155,6 +319,15 @@ bool envelope_gate(const char *model_path, const char *runtime_version,
         snprintf(msg, (size_t)cap,
                  "envelope: manifest present but unreadable (indeterminate)");
         if (out_state) *out_state = ENV_INDETERMINATE;
+        return true;
+    }
+
+    // A sidecar whose artifact.sha256 does not match the loaded file is NOT
+    // this model's manifest: its verdict must have no effect. Treat it like any
+    // other unusable sidecar — indeterminate, fail-open, never a refusal.
+    if (!sidecar_matches_artifact(m, model_path, msg, cap)) {
+        if (out_state) *out_state = ENV_INDETERMINATE;
+        jv_free(m);
         return true;
     }
 

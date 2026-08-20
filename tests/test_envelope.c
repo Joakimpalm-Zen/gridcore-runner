@@ -35,6 +35,34 @@ static const char *manifest(const char *version, const char *backend,
     return buf;
 }
 
+// Same, but the manifest also carries an artifact.sha256 (Unit 7).
+static const char *manifest_sha(const char *version, const char *backend,
+                                const char *verdict, const char *sha) {
+    static char buf[1024];
+    snprintf(buf, sizeof buf,
+             "{\"schema_version\":\"xyntetik.runner.envelope.v1\","
+             "\"artifact\":{\"sha256\":\"%s\"},"
+             "\"runtime\":{\"version\":\"%s\","
+             "\"kernel_set\":{\"backend\":\"%s\"}},"
+             "\"verdict\":\"%s\"}",
+             sha, version, backend, verdict);
+    return buf;
+}
+
+// Write a model file (not just its sidecar) so artifact.sha256 has a real file
+// to hash. "abc" is the classic FIPS 180-4 SHA-256 test vector.
+static void write_model(const char *bytes, size_t n) {
+    FILE *f = fopen(MODEL, "wb");
+    assert(f);
+    fwrite(bytes, 1, n, f);
+    fclose(f);
+}
+static void rm_model(void) { remove(MODEL); }
+static const char *ABC_SHA =
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+static const char *ZERO_SHA =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 int main(void) {
     char out[256];
 
@@ -126,6 +154,39 @@ int main(void) {
     assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
     assert(st == ENV_INDETERMINATE);
 
+    // ---- Unit 7: artifact.sha256 must match the loaded file -----------------
+    // A sidecar carries an artifact.sha256; the manifest resolves on
+    // (version, backend) only, so nothing else proves it belongs to THIS file.
+    // Verify the hash before applying any verdict.
+    write_model("abc", 3);
+
+    // Matching sha + outside-envelope -> the verdict STILL applies (refuse).
+    write_manifest(manifest_sha(RUNNER_VERSION, "cpu", "outside-envelope", ABC_SHA));
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == false);
+    assert(st == ENV_OUTSIDE && strstr(out, "refusing"));
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_OUTSIDE);
+
+    // WRONG sha -> the sidecar names a different artifact: its outside-envelope
+    // verdict has NO effect (loads), state INDETERMINATE, and it says why.
+    write_manifest(manifest_sha(RUNNER_VERSION, "cpu", "outside-envelope", ZERO_SHA));
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
+    assert(st == ENV_INDETERMINATE && strstr(out, "does not match"));
+    assert(envelope_report(MODEL, RUNNER_VERSION, "cpu", out, sizeof out) == ENV_INDETERMINATE);
+    assert(strstr(out, "does not match"));
+
+    // A matching-sha certified sidecar still certifies (the check gates on
+    // identity, it does not weaken a legitimate verdict).
+    write_manifest(manifest_sha(RUNNER_VERSION, "cpu", "certified", ABC_SHA));
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == true);
+    assert(st == ENV_CERTIFIED && strstr(out, "certified"));
+
+    // Back-compat: a manifest with NO artifact.sha256 behaves exactly as before
+    // even when the model file exists — the outside verdict still enforces.
+    write_manifest(manifest(RUNNER_VERSION, "cpu", "outside-envelope"));
+    assert(envelope_gate(MODEL, RUNNER_VERSION, "cpu", false, out, sizeof out, &st) == false);
+    assert(st == ENV_OUTSIDE);
+
+    rm_model();
     rm_manifest();
     printf("test-envelope: OK\n");
     return 0;
