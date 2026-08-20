@@ -105,8 +105,12 @@ bool engine_init(engine *e, model_t *m, tokenizer *tok, sampler *smp) {
     // parses strictly (=1/on), never by existence — the RUNNER_CUDA_TC=0
     // bug class. The structural fix is a model-canonical drafter (the
     // Syntetik half of JC-R2).
+    // Recurrent targets are excluded for the same reason spec_draft_load refuses
+    // them: the batched verify advances the running fold through every drafted
+    // token and a divergent round cannot roll it back yet (tracer 6), so the fold
+    // would desync from e->pos. Guarded until the fold checkpoint lands.
     const char *ff = getenv("RUNNER_GRAMMAR_FF");
-    e->gram_ff = model_spec_verify_ok(m) &&
+    e->gram_ff = model_spec_verify_ok(m) && !model_has_recurrent(m) &&
                  ff && (!strcmp(ff, "1") || !strcmp(ff, "on"));
     e->hist = malloc(sizeof(int32_t) * m->n_ctx);
     if (!e->hist) return false;   // no history buffer: the engine is unusable
@@ -746,6 +750,16 @@ model_t *spec_draft_load(const char *path, const model_t *target,
     if (target->gpu && target->gpu_layers >= target->n_layer) {
         fprintf(stderr, "draft: target is fully GPU-offloaded — speculative "
                 "decoding needs the CPU verify path, ignoring --draft\n");
+        return NULL;
+    }
+    if (model_has_recurrent(target)) {
+        // The batched verify advances the running recurrent fold (Mamba-2
+        // SSD state / qwen35 DeltaNet) through EVERY draft token; a divergent
+        // round accepts only a prefix, and there is no cheap fold rollback yet
+        // (tracer 6). Left on, a rejected draft desyncs the fold from e->pos and
+        // silently corrupts the rest of the stream. Refuse until the checkpoint.
+        fprintf(stderr, "draft: target has recurrent state not yet checkpointed "
+                "across speculative rounds — ignoring --draft\n");
         return NULL;
     }
     model_params dmp = *mp;
