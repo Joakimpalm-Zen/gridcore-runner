@@ -1575,9 +1575,13 @@ clean:
 
 # regenerate the committed PTX header (dev machines only: needs nvcc + a host
 # compiler). Normal builds and CI use the committed src/kernels_ptx.h.
+# nvcc needs a host C++ compiler; on toolchain-in-a-prefix machines (conda cross
+# compilers) the default `gcc` is not on PATH, so pass NVCC_CCBIN explicitly:
+#   make ptx NVCC_CCBIN=x86_64-conda-linux-gnu-gcc
 NVCC ?= nvcc
+NVCC_CCBIN ?=
 ptx: src/kernels.cu
-	$(NVCC) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
+	$(NVCC) $(if $(NVCC_CCBIN),-ccbin $(NVCC_CCBIN)) -ptx -arch=compute_75 -O3 -o src/kernels.ptx src/kernels.cu
 	python3 scripts/embed-ptx.py || python scripts/embed-ptx.py
 
 # A duplicate target name makes make DISCARD one recipe and say so — but only
