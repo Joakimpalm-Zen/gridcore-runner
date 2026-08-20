@@ -110,6 +110,31 @@ static void cli_cleanup(engine *e, int32_t *toks, tokenizer *tok, model_t *m) {
     prefix_cache_clear();
 }
 
+// --tool-info resolves, from the model's chat template alone, which native
+// tool-call protocol family the runtime speaks for this model and whether that
+// protocol is native (vs the generic marker/envelope fallback). BOTH are read
+// from template.c truth -- the protocol tool_decl_native() selects for the
+// family, plus the one family (ornith/qwen3_xml) whose native declaration
+// tools_render_for renders instead and which tool_decl_native deliberately
+// leaves alone -- never a static arch->family table, which would drift from the
+// renderer. `native` is set to whether that family has a native tool protocol.
+static const char *tool_family_for(int tmpl, bool *native) {
+    tool_envelope env = {0};
+    bool skip_generic = false;
+    // strict + atem_tool_calling: ask for each family's NATIVE default, so the
+    // protocol tool_decl_native selects is the one this model was trained on.
+    tool_decl_native(tmpl, true, true, NULL, &env, &skip_generic);
+    switch (env.proto) {
+        case TP_ATEM:    *native = true; return "atem";
+        case TP_HARMONY: *native = true; return "harmony";
+        case TP_GEMMA4:  *native = true; return "gemma4";
+        default: break;
+    }
+    if (tmpl == TMPL_ORNITH) { *native = true; return "qwen3_xml"; }
+    *native = false;
+    return "generic";
+}
+
 // One line of chat input, newline stripped, in a buffer that grows to fit it.
 // NULL at EOF with nothing read, or on allocation failure (*oom set then).
 //
@@ -279,6 +304,8 @@ static void usage(const char *prog) {
         "  --draft-k N    draft tokens per round (default 4)\n"
         "  --bench-json   run a small decode benchmark and print JSON metrics\n"
         "  --caps         print machine capabilities as JSON and exit\n"
+        "  --tool-info    load -m MODEL and print its native tool-call protocol\n"
+        "                 as one JSON line, then exit\n"
         "  --fit PATH     estimate whether a GGUF fits this machine and exit;\n"
         "                 reads only the header, so a partial download works\n"
         "  --version      print the runner version and exit\n"
@@ -415,6 +442,7 @@ int main(int argc, char **argv) {
     bool interactive = false, verbose = false, no_bos = false;
     bool seed_given = false;
     bool ignore_eos = false, json_mode = false, serve = false, caps = false;
+    bool tool_info = false;
     const char *fit_path = NULL;
     bool no_tray = false;
     bool force_uncertified = false;
@@ -552,6 +580,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--yield-on-request")) mp.yield_on_request = true;
         else if (!strcmp(a, "--parent-pid")) parent_pid = (long)int_arg(a, NEXT, 1, LONG_MAX);
         else if (!strcmp(a, "--caps")) caps = true;
+        // Per-MODEL evidence: the native tool-call protocol resolved from this
+        // model's chat template (a build property --caps cannot carry). Loads
+        // the model, prints one JSON line, exits.
+        else if (!strcmp(a, "--tool-info")) tool_info = true;
         else if (!strcmp(a, "--fit")) fit_path = NEXT;
         else if (!strcmp(a, "--version")) { printf("runner %s\n", RUNNER_VERSION); return 0; }
         else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(argv[0]); return 0; }
@@ -725,7 +757,8 @@ int main(int argc, char **argv) {
         free(fdata);
         prompt = owned_prompt = fbuf;
     }
-    if (!prompt && !interactive && !serve && !quant_out && !bench_json) {
+    if (!prompt && !interactive && !serve && !quant_out && !bench_json &&
+        !tool_info) {
         fprintf(stderr, "error: need -p PROMPT, -i, or --serve\n");
         usage(argv[0]);
         return 1;
@@ -866,6 +899,20 @@ int main(int argc, char **argv) {
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 load_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),
                 now_s() - t1);
+        // --tool-info: one JSON line naming this model's native tool-call
+        // protocol, resolved from its chat template exactly as the chat surface
+        // would (honouring --chat-template). stdout is JSON-only.
+        if (tool_info) {
+            int ti_tmpl = tmpl_override >= 0 ? tmpl_override
+                        : template_detect(gguf_get_str(&m.gf,
+                                          "tokenizer.chat_template", NULL), &tok);
+            bool native = false;
+            const char *fam = tool_family_for(ti_tmpl, &native);
+            printf("{\"tool_family\":\"%s\",\"native_tool_protocol\":%s}\n",
+                   fam, native ? "true" : "false");
+            cli_cleanup(NULL, NULL, &tok, &m);
+            return 0;
+        }
         // Measured-envelope sidecar, if one sits next to the model: the
         // load-time three-state gate. Certified/experimental print a banner and
         // load; an OUTSIDE-envelope verdict REFUSES the load with the measured
