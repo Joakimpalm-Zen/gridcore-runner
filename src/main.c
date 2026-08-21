@@ -309,6 +309,14 @@ static void usage(const char *prog) {
         "  --lora FILE    load a LoRA adapter GGUF beside the frozen base\n"
         "                 (CPU dense projections; fails closed otherwise)\n"
         "  --lora-scale F multiply the adapter's trained alpha/r (default 1.0)\n"
+        "  --train FILE   AdamW LoRA training (CPU): plain text, or .jsonl\n"
+        "                 lines {\"prompt\",\"completion\",\"weight\"} with the\n"
+        "                 prompt masked from the loss. Deterministic by\n"
+        "                 default: same data + seed -> byte-identical adapter\n"
+        "  --train-steps N --lr F --train-ctx N --save-every N\n"
+        "                 training-loop knobs (defaults 100, 1e-4, 128, 0)\n"
+        "  --train-out F  adapter GGUF to write (default adapter-out.gguf)\n"
+        "  --lora-rank R  fresh-adapter rank when no --lora is given (8)\n"
         "  --caps         print machine capabilities as JSON and exit\n"
         "  --tool-info    load -m MODEL and print its native tool-call protocol\n"
         "                 as one JSON line, then exit\n"
@@ -457,6 +465,9 @@ int main(int argc, char **argv) {
     bool score = false;
     const char *lora_path = NULL;
     float lora_scale = 1.0f;
+    const char *train_path = NULL, *train_out = "adapter-out.gguf";
+    int train_steps = 100, train_ctx = 128, lora_rank = 8, save_every = 0;
+    float train_lr = 1e-4f;
     model_params mp = {0};
     // RUNNER_VRAM_PRIORITY sets the baseline; --vram-priority (parsed below)
     // overrides it, same precedence as every other env/flag pair in runner.
@@ -551,6 +562,18 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--lora")) lora_path = NEXT;
         else if (!strcmp(a, "--lora-scale"))
             lora_scale = (float)float_arg(a, NEXT, 0, FLT_MAX);
+        else if (!strcmp(a, "--train")) train_path = NEXT;
+        else if (!strcmp(a, "--train-steps"))
+            train_steps = (int)int_arg(a, NEXT, 1, INT_MAX);
+        else if (!strcmp(a, "--train-out")) train_out = NEXT;
+        else if (!strcmp(a, "--train-ctx"))
+            train_ctx = (int)int_arg(a, NEXT, 2, INT_MAX);
+        else if (!strcmp(a, "--lr"))
+            train_lr = (float)float_arg(a, NEXT, 0, 1);
+        else if (!strcmp(a, "--lora-rank"))
+            lora_rank = (int)int_arg(a, NEXT, 1, 512);
+        else if (!strcmp(a, "--save-every"))
+            save_every = (int)int_arg(a, NEXT, 0, INT_MAX);
         else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--gpu-layers")) {
@@ -771,7 +794,7 @@ int main(int argc, char **argv) {
         prompt = owned_prompt = fbuf;
     }
     if (!prompt && !interactive && !serve && !quant_out && !bench_json &&
-        !tool_info) {
+        !tool_info && !train_path) {
         fprintf(stderr, "error: need -p PROMPT, -i, or --serve\n");
         usage(argv[0]);
         return 1;
@@ -904,6 +927,7 @@ int main(int argc, char **argv) {
     // that sized itself alone would both over-commit and — because the CUDA
     // shared-weight registry keys on context — disagree with its peers and
     // force a second upload of the same weights.
+    if (train_path) mp.gpu_mode = GPU_OFF;   // --train is the CPU path (v1)
     if (serve) mp.n_seq = parallel;
     if (!registry) {
         double t1 = now_s();
@@ -1055,6 +1079,156 @@ int main(int argc, char **argv) {
     if (!toks) { fprintf(stderr, "error: out of memory\n"); CLI_FAIL; }
     double ptime, gtime, t0;
     int n_prompt, n_gen;
+
+    if (train_path) {
+        // --train (adaptation D4): AdamW LoRA training in the serving binary,
+        // CPU reference. Two data modes: plain text (tokenize, fixed windows,
+        // cycle) and .jsonl lines {"prompt","completion","weight"} — prompt
+        // transitions masked to weight 0, completion transitions carry the
+        // example weight (the GRPO-style advantage hook). Determinism is the
+        // default: fixed init seed unless -s is given, fixed data order, and
+        // the whole compute path is the byte-deterministic D3 backward — same
+        // data + same seed -> byte-identical adapter file.
+        if (m.gpu) {
+            // v1 trains on the CPU path only (D8 is CUDA training); refuse
+            // loudly rather than train a model whose forward the backward
+            // cannot see.
+            fprintf(stderr, "error: --train is CPU-only for now — run with "
+                    "--gpu off\n");
+            CLI_FAIL;
+        }
+        if (!m.lora) {
+            uint64_t iseed = seed_given ? smp.rng : 0;
+            if (!model_lora_train_init(&m, lora_rank,
+                                       2.0f * (float)lora_rank, iseed))
+                CLI_FAIL;
+            fprintf(stderr, "train: fresh rank-%d adapters on every "
+                    "projection (alpha %g)\n", lora_rank,
+                    (double)(2.0f * lora_rank));
+        }
+        FILE *tf = fopen(train_path, "rb");
+        if (!tf) {
+            fprintf(stderr, "error: cannot open %s\n", train_path);
+            CLI_FAIL;
+        }
+        fseek(tf, 0, SEEK_END);
+        long tlen = ftell(tf);
+        fseek(tf, 0, SEEK_SET);
+        char *tdata = malloc((size_t)tlen + 1);
+        if (!tdata || fread(tdata, 1, (size_t)tlen, tf) != (size_t)tlen) {
+            fprintf(stderr, "error: cannot read %s\n", train_path);
+            fclose(tf);
+            CLI_FAIL;
+        }
+        fclose(tf);
+        tdata[tlen] = 0;
+        size_t plen = strlen(train_path);
+        bool jsonl = plen > 6 && strcmp(train_path + plen - 6, ".jsonl") == 0;
+
+        // examples: token arrays + per-transition weights
+        typedef struct { int32_t *t; float *w; int n; } train_ex;
+        train_ex *exs = NULL;
+        int n_ex = 0;
+        int wctx = train_ctx < m.n_ctx ? train_ctx : m.n_ctx;
+        if (jsonl) {
+            char *line = tdata;
+            while (line && *line) {
+                char *nl = strchr(line, '\n');
+                size_t ll = nl ? (size_t)(nl - line) : strlen(line);
+                if (ll > 1) {
+                    jv *v = json_parse(line, ll);
+                    const char *pr = v ? jv_str(jv_get(v, "prompt"), NULL) : NULL;
+                    const char *co = v ? jv_str(jv_get(v, "completion"), NULL) : NULL;
+                    double w = v ? jv_num(jv_get(v, "weight"), 1.0) : 1.0;
+                    if (!pr || !co) {
+                        fprintf(stderr, "error: %s line %d needs "
+                                "{\"prompt\",\"completion\"}\n", train_path,
+                                n_ex + 1);
+                        CLI_FAIL;
+                    }
+                    int32_t *pt = malloc(sizeof(int32_t) * (size_t)m.n_ctx);
+                    int np = tok_encode(&tok, pr, pt, m.n_ctx, !no_bos, true);
+                    int nc = np >= 0 ? tok_encode(&tok, co, pt + np,
+                                                  m.n_ctx - np, false, false)
+                                     : -1;
+                    if (np < 1 || nc < 1) {
+                        fprintf(stderr, "error: %s line %d does not tokenize "
+                                "into prompt+completion within the context\n",
+                                train_path, n_ex + 1);
+                        CLI_FAIL;
+                    }
+                    int tot = np + nc;
+                    float *pw = malloc(sizeof(float) * (size_t)(tot - 1));
+                    // transition t predicts token t+1: completion tokens are
+                    // targets from transition np-1 onward
+                    for (int i = 0; i < tot - 1; i++)
+                        pw[i] = i >= np - 1 ? (float)w : 0.0f;
+                    exs = realloc(exs, sizeof(train_ex) * (size_t)(n_ex + 1));
+                    exs[n_ex++] = (train_ex){ pt, pw, tot };
+                    jv_free(v);
+                } 
+                line = nl ? nl + 1 : NULL;
+            }
+        } else {
+            int32_t *all = malloc(sizeof(int32_t) * ((size_t)tlen + 8));
+            int ntok = tok_encode(&tok, tdata, all, (int)tlen + 8, !no_bos,
+                                  true);
+            if (ntok < 2) {
+                fprintf(stderr, "error: training text tokenizes to %d "
+                        "tokens\n", ntok);
+                CLI_FAIL;
+            }
+            for (int st = 0; st + 2 <= ntok; st += wctx - 1) {
+                int n = ntok - st < wctx ? ntok - st : wctx;
+                if (n < 2) break;
+                int32_t *t = malloc(sizeof(int32_t) * (size_t)n);
+                memcpy(t, all + st, sizeof(int32_t) * (size_t)n);
+                exs = realloc(exs, sizeof(train_ex) * (size_t)(n_ex + 1));
+                exs[n_ex++] = (train_ex){ t, NULL, n };
+            }
+            free(all);
+        }
+        free(tdata);
+        if (n_ex < 1) {
+            fprintf(stderr, "error: no training examples in %s\n", train_path);
+            CLI_FAIL;
+        }
+        fprintf(stderr, "train: %d example%s, %d steps, lr %g, ctx %d\n",
+                n_ex, n_ex == 1 ? "" : "s", train_steps, (double)train_lr,
+                wctx);
+        double first_loss = 0, last_loss = 0;
+        for (int step = 1; step <= train_steps; step++) {
+            train_ex *ex = &exs[(step - 1) % n_ex];
+            double loss = 0;
+            model_lora_grad_zero(&m);
+            if (!model_lora_backward_w(&m, ex->t, ex->n, ex->w, &loss))
+                CLI_FAIL;
+            model_lora_adam_step(&m, train_lr, 0.9f, 0.999f, 1e-8f, 0.01f,
+                                 step);
+            // per-token mean over the weighted positions
+            double wsum = 0;
+            if (ex->w) {
+                for (int i = 0; i < ex->n - 1; i++) wsum += ex->w[i];
+            } else wsum = ex->n - 1;
+            double ml = wsum > 0 ? loss / wsum : loss;
+            if (step == 1) first_loss = ml;
+            last_loss = ml;
+            printf("{\"step\":%d,\"example\":%d,\"tokens\":%d,"
+                   "\"loss\":%.6f}\n", step, (step - 1) % n_ex, ex->n, ml);
+            fflush(stdout);
+            if (save_every > 0 && step % save_every == 0 &&
+                !model_lora_save(&m, train_out))
+                CLI_FAIL;
+        }
+        if (!model_lora_save(&m, train_out)) CLI_FAIL;
+        fprintf(stderr, "train: done — first-step loss %.4f, last-step "
+                "%.4f, adapter -> %s\n", first_loss, last_loss, train_out);
+        for (int i = 0; i < n_ex; i++) { free(exs[i].t); free(exs[i].w); }
+        free(exs);
+        cli_cleanup(&e, toks, &tok, &m);
+        free(owned_prompt);
+        return 0;
+    }
 
     if (score) {
         // Teacher-forced scoring (adaptation D1): per-position

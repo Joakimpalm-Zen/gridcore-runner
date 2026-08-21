@@ -306,6 +306,7 @@ typedef struct {
     // cross an adapter boundary.
     struct lora_w *lora;
     uint64_t lora_id;
+    float    lora_alpha;     // adapter alpha (load or train-init), for saving
     // D3 activation tape: [n_layer+1][tape_T][n_embd] layer-entry residual
     // streams (+ the final pre-norm hidden), recorded by solo forwards when
     // non-NULL. Owned by model_lora_backward for the duration of one call.
@@ -605,6 +606,19 @@ void   model_lora_free(model_t *m);
 // head transforms, per-head norms, sliding windows.
 bool   model_lora_backward(model_t *m, const int32_t *toks, int n,
                            double *loss_out);
+// weighted variant: pos_w[t] scales transition t (predicting toks[t+1]) in
+// both loss and gradient; 0 masks it out entirely (prompt masking /
+// advantage weighting). NULL = all ones.
+bool   model_lora_backward_w(model_t *m, const int32_t *toks, int n,
+                             const float *pos_w, double *loss_out);
+// --- adaptation D4: fresh trainable adapters (A seeded, B zero -> exact
+// no-op start), one AdamW step from the accumulated gradients (byte-
+// deterministic), and the adapter-GGUF writer (the format --lora reads).
+bool   model_lora_train_init(model_t *m, int rank, float alpha,
+                             uint64_t seed);
+void   model_lora_adam_step(model_t *m, float lr, float beta1, float beta2,
+                            float eps, float wd, int step);
+bool   model_lora_save(model_t *m, const char *path);
 void   model_lora_grad_zero(model_t *m);
 // FD-test access: the parameter / gradient buffer for (layer, slot, which)
 // where slot indexes [q,k,v,o,gate,up,down] and which is 0=A 1=B; returns

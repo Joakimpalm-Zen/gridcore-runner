@@ -4957,6 +4957,7 @@ enum { LW_Q, LW_K, LW_V, LW_O, LW_GATE, LW_UP, LW_DOWN, LW_SLOTS };
 struct lora_w {
     float *a, *b;   // a: [r][n_in] row-major, b: [n_out][r] row-major
     float *ga, *gb; // D3 gradient accumulators, same shapes (NULL until used)
+    float *ma, *va, *mb, *vb;  // D4 AdamW first/second moments (lazy)
     int    r;       // 0 = no adapter on this slot
     float  scale;   // (alpha / r) * user scale, folded at load
 };
@@ -4974,6 +4975,10 @@ void model_lora_free(model_t *m) {
             free(m->lora[(size_t)l * LW_SLOTS + s].b);
             free(m->lora[(size_t)l * LW_SLOTS + s].ga);
             free(m->lora[(size_t)l * LW_SLOTS + s].gb);
+            free(m->lora[(size_t)l * LW_SLOTS + s].ma);
+            free(m->lora[(size_t)l * LW_SLOTS + s].va);
+            free(m->lora[(size_t)l * LW_SLOTS + s].mb);
+            free(m->lora[(size_t)l * LW_SLOTS + s].vb);
         }
     free(m->lora);
     m->lora = NULL;
@@ -5159,6 +5164,7 @@ bool model_lora_load(model_t *m, const char *path, float user_scale) {
     }
     model_lora_free(m);
     m->lora = tab;
+    m->lora_alpha = alpha;
     m->lora_id = id ^ (uint64_t)(int64_t)(user_scale * 65536.0f);
     fprintf(stderr, "lora: %s — %d adapted projections, alpha %g, "
             "scale x%g\n", path, n_pairs, (double)alpha,
@@ -5551,6 +5557,14 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
 
 bool model_lora_backward(model_t *m, const int32_t *toks, int T,
                          double *loss_out) {
+    return model_lora_backward_w(m, toks, T, NULL, loss_out);
+}
+
+// pos_w: per-transition weights (length T-1; transition t scores toks[t+1]).
+// NULL = all ones. A zero weight removes the position from loss AND gradient
+// (the prompt-masking / advantage-weighting hook GRPO-style training needs).
+bool model_lora_backward_w(model_t *m, const int32_t *toks, int T,
+                           const float *pos_w, double *loss_out) {
     char why[128];
     if (!m->lora) {
         fprintf(stderr, "error: backward needs a loaded adapter (--lora)\n");
@@ -5574,12 +5588,14 @@ bool model_lora_backward(model_t *m, const int32_t *toks, int T,
     for (int t = 0; t < T; t++) {
         float *lg = model_forward(m, toks[t], t);
         if (!lg) goto fail;
-        if (t < T - 1) {
+        if (t < T - 1 && (!pos_w || pos_w[t] != 0.0f)) {
             float mx = lg[0];
             for (int i = 1; i < V; i++) if (lg[i] > mx) mx = lg[i];
             double sum = 0;
             for (int i = 0; i < V; i++) sum += expf(lg[i] - mx);
-            loss += (double)(mx + logf((float)sum)) - (double)lg[toks[t + 1]];
+            double w = pos_w ? (double)pos_w[t] : 1.0;
+            loss += w * ((double)(mx + logf((float)sum))
+                         - (double)lg[toks[t + 1]]);
         }
     }
     {
@@ -5593,11 +5609,14 @@ bool model_lora_backward(model_t *m, const int32_t *toks, int T,
     float *dhn = calloc((size_t)E, sizeof(float));
     if (!dhn) { free(dx); free(probs); free(hn); goto fail; }
     for (int t = 0; t < T - 1; t++) {
+        if (pos_w && pos_w[t] == 0.0f) continue;
         const float *h = m->tape + ((size_t)L * T + t) * E;
         rmsnorm(hn, h, m->out_norm_w, E, m->rms_eps);
         matvec_b(m->tp, probs, V, m->output, hn, E, E, V, NULL, 1);
         softmax(probs, V);
         probs[toks[t + 1]] -= 1.0f;
+        if (pos_w)
+            for (int i = 0; i < V; i++) probs[i] *= pos_w[t];
         memset(dhn, 0, sizeof(float) * (size_t)E);
         if (!matvec_t(m->output, probs, dhn, E, V)) {
             free(dhn); free(dx); free(probs); free(hn); goto fail;
@@ -5619,6 +5638,179 @@ bool model_lora_backward(model_t *m, const int32_t *toks, int T,
 fail:
     free(m->tape); m->tape = NULL; m->tape_T = 0;
     return false;
+}
+
+
+// ------------------------------- adaptation D4: init / AdamW / adapter save
+// m->lora_alpha remembers the adapter's alpha for saving (load or init).
+
+// Fresh trainable adapters on every hooked slot: A seeded small (xorshift,
+// deterministic from the given seed), B zero — so the initial adapter is an
+// exact no-op and training starts from the base model's own behavior.
+bool model_lora_train_init(model_t *m, int rank, float alpha, uint64_t seed) {
+    char why[128];
+    if (rank < 1 || rank > LORA_R_MAX) {
+        fprintf(stderr, "error: --lora-rank must be 1..%d\n", LORA_R_MAX);
+        return false;
+    }
+    if (!lora_bw_supported(m, why, sizeof why)) {
+        fprintf(stderr, "error: training does not cover this model yet: "
+                "%s\n", why);
+        return false;
+    }
+    struct lora_w *tab =
+        calloc((size_t)m->n_layer * LW_SLOTS, sizeof(struct lora_w));
+    if (!tab) return false;
+    uint64_t st = seed ? seed : 0x5EEDBA5Eull;
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++) {
+            gguf_tensor *base = lora_slot_base(m, l, s);
+            if (!base) continue;
+            struct lora_w *lw = &tab[(size_t)l * LW_SLOTS + s];
+            int64_t n_in = base->ne[0], n_out = base->ne[1];
+            lw->r = rank;
+            lw->scale = alpha / (float)rank;
+            lw->a = malloc(sizeof(float) * (size_t)rank * n_in);
+            lw->b = calloc((size_t)n_out * rank, sizeof(float));
+            if (!lw->a || !lw->b) {
+                for (int i = 0; i <= l * LW_SLOTS + s; i++) {
+                    free(tab[i].a); free(tab[i].b);
+                }
+                free(tab);
+                return false;
+            }
+            // uniform in [-1,1)/sqrt(n_in): the standard small-A init,
+            // deterministic from the xorshift stream
+            float sc = 1.0f / sqrtf((float)n_in);
+            for (int64_t i = 0; i < (int64_t)rank * n_in; i++) {
+                st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+                lw->a[i] = ((float)(int32_t)(uint32_t)(st >> 32)
+                            / 2147483648.0f) * sc;
+            }
+        }
+    model_lora_free(m);
+    m->lora = tab;
+    m->lora_alpha = alpha;
+    // identity: a fresh adapter is a distinct model identity even before the
+    // first step (B==0 makes it behaviorally the base, but training mutates
+    // it in place and cached prefixes must not straddle that)
+    m->lora_id = 0x11A0D000ull ^ (seed ? seed : 0x5EEDBA5Eull) ^
+                 ((uint64_t)rank << 32);
+    return true;
+}
+
+// One AdamW step over every adapter parameter from the accumulated
+// gradients. Plain elementwise loops in fixed order: byte-deterministic.
+static void adam_buf(float *th, const float *g, float **mp, float **vp,
+                     int64_t n, float lr, float b1, float b2, float eps,
+                     float wd, float bc1, float bc2) {
+    if (!*mp) *mp = calloc((size_t)n, sizeof(float));
+    if (!*vp) *vp = calloc((size_t)n, sizeof(float));
+    if (!*mp || !*vp) return;
+    float *mo = *mp, *vo = *vp;
+    for (int64_t i = 0; i < n; i++) {
+        float gi = g[i];
+        mo[i] = b1 * mo[i] + (1.0f - b1) * gi;
+        vo[i] = b2 * vo[i] + (1.0f - b2) * gi * gi;
+        float mh = mo[i] / bc1;
+        float vh = vo[i] / bc2;
+        th[i] -= lr * (mh / (sqrtf(vh) + eps) + wd * th[i]);
+    }
+}
+
+void model_lora_adam_step(model_t *m, float lr, float beta1, float beta2,
+                          float eps, float wd, int step) {
+    if (!m->lora) return;
+    float bc1 = 1.0f - powf(beta1, (float)step);
+    float bc2 = 1.0f - powf(beta2, (float)step);
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++) {
+            struct lora_w *lw = &m->lora[(size_t)l * LW_SLOTS + s];
+            gguf_tensor *base = lora_slot_base(m, l, s);
+            if (!lw->r || !base || !lw->ga || !lw->gb) continue;
+            adam_buf(lw->a, lw->ga, &lw->ma, &lw->va,
+                     (int64_t)lw->r * base->ne[0], lr, beta1, beta2, eps,
+                     wd, bc1, bc2);
+            adam_buf(lw->b, lw->gb, &lw->mb, &lw->vb,
+                     (int64_t)base->ne[1] * lw->r, lr, beta1, beta2, eps,
+                     wd, bc1, bc2);
+        }
+    // parameters moved: the adapter is a new behavioral identity
+    m->lora_id = m->lora_id * 0x100000001B3ull + 1;
+}
+
+// Adapter GGUF writer — exactly the format model_lora_load reads (v3 header,
+// general.type=adapter / adapter.type=lora / adapter.lora.alpha, F32
+// blk.N.<proj>.weight.lora_a/_b tensors, 32-byte-aligned data).
+static void put_u32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
+static void put_u64(FILE *f, uint64_t v) { fwrite(&v, 8, 1, f); }
+static void put_str(FILE *f, const char *s) {
+    put_u64(f, strlen(s));
+    fwrite(s, 1, strlen(s), f);
+}
+
+bool model_lora_save(model_t *m, const char *path) {
+    if (!m->lora) return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "error: cannot write %s\n", path);
+        return false;
+    }
+    // collect live pairs
+    int n_t = 0;
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++)
+            if (m->lora[(size_t)l * LW_SLOTS + s].r &&
+                lora_slot_base(m, l, s)) n_t += 2;
+    put_u32(f, 0x46554747); put_u32(f, 3);
+    put_u64(f, (uint64_t)n_t); put_u64(f, 4);
+    put_str(f, "general.architecture"); put_u32(f, 8); put_str(f, m->arch);
+    put_str(f, "general.type"); put_u32(f, 8); put_str(f, "adapter");
+    put_str(f, "adapter.type"); put_u32(f, 8); put_str(f, "lora");
+    put_str(f, "adapter.lora.alpha"); put_u32(f, 6);
+    fwrite(&m->lora_alpha, 4, 1, f);
+    uint64_t off = 0;
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++) {
+            struct lora_w *lw = &m->lora[(size_t)l * LW_SLOTS + s];
+            gguf_tensor *base = lora_slot_base(m, l, s);
+            if (!lw->r || !base) continue;
+            char nm[160];
+            snprintf(nm, sizeof nm, "blk.%d.%s.weight.lora_a", l,
+                     lora_slot_name[s]);
+            put_str(f, nm); put_u32(f, 2);
+            put_u64(f, base->ne[0]); put_u64(f, (uint64_t)lw->r);
+            put_u32(f, 0 /*F32*/); put_u64(f, off);
+            off = (off + sizeof(float) * (uint64_t)lw->r * base->ne[0] + 31)
+                  & ~31ull;
+            snprintf(nm, sizeof nm, "blk.%d.%s.weight.lora_b", l,
+                     lora_slot_name[s]);
+            put_str(f, nm); put_u32(f, 2);
+            put_u64(f, (uint64_t)lw->r); put_u64(f, base->ne[1]);
+            put_u32(f, 0); put_u64(f, off);
+            off = (off + sizeof(float) * (uint64_t)base->ne[1] * lw->r + 31)
+                  & ~31ull;
+        }
+    long hdr_end = ftell(f);
+    static const char zeros[32] = {0};
+    long pad = (-(long)hdr_end) & 31;
+    fwrite(zeros, 1, (size_t)pad, f);
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++) {
+            struct lora_w *lw = &m->lora[(size_t)l * LW_SLOTS + s];
+            gguf_tensor *base = lora_slot_base(m, l, s);
+            if (!lw->r || !base) continue;
+            size_t na = sizeof(float) * (size_t)lw->r * base->ne[0];
+            size_t nb = sizeof(float) * (size_t)base->ne[1] * lw->r;
+            fwrite(lw->a, 1, na, f);
+            fwrite(zeros, 1, (size_t)((-(long)na) & 31), f);
+            fwrite(lw->b, 1, nb, f);
+            fwrite(zeros, 1, (size_t)((-(long)nb) & 31), f);
+        }
+    bool ok = fflush(f) == 0 && !ferror(f);
+    fclose(f);
+    if (!ok) fprintf(stderr, "error: short write to %s\n", path);
+    return ok;
 }
 
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
