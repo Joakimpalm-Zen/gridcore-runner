@@ -2508,6 +2508,19 @@ static bool model_bind_weights(model_t *m, const char *path, const model_params 
             l->ssm_norm_w   = tensor_to_f32(sn2, inner, &ok);
             if (!ok) return false;
             l->out_scale = 1.0f;
+            // Dense h-models (granite-4.0-h-micro: expert_count 0) carry a
+            // gated MLP on every recurrent layer, and no MoE binding below
+            // will reach this layer — bind gate/up here or the FFN falls into
+            // the ungated branch with NULL weights. MoE h-models (h-small)
+            // still take the shared MoE binding, exactly as certified.
+            if (m->n_expert == 0 || i < m->n_dense_lead) {
+                l->w_gate = need_tensor(g, "blk.%d.ffn_gate.weight", i, &ok);
+                l->w_up   = need_tensor(g, "blk.%d.ffn_up.weight", i, &ok);
+                if (!ok) return false;
+                if (!check_shape(l->w_gate, m->n_embd, l->n_ff, "ffn_gate", i) ||
+                    !check_shape(l->w_up,   m->n_embd, l->n_ff, "ffn_up",   i))
+                    return false;
+            }
         }
         if (!l->recurrent) {
         if (fused_qkv) {

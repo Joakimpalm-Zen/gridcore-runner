@@ -42,6 +42,12 @@ def models(tmp_path_factory):
              "--arch", arch], check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
         out[arch] = (pfx.with_suffix(".gguf"),
                      d / (arch + ".missing-ssm_d.gguf"))
+    # granite-4.0-h-micro shape: expert_count 0, dense gated MLP on every layer
+    pfx = d / "granitehybrid-dense"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-hybrid.py", str(pfx),
+         "--dense"], check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    out["granitehybrid-dense"] = (pfx.with_suffix(".gguf"), None)
     return out
 
 
@@ -117,6 +123,27 @@ def test_granitehybrid_loads_and_decodes(runner_bin, models):
     # the load announces the hybrid layout, not a refusal
     assert "granitehybrid" in err
     assert "forward not yet implemented" not in err
+
+
+def test_granitehybrid_dense_loads_and_decodes(runner_bin, models):
+    """The DENSE h-variant (granite-4.0-h-micro: expert_count 0, gated MLP on
+    every layer). The loader used to bind ffn_gate/ffn_up only inside the
+    attention branch, so a dense model's recurrent layers decoded with NULL
+    FFN weights — a segfault on the first Mamba-2 layer of the real h-micro."""
+    good, _ = models["granitehybrid-dense"]
+    proc = _run(runner_bin, good, n="8")
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    err = proc.stderr.decode(errors="replace")
+    assert "granitehybrid" in err
+    assert "forward not yet implemented" not in err
+
+
+def test_granitehybrid_dense_decode_is_deterministic(runner_bin, models):
+    good, _ = models["granitehybrid-dense"]
+    a = _run(runner_bin, good, n="8")
+    b = _run(runner_bin, good, n="8")
+    assert a.returncode == 0 and b.returncode == 0
+    assert a.stdout == b.stdout
 
 
 def test_granitehybrid_decode_is_deterministic(runner_bin, models):

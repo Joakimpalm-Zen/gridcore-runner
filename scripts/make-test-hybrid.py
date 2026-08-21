@@ -26,7 +26,13 @@ always-on shared expert. It is small but honors the load-bearing invariants:
 `.missing-ssm_d` variant drops one SSM tensor so admission must FAIL CLOSED
 naming it (the hostile-GGUF discipline).
 
-Usage:  make-test-hybrid.py <out-prefix> [--arch granitehybrid]
+`--dense` builds the granite-4.0-h-micro shape instead: expert_count 0, no
+router or expert tensors, and a plain gated MLP (ffn_gate/up/down) on EVERY
+layer, recurrent and attention alike. The dense variant is what caught the
+loader binding gate/up only inside the attention branch, so recurrent layers
+decoded with NULL FFN weights (segfault on real h-micro).
+
+Usage:  make-test-hybrid.py <out-prefix> [--arch granitehybrid] [--dense]
 Writes <out>.gguf (valid) and <out>.missing-ssm_d.gguf (drops one SSM tensor).
 """
 import struct
@@ -36,6 +42,7 @@ OUT = sys.argv[1] if len(sys.argv) > 1 else "test-hybrid"
 ARCH = "granitehybrid"
 if "--arch" in sys.argv:
     ARCH = sys.argv[sys.argv.index("--arch") + 1]
+DENSE = "--dense" in sys.argv
 
 # tiny geometry (structurally faithful to Mamba-2, not to any real size)
 E = 32                    # embedding_length
@@ -117,10 +124,13 @@ def meta():
         # granite-4.0-h uses rope_finetuned as an on/off switch for rope; false
         # means the attention layers are NoPE (position comes from the mixers).
         kb(f"{p}.rope.scaling.finetuned", False),
-        # sparse-MoE FFN with an always-on shared expert (granite MoE shared)
-        ku(f"{p}.expert_count", N_EXPERT), ku(f"{p}.expert_used_count", N_USED),
-        ku(f"{p}.expert_feed_forward_length", FF_EXP),
-        ku(f"{p}.expert_shared_feed_forward_length", FF_SHEXP),
+        # sparse-MoE FFN with an always-on shared expert (granite MoE shared);
+        # the dense variant (h-micro shape) carries none of these keys
+        *([] if DENSE else [
+            ku(f"{p}.expert_count", N_EXPERT),
+            ku(f"{p}.expert_used_count", N_USED),
+            ku(f"{p}.expert_feed_forward_length", FF_EXP),
+            ku(f"{p}.expert_shared_feed_forward_length", FF_SHEXP)]),
         # Mamba-2 SSM block
         ku(f"{p}.ssm.conv_kernel", SSM_CONV),
         ku(f"{p}.ssm.inner_size", SSM_INNER),
@@ -154,7 +164,19 @@ def write(path, tensors, kvs):
     print(f"wrote {path}")
 
 
+def dense_ffn(i):
+    # granite-4.0-h-micro shape: plain gated MLP, no router, no experts
+    return [
+        (f"blk.{i}.ffn_norm.weight", [E], ones(E)),
+        (f"blk.{i}.ffn_gate.weight", [E, FF_EXP], pack(flist(E * FF_EXP))),
+        (f"blk.{i}.ffn_up.weight", [E, FF_EXP], pack(flist(E * FF_EXP))),
+        (f"blk.{i}.ffn_down.weight", [FF_EXP, E], pack(flist(FF_EXP * E))),
+    ]
+
+
 def moe(i):
+    if DENSE:
+        return dense_ffn(i)
     # routed experts (fused 3D: {E, FF_EXP, N_EXPERT} etc.) + shared expert
     return [
         (f"blk.{i}.ffn_norm.weight", [E], ones(E)),
