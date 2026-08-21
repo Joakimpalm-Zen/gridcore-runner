@@ -794,6 +794,11 @@ test-ornith-draft.gguf: scripts/make-test-ornith.py
 test-q8.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py --quant q8_0 test-q8.gguf
 
+# BF16 reaches its own CUDA decode-microbatch twins. The F32 and Q8_0 runs do
+# not execute k_gemvb_bf16_x4/_x8, so neither can hold their identity contract.
+test-bf16.gguf: scripts/make-test-model.py
+	$(PYTHON) scripts/make-test-model.py --quant bf16 test-bf16.gguf
+
 # Ornith/Qwen3.5 CPU tracer: a committed generator builds a tiny hybrid model
 # with three recurrent DeltaNet blocks and one full-attention block.
 test-ornith-cpu: runner
@@ -1251,7 +1256,7 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
       $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) $(TEST_RECURRENT) \
-      runner test.gguf test-q8.gguf test-ornith.gguf test-ornith-draft.gguf
+      runner test.gguf test-q8.gguf test-bf16.gguf test-ornith.gguf test-ornith-draft.gguf
 	./$(TEST_RECURRENT)
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
@@ -1279,6 +1284,8 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@# and again on a QUANTIZED fixture: the F32 run above cannot reach a
 	@# quantized matvec at all, so on its own it gates nothing real
 	./$(TEST_BATCH) test-q8.gguf
+	@# BF16 has separate width-classed CUDA twins; cover both x4 and x8.
+	./$(TEST_BATCH) test-bf16.gguf
 	@# A rope-enabled dense Mamba-2 hybrid must decline the CUDA microbatch:
 	@# fwd_batch has no recurrent/skip-layer path and would treat its NULL
 	@# attention projections as dense weights. The sequential fallback remains
@@ -1559,7 +1566,7 @@ fuzz:
 	fi
 
 clean:
-	rm -f test-moe-fixture.*.gguf test-q8.gguf runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
+	rm -f test-moe-fixture.*.gguf test-q8.gguf test-bf16.gguf runner runner-debug $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) \
 		$(TEST_TEMPLATE_OOM) \
 	      $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_TOKENIZER) \
 	      $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) $(TEST_SHARED) \

@@ -40,7 +40,7 @@ MUSE_GATE_FLAT = False  # zero the attn_gate weights (sigmoid -> flat 0.5)
 MUSE_ALL_SWA = False    # pattern array all-sliding (every layer ropes)
 GRANITE = False    # granite: four muP scalars, tied embeddings
 GRANITE_RESID = 0.5  # residual_scale for the fixture (CLI-overridable)
-QUANT = None       # --quant q8_0: store the 2-D matmul weights quantized
+QUANT = None       # --quant q8_0/bf16: store the 2-D matmul weights converted
 WIDE = False       # 256-wide rows, large enough for an i-quant test block
 GPU_UNSUPPORTED = None  # one named tensor stored as CPU-only IQ2_XXS
 args = sys.argv[1:]
@@ -132,8 +132,9 @@ while i < len(args):
         # model the batch gate ran on was F32.
         i += 1
         QUANT = args[i].lower()
-        if QUANT not in ("q8_0",):
-            sys.exit(f"--quant: unsupported type {QUANT!r} (have: q8_0)")
+        if QUANT not in ("q8_0", "bf16"):
+            sys.exit(f"--quant: unsupported type {QUANT!r} "
+                     "(have: q8_0, bf16)")
     elif a == "--wide":
         WIDE = True
     elif a == "--gpu-unsupported":
@@ -463,7 +464,7 @@ if SUPPRESS_ALL_BUT_EOS:
 meta = b"".join(meta_kvs)
 
 # ---------------------------------------------------------------- quantization
-GGML_F32, GGML_Q8_0, GGML_IQ2_XXS = 0, 8, 16
+GGML_F32, GGML_Q8_0, GGML_IQ2_XXS, GGML_BF16 = 0, 8, 16, 30
 
 
 def q8_0_row(vals):
@@ -481,6 +482,12 @@ def q8_0_row(vals):
     return bytes(out)
 
 
+def bf16_data(data):
+    """F32 bytes -> GGML BF16 (the high 16 bits of each stored float)."""
+    words = struct.unpack(f"<{len(data) // 4}I", data)
+    return struct.pack(f"<{len(words)}H", *(word >> 16 for word in words))
+
+
 def quantize(name, ne, data):
     """(type, data) for one tensor under QUANT.
 
@@ -496,7 +503,11 @@ def quantize(name, ne, data):
         # A zero-scale IQ2_XXS block dequantizes to exact zero regardless of
         # its codebook indices. 66 bytes per 256 values: f16 scale + 32 u16.
         return GGML_IQ2_XXS, bytes((ne[0] // 256) * ne[1] * 66)
-    if QUANT is None or len(ne) != 2 or ne[0] % 32 or name == "token_embd.weight":
+    if QUANT is None or len(ne) != 2 or name == "token_embd.weight":
+        return GGML_F32, data
+    if QUANT == "bf16":
+        return GGML_BF16, bf16_data(data)
+    if ne[0] % 32:
         return GGML_F32, data
     vals = struct.unpack(f"<{len(data) // 4}f", data)
     rows = [vals[r * ne[0]:(r + 1) * ne[0]] for r in range(ne[1])]
