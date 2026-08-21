@@ -1278,8 +1278,11 @@ started continuous batching (a single slot, or swap mode). On CUDA they also
 stay `0` for a model whose weights use a quantization the batched path has no
 bitwise-identical kernel for — a batched step must return, per sequence, the
 bits a lone step would have, so such a model decodes its sequences one at a
-time rather than batching them into different numbers. Q8_0, Q4_0, Q4_K, Q5_K,
-Q6_K, F32 and F16 batch; the rest do not.
+time rather than batching them into different numbers. The current CUDA
+microbatch loop covers gated dense transformer layers; recurrent, MoE, NoPE,
+attention-gated, and ungated xIELU models use sequential GPU forwards. Within
+the covered family Q8_0, Q4_0, Q4_K, Q5_K, Q6_K, F32 and F16 batch; the rest do
+not.
 
 Those are deliberately raw counters rather than a tokens-per-second field: a
 rate needs an averaging window, and the runner has no business choosing one for

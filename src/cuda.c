@@ -3696,6 +3696,15 @@ static bool batch_eligible(model_t **seqs, int n, gpu_t **lead_out) {
         if (!batch_mv_twin_ok(g->sw, m->output)) return false;
         for (int l = 0; l < m->n_layer; l++) {
             const layer_t *ly = &m->layers[l];
+            // fwd_batch implements the gated dense transformer loop only.
+            // Apertus is dense but deliberately has no w_gate (its FFN is
+            // up -> xIELU -> down); admitting it would hand NULL to
+            // enc_mv_batch below. Keep it on the bit-identical sequential GPU
+            // path until the batched loop has an explicit ungated branch.
+            if (!ly->wq || !ly->wo || !ly->w_gate ||
+                !ly->w_up || !ly->w_down ||
+                (model_kv_owner(m, l) == l && !ly->wk))
+                return false;
             const gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
                                         ly->w_gate, ly->w_up, ly->w_down };
             for (size_t k = 0; k < sizeof(ws) / sizeof(*ws); k++)

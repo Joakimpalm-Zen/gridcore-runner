@@ -1282,6 +1282,11 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@# the byte-identity reference until a real recurrent batch loop exists.
 	$(PYTHON) scripts/make-test-hybrid.py test-hybrid-batch --dense --rope
 	./$(TEST_BATCH) test-hybrid-batch.gguf 2
+	@# Apertus is dense but ungated: fwd_batch's gated FFN would pass its NULL
+	@# w_gate to enc_mv_batch. It must use the sequential GPU fallback until
+	@# that loop grows an explicit xIELU branch.
+	$(PYTHON) scripts/make-test-model.py --apertus REAL test-apertus-batch.gguf
+	./$(TEST_BATCH) test-apertus-batch.gguf 2
 	./$(TEST_PREFIX)
 	./$(TEST_GRAMMAR_FF)
 	./$(TEST_GRAMMAR_FF) test-ornith.gguf
