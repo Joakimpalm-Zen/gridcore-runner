@@ -1276,6 +1276,12 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
 	@# and again on a QUANTIZED fixture: the F32 run above cannot reach a
 	@# quantized matvec at all, so on its own it gates nothing real
 	./$(TEST_BATCH) test-q8.gguf
+	@# A rope-enabled dense Mamba-2 hybrid must decline the CUDA microbatch:
+	@# fwd_batch has no recurrent/skip-layer path and would treat its NULL
+	@# attention projections as dense weights. The sequential fallback remains
+	@# the byte-identity reference until a real recurrent batch loop exists.
+	$(PYTHON) scripts/make-test-hybrid.py test-hybrid-batch --dense --rope
+	./$(TEST_BATCH) test-hybrid-batch.gguf 2
 	./$(TEST_PREFIX)
 	./$(TEST_GRAMMAR_FF)
 	./$(TEST_GRAMMAR_FF) test-ornith.gguf

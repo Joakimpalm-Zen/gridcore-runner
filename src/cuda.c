@@ -1360,7 +1360,11 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 w->g_dsc[l] = f32_dbuf_ones(ly->down_exps_scale, m->n_expert);
             }
             bool moe_dev = ly->is_moe && !moe_on_host(m, l);
-            if (!w->attn_norm[l] || !w->ffn_norm[l] ||
+            // ffn_norm is required only where the layer HAS an FFN: a
+            // nemotron_h SSM or attention block carries none (skip_ffn), and
+            // demanding its upload here silently pushed every nemotron_h
+            // model to the CPU.
+            if (!w->attn_norm[l] || (ly->ffn_norm_w && !w->ffn_norm[l]) ||
                 (ly->bq && !w->bq[l]) || (ly->bk && !w->bk[l]) ||
                 (ly->bv && !w->bv[l]) || (ly->bo && !w->bo[l]) ||
                 (ly->qnorm_w && !w->qn[l]) || (ly->knorm_w && !w->kn[l]) ||
@@ -1372,8 +1376,15 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 (moe_dev && ly->ffn_gate_exps_b && !w->geb[l]) ||
                 (moe_dev && ly->ffn_up_exps_b   && !w->ueb[l]) ||
                 (moe_dev && ly->ffn_down_exps_b && !w->deb[l]) ||
-                (ly->recurrent && (!w->ssm_dt[l] || !w->ssm_a[l] ||
-                                    !w->ssm_norm[l])) ||
+                // per-family recurrent tables: qwen35 fills ssm_norm; the
+                // Mamba-2 branch fills gnorm/D/conv_b instead. Checking
+                // ssm_norm for both families made every granitehybrid and
+                // nemotron_h layer fail here — a SILENT whole-model CPU
+                // fallback that kept the k_mamba2_* path from ever running.
+                (ly->recurrent && (!w->ssm_dt[l] || !w->ssm_a[l])) ||
+                (ly->recurrent && m->qwen35 && !w->ssm_norm[l]) ||
+                (ly->recurrent && !m->qwen35 &&
+                 (!w->ssm_gnorm[l] || !w->ssm_D[l] || !w->ssm_conv_b[l])) ||
                 (ly->moe_gemma && (!w->g_pn1[l] || !w->g_prn2[l] ||
                                    !w->g_pn2[l] || !w->g_gis[l] ||
                                    !w->g_dsc[l])))
@@ -1429,11 +1440,13 @@ bool gpu_init(model_t *m) {
     // top-k + renormalize with no bias input, and regenerating kernels_ptx.h
     // is the CUDA-13.3 machine's job. Refuse the backend rather than route
     // with the wrong function and produce confident, wrong output.
-    // Mamba-2 hybrids (granitehybrid, nemotron_h) now have a device SSD-scan
+    // Mamba-2 hybrids (granitehybrid, nemotron_h) have a device SSD-scan
     // + conv1d kernel (k_mamba2_*), dispatched from gpu_mamba2_recurrent and
-    // wired through skip_mixer/skip_ffn below. nemotron_h (dense) fully
-    // offloads; granitehybrid still trips the shared-expert / MoE-router
-    // guards below and falls back there.
+    // wired through skip_mixer/skip_ffn below. nemotron_h (dense) and DENSE
+    // granitehybrid (h-micro) fully offload — CPU/CUDA token-identity
+    // measured 2026-08-21 (compat-reports/cpu-cuda-hybrid). MoE granitehybrid
+    // (h-small) still trips the shared-expert / MoE-router guards below and
+    // falls back there.
     if (m->n_expert > 0 && !model_moe_router_is_plain(m)) {
         fprintf(stderr, "gpu: this model's MoE router (gating=%d groups=%d "
                 "norm_w=%d scale=%g) has no device kernel — running on CPU\n",
@@ -3449,9 +3462,16 @@ static bool batch_eligible(model_t **seqs, int n, gpu_t **lead_out) {
         // fwd_batch runs a dense FFN unconditionally; MoE (sparse experts or
         // the gemma-4 dual-branch) has no path there, and it neither projects
         // the attention output gate nor skips rope on nope_on_full layers —
-        // keep all of those on fwd_tile
+        // keep all of those on fwd_tile. The recurrent families (qwen35 and
+        // the Mamba-2 hybrids) are declined as a family: fwd_batch has no
+        // mixer path and would hand a recurrent layer's NULL attention
+        // weights to enc_mv_batch as dense tensors. NoPE-stepped models are
+        // declined here too (enc_rope_batch ropes every layer); the same
+        // check in gpu_batch_decode stays as the runtime backstop.
         if (m->n_expert > 0 || m->moe_gemma || m->qwen35 ||
-            m->attn_out_gate || m->nope_on_full) return false;
+            m->granite_hybrid || m->nemotron_h ||
+            m->attn_out_gate || m->nope_on_full ||
+            m->no_rope_layer_step > 0) return false;
         if (!g->sw->f_rope_seq || !g->sw->f_store_seq || !g->sw->f_attn_dec_seq)
             return false;
         // every tensor fwd_batch hands to enc_mv_batch must have a real twin

@@ -32,7 +32,11 @@ layer, recurrent and attention alike. The dense variant is what caught the
 loader binding gate/up only inside the attention branch, so recurrent layers
 decoded with NULL FFN weights (segfault on real h-micro).
 
-Usage:  make-test-hybrid.py <out-prefix> [--arch granitehybrid] [--dense]
+`--rope` flips the Granite export's certified rope switch on. It exists to
+exercise the rope-enabled hybrid admission path; the default remains the real
+granite-4.0-h NoPE layout.
+
+Usage:  make-test-hybrid.py <out-prefix> [--arch granitehybrid] [--dense] [--rope]
 Writes <out>.gguf (valid) and <out>.missing-ssm_d.gguf (drops one SSM tensor).
 """
 import struct
@@ -43,6 +47,7 @@ ARCH = "granitehybrid"
 if "--arch" in sys.argv:
     ARCH = sys.argv[sys.argv.index("--arch") + 1]
 DENSE = "--dense" in sys.argv
+ROPE = "--rope" in sys.argv
 
 # tiny geometry (structurally faithful to Mamba-2, not to any real size)
 E = 32                    # embedding_length
@@ -123,7 +128,7 @@ def meta():
         kf(f"{p}.rope.freq_base", 10000.0),
         # granite-4.0-h uses rope_finetuned as an on/off switch for rope; false
         # means the attention layers are NoPE (position comes from the mixers).
-        kb(f"{p}.rope.scaling.finetuned", False),
+        kb(f"{p}.rope.scaling.finetuned", ROPE),
         # sparse-MoE FFN with an always-on shared expert (granite MoE shared);
         # the dense variant (h-micro shape) carries none of these keys
         *([] if DENSE else [
