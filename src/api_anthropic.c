@@ -310,8 +310,22 @@ static char *anth_system_text(jv *system, char *err, int errcap, bool *oom) {
     }
     sbuf b = {0};
     for (int i = 0; i < system->n; i++) {
-        const char *txt = jv_str(jv_get(system->items[i], "text"), NULL);
-        if (!txt) continue;
+        jv *block = system->items[i];
+        const char *type = block && block->type == J_OBJ
+                         ? jv_str(jv_get(block, "type"), NULL) : NULL;
+        if (!type || strcmp(type, "text")) {
+            snprintf(err, errcap,
+                     "system blocks must be objects with type \"text\"");
+            free(b.s);
+            return NULL;
+        }
+        const char *txt = jv_str(jv_get(block, "text"), NULL);
+        if (!txt) {
+            snprintf(err, errcap,
+                     "system text blocks must carry a text string");
+            free(b.s);
+            return NULL;
+        }
         if (b.n) sb_lit(&b, "\n");
         sb_put(&b, txt, strlen(txt));
     }
@@ -589,7 +603,7 @@ static char *messages_prompt(slot_t *s, sock_t fd, jv *req, tool_envelope *env,
         if (ts.n) turn_add_borrowed(&t, "system", ts.s);
         char *sys = anth_system_text(jv_get(req, "system"), terr, sizeof(terr),
                                      &oom);
-        if (terr[0] || oom) ok = false;   // sys is NULL on both
+        if (terr[0] || oom) { free(sys); ok = false; }
         else if (sys) turn_add(&t, "system", sys);
     }
     for (int i = 0; ok && i < msgs->n; i++) {
