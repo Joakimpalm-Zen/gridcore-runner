@@ -14,6 +14,11 @@ size_t ggml_type_size(int type) {
     abort();
 }
 
+const char *ggml_type_name(int type) {
+    (void)type;
+    return "test type";
+}
+
 void dequant_row(int type, const void *src, float *dst, int n) {
     (void)type; (void)src; (void)dst; (void)n;
     abort();
