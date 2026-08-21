@@ -193,3 +193,7 @@ test-envelope.exe
 test-template.dSYM/
 test-template-oom.dSYM/
 test-lora.*
+test-lora-grad
+test-lora-q8.*
+test-lora-qk.*
+test-qk.gguf
