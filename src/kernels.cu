@@ -1546,6 +1546,64 @@ extern "C" __global__ void k_gemm_q6_K(MV_PARAMS) {
     }
 }
 
+// Q3_K prefill GEMM: same shared-memory x staging as k_gemm_q4_K, with 8
+// CONTIGUOUS elements per lane. That split keeps every per-element input
+// constant across the lane's strip: elements el..el+7 share one 16-element
+// scale group (el is a multiple of 8), one 2-bit shift (el's 32-quarter),
+// one hmask bit and one qs quarter — so the inner loop is one scale mul and
+// eight mask/shift ops. Reordered k-reduction vs k_mv_q3_K_b -> token
+// identity verified empirically, the k_gemm_q6_K precedent. This kernel is
+// what retires the measured Q3_K prefill pathology (6.7-15.5x slower than
+// Q4_K on the full card): batch>1 previously fell back to per-token matvec
+// because f_gemm[T_Q3_K] did not exist.
+extern "C" __global__ void k_gemm_q3_K(MV_PARAMS) {
+    __shared__ float xsm[MVT][256];
+    unsigned warp = threadIdx.x >> 5;
+    unsigned lane = threadIdx.x & 31;
+    unsigned row  = blockIdx.x * GEMM_WARPS + warp;
+    int nb = a.n_in / 256;
+    const uchar *rw = wb + a.w_off +
+                      (ulong64)(row < (unsigned)a.n_out ? row : 0) * nb * 110;
+    float s[MVT] = {0};
+    int el    = (int)lane * 8;          // this lane's 8 contiguous elements
+    int half  = el >> 7;                // the mv loop's n = 0 / n = 128 halves
+    int shift = ((el & 127) >> 5) * 2;  // 2-bit group within the half
+    int idx   = el & 31;                // byte index within the quarter
+    uchar mbit = (uchar)(1 << (half * 4 + (shift >> 1)));
+    int sidx  = el >> 4;                // 16-element scale group
+
+    for (int b = 0; b < nb; b++) {
+        const uchar *blk = rw + (ulong64)b * 110;
+        int base_e = b * 256;
+        #pragma unroll
+        for (int t = 0; t < MVT; t++) {
+            const float *xg = x + (ulong64)t * a.xs + base_e;
+            for (int e = threadIdx.x; e < 256; e += blockDim.x) xsm[t][e] = xg[e];
+        }
+        __syncthreads();
+        if (row < (unsigned)a.n_out) {
+            Q3K_UNPACK_SCALES;
+            float dl = d_all * (q3scales[sidx] - 32);
+            const uchar *q = qbase + half * 32;
+            #pragma unroll
+            for (int k = 0; k < 8; k++) {
+                int i = idx + k;
+                float w = dl * (float)(((q[i] >> shift) & 3) -
+                                       ((hm[i] & mbit) ? 0 : 4));
+                #pragma unroll
+                for (int t = 0; t < MVT; t++) s[t] += w * xsm[t][el + k];
+            }
+        }
+        __syncthreads();
+    }
+    if (row < (unsigned)a.n_out) {
+        for (int t = 0; t < a.batch; t++) {
+            float r = warp_sum(s[t]);
+            if (lane == 0) y[(ulong64)t * a.ys + row] = a.has_bias ? r + bias[row] : r;
+        }
+    }
+}
+
 // IQ4: the nibble indexes a fixed 16-entry codebook
 static __device__ const signed char kv_iq4[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,

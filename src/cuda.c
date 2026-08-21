@@ -1219,6 +1219,7 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_mvb[T_MXFP4], "k_mv_mxfp4_b" },
             // prefill tiled-GEMM variants (batch>1 fast path for these formats)
             { &w->f_gemm[T_Q8_0], "k_gemm_q8_0" },
+            { &w->f_gemm[T_Q3_K], "k_gemm_q3_K" },
             { &w->f_gemm[T_Q4_K], "k_gemm_q4_K" },
             { &w->f_gemm[T_Q5_K], "k_gemm_q5_K" },
             { &w->f_gemm[T_Q6_K], "k_gemm_q6_K" },
