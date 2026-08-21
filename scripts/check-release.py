@@ -66,8 +66,11 @@ def check(args):
         ok &= fail(f"binary version {got!r} does not match tag {args.tag!r}")
 
     readme = read(args.readme)
-    if f"Public alpha (`{version}`)" not in readme:
-        ok &= fail(f"README does not identify public alpha {version}")
+    # v0.2.0 retired the -alpha suffix: the README banner says "Pre-1.0"
+    # with the exact version; older tags keep the alpha phrasing.
+    if (f"Pre-1.0 (`{version}`)" not in readme and
+            f"Public alpha (`{version}`)" not in readme):
+        ok &= fail(f"README does not identify the {version} banner")
     if f"./runner --version   # -> runner {version}" not in readme:
         ok &= fail("README version-output example is not in sync")
     for stale in stale_release_strings(readme, version, args.tag):

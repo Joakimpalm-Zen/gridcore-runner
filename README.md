@@ -28,7 +28,7 @@ for Linux, macOS, or Windows, or build from source:
 git clone https://github.com/Joakimpalm-Zen/xyntetik-runner
 cd xyntetik-runner
 make
-./runner --version   # -> runner 0.1.20-alpha
+./runner --version   # -> runner 0.2.0
 ```
 
 CUDA builds and releases need only an NVIDIA driver at runtime. The CUDA
@@ -81,8 +81,9 @@ Run a GGUF:
 ./runner -m big.gguf --draft small.gguf -p "Continue this code"
 ```
 
-> **Public alpha (`0.1.20-alpha`).** CI builds and smoke-tests Linux, macOS,
-> and Windows, but the project still has limited hardware coverage. Include
+> **Pre-1.0 (`0.2.0`).** APIs, model coverage and certification envelopes may
+> change between releases. CI builds and smoke-tests Linux, macOS, and
+> Windows, but the project still has limited hardware coverage. Include
 > `runner --version`, `runner --caps`, the model's exact filename, and the load
 > log in issue reports. Read [SECURITY.md](SECURITY.md) for the threat model and
 > [CONTRIBUTING.md](CONTRIBUTING.md) for the required correctness gates.
@@ -139,6 +140,19 @@ guarantees the SHAPE of a call at any quantization, not its contents
 ([docs/quant-fidelity.md](docs/quant-fidelity.md)).
 
 The rest of what sets Runner apart, ordered by how much difference each makes:
+
+- **The binary that serves your model also trains it — through the same
+  quantized weights, reproducibly.** `--train` does LoRA adaptation directly
+  against the GGUF you deploy (a frozen Q4_K_M base included): no FP16
+  training copy, no Python training stack, no second runtime whose numerics
+  drift from the one you serve with. The trainer's forward pass IS the
+  inference forward pass, so the policy you sample is the policy you train —
+  and training is deterministic: same data + same seed produce a
+  byte-identical adapter, with a provenance record (base/data/adapter
+  sha256s, seed, config) written beside every adapter. `--score` gives
+  teacher-forced logprobs for evals and rewards; `--lora` serves any adapter
+  back. Design, gates and measured results:
+  [docs/adaptation-engine.md](docs/adaptation-engine.md).
 
 - **A shared GPU stops being first-come, first-crash.** Run a coding agent
   beside an embeddings model beside a draft model and the usual outcome is that

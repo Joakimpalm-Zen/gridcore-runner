@@ -1,6 +1,6 @@
 # Security Policy
 
-Runner is in **public alpha** (`0.1.20-alpha`). Only the latest release is
+Runner is **pre-1.0** (`0.2.0`). Only the latest release is
 supported; there are no backports.
 
 ## Threat model

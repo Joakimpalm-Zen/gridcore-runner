@@ -1,9 +1,88 @@
 # Changelog
 
-All notable changes to xyntetik-runner (formerly gridcore-runner). This project
-is in **alpha**; the HTTP protocol and CLI may still change between alpha
-releases. Entries below the rename keep the names that were true when they
-were written.
+All notable changes to xyntetik-runner (formerly gridcore-runner). This
+project is **pre-1.0**: APIs, model coverage and certification envelopes may
+change between releases (the `-alpha` suffix was retired at v0.2.0 — the 0.x
+version already says what it needs to). Entries below the rename keep the
+names that were true when they were written.
+
+## v0.2.0 — 2026-08-21
+
+The adaptation release — and the release that drops the `-alpha` suffix. The
+binary that serves a model can now score it, load adapters for it, and train
+it, deterministically, through the same quantized weights it serves. Plus a
+round of CUDA work that retired two long-standing performance pathologies,
+request cancellation, and a batch of correctness fixes from an external
+review series.
+
+### The adaptation engine (`--score`, `--lora`, `--train`)
+
+- **`--score`**: teacher-forced per-token logprobs/NLL/perplexity over raw
+  text as versioned JSON. Defaults to the solo forward path — measured: the
+  CPU batched forward is not bit-identical to solo (~1e-6), and the score
+  should be the sampler's numerics; the faster chunked pass is opt-in with a
+  test-pinned envelope.
+- **`--lora`**: LoRA adapter GGUFs (llama.cpp naming) applied beside the
+  untouched base matvecs on the CPU dense projections. Zero adapter is gated
+  byte-identical to the bare base; a real adapter is gated against the
+  merged-weights reference. The adapter id joins the engine's model
+  identity, so cached prefixes never cross an adapter boundary.
+- **The backward pass**: full activation-gradient reverse sweep (attention
+  with cross-position dK/dV, rope adjoint, per-head QK-norm adjoint, rmsnorm
+  backward) with weight gradients only for adapters; frozen-base gradients
+  flow through a transposed quantized matvec (any decodable weight type,
+  FD-verified through real Q8_0 rows). Finite-difference gates across every
+  projection slot on three fixture families; a sabotaged rope adjoint fails
+  the gate at relative error 1.36.
+- **`--train`**: AdamW LoRA training with adapter-GGUF checkpoints, plain-
+  text and JSONL (prompt-masked, weighted) data modes, and a provenance
+  record (`<adapter>.train.json`: base/data/adapter sha256s, seed, config)
+  beside every adapter. **Deterministic training is a gated property**: same
+  data + same seed produce a byte-identical adapter file. Measured at scale:
+  Llama-3.2-3B Q4_K_M trains through its frozen 4-bit base at ~33 s/step on
+  32 CPU threads (exact-corpus nll 5.00 → 0.31).
+- **GRPO-lite** (`scripts/train-grpo-lite.py`): seeded sampling from the
+  runner itself + group-normalized clipped advantages + weighted `--train`
+  passes. Both measured runs are documented, including the raw-advantage
+  policy collapse. `scripts/make-tooluse-data.py` + `scripts/eval-tooluse.py`
+  provide a deterministic tool-calling dataset and eval.
+- Full design + measurements: `docs/adaptation-engine.md`. CPU path v1; CUDA
+  training is future work. Scope is fail-closed by property (dense SiLU
+  transformers incl. QK-norm families; recurrent/MoE refuse by name).
+
+### CUDA
+
+- **The Mamba-2 device path had never actually run** — two silent
+  validation bugs pushed every hybrid to CPU behind a full-offload banner.
+  Fixed and certified: `nemotron_h` and dense granitehybrid now fully
+  offload token-identically (h-micro 11.9 → 114.5 tok/s;
+  `docs/compat-reports/cpu-cuda-hybrid-2026-08-21/`).
+- **Q3_K prefill GEMM**: the measured 6.7–15.5× prompt-processing pathology
+  is retired — `k_gemm_q3_K` lands at 6.6× measured prefill speedup on the
+  reference model, byte-identical across `-b 512/64/1` and the CPU path.
+- **qwen35 promoted to the tensor-core arch list** on four measured gate
+  rows (two checkpoints × two types, all 0/64 flips).
+- The decode microbatch now declines recurrent and NoPE-stepped families
+  explicitly, and Apertus's ungated FFN, before touching NULL weights.
+
+### Engine and server
+
+- **Request cancellation**: an engine stop predicate polled between prefill
+  chunks and decode steps, wired to socket-close detection (an orderly FIN
+  cancels; quiet or pipelined connections never do). An abandoned prefill
+  now stops within one chunk.
+- Sparse-MoE thread default capped at the measured knee (32) on many-core
+  hosts; pinned `-t` never overridden.
+- granitehybrid dense variant (h-micro) no longer segfaults: the recurrent-
+  layer MLP binds on dense h-models.
+- `nemotron_h_moe` loads coverage-pruned files (per-layer expert counts).
+- Anthropic API: malformed `system` blocks now return a 400; conformance
+  tests follow the SDK v1.0 sampling migration.
+- Native tool protocols (gemma4, muse) no longer force optional parameters:
+  a shared optional-member construct landed in the constrained-decoding
+  validator. Apertus tool turns render byte-conformant to the reference.
+- Grammar fast-forward measured net-negative on sparse-MoE wall-clock and
+  stays opt-in; teacher-forced scoring documents why.
 
 ## v0.1.20-alpha — 2026-08-20
 
