@@ -74,6 +74,12 @@ def test_training_is_byte_deterministic(runner_bin, base, tmp_path):
     assert l1 == l2, "loss trajectories differ between identical runs"
     assert a1.read_bytes() == a2.read_bytes(), \
         "adapter files differ between identical runs"
+    # D7: the provenance records agree on the adapter sha (and carry the
+    # base/data shas that make the reproducibility claim checkable)
+    r1 = json.loads((tmp_path / "a1.gguf.train.json").read_text())
+    r2 = json.loads((tmp_path / "a2.gguf.train.json").read_text())
+    assert r1["adapter"]["sha256"] == r2["adapter"]["sha256"]
+    assert len(r1["base"]["sha256"]) == 64 and len(r1["data"]["sha256"]) == 64
 
 
 def test_loss_falls_and_adapter_improves_score(runner_bin, base, tmp_path):

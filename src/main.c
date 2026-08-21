@@ -1221,6 +1221,38 @@ int main(int argc, char **argv) {
                 CLI_FAIL;
         }
         if (!model_lora_save(&m, train_out)) CLI_FAIL;
+        {
+            // D7: the provenance record, written beside every adapter — the
+            // reproducibility claim in checkable form. Two runs with the same
+            // base/data/seed/config must produce the same adapter_sha256.
+            char rec[1024];
+            snprintf(rec, sizeof rec, "%s.train.json", train_out);
+            char bsha[65] = "", dsha[65] = "", asha[65] = "";
+            envelope_file_sha256(load_path, bsha);
+            envelope_file_sha256(train_path, dsha);
+            envelope_file_sha256(train_out, asha);
+            FILE *rf = fopen(rec, "wb");
+            if (rf) {
+                fprintf(rf,
+                    "{\"schema_version\":\"xyntetik.runner.train.v1\","
+                    "\"runner\":\"%s\","
+                    "\"base\":{\"path\":\"%s\",\"sha256\":\"%s\"},"
+                    "\"data\":{\"path\":\"%s\",\"sha256\":\"%s\"},"
+                    "\"seed\":%llu,\"lora_rank\":%d,\"alpha\":%g,"
+                    "\"lr\":%g,\"steps\":%d,\"ctx\":%d,"
+                    "\"adamw\":{\"beta1\":0.9,\"beta2\":0.999,"
+                    "\"eps\":1e-8,\"weight_decay\":0.01},"
+                    "\"loss_first\":%.6f,\"loss_last\":%.6f,"
+                    "\"adapter\":{\"path\":\"%s\",\"sha256\":\"%s\"}}\n",
+                    RUNNER_VERSION, load_path, bsha, train_path, dsha,
+                    (unsigned long long)(seed_given ? smp.rng : 0),
+                    lora_rank, (double)m.lora_alpha, (double)train_lr,
+                    train_steps, wctx, first_loss, last_loss, train_out,
+                    asha);
+                fclose(rf);
+                fprintf(stderr, "train: provenance -> %s\n", rec);
+            }
+        }
         fprintf(stderr, "train: done — first-step loss %.4f, last-step "
                 "%.4f, adapter -> %s\n", first_loss, last_loss, train_out);
         for (int i = 0; i < n_ex; i++) { free(exs[i].t); free(exs[i].w); }

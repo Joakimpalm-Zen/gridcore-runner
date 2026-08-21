@@ -43,6 +43,10 @@ enum envelope_state {
 // `runtime_version`: RUNNER_VERSION. `backend`: the compiled backend name
 // ("metal" / "cuda" / "cpu"). Writes a one-line human summary into `out`
 // (<= cap, always NUL-terminated when cap > 0) and returns the state.
+// sha256 of a whole file as lowercase hex (exported for the training
+// provenance record; the envelope gate uses it internally)
+bool envelope_file_sha256(const char *path, char hex[65]);
+
 int envelope_report(const char *model_path, const char *runtime_version,
                     const char *backend, char *out, int cap);
 

@@ -546,7 +546,7 @@ $(TEST_TC_TOL): $(TEST_TC_TOL_SRC) $(HDR)
 TEST_LORA_GRAD_SRC = tests/test_lora_grad.c src/gguf.c src/compat.c \
                   $(QUANTS_OBJ) src/tokenizer.c src/model.c src/vramreg.c \
                   $(GPU_SRC)
-$(TEST_LORA_GRAD): $(TEST_LORA_GRAD_SRC) $(HDR) test.gguf test-lora.full.gguf test-q8.gguf test-lora-q8.full.gguf
+$(TEST_LORA_GRAD): $(TEST_LORA_GRAD_SRC) $(HDR) test.gguf test-lora.full.gguf test-q8.gguf test-lora-q8.full.gguf test-qk.gguf test-lora-qk.full.gguf
 	$(CC) $(CFLAGS) -I src $(TEST_LORA_GRAD_SRC) -o $@ $(LDFLAGS)
 
 test-lora.full.gguf: test.gguf scripts/make-test-lora.py
@@ -554,6 +554,12 @@ test-lora.full.gguf: test.gguf scripts/make-test-lora.py
 
 test-lora-q8.full.gguf: test-q8.gguf scripts/make-test-lora.py
 	$(PYTHON) scripts/make-test-lora.py test-q8.gguf test-lora-q8
+
+test-qk.gguf: scripts/make-test-model.py
+	$(PYTHON) scripts/make-test-model.py --qk-norm test-qk.gguf
+
+test-lora-qk.full.gguf: test-qk.gguf scripts/make-test-lora.py
+	$(PYTHON) scripts/make-test-lora.py test-qk.gguf test-lora-qk
 
 # fused-int8 CPU dot tolerance gate: the CPU twin of the TC gate — teacher-
 # forced logits, 0/64 top-1 flips + bounded deviation, per (type, model) via
@@ -1291,6 +1297,9 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(
 	@# W^T dy through frozen Q8_0 rows) is the one genuinely new kernel
 	@# family here, so it gets its own gradient gate
 	./$(TEST_LORA_GRAD) test-q8.gguf test-lora-q8.full.gguf
+	@# and with qwen3-style per-head QK norms in the layer: the norm adjoint
+	@# sits between the rope adjoint and the projection backward
+	./$(TEST_LORA_GRAD) test-qk.gguf test-lora-qk.full.gguf
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)

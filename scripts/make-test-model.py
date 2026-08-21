@@ -41,6 +41,7 @@ MUSE_ALL_SWA = False    # pattern array all-sliding (every layer ropes)
 GRANITE = False    # granite: four muP scalars, tied embeddings
 GRANITE_RESID = 0.5  # residual_scale for the fixture (CLI-overridable)
 QUANT = None       # --quant q8_0/bf16: store the 2-D matmul weights converted
+QK_NORM = False    # --qk-norm: per-head attn_q_norm/attn_k_norm (qwen3-style)
 WIDE = False       # 256-wide rows, large enough for an i-quant test block
 GPU_UNSUPPORTED = None  # one named tensor stored as CPU-only IQ2_XXS
 args = sys.argv[1:]
@@ -49,6 +50,8 @@ while i < len(args):
     a = args[i]
     if a == "--suppress-all-but-eos":
         SUPPRESS_ALL_BUT_EOS = True
+    elif a == "--qk-norm":
+        QK_NORM = True
     elif a == "--zero-first-dim":
         ZERO_FIRST_DIM = True
     elif a == "--wrap-first-offset":
@@ -276,6 +279,11 @@ for i in range(N_LAYER + MTP_LAYERS):
         *([] if (G4HETERO and not g4_swa(i)) else
           [(f"blk.{i}.attn_v.weight", [N_EMBD, kv_dim], tensor_data(N_EMBD * kv_dim))]),
         (f"blk.{i}.attn_output.weight", [q_dim, N_EMBD], tensor_data(q_dim * N_EMBD)),
+        *([] if not QK_NORM else
+          [(f"blk.{i}.attn_q_norm.weight", [N_EMBD // N_HEAD],
+            tensor_data(N_EMBD // N_HEAD)),
+           (f"blk.{i}.attn_k_norm.weight", [N_EMBD // N_HEAD],
+            tensor_data(N_EMBD // N_HEAD))]),
         (f"blk.{i}.ffn_norm.weight", [N_EMBD], ones(N_EMBD)),
         *([] if APERTUS else
           [(f"blk.{i}.ffn_gate.weight", [N_EMBD, N_FF_I],

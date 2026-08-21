@@ -101,7 +101,7 @@ static void sha256_final(sha256_ctx *c, uint8_t out[32]) {
 }
 
 // Hash a whole file to lowercase hex. Returns false if it cannot be read.
-static bool file_sha256_hex(const char *path, char hex[65]) {
+bool envelope_file_sha256(const char *path, char hex[65]) {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     sha256_ctx c;
@@ -151,7 +151,7 @@ static bool sidecar_matches_artifact(jv *m, const char *model_path,
     const char *want = jv_str(jv_get(jv_get(m, "artifact"), "sha256"), "");
     if (!want[0]) return true;   // no sha declared: hash nothing, behave as before
     char have[65];
-    if (!file_sha256_hex(model_path, have)) {
+    if (!envelope_file_sha256(model_path, have)) {
         snprintf(out, (size_t)cap,
                  "envelope: could not hash this artifact to verify the sidecar "
                  "— ignored");

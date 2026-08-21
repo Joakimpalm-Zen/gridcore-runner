@@ -5330,13 +5330,13 @@ static bool lora_bw_supported(model_t *m, char *why, size_t cap) {
     else if (m->embd_scale != 1.0f || m->resid_scale != 1.0f ||
              m->embd_norm) r = "muP/embedding scaling";
     else if (m->attn_out_gate) r = "attention output gate";
+    else if (m->v_rmsnorm) r = "V-projection rmsnorm";
     else if (m->ple) r = "per-layer embeddings";
     for (int l = 0; !r && l < m->n_layer; l++) {
         const layer_t *ly = &m->layers[l];
         if (model_is_swa(m, l)) r = "sliding-window attention";
         else if (!ly->wv) r = "shared/absent V projection";
         else if (!ly->w_gate || !ly->w_up) r = "ungated FFN";
-        else if (ly->qnorm_w || ly->knorm_w) r = "per-head QK norms";
         else if (ly->post_attn_norm_w || ly->post_ffn_norm_w)
             r = "post-block norms";
         else if (ly->attn_sinks) r = "attention sinks";
@@ -5408,7 +5408,12 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
     size_t row_b = model_kv_row_bytes(m, l);
     const float *tape_x = m->tape + (size_t)l * m->tape_T * E;
 
+    int hd_l = hd;
     size_t szE = sizeof(float) * (size_t)T * E;
+    float *qpre = ly->qnorm_w ? malloc(sizeof(float) * (size_t)T * q_dim)
+                              : NULL;
+    float *kpre = ly->knorm_w ? malloc(sizeof(float) * (size_t)T * kv_dim)
+                              : NULL;
     float *xn1 = malloc(sizeof(float) * (size_t)T * E);
     float *xa  = malloc(szE);
     float *xn2 = malloc(szE);
@@ -5429,7 +5434,8 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
     float *tmpE = malloc(sizeof(float) * (size_t)E);
     float *p    = malloc(sizeof(float) * (size_t)T);
     bool ok = xn1 && xa && xn2 && q && ao && g && u && dxn1 && dxa && dq &&
-              dk && dv && hact && dhact && dgu && dxn2 && dao && tmpE && p;
+              dk && dv && hact && dhact && dgu && dxn2 && dao && tmpE && p &&
+              (!ly->qnorm_w || qpre) && (!ly->knorm_w || kpre);
 
     // ---- phase R: recompute forward internals from the tape
     for (int t = 0; ok && t < T; t++) {
@@ -5439,7 +5445,17 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
         float *qt = q + (size_t)t * q_dim;
         matvec_b(m->tp, qt, q_dim, ly->wq, x1, E, E, q_dim, ly->bq, 1);
         lora_site_fw(m, l, LW_Q, qt, x1, E, q_dim);
+        if (ly->qnorm_w) {
+            memcpy(qpre + (size_t)t * q_dim, qt,
+                   sizeof(float) * (size_t)q_dim);
+            qk_norm(qt, ly->qnorm_w, n_head, hd_l, m->rms_eps);
+        }
         rope_apply(m, qt, n_head, t, l);
+        if (ly->knorm_w) {
+            float *kt = kpre + (size_t)t * kv_dim;
+            matvec_b(m->tp, kt, kv_dim, ly->wk, x1, E, E, kv_dim, ly->bk, 1);
+            lora_site_fw(m, l, LW_K, kt, x1, E, kv_dim);
+        }
         attn_job aj = { m, kc_l, vc_l, qt, ao + (size_t)t * q_dim, t, 0,
                        hd, kv_dim, row_b, false, scale, NULL };
         tpool_run(m->tp, attn_heads, &aj, n_head);
@@ -5531,6 +5547,33 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
     for (int t = 0; ok && t < T; t++) {
         rope_unapply(m, dq + (size_t)t * q_dim, n_head, t, l);
         rope_unapply(m, dk + (size_t)t * kv_dim, n_kv, t, l);
+        // per-head QK-norm adjoints (qwen3-style): the cached/roped values
+        // are POST-norm, so the projection backward needs the pre-norm
+        // gradient computed against the recomputed pre-norm activations
+        if (ly->qnorm_w) {
+            float *dqt = dq + (size_t)t * q_dim;
+            const float *qp = qpre + (size_t)t * q_dim;
+            for (int h = 0; h < n_head; h++) {
+                float tmp[512];
+                memset(tmp, 0, sizeof(float) * (size_t)hd_l);
+                rmsnorm_bw(qp + (size_t)h * hd_l, ly->qnorm_w,
+                           dqt + (size_t)h * hd_l, tmp, hd_l, m->rms_eps);
+                memcpy(dqt + (size_t)h * hd_l, tmp,
+                       sizeof(float) * (size_t)hd_l);
+            }
+        }
+        if (ly->knorm_w) {
+            float *dkt = dk + (size_t)t * kv_dim;
+            const float *kp = kpre + (size_t)t * kv_dim;
+            for (int h = 0; h < n_kv; h++) {
+                float tmp[512];
+                memset(tmp, 0, sizeof(float) * (size_t)hd_l);
+                rmsnorm_bw(kp + (size_t)h * hd_l, ly->knorm_w,
+                           dkt + (size_t)h * hd_l, tmp, hd_l, m->rms_eps);
+                memcpy(dkt + (size_t)h * hd_l, tmp,
+                       sizeof(float) * (size_t)hd_l);
+            }
+        }
         float *dx1 = dxn1 + (size_t)t * E;
         const float *x1 = xn1 + (size_t)t * E;
         ok = ok && lora_site_bw(m, l, LW_Q, ly->wq, x1,
@@ -5549,6 +5592,7 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
                    dxn1 + (size_t)t * E, out, E, m->rms_eps);
     }
 
+    free(qpre); free(kpre);
     free(xn1); free(xa); free(xn2); free(q); free(ao); free(g); free(u);
     free(dxn1); free(dxa); free(dq); free(dk); free(dv); free(hact);
     free(dhact); free(dgu); free(dxn2); free(dao); free(tmpE); free(p);
