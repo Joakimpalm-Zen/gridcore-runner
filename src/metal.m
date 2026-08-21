@@ -426,6 +426,15 @@ static bool metal_moe_type_ok(int type) {
     }
 }
 
+static bool metal_tensor_type_ok(const gguf_tensor *t, bool moe) {
+    if (!t || (moe ? metal_moe_type_ok(t->type) : gpu_type_ok(t->type)))
+        return true;
+    fprintf(stderr, "gpu: tensor %s uses %s, which has no Metal%s kernel — "
+            "using CPU\n", t->name, ggml_type_name(t->type),
+            moe ? " MoE" : "");
+    return false;
+}
+
 static bool metal_moe_supported(const model_t *m) {
     if (m->n_expert <= 0) return true;
     if (m->n_expert > 256 || m->n_expert_used < 1 ||
@@ -464,10 +473,9 @@ static bool metal_moe_supported(const model_t *m) {
                 fprintf(stderr, "gpu: unsupported Gemma MoE tensor layout for Metal — using CPU\n");
                 return false;
             }
-            if (!gpu_type_ok(ly->ffn_gate_inp->type) ||
-                !metal_moe_type_ok(ly->ffn_gate_up_exps->type) ||
-                !metal_moe_type_ok(ly->ffn_down_exps->type)) {
-                fprintf(stderr, "gpu: Gemma MoE tensor type is not on the metal backend yet — using CPU\n");
+            if (!metal_tensor_type_ok(ly->ffn_gate_inp, false) ||
+                !metal_tensor_type_ok(ly->ffn_gate_up_exps, true) ||
+                !metal_tensor_type_ok(ly->ffn_down_exps, true)) {
                 return false;
             }
         } else {
@@ -476,11 +484,10 @@ static bool metal_moe_supported(const model_t *m) {
                 fprintf(stderr, "gpu: unsupported MoE tensor layout for Metal — using CPU\n");
                 return false;
             }
-            if (!gpu_type_ok(ly->ffn_gate_inp->type) ||
-                !metal_moe_type_ok(ly->ffn_gate_exps->type) ||
-                !metal_moe_type_ok(ly->ffn_up_exps->type) ||
-                !metal_moe_type_ok(ly->ffn_down_exps->type)) {
-                fprintf(stderr, "gpu: MoE tensor type is not on the metal backend yet — using CPU\n");
+            if (!metal_tensor_type_ok(ly->ffn_gate_inp, false) ||
+                !metal_tensor_type_ok(ly->ffn_gate_exps, true) ||
+                !metal_tensor_type_ok(ly->ffn_up_exps, true) ||
+                !metal_tensor_type_ok(ly->ffn_down_exps, true)) {
                 return false;
             }
         }
@@ -952,7 +959,7 @@ bool gpu_init(model_t *m) {
         return false;
     }
     // every weight matmul must have a kernel for its quant type
-    if (!gpu_type_ok(m->output->type)) goto unsupported;
+    if (!metal_tensor_type_ok(m->output, false)) return false;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
         if (!ly->wv && !m->v_rmsnorm) {
@@ -977,7 +984,7 @@ bool gpu_init(model_t *m) {
                               ly->w_gate, ly->w_up, ly->w_down, ly->wq_gate,
                               ly->ple_gate, ly->ple_proj };
         for (size_t i = 0; i < sizeof(ws) / sizeof(*ws); i++)
-            if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
+            if (!metal_tensor_type_ok(ws[i], false)) return false;
     }
 
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
@@ -1377,9 +1384,6 @@ bool gpu_init(model_t *m) {
                 ws_limit / 1e9, m->n_layer - gpu_K);
     return true;
 
-unsupported:
-    fprintf(stderr, "gpu: model uses a quant type without a Metal kernel — using CPU\n");
-    return false;
 }
 
 // ---------------------------------------------------------------- encoding

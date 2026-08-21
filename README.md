@@ -1434,7 +1434,7 @@ silently dropped branch.
 |---|---|
 | File format | GGUF v2/v3, mmap/file-mapped host weights, including standard local multi-part sets. |
 | Tokenizers | SPM and byte-level BPE with llama, qwen2/qwen35, smollm, afmoe, tekken, llama4/gpt-4o, Gemma, and GPT-2-family pre-tokenization rules. |
-| Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1, IQ2 and IQ3 families are CPU-only with NEON/AVX2 dequant kernels; the CUDA and Metal backends refuse those files loudly instead of computing wrong. |
+| Quantizations | `--caps` lists the admitted tensor formats: the k-quant and legacy families plus MXFP4 and the codebook i-quants (IQ1_S/M, IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_NL/XS). The IQ1, IQ2 and IQ3 families are CPU-only with NEON/AVX2 dequant kernels; CUDA and Metal refuse them loudly, naming the exact tensor and type that caused the CPU fallback. |
 | Transformer | RMSNorm, adjacent-pair and NeoX RoPE, grouped-query attention, SwiGLU/GELU/xIELU family paths, tied embeddings, dense and selected sparse MoE. |
 | Sampling | Greedy, temperature, top-k, top-p, min-p, repeat penalty, stop strings, JSON/schema constraints, speculative decoding. |
 | Context | Batched prefill, f16/q8 KV, linear/YaRN/llama-3 scaling, automatic extension. |

@@ -41,6 +41,8 @@ MUSE_ALL_SWA = False    # pattern array all-sliding (every layer ropes)
 GRANITE = False    # granite: four muP scalars, tied embeddings
 GRANITE_RESID = 0.5  # residual_scale for the fixture (CLI-overridable)
 QUANT = None       # --quant q8_0: store the 2-D matmul weights quantized
+WIDE = False       # 256-wide rows, large enough for an i-quant test block
+GPU_UNSUPPORTED = None  # one named tensor stored as CPU-only IQ2_XXS
 args = sys.argv[1:]
 i = 0
 while i < len(args):
@@ -132,6 +134,15 @@ while i < len(args):
         QUANT = args[i].lower()
         if QUANT not in ("q8_0",):
             sys.exit(f"--quant: unsupported type {QUANT!r} (have: q8_0)")
+    elif a == "--wide":
+        WIDE = True
+    elif a == "--gpu-unsupported":
+        # Admission-diagnostic fixture: IQ2_XXS is a supported CPU type but
+        # intentionally has no CUDA/Metal kernel. Its 256-value block also
+        # forces --wide, keeping the generated file structurally valid.
+        i += 1
+        GPU_UNSUPPORTED = args[i]
+        WIDE = True
     elif a == "--gemma4-hetero":
         # the real gemma-4 26B/12B attention shape, scaled down: sliding
         # layers (i%3 != 2) rotate fewer dims on smaller heads with fewer KV
@@ -157,6 +168,8 @@ while i < len(args):
     i += 1
 
 N_EMBD, N_HEAD, N_KV, N_FF, N_LAYER = 64, 4, 2, 128, 2
+if WIDE:
+    N_EMBD, N_FF = 256, 512
 if ESERIES_SHARED_KV or ESERIES_PLE or G4HETERO:
     # enough layers for a sliding/full pattern (with a shared-KV tail for
     # the E-series variants)
@@ -450,7 +463,7 @@ if SUPPRESS_ALL_BUT_EOS:
 meta = b"".join(meta_kvs)
 
 # ---------------------------------------------------------------- quantization
-GGML_F32, GGML_Q8_0 = 0, 8
+GGML_F32, GGML_Q8_0, GGML_IQ2_XXS = 0, 8, 16
 
 
 def q8_0_row(vals):
@@ -477,6 +490,12 @@ def quantize(name, ne, data):
     lm head to the embedding, so quantizing it would drag the embedding-lookup
     dequant into a gate that is not about it. Norms are 1-D and never eligible.
     """
+    if name == GPU_UNSUPPORTED:
+        if len(ne) != 2 or ne[0] % 256:
+            sys.exit(f"--gpu-unsupported tensor {name!r} needs 256-wide rows")
+        # A zero-scale IQ2_XXS block dequantizes to exact zero regardless of
+        # its codebook indices. 66 bytes per 256 values: f16 scale + 32 u16.
+        return GGML_IQ2_XXS, bytes((ne[0] // 256) * ne[1] * 66)
     if QUANT is None or len(ne) != 2 or ne[0] % 32 or name == "token_embd.weight":
         return GGML_F32, data
     vals = struct.unpack(f"<{len(data) // 4}f", data)
@@ -489,6 +508,8 @@ for name, ne, data in tensors:
     ttype, data = quantize(name, ne, data)
     _typed.append((name, ne, data, ttype))
 tensors = _typed
+if GPU_UNSUPPORTED and not any(t[0] == GPU_UNSUPPORTED for t in tensors):
+    sys.exit(f"--gpu-unsupported tensor {GPU_UNSUPPORTED!r} was not generated")
 
 header = struct.pack("<IIQQ", 0x46554747, 3, len(tensors), len(meta_kvs))
 

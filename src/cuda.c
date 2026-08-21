@@ -490,6 +490,13 @@ static bool gpu_type_ok(int type) {
     }
 }
 
+static bool gpu_tensor_type_ok(const gguf_tensor *t) {
+    if (!t || gpu_type_ok(t->type)) return true;
+    fprintf(stderr, "gpu: tensor %s uses %s, which has no CUDA kernel — "
+            "using CPU\n", t->name, ggml_type_name(t->type));
+    return false;
+}
+
 // The --caps answer for this backend, sourced from the admission test above so
 // the advertised list and the loader agree by construction.
 bool gpu_quant_ok(int type) { return gpu_type_ok(type); }
@@ -1452,13 +1459,13 @@ bool gpu_init(model_t *m) {
                 "norm_w=%d scale=%g) has no device kernel — running on CPU\n",
                 m->expert_gating, m->n_expert_groups, (int)m->expert_norm_w,
                 (double)m->expert_w_scale);
-        goto unsupported;
+        return false;
     }
     for (int l = 0; l < m->n_layer && m->n_expert > 0; l++)
         if (m->layers[l].exp_probs_b) {
             fprintf(stderr, "gpu: MoE selection bias (exp_probs_b) has no "
                     "device kernel — running on CPU\n");
-            goto unsupported;
+            return false;
         }
     // Every device MoE path (weight upload sizing, k_moe_route's expert
     // count, the gather/scatter kernels) assumes one uniform n_expert for
@@ -1472,14 +1479,14 @@ bool gpu_init(model_t *m) {
                     "(pruned model) — no device kernel assumes non-uniform "
                     "per-layer expert counts, running on CPU\n",
                     l, m->layers[l].n_expert, m->n_expert);
-            goto unsupported;
+            return false;
         }
     // The shared always-on expert has no device path: the routed MoE
     // kernels write the FFN output and nothing adds a second dense branch.
     if (m->n_ff_shexp > 0) {
         fprintf(stderr, "gpu: shared-expert MoE has no device path — "
                 "running on CPU\n");
-        goto unsupported;
+        return false;
     }
     // The DENSE attention output gate (muse-glimmer) rides qwen35's
     // machinery: wq_gate is already in every weight table and k_q35_attn_gate
@@ -1505,9 +1512,9 @@ bool gpu_init(model_t *m) {
         // off correctly.
         fprintf(stderr, "gpu: per-layer FFN widths have no device path — "
                 "running on CPU\n");
-        goto unsupported;
+        return false;
     }
-    if (!gpu_type_ok(m->output->type)) goto unsupported;
+    if (!gpu_tensor_type_ok(m->output)) return false;
     for (int l = 0; l < m->n_layer; l++) {
         layer_t *ly = &m->layers[l];
         gguf_tensor *ws[] = { ly->wq, ly->wk, ly->wv, ly->wo,
@@ -1516,11 +1523,16 @@ bool gpu_init(model_t *m) {
                               ly->ssm_out };
         int count = m->cpu_moe && ly->is_moe && moe_on_host(m, l) ? 4 : 12;
         for (int i = 0; i < count; i++)
-            if (ws[i] && !gpu_type_ok(ws[i]->type)) goto unsupported;
+            if (!gpu_tensor_type_ok(ws[i])) return false;
         // The architecture publishes this tiny depthwise kernel as F32 in its
         // GGUF contract. Keeping it F32 avoids a second quant decoder in the
         // stateful kernel; an unexpected export falls back safely.
-        if (ly->ssm_conv && ly->ssm_conv->type != T_F32) goto unsupported;
+        if (ly->ssm_conv && ly->ssm_conv->type != T_F32) {
+            fprintf(stderr, "gpu: tensor %s uses %s; the CUDA recurrent "
+                    "kernel requires F32 — using CPU\n", ly->ssm_conv->name,
+                    ggml_type_name(ly->ssm_conv->type));
+            return false;
+        }
     }
     // MoE layers leave the dense gate/up/down NULL, so the loop above never
     // checks the router or the per-expert weights — yet enc_mv indexes the
@@ -1534,17 +1546,16 @@ bool gpu_init(model_t *m) {
         // still promote this layer later, so only a pinned host layer skips.
         if (!ly->is_moe || (moe_on_host(m, l) && m->cpu_moe_layers != CPU_MOE_AUTO))
             continue;
-        if (ly->ffn_gate_inp && !gpu_type_ok(ly->ffn_gate_inp->type)) goto unsupported;
+        if (!gpu_tensor_type_ok(ly->ffn_gate_inp)) return false;
         if (ly->moe_split) {
             for (int e = 0; e < m->n_expert; e++)
-                if (!gpu_type_ok(ly->moe_g[e]->type) ||
-                    !gpu_type_ok(ly->moe_u[e]->type) ||
-                    !gpu_type_ok(ly->moe_d[e]->type)) goto unsupported;
+                if (!gpu_tensor_type_ok(ly->moe_g[e]) ||
+                    !gpu_tensor_type_ok(ly->moe_u[e]) ||
+                    !gpu_tensor_type_ok(ly->moe_d[e])) return false;
         } else {
-            if ((ly->ffn_gate_exps && !gpu_type_ok(ly->ffn_gate_exps->type)) ||
-                (ly->ffn_up_exps   && !gpu_type_ok(ly->ffn_up_exps->type))   ||
-                (ly->ffn_down_exps && !gpu_type_ok(ly->ffn_down_exps->type)))
-                goto unsupported;
+            if (!gpu_tensor_type_ok(ly->ffn_gate_exps) ||
+                !gpu_tensor_type_ok(ly->ffn_up_exps) ||
+                !gpu_tensor_type_ok(ly->ffn_down_exps)) return false;
         }
     }
 
@@ -1794,9 +1805,6 @@ fail_quiet:
     gpu_ctx_free(m, g);
     return false;
 
-unsupported:
-    fprintf(stderr, "gpu: model uses a quant type without a CUDA kernel — using CPU\n");
-    return false;
 }
 
 // ----------------------------------------------------------------- launches

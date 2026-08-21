@@ -54,3 +54,31 @@ def test_gated_sparse_moe_declines_loudly(runner_bin, moe_fixtures):
     assert "metal backend on" not in err.lower(), err
     assert "gated attention with sparse MoE (afmoe)" in err, err
     assert "quant type without a" not in err, err
+
+
+@pytest.mark.parametrize(
+    "flags,tensor",
+    [
+        (["--granite"], "output.weight"),
+        ([], "blk.0.attn_q.weight"),
+    ],
+    ids=["output", "layer-weight"],
+)
+def test_unsupported_tensor_names_itself(runner_bin, tmp_path, flags, tensor):
+    model = tmp_path / (tensor.replace(".", "-") + ".gguf")
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py", "--wide", *flags,
+         "--gpu-unsupported", tensor, str(model)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+
+    cpu = _run(runner_bin, model, "off")
+    auto = _run(runner_bin, model, "auto")
+    assert cpu.returncode == 0, cpu.stderr.decode(errors="replace")
+    assert auto.returncode == 0, auto.stderr.decode(errors="replace")
+    assert cpu.stdout, "CPU produced no output; fallback comparison is vacuous"
+    assert cpu.stdout == auto.stdout
+
+    err = auto.stderr.decode(errors="replace")
+    assert tensor in err, err
+    assert "IQ2_XXS" in err, err
+    assert "using CPU" in err, err
