@@ -1492,7 +1492,9 @@ bool gpu_init(model_t *m) {
         // afmoe: per-element attention output gate + sparse MoE has no
         // certified device path; running it would be unverified, so the
         // whole model stays on the host.
-        goto unsupported;
+        fprintf(stderr, "gpu: gated attention with sparse MoE (afmoe) is not "
+                "on the CUDA backend yet — using CPU\n");
+        return false;
     }
     if (m->ffn_var && !m->nemotron_h) {
         // gemma-4 E2B: per-layer FFN widths differ, and the device FFN path

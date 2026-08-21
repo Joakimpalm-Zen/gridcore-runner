@@ -240,6 +240,28 @@ for i in range(LAYERS):
 write(f"{OUT}.moe4.gguf", moe4,
       base_meta("llama", [ku("llama.expert_count", 4), ku("llama.expert_used_count", 2)]))
 
+# afmoe with the router deliberately reduced to the CUDA/Metal device
+# kernel's plain softmax contract.  Shipping Trinity profiles use sigmoid
+# routing and are rejected earlier for that reason; this variant reaches the
+# independent gated-attention + sparse-MoE admission guard so its diagnostic
+# cannot pass accidentally on the router refusal.
+afmoe_plain = list(shared)
+for i in range(LAYERS):
+    afmoe_plain += [
+        (f"blk.{i}.attn_gate.weight", [E, E], pack(flist(E * E))),
+    ]
+    afmoe_plain += moe_ffn_routed(i, 4)
+write(f"{OUT}.afmoe-plain.gguf", afmoe_plain,
+      base_meta("afmoe", [
+          ku("afmoe.expert_count", 4),
+          ku("afmoe.expert_used_count", 2),
+          ku("afmoe.expert_feed_forward_length", FF),
+          ku("afmoe.expert_gating_func", 1),
+          kb("afmoe.expert_weights_norm", True),
+          kf("afmoe.expert_weights_scale", 1.0),
+          ku("afmoe.attention.sliding_window", 8),
+      ]))
+
 def moe_ffn_n(i, downs, probs_b=None, probs_b_suffix="weight"):
     """N experts sharing the dense gate/up, each with its own `down` row block.
 
