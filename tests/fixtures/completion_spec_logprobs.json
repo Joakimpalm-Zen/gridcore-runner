@@ -1,0 +1,7 @@
+{
+  "prompt": "spec telemetry",
+  "max_tokens": 8,
+  "temperature": 0,
+  "cache_prompt": false,
+  "logprobs": 2
+}

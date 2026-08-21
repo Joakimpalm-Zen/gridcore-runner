@@ -1915,6 +1915,10 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         }
     }
 
+    // A configured draft is not proof that this request speculated. Logprob
+    // and choice-logprob capture deliberately select the solo walk, so record
+    // the execution decision while those request flags are still installed.
+    bool spec_used = engine_wants_spec(e);
     double gtime;
     int n_gen = sched_generate(s, logits, max_tokens, gen_collect, &g, &gtime,
                                req_deadline);
@@ -2002,7 +2006,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            .forked = reuse.forked, .saved_s = reuse.saved_s,
                            .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
                            .schema = schema != NULL,
-                           .json_mode = e->json_mode, .spec = e->dm != NULL,
+                           .json_mode = e->json_mode, .spec = spec_used,
                            .req = req };
             sbuf f = {0};
             sb_lit(&f, ",\"response\":");
@@ -2191,7 +2195,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            .forked = reuse.forked, .saved_s = reuse.saved_s,
                            .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
                            .schema = schema != NULL,
-                           .json_mode = e->json_mode, .spec = e->dm != NULL,
+                           .json_mode = e->json_mode, .spec = spec_used,
                            .req = req };
             sbuf r = {0};
             anth_body(&r, &g, &d);
@@ -2225,7 +2229,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                            .forked = reuse.forked, .saved_s = reuse.saved_s,
                            .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
                            .schema = schema != NULL,
-                           .json_mode = e->json_mode, .spec = e->dm != NULL,
+                           .json_mode = e->json_mode, .spec = spec_used,
                            .req = req };
             sbuf r = {0};
             responses_body(&r, &g, &d);
@@ -2320,7 +2324,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
                         .gtime = gtime, .major_faults = plat_major_faults() - faults_at_start,
                            .schema = schema != NULL,
                         .finish_detail = finish_detail_of(finish),
-                        .json_mode = e->json_mode, .spec = e->dm != NULL };
+                        .json_mode = e->json_mode, .spec = spec_used };
         telemetry_json(&r, &td);
         sb_lit(&r, "}");
         send_built(fd, &r);
@@ -2341,7 +2345,7 @@ done: ;
     fprintf(stderr, "[slot %d] %s: %d prompt (%d cached) + %d gen tok (%.1f tok/s)%s%s%s\n",
             s->id, g.id, n_prompt, keep, n_gen,
             n_gen / (gtime > 0 ? gtime : 1e-9),
-            schema ? " [schema]" : e->json_mode ? " [json]" : e->dm ? " [spec]" : "",
+            schema ? " [schema]" : e->json_mode ? " [json]" : spec_used ? " [spec]" : "",
             // "[client gone]" is an accusation, and it used to be made about a
             // client that never left: an unmappable envelope set the same flag.
             // The two are named apart so a log line means what it says.

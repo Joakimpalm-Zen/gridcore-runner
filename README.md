@@ -800,8 +800,11 @@ non-loopback authorities.
 
 Buffered generation responses include `runner_telemetry` with prompt tokens
 reused/evaluated, generation timing, paging counters, and structured or
-speculative mode flags. Set request field `"cache_prompt": false` to bypass
-prefix reuse. Streaming clients that disconnect cancel generation.
+speculative mode flags. `speculative` reports whether that request used the
+speculative walk, not merely whether the server has a draft loaded; logprob and
+choice-logprob capture use the solo walk and therefore report it as false. Set
+request field `"cache_prompt": false` to bypass prefix reuse. Streaming clients
+that disconnect cancel generation.
 
 Every generating endpoint also accepts a per-request `"timeout"` in seconds
 (`0`–`86400`), which overrides `RUNNER_REQUEST_TIMEOUT` for that request; `0`
