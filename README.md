@@ -465,6 +465,7 @@ flags into unrelated feature sections.
 | `--type-plan PLAN.json` | Per-tensor rewrite plan. First substring rule wins; types are `keep`, `q8_0`, `q4_0`, `q3_k`, and `f16`. Example: `{"default":"keep","rules":[{"match":"_exps.weight","type":"q3_k"}]}`. Requires `--quantize`. |
 | `--prune-experts FILE` | Apply a per-layer MoE expert keep-list while rewriting. Requires `--quantize`. |
 | `--bench-json` | Run the built-in prompt/decode benchmark and print JSON metrics. |
+| `--score` | Teacher-forced scoring: per-token log P(token\|prefix) over the raw `-p`/`-f` text — no template, no sampling — printed as JSON (`xyntetik.runner.score.v1`) with per-position logprobs, NLL and perplexity. The default path scores one forward per position, the exact numerics the sampler sees at decode time; `RUNNER_SCORE_CHUNKED=1` opts into a faster batched pass whose deviation from solo is measured and test-pinned (max \|Δlogprob\| ~1e-6 on the fixtures — the CPU batched forward is not bit-identical to solo, and scoring defaults to exactness over speed). |
 | `--caps` | Print machine, backend, quant, architecture, placement, and sampling capabilities as JSON. |
 | `--tool-info` | With `-m`, print the model's tool-call protocol as JSON (`{"tool_family":…,"native_tool_protocol":…}`) and exit. No manifest required. |
 | `--fit PATH` | Estimate whether a GGUF fits this machine and exit. Reads only the header, so a partial download answers the question. |

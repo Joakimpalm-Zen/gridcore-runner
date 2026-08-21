@@ -303,6 +303,9 @@ static void usage(const char *prog) {
         "                 (one-shot, chat, and single-model --serve)\n"
         "  --draft-k N    draft tokens per round (default 4)\n"
         "  --bench-json   run a small decode benchmark and print JSON metrics\n"
+        "  --score        teacher-forced scoring: per-token log P(token|prefix)\n"
+        "                 over the raw -p/-f text (no template, no sampling),\n"
+        "                 printed as JSON with NLL and perplexity\n"
         "  --caps         print machine capabilities as JSON and exit\n"
         "  --tool-info    load -m MODEL and print its native tool-call protocol\n"
         "                 as one JSON line, then exit\n"
@@ -448,6 +451,7 @@ int main(int argc, char **argv) {
     bool force_uncertified = false;
     int thinking = THINK_DEFAULT;
     bool bench_json = false;
+    bool score = false;
     model_params mp = {0};
     // RUNNER_VRAM_PRIORITY sets the baseline; --vram-priority (parsed below)
     // overrides it, same precedence as every other env/flag pair in runner.
@@ -538,6 +542,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--draft"))   draft_path = NEXT;
         else if (!strcmp(a, "--draft-k")) draft_k = (int)int_arg(a, NEXT, 1, 15);
         else if (!strcmp(a, "--bench-json")) bench_json = true;
+        else if (!strcmp(a, "--score")) score = true;
         else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--gpu-layers")) {
@@ -1040,6 +1045,97 @@ int main(int argc, char **argv) {
     if (!toks) { fprintf(stderr, "error: out of memory\n"); CLI_FAIL; }
     double ptime, gtime, t0;
     int n_prompt, n_gen;
+
+    if (score) {
+        // Teacher-forced scoring (adaptation D1): per-position
+        // log P(token | prefix) over the RAW prompt bytes — no template, no
+        // sampling, no gradients. DEFAULT IS THE SOLO PATH: one forward per
+        // position, the exact numerics the sampler sees at decode time —
+        // measured 2026-08-21, the CPU batched forward is NOT bit-identical
+        // to solo (max |dlp| ~1e-6 on the fixtures, diverging from batch row
+        // 2), so a chunked scorer would quietly reintroduce the train/infer
+        // mismatch this mode exists to abolish. RUNNER_SCORE_CHUNKED=1 opts
+        // into the ~10x-faster batched path with that measured envelope;
+        // tests/test_score.py pins the delta and the solo determinism.
+        if (!prompt || !*prompt) {
+            fprintf(stderr, "error: --score needs a prompt (-p or -f)\n");
+            CLI_FAIL;
+        }
+        char *p = unescape(prompt);
+        n_prompt = tok_encode(&tok, p, toks, (int)tok_cap, !no_bos, true);
+        free(p);
+        if (n_prompt < 0) {
+            fprintf(stderr, "error: out of memory tokenizing prompt\n");
+            CLI_FAIL;
+        }
+        if (n_prompt < 2) {
+            fprintf(stderr, "error: --score needs at least 2 tokens to score "
+                    "a transition (got %d)\n", n_prompt);
+            CLI_FAIL;
+        }
+        if (n_prompt > m.n_ctx) {
+            fprintf(stderr, "error: --score prompt is %d tokens, context is "
+                    "%d\n", n_prompt, m.n_ctx);
+            CLI_FAIL;
+        }
+        const char *ch_env = getenv("RUNNER_SCORE_CHUNKED");
+        bool solo = !(ch_env && *ch_env && strcmp(ch_env, "0") != 0);
+        printf("{\"schema_version\":\"xyntetik.runner.score.v1\","
+               "\"n_tokens\":%d,\"n_scored\":%d,\"tokens\":[", n_prompt,
+               n_prompt - 1);
+        for (int i = 0; i < n_prompt; i++)
+            printf("%s%d", i ? "," : "", toks[i]);
+        printf("],\"logprobs\":[");
+        double total = 0;
+        int pos = 0, emitted = 0, fail = 0;
+        while (pos < n_prompt - 1 && !fail) {
+            int k = n_prompt - 1 - pos;
+            int cap = m.spec_batch < m.n_batch ? m.spec_batch : m.n_batch;
+            if (k > cap) k = cap;
+            if (!solo && k > 1 &&
+                model_forward_batch_keep(&m, toks + pos, k, pos)) {
+                for (int b = 0; b < k; b++) {
+                    float *lg = model_spec_row_logits(&m, b);
+                    // raw-logit log-softmax, the lp_capture_pre arithmetic:
+                    // float max, double sum of expf, float result
+                    float mx = lg[0];
+                    for (int i = 1; i < m.n_vocab; i++)
+                        if (lg[i] > mx) mx = lg[i];
+                    double sum = 0;
+                    for (int i = 0; i < m.n_vocab; i++)
+                        sum += expf(lg[i] - mx);
+                    float lp = lg[toks[pos + b + 1]] - (mx + logf((float)sum));
+                    printf("%s%.9g", emitted++ ? "," : "", (double)lp);
+                    total += lp;
+                }
+                pos += k;
+            } else {
+                float *lg = model_forward(&m, toks[pos], pos);
+                if (!lg) { fail = 1; break; }
+                float mx = lg[0];
+                for (int i = 1; i < m.n_vocab; i++)
+                    if (lg[i] > mx) mx = lg[i];
+                double sum = 0;
+                for (int i = 0; i < m.n_vocab; i++)
+                    sum += expf(lg[i] - mx);
+                float lp = lg[toks[pos + 1]] - (mx + logf((float)sum));
+                printf("%s%.9g", emitted++ ? "," : "", (double)lp);
+                total += lp;
+                pos += 1;
+            }
+        }
+        if (fail) {
+            printf("]}\n");
+            fprintf(stderr, "error: forward pass failed at position %d\n", pos);
+            CLI_FAIL;
+        }
+        double nll = -total, mean = nll / (n_prompt - 1);
+        printf("],\"nll_total\":%.9g,\"nll_mean\":%.9g,\"ppl\":%.9g}\n",
+               nll, mean, exp(mean));
+        cli_cleanup(&e, toks, &tok, &m);
+        free(owned_prompt);
+        return 0;
+    }
 
     if (bench_json) {
         // A bench that stops at EOS measures the model's chattiness, not the
