@@ -253,7 +253,10 @@ without `--gpus` reports `"gpu":null` and runs on CPU (`libcuda.so.1` absent), s
 the flag is what makes the difference. A generation attempt in that case says
 that the CUDA driver library is unavailable before continuing on the CPU;
 runtime/device discovery and backend staging failures likewise name the failed
-stage instead of looking like a successful GPU admission. Metal cannot be containerized
+stage instead of looking like a successful GPU admission. CUDA shared-weight
+setup also identifies the tensor upload or per-layer table/field that failed,
+including architecture-specific recurrent, sink, MoE-bias, and Gemma tables.
+Metal cannot be containerized
 (Apple-Silicon only, no passthrough).
 
 ## Models and conversion

@@ -617,12 +617,40 @@ static void gpu_ctx_free(model_t *m, gpu_t *g);
 #define CK(call) do { CUresult _r = (call); if (_r != 0) { \
     fprintf(stderr, "gpu: %s failed: %s\n", #call, cu_err(_r)); goto fail; } } while (0)
 
-static CUdeviceptr f32_dbuf(const float *src, size_t n) {
+static CUdeviceptr f32_dbuf(const float *src, size_t n, const char *what,
+                           int layer) {
     if (!src) return 0;
-    if (n > SIZE_MAX / sizeof(float)) return 0;
+    if (n > SIZE_MAX / sizeof(float)) {
+        if (layer >= 0)
+            fprintf(stderr, "gpu: CUDA upload size overflow for %s in blk.%d "
+                    "— using CPU\n", what, layer);
+        else
+            fprintf(stderr, "gpu: CUDA upload size overflow for %s — using "
+                    "CPU\n", what);
+        return 0;
+    }
     CUdeviceptr d = 0;
-    if (cu.MemAlloc(&d, n * sizeof(float)) != 0) return 0;
-    if (cu.MemcpyHtoD(d, src, n * sizeof(float)) != 0) { cu.MemFree(d); return 0; }
+    CUresult rc = cu.MemAlloc(&d, n * sizeof(float));
+    if (rc != 0) {
+        if (layer >= 0)
+            fprintf(stderr, "gpu: CUDA allocation for %s in blk.%d failed: %s "
+                    "— using CPU\n", what, layer, cu_err(rc));
+        else
+            fprintf(stderr, "gpu: CUDA allocation for %s failed: %s — using "
+                    "CPU\n", what, cu_err(rc));
+        return 0;
+    }
+    rc = cu.MemcpyHtoD(d, src, n * sizeof(float));
+    if (rc != 0) {
+        if (layer >= 0)
+            fprintf(stderr, "gpu: CUDA upload for %s in blk.%d failed: %s — "
+                    "using CPU\n", what, layer, cu_err(rc));
+        else
+            fprintf(stderr, "gpu: CUDA upload for %s failed: %s — using CPU\n",
+                    what, cu_err(rc));
+        cu.MemFree(d);
+        return 0;
+    }
     return d;
 }
 
@@ -630,13 +658,30 @@ static CUdeviceptr f32_dbuf(const float *src, size_t n) {
 // The CPU rmsnorm() runs weightless (multiply by 1) when its weight is NULL, so
 // an optional gemma norm that a GGUF omits must become ones on the GPU — a null
 // device pointer would instead fault k_rmsnorm (no NULL guard in the kernel).
-static CUdeviceptr f32_dbuf_ones(const float *src, size_t n) {
-    if (src) return f32_dbuf(src, n);
-    if (n > SIZE_MAX / sizeof(float)) return 0;
+static CUdeviceptr f32_dbuf_ones(const float *src, size_t n, const char *what,
+                                int layer) {
+    if (src) return f32_dbuf(src, n, what, layer);
+    if (n > SIZE_MAX / sizeof(float)) {
+        if (layer >= 0)
+            fprintf(stderr, "gpu: CUDA host size overflow for %s in blk.%d — "
+                    "using CPU\n", what, layer);
+        else
+            fprintf(stderr, "gpu: CUDA host size overflow for %s — using "
+                    "CPU\n", what);
+        return 0;
+    }
     float *ones = malloc(n * sizeof(float));
-    if (!ones) return 0;
+    if (!ones) {
+        if (layer >= 0)
+            fprintf(stderr, "gpu: CUDA host staging allocation for %s in "
+                    "blk.%d failed — using CPU\n", what, layer);
+        else
+            fprintf(stderr, "gpu: CUDA host staging allocation for %s failed "
+                    "— using CPU\n", what);
+        return 0;
+    }
     for (size_t i = 0; i < n; i++) ones[i] = 1.0f;
-    CUdeviceptr d = f32_dbuf(ones, n);
+    CUdeviceptr d = f32_dbuf(ones, n, what, layer);
     free(ones);
     return d;
 }
@@ -847,13 +892,25 @@ static bool binding_add(gpu_weights *w, const model_t *m, gguf_tensor *t) {
     if (w->n_bindings == w->cap_bindings) {
         int cap = w->cap_bindings ? w->cap_bindings * 2 : 64;
         gpu_weight_binding *nb = realloc(w->bindings, sizeof(*nb) * (size_t)cap);
-        if (!nb) return false;
+        if (!nb) {
+            fprintf(stderr, "gpu: CUDA binding-table growth failed while "
+                    "adding tensor %s — using CPU\n", t->name);
+            return false;
+        }
         w->bindings = nb;
         w->cap_bindings = cap;
     }
     CUdeviceptr d = 0;
-    if (cu.MemAlloc(&d, t->nbytes) != 0) return false;
-    if (cu.MemcpyHtoD(d, t->data, t->nbytes) != 0) {
+    CUresult rc = cu.MemAlloc(&d, t->nbytes);
+    if (rc != 0) {
+        fprintf(stderr, "gpu: CUDA allocation for tensor %s failed: %s — "
+                "using CPU\n", t->name, cu_err(rc));
+        return false;
+    }
+    rc = cu.MemcpyHtoD(d, t->data, t->nbytes);
+    if (rc != 0) {
+        fprintf(stderr, "gpu: CUDA upload for tensor %s failed: %s — using "
+                "CPU\n", t->name, cu_err(rc));
         cu.MemFree(d);
         return false;
     }
@@ -920,11 +977,19 @@ static size_t layer_weight_end(const layer_t *ly, int n_expert, const uint8_t *m
 static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                                  uint64_t fsize, uint64_t fino, int64_t fmtime) {
     gpu_weights *w = calloc(1, sizeof(gpu_weights));
-    if (!w) return NULL;
+    if (!w) {
+        fprintf(stderr, "gpu: CUDA shared-weight state allocation failed — "
+                "using CPU\n");
+        return NULL;
+    }
     if (m->path) {
         size_t n = strlen(m->path) + 1;
         w->path = malloc(n);
-        if (!w->path) goto fail_quiet;
+        if (!w->path) {
+            fprintf(stderr, "gpu: CUDA shared-weight path allocation failed — "
+                    "using CPU\n");
+            goto fail_quiet;
+        }
         memcpy(w->path, m->path, n);
     }
     w->fsize = fsize; w->fino = fino; w->fmtime = fmtime;
@@ -940,12 +1005,20 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         // them without reaching into a model_t that may since have been freed
         size_t nb = sizeof(float) * (size_t)(m->rope_dim / 2);
         w->rope_inv_freq = malloc(nb);
-        if (!w->rope_inv_freq) goto fail_quiet;
+        if (!w->rope_inv_freq) {
+            fprintf(stderr, "gpu: CUDA shared rope-table allocation failed — "
+                    "using CPU\n");
+            goto fail_quiet;
+        }
         memcpy(w->rope_inv_freq, m->rope_inv_freq, nb);
         if (m->rope_inv_freq_local) {
             size_t lb = sizeof(float) * (size_t)(m->rope_dim_local / 2);
             w->rope_inv_freq_local = malloc(lb);
-            if (!w->rope_inv_freq_local) goto fail_quiet;
+            if (!w->rope_inv_freq_local) {
+                fprintf(stderr, "gpu: CUDA shared local-rope-table allocation "
+                        "failed — using CPU\n");
+                goto fail_quiet;
+            }
             memcpy(w->rope_inv_freq_local, m->rope_inv_freq_local, lb);
         }
     }
@@ -1253,16 +1326,24 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         }
         CK(cu.MemAlloc(&w->dummy, 4));
 
-        w->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2);
-        w->inv_freq_local = f32_dbuf(m->rope_inv_freq_local, m->rope_dim_local / 2);
-        w->out_norm = f32_dbuf(m->out_norm_w, m->n_embd);
+        w->inv_freq = f32_dbuf(m->rope_inv_freq, m->rope_dim / 2,
+                               "global rope table", -1);
+        w->inv_freq_local = f32_dbuf(m->rope_inv_freq_local,
+                                     m->rope_dim_local / 2,
+                                     "local rope table", -1);
+        w->out_norm = f32_dbuf(m->out_norm_w, m->n_embd,
+                               "output norm", -1);
         if (!w->inv_freq || !w->out_norm ||
             (m->rope_inv_freq_local && !w->inv_freq_local)) goto fail;
         if (m->v_rmsnorm) { // weightless per-head V norm: weight of ones
             float *ones = malloc(sizeof(float) * max_hd);
-            if (!ones) goto fail;
+            if (!ones) {
+                fprintf(stderr, "gpu: CUDA V-norm staging allocation failed — "
+                        "using CPU\n");
+                goto fail;
+            }
             for (int i = 0; i < max_hd; i++) ones[i] = 1.0f;
-            w->ones = f32_dbuf(ones, max_hd);
+            w->ones = f32_dbuf(ones, max_hd, "weightless V norm", -1);
             free(ones);
             if (!w->ones) goto fail;
         }
@@ -1282,7 +1363,6 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         w->g_pn2  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_gis  = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->g_dsc  = calloc(m->n_layer, sizeof(CUdeviceptr));
-        if (!w->ple_pn) goto fail;
         w->ssm_dt   = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_a    = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ssm_norm = calloc(m->n_layer, sizeof(CUdeviceptr));
@@ -1294,55 +1374,100 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
         w->geb      = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->ueb      = calloc(m->n_layer, sizeof(CUdeviceptr));
         w->deb      = calloc(m->n_layer, sizeof(CUdeviceptr));
-        if (!w->attn_norm || !w->ffn_norm || !w->bq || !w->bk || !w->bv ||
-            !w->bo || !w->qn || !w->kn || !w->pan || !w->pfn ||
-            !w->g_pn1 || !w->g_prn2 || !w->g_pn2 || !w->g_gis || !w->g_dsc ||
-            !w->ssm_dt || !w->ssm_a || !w->ssm_norm ||
-            !w->ssm_D || !w->ssm_conv_b || !w->ssm_gnorm ||
-            !w->sinks || !w->gib || !w->geb || !w->ueb || !w->deb)
-            goto fail;
+#define REQUIRE_PTR_TABLE(ptr, label) do { if (!(ptr)) { \
+            fprintf(stderr, "gpu: CUDA shared per-layer pointer-table " \
+                    "allocation failed (%s) — using CPU\n", label); \
+            goto fail; \
+        } } while (0)
+        REQUIRE_PTR_TABLE(w->attn_norm, "attn_norm");
+        REQUIRE_PTR_TABLE(w->ffn_norm, "ffn_norm");
+        REQUIRE_PTR_TABLE(w->bq, "attn_q bias");
+        REQUIRE_PTR_TABLE(w->bk, "attn_k bias");
+        REQUIRE_PTR_TABLE(w->bv, "attn_v bias");
+        REQUIRE_PTR_TABLE(w->bo, "attn_output bias");
+        REQUIRE_PTR_TABLE(w->qn, "attn_q_norm");
+        REQUIRE_PTR_TABLE(w->kn, "attn_k_norm");
+        REQUIRE_PTR_TABLE(w->pan, "post_attention_norm");
+        REQUIRE_PTR_TABLE(w->pfn, "post_ffn_norm");
+        REQUIRE_PTR_TABLE(w->ple_pn, "per-layer embedding post_norm");
+        REQUIRE_PTR_TABLE(w->g_pn1, "Gemma post_ffw_norm_1");
+        REQUIRE_PTR_TABLE(w->g_prn2, "Gemma pre_ffw_norm_2");
+        REQUIRE_PTR_TABLE(w->g_pn2, "Gemma post_ffw_norm_2");
+        REQUIRE_PTR_TABLE(w->g_gis, "Gemma router input scale");
+        REQUIRE_PTR_TABLE(w->g_dsc, "Gemma expert down scale");
+        REQUIRE_PTR_TABLE(w->ssm_dt, "SSM dt");
+        REQUIRE_PTR_TABLE(w->ssm_a, "SSM A");
+        REQUIRE_PTR_TABLE(w->ssm_norm, "SSM norm");
+        REQUIRE_PTR_TABLE(w->ssm_D, "Mamba D");
+        REQUIRE_PTR_TABLE(w->ssm_conv_b, "Mamba conv bias");
+        REQUIRE_PTR_TABLE(w->ssm_gnorm, "Mamba gated norm");
+        REQUIRE_PTR_TABLE(w->sinks, "attention sinks");
+        REQUIRE_PTR_TABLE(w->gib, "MoE router bias");
+        REQUIRE_PTR_TABLE(w->geb, "MoE gate bias");
+        REQUIRE_PTR_TABLE(w->ueb, "MoE up bias");
+        REQUIRE_PTR_TABLE(w->deb, "MoE down bias");
+#undef REQUIRE_PTR_TABLE
         if (moe_any_on_device(m)) {
             // all-ones per-expert scale table for archs without a down-
             // projection scale — k_moe_actmul multiplies unconditionally
-            w->moe_ones = f32_dbuf_ones(NULL, (size_t)m->n_expert);
+            w->moe_ones = f32_dbuf_ones(NULL, (size_t)m->n_expert,
+                                        "MoE default expert scale", -1);
             if (!w->moe_ones) goto fail;
         }
         for (int l = 0; l < m->n_layer; l++) {
             layer_t *ly = &m->layers[l];
-            w->attn_norm[l] = f32_dbuf(ly->attn_norm_w, m->n_embd);
-            w->ffn_norm[l]  = f32_dbuf(ly->ffn_norm_w, m->n_embd);
-            w->bq[l] = f32_dbuf(ly->bq, model_q_dim(m, l));
-            w->bk[l] = f32_dbuf(ly->bk, model_kv_dim(m, l));
-            w->bv[l] = f32_dbuf(ly->bv, model_kv_dim(m, l));
-            w->bo[l] = f32_dbuf(ly->bo, m->n_embd);
-            w->qn[l] = f32_dbuf(ly->qnorm_w, model_head_dim(m, l));
-            w->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l));
-            w->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd);
-            w->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd);
+            w->attn_norm[l] = f32_dbuf(ly->attn_norm_w, m->n_embd,
+                                       "attention norm", l);
+            w->ffn_norm[l]  = f32_dbuf(ly->ffn_norm_w, m->n_embd,
+                                       "FFN norm", l);
+            w->bq[l] = f32_dbuf(ly->bq, model_q_dim(m, l), "Q bias", l);
+            w->bk[l] = f32_dbuf(ly->bk, model_kv_dim(m, l), "K bias", l);
+            w->bv[l] = f32_dbuf(ly->bv, model_kv_dim(m, l), "V bias", l);
+            w->bo[l] = f32_dbuf(ly->bo, m->n_embd, "attention output bias", l);
+            w->qn[l] = f32_dbuf(ly->qnorm_w, model_head_dim(m, l),
+                                "Q norm", l);
+            w->kn[l] = f32_dbuf(ly->knorm_w, model_head_dim(m, l),
+                                "K norm", l);
+            w->pan[l] = f32_dbuf(ly->post_attn_norm_w, m->n_embd,
+                                 "post-attention norm", l);
+            w->pfn[l] = f32_dbuf(ly->post_ffn_norm_w, m->n_embd,
+                                 "post-FFN norm", l);
             if (ly->ple_post_norm)
-                w->ple_pn[l] = f32_dbuf(ly->ple_post_norm, m->n_embd);
+                w->ple_pn[l] = f32_dbuf(ly->ple_post_norm, m->n_embd,
+                                        "per-layer embedding post-norm", l);
             if (ly->recurrent) {
-                w->ssm_dt[l] = f32_dbuf(ly->ssm_dt, m->ssm_v_heads);
-                w->ssm_a[l] = f32_dbuf(ly->ssm_a, m->ssm_v_heads);
+                w->ssm_dt[l] = f32_dbuf(ly->ssm_dt, m->ssm_v_heads,
+                                        "SSM dt", l);
+                w->ssm_a[l] = f32_dbuf(ly->ssm_a, m->ssm_v_heads,
+                                       "SSM A", l);
                 if (m->qwen35) {
-                    w->ssm_norm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_state);
+                    w->ssm_norm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_state,
+                                              "SSM norm", l);
                 } else {   // Mamba-2 (granitehybrid/nemotron_h)
                     int cd = m->ssm_inner + 2 * m->ssm_groups * m->ssm_state;
-                    w->ssm_D[l] = f32_dbuf(ly->ssm_d, m->ssm_v_heads);
-                    w->ssm_conv_b[l] = f32_dbuf(ly->ssm_conv1d_b, cd);
-                    w->ssm_gnorm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_inner);
+                    w->ssm_D[l] = f32_dbuf(ly->ssm_d, m->ssm_v_heads,
+                                           "Mamba D", l);
+                    w->ssm_conv_b[l] = f32_dbuf(ly->ssm_conv1d_b, cd,
+                                                "Mamba conv bias", l);
+                    w->ssm_gnorm[l] = f32_dbuf(ly->ssm_norm_w, m->ssm_inner,
+                                               "Mamba gated norm", l);
                 }
             }
             // gpt-oss: per-head sink logits + router/per-expert bias tables
-            w->sinks[l] = f32_dbuf(ly->attn_sinks, m->n_head);
+            w->sinks[l] = f32_dbuf(ly->attn_sinks, m->n_head,
+                                    "attention sinks", l);
             if (ly->is_moe && !moe_on_host(m, l)) {
-                w->gib[l] = f32_dbuf(ly->ffn_gate_inp_b, m->n_expert);
+                w->gib[l] = f32_dbuf(ly->ffn_gate_inp_b, m->n_expert,
+                                     "MoE router bias", l);
                 w->geb[l] = f32_dbuf(ly->ffn_gate_exps_b,
-                                     (size_t)m->n_expert * m->n_ff_exp);
+                                     (size_t)m->n_expert * m->n_ff_exp,
+                                     "MoE gate bias", l);
                 w->ueb[l] = f32_dbuf(ly->ffn_up_exps_b,
-                                     (size_t)m->n_expert * m->n_ff_exp);
+                                     (size_t)m->n_expert * m->n_ff_exp,
+                                     "MoE up bias", l);
                 w->deb[l] = f32_dbuf(ly->ffn_down_exps_b,
-                                     (size_t)m->n_expert * m->n_embd);
+                                     (size_t)m->n_expert * m->n_embd,
+                                     "MoE down bias", l);
             }
             if (ly->moe_gemma) {
                 // gemma-4 dual-branch norms + router scale. All are optional in
@@ -1350,52 +1475,89 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
                 // an absent gate_inp_scale as 1.0, so mirror that here (ones /
                 // 1.0-fold) rather than leave a null device ptr — k_rmsnorm has
                 // no NULL guard and would fault on device pointer 0.
-                w->g_pn1[l]  = f32_dbuf_ones(ly->ffn_post_norm1_w, m->n_embd);
-                w->g_prn2[l] = f32_dbuf_ones(ly->ffn_pre_norm2_w,  m->n_embd);
-                w->g_pn2[l]  = f32_dbuf_ones(ly->ffn_post_norm2_w, m->n_embd);
+                w->g_pn1[l]  = f32_dbuf_ones(ly->ffn_post_norm1_w, m->n_embd,
+                                             "Gemma post-FFN norm 1", l);
+                w->g_prn2[l] = f32_dbuf_ones(ly->ffn_pre_norm2_w, m->n_embd,
+                                             "Gemma pre-FFN norm 2", l);
+                w->g_pn2[l]  = f32_dbuf_ones(ly->ffn_post_norm2_w, m->n_embd,
+                                             "Gemma post-FFN norm 2", l);
                 // fold the router's 1/sqrt(n_embd) into the uploaded scale so a
                 // plain weighted rmsnorm reproduces the CPU router input exactly
                 float inv = 1.0f / sqrtf((float)m->n_embd);
                 float *gs = malloc(sizeof(float) * m->n_embd);
-                if (!gs) goto fail;
+                if (!gs) {
+                    fprintf(stderr, "gpu: CUDA Gemma router-scale staging "
+                            "allocation failed in blk.%d — using CPU\n", l);
+                    goto fail;
+                }
                 for (int i = 0; i < m->n_embd; i++)
                     gs[i] = (ly->gate_inp_scale ? ly->gate_inp_scale[i] : 1.0f) * inv;
-                w->g_gis[l] = f32_dbuf(gs, m->n_embd);
+                w->g_gis[l] = f32_dbuf(gs, m->n_embd,
+                                       "Gemma router input scale", l);
                 free(gs);
                 // per-expert down scale for the indirect expert path (ones
                 // when the GGUF has none — same 1.0 fold the CPU applies)
-                w->g_dsc[l] = f32_dbuf_ones(ly->down_exps_scale, m->n_expert);
+                w->g_dsc[l] = f32_dbuf_ones(ly->down_exps_scale, m->n_expert,
+                                            "Gemma expert down scale", l);
             }
             bool moe_dev = ly->is_moe && !moe_on_host(m, l);
             // ffn_norm is required only where the layer HAS an FFN: a
             // nemotron_h SSM or attention block carries none (skip_ffn), and
             // demanding its upload here silently pushed every nemotron_h
             // model to the CPU.
-            if (!w->attn_norm[l] || (ly->ffn_norm_w && !w->ffn_norm[l]) ||
-                (ly->bq && !w->bq[l]) || (ly->bk && !w->bk[l]) ||
-                (ly->bv && !w->bv[l]) || (ly->bo && !w->bo[l]) ||
-                (ly->qnorm_w && !w->qn[l]) || (ly->knorm_w && !w->kn[l]) ||
-                (ly->post_attn_norm_w && !w->pan[l]) ||
-                (ly->post_ffn_norm_w && !w->pfn[l]) ||
-                (ly->ple_post_norm && !w->ple_pn[l]) ||
-                (ly->attn_sinks && !w->sinks[l]) ||
-                (moe_dev && ly->ffn_gate_inp_b  && !w->gib[l]) ||
-                (moe_dev && ly->ffn_gate_exps_b && !w->geb[l]) ||
-                (moe_dev && ly->ffn_up_exps_b   && !w->ueb[l]) ||
-                (moe_dev && ly->ffn_down_exps_b && !w->deb[l]) ||
-                // per-family recurrent tables: qwen35 fills ssm_norm; the
-                // Mamba-2 branch fills gnorm/D/conv_b instead. Checking
-                // ssm_norm for both families made every granitehybrid and
-                // nemotron_h layer fail here — a SILENT whole-model CPU
-                // fallback that kept the k_mamba2_* path from ever running.
-                (ly->recurrent && (!w->ssm_dt[l] || !w->ssm_a[l])) ||
-                (ly->recurrent && m->qwen35 && !w->ssm_norm[l]) ||
-                (ly->recurrent && !m->qwen35 &&
-                 (!w->ssm_gnorm[l] || !w->ssm_D[l] || !w->ssm_conv_b[l])) ||
-                (ly->moe_gemma && (!w->g_pn1[l] || !w->g_prn2[l] ||
-                                   !w->g_pn2[l] || !w->g_gis[l] ||
-                                   !w->g_dsc[l])))
-                goto fail;
+#define REQUIRE_UPLOAD(cond, label) do { if (cond) { \
+                fprintf(stderr, "gpu: CUDA shared upload is missing %s in " \
+                        "blk.%d — using CPU\n", label, l); \
+                goto fail; \
+            } } while (0)
+            REQUIRE_UPLOAD(!w->attn_norm[l], "attention norm");
+            REQUIRE_UPLOAD(ly->ffn_norm_w && !w->ffn_norm[l], "FFN norm");
+            REQUIRE_UPLOAD(ly->bq && !w->bq[l], "Q bias");
+            REQUIRE_UPLOAD(ly->bk && !w->bk[l], "K bias");
+            REQUIRE_UPLOAD(ly->bv && !w->bv[l], "V bias");
+            REQUIRE_UPLOAD(ly->bo && !w->bo[l], "attention output bias");
+            REQUIRE_UPLOAD(ly->qnorm_w && !w->qn[l], "Q norm");
+            REQUIRE_UPLOAD(ly->knorm_w && !w->kn[l], "K norm");
+            REQUIRE_UPLOAD(ly->post_attn_norm_w && !w->pan[l],
+                           "post-attention norm");
+            REQUIRE_UPLOAD(ly->post_ffn_norm_w && !w->pfn[l],
+                           "post-FFN norm");
+            REQUIRE_UPLOAD(ly->ple_post_norm && !w->ple_pn[l],
+                           "per-layer embedding post-norm");
+            REQUIRE_UPLOAD(ly->attn_sinks && !w->sinks[l],
+                           "attention sinks");
+            REQUIRE_UPLOAD(moe_dev && ly->ffn_gate_inp_b && !w->gib[l],
+                           "MoE router bias");
+            REQUIRE_UPLOAD(moe_dev && ly->ffn_gate_exps_b && !w->geb[l],
+                           "MoE gate bias");
+            REQUIRE_UPLOAD(moe_dev && ly->ffn_up_exps_b && !w->ueb[l],
+                           "MoE up bias");
+            REQUIRE_UPLOAD(moe_dev && ly->ffn_down_exps_b && !w->deb[l],
+                           "MoE down bias");
+            // Per-family recurrent tables: Qwen3.5 fills ssm_norm; Mamba-2
+            // fills gated norm/D/conv bias instead. Keep each validation beside
+            // the same family predicate that filled it above.
+            REQUIRE_UPLOAD(ly->recurrent && !w->ssm_dt[l], "SSM dt");
+            REQUIRE_UPLOAD(ly->recurrent && !w->ssm_a[l], "SSM A");
+            REQUIRE_UPLOAD(ly->recurrent && m->qwen35 && !w->ssm_norm[l],
+                           "SSM norm");
+            REQUIRE_UPLOAD(ly->recurrent && !m->qwen35 && !w->ssm_gnorm[l],
+                           "Mamba gated norm");
+            REQUIRE_UPLOAD(ly->recurrent && !m->qwen35 && !w->ssm_D[l],
+                           "Mamba D");
+            REQUIRE_UPLOAD(ly->recurrent && !m->qwen35 && !w->ssm_conv_b[l],
+                           "Mamba conv bias");
+            REQUIRE_UPLOAD(ly->moe_gemma && !w->g_pn1[l],
+                           "Gemma post-FFN norm 1");
+            REQUIRE_UPLOAD(ly->moe_gemma && !w->g_prn2[l],
+                           "Gemma pre-FFN norm 2");
+            REQUIRE_UPLOAD(ly->moe_gemma && !w->g_pn2[l],
+                           "Gemma post-FFN norm 2");
+            REQUIRE_UPLOAD(ly->moe_gemma && !w->g_gis[l],
+                           "Gemma router input scale");
+            REQUIRE_UPLOAD(ly->moe_gemma && !w->g_dsc[l],
+                           "Gemma expert down scale");
+#undef REQUIRE_UPLOAD
         }
     }
     w->refs = 1;
@@ -1557,6 +1719,17 @@ bool gpu_init(model_t *m) {
                 !gpu_tensor_type_ok(ly->ffn_up_exps) ||
                 !gpu_tensor_type_ok(ly->ffn_down_exps)) return false;
         }
+    }
+
+    // Deterministic admission-fallback tracer. This fires before driver
+    // discovery so CPU-only CI can hold the diagnostic contract for a failure
+    // that normally requires an actual CUDA device plus host allocation
+    // pressure to reach.
+    const char *init_inject = getenv("RUNNER_CUDA_INIT_INJECT_FAILURE");
+    if (init_inject && !strcmp(init_inject, "shared-pointer-tables")) {
+        fprintf(stderr, "gpu: CUDA shared per-layer pointer-table allocation "
+                "failed (injected) — using CPU\n");
+        return false;
     }
 
     if (!cu_load()) {

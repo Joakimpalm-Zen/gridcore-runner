@@ -6,6 +6,7 @@ tensors use a supported type, and a CPU-vs-auto comparison alone would pass
 vacuously after an unexplained fallback.
 """
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -34,11 +35,12 @@ def moe_fixtures(tmp_path_factory):
     return prefix
 
 
-def _run(runner_bin, model, mode):
+def _run(runner_bin, model, mode, env=None):
     return subprocess.run(
         [runner_bin, "-m", str(model), "-p", PROMPT, "-n", "4", "--temp",
          "0", "--gpu", mode],
-        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300,
+        env=env)
 
 
 def test_gated_sparse_moe_declines_loudly(runner_bin, moe_fixtures):
@@ -105,4 +107,24 @@ def test_cuda_runtime_absence_is_loud(runner_bin, tmp_path):
     assert cpu.stdout == auto.stdout
     err = auto.stderr.decode(errors="replace")
     assert "CUDA driver library is unavailable" in err, err
+    assert "using CPU" in err, err
+
+
+def test_cuda_shared_table_failure_is_loud(runner_bin, tmp_path):
+    caps = json.loads(subprocess.run(
+        [runner_bin, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
+        check=True).stdout)
+    if (caps.get("gpu") or {}).get("backend") == "metal":
+        pytest.skip("CUDA-only diagnostic")
+
+    model = tmp_path / "dense.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py", str(model)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    env = {**os.environ,
+           "RUNNER_CUDA_INIT_INJECT_FAILURE": "shared-pointer-tables"}
+    auto = _run(runner_bin, model, "auto", env=env)
+    assert auto.returncode == 0, auto.stderr.decode(errors="replace")
+    err = auto.stderr.decode(errors="replace")
+    assert "CUDA shared per-layer pointer-table allocation failed" in err, err
     assert "using CPU" in err, err
