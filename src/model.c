@@ -3254,6 +3254,17 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
         // 8 threads gave 1.7 tok/s where 64 gave 5.1.
         pool_threads = p->cpu_fallback_threads;
     }
+    // Sparse-MoE decode is bandwidth-bound, not compute-bound: measured on a
+    // 128-cpu host (Lightning-30B-A3B Q4_0, 48-token greedy, two reps per
+    // point), decode peaks at 24-32 threads (30-31 tok/s) and FALLS ~8% by
+    // the 64-thread default cap (28.3); its 601-token prefill saturates by
+    // t=32 too (147 tok/s; 64/96 within noise). The dense control
+    // (Hermes-4-14B Q4_K_M) peaks at 48 and keeps the old cap. Applies only
+    // to a DEFAULTED count (cpu_fallback_threads is 0 under a pinned -t or
+    // --reserve-cpu); boxes at or below 32 cores are unaffected.
+    if (p->cpu_fallback_threads > 0 && m->n_expert > 0 &&
+        m->n_expert_used < m->n_expert && pool_threads > 32)
+        pool_threads = 32;
     m->tp = tpool_create(pool_threads);
     if (!m->tp) {
         fprintf(stderr, "error: cannot create thread pool\n");
