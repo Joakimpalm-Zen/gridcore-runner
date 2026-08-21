@@ -18,6 +18,18 @@ void sock_init(void) {
 int  sock_recv(sock_t fd, char *buf, size_t n) { return recv(fd, buf, (int)n, 0); }
 int  sock_send(sock_t fd, const char *buf, size_t n) { return send(fd, buf, (int)n, 0); }
 int  sock_peek(sock_t fd, char *buf, size_t n) { return recv(fd, buf, (int)n, MSG_PEEK); }
+bool sock_peer_closed(sock_t fd) {
+    // Winsock has no MSG_DONTWAIT. A zero-timeout readiness check makes the
+    // following peek non-blocking; this is the same shape accept_fastpath uses
+    // before its own MSG_PEEK. No other thread reads an in-flight request fd.
+    fd_set rs;
+    struct timeval tv = {0, 0};
+    FD_ZERO(&rs);
+    FD_SET(fd, &rs);
+    if (select(0, &rs, NULL, NULL, &tv) != 1) return false;
+    char byte;
+    return recv(fd, &byte, 1, MSG_PEEK) == 0;
+}
 void sock_close(sock_t fd) { closesocket(fd); }
 // Winsock reports through WSAGetLastError, NOT errno — strerror(errno) here
 // prints "Success" (or a stale unrelated error) for a genuine bind failure,
@@ -56,6 +68,13 @@ void sock_init(void) {
 int  sock_recv(sock_t fd, char *buf, size_t n) { return (int)read(fd, buf, n); }
 int  sock_send(sock_t fd, const char *buf, size_t n) { return (int)write(fd, buf, n); }
 int  sock_peek(sock_t fd, char *buf, size_t n) { return (int)recv(fd, buf, n, MSG_PEEK); }
+bool sock_peer_closed(sock_t fd) {
+    char byte;
+    // Only an orderly FIN is cancellation. Positive means data (possibly the
+    // next pipelined request) and is left untouched by MSG_PEEK. Negative —
+    // especially EAGAIN/EWOULDBLOCK for an alive, quiet peer — is not proof.
+    return recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT) == 0;
+}
 void sock_close(sock_t fd) { close(fd); }
 const char *sock_errstr(void) { return strerror(errno); }
 void sock_recv_timeout(sock_t fd, double s) {

@@ -38,6 +38,9 @@ void sock_init(void);
 int  sock_recv(sock_t fd, char *buf, size_t n);
 int  sock_send(sock_t fd, const char *buf, size_t n);
 int  sock_peek(sock_t fd, char *buf, size_t n);
+// Non-consuming, non-blocking proof of an orderly peer close. Readable bytes
+// and every error (including would-block) mean "not proven closed".
+bool sock_peer_closed(sock_t fd);
 void sock_close(sock_t fd);
 // The reason a socket call failed, from the platform's own error channel.
 const char *sock_errstr(void);

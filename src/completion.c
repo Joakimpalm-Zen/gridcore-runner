@@ -78,6 +78,18 @@ typedef struct {
     int   u8_pend_n[2];
 } gen_ctx;
 
+typedef struct {
+    sock_t fd;
+    bool  *dead; // shared with the write path's existing failure verdict
+} client_stop;
+
+static bool client_disconnected(void *ud) {
+    client_stop *s = ud;
+    if (*s->dead) return true;
+    if (sock_peer_closed(s->fd)) *s->dead = true;
+    return *s->dead;
+}
+
 // common prefix of every streamed chunk. `created` and `model` are required by
 // the ChatCompletionChunk schema and strictly-validating SDKs reject a chunk
 // without them, so they are written here rather than per call site.
@@ -184,6 +196,7 @@ static void append_text_logprobs(sbuf *r, slot_t *s, engine *e) {
 }
 
 static void completion_cleanup(engine *e, snode *schema, gen_ctx *g) {
+    engine_set_stop(e, NULL, NULL);
     e->schema = NULL;
     e->emit_think_prelude = false;
     e->constraint_includes_prelude = false;
@@ -1796,6 +1809,11 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     // telemetry wants neither. cache_prompt:false remains the full opt-out.
     bool share_prefix = jv_bool(jv_get(req, "prefix_cache"), true);
     prefix_reuse reuse = { 0, 0, 0.0 };
+    gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
+                  .stop_strs = stops, .n_stop = n_stops, .eng = e,
+                  .created = (long)time(NULL) };
+    client_stop stop = { .fd = fd, .dead = &g.dead };
+    snprintf(g.id, sizeof(g.id), "%s", req_id);
     // Prefill is scheduled apart from decode: different kernel shape, and it
     // is this slot's own model_forward_batch, so it must not overlap a
     // microbatch containing this sequence. It cannot — the sequence only joins
@@ -1805,6 +1823,7 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     // Yield the device turn between prefill chunks. Without it a long prompt
     // holds it for the whole prefill and every other slot waits: measured at
     // 26.2 s for a short request arriving during a 2,300-token prefill.
+    engine_set_stop(e, client_disconnected, &stop);
     engine_set_prefill_yield(e, prefill_yield_turn, NULL);
     sched_prefill_begin();
     if (cache_prompt && share_prefix)
@@ -1837,22 +1856,19 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
         engine_prefix_publish(e, toks, n_prompt, n_prompt - keep, prefill_s);
     free(toks);
     if (!logits) {
-        completion_cleanup(e, schema, NULL);
-        send_error_detail(fd, 400, "context overflow",
-                          api == API_TEXT ? "prompt" :
-                          api == API_RESPONSES ? "input" : "messages",
-                          "context_length_exceeded");
+        completion_cleanup(e, schema, &g);
+        if (!g.dead)
+            send_error_detail(fd, 400, "context overflow",
+                              api == API_TEXT ? "prompt" :
+                              api == API_RESPONSES ? "input" : "messages",
+                              "context_length_exceeded");
         return;
     }
     if ((chat && s->tmpl == TMPL_ORNITH) || muse_forced_think ||
         harmony_primed_think)
         engine_think_started(e);
 
-    gen_ctx g = { .out = {0}, .fd = fd, .stream = stream, .api = api,
-                  .stop_strs = stops, .n_stop = n_stops, .eng = e,
-                  .created = (long)time(NULL) };
     tool_envelope muse_plain_env = {.proto = TP_MUSE_PLAIN};
-    snprintf(g.id, sizeof(g.id), "%s", req_id);
     // split thinking channels out of chat responses; raw completions stay raw
     if (env && (env->proto == TP_HARMONY || env->proto == TP_GEMMA4))
         think_init(&g.ts, NULL, NULL);
@@ -1925,6 +1941,11 @@ void run_completion(slot_t *s, sock_t fd, const char *prompt, int api,
     // The one place every surface's generation passes through, so /health's
     // cumulative counters see chat, completions, responses and messages alike.
     server_record_work(n_prompt, n_gen, gtime);
+    // The socket probe and the streaming write path share g.dead. Whichever
+    // learned the verdict first takes this same cleanup exit: no terminal
+    // frame is owed to a peer already proven gone, and buffered responses must
+    // not spend time building a body only to rediscover the failed socket.
+    if (g.dead) goto done;
     think_finish(&g.ts, gen_emit, &g);
     // generation ended without a stop match: the withheld partial-match
     // tail was ordinary output after all

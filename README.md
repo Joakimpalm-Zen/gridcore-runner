@@ -804,7 +804,11 @@ speculative mode flags. `speculative` reports whether that request used the
 speculative walk, not merely whether the server has a draft loaded; logprob and
 choice-logprob capture use the solo walk and therefore report it as false. Set
 request field `"cache_prompt": false` to bypass prefix reuse. Streaming clients
-that disconnect cancel generation.
+whose writes fail cancel generation. An orderly client socket close on any
+completion surface also cancels at the next complete prefill chunk or decode
+step, so an abandoned long prompt does not keep its slot busy; the probe is
+non-consuming, so an alive quiet client or readable pipelined bytes are not a
+cancellation signal.
 
 Every generating endpoint also accepts a per-request `"timeout"` in seconds
 (`0`–`86400`), which overrides `RUNNER_REQUEST_TIMEOUT` for that request; `0`

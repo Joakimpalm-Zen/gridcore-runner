@@ -1628,6 +1628,7 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
             st_gr_accepted, st_gr_drafted); } while (0)
 
     while ((max_new < 0 || n_gen < max_new) && e->pos < m->n_ctx) {
+        if (e->stop && e->stop(e->stop_ud)) break;
         st_rounds++;
         // a grammar-pinned run drafts for free and preempts the draft model
         int nd = 0, gr = 0;
@@ -1673,6 +1674,12 @@ static int engine_generate_spec(engine *e, float *logits, int max_new,
         int i = 0;
         for (; i <= nd; i++) {
             if (max_new >= 0 && n_gen >= max_new) goto rewind;
+            if (e->stop && e->stop(e->stop_ud)) {
+                e->pos += i; // keep only drafts accepted before this poll
+                spec_fold_sync(e, d, i, nd, round_pos);
+                dpos_rewind(e, e->pos);
+                goto done;
+            }
             float *ti = i == 0 ? logits : model_spec_row_logits(m, i - 1);
             int tok = sample_pick(e->smp, ti, m->n_vocab, ok, e);
             if (tok < 0) {
@@ -1937,7 +1944,9 @@ int engine_generate(engine *e, float *logits, int max_new,
     }
     engine_gen_begin(e, max_new);
     int32_t tok; int pos;
-    while (engine_gen_step(e, logits, cb, ud, &tok, &pos) == ENGINE_STEP_MORE)
+    while (engine_gen_step(e, logits, cb, ud, &tok, &pos) == ENGINE_STEP_MORE) {
+        if (e->stop && e->stop(e->stop_ud)) break;
         logits = model_forward(e->m, tok, pos);
+    }
     return engine_gen_end(e, cb, ud, gen_time);
 }
