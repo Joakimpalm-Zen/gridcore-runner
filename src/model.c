@@ -4956,6 +4956,7 @@ enum { LW_Q, LW_K, LW_V, LW_O, LW_GATE, LW_UP, LW_DOWN, LW_SLOTS };
 #define LORA_R_MAX 512
 struct lora_w {
     float *a, *b;   // a: [r][n_in] row-major, b: [n_out][r] row-major
+    float *ga, *gb; // D3 gradient accumulators, same shapes (NULL until used)
     int    r;       // 0 = no adapter on this slot
     float  scale;   // (alpha / r) * user scale, folded at load
 };
@@ -4971,6 +4972,8 @@ void model_lora_free(model_t *m) {
         for (int s = 0; s < LW_SLOTS; s++) {
             free(m->lora[(size_t)l * LW_SLOTS + s].a);
             free(m->lora[(size_t)l * LW_SLOTS + s].b);
+            free(m->lora[(size_t)l * LW_SLOTS + s].ga);
+            free(m->lora[(size_t)l * LW_SLOTS + s].gb);
         }
     free(m->lora);
     m->lora = NULL;
@@ -5174,6 +5177,450 @@ done:
     return ok;
 }
 
+
+// ------------------- adaptation D3: backward through the LoRA path (CPU ref)
+// Frozen base, gradients only for the adapters — but ACTIVATION gradients
+// flow through everything, so this is a full reverse sweep: loss -> head ->
+// out-norm -> layers in reverse (FFN back, attention back including the
+// cross-position dK/dV paths, rope transpose, rmsnorm backward). The forward
+// half IS the inference forward: solo model_forward calls tape each layer's
+// residual-stream input, and the backward recomputes layer internals with
+// the same primitives (rmsnorm, matvec_b, attn_heads, softmax) so the values
+// differentiated are the values inference computed — including the f16
+// rounding of the cached K/V, which the backward reads from the cache rather
+// than re-deriving. Everything accumulates with explicit fmaf in fixed
+// sequential order: same data -> byte-identical gradients, the property D5
+// pins for the whole training loop.
+
+// dx[i] += sum_j W[j,i] * dy[j] — the transposed quantized matvec from the
+// T0 audit: rows are dequantized one at a time (any weight type quants.c can
+// decode) and accumulated serially for reproducibility.
+static bool matvec_t(const gguf_tensor *w, const float *dy, float *dx,
+                     int n_in, int n_out) {
+    float *rowbuf = malloc(sizeof(float) * (size_t)n_in);
+    if (!rowbuf) return false;
+    size_t rs = ggml_row_size(w->type, n_in);
+    for (int j = 0; j < n_out; j++) {
+        float d = dy[j];
+        if (d == 0.0f) continue;
+        dequant_row(w->type, (const uint8_t *)w->data + (size_t)j * rs,
+                    rowbuf, n_in);
+        for (int i = 0; i < n_in; i++) dx[i] = fmaf(rowbuf[i], d, dx[i]);
+    }
+    free(rowbuf);
+    return true;
+}
+
+// y_i = x_i * r * w_i with r = 1/sqrt(mean(x^2)+eps):
+// dx_i += r*w_i*dy_i - (r^3/n)*x_i*sum_j(w_j*dy_j*x_j)
+static void rmsnorm_bw(const float *x, const float *w, const float *dy,
+                       float *dx, int n, float eps) {
+    float ss = 0.0f, dot = 0.0f;
+    for (int i = 0; i < n; i++) ss = fmaf(x[i], x[i], ss);
+    float r = 1.0f / sqrtf(ss / (float)n + eps);
+    for (int i = 0; i < n; i++) dot = fmaf(w[i] * dy[i], x[i], dot);
+    float c = r * r * r / (float)n * dot;
+    for (int i = 0; i < n; i++)
+        dx[i] += r * w[i] * dy[i] - c * x[i];
+}
+
+// adapter backward at one projection site: given dy (grad wrt the site's
+// output) and xin (the site's input), accumulate dA/dB and add both the
+// adapter's and the FROZEN BASE's contribution to dxin.
+static bool lora_site_bw(model_t *m, int l, int slot, const gguf_tensor *w,
+                         const float *xin, const float *dy, float *dxin,
+                         int n_in, int n_out) {
+    if (!matvec_t(w, dy, dxin, n_in, n_out)) return false;
+    struct lora_w *lw = m->lora ? &m->lora[(size_t)l * LW_SLOTS + slot] : NULL;
+    if (!lw || !lw->r) return true;
+    if (!lw->ga) lw->ga = calloc((size_t)lw->r * n_in, sizeof(float));
+    if (!lw->gb) lw->gb = calloc((size_t)n_out * lw->r, sizeof(float));
+    if (!lw->ga || !lw->gb) return false;
+    float tb[LORA_R_MAX], tf[LORA_R_MAX];
+    // tb = B^T dy ; tf = A x
+    for (int k = 0; k < lw->r; k++) {
+        float acc = 0.0f;
+        for (int j = 0; j < n_out; j++)
+            acc = fmaf(lw->b[(size_t)j * lw->r + k], dy[j], acc);
+        tb[k] = acc;
+        const float *ar = lw->a + (size_t)k * n_in;
+        float acf = 0.0f;
+        for (int i = 0; i < n_in; i++) acf = fmaf(ar[i], xin[i], acf);
+        tf[k] = acf;
+    }
+    float s = lw->scale;
+    for (int k = 0; k < lw->r; k++) {
+        float *gar = lw->ga + (size_t)k * n_in;
+        float stb = s * tb[k];
+        for (int i = 0; i < n_in; i++) gar[i] = fmaf(stb, xin[i], gar[i]);
+    }
+    for (int j = 0; j < n_out; j++) {
+        float *gbr = lw->gb + (size_t)j * lw->r;
+        float sdy = s * dy[j];
+        for (int k = 0; k < lw->r; k++) gbr[k] = fmaf(sdy, tf[k], gbr[k]);
+    }
+    for (int i = 0; i < n_in; i++) {
+        float acc = 0.0f;
+        for (int k = 0; k < lw->r; k++)
+            acc = fmaf(lw->a[(size_t)k * n_in + i], tb[k], acc);
+        dxin[i] = fmaf(s, acc, dxin[i]);
+    }
+    return true;
+}
+
+// forward apply for the recompute passes (same math as LORA_HOOK, one row)
+static void lora_site_fw(model_t *m, int l, int slot, float *y,
+                         const float *xin, int n_in, int n_out) {
+    if (!m->lora) return;
+    lora_apply(&m->lora[(size_t)l * LW_SLOTS + slot], y, n_out, xin, n_in,
+               n_in, n_out, 1);
+}
+
+// transpose of rope_apply's per-pair rotation (the ms factor rides inside
+// c/s exactly as in the forward, so this is the true adjoint)
+static void rope_unapply(model_t *m, float *v, int n_heads, int pos,
+                         int layer) {
+    bool local = model_is_swa(m, layer);
+    int hd   = model_head_dim(m, layer);
+    int half = model_rope_dim(m, layer) / 2;
+    const float *fr = local ? m->rope_inv_freq_local : m->rope_inv_freq;
+    float ms = model_rope_mscale(m, layer);
+    for (int j = 0; j < half; j++) {
+        float a = pos * fr[j];
+        float c = cosf(a) * ms, s = sinf(a) * ms;
+        for (int h = 0; h < n_heads; h++) {
+            float *p = v + h * hd;
+            float *p0 = m->rope_neox ? p + j : p + 2 * j;
+            float *p1 = m->rope_neox ? p + j + half : p0 + 1;
+            float x0 = *p0, x1 = *p1;
+            *p0 =  x0 * c + x1 * s;
+            *p1 = -x0 * s + x1 * c;
+        }
+    }
+}
+
+// the exact SiLU the forward's gated_act computes (same -80 cutoff), and its
+// derivative (zero in the cutoff region, matching the piecewise definition)
+static float silu_f(float g) {
+    return g < -80.0f ? 0.0f : g / (1.0f + expf(-g));
+}
+static float silu_d(float g) {
+    if (g < -80.0f) return 0.0f;
+    float sg = 1.0f / (1.0f + expf(-g));
+    return sg * (1.0f + g * (1.0f - sg));
+}
+
+static bool lora_bw_supported(model_t *m, char *why, size_t cap) {
+    const char *r = NULL;
+    if (m->gpu) r = "GPU-resident model (run --gpu off)";
+    else if (m->qwen35 || m->granite_hybrid || m->nemotron_h)
+        r = "recurrent architecture";
+    else if (m->n_expert > 0 || m->moe_gemma) r = "MoE FFN";
+    else if (m->kv_q8) r = "q8 KV cache (use --kv f16)";
+    else if (m->ffn_act != ACT_SILU) r = "non-SiLU FFN activation";
+    else if (m->logit_softcap != 0.0f || m->n_suppress > 0)
+        r = "head transforms (softcap/suppress)";
+    else if (m->logit_scale != 1.0f) r = "scaled logits";
+    else if (m->embd_scale != 1.0f || m->resid_scale != 1.0f ||
+             m->embd_norm) r = "muP/embedding scaling";
+    else if (m->attn_out_gate) r = "attention output gate";
+    else if (m->ple) r = "per-layer embeddings";
+    for (int l = 0; !r && l < m->n_layer; l++) {
+        const layer_t *ly = &m->layers[l];
+        if (model_is_swa(m, l)) r = "sliding-window attention";
+        else if (!ly->wv) r = "shared/absent V projection";
+        else if (!ly->w_gate || !ly->w_up) r = "ungated FFN";
+        else if (ly->qnorm_w || ly->knorm_w) r = "per-head QK norms";
+        else if (ly->post_attn_norm_w || ly->post_ffn_norm_w)
+            r = "post-block norms";
+        else if (ly->attn_sinks) r = "attention sinks";
+        else if (model_rope_dim(m, l) != model_head_dim(m, l))
+            r = "partial-dimension rope";
+    }
+    if (r && why) snprintf(why, cap, "%s", r);
+    return r == NULL;
+}
+
+void model_lora_grad_zero(model_t *m) {
+    if (!m->lora) return;
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++) {
+            struct lora_w *lw = &m->lora[(size_t)l * LW_SLOTS + s];
+            gguf_tensor *base = lora_slot_base(m, l, s);
+            if (!lw->r || !base) continue;
+            if (lw->ga) memset(lw->ga, 0,
+                sizeof(float) * (size_t)lw->r * base->ne[0]);
+            if (lw->gb) memset(lw->gb, 0,
+                sizeof(float) * (size_t)base->ne[1] * lw->r);
+        }
+}
+
+float *model_lora_param(model_t *m, int layer, int slot, int which,
+                        int *count) {
+    if (!m->lora || layer < 0 || layer >= m->n_layer || slot < 0 ||
+        slot >= LW_SLOTS) return NULL;
+    struct lora_w *lw = &m->lora[(size_t)layer * LW_SLOTS + slot];
+    gguf_tensor *base = lora_slot_base(m, layer, slot);
+    if (!lw->r || !base) return NULL;
+    if (count) *count = which ? (int)(base->ne[1] * lw->r)
+                              : (int)(lw->r * base->ne[0]);
+    return which ? lw->b : lw->a;
+}
+
+float *model_lora_gradbuf(model_t *m, int layer, int slot, int which,
+                          int *count) {
+    if (!m->lora || layer < 0 || layer >= m->n_layer || slot < 0 ||
+        slot >= LW_SLOTS) return NULL;
+    struct lora_w *lw = &m->lora[(size_t)layer * LW_SLOTS + slot];
+    gguf_tensor *base = lora_slot_base(m, layer, slot);
+    if (!lw->r || !base) return NULL;
+    if (count) *count = which ? (int)(base->ne[1] * lw->r)
+                              : (int)(lw->r * base->ne[0]);
+    return which ? lw->gb : lw->ga;
+}
+
+// One layer's reverse sweep. dx enters as the grad wrt the layer's OUTPUT
+// residual stream (per position) and leaves as the grad wrt its INPUT.
+// Phase R recomputes the layer's forward internals from the tape (attention
+// via the production attn_heads worker so the recomputed values are the
+// forward's bits); phase B1 walks positions doing FFN + attention backward
+// (accumulating the cross-position dK/dV); phase B2 finishes the projection
+// backwards once dK/dV are complete; phase B3 folds the attn-norm backward
+// into the residual path.
+static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
+                          float *dx) {
+    (void)toks;
+    layer_t *ly = &m->layers[l];
+    int E = m->n_embd;
+    int hd = model_head_dim(m, l), n_head = m->n_head;
+    int q_dim = model_q_dim(m, l), kv_dim = model_kv_dim(m, l);
+    int n_kv = kv_dim / hd, kv_mul = n_head / n_kv;
+    int nff = ly->n_ff;
+    float scale = model_attn_scale(m, l);
+    const uint8_t *kc_l = (const uint8_t *)m->kcache + model_kv_byte_off(m, l);
+    const uint8_t *vc_l = (const uint8_t *)m->vcache + model_kv_byte_off(m, l);
+    size_t row_b = model_kv_row_bytes(m, l);
+    const float *tape_x = m->tape + (size_t)l * m->tape_T * E;
+
+    size_t szE = sizeof(float) * (size_t)T * E;
+    float *xn1 = malloc(sizeof(float) * (size_t)T * E);
+    float *xa  = malloc(szE);
+    float *xn2 = malloc(szE);
+    float *q   = malloc(sizeof(float) * (size_t)T * q_dim);
+    float *ao  = malloc(sizeof(float) * (size_t)T * q_dim);
+    float *g   = malloc(sizeof(float) * (size_t)T * nff);
+    float *u   = malloc(sizeof(float) * (size_t)T * nff);
+    float *dxn1 = calloc((size_t)T * E, sizeof(float));
+    float *dxa  = malloc(szE);
+    float *dq   = calloc((size_t)T * q_dim, sizeof(float));
+    float *dk   = calloc((size_t)T * kv_dim, sizeof(float));
+    float *dv   = calloc((size_t)T * kv_dim, sizeof(float));
+    float *hact = malloc(sizeof(float) * (size_t)nff);
+    float *dhact = malloc(sizeof(float) * (size_t)nff);
+    float *dgu  = malloc(sizeof(float) * (size_t)nff);
+    float *dxn2 = malloc(szE / (size_t)T * 1);   // one row [E]
+    float *dao  = malloc(sizeof(float) * (size_t)q_dim);
+    float *tmpE = malloc(sizeof(float) * (size_t)E);
+    float *p    = malloc(sizeof(float) * (size_t)T);
+    bool ok = xn1 && xa && xn2 && q && ao && g && u && dxn1 && dxa && dq &&
+              dk && dv && hact && dhact && dgu && dxn2 && dao && tmpE && p;
+
+    // ---- phase R: recompute forward internals from the tape
+    for (int t = 0; ok && t < T; t++) {
+        const float *xt = tape_x + (size_t)t * E;
+        float *x1 = xn1 + (size_t)t * E;
+        rmsnorm(x1, xt, ly->attn_norm_w, E, m->rms_eps);
+        float *qt = q + (size_t)t * q_dim;
+        matvec_b(m->tp, qt, q_dim, ly->wq, x1, E, E, q_dim, ly->bq, 1);
+        lora_site_fw(m, l, LW_Q, qt, x1, E, q_dim);
+        rope_apply(m, qt, n_head, t, l);
+        attn_job aj = { m, kc_l, vc_l, qt, ao + (size_t)t * q_dim, t, 0,
+                       hd, kv_dim, row_b, false, scale, NULL };
+        tpool_run(m->tp, attn_heads, &aj, n_head);
+        matvec_b(m->tp, tmpE, E, ly->wo, ao + (size_t)t * q_dim, q_dim,
+                 q_dim, E, ly->bo, 1);
+        lora_site_fw(m, l, LW_O, tmpE, ao + (size_t)t * q_dim, q_dim, E);
+        float *xat = xa + (size_t)t * E;
+        for (int i = 0; i < E; i++) xat[i] = xt[i] + tmpE[i];
+        float *x2 = xn2 + (size_t)t * E;
+        rmsnorm(x2, xat, ly->ffn_norm_w, E, m->rms_eps);
+        matvec_b(m->tp, g + (size_t)t * nff, nff, ly->w_gate, x2, E, E, nff,
+                 NULL, 1);
+        lora_site_fw(m, l, LW_GATE, g + (size_t)t * nff, x2, E, nff);
+        matvec_b(m->tp, u + (size_t)t * nff, nff, ly->w_up, x2, E, E, nff,
+                 NULL, 1);
+        lora_site_fw(m, l, LW_UP, u + (size_t)t * nff, x2, E, nff);
+    }
+
+    // ---- phase B1: per position, FFN backward then attention backward
+    for (int t = 0; ok && t < T; t++) {
+        const float *dy = dx + (size_t)t * E;      // grad wrt layer output
+        const float *gt = g + (size_t)t * nff, *ut = u + (size_t)t * nff;
+        for (int i = 0; i < nff; i++) hact[i] = silu_f(gt[i]) * ut[i];
+        memset(dhact, 0, sizeof(float) * (size_t)nff);
+        ok = ok && lora_site_bw(m, l, LW_DOWN, ly->w_down, hact, dy, dhact,
+                                nff, E);
+        memset(dxn2, 0, sizeof(float) * (size_t)E);
+        for (int i = 0; i < nff; i++) dgu[i] = dhact[i] * ut[i] * silu_d(gt[i]);
+        ok = ok && lora_site_bw(m, l, LW_GATE, ly->w_gate,
+                                xn2 + (size_t)t * E, dgu, dxn2, E, nff);
+        for (int i = 0; i < nff; i++) dgu[i] = dhact[i] * silu_f(gt[i]);
+        ok = ok && lora_site_bw(m, l, LW_UP, ly->w_up,
+                                xn2 + (size_t)t * E, dgu, dxn2, E, nff);
+        float *dxat = dxa + (size_t)t * E;
+        memcpy(dxat, dy, sizeof(float) * (size_t)E);   // residual around FFN
+        rmsnorm_bw(xa + (size_t)t * E, ly->ffn_norm_w, dxn2, dxat, E,
+                   m->rms_eps);
+        // attention output projection
+        memset(dao, 0, sizeof(float) * (size_t)q_dim);
+        ok = ok && lora_site_bw(m, l, LW_O, ly->wo, ao + (size_t)t * q_dim,
+                                dxat, dao, q_dim, E);
+        if (!ok) break;
+        // score/softmax backward per head, reading K/V from the cache (the
+        // f16-rounded values the forward attended over)
+        const float *qt = q + (size_t)t * q_dim;
+        float *dqt = dq + (size_t)t * q_dim;
+        for (int h = 0; h < n_head; h++) {
+            int kvh = h / kv_mul;
+            size_t hoff = (size_t)kvh * hd * sizeof(f16_t);
+            const float *qh = qt + (size_t)h * hd;
+            const float *daoh = dao + (size_t)h * hd;
+            for (int s = 0; s <= t; s++) {
+                const f16_t *kh = (const f16_t *)(kc_l + (size_t)s * row_b + hoff);
+                float sc = 0;
+                for (int i = 0; i < hd; i++) sc += qh[i] * f16_load(kh + i);
+                p[s] = sc * scale;
+            }
+            softmax(p, t + 1);
+            float sum_pd = 0.0f;
+            for (int s = 0; s <= t; s++) {
+                const f16_t *vh = (const f16_t *)(vc_l + (size_t)s * row_b + hoff);
+                float dp = 0.0f;
+                for (int i = 0; i < hd; i++)
+                    dp = fmaf(daoh[i], f16_load(vh + i), dp);
+                // stash dp in the p buffer's shadow via recompute later; keep
+                // two passes: first accumulate sum_pd
+                sum_pd = fmaf(p[s], dp, sum_pd);
+            }
+            for (int s = 0; s <= t; s++) {
+                const f16_t *kh = (const f16_t *)(kc_l + (size_t)s * row_b + hoff);
+                const f16_t *vh = (const f16_t *)(vc_l + (size_t)s * row_b + hoff);
+                float dp = 0.0f;
+                for (int i = 0; i < hd; i++)
+                    dp = fmaf(daoh[i], f16_load(vh + i), dp);
+                float dsc = p[s] * (dp - sum_pd) * scale;
+                float *dqh = dqt + (size_t)h * hd;
+                float *dks = dk + (size_t)s * kv_dim + (size_t)kvh * hd;
+                float *dvs = dv + (size_t)s * kv_dim + (size_t)kvh * hd;
+                for (int i = 0; i < hd; i++) {
+                    dqh[i] = fmaf(dsc, f16_load(kh + i), dqh[i]);
+                    dks[i] = fmaf(dsc, qh[i], dks[i]);
+                    dvs[i] = fmaf(p[s], daoh[i], dvs[i]);
+                }
+            }
+        }
+    }
+
+    // ---- phase B2: projection backwards now that dK/dV are complete
+    for (int t = 0; ok && t < T; t++) {
+        rope_unapply(m, dq + (size_t)t * q_dim, n_head, t, l);
+        rope_unapply(m, dk + (size_t)t * kv_dim, n_kv, t, l);
+        float *dx1 = dxn1 + (size_t)t * E;
+        const float *x1 = xn1 + (size_t)t * E;
+        ok = ok && lora_site_bw(m, l, LW_Q, ly->wq, x1,
+                                dq + (size_t)t * q_dim, dx1, E, q_dim);
+        ok = ok && lora_site_bw(m, l, LW_K, ly->wk, x1,
+                                dk + (size_t)t * kv_dim, dx1, E, kv_dim);
+        ok = ok && lora_site_bw(m, l, LW_V, ly->wv, x1,
+                                dv + (size_t)t * kv_dim, dx1, E, kv_dim);
+    }
+
+    // ---- phase B3: attn-norm backward + both residual paths -> layer input
+    for (int t = 0; ok && t < T; t++) {
+        float *out = dx + (size_t)t * E;
+        memcpy(out, dxa + (size_t)t * E, sizeof(float) * (size_t)E);
+        rmsnorm_bw(tape_x + (size_t)t * E, ly->attn_norm_w,
+                   dxn1 + (size_t)t * E, out, E, m->rms_eps);
+    }
+
+    free(xn1); free(xa); free(xn2); free(q); free(ao); free(g); free(u);
+    free(dxn1); free(dxa); free(dq); free(dk); free(dv); free(hact);
+    free(dhact); free(dgu); free(dxn2); free(dao); free(tmpE); free(p);
+    return ok;
+}
+
+bool model_lora_backward(model_t *m, const int32_t *toks, int T,
+                         double *loss_out) {
+    char why[128];
+    if (!m->lora) {
+        fprintf(stderr, "error: backward needs a loaded adapter (--lora)\n");
+        return false;
+    }
+    if (T < 2 || T > m->n_ctx) {
+        fprintf(stderr, "error: backward needs 2..n_ctx tokens (got %d)\n", T);
+        return false;
+    }
+    if (!lora_bw_supported(m, why, sizeof why)) {
+        fprintf(stderr, "error: backward does not cover this model yet: "
+                "%s\n", why);
+        return false;
+    }
+    int E = m->n_embd, V = m->n_vocab, L = m->n_layer;
+    // ---- taped forward: the inference forward, solo per position
+    m->tape_T = T;
+    m->tape = malloc(sizeof(float) * (size_t)(L + 1) * T * E);
+    if (!m->tape) { m->tape_T = 0; return false; }
+    double loss = 0.0;
+    for (int t = 0; t < T; t++) {
+        float *lg = model_forward(m, toks[t], t);
+        if (!lg) goto fail;
+        if (t < T - 1) {
+            float mx = lg[0];
+            for (int i = 1; i < V; i++) if (lg[i] > mx) mx = lg[i];
+            double sum = 0;
+            for (int i = 0; i < V; i++) sum += expf(lg[i] - mx);
+            loss += (double)(mx + logf((float)sum)) - (double)lg[toks[t + 1]];
+        }
+    }
+    {
+    // ---- reverse sweep
+    float *dx     = calloc((size_t)T * E, sizeof(float));
+    float *probs  = malloc(sizeof(float) * (size_t)V);
+    float *hn     = malloc(sizeof(float) * (size_t)E);
+    if (!dx || !probs || !hn) { free(dx); free(probs); free(hn); goto fail; }
+    // head + out-norm, per scored position (logits recomputed from the tape
+    // rather than stored: memory over speed, the reference trade)
+    float *dhn = calloc((size_t)E, sizeof(float));
+    if (!dhn) { free(dx); free(probs); free(hn); goto fail; }
+    for (int t = 0; t < T - 1; t++) {
+        const float *h = m->tape + ((size_t)L * T + t) * E;
+        rmsnorm(hn, h, m->out_norm_w, E, m->rms_eps);
+        matvec_b(m->tp, probs, V, m->output, hn, E, E, V, NULL, 1);
+        softmax(probs, V);
+        probs[toks[t + 1]] -= 1.0f;
+        memset(dhn, 0, sizeof(float) * (size_t)E);
+        if (!matvec_t(m->output, probs, dhn, E, V)) {
+            free(dhn); free(dx); free(probs); free(hn); goto fail;
+        }
+        rmsnorm_bw(h, m->out_norm_w, dhn, dx + (size_t)t * E, E, m->rms_eps);
+    }
+    free(dhn);
+    // layers in reverse
+    bool ok = true;
+    for (int l = L - 1; ok && l >= 0; l--)
+        ok = lora_layer_bw(m, l, toks, T, dx);
+    free(probs); free(hn);
+    if (!ok) { free(dx); goto fail; }
+    free(dx);
+    }
+    free(m->tape); m->tape = NULL; m->tape_T = 0;
+    if (loss_out) *loss_out = loss;
+    return true;
+fail:
+    free(m->tape); m->tape = NULL; m->tape_T = 0;
+    return false;
+}
+
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
     m->fwd_pos = pos;
@@ -5275,6 +5722,12 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
     }
 
     for (int l = start; l < m->n_layer; l++) {
+        // adaptation D3 tape: record the residual stream entering each layer
+        // (solo forwards only; the backward pass recomputes everything else
+        // from these checkpoints plus the KV cache)
+        if (m->tape && n == 1 && pos < m->tape_T)
+            memcpy(m->tape + ((size_t)l * m->tape_T + pos) * m->n_embd,
+                   m->x, sizeof(float) * (size_t)m->n_embd);
         layer_t *ly = &m->layers[l];
         bool local   = model_is_swa(m, l);
         int hd       = model_head_dim(m, l);
@@ -5575,6 +6028,9 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         }
     }
 
+    if (m->tape && n == 1 && pos < m->tape_T)
+        memcpy(m->tape + ((size_t)m->n_layer * m->tape_T + pos) * m->n_embd,
+               m->x, sizeof(float) * (size_t)m->n_embd);
     if (!want_logits) return NULL;
     rmsnorm(m->xb, m->x + (size_t)(n - 1) * n_embd, m->out_norm_w, n_embd, m->rms_eps);
     if (dbg) dbg_stat("final-norm", m->n_layer, m->xb, n_embd);

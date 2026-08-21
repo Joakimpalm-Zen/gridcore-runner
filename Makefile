@@ -111,6 +111,7 @@ TEST_METAL_ADMISSION = $(TEST_BATCH:test-batch%=test-metal-admission%)
 TEST_TRAY_CORE = $(TEST_BATCH:test-batch%=test-tray-core%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_I8_TOL = $(TEST_BATCH:test-batch%=test-i8-tol%)
+TEST_LORA_GRAD = $(TEST_BATCH:test-batch%=test-lora-grad%)
 TEST_MV_TOL = $(TEST_BATCH:test-batch%=test-mv-tol%)
 TEST_ATTN_TOL = $(TEST_BATCH:test-batch%=test-attn-tol%)
 TEST_GPU_ID = $(TEST_BATCH:test-batch%=test-gpu-identity%)
@@ -539,6 +540,20 @@ TEST_TC_TOL_SRC = tests/test_tc_tol.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
                   src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
 $(TEST_TC_TOL): $(TEST_TC_TOL_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_TC_TOL_SRC) -o $@ $(LDFLAGS)
+
+# adaptation D3: finite-difference gradient gate over the full-coverage
+# adapter fixture (rank-2 pairs on every hooked projection of every layer)
+TEST_LORA_GRAD_SRC = tests/test_lora_grad.c src/gguf.c src/compat.c \
+                  $(QUANTS_OBJ) src/tokenizer.c src/model.c src/vramreg.c \
+                  $(GPU_SRC)
+$(TEST_LORA_GRAD): $(TEST_LORA_GRAD_SRC) $(HDR) test.gguf test-lora.full.gguf test-q8.gguf test-lora-q8.full.gguf
+	$(CC) $(CFLAGS) -I src $(TEST_LORA_GRAD_SRC) -o $@ $(LDFLAGS)
+
+test-lora.full.gguf: test.gguf scripts/make-test-lora.py
+	$(PYTHON) scripts/make-test-lora.py test.gguf test-lora
+
+test-lora-q8.full.gguf: test-q8.gguf scripts/make-test-lora.py
+	$(PYTHON) scripts/make-test-lora.py test-q8.gguf test-lora-q8
 
 # fused-int8 CPU dot tolerance gate: the CPU twin of the TC gate — teacher-
 # forced logits, 0/64 top-1 flips + bounded deviation, per (type, model) via
@@ -1256,7 +1271,7 @@ else
 	@echo "metal SWA smoke skipped: macOS-only backend"
 endif
 
-test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
+test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_LORA_GRAD) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TEMPLATE_OOM) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
@@ -1271,6 +1286,11 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       runner test.gguf test-q8.gguf test-bf16.gguf test-ornith.gguf test-ornith-draft.gguf
 	./$(TEST_RECURRENT)
 	./$(TEST_REQUEST_STOP)
+	./$(TEST_LORA_GRAD)
+	@# and against a QUANTIZED base: the transposed quantized matvec (dx =
+	@# W^T dy through frozen Q8_0 rows) is the one genuinely new kernel
+	@# family here, so it gets its own gradient gate
+	./$(TEST_LORA_GRAD) test-q8.gguf test-lora-q8.full.gguf
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)

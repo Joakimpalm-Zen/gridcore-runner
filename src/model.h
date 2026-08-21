@@ -306,6 +306,11 @@ typedef struct {
     // cross an adapter boundary.
     struct lora_w *lora;
     uint64_t lora_id;
+    // D3 activation tape: [n_layer+1][tape_T][n_embd] layer-entry residual
+    // streams (+ the final pre-norm hidden), recorded by solo forwards when
+    // non-NULL. Owned by model_lora_backward for the duration of one call.
+    float *tape;
+    int    tape_T;
     float *all_logits;       // lazy [spec_batch][n_vocab] (speculative verify)
     int    spec_batch;       // rows all_logits can hold
     int    xdim;             // max(n_embd, per-layer q_dim); sizes xb/xb2/q
@@ -589,6 +594,25 @@ bool   model_load(model_t *m, const char *path, const model_params *p);
 // multiplies the adapter's alpha/r (1.0 = as trained).
 bool   model_lora_load(model_t *m, const char *path, float user_scale);
 void   model_lora_free(model_t *m);
+// --- adaptation D3: backward through the LoRA path (CPU reference).
+// model_lora_backward teacher-forces toks[0..n) from position 0 (clobbering
+// KV rows [0,n)), computes the summed NLL over transitions, and ACCUMULATES
+// dL/dA, dL/dB for every adapted projection into the adapter's grad buffers
+// (allocated on first use; model_lora_grad_zero clears them). Frozen base
+// weights receive no gradient; activation gradients flow through them via a
+// transposed quantized matvec. Fails closed (false) on any feature outside
+// the reference scope: GPU-resident, recurrent, MoE, q8 KV, non-SiLU FFN,
+// head transforms, per-head norms, sliding windows.
+bool   model_lora_backward(model_t *m, const int32_t *toks, int n,
+                           double *loss_out);
+void   model_lora_grad_zero(model_t *m);
+// FD-test access: the parameter / gradient buffer for (layer, slot, which)
+// where slot indexes [q,k,v,o,gate,up,down] and which is 0=A 1=B; returns
+// NULL if that slot has no adapter. *count = element count.
+float *model_lora_param(model_t *m, int layer, int slot, int which,
+                        int *count);
+float *model_lora_gradbuf(model_t *m, int layer, int slot, int which,
+                          int *count);
 
 // The identity a shared-weights record is keyed on: which file this actually
 // is, beyond the path it was spelled with. Every keyed view of a file — the

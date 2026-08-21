@@ -110,10 +110,13 @@ def read_base(path):
 
 raw, tens, data0 = read_base(BASE)
 targets = {"blk.0.attn_q.weight": None, "blk.0.ffn_down.weight": None}
+targets_f32 = True
 for name, dims, ttype, toff in tens:
     if name in targets:
-        assert ttype == T_F32, f"{name} is not F32 in the base fixture"
         targets[name] = (dims, toff)
+        if ttype != T_F32:
+            targets_f32 = False   # quantized base: adapters still written,
+                                  # the merged F32 reference is skipped
 for k, v in targets.items():
     assert v, f"base lacks {k}"
 
@@ -146,9 +149,9 @@ write_gguf(OUT + ".zero.gguf", meta, adapter_tensors(zero_b=True))
 
 # merged reference: base bytes with W += (alpha/r) * B @ A on the targets,
 # using the SAME adapter values (same seed replay)
-merged = bytearray(raw)
+merged = bytearray(raw) if targets_f32 else None
 _seed = 0x1234
-for name, (dims, toff) in targets.items():
+for name, (dims, toff) in (targets.items() if targets_f32 else []):
     nin, nout = dims[0], dims[1]
     a = [rnd() for _ in range(RANK * nin)]     # a[k*nin + i]
     b = [rnd() for _ in range(nout * RANK)]    # b[j*RANK + k]
@@ -163,8 +166,39 @@ for name, (dims, toff) in targets.items():
                 delta += b[j * RANK + k] * a[k * nin + i]
             w[i] += scale * delta
         struct.pack_into("<%df" % nin, merged, row, *w)
-open(OUT + ".merged.gguf", "wb").write(merged)
-print(f"wrote {OUT}.merged.gguf")
+if targets_f32:
+    open(OUT + ".merged.gguf", "wb").write(merged)
+    print(f"wrote {OUT}.merged.gguf")
+
+# full-coverage adapter for the D3 gradient gate: rank-2 pairs on EVERY
+# hooked slot of EVERY layer (attention q/k/v/output + ffn gate/up/down)
+def all_target_dims():
+    names = {}
+    for name, dims, ttype, toff in tens:
+        names[name] = dims
+    n_layers = 1 + max(int(n.split(".")[1]) for n in names if n.startswith("blk."))
+    slots = ["attn_q", "attn_k", "attn_v", "attn_output",
+             "ffn_gate", "ffn_up", "ffn_down"]
+    out = []
+    for l in range(n_layers):
+        for sname in slots:
+            key = f"blk.{l}.{sname}.weight"
+            if key in names:
+                out.append((key, names[key]))
+    return out
+
+
+_seed = 0x7777
+full = []
+FULL_RANK = 2
+for name, dims in all_target_dims():
+    nin, nout = dims[0], dims[1]
+    a = [rnd() for _ in range(FULL_RANK * nin)]
+    b = [rnd() for _ in range(nout * FULL_RANK)]
+    base = name[:-len(".weight")]
+    full.append((f"{base}.weight.lora_a", [nin, FULL_RANK], pack_f(a)))
+    full.append((f"{base}.weight.lora_b", [FULL_RANK, nout], pack_f(b)))
+write_gguf(OUT + ".full.gguf", meta, full)
 
 # hostile variants
 nin, nout = targets["blk.0.attn_q.weight"][0][0], targets["blk.0.attn_q.weight"][0][1]
