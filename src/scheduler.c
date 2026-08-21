@@ -381,6 +381,7 @@ int sched_generate(slot_t *s, float *logits, int max_new,
     int32_t tok; int pos;
     while (engine_gen_step(e, lg, cb, ud, &tok, &pos) == ENGINE_STEP_MORE) {
         if (deadline > 0 && now_s() >= deadline) break;
+        if (e->stop && e->stop(e->stop_ud)) break;
         if (!(lg = sched_forward(s->id, tok, pos, deadline))) break;
     }
     int n = engine_gen_end(e, cb, ud, gen_time);

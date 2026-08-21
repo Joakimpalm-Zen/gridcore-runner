@@ -47,6 +47,8 @@ test-prefix
 test-prefix.exe
 test-recurrent-rewind
 test-recurrent-rewind.exe
+test-request-stop
+test-request-stop.exe
 test-grammar-ff
 test-grammar-ff.exe
 test-moe-tol

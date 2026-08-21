@@ -1,0 +1,180 @@
+// Request-stop predicate gate.
+//
+// Cancellation is sampled only at the engine's existing safe boundaries:
+// between complete prefill chunks and between a sampled decode token and its
+// forward.  This test uses the generated Ornith hybrid fixture so an aborted
+// slot has both attention KV and a recurrent fold to clean up before reuse.
+// A follow-up on that slot must remain bit-identical to a cold run.
+#include "scheduler.c"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+server_state SV;
+
+static int g_fail;
+
+static void ck(bool cond, const char *what) {
+    if (!cond) { fprintf(stderr, "FAIL: %s\n", what); g_fail = 1; }
+    else        fprintf(stderr, "ok: %s\n", what);
+}
+
+enum { NSLOTS = 2, CTX = 64, BATCH = 4 };
+
+typedef struct {
+    int polls;
+    int fire_after;
+} stop_probe;
+
+static bool stop_after(void *ud) {
+    stop_probe *p = ud;
+    p->polls++;
+    return p->polls >= p->fire_after;
+}
+
+typedef struct {
+    unsigned char bytes[2048];
+    int n;
+} capture;
+
+static int capture_cb(void *ud, const char *s, int n) {
+    capture *c = ud;
+    if (n < 0 || c->n + n > (int)sizeof(c->bytes)) return 1;
+    memcpy(c->bytes + c->n, s, (size_t)n);
+    c->n += n;
+    return 0;
+}
+
+static bool slots_open(void) {
+    model_params p;
+    memset(&p, 0, sizeof(p));
+    p.gpu_mode = GPU_OFF;
+    p.n_threads = 1;
+    p.n_ctx = CTX;
+    p.n_batch = BATCH;
+
+    SV.n_slots = NSLOTS;
+    SV.slots = calloc(NSLOTS, sizeof(*SV.slots));
+    if (!SV.slots) return false;
+    tokenizer *tok = calloc(1, sizeof(*tok));
+    if (!tok) return false;
+    for (int i = 0; i < NSLOTS; i++) {
+        slot_t *s = &SV.slots[i];
+        s->id = i;
+        s->m = calloc(1, sizeof(*s->m));
+        if (!s->m || !model_load(s->m, "test-ornith.gguf", &p)) return false;
+        if (i == 0 && !tokenizer_init(tok, &s->m->gf)) return false;
+        s->tok = tok;
+        s->smp.temp = 0;
+        s->smp.repeat_penalty = 1.0f;
+        s->smp.rng = (uint64_t)(i + 1);
+        if (!engine_init(&s->e, s->m, tok, &s->smp)) return false;
+        s->e.ignore_eos = true;
+    }
+    return sched_start();
+}
+
+static void slots_close(void) {
+    sched_shutdown();
+    tokenizer *tok = SV.slots ? SV.slots[0].tok : NULL;
+    for (int i = 0; i < SV.n_slots; i++) {
+        free(SV.slots[i].e.hist);
+        if (SV.slots[i].m) {
+            model_free(SV.slots[i].m);
+            free(SV.slots[i].m);
+        }
+    }
+    if (tok) { tokenizer_free(tok); free(tok); }
+    free(SV.slots);
+    memset(&SV, 0, sizeof(SV));
+}
+
+static float *copy_logits(const model_t *m, const float *logits) {
+    float *copy = malloc(sizeof(*copy) * (size_t)m->n_vocab);
+    if (copy && logits)
+        memcpy(copy, logits, sizeof(*copy) * (size_t)m->n_vocab);
+    return copy;
+}
+
+static bool same_logits(const model_t *m, const float *a, const float *b) {
+    return a && b && memcmp(a, b, sizeof(*a) * (size_t)m->n_vocab) == 0;
+}
+
+static void followup_matches_cold(const int32_t *prompt, int n,
+                                  const char *logits_what,
+                                  const char *output_what) {
+    slot_t *warm = &SV.slots[0], *cold = &SV.slots[1];
+    int keep = engine_rewind(&warm->e, prompt, n);
+    float *wl = engine_feed(&warm->e, prompt + keep, n - keep);
+    float *warm_logits = copy_logits(warm->m, wl);
+
+    engine_reset(&cold->e);
+    float *cl = engine_feed(&cold->e, prompt, n);
+    float *cold_logits = copy_logits(cold->m, cl);
+    ck(same_logits(warm->m, warm_logits, cold_logits), logits_what);
+
+    capture wc = {{0}, 0}, cc = {{0}, 0};
+    int wn = sched_generate(warm, warm_logits, 8, capture_cb, &wc, NULL, 0);
+    int cn = sched_generate(cold, cold_logits, 8, capture_cb, &cc, NULL, 0);
+    ck(wn == cn && wc.n == cc.n &&
+       memcmp(wc.bytes, cc.bytes, (size_t)wc.n) == 0, output_what);
+    free(warm_logits);
+    free(cold_logits);
+}
+
+static void test_prefill_stop_and_reuse(void) {
+    slot_t *s = &SV.slots[0];
+    int32_t prompt[20];
+    for (int i = 0; i < 20; i++) prompt[i] = 10 + i;
+    stop_probe p = {0, 2};
+
+    engine_reset(&s->e);
+    engine_set_stop(&s->e, stop_after, &p);
+    ck(engine_feed(&s->e, prompt, 20) == NULL,
+       "prefill stop returns NULL before the prompt completes");
+    ck(p.polls == 2 && s->e.pos == BATCH * 2,
+       "prefill stop fires only between complete chunks");
+    engine_set_stop(&s->e, NULL, NULL);
+
+    const int32_t next[6] = {70, 71, 72, 73, 74, 75};
+    followup_matches_cold(next, 6,
+        "a slot reused after stopped prefill has cold-identical hybrid logits",
+        "a slot reused after stopped prefill has cold-identical output");
+}
+
+static void test_decode_stop_and_reuse(void) {
+    slot_t *s = &SV.slots[0];
+    const int32_t prompt[6] = {30, 31, 32, 33, 34, 35};
+    engine_reset(&s->e);
+    float *logits = engine_feed(&s->e, prompt, 6);
+    stop_probe p = {0, 3};
+    capture out = {{0}, 0};
+
+    engine_set_stop(&s->e, stop_after, &p);
+    int n = sched_generate(s, logits, 16, capture_cb, &out, NULL, 0);
+    ck(p.polls == 3 && n == 3,
+       "decode stop ends generation after the requested poll");
+    ck(s->e.pending_pos == -1 && s->e.pos == 6 + 2,
+       "decode stop rewinds the sampled token whose forward was abandoned");
+    engine_set_stop(&s->e, NULL, NULL);
+
+    const int32_t next[6] = {90, 91, 92, 93, 94, 95};
+    followup_matches_cold(next, 6,
+        "a slot reused after stopped decode has cold-identical hybrid logits",
+        "a slot reused after stopped decode has cold-identical output");
+}
+
+int main(void) {
+    if (!slots_open()) {
+        fprintf(stderr, "FAIL: could not open scheduler slots\n");
+        slots_close();
+        return 1;
+    }
+    ck(model_has_recurrent(SV.slots[0].m),
+       "request-stop fixture has recurrent layers");
+    test_prefill_stop_and_reuse();
+    test_decode_stop_and_reuse();
+    slots_close();
+    return g_fail;
+}

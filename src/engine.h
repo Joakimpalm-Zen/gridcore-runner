@@ -136,6 +136,9 @@ typedef struct {
     // yielded between prefill chunks (see engine_set_prefill_yield)
     void (*prefill_yield)(void *ud);
     void *prefill_ud;
+    // request cancellation, sampled only at complete prefill/decode steps
+    bool (*stop)(void *ud);
+    void *stop_ud;
     // identity of everything that decides what this engine's KV bytes mean:
     // the weights, the geometry, the tokenizer and the cache element type.
     // Computed once by engine_init; see engine_prefix_reuse.
@@ -155,6 +158,11 @@ typedef struct {
 // Unset is a no-op: the CLI, and any server without a scheduler running.
 void engine_set_prefill_yield(engine *e, void (*yield)(void *ud), void *ud);
 
+// Install a request-scoped cancellation predicate. It is sampled between
+// complete prefill chunks and decode steps, never inside a model forward.
+// Unset is a no-op.
+void engine_set_stop(engine *e, bool (*stop)(void *ud), void *ud);
+
 // True when this request should take the speculative walk (a draft model
 // and/or grammar fast-forward under an active constraint) — shared by
 // engine_generate and the server's scheduler dispatch so they cannot drift.
@@ -168,7 +176,7 @@ void   engine_think_started(engine *e); // prompt already contains think_open
 // keep the KV for the longest common prefix of hist and toks, reset the rest
 // of the engine state; returns how many prompt tokens can be skipped
 int    engine_rewind(engine *e, const int32_t *toks, int n);
-// feed tokens (batched); returns last-token logits or NULL on ctx overflow
+// feed tokens (batched); returns last-token logits, or NULL on overflow/stop
 float *engine_feed(engine *e, const int32_t *toks, int n);
 // sample until stop/limit, streaming decoded bytes to cb; returns token count
 int    engine_generate(engine *e, float *logits, int max_new,

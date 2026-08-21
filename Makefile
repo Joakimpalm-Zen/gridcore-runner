@@ -100,6 +100,7 @@ endif
 # three-way platform branch above
 TEST_PREFIX = $(TEST_BATCH:test-batch%=test-prefix%)
 TEST_RECURRENT = $(TEST_BATCH:test-batch%=test-recurrent-rewind%)
+TEST_REQUEST_STOP = $(TEST_BATCH:test-batch%=test-request-stop%)
 TEST_HOST_HEADER = $(TEST_BATCH:test-batch%=test-host-header%)
 TEST_GRAMMAR_FF = $(TEST_BATCH:test-batch%=test-grammar-ff%)
 TEST_VRAMREG = $(TEST_BATCH:test-batch%=test-vram-registry%)
@@ -453,6 +454,17 @@ TEST_RECURRENT_SRC = tests/test_recurrent_rewind.c src/gguf.c src/compat.c $(QUA
                   src/schema.c src/json.c src/engine.c src/vramreg.c $(GPU_SRC)
 $(TEST_RECURRENT): $(TEST_RECURRENT_SRC) $(HDR)
 	$(CC) $(CFLAGS) -I src $(TEST_RECURRENT_SRC) -o $@ $(LDFLAGS)
+
+# Request cancellation at the engine's prefill/decode poll boundaries.  The
+# scheduler is included so its private batched loop is exercised without
+# widening that loop into a public test API; the generated recurrent fixture
+# makes stale-fold reuse observable as byte divergence.
+TEST_REQUEST_STOP_SRC = tests/test_request_stop.c src/gguf.c src/compat.c \
+                  $(QUANTS_OBJ) src/tokenizer.c src/model.c src/sample.c \
+                  src/jsonmode.c src/schema.c src/json.c src/engine.c \
+                  src/vramreg.c $(GPU_SRC)
+$(TEST_REQUEST_STOP): $(TEST_REQUEST_STOP_SRC) src/scheduler.c $(HDR) test-ornith.gguf
+	$(CC) $(CFLAGS) -I src $(TEST_REQUEST_STOP_SRC) -o $@ $(LDFLAGS)
 
 # grammar fast-forward: same full-engine link as the prefix test — the gate
 # is byte identity of a real constrained generation with the walk on and off
@@ -1255,9 +1267,10 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) \
       $(TEST_THREAD_DEFAULT) \
       $(TEST_MODEL_LOAD_FAILURE) $(TEST_RESTART) $(TEST_PFX_PERSIST) \
       $(TEST_SCHED_TURN) $(TEST_RESIDENCY) $(TEST_BUDGET) $(TEST_ATTRIB_DEP) \
-      $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) $(TEST_RECURRENT) \
+      $(TEST_STOP_CONSTRAINT) $(TEST_MSG_OOM_DEP) $(TEST_RECURRENT) $(TEST_REQUEST_STOP) \
       runner test.gguf test-q8.gguf test-bf16.gguf test-ornith.gguf test-ornith-draft.gguf
 	./$(TEST_RECURRENT)
+	./$(TEST_REQUEST_STOP)
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)
