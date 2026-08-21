@@ -684,7 +684,8 @@ void     model_moe_prefetch(const model_t *m, const layer_t *ly,
 // fill m->moe_host for a requested host-expert layer count (see model.c)
 void   model_moe_place_host(model_t *m, int host_layers);
 // speculative verify: forward a small batch keeping hidden states, then pull
-// each row's logits lazily (false/NULL on full GPU offload or n > spec_batch)
+// each row's logits lazily (false/NULL on full GPU offload, a device-resident
+// recurrent fold, or n > spec_batch)
 bool   model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos);
 // whether the batched verify path above can run at all for this model
 bool   model_spec_verify_ok(const model_t *m);

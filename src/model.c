@@ -5324,9 +5324,15 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
 }
 
 // forward a small batch keeping every row's hidden state in x (speculative
-// verify). CPU path only: full GPU offload keeps hidden states on-device.
+// verify). Full GPU offload keeps hidden states on-device. A partial CUDA split
+// is usable only while every recurrent layer remains on the host: the public
+// round snapshot/restore seam checkpoints the host fold, not CUDA's live fold.
 bool model_spec_verify_ok(const model_t *m) {
-    return !(m->gpu && m->gpu_layers >= m->n_layer);
+    if (!m->gpu) return true;
+    if (m->gpu_layers >= m->n_layer) return false;
+    for (int l = 0; l < m->gpu_layers; l++)
+        if (m->layers[l].recurrent) return false;
+    return true;
 }
 
 bool model_forward_batch_keep(model_t *m, const int32_t *tokens, int n, int pos) {

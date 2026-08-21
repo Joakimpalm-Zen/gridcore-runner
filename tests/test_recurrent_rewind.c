@@ -314,11 +314,45 @@ static void test_spec_full_accept_identity(void) {
     slot_close(&plain); slot_close(&spec);
 }
 
+// ---- gate 5: speculative rollback must own every recurrent fold ------------
+//
+// Partial CUDA offload used to pass model_spec_verify_ok even when one of the
+// offloaded leading layers was recurrent. Its live fold is then device-owned,
+// while model_recurrent_snapshot/restore above only checkpoints the host fold.
+// A rejected speculative round therefore cannot be rolled back correctly.
+// Keep CPU recurrent verification enabled, but decline the first split that
+// places this fixture's recurrent layer 0 on the device.
+static void test_spec_admission_requires_host_recurrent_fold(void) {
+    model_params p = base_params();
+    slot s;
+    if (!slot_open(&s, &p)) {
+        ck(0, "load an instance for the speculative admission gate");
+        return;
+    }
+
+    ck(s.m.layers[0].recurrent, "the fixture's leading layer is recurrent");
+    ck(model_spec_verify_ok(&s.m), "CPU recurrent verification is admitted");
+
+    // No backend call is made: the non-NULL marker models the placement fields
+    // that CUDA publishes after upload, and is cleared before model_free.
+    s.m.gpu = &s;
+    s.m.gpu_layers = 1;
+    ck(!model_spec_verify_ok(&s.m),
+       "a CUDA-resident recurrent fold declines speculative verification");
+    ck(spec_draft_load("test-ornith-draft.gguf", &s.m, &p) == NULL,
+       "draft loading declines the unsafe partial CUDA split");
+    s.m.gpu = NULL;
+    s.m.gpu_layers = 0;
+
+    slot_close(&s);
+}
+
 int main(void) {
     test_snapshot_restore_roundtrip();
     test_rewind_divergence_matches_cold();
     test_prefix_cache_fold_restore_matches_cold();
     test_divergent_round_rollback();
     test_spec_full_accept_identity();
+    test_spec_admission_requires_host_recurrent_fold();
     return g_fail;
 }

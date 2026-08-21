@@ -802,6 +802,12 @@ model_t *spec_draft_load(const char *path, const model_t *target,
                 "decoding needs the CPU verify path, ignoring --draft\n");
         return NULL;
     }
+    if (!model_spec_verify_ok(target)) {
+        fprintf(stderr, "draft: target has CUDA-resident recurrent state — "
+                "speculative decoding needs host-visible fold rollback, "
+                "ignoring --draft\n");
+        return NULL;
+    }
     model_params dmp = *mp;
     dmp.n_ctx = target->n_ctx; // draft must cover the target's positions
     // Draft KV may use the requested q8 storage too. It can change which
