@@ -603,7 +603,8 @@ def sdk(server):
 
 @needs_sdk
 def test_real_sdk_parses_a_buffered_turn(sdk):
-    m = sdk.messages.create(model="local", max_tokens=8, temperature=0,
+    m = sdk.messages.create(model="local", max_tokens=8,
+                            extra_body={"temperature": 0},
                             messages=[{"role": "user", "content": "hello"}])
     if m.type != "message" or m.role != "assistant":
         raise ProtocolError("SDK did not deserialise a Message", got=repr(m))
@@ -618,7 +619,8 @@ def test_real_sdk_parses_a_buffered_turn(sdk):
 def test_real_sdk_accumulates_a_stream(sdk):
     """The SDK's own event accumulator is far stricter than a shape check: it
     rejects an out-of-order or misnamed event outright."""
-    with sdk.messages.stream(model="local", max_tokens=16, temperature=0,
+    with sdk.messages.stream(model="local", max_tokens=16,
+                             extra_body={"temperature": 0},
                              messages=[{"role": "user", "content": "hello"}]) as s:
         kinds = [ev.type for ev in s]
         final = s.get_final_message()
@@ -635,7 +637,8 @@ def test_real_sdk_accumulates_a_stream(sdk):
 
 @needs_sdk
 def test_real_sdk_reads_a_tool_use_block(sdk):
-    m = sdk.messages.create(model="local", max_tokens=48, temperature=0,
+    m = sdk.messages.create(model="local", max_tokens=48,
+                            extra_body={"temperature": 0},
                             tools=[WEATHER], tool_choice={"type": "any"},
                             messages=[{"role": "user", "content": "weather in Oslo?"}])
     uses = [b for b in m.content if b.type == "tool_use"]
