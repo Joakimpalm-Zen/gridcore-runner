@@ -59,6 +59,17 @@ def pruneprobe_bias_model(tmp_path_factory):
     return pathlib.Path(f"{base}.pruneprobe-bias.gguf")
 
 
+@pytest.fixture(scope="module")
+def nemotron_prune_model(tmp_path_factory):
+    """Generated Nemotron-H-MoE with two independently prunable MoE layers."""
+    base = tmp_path_factory.mktemp("prune-nemotron") / "m"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-hybrid.py", str(base),
+         "--arch", "nemotron_h_moe", "--prune-fixture"],
+        check=True, cwd=ROOT)
+    return pathlib.Path(f"{base}.gguf")
+
+
 def _generate(runner_bin, model):
     proc = subprocess.run(
         [runner_bin, "-m", str(model), "-p", PROMPT, "-n", str(N_GEN),
@@ -240,6 +251,35 @@ def test_prune_slices_exp_probs_b_bias_spelling(runner_bin, pruneprobe_bias_mode
     assert pruned_out == base_out, (
         "pruning the two never-selected experts changed output\nstderr: "
         + pruned_err.decode(errors="replace"))
+
+
+def test_nemotron_prune_loads_nonuniform_layers_deterministically(
+        runner_bin, nemotron_prune_model, tmp_path):
+    """The Nemotron loader must take each layer's count from its own router.
+
+    The two layers also cover both exp_probs_b spellings. Their zero routers
+    make those biases solely responsible for selecting the retained experts,
+    so base/pruned byte identity proves the biases were sliced and consumed.
+    """
+    plan = tmp_path / "plan.json"
+    _write_plan(plan, {2: [2, 3], 3: [1, 2, 3]})
+    pruned = tmp_path / "pruned.gguf"
+    proc = _prune(runner_bin, nemotron_prune_model, pruned, plan)
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    assert _router_ne1(pruned, 2) == 2
+    assert _router_ne1(pruned, 3) == 3
+    assert _tensor_ne0(pruned, "blk.2.exp_probs_b.weight") == 2
+    assert _tensor_ne0(pruned, "blk.3.exp_probs_b.bias") == 3
+
+    base_out, _ = _generate(runner_bin, nemotron_prune_model)
+    first, first_err = _generate(runner_bin, pruned)
+    second, second_err = _generate(runner_bin, pruned)
+    assert first == base_out, (
+        "coverage-pruning provably selected Nemotron experts changed output\n" +
+        first_err.decode(errors="replace"))
+    assert second == first, (
+        "the non-uniform pruned Nemotron decode was not deterministic\n" +
+        second_err.decode(errors="replace"))
 
 
 def test_pruneprobe_fixture_never_selects_2_or_3(runner_bin, pruneprobe_model, tmp_path):

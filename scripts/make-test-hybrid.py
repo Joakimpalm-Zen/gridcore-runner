@@ -22,9 +22,8 @@ always-on shared expert. It is small but honors the load-bearing invariants:
   * the four granite scalars (embedding/attention/residual/logit),
   * rope.scaling.finetuned = false, so the attention layers are NoPE.
 
-`granitehybrid` loads and decodes it; `nemotron_h_moe` is refused. The
-`.missing-ssm_d` variant drops one SSM tensor so admission must FAIL CLOSED
-naming it (the hostile-GGUF discipline).
+Both architectures load and decode. The `.missing-ssm_d` variant drops one SSM
+tensor so admission must FAIL CLOSED naming it (the hostile-GGUF discipline).
 
 `--dense` builds the granite-4.0-h-micro shape instead: expert_count 0, no
 router or expert tensors, and a plain gated MLP (ffn_gate/up/down) on EVERY
@@ -36,7 +35,12 @@ decoded with NULL FFN weights (segfault on real h-micro).
 exercise the rope-enabled hybrid admission path; the default remains the real
 granite-4.0-h NoPE layout.
 
+`--prune-fixture` gives `nemotron_h_moe` two MoE layers with selection biases
+under both real on-disk spellings. It is the source fixture for the non-uniform
+per-layer expert-count prune gate.
+
 Usage:  make-test-hybrid.py <out-prefix> [--arch granitehybrid] [--dense] [--rope]
+                                      [--prune-fixture]
 Writes <out>.gguf (valid) and <out>.missing-ssm_d.gguf (drops one SSM tensor).
 """
 import struct
@@ -48,6 +52,9 @@ if "--arch" in sys.argv:
     ARCH = sys.argv[sys.argv.index("--arch") + 1]
 DENSE = "--dense" in sys.argv
 ROPE = "--rope" in sys.argv
+PRUNE_FIXTURE = "--prune-fixture" in sys.argv
+if PRUNE_FIXTURE and ARCH != "nemotron_h_moe":
+    sys.exit("--prune-fixture requires --arch nemotron_h_moe")
 
 # tiny geometry (structurally faithful to Mamba-2, not to any real size)
 E = 32                    # embedding_length
@@ -70,8 +77,10 @@ FF_SHEXP = 16            # shared-expert FFN width
 # EXACTLY one of SSM / attention / MoE-MLP, typed off per-layer head_count_kv (0)
 # and feed_forward_length (0), with the FFN on the MLP block only.
 if ARCH == "nemotron_h_moe":
-    LAYER_KV = [0, KV, 0]        # SSM, attention, MoE-MLP
-    LAYER_FF = [0, 0, FF_EXP]    # per-layer feed_forward_length (0 on SSM/attn)
+    LAYER_KV = [0, KV, 0, 0] if PRUNE_FIXTURE else [0, KV, 0]
+    # SSM, attention, then one or two MoE-MLP blocks. The prune fixture needs
+    # two MoE layers so its post-prune expert counts can deliberately disagree.
+    LAYER_FF = [0, 0, FF_EXP, FF_EXP] if PRUNE_FIXTURE else [0, 0, FF_EXP]
 else:
     LAYER_KV = [0, KV]
     LAYER_FF = None
@@ -108,6 +117,7 @@ def rnd():
 def flist(n): return [rnd() for _ in range(n)]
 def pack(xs): return struct.pack(f"<{len(xs)}f", *xs)
 def ones(n): return pack([1.0] * n)
+def zeros(n): return pack([0.0] * n)
 # ssm_a is stored as the (negative) decay coefficient A, used directly as
 # exp(dt*A); make it plausibly negative so the recurrence is a decay.
 def negs(n): return pack([-(0.5 + abs(rnd())) for _ in range(n)])
@@ -183,9 +193,10 @@ def moe(i):
     if DENSE:
         return dense_ffn(i)
     # routed experts (fused 3D: {E, FF_EXP, N_EXPERT} etc.) + shared expert
-    return [
+    tensors = [
         (f"blk.{i}.ffn_norm.weight", [E], ones(E)),
-        (f"blk.{i}.ffn_gate_inp.weight", [E, N_EXPERT], pack(flist(E * N_EXPERT))),
+        (f"blk.{i}.ffn_gate_inp.weight", [E, N_EXPERT],
+         zeros(E * N_EXPERT) if PRUNE_FIXTURE else pack(flist(E * N_EXPERT))),
         (f"blk.{i}.ffn_gate_exps.weight", [E, FF_EXP, N_EXPERT], pack(flist(E * FF_EXP * N_EXPERT))),
         (f"blk.{i}.ffn_up_exps.weight", [E, FF_EXP, N_EXPERT], pack(flist(E * FF_EXP * N_EXPERT))),
         (f"blk.{i}.ffn_down_exps.weight", [FF_EXP, E, N_EXPERT], pack(flist(FF_EXP * E * N_EXPERT))),
@@ -193,6 +204,16 @@ def moe(i):
         (f"blk.{i}.ffn_up_shexp.weight", [E, FF_SHEXP], pack(flist(E * FF_SHEXP))),
         (f"blk.{i}.ffn_down_shexp.weight", [FF_SHEXP, E], pack(flist(FF_SHEXP * E))),
     ]
+    if PRUNE_FIXTURE:
+        # Zero router: this bias alone selects original experts 2 and 3 for
+        # every token. Layer 2 uses the generic `.weight` spelling and layer 3
+        # the spelling shipped by nemotron_h_moe. The prune plan keeps {2,3}
+        # versus {1,2,3}; slicing/remapping either bias incorrectly changes the
+        # exact output, rather than merely changing an inert descriptor.
+        suffix = "weight" if i == 2 else "bias"
+        tensors.append((f"blk.{i}.exp_probs_b.{suffix}", [N_EXPERT],
+                        pack([0.0, 500.0, 1000.0, 900.0])))
+    return tensors
 
 
 def ssm_layer(i, drop=None):

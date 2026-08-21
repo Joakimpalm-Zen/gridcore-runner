@@ -329,7 +329,10 @@ producing a different model. The layer's router (`ffn_gate_inp`) and its
 per-expert selection bias (`exp_probs_b`, in either on-disk spelling — the
 `.weight` of the DeepSeek-style GGUFs and the `.bias` of `nemotron_h_moe`) are
 sliced along with the expert banks, so the survivors in plan order become the
-new expert index space with no runtime remapping.
+new expert index space with no runtime remapping. Non-uniform coverage-pruned
+`nemotron_h_moe` layers resolve their expert count from each layer's router and
+run on CPU; CUDA names and declines this layout because its MoE kernels require
+one model-wide expert count.
 `scripts/moe-prune-plan.py` can build a plan from calibration data.
 
 ### Published artifacts

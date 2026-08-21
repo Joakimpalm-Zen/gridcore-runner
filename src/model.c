@@ -1238,20 +1238,41 @@ static bool nemotron_bind_layer(model_t *m, gguf_file *g, layer_t *l, int i) {
         l->ffn_norm_w = tensor_to_f32(an, m->n_embd, &ok);
         if (!ok) return false;
         if (m->n_expert > 0) {
-            l->is_moe   = true;
-            l->n_expert = m->n_expert;
+            l->is_moe = true;
             l->ffn_gate_inp  = need_tensor(g, "blk.%d.ffn_gate_inp.weight", i, &ok);
             l->ffn_up_exps   = need_tensor(g, "blk.%d.ffn_up_exps.weight", i, &ok);
             l->ffn_down_exps = need_tensor(g, "blk.%d.ffn_down_exps.weight", i, &ok);
             if (!ok) return false;
-            if ((int64_t)l->ffn_gate_inp->ne[0] != m->n_embd ||
-                (int64_t)l->ffn_gate_inp->ne[1] != m->n_expert) {
-                fprintf(stderr, "error: blk.%d ffn_gate_inp is [%lld,%lld], "
-                        "expected [%d,%d]\n", i,
-                        (long long)l->ffn_gate_inp->ne[0],
-                        (long long)l->ffn_gate_inp->ne[1], m->n_embd, m->n_expert);
+            // Match the generic MoE binding: the router is this layer's source
+            // of truth after --prune-experts shortens one layer independently.
+            // Model metadata remains the upper bound and sizes shared scratch;
+            // CUDA separately names and refuses non-uniform layer counts.
+            if ((int64_t)l->ffn_gate_inp->ne[0] != m->n_embd) {
+                fprintf(stderr, "error: blk.%d ffn_gate_inp has ne[0]=%lld, "
+                        "expected %d\n", i,
+                        (long long)l->ffn_gate_inp->ne[0], m->n_embd);
                 return false;
             }
+            l->n_expert = (int)l->ffn_gate_inp->ne[1];
+            if (l->n_expert < m->n_expert_used || l->n_expert > m->n_expert) {
+                fprintf(stderr, "error: blk.%d declares %d experts via "
+                        "ffn_gate_inp, outside [n_expert_used=%d, "
+                        "expert_count=%d]\n", i, l->n_expert,
+                        m->n_expert_used, m->n_expert);
+                return false;
+            }
+            // Nemotron's routed experts have no gate stack: up/down alone must
+            // agree exactly with the layer-local router count. Selection bias
+            // has two live GGUF spellings and is indexed by that same count.
+            if (!check_shape3(l->ffn_up_exps, m->n_embd, m->n_ff_exp,
+                              l->n_expert, "ffn_up_exps", i) ||
+                !check_shape3(l->ffn_down_exps, m->n_ff_exp, m->n_embd,
+                              l->n_expert, "ffn_down_exps", i))
+                return false;
+            gguf_tensor *epb = opt_tensor(g, "blk.%d.exp_probs_b.weight", i);
+            if (!epb) epb = opt_tensor(g, "blk.%d.exp_probs_b.bias", i);
+            l->exp_probs_b = tensor_to_f32(epb, l->n_expert, &ok);
+            if (!ok) return false;
             if (m->n_ff_shexp > 0) {
                 l->w_up_shexp   = need_tensor(g, "blk.%d.ffn_up_shexp.weight", i, &ok);
                 l->w_down_shexp = need_tensor(g, "blk.%d.ffn_down_shexp.weight", i, &ok);
