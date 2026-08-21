@@ -990,8 +990,12 @@ bool gpu_init(model_t *m) {
             if (!metal_tensor_type_ok(ws[i], false)) return false;
     }
 
-    id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
-    if (!dev) return false;
+    id<MTLDevice> dev = metal_init_injected("device")
+                      ? nil : MTLCreateSystemDefaultDevice();
+    if (!dev) {
+        fprintf(stderr, "gpu: no Metal device is available — using CPU\n");
+        return false;
+    }
 
     NSError *err = nil;
     id<MTLLibrary> lib = [dev newLibraryWithSource:

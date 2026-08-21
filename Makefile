@@ -854,6 +854,9 @@ ifeq ($(shell uname -s),Darwin)
 		    env RUNNER_METAL_MM=0 RUNNER_METAL_ATTN_COOP=0 ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-init-fallback.out 2> metal-init-fallback.err; \
 		cmp -s metal-cpu.out metal-init-fallback.out; \
 		grep -q "Metal initialization failed" metal-init-fallback.err; \
+		env RUNNER_METAL_INIT_INJECT_FAILURE=device ./$(RUNNER_EXE) -m test.gguf -p "hello" -n 8 --temp 0 --gpu auto > metal-init-fallback.out 2> metal-init-fallback.err; \
+		cmp -s metal-cpu.out metal-init-fallback.out; \
+		grep -q "no Metal device is available — using CPU" metal-init-fallback.err; \
 		echo "metal fallback ownership ok"; \
 	else \
 		echo "metal fallback runtime smoke skipped: no Metal device reported by --caps"; \
