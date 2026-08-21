@@ -323,6 +323,53 @@ static void test_atem_declared_optional_parameters_are_constrained(void) {
     jv_free(tools);
 }
 
+static void test_atem_native_turn_preserves_optional_parameters(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"rank\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"first\":{\"type\":\"integer\"},"
+        "\"middle\":{\"type\":\"integer\"},"
+        "\"third\":{\"type\":\"integer\"}},"
+        "\"required\":[\"first\",\"third\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_atem_turn(
+        tools, false, NULL, NULL, ATEM_TURN_DIRECT, err, sizeof(err));
+    if (!root) fprintf(stderr, "optional atem turn: %s\n", err);
+    assert(root != NULL);
+
+    const char *head = " to=rank<|message|><atem:function_calls>\n"
+                       "<atem:invoke name=\"rank\">\n";
+    const char *tail = "</atem:invoke>\n</atem:function_calls>";
+    char doc[1024];
+    snprintf(doc, sizeof(doc), "%s"
+        "<atem:parameter name=\"first\">1</atem:parameter>\n"
+        "<atem:parameter name=\"third\">3</atem:parameter>\n%s", head, tail);
+    assert(accepts(root, doc));
+    snprintf(doc, sizeof(doc), "%s"
+        "<atem:parameter name=\"first\">1</atem:parameter>\n"
+        "<atem:parameter name=\"middle\">2</atem:parameter>\n"
+        "<atem:parameter name=\"third\">3</atem:parameter>\n%s", head, tail);
+    assert(accepts(root, doc));
+    snprintf(doc, sizeof(doc), "%s"
+        "<atem:parameter name=\"middle\">2</atem:parameter>\n"
+        "<atem:parameter name=\"third\">3</atem:parameter>\n%s", head, tail);
+    assert(!accepts(root, doc));
+    snprintf(doc, sizeof(doc), "%s"
+        "<atem:parameter name=\"first\">1</atem:parameter>\n"
+        "<atem:parameter name=\"middle\">2</atem:parameter>\n%s", head, tail);
+    assert(!accepts(root, doc));
+    snprintf(doc, sizeof(doc), "%s"
+        "<atem:parameter name=\"first\">1</atem:parameter>\n"
+        "<atem:parameter name=\"middle\">2</atem:parameter>\n"
+        "<atem:parameter name=\"middle\">4</atem:parameter>\n"
+        "<atem:parameter name=\"third\">3</atem:parameter>\n%s", head, tail);
+    assert(!accepts(root, doc));
+
+    schema_free(root);
+    jv_free(tools);
+}
+
 static void test_atem_parallel_turn_constrains_two_recipient_calls(void) {
     jv *tools = parse(
         "[{\"type\":\"function\",\"function\":{\"name\":\"weather.get\","
@@ -1534,6 +1581,76 @@ static void test_gemma4_native_turn_constrains_names_and_arguments(void) {
     jv_free(tools);
 }
 
+static void test_gemma4_native_turn_preserves_optional_parameters(void) {
+    jv *tools = parse(
+        "[{\"type\":\"function\",\"function\":{\"name\":\"rank\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"first\":{\"type\":\"integer\"},"
+        "\"middle\":{\"type\":\"integer\"},"
+        "\"third\":{\"type\":\"integer\"}},"
+        "\"required\":[\"first\",\"third\"]}}}]"
+    );
+    char err[192];
+    snode *root = schema_compile_gemma4_turn(
+        tools, false, NULL, NULL, false, false, err, sizeof(err));
+    if (!root) fprintf(stderr, "optional gemma4 turn: %s\n", err);
+    assert(root != NULL);
+
+    assert(accepts(root,
+        "<|tool_call>call:rank{first:1,third:3}<tool_call|>"));
+    assert(accepts(root,
+        "<|tool_call>call:rank{first:1,middle:2,third:3}<tool_call|>"));
+    assert(!accepts(root,
+        "<|tool_call>call:rank{middle:2,third:3}<tool_call|>"));
+    assert(!accepts(root,
+        "<|tool_call>call:rank{first:1,middle:2}<tool_call|>"));
+    assert(!accepts(root,
+        "<|tool_call>call:rank{first:1,middle:2,middle:4,third:3}<tool_call|>"));
+
+    schema_free(root);
+    jv_free(tools);
+}
+
+// Sixty declared properties is the validator's bitset ceiling. Reaching the
+// required last member makes the native member node compare all 60 shared
+// prefixes while storing each value subtree only once; bit 60 is the closer.
+static void test_native_optional_member_property_ceiling(void) {
+    sbuf src = {0};
+    sb_fmt(&src, "%s",
+           "[{\"type\":\"function\",\"function\":{\"name\":\"wide\","
+           "\"parameters\":{\"type\":\"object\",\"properties\":{");
+    for (int i = 0; i < 60; i++) {
+        if (i) sb_fmt(&src, ",");
+        sb_fmt(&src, "\"field_%02d\":{\"type\":\"integer\"}", i);
+    }
+    sb_fmt(&src, "%s", "},\"required\":[\"field_59\"]}}}]");
+    assert(!src.failed);
+    jv *tools = parse(src.s);
+    char err[192];
+
+    snode *root = schema_compile_atem_turn(
+        tools, false, NULL, NULL, ATEM_TURN_DIRECT, err, sizeof(err));
+    if (!root) fprintf(stderr, "wide atem turn: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root,
+        " to=wide<|message|><atem:function_calls>\n"
+        "<atem:invoke name=\"wide\">\n"
+        "<atem:parameter name=\"field_59\">59</atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>"));
+    schema_free(root);
+
+    root = schema_compile_gemma4_turn(
+        tools, false, NULL, NULL, false, false, err, sizeof(err));
+    if (!root) fprintf(stderr, "wide gemma4 turn: %s\n", err);
+    assert(root != NULL);
+    assert(accepts(root,
+        "<|tool_call>call:wide{field_59:59}<tool_call|>"));
+    schema_free(root);
+
+    free(src.s);
+    jv_free(tools);
+}
+
 static void test_gemma4_thought_block_precedes_either_branch(void) {
     jv *tools = parse(TOOLS);
     char err[192];
@@ -1891,6 +2008,7 @@ int main(void) {
     test_atem_header_discriminates_matching_invoke();
     test_atem_stop_token_is_valid_at_the_raw_answer_tail();
     test_atem_declared_optional_parameters_are_constrained();
+    test_atem_native_turn_preserves_optional_parameters();
     test_atem_parallel_turn_constrains_two_recipient_calls();
     test_muse_generic_envelope_is_constrained_behind_user_recipient();
     test_atem_auto_user_branch_honors_response_schema();
@@ -1922,6 +2040,8 @@ int main(void) {
     test_harmony_truncation_pairs_the_name_it_emits();
     test_harmony_native_mapping_and_stream_boundaries();
     test_gemma4_native_turn_constrains_names_and_arguments();
+    test_gemma4_native_turn_preserves_optional_parameters();
+    test_native_optional_member_property_ceiling();
     test_gemma4_thought_block_precedes_either_branch();
     test_gemma4_truncated_call_still_parses();
     test_gemma4_native_mapping_and_stream_boundaries();

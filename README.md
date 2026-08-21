@@ -1003,7 +1003,9 @@ Muse's native atem format carries scalar parameter values as raw text rather
 than JSON strings. Consequently a scalar value cannot contain the literal
 `</atem:parameter>` sequence: atem itself uses that sentinel as the value
 boundary and its reference template describes the output as regex-parsed,
-not XML-escaped.
+not XML-escaped. Declared parameters retain their schema optionality: members
+listed in `required` are forced, while other members may be omitted in their
+declared order.
 
 For Muse, the recipient header is part of the constrained turn: `to=user`
 selects a plain answer and a declared tool recipient pins the matching
@@ -1092,14 +1094,14 @@ ordinary JSON: `arguments` is translated out of gemma4's `<|"|>` spelling on
 both the buffered and the streamed path, so no native framing reaches an
 OpenAI client.
 
-Two limits are worth knowing before you write a schema for this family. Every
-DECLARED parameter is emitted whether or not it is `required`, so an optional
-parameter is one the model will always fill in — give it a description that
-says what to put there. And a parameter with no declared `type` is rejected
-with a 400 that names it: gemma4's native call syntax has no spelling for a
+Declared parameters retain their schema optionality: members listed in
+`required` are forced, while other members may be omitted without changing
+gemma4's dict-sorted native order. One limit is worth knowing before you write
+a schema for this family: a parameter with no declared `type` is rejected with
+a 400 that names it. Gemma4's native call syntax has no spelling for a
 free-form value, and refusing is better than an unconstrained call the mapper
-may not be able to read back. Both differ from the generic JSON envelope,
-which other families still use.
+may not be able to read back. This differs from the generic JSON envelope,
+which can represent a free JSON value.
 
 ### Apertus tool rendering
 

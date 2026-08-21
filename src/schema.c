@@ -45,9 +45,12 @@ void schema_free(snode *n) {
     free(n->sentinel);
     for (int i = 0; i < n->n_props; i++) {
         if (n->keys) free(n->keys[i]);
+        if (n->next_keys) free(n->next_keys[i]);
         schema_free(n->props[i]);
     }
-    free(n->keys); free(n->key_len); free(n->props); free(n->req);
+    free(n->keys); free(n->key_len);
+    free(n->next_keys); free(n->next_key_len);
+    free(n->props); free(n->req);
     schema_free(n->items);
     for (int i = 0; i < n->n_alts; i++) schema_free(n->alts[i]);
     free(n->alts);
@@ -838,6 +841,11 @@ static bool union_start_bytes(const snode *a, bool set[256]) {
         // elements (`<|"|>` opener, itself a two-node SEQ) would have failed.
         case SN_SEQ:
             return a->n_props > 0 && union_start_bytes(a->props[0], set);
+        case SN_MEMBERS:
+            for (int i = 0; i < a->n_props; i++)
+                set[(uint8_t)a->keys[i][0]] = true;
+            if (a->sentinel_len) set[(uint8_t)a->sentinel[0]] = true;
+            return true;
         // Raw text accepts ANY byte, so as a union alternative it is the
         // catch-all. Order matters and is the caller's: put it last.
         case SN_RAW:
@@ -1084,6 +1092,78 @@ static bool atem_seq_add(snode *seq, snode *child) {
     return true;
 }
 
+// An ordered native-protocol member list is the non-JSON analogue of SN_OBJ:
+// each position carries one value subtree, required members cannot be skipped,
+// and optional members may be omitted without copying every possible suffix.
+// `keys` are the prefixes used before the first emitted member, `next_keys`
+// the prefixes used after one. The validator matches all skippable prefixes
+// through the next required member in parallel, so common multi-byte prefixes
+// remain exact without an ENUM+COND expansion per possible position.
+static snode *native_members_new(int count, const char *close) {
+    snode *n = sn_new(SN_MEMBERS);
+    if (!n) return NULL;
+    n->keys = calloc((size_t)count, sizeof(*n->keys));
+    n->key_len = calloc((size_t)count, sizeof(*n->key_len));
+    n->next_keys = calloc((size_t)count, sizeof(*n->next_keys));
+    n->next_key_len = calloc((size_t)count, sizeof(*n->next_key_len));
+    n->props = calloc((size_t)count, sizeof(*n->props));
+    n->req = calloc((size_t)count, sizeof(*n->req));
+    n->sentinel = strdup(close);
+    if ((count && (!n->keys || !n->key_len || !n->next_keys ||
+                   !n->next_key_len || !n->props || !n->req)) ||
+        !n->sentinel) {
+        schema_free(n);
+        return NULL;
+    }
+    n->sentinel_len = (int)strlen(close);
+    n->n_props = count;
+    n->whitespace_significant = true;
+    return n;
+}
+
+static bool native_member_set(snode *n, int at, const char *first,
+                              const char *next, snode *value) {
+    n->keys[at] = strdup(first);
+    n->next_keys[at] = strdup(next);
+    if (!n->keys[at] || !n->next_keys[at] || !value) {
+        return false;
+    }
+    n->key_len[at] = (int)strlen(first);
+    n->next_key_len[at] = (int)strlen(next);
+    n->props[at] = value;
+    return true;
+}
+
+// Mark the required names after a compiler has put the properties in its own
+// protocol order (declaration order for Muse, dictsort order for gemma4).
+// This mirrors the generic object compiler's exact required-name check rather
+// than interpreting a misspelled required entry as optional.
+static bool native_members_required(snode *n, jv *params, jv *props,
+                                    const int *order,
+                                    char *err, int errcap) {
+    jv *req = params ? jv_get(params, "required") : NULL;
+    if (!req) return true;
+    if (req->type != J_ARR) {
+        snprintf(err, errcap, "required must be an array");
+        return false;
+    }
+    for (int r = 0; r < req->n; r++) {
+        const char *key = jv_str(req->items[r], NULL);
+        int found = -1;
+        for (int i = 0; key && i < props->n; i++) {
+            int pi = order ? order[i] : i;
+            if (!strcmp(props->keys[pi], key)) { found = i; break; }
+        }
+        if (found < 0) {
+            snprintf(err, errcap, "required key '%s' not in properties",
+                     key ? key : "?");
+            return false;
+        }
+        n->req[found] = true;
+    }
+    return true;
+}
+
 static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
     jv *fn = jv_get(tool, "function");
     if (!fn) fn = tool;
@@ -1093,34 +1173,45 @@ static snode *atem_tool_tail(jv *tool, char *err, int errcap) {
         snprintf(err, errcap, "atem tool parameters.properties must be an object");
         return NULL;
     }
-    int count = 2 + (props ? props->n * 4 : 0);
-    snode *seq = atem_seq(count);
+    if (props && props->n > 60) {
+        snprintf(err, errcap, "atem tool has too many parameters (max 60)");
+        return NULL;
+    }
+    snode *seq = atem_seq(2);
     if (!seq) goto oom;   // NOT a bare return: the caller prints this message
     if (!atem_seq_add(seq, atem_lit("\">\n"))) goto oom;
+    snode *members = native_members_new(
+        props ? props->n : 0, "</atem:invoke>\n</atem:function_calls>");
+    if (!members) goto oom;
     for (int i = 0; props && i < props->n; i++) {
         jv *ty = jv_get(props->items[i], "type");
         const char *type = jv_str(ty, "");
         sbuf open = {0};
         sb_fmt(&open, "<atem:parameter name=\"%s\">", props->keys[i]);
-        if (open.failed || !atem_seq_add(seq, atem_lit(open.s))) {
-            free(open.s); goto oom;
-        }
-        free(open.s);
         bool structured = !strcmp(type, "object") || !strcmp(type, "array");
         snode *value = structured
                      ? compile_node(props->items[i], err, errcap, 0)
                      : atem_raw("</atem:parameter>");
-        if (!value || !atem_seq_add(seq, value)) {
-            schema_free(value);
+        snode *tail = atem_seq(structured ? 3 : 2);
+        if (open.failed || !value || !tail || !atem_seq_add(tail, value) ||
+            (structured &&
+             !atem_seq_add(tail, atem_lit("</atem:parameter>"))) ||
+            !atem_seq_add(tail, atem_lit("\n")) ||
+            !native_member_set(members, i, open.s, open.s, tail)) {
+            free(open.s);
+            if (!tail || tail->n_props == 0) schema_free(value);
+            schema_free(tail);
+            schema_free(members);
             if (!err[0]) goto oom;
             schema_free(seq); return NULL;
         }
-        if (structured &&
-            !atem_seq_add(seq, atem_lit("</atem:parameter>"))) goto oom;
-        if (!atem_seq_add(seq, atem_lit("\n"))) goto oom;
+        free(open.s);
     }
-    if (!atem_seq_add(seq,
-            atem_lit("</atem:invoke>\n</atem:function_calls>"))) goto oom;
+    if (props && !native_members_required(members, params, props, NULL,
+                                          err, errcap)) {
+        schema_free(members); schema_free(seq); return NULL;
+    }
+    if (!atem_seq_add(seq, members)) { schema_free(members); goto oom; }
     return seq;
 oom:
     if (!err[0]) snprintf(err, errcap, "out of memory compiling atem tools");
@@ -1574,16 +1665,10 @@ snode *schema_compile_harmony_turn(jv *tools, bool allow_final,
 // So the envelope stays and its GRAMMAR changes, which is what muse and
 // harmony already do.
 //
-// TWO limitations, both deliberate and both shared with the muse compiler:
-//
-//   * every DECLARED property is emitted, `required` or not. The choice to
-//     skip an optional key mid-object is a multi-byte decision between key
-//     literals, which this validator can only express as an ENUM+COND pair
-//     per position -- quadratic in the property count, with no subtree
-//     sharing. atem_tool_tail made the same call in the same place.
-//   * a parameter with no declared `type` is refused rather than admitted as
-//     free JSON: there is no native spelling to constrain it to. The error
-//     names the parameter, so a caller can type it and retry.
+// One limitation is deliberate: a parameter with no declared `type` is
+// refused rather than admitted as free JSON. There is no native spelling to
+// constrain it to; the error names the parameter, so a caller can type it and
+// retry.
 #define G4_MAX_ITEMS 24      // bounded array: an unbounded one under a token
                              // budget is a truncation waiting to happen
 #define G4_MAX_DEPTH 6
@@ -1661,37 +1746,61 @@ oom:
 }
 
 // `{` key `:` VALUE ( `,` key `:` VALUE )* `}` -- keys UNQUOTED and in
-// jinja dictsort order, which is what format_argument writes.
-static snode *g4_object(jv *props, const char *what, int depth, int *budget,
+// jinja dictsort order, which is what format_argument writes. SN_MEMBERS owns
+// the ordered optionality; the opening brace stays outside it so first and
+// subsequent member prefixes differ only by the latter's comma.
+static snode *g4_object(jv *schema, const char *what, int depth, int *budget,
                         char *err, int errcap) {
-    if (props->n == 0) return atem_lit("{}");
+    jv *props = jv_get(schema, "properties");
+    if (!props || props->type != J_OBJ) {
+        snprintf(err, errcap,
+                 "gemma4 %s is an object without declared `properties`",
+                 what);
+        return NULL;
+    }
+    if (props->n > 60) {
+        snprintf(err, errcap, "gemma4 %s has too many properties (max 60)",
+                 what);
+        return NULL;
+    }
     int *order = malloc(sizeof(int) * (size_t)(props->n > 0 ? props->n : 1));
     if (!order) {
         snprintf(err, errcap, "out of memory compiling gemma4 object");
         return NULL;
     }
     jv_dictsort(props, order);
-    snode *seq = atem_seq(props->n * 2 + 2);
-    if (!seq) { free(order); goto oom; }
+    snode *seq = atem_seq(2);
+    snode *members = native_members_new(props->n, "}");
+    if (!seq || !members) {
+        free(order); schema_free(seq); schema_free(members); goto oom;
+    }
     seq->whitespace_significant = true;
     for (int i = 0; i < props->n; i++) {
         const char *key = props->keys[order[i]];
-        sbuf open = {0};
-        sb_fmt(&open, "%s%s:", i ? "," : "{", key);
-        bool ok = !open.failed && atem_seq_add(seq, atem_lit(open.s));
-        free(open.s);
-        if (!ok) { free(order); schema_free(seq); goto oom; }
+        sbuf first = {0}, next = {0};
+        sb_fmt(&first, "%s:", key);
+        sb_fmt(&next, ",%s:", key);
         char what2[96];
         snprintf(what2, sizeof(what2), "%s.%s", what, key);
         snode *value = g4_value(props->items[order[i]], what2, depth + 1,
                                 budget, err, errcap);
-        if (!value || !atem_seq_add(seq, value)) {
-            schema_free(value); free(order); schema_free(seq);
+        if (first.failed || next.failed || !value ||
+            !native_member_set(members, i, first.s, next.s, value)) {
+            free(first.s); free(next.s); schema_free(value);
+            free(order); schema_free(members); schema_free(seq);
             return NULL;
         }
+        free(first.s); free(next.s);
+    }
+    if (!native_members_required(members, schema, props, order, err, errcap)) {
+        free(order); schema_free(members); schema_free(seq); return NULL;
     }
     free(order);
-    if (!atem_seq_add(seq, atem_lit("}"))) { schema_free(seq); goto oom; }
+    if (!atem_seq_add(seq, atem_lit("{")) ||
+        !atem_seq_add(seq, members)) {
+        if (seq->n_props < 2) schema_free(members);
+        schema_free(seq); goto oom;
+    }
     return seq;
 oom:
     if (!err[0]) snprintf(err, errcap, "out of memory compiling gemma4 object");
@@ -1799,14 +1908,7 @@ static snode *g4_value(jv *schema, const char *what, int depth, int *budget,
     if (!strcmp(type, "array"))
         return g4_array(schema, what, depth, budget, err, errcap);
     if (!strcmp(type, "object")) {
-        jv *props = jv_get(schema, "properties");
-        if (!props || props->type != J_OBJ) {
-            snprintf(err, errcap,
-                     "gemma4 %s is an object without declared `properties`",
-                     what);
-            return NULL;
-        }
-        return g4_object(props, what, depth, budget, err, errcap);
+        return g4_object(schema, what, depth, budget, err, errcap);
     }
     snprintf(err, errcap, "gemma4 %s has unsupported type \"%s\"", what, type);
     return NULL;
@@ -1829,7 +1931,7 @@ static snode *g4_call_tail(jv *tool, int *budget, char *err, int errcap) {
     if (!seq) goto oom;
     seq->whitespace_significant = true;
     snode *args = props && props->n
-                ? g4_object(props, name, 0, budget, err, errcap)
+                ? g4_object(params, name, 0, budget, err, errcap)
                 : atem_lit("{}");
     if (!args || !atem_seq_add(seq, args)) {
         schema_free(args); schema_free(seq);
@@ -2055,6 +2157,8 @@ enum {
     P_NUM,
     P_SEQ,
     P_RAW,
+    P_MEM_FIRST,      // native members: before the first emitted member
+    P_MEM_NEXT,       // native members: after one emitted member
 };
 
 // number micro-states (frame->sub)
@@ -2097,6 +2201,26 @@ static bool close_allowed(const snode *n, int from) {
     return true;
 }
 
+// Native ordered members use one extra candidate bit for the closing literal.
+// A close is reachable only when no required member remains, exactly as for a
+// JSON object; already-consumed members lie below `from`, so duplicates and
+// backwards order are unreachable by construction.
+static uint64_t member_candidates(const snode *n, int from) {
+    uint64_t m = key_candidates(n, from);
+    if (close_allowed(n, from)) m |= 1ull << n->n_props;
+    return m;
+}
+
+static const char *member_prefix(const snode *n, int which, bool first) {
+    if (which == n->n_props) return n->sentinel;
+    return first ? n->keys[which] : n->next_keys[which];
+}
+
+static int member_prefix_len(const snode *n, int which, bool first) {
+    if (which == n->n_props) return n->sentinel_len;
+    return first ? n->key_len[which] : n->next_key_len[which];
+}
+
 static void frame_done(sval *v);
 
 // child value finished: advance parent
@@ -2115,6 +2239,11 @@ static void frame_done(sval *v) {
             f->disc = (uint16_t)(v->last_enum + 1);
         if (f->idx >= f->node->n_props) frame_done(v);
         else f->phase = P_SEQ;
+    } else if (f->node->kind == SN_MEMBERS) {
+        f->phase = P_MEM_NEXT;
+        f->alive = 0;
+        f->lit_pos = 0;
+        f->sub = 0;
     } else {
         f->phase = P_ARR_NEXT; // SN_ARR
     }
@@ -2146,6 +2275,11 @@ static const snode *pick_alt(const snode *u, uint8_t c) {
                     if (union_start_bytes(a->props[0], starts) && starts[c])
                         return a;
                 }
+                break;
+            case SN_MEMBERS:
+                for (int j = 0; j < a->n_props; j++)
+                    if (c == (uint8_t)a->keys[j][0]) return a;
+                if (a->sentinel_len && c == (uint8_t)a->sentinel[0]) return a;
                 break;
             case SN_BOOL: if (c == 't' || c == 'f') return a; break;
             case SN_NULL: if (c == 'n') return a; break;
@@ -2428,6 +2562,13 @@ static int feed_byte(sval *v, uint8_t c) {
             f->idx = 1;
             if (!push_value(v, n->props[0])) return -1;
             return feed_byte(v, c);
+        case SN_MEMBERS:
+            f->phase = P_MEM_FIRST;
+            f->idx = 0;
+            f->lit_pos = 0;
+            f->sub = 0;
+            f->alive = member_candidates(n, 0);
+            return feed_byte(v, c);
         case SN_RAW:
             f->phase = P_RAW;
             f->lit_pos = 0;
@@ -2626,6 +2767,48 @@ static int feed_byte(sval *v, uint8_t c) {
     case P_SEQ:
         if (f->idx >= n->n_props) { frame_done(v); return 1; }
         return push_value(v, n->props[f->idx++]) ? feed_byte(v, c) : -1;
+
+    case P_MEM_FIRST:
+    case P_MEM_NEXT: {
+        bool first = f->phase == P_MEM_FIRST;
+        if (!f->alive) f->alive = member_candidates(n, f->idx);
+        uint64_t next = 0;
+        int completed = -1;
+        int pending_completed = f->sub ? f->sub - 1 : -1;
+        for (int i = f->idx; i <= n->n_props; i++) {
+            if (!(f->alive & (1ull << i))) continue;
+            const char *lit = member_prefix(n, i, first);
+            int len = member_prefix_len(n, i, first);
+            if (f->lit_pos >= len || lit[f->lit_pos] != (char)c) continue;
+            if (f->lit_pos + 1 == len) completed = i;
+            else next |= 1ull << i;
+        }
+        bool reconsume = false;
+        int picked = completed;
+        if (completed >= 0 && next == 0) {
+            // the current byte completed the selected prefix
+        } else if (!next) {
+            if (pending_completed < 0) return -1;
+            picked = pending_completed;
+            reconsume = true; // c belongs to the selected member's value/parent
+        } else {
+            f->alive = next;
+            f->sub = completed >= 0 ? (uint8_t)(completed + 1) : 0;
+            f->lit_pos++;
+            return 0;
+        }
+        if (picked == n->n_props) {
+            frame_done(v);
+            return reconsume ? 1 : 0;
+        }
+        f->idx = picked + 1;
+        f->sub = (uint8_t)picked;
+        f->phase = P_MEM_NEXT;
+        f->alive = 0;
+        f->lit_pos = 0;
+        if (!push_value(v, n->props[picked])) return -1;
+        return reconsume ? feed_byte(v, c) : 0;
+    }
 
     case P_RAW: {
         const char *sentinel = n->sentinel;
@@ -2973,6 +3156,17 @@ static void emit_min_choice(emitq *q, const snode *n, int depth, int choice) {
                     choice = 0;
             }
             break;
+        case SN_MEMBERS: {
+            bool first = true;
+            for (int i = 0; i < n->n_props; i++) {
+                if (!n->req[i]) continue;
+                eq_put(q, member_prefix(n, i, first));
+                emit_min_choice(q, n->props[i], depth + 1, choice);
+                first = false;
+            }
+            eq_put(q, n->sentinel);
+            break;
+        }
         case SN_RAW:
             eq_put(q, n->sentinel);
             break;
@@ -3001,6 +3195,17 @@ static void close_obj(emitq *q, const snode *n, int from, bool need_comma,
         emit_min_choice(q, n->props[from], 0, choice);
     }
     eq_putc(q, '}');
+}
+
+static void close_members(emitq *q, const snode *n, int from, bool first,
+                          int choice) {
+    for (int i = from; i < n->n_props; i++) {
+        if (!n->req[i]) continue;
+        eq_put(q, member_prefix(n, i, first));
+        emit_min_choice(q, n->props[i], 0, choice);
+        first = false;
+    }
+    eq_put(q, n->sentinel);
 }
 
 int sval_close(sval *v, char *out, int cap) {
@@ -3139,6 +3344,27 @@ int sval_close(sval *v, char *out, int cap) {
             for (int i = f->idx; i < n->n_props && !eq_full(&q); i++)
                 emit_min_choice(&q, n->props[i], 0, choice);
             break;
+        case P_MEM_FIRST:
+        case P_MEM_NEXT: {
+            bool first = f->phase == P_MEM_FIRST;
+            if (f->lit_pos == 0) {
+                close_members(&q, n, f->idx, first, choice);
+                break;
+            }
+            int pick = f->sub ? f->sub - 1 : -1;
+            if (pick < 0) {
+                for (int i = f->idx; i <= n->n_props; i++) {
+                    if (f->alive & (1ull << i)) { pick = i; break; }
+                }
+            }
+            if (pick < 0) break;
+            const char *prefix = member_prefix(n, pick, first);
+            eq_put(&q, prefix + f->lit_pos);
+            if (pick == n->n_props) break;
+            emit_min_choice(&q, n->props[pick], 0, choice);
+            close_members(&q, n, pick + 1, false, choice);
+            break;
+        }
         case P_RAW:
             // Bytes already matching the sentinel are part of the generated
             // prefix; append only the unmatched suffix, then the enclosing
