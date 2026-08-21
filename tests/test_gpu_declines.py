@@ -5,6 +5,7 @@ decline.  A generic quantization message is actively misleading when all
 tensors use a supported type, and a CPU-vs-auto comparison alone would pass
 vacuously after an unexplained fallback.
 """
+import json
 import pathlib
 import subprocess
 import sys
@@ -81,4 +82,27 @@ def test_unsupported_tensor_names_itself(runner_bin, tmp_path, flags, tensor):
     err = auto.stderr.decode(errors="replace")
     assert tensor in err, err
     assert "IQ2_XXS" in err, err
+    assert "using CPU" in err, err
+
+
+def test_cuda_runtime_absence_is_loud(runner_bin, tmp_path):
+    caps = json.loads(subprocess.run(
+        [runner_bin, "--caps"], cwd=ROOT, stdout=subprocess.PIPE,
+        check=True).stdout)
+    if (caps.get("gpu") or {}).get("backend") == "metal":
+        pytest.skip("CUDA-only diagnostic")
+    if caps.get("gpu") is not None:
+        pytest.skip("CUDA runtime is available")
+
+    model = tmp_path / "dense.gguf"
+    subprocess.run(
+        [sys.executable, ROOT / "scripts/make-test-model.py", str(model)],
+        check=True, cwd=ROOT, stdout=subprocess.DEVNULL)
+    cpu = _run(runner_bin, model, "off")
+    auto = _run(runner_bin, model, "auto")
+    assert cpu.returncode == 0, cpu.stderr.decode(errors="replace")
+    assert auto.returncode == 0, auto.stderr.decode(errors="replace")
+    assert cpu.stdout == auto.stdout
+    err = auto.stderr.decode(errors="replace")
+    assert "CUDA driver library is unavailable" in err, err
     assert "using CPU" in err, err

@@ -250,7 +250,10 @@ distroless image run with `--gpus all` reports `"gpu":{"backend":"cuda","name":
 "NVIDIA GeForce RTX 3070",…}` from `runner --caps` and prints `gpu: CUDA backend
 on NVIDIA GeForce RTX 3070` with VRAM accounting at load; the identical image run
 without `--gpus` reports `"gpu":null` and runs on CPU (`libcuda.so.1` absent), so
-the flag is what makes the difference. Metal cannot be containerized
+the flag is what makes the difference. A generation attempt in that case says
+that the CUDA driver library is unavailable before continuing on the CPU;
+runtime/device discovery and backend staging failures likewise name the failed
+stage instead of looking like a successful GPU admission. Metal cannot be containerized
 (Apple-Silicon only, no passthrough).
 
 ## Models and conversion

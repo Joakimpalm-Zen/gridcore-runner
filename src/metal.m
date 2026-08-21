@@ -341,7 +341,10 @@ static bool metal_ensure_batch(gpu_t *g, model_t *m, int n) {
 // on the --caps path. tests/test_metal_shaders.m is the build-time gate.
 bool gpu_available(char *name, int cap) {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
-    if (!dev) return false;
+    if (!dev) {
+        fprintf(stderr, "gpu: no Metal device is available — using CPU\n");
+        return false;
+    }
     NSError *err = nil;
     id<MTLLibrary> lib = [dev newLibraryWithSource:
                               [NSString stringWithUTF8String:k_metal_src]
@@ -1004,6 +1007,8 @@ bool gpu_init(model_t *m) {
 
     gpu_t *g = calloc(1, sizeof(gpu_t));
     if (!g) {
+        fprintf(stderr, "gpu: Metal backend state allocation failed — using "
+                "CPU\n");
         [lib release];
         [dev release];
         return false;

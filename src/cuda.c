@@ -1559,13 +1559,36 @@ bool gpu_init(model_t *m) {
         }
     }
 
-    if (!cu_load() || cu.Init(0) != 0) return false;
+    if (!cu_load()) {
+        fprintf(stderr, "gpu: CUDA driver library is unavailable or incomplete "
+                "— using CPU\n");
+        return false;
+    }
+    CUresult init_rc = cu.Init(0);
+    if (init_rc != 0) {
+        fprintf(stderr, "gpu: CUDA initialization failed: %s — using CPU\n",
+                cu_err(init_rc));
+        return false;
+    }
     prof.on = getenv("RUNNER_CUDA_PROFILE") != NULL;
     int ndev = 0;
-    if (cu.DeviceGetCount(&ndev) != 0 || ndev < 1) return false;
+    CUresult count_rc = cu.DeviceGetCount(&ndev);
+    if (count_rc != 0) {
+        fprintf(stderr, "gpu: CUDA device enumeration failed: %s — using "
+                "CPU\n", cu_err(count_rc));
+        return false;
+    }
+    if (ndev < 1) {
+        fprintf(stderr, "gpu: CUDA reports no devices — using CPU\n");
+        return false;
+    }
 
     gpu_t *g = calloc(1, sizeof(gpu_t));
-    if (!g) return false;
+    if (!g) {
+        fprintf(stderr, "gpu: CUDA backend state allocation failed — using "
+                "CPU\n");
+        return false;
+    }
     g->last_pos = -2;
 
     {
@@ -1721,7 +1744,11 @@ bool gpu_init(model_t *m) {
             g->h_moe_gidx = malloc(sizeof(int)   * (size_t)MVB * used_c);
             g->h_moe_gw   = malloc(sizeof(float) * (size_t)MVB * used_c);
             if (!g->h_moe_sel || !g->h_moe_selw || !g->h_moe_gidx ||
-                !g->h_moe_gw) goto fail;
+                !g->h_moe_gw) {
+                fprintf(stderr, "gpu: CUDA MoE host staging allocation failed "
+                        "— using CPU\n");
+                goto fail;
+            }
             g->moe_fused_ok = moe_fused_eligible(m);
             // RUNNER_MOE_EAGER: debug escape to the v0.1.4 host-routing
             // path — the reference side of the RUNNER_DEBUG_MOE bit
@@ -1756,14 +1783,22 @@ bool gpu_init(model_t *m) {
             size_t per_tok = (size_t)m->n_layer * m->n_embd_ple;
             g->h_ple     = malloc(sizeof(float) * MVB * per_tok);
             g->h_ple_tmp = malloc(sizeof(float) * per_tok);
-            if (!g->h_ple || !g->h_ple_tmp) goto fail;
+            if (!g->h_ple || !g->h_ple_tmp) {
+                fprintf(stderr, "gpu: CUDA per-layer embedding host staging "
+                        "allocation failed — using CPU\n");
+                goto fail;
+            }
         }
         g->h_x      = malloc(sizeof(float) * MVB * m->n_embd);
         g->h_logits = malloc(sizeof(float) * m->n_vocab);
         if (m->n_expert > 0)
             g->h_moe_logits = malloc(sizeof(float) * (size_t)m->n_expert);
         if (!g->h_x || !g->h_logits ||
-            (m->n_expert > 0 && !g->h_moe_logits)) goto fail;
+            (m->n_expert > 0 && !g->h_moe_logits)) {
+            fprintf(stderr, "gpu: CUDA host activation staging allocation "
+                    "failed — using CPU\n");
+            goto fail;
+        }
 
         char name[128] = "CUDA GPU";
         cu.DeviceGetName(name, sizeof(name), g->sw->dev);
@@ -3508,9 +3543,18 @@ gpu_batch *gpu_batch_create(model_t **seqs, int n) {
     model_t *m0 = seqs[0];
 
     gpu_batch *b = calloc(1, sizeof(gpu_batch));
-    if (!b) return NULL;
+    if (!b) {
+        fprintf(stderr, "gpu: CUDA batch state allocation failed — using "
+                "sequential GPU forwards\n");
+        return NULL;
+    }
     b->seqs = malloc(sizeof(model_t *) * (size_t)n);
-    if (!b->seqs) { free(b); return NULL; }
+    if (!b->seqs) {
+        fprintf(stderr, "gpu: CUDA batch sequence-table allocation failed — "
+                "using sequential GPU forwards\n");
+        free(b);
+        return NULL;
+    }
     memcpy(b->seqs, seqs, sizeof(model_t *) * (size_t)n);
     b->n = n;
     b->lead = lead;
@@ -3521,13 +3565,22 @@ gpu_batch *gpu_batch_create(model_t **seqs, int n) {
     for (int l = 0; l < m0->n_layer; l++)
         if (model_q_dim(m0, l) > b->xdim) b->xdim = model_q_dim(m0, l);
 
-    if (cu.CtxSetCurrent(b->sw->ctx) != 0) goto fail;
+    CUresult ctx_rc = cu.CtxSetCurrent(b->sw->ctx);
+    if (ctx_rc != 0) {
+        fprintf(stderr, "gpu: CUDA batch context selection failed: %s — "
+                "using sequential GPU forwards\n", cu_err(ctx_rc));
+        goto fail;
+    }
     CK(cu.MemAlloc(&b->logits_n, sizeof(float) * (size_t)MVB * b->n_vocab));
     CK(cu.MemAlloc(&b->pos_d, sizeof(int) * MVB));
     CK(cu.MemAlloc(&b->kcp_d, sizeof(uint64_t) * MVB));
     CK(cu.MemAlloc(&b->vcp_d, sizeof(uint64_t) * MVB));
     b->h_logits = malloc(sizeof(float) * (size_t)MVB * b->n_vocab);
-    if (!b->h_logits) goto fail;
+    if (!b->h_logits) {
+        fprintf(stderr, "gpu: CUDA batch host-logit allocation failed — using "
+                "sequential GPU forwards\n");
+        goto fail;
+    }
     // no stream means no graphs; plain launches still work, just slower.
     // gemma4's V-copy path (ly->wv == NULL) uses a synchronous MemsetD8 that
     // cannot be captured, same as the solo decode graph refuses it.
