@@ -974,8 +974,8 @@
       "id": "muse-glimmer-30b-kquant",
       "architecture": "muse-glimmer",
       "family": "Meta Muse Glimmer",
-      "file": "models/muse-glimmer-30B-kquant-17gb.gguf",
-      "sha256": "7e9b74b7c8875e9e265695df9613bf6290f2392e479ce740495a129019c488d8",
+      "file": "models/Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf",
+      "sha256": "4cc57c0f51040a226e5a72cc47b7613f7772950e460a665f7083de89f183f60e",
       "tokenizer_reference": "meta-models/Muse-Glimmer-30B",
       "reference": {
         "implementation": "llama.cpp",
@@ -988,7 +988,7 @@
         "cpu_cuda",
         "chat"
       ],
-      "notes": "Official meta-models GGUF (muse-glimmer-30B-kquant-17gb.gguf, 4-bit k-quant). Text path only: the separate vision encoder (mmproj) and atem tool syntax are out of scope. Evidence: docs/muse-glimmer-cert-2026-08-11.md.",
+      "notes": "Official meta-models GGUF (Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf, 4-bit k-quant; upstream renamed/replaced the original muse-glimmer-30B-kquant-17gb.gguf — re-measured 2026-08-21, all six greedy cert outputs byte-identical, only the sha changed). Text path only: the separate vision encoder (mmproj) and atem tool syntax are out of scope. Evidence: docs/muse-glimmer-cert-2026-08-11.md.",
       "check_params": {
         "cpu_cuda": {
           "pins": {

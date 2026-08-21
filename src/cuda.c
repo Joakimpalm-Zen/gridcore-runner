@@ -2217,6 +2217,14 @@ static bool tc_promoted(const model_t *m, int type) {
     // withdrawn — reproduced from a rebuilt pre-fix binary, that verdict is a
     // false pass (same binary, same model, free-running divergence at -b 64).
     // The promotion survives; the evidence behind it did not.
+    //
+    // qwen35 gate row (measured 2026-08-21, Qwen3.5-4B-Q4_K_M, Blackwell):
+    // mean|dlogit| 0.000518 = 2e-5 of range (limit 5e-3), 0/64 top-1 flips,
+    // free-running 32-token greedy at batch 64 token-identical. One model,
+    // one type — a promotion-grade row, but the arch stays UNPROMOTED until
+    // it has rows on more than one checkpoint (the granite lesson: coverage
+    // per promoted type on the arch's own weights). RUNNER_CUDA_TC=1 remains
+    // the opt-in.
     static const char *archs[] = { "llama", "phi3", "gemma4", "qwen3",
                                    "mistral", "gemma3", "smollm", "granite" };
     for (size_t i = 0; i < sizeof(archs) / sizeof(*archs); i++)

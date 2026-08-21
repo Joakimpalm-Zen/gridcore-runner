@@ -149,3 +149,18 @@ arch, tracked as an open item, not smuggled in here.
   system turn); `enable_thinking:false` pins the generation prompt to
   `<|start|>assistant to=user<|message|>`, which is the format's own way to
   suppress the reasoning turn.
+
+## Re-measure addendum — 2026-08-21: upstream replaced the artifact; behavior unchanged
+
+Upstream (`meta-models/Muse-Glimmer-30B-GGUF`) renamed and replaced the pinned
+file: `muse-glimmer-30B-kquant-17gb.gguf` is gone; the current artifact is
+`Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf` (16,756,683,904 B), sha256
+`4cc57c0f51040a226e5a72cc47b7613f7772950e460a665f7083de89f183f60e`.
+
+Re-measured on the new file with the original protocol (six greedy cert
+prompts, CPU, temp 0, rstrip+sha256 of the completion): **6/6 runner outputs
+byte-identical to the committed evidence** produced on the old artifact
+(`muse-glimmer-evidence/remeasure-2026-08-21.json`). The replacement changed
+the container, not the behavior under this protocol, so every gate verdict in
+this document carries over; only the pinned sha above is superseded by the one
+in `tests/compatibility/models.json`.
