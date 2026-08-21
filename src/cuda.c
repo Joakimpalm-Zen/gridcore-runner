@@ -2218,14 +2218,22 @@ static bool tc_promoted(const model_t *m, int type) {
     // false pass (same binary, same model, free-running divergence at -b 64).
     // The promotion survives; the evidence behind it did not.
     //
-    // qwen35 gate row (measured 2026-08-21, Qwen3.5-4B-Q4_K_M, Blackwell):
-    // mean|dlogit| 0.000518 = 2e-5 of range (limit 5e-3), 0/64 top-1 flips,
-    // free-running 32-token greedy at batch 64 token-identical. One model,
-    // one type — a promotion-grade row, but the arch stays UNPROMOTED until
-    // it has rows on more than one checkpoint (the granite lesson: coverage
-    // per promoted type on the arch's own weights). RUNNER_CUDA_TC=1 remains
-    // the opt-in.
+    // qwen35 PROMOTED 2026-08-21 on four rows across two checkpoints and both
+    // promoted types (Blackwell, N_BATCH=64, all 0/64 flips, free-running
+    // batch-64 greedy token-identical):
+    //
+    //   Qwen3.5-4B    Q4_K_M  mean|dlogit| 0.000518 = 2e-5 of range
+    //   Qwen3.5-4B    Q8_0    mean|dlogit| 0.000366 = 1e-5 of range
+    //   Qwen3.5-0.8B  Q4_K_M  mean|dlogit| 0.000400 = 1e-5 of range
+    //   Qwen3.5-0.8B  Q8_0    mean|dlogit| 0.000516 = 2e-5 of range
+    //
+    // The rows gate the whole model (teacher-forced + free-running), so
+    // whatever subset of qwen35's projections the TC prefill actually
+    // reaches — attention, MLP and the recurrent-layer projections alike —
+    // is inside the measured envelope; the scan kernels themselves have no
+    // GEMM shape and are untouched.
     static const char *archs[] = { "llama", "phi3", "gemma4", "qwen3",
+                                   "qwen35",
                                    "mistral", "gemma3", "smollm", "granite" };
     for (size_t i = 0; i < sizeof(archs) / sizeof(*archs); i++)
         if (strcmp(m->arch, archs[i]) == 0) return true;
