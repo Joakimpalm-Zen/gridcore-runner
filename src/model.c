@@ -3330,6 +3330,7 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
 
 void model_free(model_t *m) {
     gpu_free(m); // nulls kcache/vcache if the GPU owned them
+    model_lora_free(m);
     free(m->moe_host);
     m->moe_host = NULL;
     // Deregister on the clean path. The unclean paths (SIGKILL, crash) are
@@ -4946,6 +4947,233 @@ bool model_recurrent_blob_load(model_t *m, const uint8_t *src) {
     return true;
 }
 
+// ------------------------------------------------ LoRA adapters (adaptation D2)
+// Frozen quantized base + small f32 low-rank deltas, applied on the CPU dense
+// projections as y += scale * B(Ax) right after each base matvec — the base
+// weights and their kernels are untouched, which is what keeps every existing
+// identity gate meaningful for adapted runs too.
+enum { LW_Q, LW_K, LW_V, LW_O, LW_GATE, LW_UP, LW_DOWN, LW_SLOTS };
+#define LORA_R_MAX 512
+struct lora_w {
+    float *a, *b;   // a: [r][n_in] row-major, b: [n_out][r] row-major
+    int    r;       // 0 = no adapter on this slot
+    float  scale;   // (alpha / r) * user scale, folded at load
+};
+
+static const char *const lora_slot_name[LW_SLOTS] = {
+    "attn_q", "attn_k", "attn_v", "attn_output",
+    "ffn_gate", "ffn_up", "ffn_down",
+};
+
+void model_lora_free(model_t *m) {
+    if (!m->lora) return;
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++) {
+            free(m->lora[(size_t)l * LW_SLOTS + s].a);
+            free(m->lora[(size_t)l * LW_SLOTS + s].b);
+        }
+    free(m->lora);
+    m->lora = NULL;
+    m->lora_id = 0;
+}
+
+// The low-rank delta for one projection: t = A x (r dots), y += scale * B t.
+// Explicit fmaf accumulation in a fixed sequential order — the adapter path
+// must be as reproducible as the base kernels it rides beside.
+static void lora_apply(const struct lora_w *lw, float *y, int ys,
+                       const float *xin, int xs, int n_in, int n_out, int nb) {
+    if (!lw->r) return;
+    float t[LORA_R_MAX];
+    for (int bb = 0; bb < nb; bb++) {
+        const float *xr = xin + (size_t)bb * xs;
+        float *yr = y + (size_t)bb * ys;
+        for (int k = 0; k < lw->r; k++) {
+            const float *ar = lw->a + (size_t)k * n_in;
+            float acc = 0.0f;
+            for (int i = 0; i < n_in; i++) acc = fmaf(ar[i], xr[i], acc);
+            t[k] = acc;
+        }
+        for (int j = 0; j < n_out; j++) {
+            const float *br = lw->b + (size_t)j * lw->r;
+            float acc = 0.0f;
+            for (int k = 0; k < lw->r; k++) acc = fmaf(br[k], t[k], acc);
+            yr[j] = fmaf(lw->scale, acc, yr[j]);
+        }
+    }
+}
+
+// hook macro: cheap NULL check first, layer/slot lookup second
+#define LORA_HOOK(slot, y, ys, xin, xs, nin, nout, nb) \
+    do { if (m->lora) lora_apply(&m->lora[(size_t)l * LW_SLOTS + (slot)], \
+                                 (y), (ys), (xin), (xs), (nin), (nout), (nb)); \
+    } while (0)
+
+static gguf_tensor *lora_slot_base(const model_t *m, int l, int s) {
+    const layer_t *ly = &m->layers[l];
+    switch (s) {
+        case LW_Q:    return ly->wq;
+        case LW_K:    return ly->wk;
+        case LW_V:    return ly->wv;
+        case LW_O:    return ly->wo;
+        case LW_GATE: return ly->w_gate;
+        case LW_UP:   return ly->w_up;
+        case LW_DOWN: return ly->w_down;
+    }
+    return NULL;
+}
+
+bool model_lora_load(model_t *m, const char *path, float user_scale) {
+    // v1 scope, refused by property rather than allowed by accident: the
+    // hooks live on the CPU dense-transformer projection sites only.
+    if (m->gpu) {
+        fprintf(stderr, "error: --lora is CPU-only for now — run with "
+                "--gpu off\n");
+        return false;
+    }
+    if (m->qwen35 || m->granite_hybrid || m->nemotron_h) {
+        fprintf(stderr, "error: --lora does not cover recurrent "
+                "architectures yet (%s)\n", m->arch);
+        return false;
+    }
+    if (m->moe_gemma) {
+        fprintf(stderr, "error: --lora does not cover the gemma-4 "
+                "dual-branch FFN yet\n");
+        return false;
+    }
+    gguf_file g;
+    if (!gguf_open(&g, path)) {
+        fprintf(stderr, "error: cannot open adapter %s\n", path);
+        return false;
+    }
+    bool ok = false;
+    const char *ftype = gguf_get_str(&g, "general.type", "");
+    const char *atype = gguf_get_str(&g, "adapter.type", "");
+    if (strcmp(ftype, "adapter") != 0 || strcmp(atype, "lora") != 0) {
+        fprintf(stderr, "error: %s is not a LoRA adapter GGUF "
+                "(general.type=%s adapter.type=%s)\n", path, ftype, atype);
+        goto done;
+    }
+    const char *aarch = gguf_get_str(&g, "general.architecture", "");
+    if (strcmp(aarch, m->arch) != 0) {
+        fprintf(stderr, "error: adapter architecture '%s' does not match "
+                "the model's '%s'\n", aarch, m->arch);
+        goto done;
+    }
+    float alpha = gguf_get_f32(&g, "adapter.lora.alpha", 0.0f);
+    if (!(alpha > 0.0f)) {
+        fprintf(stderr, "error: adapter.lora.alpha missing or not "
+                "positive\n");
+        goto done;
+    }
+    struct lora_w *tab =
+        calloc((size_t)m->n_layer * LW_SLOTS, sizeof(struct lora_w));
+    if (!tab) goto done;
+    uint64_t id = 0xCBF29CE484222325ull;
+    for (uint64_t c = 0; path[c]; c++)
+        id = (id ^ (uint8_t)path[c]) * 0x100000001B3ull;
+    // every adapter tensor must map onto a hooked slot and match its base
+    // tensor's geometry — an unknown or misshapen tensor refuses the whole
+    // adapter (the hostile-GGUF discipline; a silently skipped tensor would
+    // serve a model that is not the one the adapter trained)
+    for (uint64_t ti = 0; ti < g.n_tensors; ti++) {
+        gguf_tensor *t = &g.tensors[ti];
+        int l = -1;
+        char pname[64];
+        char side = 0;
+        if (sscanf(t->name, "blk.%d.%40[a-z_].weight.lora_%c", &l, pname,
+                   &side) != 3 || (side != 'a' && side != 'b') ||
+            l < 0 || l >= m->n_layer) {
+            fprintf(stderr, "error: adapter tensor '%s' does not name a "
+                    "hooked projection\n", t->name);
+            goto fail_tab;
+        }
+        int s = -1;
+        for (int k = 0; k < LW_SLOTS; k++)
+            if (strcmp(pname, lora_slot_name[k]) == 0) { s = k; break; }
+        gguf_tensor *base = s >= 0 ? lora_slot_base(m, l, s) : NULL;
+        if (s < 0 || !base) {
+            fprintf(stderr, "error: adapter tensor '%s' targets a "
+                    "projection this model/path does not carry\n", t->name);
+            goto fail_tab;
+        }
+        struct lora_w *lw = &tab[(size_t)l * LW_SLOTS + s];
+        int64_t n_in = base->ne[0], n_out = base->ne[1];
+        if (t->type != T_F32) {
+            fprintf(stderr, "error: adapter tensor '%s' is not F32\n",
+                    t->name);
+            goto fail_tab;
+        }
+        int64_t r = side == 'a' ? t->ne[1] : t->ne[0];
+        int64_t want0 = side == 'a' ? n_in : r;
+        int64_t want1 = side == 'a' ? r : n_out;
+        if (r < 1 || r > LORA_R_MAX ||
+            t->ne[0] != want0 || t->ne[1] != want1) {
+            fprintf(stderr, "error: adapter tensor '%s' is [%lld,%lld]; "
+                    "base '%s' is [%lld,%lld]\n", t->name,
+                    (long long)t->ne[0], (long long)t->ne[1], base->name,
+                    (long long)n_in, (long long)n_out);
+            goto fail_tab;
+        }
+        if (lw->r && lw->r != (int)r) {
+            fprintf(stderr, "error: adapter '%s' rank %lld disagrees with "
+                    "its pair (rank %d)\n", t->name, (long long)r, lw->r);
+            goto fail_tab;
+        }
+        lw->r = (int)r;
+        bool cok = true;
+        int64_t need = side == 'a' ? (int64_t)r * n_in : (int64_t)r * n_out;
+        float *dat = tensor_to_f32(t, need, &cok);
+        if (!cok || !dat) {
+            fprintf(stderr, "error: adapter tensor '%s' failed to load\n",
+                    t->name);
+            goto fail_tab;
+        }
+        if (side == 'a') { free(lw->a); lw->a = dat; }
+        else             { free(lw->b); lw->b = dat; }
+        for (int64_t c = 0; c < need; c++) {
+            uint32_t bits;
+            memcpy(&bits, &dat[c], 4);
+            id = (id ^ bits) * 0x100000001B3ull;
+        }
+    }
+    int n_pairs = 0;
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++) {
+            struct lora_w *lw = &tab[(size_t)l * LW_SLOTS + s];
+            if (!lw->r) continue;
+            if (!lw->a || !lw->b) {
+                fprintf(stderr, "error: adapter has only half of the "
+                        "lora_a/lora_b pair for blk.%d.%s\n", l,
+                        lora_slot_name[s]);
+                goto fail_tab;
+            }
+            lw->scale = alpha / (float)lw->r * user_scale;
+            n_pairs++;
+        }
+    if (!n_pairs) {
+        fprintf(stderr, "error: adapter carries no lora_a/lora_b pairs\n");
+        goto fail_tab;
+    }
+    model_lora_free(m);
+    m->lora = tab;
+    m->lora_id = id ^ (uint64_t)(int64_t)(user_scale * 65536.0f);
+    fprintf(stderr, "lora: %s — %d adapted projections, alpha %g, "
+            "scale x%g\n", path, n_pairs, (double)alpha,
+            (double)user_scale);
+    ok = true;
+    goto done;
+fail_tab:
+    for (int l = 0; l < m->n_layer; l++)
+        for (int s = 0; s < LW_SLOTS; s++) {
+            free(tab[(size_t)l * LW_SLOTS + s].a);
+            free(tab[(size_t)l * LW_SLOTS + s].b);
+        }
+    free(tab);
+done:
+    gguf_close(&g);
+    return ok;
+}
+
 float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                            bool want_logits) {
     m->fwd_pos = pos;
@@ -5117,6 +5345,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         } else {
             matvec_b(m->tp, m->q, q_dim, ly->wq, m->xb, xdim,
                      n_embd, q_dim, ly->bq, n);
+            LORA_HOOK(LW_Q, m->q, q_dim, m->xb, xdim, n_embd, q_dim, n);
             // afmoe output gate: projected from the SAME normed input as Q,
             // consumed after attn_heads by the shared q_gate multiply below
             if (m->attn_out_gate && ly->wq_gate)
@@ -5130,9 +5359,11 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         bool owns_kv = model_kv_owner(m, l) == l;
         if (owns_kv) {
             matvec_b(m->tp, m->k_tmp, kv_dim, ly->wk, m->xb, xdim, n_embd, kv_dim, ly->bk, n);
-            if (ly->wv)
+            LORA_HOOK(LW_K, m->k_tmp, kv_dim, m->xb, xdim, n_embd, kv_dim, n);
+            if (ly->wv) {
                 matvec_b(m->tp, m->v_tmp, kv_dim, ly->wv, m->xb, xdim, n_embd, kv_dim, ly->bv, n);
-            else
+                LORA_HOOK(LW_V, m->v_tmp, kv_dim, m->xb, xdim, n_embd, kv_dim, n);
+            } else
                 // gemma4 global layers have no V projection: V is the raw K
                 memcpy(m->v_tmp, m->k_tmp, sizeof(float) * (size_t)n * kv_dim);
         }
@@ -5208,6 +5439,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         }
         if (dbg) dbg_stat("attn-out", l, m->xb2 + (size_t)(n - 1) * xdim, q_dim);
         matvec_b(m->tp, m->xb, xdim, ly->wo, m->xb2, xdim, q_dim, n_embd, ly->bo, n);
+        LORA_HOOK(LW_O, m->xb, xdim, m->xb2, xdim, q_dim, n_embd, n);
         }
         if (dbg) dbg_stat("wo-out", l, m->xb + (size_t)(n - 1) * xdim, n_embd);
         if (ly->post_attn_norm_w)
@@ -5251,6 +5483,7 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
         if (!ly->w_gate) {
             // ungated MLP: up -> activation -> down, no gate branch
             matvec_b(m->tp, m->hb, nff, ly->w_up, m->xb, xdim, n_embd, nff, NULL, n);
+            LORA_HOOK(LW_UP, m->hb, nff, m->xb, xdim, n_embd, nff, n);
             if (m->ffn_relu2) {
                 // nemotron_h: gate-less squared ReLU, down(relu(up(x))^2)
                 for (size_t i = 0; i < (size_t)n * nff; i++) {
@@ -5267,12 +5500,15 @@ float *model_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
             }
         } else {
         matvec_b(m->tp, m->hb,  nff, ly->w_gate, m->xb, xdim, n_embd, nff, NULL, n);
+        LORA_HOOK(LW_GATE, m->hb, nff, m->xb, xdim, n_embd, nff, n);
         matvec_b(m->tp, m->hb2, nff, ly->w_up,   m->xb, xdim, n_embd, nff, NULL, n);
+        LORA_HOOK(LW_UP, m->hb2, nff, m->xb, xdim, n_embd, nff, n);
         for (size_t i = 0; i < (size_t)n * nff; i++)
             m->hb[i] = gated_act(m->ffn_act, m->hb[i], m->hb2[i]);
         }
         if (dbg) dbg_stat("ffn-act", l, m->hb + (size_t)(n - 1) * nff, nff);
         matvec_b(m->tp, m->xb, xdim, ly->w_down, m->hb, nff, nff, n_embd, NULL, n);
+        LORA_HOOK(LW_DOWN, m->xb, xdim, m->hb, nff, nff, n_embd, n);
         }
         }
         ffn_done:

@@ -306,6 +306,9 @@ static void usage(const char *prog) {
         "  --score        teacher-forced scoring: per-token log P(token|prefix)\n"
         "                 over the raw -p/-f text (no template, no sampling),\n"
         "                 printed as JSON with NLL and perplexity\n"
+        "  --lora FILE    load a LoRA adapter GGUF beside the frozen base\n"
+        "                 (CPU dense projections; fails closed otherwise)\n"
+        "  --lora-scale F multiply the adapter's trained alpha/r (default 1.0)\n"
         "  --caps         print machine capabilities as JSON and exit\n"
         "  --tool-info    load -m MODEL and print its native tool-call protocol\n"
         "                 as one JSON line, then exit\n"
@@ -452,6 +455,8 @@ int main(int argc, char **argv) {
     int thinking = THINK_DEFAULT;
     bool bench_json = false;
     bool score = false;
+    const char *lora_path = NULL;
+    float lora_scale = 1.0f;
     model_params mp = {0};
     // RUNNER_VRAM_PRIORITY sets the baseline; --vram-priority (parsed below)
     // overrides it, same precedence as every other env/flag pair in runner.
@@ -543,6 +548,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--draft-k")) draft_k = (int)int_arg(a, NEXT, 1, 15);
         else if (!strcmp(a, "--bench-json")) bench_json = true;
         else if (!strcmp(a, "--score")) score = true;
+        else if (!strcmp(a, "--lora")) lora_path = NEXT;
+        else if (!strcmp(a, "--lora-scale"))
+            lora_scale = (float)float_arg(a, NEXT, 0, FLT_MAX);
         else if (!strcmp(a, "--reserve")) mp.reserve_vram_pct = mp.reserve_ram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--reserve-vram")) mp.reserve_vram_pct = (int)int_arg(a, NEXT, 0, 100);
         else if (!strcmp(a, "--gpu-layers")) {
@@ -900,6 +908,8 @@ int main(int argc, char **argv) {
     if (!registry) {
         double t1 = now_s();
         if (!model_load(&m, load_path, &mp)) return 1;
+        if (lora_path && !model_lora_load(&m, lora_path, lora_scale))
+            return 1;
         if (!tokenizer_init(&tok, &m.gf)) return 1;
         fprintf(stderr, "loaded %s | %s | %d layers | ctx %d | %d threads | %.2fs\n",
                 load_path, m.arch, m.n_layer, m.n_ctx, tpool_size(m.tp),

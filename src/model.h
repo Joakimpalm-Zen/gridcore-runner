@@ -300,6 +300,12 @@ typedef struct {
     float *ssm_conv_snap, *ssm_state_snap; // snapshot of the two buffers above
     int    ssm_snap_pos;                   // position that snapshot is valid at, -1 = none
     float *att, *logits;
+    // --- LoRA adapter (adaptation D2): frozen base + low-rank f32 deltas,
+    // CPU dense projections. lora is [n_layer][LORA_SLOTS] or NULL; lora_id
+    // folds into the engine's model identity so cached prefixes can never
+    // cross an adapter boundary.
+    struct lora_w *lora;
+    uint64_t lora_id;
     float *all_logits;       // lazy [spec_batch][n_vocab] (speculative verify)
     int    spec_batch;       // rows all_logits can hold
     int    xdim;             // max(n_embd, per-layer q_dim); sizes xb/xb2/q
@@ -575,6 +581,14 @@ typedef struct {
 } model_params;
 
 bool   model_load(model_t *m, const char *path, const model_params *p);
+// LoRA adapter loading (adaptation D2): llama.cpp adapter-GGUF naming
+// (blk.N.<proj>.weight.lora_a/_b + adapter.lora.alpha), f32 tensors, dense
+// transformer projections (attn q/k/v/output, ffn gate/up/down), CPU path
+// only. Fails closed — unknown target, shape/rank mismatch, unsupported
+// arch or a GPU-resident model refuse with a named reason. user_scale
+// multiplies the adapter's alpha/r (1.0 = as trained).
+bool   model_lora_load(model_t *m, const char *path, float user_scale);
+void   model_lora_free(model_t *m);
 
 // The identity a shared-weights record is keyed on: which file this actually
 // is, beyond the path it was spelled with. Every keyed view of a file — the

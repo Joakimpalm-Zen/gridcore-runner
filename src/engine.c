@@ -266,8 +266,12 @@ static uint64_t h64f(uint64_t h, double v) { return h64(h, &v, sizeof v); }
 // cannot report a useful identity.
 static uint64_t model_identity(const model_t *m, const tokenizer *tok) {
     uint64_t h = 0xCBF29CE484222325ull;
-    h = h64s(h, "runner.prefix.v1");
+    // v2: the LoRA adapter id joined the identity — a cached prefix computed
+    // under one adapter (or none) must never serve a run under another. The
+    // version bump deliberately invalidates every v1 persisted prefix once.
+    h = h64s(h, "runner.prefix.v2");
     h = h64s(h, m->path);
+    h = h64i(h, (long long)m->lora_id);
     h = h64s(h, m->arch);
     h = h64i(h, m->file_id_ok);
     h = h64i(h, (long long)m->file_size);
