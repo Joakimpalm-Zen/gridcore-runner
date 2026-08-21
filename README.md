@@ -1020,8 +1020,10 @@ named, and `none`) still controls the allowed recipients.
 `parallel_tool_calls:true` with a required/named native choice constrains a
 bounded two-call turn. With native `tool_choice:"auto"`, the same flag retains
 the auto turn and therefore permits at most one call. Families without a native
-protocol of their own — everything except gpt-oss, Muse Glimmer and gemma-4 —
-keep the generic JSON-schema tool path unchanged.
+constrained-generation protocol keep the generic JSON-schema output path.
+gpt-oss, Muse Glimmer and gemma-4 have native constrained-generation paths;
+Apertus uses its reference template's native declarations and history framing,
+while its generated output remains on the generic strict envelope.
 
 When native `tool_choice:"auto"` is combined with a JSON-schema
 `response_format`, the `to=user` alternative is compiled against that final
@@ -1098,6 +1100,20 @@ with a 400 that names it: gemma4's native call syntax has no spelling for a
 free-form value, and refusing is better than an unconstrained call the mapper
 may not be able to read back. Both differ from the generic JSON envelope,
 which other families still use.
+
+### Apertus tool rendering
+
+Apertus tool prompts follow
+`swiss-ai/Apertus-8B-Instruct-2509`'s `chat_template.jinja` at revision
+`b946d40447b2b597999b9c86d44bee0b452c919f`: declarations are
+TypeScript under `Tool Capabilities:` in the developer turn, assistant calls
+use `<|tools_prefix|>...<|tools_suffix|>`, and raw tool results form a bracketed
+list inside the assistant turn that made the call. A text-plus-calls turn keeps
+the text immediately before the call block, and an answer after the result
+continues that same assistant turn. The conformance gate proves these rendered
+bytes against the upstream template. No Apertus checkpoint/tokenizer was
+available for this change, so token identity and checkpoint behavior remain
+unmeasured.
 
 `enable_thinking`, either at the top level or inside `chat_template_kwargs`,
 is the request-level form of `--think`/`--no-think`. Omitting it is not the

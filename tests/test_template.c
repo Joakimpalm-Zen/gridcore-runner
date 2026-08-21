@@ -404,6 +404,103 @@ static void test_apertus_consecutive_assistant(void) {
     assert(strcmp(out, want) == 0);
 }
 
+// Apertus tool ground truth is swiss-ai/Apertus-8B-Instruct-2509's
+// chat_template.jinja at b946d40447b2b597999b9c86d44bee0b452c919f,
+// fetched 2026-08-21. Unlike the generic Runner protocol, the reference puts
+// TypeScript declarations in the
+// developer block, uses <|tools_prefix|>/<|tools_suffix|> for assistant calls,
+// and appends a raw bracketed result list inside that same assistant turn.
+static void test_apertus_tool_turns(void) {
+    const char *tool_src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"description\":\"Get the current weather for a city.\","
+        "\"parameters\":{\"type\":\"object\",\"properties\":{"
+        "\"city\":{\"type\":\"string\",\"description\":\"City name.\"}},"
+        "\"required\":[\"city\"]}}}]";
+    const char *call_src =
+        "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+        "\"arguments\":\"{\\\"city\\\": \\\"Oslo\\\"}\"}}]";
+    jv *tools = json_parse(tool_src, strlen(tool_src));
+    jv *calls = json_parse(call_src, strlen(call_src));
+    assert(tools != NULL && calls != NULL);
+
+    // Declared tools replace the disabled literal with render_tools(tools).
+    const chat_msg declared[] = {
+        { "system", "SYS" }, { "user", "Weather in Oslo?" },
+    };
+    char out[4096];
+    render_messages_with_tools(TMPL_APERTUS, declared, 2, true,
+                               THINK_DEFAULT, tools, out, sizeof(out));
+    assert(strcmp(out,
+        "<|system_start|>SYS<|system_end|>"
+        "<|developer_start|>Deliberation: disabled\n"
+        "Tool Capabilities:\n"
+        "// Get the current weather for a city.\n"
+        "type get_weather = (_: {\n"
+        "// City name.\n"
+        "city: string\n"
+        "}) => any;<|developer_end|>"
+        "<|user_start|>Weather in Oslo?<|user_end|>"
+        "<|assistant_start|>") == 0);
+
+    // Calls use Apertus's own markers and preserve the JSON argument string.
+    sbuf call = {0};
+    assistant_calls_render(TMPL_APERTUS, NULL, calls, &call, NULL);
+    assert(call.s != NULL);
+    assert(strcmp(call.s,
+        "<|tools_prefix|>[{\"get_weather\": {\"city\": \"Oslo\"}}]"
+        "<|tools_suffix|>") == 0);
+
+    // A result has no role tokens of its own. It is a list appended inside the
+    // assistant turn that made the call, then the completed turn closes.
+    const chat_msg result[] = {
+        { "user", "Weather in Oslo?" },
+        { "assistant", call.s },
+        { "tool", "{\"temp_c\": -3}" },
+    };
+    render_messages(TMPL_APERTUS, result, 3, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out,
+        "<|developer_start|>Deliberation: disabled\n"
+        "Tool Capabilities: disabled<|developer_end|>"
+        "<|user_start|>Weather in Oslo?<|user_end|>"
+        "<|assistant_start|>"
+        "<|tools_prefix|>[{\"get_weather\": {\"city\": \"Oslo\"}}]"
+        "<|tools_suffix|>[{\"temp_c\": -3}]"
+        "<|assistant_end|><|assistant_start|>") == 0);
+
+    // In a text+calls turn the text precedes the call with no invented
+    // separator. After the result, a later assistant message continues the
+    // same open turn; this is the tool-aware widening marked in template.c.
+    sbuf spoke = {0};
+    assistant_calls_render(TMPL_APERTUS, "Let me look that up.", calls,
+                           &spoke, NULL);
+    assert(spoke.s != NULL);
+    const chat_msg text_calls[] = {
+        { "user", "Weather in Oslo?" },
+        { "assistant", spoke.s },
+        { "tool", "{\"temp_c\": -3}" },
+        { "assistant", "It is -3 C in Oslo." },
+        { "user", "Coat?" },
+    };
+    render_messages(TMPL_APERTUS, text_calls, 5, true, THINK_DEFAULT,
+                    out, sizeof(out));
+    assert(strcmp(out,
+        "<|developer_start|>Deliberation: disabled\n"
+        "Tool Capabilities: disabled<|developer_end|>"
+        "<|user_start|>Weather in Oslo?<|user_end|>"
+        "<|assistant_start|>Let me look that up."
+        "<|tools_prefix|>[{\"get_weather\": {\"city\": \"Oslo\"}}]"
+        "<|tools_suffix|>[{\"temp_c\": -3}]It is -3 C in Oslo."
+        "<|assistant_end|><|user_start|>Coat?<|user_end|>"
+        "<|assistant_start|>") == 0);
+
+    free(spoke.s);
+    free(call.s);
+    jv_free(calls);
+    jv_free(tools);
+}
+
 static void test_detect_by_marker(tokenizer *t) {
     assert(template_detect("<|im_start|>system", t) == TMPL_CHATML);
     assert(template_detect("<|start_header_id|>system<|end_header_id|>", t) == TMPL_LLAMA3);
@@ -2149,6 +2246,7 @@ int main(void) {
     test_detect_and_render_apertus(&t);
     test_render_apertus_without_system();
     test_apertus_consecutive_assistant();
+    test_apertus_tool_turns();
     test_render_system_prompt();
     test_render_without_system();
     test_name_roundtrip();

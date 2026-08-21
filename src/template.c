@@ -946,6 +946,163 @@ static void g4_render_tool_defs(const jv *tools, sbuf *o) {
     }
 }
 
+// Apertus reference: swiss-ai/Apertus-8B-Instruct-2509 at
+// b946d40447b2b597999b9c86d44bee0b452c919f, chat_template.jinja as fetched
+// 2026-08-21 (sha256[:16] 56f72c27fa2e5653). Its developer turn declares
+// OpenAI function tools as compact TypeScript. The declaration bytes are part
+// of the trained template:
+// JSON or another family's call instructions are not interchangeable here.
+static bool apertus_required(const jv *schema, const char *name) {
+    jv *req = jv_get((jv *)schema, "required");
+    if (!req || req->type != J_ARR) return false;
+    for (int i = 0; i < req->n; i++)
+        if (req->items[i]->type == J_STR &&
+            !strcmp(req->items[i]->str, name)) return true;
+    return false;
+}
+
+static void apertus_ts_type(const jv *schema, sbuf *o) {
+    if (!schema || schema->type != J_OBJ) { sb_lit(o, "any"); return; }
+    jv *tv = jv_get((jv *)schema, "type");
+    const char *type = jv_str(tv, NULL);
+    if (type && !strcmp(type, "array")) {
+        jv *items = jv_get((jv *)schema, "items");
+        if (g4_truthy(items)) {
+            const char *it = jv_str(jv_get(items, "type"), NULL);
+            if (it && !strcmp(it, "string")) sb_lit(o, "string[]");
+            else if (it && (!strcmp(it, "number") || !strcmp(it, "integer")))
+                sb_lit(o, "number[]");
+            else if (it && !strcmp(it, "boolean")) sb_lit(o, "boolean[]");
+            else {
+                sbuf inner = {0};
+                apertus_ts_type(items, &inner);
+                if (inner.failed) o->failed = true;
+                if (!inner.s || !strcmp(inner.s, "object | object") ||
+                    inner.n > 50)
+                    sb_lit(o, "any[]");
+                else {
+                    sb_put(o, inner.s, inner.n);
+                    sb_lit(o, "[]");
+                }
+                free(inner.s);
+            }
+        } else {
+            sb_lit(o, "any[]");
+        }
+        if (g4_truthy(jv_get((jv *)schema, "nullable")))
+            sb_lit(o, " | null");
+        return;
+    }
+    if (tv && tv->type == J_ARR && tv->n > 0) {
+        for (int i = 0; i < tv->n; i++) {
+            if (i) sb_lit(o, " | ");
+            sb_lit(o, jv_str(tv->items[i], ""));
+        }
+        return;
+    }
+    jv *one = jv_get((jv *)schema, "oneOf");
+    if (g4_truthy(one) && one->type == J_ARR) {
+        bool object_variant = false;
+        for (int i = 0; i < one->n; i++)
+            if (!strcmp(jv_str(jv_get(one->items[i], "type"), ""), "object"))
+                object_variant = true;
+        if (object_variant && one->n > 1) { sb_lit(o, "any"); return; }
+        for (int i = 0; i < one->n; i++) {
+            if (i) sb_lit(o, " | ");
+            apertus_ts_type(one->items[i], o);
+            const char *desc = jv_str(jv_get(one->items[i], "description"), NULL);
+            if (desc) sb_fmt(o, "// %s", desc);
+            jv *dflt = jv_get(one->items[i], "default");
+            if (dflt) {
+                sb_lit(o, "// default: ");
+                jv_dump_tojson(dflt, o);
+            }
+        }
+        return;
+    }
+    if (type && !strcmp(type, "string")) {
+        jv *en = jv_get((jv *)schema, "enum");
+        if (g4_truthy(en) && en->type == J_ARR) {
+            for (int i = 0; i < en->n; i++) {
+                sb_lit(o, i ? "\" | \"" : "\"");
+                sb_lit(o, jv_str(en->items[i], ""));
+            }
+            sb_lit(o, "\"");
+        } else {
+            sb_lit(o, "string");
+            if (g4_truthy(jv_get((jv *)schema, "nullable")))
+                sb_lit(o, " | null");
+        }
+        return;
+    }
+    if (type && (!strcmp(type, "number") || !strcmp(type, "integer"))) {
+        sb_lit(o, "number");
+        return;
+    }
+    if (type && !strcmp(type, "boolean")) { sb_lit(o, "boolean"); return; }
+    if (type && !strcmp(type, "object")) {
+        jv *props = jv_get((jv *)schema, "properties");
+        if (!g4_truthy(props) || props->type != J_OBJ) {
+            sb_lit(o, "object");
+            return;
+        }
+        sb_lit(o, "{\n");
+        for (int i = 0; i < props->n; i++) {
+            sb_lit(o, props->keys[i]);
+            if (!apertus_required(schema, props->keys[i])) sb_lit(o, "?");
+            sb_lit(o, ": ");
+            apertus_ts_type(props->items[i], o);
+            if (i + 1 < props->n) sb_lit(o, ", ");
+        }
+        sb_lit(o, "}");
+        return;
+    }
+    sb_lit(o, "any");
+}
+
+static void apertus_render_tools(const jv *tools, sbuf *o) {
+    if (!tools || tools->type != J_ARR) return;
+    for (int i = 0; i < tools->n; i++) {
+        jv *fn = jv_get(tools->items[i], "function");
+        if (!fn) fn = tools->items[i];
+        sb_fmt(o, "// %s\ntype %s = ",
+               jv_str(jv_get(fn, "description"), ""),
+               jv_str(jv_get(fn, "name"), ""));
+        jv *params = jv_get(fn, "parameters");
+        jv *props = jv_get(params, "properties");
+        if (!g4_truthy(params) || !g4_truthy(props) || props->type != J_OBJ) {
+            sb_lit(o, "() => any;");
+        } else {
+            sb_lit(o, "(_: {\n");
+            for (int k = 0; k < props->n; k++) {
+                jv *spec = props->items[k];
+                const char *desc = jv_str(jv_get(spec, "description"), NULL);
+                if (desc) sb_fmt(o, "// %s\n", desc);
+                sb_lit(o, props->keys[k]);
+                if (!apertus_required(params, props->keys[k])) sb_lit(o, "?");
+                sb_lit(o, ": ");
+                apertus_ts_type(spec, o);
+                jv *dflt = jv_get(spec, "default");
+                if (dflt) {
+                    if (g4_truthy(jv_get(spec, "enum"))) {
+                        sb_lit(o, ", // default: ");
+                        sb_lit(o, jv_str(dflt, ""));
+                    } else if (g4_truthy(jv_get(spec, "oneOf"))) {
+                        sb_lit(o, "// default: ");
+                        sb_lit(o, jv_str(dflt, ""));
+                    } else {
+                        sb_lit(o, ", // default: ");
+                        jv_dump_tojson(dflt, o);
+                    }
+                }
+                sb_lit(o, k + 1 < props->n ? ",\n" : "\n");
+            }
+            sb_lit(o, "}) => any;");
+        }
+        if (i + 1 < tools->n) sb_lit(o, "\n");
+    }
+}
+
 // Defined below with the tool parsers; llama-2's `.strip()` needs them here.
 static const char *trim_left(const char *p, const char *end);
 static const char *trim_right(const char *p, const char *end);
@@ -1068,10 +1225,9 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
         // with a native system role that must come first.
         //
         // Between the system turn and the first real turn the reference always
-        // emits a developer block carrying two switches. Runner supports
-        // neither thinking mode nor Apertus-native tool declarations here, so
-        // it emits the both-disabled constant -- which is exactly what the
-        // reference produces for a plain chat, not an approximation of it.
+        // emits a developer block carrying two switches. Runner does not
+        // expose Apertus thinking, but declared tools use the reference's
+        // render_tools TypeScript rather than the generic protocol.
         //
         // Two deliberate omissions, both matching decisions already made for
         // other families: when there is no system message the reference
@@ -1089,34 +1245,67 @@ size_t render_messages_with_tools(int tmpl, const chat_msg *msgs, int n_msgs,
             off = emit(out, cap, off, "<|system_start|>%s<|system_end|>", sys, NULL);
         off = emit(out, cap, off,
                    "<|developer_start|>Deliberation: disabled\n"
-                   "Tool Capabilities: disabled<|developer_end|>", NULL, NULL);
-        // Consecutive assistant messages are ONE turn, not two. The reference
-        // carries an `ns.in_assistant` flag and opens the turn only when it is
-        // false -- `{%- if not ns.in_assistant -%}{{ assistant_token }}` --
-        // closing it at the next user turn or at the end of the conversation.
-        // The two contents are therefore concatenated with NO separator.
-        // Emitting <|assistant_end|><|assistant_start|> between them handed the
-        // model a turn boundary its own template never produces.
-        //
-        // Adjacency here is DIRECT (msgs[i-1]), not "previous non-tool
-        // message". The reference keeps a `tool` message inside the open
-        // assistant turn, but runner renders one as a turn of its own
-        // (<|tool_start|>...<|tool_end|>, a framing the reference has no
-        // concept of), so skipping over it when deciding to continue would
-        // leave that turn unbalanced. That divergence is the tool path's, and
-        // is untouched here.
-        for (int i = first; i < n_msgs; i++) {
-            bool asst = !strcmp(msgs[i].role, "assistant");
-            bool merge_prev = asst && i > first &&
-                              !strcmp(msgs[i - 1].role, "assistant");
-            bool merge_next = asst && i + 1 < n_msgs &&
-                              !strcmp(msgs[i + 1].role, "assistant");
-            if (!merge_prev)
-                off = emit(out, cap, off, "<|%s_start|>", msgs[i].role, NULL);
-            off = emit(out, cap, off, "%s", msgs[i].content, NULL);
-            if (!merge_next)
-                off = emit(out, cap, off, "<|%s_end|>", msgs[i].role, NULL);
+                   "Tool Capabilities:", NULL, NULL);
+        if (tools && tools->type == J_ARR && tools->n) {
+            sbuf defs = {0};
+            apertus_render_tools(tools, &defs);
+            off = emit(out, cap, off, "\n%s", defs.s ? defs.s : "", NULL);
+            free(defs.s);
+        } else {
+            off = emit(out, cap, off, " disabled", NULL, NULL);
         }
+        off = emit(out, cap, off, "<|developer_end|>", NULL, NULL);
+        // The reference's ns.in_assistant/ns.in_tool state keeps consecutive
+        // assistant messages, their calls, and following tool results in ONE
+        // assistant turn. Results are raw values inside one bracketed list;
+        // no role marker or family-generic wrapper exists. An assistant reply
+        // after those results therefore continues the same turn -- the marked
+        // direct-adjacency limitation is discharged now that the tool turn is
+        // conformant.
+        bool in_assistant = false, in_tool = false, waiting_for_outputs = false;
+        for (int i = first; i < n_msgs; i++) {
+            const char *role = msgs[i].role;
+            if (!strcmp(role, "user")) {
+                if (in_tool) {
+                    off = emit(out, cap, off, "]", NULL, NULL);
+                    in_tool = false;
+                }
+                if (in_assistant) {
+                    off = emit(out, cap, off, "<|assistant_end|>", NULL, NULL);
+                    in_assistant = false;
+                }
+                off = emit(out, cap, off, "<|user_start|>%s<|user_end|>",
+                           msgs[i].content, NULL);
+            } else if (!strcmp(role, "assistant")) {
+                if (!in_assistant) {
+                    off = emit(out, cap, off, "<|assistant_start|>", NULL, NULL);
+                    in_assistant = true;
+                }
+                if (in_tool) {
+                    off = emit(out, cap, off, "]", NULL, NULL);
+                    in_tool = false;
+                }
+                off = emit(out, cap, off, "%s", msgs[i].content, NULL);
+                if (strstr(msgs[i].content, "<|tools_prefix|>"))
+                    waiting_for_outputs = true;
+            } else if (!strcmp(role, "tool")) {
+                // The reference rejects an orphan tool message. The renderer
+                // has no error channel, so it drops that invalid role rather
+                // than inventing a prompt token for it.
+                if (!in_assistant) continue;
+                off = emit(out, cap, off, in_tool ? ", " : "[", NULL, NULL);
+                in_tool = true;
+                waiting_for_outputs = false;
+                off = emit(out, cap, off, "%s", msgs[i].content, NULL);
+            } else {
+                off = emit(out, cap, off, "<|%s_start|>%s", role,
+                           msgs[i].content);
+                off = emit(out, cap, off, "<|%s_end|>", role, NULL);
+            }
+        }
+        if (in_tool) off = emit(out, cap, off, "]", NULL, NULL);
+        if (in_assistant && !waiting_for_outputs)
+            off = emit(out, cap, off, "<|assistant_end|>", NULL, NULL);
         if (add_assistant)
             off = emit(out, cap, off, "<|assistant_start|>", NULL, NULL);
         break;
@@ -1949,6 +2138,7 @@ void tool_history_render_for(int tmpl, const jv *calls,
     // into assistant content would teach a second, conflicting protocol.
     if (tmpl == TMPL_HARMONY) return;
     int muse_calls = 0;
+    int ap_calls = 0;
     // ornith frames each call relative to what precedes it: the first opens
     // with "\n\n" when the turn carried visible text and with nothing when it
     // did not, every later one with "\n" (ornith.jinja:106-114).
@@ -1964,6 +2154,16 @@ void tool_history_render_for(int tmpl, const jv *calls,
         const char *name = jv_str(jv_get(fn, "name"), NULL);
         const char *args = jv_str(jv_get(fn, "arguments"), "{}");
         if (!name) continue;
+        if (tmpl == TMPL_APERTUS) {
+            if (!ap_calls++) sb_lit(out, "<|tools_prefix|>[");
+            else sb_lit(out, ", ");
+            sb_lit(out, "{\"");
+            sb_esc(out, name, strlen(name));
+            sb_lit(out, "\": ");
+            sb_lit(out, args);
+            sb_lit(out, "}");
+            continue;
+        }
         if (is_gemma4(tmpl)) {
             // The wire format hands runner `arguments` as a JSON STRING; the
             // reference is handed the parsed mapping and runs it through
@@ -2024,6 +2224,8 @@ void tool_history_render_for(int tmpl, const jv *calls,
         sb_lit(out, "</function>\n</tool_call>");
         jv_free(obj);
     }
+    if (tmpl == TMPL_APERTUS && ap_calls)
+        sb_lit(out, "]<|tools_suffix|>");
 }
 
 // True when `text` holds anything the model would read as content, i.e. a
@@ -2357,17 +2559,18 @@ const jv *tool_decl_native(int tmpl, bool strict, bool atem_tool_calling,
         env->proto = TP_GEMMA4;
         env->tools = tools;
     }
-    // gemma4 renders its declaration whenever tools are present, strict or not:
-    // tool_choice is a concept its template lacks, so tool_choice:"none" must
-    // not fall through to the generic block -- a second, untrained protocol --
-    // for a turn that will not call anything anyway. muse and Harmony render
-    // theirs only on the strict path (env->proto gates them).
-    *skip_generic = is_gemma4(tmpl) ||
+    // gemma4 and Apertus render declarations whenever tools are present,
+    // strict or not: tool_choice is a concept their templates lack, so
+    // tool_choice:"none" must not fall through to the generic block -- a
+    // second, untrained protocol -- for a turn that will not call anything
+    // anyway. muse and Harmony render theirs only on the strict path
+    // (env->proto gates them).
+    *skip_generic = is_gemma4(tmpl) || tmpl == TMPL_APERTUS ||
                     (tmpl == TMPL_MUSE && env->proto == TP_ATEM) ||
                     tmpl == TMPL_HARMONY;
     return (tmpl == TMPL_MUSE && env->proto == TP_ATEM) ||
            (tmpl == TMPL_HARMONY && env->proto == TP_HARMONY) ||
-           is_gemma4(tmpl)
+           is_gemma4(tmpl) || tmpl == TMPL_APERTUS
                ? tools : NULL;
 }
 
