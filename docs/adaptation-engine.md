@@ -164,6 +164,24 @@ model, and the stabilization it needed is the standard one, arrived at by
 measurement. A product-grade recipe (KL anchoring, bigger prompt sets,
 harder rewards) is future work, not engine work.
 
+## D8 (begun) — CUDA training, slice 1: the transposed matvec on device
+
+The deterministic-training claim extends to the GPU only if the GPU produces
+the same BYTES as the CPU backward. Slice 1 delivers that for the backward's
+dominant primitive: `k_mvt_{f32,f16,bf16,q8_0,q4_0,q4_K,q6_K}` compute
+`dx += Wᵀ·dy` with the CPU trainer's exact accumulation chain (accumulator
+starts from dx, serial j per output element, fmaf, zero-dy skip), and the
+gate (`test-mvt`, in `make test`, self-skipping without CUDA) byte-compares
+the float buffers against the CPU path on real fixture and real-model
+tensors. Measured on the RTX 3070 (CUDA 13.3): **bit-identical on every
+type**, first try for five of seven. Throughput, honestly: with per-call
+PCIe transfers the f16 head wins 1.9× over one CPU thread, while the naive
+per-element q6_K decode LOSES (0.6×) — the primitive's win needs persistent
+device buffers and a tiled decode, which is what the remaining D8 slices
+(integrated training-side GPU context, batched taped forward) are for. What
+slice 1 establishes is the hard part: determinism does not have to be traded
+away to move training onto CUDA.
+
 ## Honest limits
 
 - CPU-only v1 (CUDA training is future work); the M1-class floor is ~2B

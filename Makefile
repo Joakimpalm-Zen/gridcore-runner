@@ -112,6 +112,7 @@ TEST_TRAY_CORE = $(TEST_BATCH:test-batch%=test-tray-core%)
 TEST_TC_TOL = $(TEST_BATCH:test-batch%=test-tc-tol%)
 TEST_I8_TOL = $(TEST_BATCH:test-batch%=test-i8-tol%)
 TEST_LORA_GRAD = $(TEST_BATCH:test-batch%=test-lora-grad%)
+TEST_MVT = $(TEST_BATCH:test-batch%=test-mvt%)
 TEST_MV_TOL = $(TEST_BATCH:test-batch%=test-mv-tol%)
 TEST_ATTN_TOL = $(TEST_BATCH:test-batch%=test-attn-tol%)
 TEST_GPU_ID = $(TEST_BATCH:test-batch%=test-gpu-identity%)
@@ -554,6 +555,13 @@ test-lora.full.gguf: test.gguf scripts/make-test-lora.py
 
 test-lora-q8.full.gguf: test-q8.gguf scripts/make-test-lora.py
 	$(PYTHON) scripts/make-test-lora.py test-q8.gguf test-lora-q8
+
+# D8 slice 1: device transposed matvec vs the CPU trainer's chain (skips
+# without a CUDA device; the three fixture runs cover F32, Q8_0 and BF16)
+TEST_MVT_SRC = tests/test_mvt.c src/gguf.c src/compat.c $(QUANTS_OBJ) \
+                  src/tokenizer.c src/model.c src/vramreg.c $(GPU_SRC)
+$(TEST_MVT): $(TEST_MVT_SRC) $(HDR) test.gguf test-q8.gguf test-bf16.gguf
+	$(CC) $(CFLAGS) -I src $(TEST_MVT_SRC) -o $@ $(LDFLAGS)
 
 test-qk.gguf: scripts/make-test-model.py
 	$(PYTHON) scripts/make-test-model.py --qk-norm test-qk.gguf
@@ -1277,7 +1285,7 @@ else
 	@echo "metal SWA smoke skipped: macOS-only backend"
 endif
 
-test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_LORA_GRAD) \
+test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(TEST_LORA_GRAD) $(TEST_MVT) \
       $(TEST_TOKENIZER) $(TEST_TOK_MERGE) $(TEST_TOKENIZER_OOM) $(TEST_TEMPLATE) \
       $(TEST_TEMPLATE_OOM) \
       $(TEST_TOOLS) $(TEST_SHARED) $(TEST_FILE_ID) $(TEST_BATCH) $(TEST_BIND) $(TEST_HOST_HEADER) \
@@ -1300,6 +1308,9 @@ test: $(TEST_JSON_SCHEMA) $(TEST_JSON_OOM) $(TEST_SCHEMA_OOM) $(TEST_SAMPLER) $(
 	@# and with qwen3-style per-head QK norms in the layer: the norm adjoint
 	@# sits between the rope adjoint and the projection backward
 	./$(TEST_LORA_GRAD) test-qk.gguf test-lora-qk.full.gguf
+	./$(TEST_MVT)
+	./$(TEST_MVT) test-q8.gguf
+	./$(TEST_MVT) test-bf16.gguf
 	./$(TEST_BIND)
 	./$(TEST_HOST_HEADER)
 	./$(TEST_RESIDENCY)

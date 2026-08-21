@@ -1604,6 +1604,173 @@ extern "C" __global__ void k_gemm_q3_K(MV_PARAMS) {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Transposed matvec for training (adaptation D8): dx[t][i] += sum_j W[j][i] *
+// dy[t][j], computed as the EXACT fmaf chain the CPU trainer runs — the
+// accumulator STARTS from dx's incoming value, j advances serially per output
+// element, and a zero dy[j] is skipped before the fmaf exactly as the CPU
+// path skips it. One thread per output element i: outputs are independent,
+// the serial-j reduction order is fixed, so the result is deterministic and
+// byte-comparable against the CPU chain. Adjacent threads read adjacent
+// elements of each weight row (coalesced) and share the row's block headers
+// through L2. Reuses mv_args: x = dy [batch][xs], y = dx in-out [batch][ys].
+
+#define MVT_HEAD \
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x); \
+    if (i >= a.n_in) return; \
+    (void)bias;
+
+extern "C" __global__ void k_mvt_f32(MV_PARAMS) {
+    MVT_HEAD;
+    for (int t = 0; t < a.batch; t++) {
+        float acc = y[(ulong64)t * a.ys + i];
+        for (int j = 0; j < a.n_out; j++) {
+            float v = x[(ulong64)t * a.xs + j];
+            if (v == 0.0f) continue;
+            const float *row = (const float *)(wb + a.w_off +
+                                               (ulong64)j * a.n_in * 4);
+            acc = fmaf(row[i], v, acc);
+        }
+        y[(ulong64)t * a.ys + i] = acc;
+    }
+}
+
+extern "C" __global__ void k_mvt_f16(MV_PARAMS) {
+    MVT_HEAD;
+    for (int t = 0; t < a.batch; t++) {
+        float acc = y[(ulong64)t * a.ys + i];
+        for (int j = 0; j < a.n_out; j++) {
+            float v = x[(ulong64)t * a.xs + j];
+            if (v == 0.0f) continue;
+            const uchar *row = wb + a.w_off + (ulong64)j * a.n_in * 2;
+            acc = fmaf(f16f(row + (ulong64)i * 2), v, acc);
+        }
+        y[(ulong64)t * a.ys + i] = acc;
+    }
+}
+
+extern "C" __global__ void k_mvt_bf16(MV_PARAMS) {
+    MVT_HEAD;
+    for (int t = 0; t < a.batch; t++) {
+        float acc = y[(ulong64)t * a.ys + i];
+        for (int j = 0; j < a.n_out; j++) {
+            float v = x[(ulong64)t * a.xs + j];
+            if (v == 0.0f) continue;
+            const ushort16 *row = (const ushort16 *)(wb + a.w_off +
+                                                     (ulong64)j * a.n_in * 2);
+            uint u = ((uint)row[i]) << 16;
+            acc = fmaf(__uint_as_float(u), v, acc);
+        }
+        y[(ulong64)t * a.ys + i] = acc;
+    }
+}
+
+extern "C" __global__ void k_mvt_q8_0(MV_PARAMS) {
+    MVT_HEAD;
+    int nb = a.n_in / 32;
+    int bi = i >> 5, el = i & 31;
+    for (int t = 0; t < a.batch; t++) {
+        float acc = y[(ulong64)t * a.ys + i];
+        for (int j = 0; j < a.n_out; j++) {
+            float v = x[(ulong64)t * a.xs + j];
+            if (v == 0.0f) continue;
+            const uchar *blk = wb + a.w_off + (ulong64)j * nb * 34 +
+                               (ulong64)bi * 34;
+            float d = f16f(blk);
+            signed char q = ((const signed char *)(blk + 2))[el];
+            acc = fmaf(d * (float)q, v, acc);
+        }
+        y[(ulong64)t * a.ys + i] = acc;
+    }
+}
+
+extern "C" __global__ void k_mvt_q4_0(MV_PARAMS) {
+    MVT_HEAD;
+    int nb = a.n_in / 32;
+    int bi = i >> 5, el = i & 31;
+    for (int t = 0; t < a.batch; t++) {
+        float acc = y[(ulong64)t * a.ys + i];
+        for (int j = 0; j < a.n_out; j++) {
+            float v = x[(ulong64)t * a.xs + j];
+            if (v == 0.0f) continue;
+            const uchar *blk = wb + a.w_off + (ulong64)j * nb * 18 +
+                               (ulong64)bi * 18;
+            float d = f16f(blk);
+            const uchar *q = blk + 2;
+            int nib = el < 16 ? (q[el] & 0xF) : (q[el - 16] >> 4);
+            acc = fmaf(d * (float)(nib - 8), v, acc);
+        }
+        y[(ulong64)t * a.ys + i] = acc;
+    }
+}
+
+extern "C" __global__ void k_mvt_q6_K(MV_PARAMS) {
+    MVT_HEAD;
+    int nb = a.n_in / 256;
+    int bi = i >> 8, e = i & 255;
+    int half = e >> 7, r = e & 127, seg = r >> 5, l = r & 31, is = l >> 4;
+    for (int t = 0; t < a.batch; t++) {
+        float acc = y[(ulong64)t * a.ys + i];
+        for (int j = 0; j < a.n_out; j++) {
+            float v = x[(ulong64)t * a.xs + j];
+            if (v == 0.0f) continue;
+            const uchar *blk = wb + a.w_off + (ulong64)j * nb * 210 +
+                               (ulong64)bi * 210;
+            const uchar *ql = blk + half * 64;
+            const uchar *qh = blk + 128 + half * 32;
+            const signed char *sc = (const signed char *)(blk + 192) +
+                                    half * 8;
+            float d = f16f(blk + 208);
+            int q;
+            signed char s;
+            if (seg == 0) {
+                q = (int)((ql[l] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                s = sc[0 + is];
+            } else if (seg == 1) {
+                q = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                s = sc[2 + is];
+            } else if (seg == 2) {
+                q = (int)((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                s = sc[4 + is];
+            } else {
+                q = (int)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                s = sc[6 + is];
+            }
+            acc = fmaf(d * (float)((int)s * q), v, acc);
+        }
+        y[(ulong64)t * a.ys + i] = acc;
+    }
+}
+
+extern "C" __global__ void k_mvt_q4_K(MV_PARAMS) {
+    MVT_HEAD;
+    int nb = a.n_in / 256;
+    int bi = i >> 8, e = i & 255;
+    int g = e >> 5;           // 32-element scale group 0..7
+    int w32 = e & 31;
+    int pair = g >> 1;        // qs stores groups in nibble pairs
+    int hi = g & 1;
+    for (int t = 0; t < a.batch; t++) {
+        float acc = y[(ulong64)t * a.ys + i];
+        for (int j = 0; j < a.n_out; j++) {
+            float v = x[(ulong64)t * a.xs + j];
+            if (v == 0.0f) continue;
+            const uchar *blk = wb + a.w_off + (ulong64)j * nb * 144 +
+                               (ulong64)bi * 144;
+            float dd   = f16f(blk);
+            float dmin = f16f(blk + 2);
+            uchar sg, mg;
+            get_scale_min_k4(g, blk + 4, &sg, &mg);
+            uchar byte = blk[16 + pair * 32 + w32];
+            int nib = hi ? (byte >> 4) : (byte & 0xF);
+            float wv = dd * (float)sg * (float)nib - dmin * (float)mg;
+            acc = fmaf(wv, v, acc);
+        }
+        y[(ulong64)t * a.ys + i] = acc;
+    }
+}
+
 // IQ4: the nibble indexes a fixed 16-entry codebook
 static __device__ const signed char kv_iq4[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,

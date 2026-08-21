@@ -1741,6 +1741,13 @@ void gpu_disable(model_t *m) {
 // CUDA one (per-column position and per-sequence KV buffer, batched twins of
 // the batch-1 matvec kernels) and is tracked in FUTURE.md Phase 6; unified
 // memory removes the KV upload/copyback half of it entirely.
+bool gpu_mvt(model_t *mm, const gguf_tensor *w, const float *dy, float *dx,
+             int n_in, int n_out, int batch) {
+    (void)mm; (void)w; (void)dy; (void)dx; (void)n_in; (void)n_out;
+    (void)batch;
+    return false;   // no Metal training path yet
+}
+
 gpu_batch *gpu_batch_create(model_t **seqs, int n) {
     (void)seqs; (void)n;
     return NULL;

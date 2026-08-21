@@ -82,6 +82,13 @@ void gpu_disable(model_t *m) {
 
 // No backend, so no microbatch: model_batch_decode sees NULL and decodes the
 // sequences one at a time, which is what this platform would have done anyway.
+bool gpu_mvt(model_t *m, const gguf_tensor *w, const float *dy, float *dx,
+             int n_in, int n_out, int batch) {
+    (void)m; (void)w; (void)dy; (void)dx; (void)n_in; (void)n_out;
+    (void)batch;
+    return false;
+}
+
 gpu_batch *gpu_batch_create(model_t **seqs, int n) {
     (void)seqs; (void)n;
     return NULL;

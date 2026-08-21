@@ -197,3 +197,4 @@ test-lora-grad
 test-lora-q8.*
 test-lora-qk.*
 test-qk.gguf
+test-mvt

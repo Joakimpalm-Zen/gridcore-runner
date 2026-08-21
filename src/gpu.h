@@ -85,6 +85,12 @@ bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 // process n tokens starting at pos (prompt batches); on success returns true
 // and sets *logits to the last token's logits when want_logits (else NULL).
 // false = failed, use CPU.
+// transposed matvec on the device (training backward, D8 slice 1): dx += W^T
+// dy with the CPU trainer's exact accumulation chain; false = no backend /
+// no kernel for the type, the caller stays on the CPU path.
+bool   gpu_mvt(model_t *m, const gguf_tensor *w, const float *dy, float *dx,
+               int n_in, int n_out, int batch);
+
 bool   gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                          bool want_logits, float **logits);
 void   gpu_free(model_t *m); // releases GPU buffers; KV pointers become invalid

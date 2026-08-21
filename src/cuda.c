@@ -289,6 +289,7 @@ typedef struct gpu_weights {
     // supported type id (T_MXFP4 = 39), not the count of supported types
     #define KT_N 40
     CUfunction  f_mv[KT_N], f_mvb[KT_N];// indexed by ggml type; _b = tile variant
+    CUfunction  f_mvt[KT_N];            // transposed matvec (training backward)
     CUfunction  f_gemm[KT_N];           // prefill tiled-GEMM variants (Q8_0/Q4_K)
     CUfunction  f_gemm_tc[KT_N];        // tensor-core prefill GEMM (opt-in, Q4_K)
     CUfunction  f_gemv[KT_N];           // decode coalesced GEMV variants (Q8_0/Q4_K)
@@ -1203,6 +1204,13 @@ static gpu_weights *shared_build(model_t *m, size_t act_bytes, int max_hd,
             { &w->f_mv[T_Q5_1], "k_mv_q5_1" },   { &w->f_mv[T_Q4_K], "k_mv_q4_K" },
             { &w->f_mv[T_Q5_K], "k_mv_q5_K" },   { &w->f_mv[T_Q6_K], "k_mv_q6_K" },
             { &w->f_mv[T_Q3_K], "k_mv_q3_K" },
+            { &w->f_mvt[T_F32],  "k_mvt_f32" },
+            { &w->f_mvt[T_F16],  "k_mvt_f16" },
+            { &w->f_mvt[T_BF16], "k_mvt_bf16" },
+            { &w->f_mvt[T_Q8_0], "k_mvt_q8_0" },
+            { &w->f_mvt[T_Q4_K], "k_mvt_q4_K" },
+            { &w->f_mvt[T_Q4_0], "k_mvt_q4_0" },
+            { &w->f_mvt[T_Q6_K], "k_mvt_q6_K" },
             { &w->f_mv[T_Q2_K], "k_mv_q2_K" },
             { &w->f_mv[T_BF16], "k_mv_bf16" },
             { &w->f_mv[T_IQ4_NL], "k_mv_iq4_nl" }, { &w->f_mv[T_IQ4_XS], "k_mv_iq4_xs" },
@@ -3734,6 +3742,41 @@ static bool batch_eligible(model_t **seqs, int n, gpu_t **lead_out) {
     }
     *lead_out = lead;
     return true;
+}
+
+// ------------------- transposed matvec for training (adaptation D8 slice 1)
+// dx[t][i] += sum_j W[j][i]*dy[t][j] on the device, with the accumulator
+// chain identical to the CPU trainer (start from dx, serial j, skip zero
+// dy). Synchronous, allocates its scratch per call: this is the correctness
+// and throughput primitive, not yet the integrated training path.
+bool gpu_mvt(model_t *m, const gguf_tensor *w, const float *dy, float *dx,
+             int n_in, int n_out, int batch) {
+    gpu_t *g = m->gpu;
+    if (!g || !w || w->type >= KT_N || !g->sw->f_mvt[w->type]) return false;
+    CUdeviceptr weights = 0;
+    uint64_t w_off = 0;
+    if (!binding_find(g->sw, m, w, &weights, &w_off)) return false;
+    if (cu.CtxSetCurrent(g->sw->ctx) != 0) return false;
+    CUdeviceptr d_dy = 0, d_dx = 0;
+    size_t ny = sizeof(float) * (size_t)batch * n_out;
+    size_t nx = sizeof(float) * (size_t)batch * n_in;
+    if (cu.MemAlloc(&d_dy, ny) != 0) return false;
+    if (cu.MemAlloc(&d_dx, nx) != 0) { cu.MemFree(d_dy); return false; }
+    bool ok = cu.MemcpyHtoD(d_dy, dy, ny) == 0 &&
+              cu.MemcpyHtoD(d_dx, dx, nx) == 0;
+    if (ok) {
+        mv_args a = { n_in, n_out, w_off, 0, batch, n_out, n_in };
+        CUdeviceptr bias = g->sw->dummy;
+        void *p[] = { &weights, &d_dy, &d_dx, &a, &bias };
+        int threads = 256;
+        int blocks = (n_in + threads - 1) / threads;
+        ok = launch(g, g->sw->f_mvt[w->type], blocks, 1, 1, threads, p) &&
+             cu.CtxSynchronize() == 0 &&
+             cu.MemcpyDtoH(dx, d_dx, nx) == 0;
+    }
+    cu.MemFree(d_dy);
+    cu.MemFree(d_dx);
+    return ok;
 }
 
 gpu_batch *gpu_batch_create(model_t **seqs, int n) {
