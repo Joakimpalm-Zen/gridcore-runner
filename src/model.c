@@ -5479,6 +5479,76 @@ float *model_lora_gradbuf(model_t *m, int layer, int slot, int which,
     return which ? lw->gb : lw->ga;
 }
 
+// attention score/softmax backward for a range of kv-head groups — the
+// tpool worker lora_layer_bw dispatches. See the call site for why the
+// partition is byte-exact.
+typedef struct {
+    const uint8_t *kc_l, *vc_l;
+    const float *q, *dao;
+    float *dq, *dk, *dv;
+    float *pbuf;           // n_kv rows of T floats, one per group
+    int T, n_head, kv_mul, hd, q_dim, kv_dim;
+    size_t row_b;
+    float scale;
+} attn_bw_job;
+
+static void attn_bw_worker(void *ctx, int g0, int g1) {
+    attn_bw_job *jb = (attn_bw_job *)ctx;
+    int hd = jb->hd, kv_mul = jb->kv_mul, T = jb->T;
+    for (int kvh = g0; kvh < g1; kvh++) {
+        float *p = jb->pbuf + (size_t)kvh * T;
+        size_t hoff = (size_t)kvh * hd * sizeof(f16_t);
+        for (int t = 0; t < T; t++) {
+            const float *daot = jb->dao + (size_t)t * jb->q_dim;
+            const float *qt = jb->q + (size_t)t * jb->q_dim;
+            float *dqt = jb->dq + (size_t)t * jb->q_dim;
+            for (int h = kvh * kv_mul; h < (kvh + 1) * kv_mul; h++) {
+                const float *qh = qt + (size_t)h * hd;
+                const float *daoh = daot + (size_t)h * hd;
+                for (int s = 0; s <= t; s++) {
+                    const f16_t *kh = (const f16_t *)(jb->kc_l +
+                                      (size_t)s * jb->row_b + hoff);
+                    float sc = 0;
+                    for (int i = 0; i < hd; i++)
+                        sc += qh[i] * f16_load(kh + i);
+                    p[s] = sc * jb->scale;
+                }
+                softmax(p, t + 1);
+                float sum_pd = 0.0f;
+                for (int s = 0; s <= t; s++) {
+                    const f16_t *vh = (const f16_t *)(jb->vc_l +
+                                      (size_t)s * jb->row_b + hoff);
+                    float dp = 0.0f;
+                    for (int i = 0; i < hd; i++)
+                        dp = fmaf(daoh[i], f16_load(vh + i), dp);
+                    // two passes: first accumulate sum_pd
+                    sum_pd = fmaf(p[s], dp, sum_pd);
+                }
+                for (int s = 0; s <= t; s++) {
+                    const f16_t *kh = (const f16_t *)(jb->kc_l +
+                                      (size_t)s * jb->row_b + hoff);
+                    const f16_t *vh = (const f16_t *)(jb->vc_l +
+                                      (size_t)s * jb->row_b + hoff);
+                    float dp = 0.0f;
+                    for (int i = 0; i < hd; i++)
+                        dp = fmaf(daoh[i], f16_load(vh + i), dp);
+                    float dsc = p[s] * (dp - sum_pd) * jb->scale;
+                    float *dqh = dqt + (size_t)h * hd;
+                    float *dks = jb->dk + (size_t)s * jb->kv_dim +
+                                 (size_t)kvh * hd;
+                    float *dvs = jb->dv + (size_t)s * jb->kv_dim +
+                                 (size_t)kvh * hd;
+                    for (int i = 0; i < hd; i++) {
+                        dqh[i] = fmaf(dsc, f16_load(kh + i), dqh[i]);
+                        dks[i] = fmaf(dsc, qh[i], dks[i]);
+                        dvs[i] = fmaf(p[s], daoh[i], dvs[i]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // One layer's reverse sweep. dx enters as the grad wrt the layer's OUTPUT
 // residual stream (per position) and leaves as the grad wrt its INPUT.
 // Phase R recomputes the layer's forward internals from the tape (attention
@@ -5529,7 +5599,7 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
     float *dxn2 = calloc((size_t)T * E, sizeof(float));
     float *dao  = calloc((size_t)T * q_dim, sizeof(float));
     float *tmpE = malloc(sizeof(float) * (size_t)E);
-    float *p    = malloc(sizeof(float) * (size_t)T);
+    float *p    = malloc(sizeof(float) * (size_t)T * n_kv);  // per-group rows
     bool ok = xn1 && xa && xn2 && q && ao && g && u && dxn1 && dxa && dq &&
               dk && dv && hact && dhact && dgu && dxn2 && dao && tmpE && p &&
               (!ly->qnorm_w || qpre) && (!ly->knorm_w || kpre);
@@ -5609,51 +5679,17 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
     }
     // attention output projection, whole window at once
     ok = ok && lora_site_bw(m, l, LW_O, ly->wo, ao, dxa, dao, q_dim, E, T);
-    for (int t = 0; ok && t < T; t++) {
-        // score/softmax backward per head, reading K/V from the cache (the
-        // f16-rounded values the forward attended over)
-        const float *daot = dao + (size_t)t * q_dim;
-        const float *qt = q + (size_t)t * q_dim;
-        float *dqt = dq + (size_t)t * q_dim;
-        for (int h = 0; h < n_head; h++) {
-            int kvh = h / kv_mul;
-            size_t hoff = (size_t)kvh * hd * sizeof(f16_t);
-            const float *qh = qt + (size_t)h * hd;
-            const float *daoh = daot + (size_t)h * hd;
-            for (int s = 0; s <= t; s++) {
-                const f16_t *kh = (const f16_t *)(kc_l + (size_t)s * row_b + hoff);
-                float sc = 0;
-                for (int i = 0; i < hd; i++) sc += qh[i] * f16_load(kh + i);
-                p[s] = sc * scale;
-            }
-            softmax(p, t + 1);
-            float sum_pd = 0.0f;
-            for (int s = 0; s <= t; s++) {
-                const f16_t *vh = (const f16_t *)(vc_l + (size_t)s * row_b + hoff);
-                float dp = 0.0f;
-                for (int i = 0; i < hd; i++)
-                    dp = fmaf(daoh[i], f16_load(vh + i), dp);
-                // stash dp in the p buffer's shadow via recompute later; keep
-                // two passes: first accumulate sum_pd
-                sum_pd = fmaf(p[s], dp, sum_pd);
-            }
-            for (int s = 0; s <= t; s++) {
-                const f16_t *kh = (const f16_t *)(kc_l + (size_t)s * row_b + hoff);
-                const f16_t *vh = (const f16_t *)(vc_l + (size_t)s * row_b + hoff);
-                float dp = 0.0f;
-                for (int i = 0; i < hd; i++)
-                    dp = fmaf(daoh[i], f16_load(vh + i), dp);
-                float dsc = p[s] * (dp - sum_pd) * scale;
-                float *dqh = dqt + (size_t)h * hd;
-                float *dks = dk + (size_t)s * kv_dim + (size_t)kvh * hd;
-                float *dvs = dv + (size_t)s * kv_dim + (size_t)kvh * hd;
-                for (int i = 0; i < hd; i++) {
-                    dqh[i] = fmaf(dsc, f16_load(kh + i), dqh[i]);
-                    dks[i] = fmaf(dsc, qh[i], dks[i]);
-                    dvs[i] = fmaf(p[s], daoh[i], dvs[i]);
-                }
-            }
-        }
+    // score/softmax backward, threaded over KV-HEAD GROUPS (slice 3): each
+    // dq element belongs to one (t,h) and each dk/dv element to one
+    // (s,kvh), so a worker that owns whole kvh groups touches a disjoint
+    // slice of every gradient buffer — and its (t asc, h asc, s asc) loop
+    // is exactly the serial sweep's order restricted to that slice, so the
+    // bytes cannot depend on the thread count. Reads K/V from the cache
+    // (the f16-rounded values the forward attended over).
+    if (ok) {
+        attn_bw_job aj = { kc_l, vc_l, q, dao, dq, dk, dv, p, T, n_head,
+                           kv_mul, hd, q_dim, kv_dim, row_b, scale };
+        tpool_run(m->tp, attn_bw_worker, &aj, n_kv);
     }
 
     // ---- phase B2: projection backwards now that dK/dV are complete
@@ -5733,6 +5769,11 @@ bool model_lora_backward_w(model_t *m, const int32_t *toks, int T,
         return false;
     }
     int E = m->n_embd, V = m->n_vocab, L = m->n_layer;
+    // RUNNER_TRAIN_PROF=1: per-step phase wall times on stderr — the dev
+    // knob the slice-3 optimization ran on (guessing at the profile cost a
+    // round of measurement; this line is cheaper than being wrong again)
+    bool prof = getenv("RUNNER_TRAIN_PROF") != NULL;
+    double pt0 = prof ? plat_now() : 0, pt_fw = 0, pt_head = 0;
     // ---- taped forward: the inference forward, solo per position
     m->tape_T = T;
     m->tape = malloc(sizeof(float) * (size_t)(L + 1) * T * E);
@@ -5751,6 +5792,7 @@ bool model_lora_backward_w(model_t *m, const int32_t *toks, int T,
                          - (double)lg[toks[t + 1]]);
         }
     }
+    if (prof) { pt_fw = plat_now(); }
     {
     // ---- reverse sweep
     // Head + out-norm, chunked (slice 3): the lm-head transposed matvec is
@@ -5799,10 +5841,14 @@ bool model_lora_backward_w(model_t *m, const int32_t *toks, int T,
         }
     }
     free(dhn);
+    if (prof) { pt_head = plat_now(); }
     // layers in reverse
     bool ok = true;
     for (int l = L - 1; ok && l >= 0; l--)
         ok = lora_layer_bw(m, l, toks, T, dx);
+    if (prof)
+        fprintf(stderr, "train-prof: fw %.2fs head %.2fs layers %.2fs\n",
+                pt_fw - pt0, pt_head - pt_fw, plat_now() - pt_head);
     free(probs); free(hn);
     if (!ok) { free(dx); goto fail; }
     free(dx);
