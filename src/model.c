@@ -5557,9 +5557,15 @@ static void attn_bw_worker(void *ctx, int g0, int g1) {
 // (accumulating the cross-position dK/dV); phase B2 finishes the projection
 // backwards once dK/dV are complete; phase B3 folds the attn-norm backward
 // into the residual path.
+// RUNNER_TRAIN_PROF phase accumulators (the backward runs on the serial
+// spine, so plain globals are race-free)
+static double lbw_prof[4];   // R recompute / B1 sites / B1 attn / B2+B3
+
 static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
                           float *dx) {
     (void)toks;
+    bool lprof = getenv("RUNNER_TRAIN_PROF") != NULL;
+    double lt = lprof ? plat_now() : 0;
     layer_t *ly = &m->layers[l];
     int E = m->n_embd;
     int hd = model_head_dim(m, l), n_head = m->n_head;
@@ -5641,6 +5647,7 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
         lora_site_fw(m, l, LW_UP, u + (size_t)t * nff, x2, E, nff);
     }
 
+    if (lprof) { double n2 = plat_now(); lbw_prof[0] += n2 - lt; lt = n2; }
     // ---- phase B1: FFN backward site-major across the window, then the
     // attention-internal backward per position. Positions are independent
     // through every step here except the dK/dV accumulation, which keeps
@@ -5679,6 +5686,7 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
     }
     // attention output projection, whole window at once
     ok = ok && lora_site_bw(m, l, LW_O, ly->wo, ao, dxa, dao, q_dim, E, T);
+    if (lprof) { double n2 = plat_now(); lbw_prof[1] += n2 - lt; lt = n2; }
     // score/softmax backward, threaded over KV-HEAD GROUPS (slice 3): each
     // dq element belongs to one (t,h) and each dk/dv element to one
     // (s,kvh), so a worker that owns whole kvh groups touches a disjoint
@@ -5692,6 +5700,7 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
         tpool_run(m->tp, attn_bw_worker, &aj, n_kv);
     }
 
+    if (lprof) { double n2 = plat_now(); lbw_prof[2] += n2 - lt; lt = n2; }
     // ---- phase B2: projection backwards now that dK/dV are complete
     for (int t = 0; ok && t < T; t++) {
         rope_unapply(m, dq + (size_t)t * q_dim, n_head, t, l);
@@ -5737,6 +5746,7 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
                    dxn1 + (size_t)t * E, out, E, m->rms_eps);
     }
 
+    if (lprof) lbw_prof[3] += plat_now() - lt;
     free(qpre); free(kpre);
     free(xn1); free(xa); free(xn2); free(q); free(ao); free(g); free(u);
     free(dxn1); free(dxa); free(dq); free(dk); free(dv); free(hact);
@@ -5846,9 +5856,13 @@ bool model_lora_backward_w(model_t *m, const int32_t *toks, int T,
     bool ok = true;
     for (int l = L - 1; ok && l >= 0; l--)
         ok = lora_layer_bw(m, l, toks, T, dx);
-    if (prof)
-        fprintf(stderr, "train-prof: fw %.2fs head %.2fs layers %.2fs\n",
-                pt_fw - pt0, pt_head - pt_fw, plat_now() - pt_head);
+    if (prof) {
+        fprintf(stderr, "train-prof: fw %.2fs head %.2fs layers %.2fs "
+                "(R %.2f sites %.2f attn %.2f b2b3 %.2f)\n",
+                pt_fw - pt0, pt_head - pt_fw, plat_now() - pt_head,
+                lbw_prof[0], lbw_prof[1], lbw_prof[2], lbw_prof[3]);
+        memset(lbw_prof, 0, sizeof(lbw_prof));
+    }
     free(probs); free(hn);
     if (!ok) { free(dx); goto fail; }
     free(dx);
