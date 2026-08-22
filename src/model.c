@@ -3330,6 +3330,7 @@ static bool model_alloc_runtime(model_t *m, const model_params *p) {
 
 void model_free(model_t *m) {
     gpu_free(m); // nulls kcache/vcache if the GPU owned them
+    gpu_train_free(m);
     model_lora_free(m);
     free(m->moe_host);
     m->moe_host = NULL;
@@ -5106,9 +5107,15 @@ bool model_lora_load(model_t *m, const char *path, float user_scale) {
         }
         struct lora_w *lw = &tab[(size_t)l * LW_SLOTS + s];
         int64_t n_in = base->ne[0], n_out = base->ne[1];
-        if (t->type != T_F32) {
-            fprintf(stderr, "error: adapter tensor '%s' is not F32\n",
-                    t->name);
+        // our own writer emits F32; llama.cpp's convert_lora_to_gguf emits
+        // F16 by default, and community adapters ship that way (measured:
+        // the first third-party adapter tried was F16 and refused here).
+        // Any float format converts losslessly-deterministically through
+        // tensor_to_f32; quantized adapter tensors stay refused by name.
+        if (t->type != T_F32 && t->type != T_F16 && t->type != T_BF16) {
+            fprintf(stderr, "error: adapter tensor '%s' is %s — adapters "
+                    "must be F32, F16 or BF16\n", t->name,
+                    ggml_type_name(t->type));
             goto fail_tab;
         }
         int64_t r = side == 'a' ? t->ne[1] : t->ne[0];
@@ -5200,9 +5207,14 @@ done:
 
 // dx[i] += sum_j W[j,i] * dy[j] — the transposed quantized matvec from the
 // T0 audit: rows are dequantized one at a time (any weight type quants.c can
-// decode) and accumulated serially for reproducibility.
-static bool matvec_t(const gguf_tensor *w, const float *dy, float *dx,
-                     int n_in, int n_out) {
+// decode) and accumulated serially for reproducibility. With a training GPU
+// context (D8 slice 2) the device twin runs instead — bit-identical by gate,
+// so a per-tensor decline (no kernel for the type, VRAM budget) falls
+// through to the CPU loop without changing a byte of the result.
+static bool matvec_t(model_t *m, const gguf_tensor *w, const float *dy,
+                     float *dx, int n_in, int n_out) {
+    if (m->train_gpu && gpu_train_mvt(m, w, dy, dx, n_in, n_out))
+        return true;
     float *rowbuf = malloc(sizeof(float) * (size_t)n_in);
     if (!rowbuf) return false;
     size_t rs = ggml_row_size(w->type, n_in);
@@ -5236,7 +5248,7 @@ static void rmsnorm_bw(const float *x, const float *w, const float *dy,
 static bool lora_site_bw(model_t *m, int l, int slot, const gguf_tensor *w,
                          const float *xin, const float *dy, float *dxin,
                          int n_in, int n_out) {
-    if (!matvec_t(w, dy, dxin, n_in, n_out)) return false;
+    if (!matvec_t(m, w, dy, dxin, n_in, n_out)) return false;
     struct lora_w *lw = m->lora ? &m->lora[(size_t)l * LW_SLOTS + slot] : NULL;
     if (!lw || !lw->r) return true;
     if (!lw->ga) lw->ga = calloc((size_t)lw->r * n_in, sizeof(float));
@@ -5662,7 +5674,7 @@ bool model_lora_backward_w(model_t *m, const int32_t *toks, int T,
         if (pos_w)
             for (int i = 0; i < V; i++) probs[i] *= pos_w[t];
         memset(dhn, 0, sizeof(float) * (size_t)E);
-        if (!matvec_t(m->output, probs, dhn, E, V)) {
+        if (!matvec_t(m, m->output, probs, dhn, E, V)) {
             free(dhn); free(dx); free(probs); free(hn); goto fail;
         }
         rmsnorm_bw(h, m->out_norm_w, dhn, dx + (size_t)t * E, E, m->rms_eps);

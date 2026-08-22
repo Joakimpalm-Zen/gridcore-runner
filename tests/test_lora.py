@@ -45,7 +45,8 @@ def fx(tmp_path_factory):
     return {"base": base, "adapter": d / "fx.adapter.gguf",
             "zero": d / "fx.zero.gguf", "merged": d / "fx.merged.gguf",
             "badshape": d / "fx.badshape.gguf",
-            "halfpair": d / "fx.halfpair.gguf"}
+            "halfpair": d / "fx.halfpair.gguf",
+            "f16": d / "fx.f16.gguf"}
 
 
 def _score(runner_bin, model, lora=None, scale=None):
@@ -88,6 +89,20 @@ def test_adapter_matches_the_merged_reference(runner_bin, fx):
     # scaled wrong, indexed the wrong row, or hit the wrong projection lands
     # orders of magnitude past this
     assert max(deltas) <= 5e-4, max(deltas)
+
+
+def test_f16_adapter_loads_and_matches_f32(runner_bin, fx):
+    """The format llama.cpp's convert_lora_to_gguf emits (measured: the
+    first community adapter tried was F16 and the loader refused it). The
+    F16 twin holds the same values rounded to half precision, so it must
+    load and score within rounding distance of the F32 adapter, and it must
+    actually be the adapter (differ from the bare base)."""
+    f32 = json.loads(_score(runner_bin, fx["base"], lora=fx["adapter"]))
+    f16 = json.loads(_score(runner_bin, fx["base"], lora=fx["f16"]))
+    base = json.loads(_score(runner_bin, fx["base"]))
+    assert abs(f16["nll_mean"] - f32["nll_mean"]) < 5e-2, \
+        (f16["nll_mean"], f32["nll_mean"])
+    assert f16["nll_mean"] != base["nll_mean"]
 
 
 @pytest.mark.parametrize("bad,needle", [

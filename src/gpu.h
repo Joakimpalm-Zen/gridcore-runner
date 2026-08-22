@@ -91,6 +91,19 @@ bool   gpu_init(model_t *m);                     // false = unsupported, use CPU
 bool   gpu_mvt(model_t *m, const gguf_tensor *w, const float *dy, float *dx,
                int n_in, int n_out, int batch);
 
+// D8 slice 2: the standalone training context. --train keeps the model
+// CPU-resident (m->gpu stays NULL); this context owns its own CUDA state,
+// uploads each weight tensor ONCE on first use, and runs the backward's
+// dx += W^T dy on the device — the kernel proven bit-identical to the CPU
+// chain in slice 1, so a call that returns false (no CUDA, no kernel for
+// the type, VRAM budget exhausted) just leaves that tensor on the CPU path
+// with the SAME bytes as the result. Opt-in from --train via
+// RUNNER_TRAIN_GPU=1. All three are no-ops / false without CUDA.
+bool   gpu_train_init(model_t *m);
+void   gpu_train_free(model_t *m);
+bool   gpu_train_mvt(model_t *m, const gguf_tensor *w, const float *dy,
+                     float *dx, int n_in, int n_out);
+
 bool   gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                          bool want_logits, float **logits);
 void   gpu_free(model_t *m); // releases GPU buffers; KV pointers become invalid

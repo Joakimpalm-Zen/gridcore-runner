@@ -100,6 +100,29 @@ def test_jsonl_mode_trains_with_prompt_masking(runner_bin, base, tmp_path):
     _score(runner_bin, base, lora=out)
 
 
+def test_gpu_training_matches_cpu_bytes(runner_bin, base, tmp_path):
+    """D8 slice 2: RUNNER_TRAIN_GPU=1 must not change a single adapter byte.
+
+    The device transposed-matvec is gated bit-identical to the CPU chain
+    (test_mvt.c), so the whole training run must be too. Skips unless a
+    CUDA device actually engaged (the runner prints its train-gpu banner).
+    """
+    import os
+    a_cpu, a_gpu = tmp_path / "cpu.gguf", tmp_path / "gpu.gguf"
+    _train(runner_bin, base, a_cpu, steps=6)
+    env = dict(os.environ, RUNNER_TRAIN_GPU="1")
+    cmd = [runner_bin, "-m", str(base / "base.gguf"),
+           "--train", str(base / "corpus.txt"), "--train-steps", "6",
+           "--lr", "3e-3", "--train-out", str(a_gpu), "-t", "2"]
+    p = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=600, env=env)
+    assert p.returncode == 0, p.stderr.decode(errors="replace")
+    if b"train-gpu:" not in p.stderr or b"no usable CUDA" in p.stderr:
+        pytest.skip("no CUDA device engaged")
+    assert a_cpu.read_bytes() == a_gpu.read_bytes(), \
+        "GPU-assisted training changed the adapter bytes"
+
+
 def test_seed_changes_the_adapter(runner_bin, base, tmp_path):
     a1, a2 = tmp_path / "s1.gguf", tmp_path / "s2.gguf"
     _train(runner_bin, base, a1, steps=4, extra=("-s", "7"))

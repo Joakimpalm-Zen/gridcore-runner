@@ -945,10 +945,12 @@ static void expert_block_geometry(const gguf_tensor *t, int64_t *row_len, int64_
 // base/adapter shas that make the merged blob auditable.
 
 typedef struct {
-    const float *a, *b;   // mmap'd F32 pair: a is r rows of n_in, b is
-                          // n_out rows of r — the orientation lora_apply
-                          // consumes, so the merged weight computes
-                          // W'x = Wx + scale*B(Ax) up to summation order
+    float *a, *b;         // owned f32 copies of the pair: a is r rows of
+                          // n_in, b is n_out rows of r — the orientation
+                          // lora_apply consumes, so the merged weight
+                          // computes W'x = Wx + scale*B(Ax) up to
+                          // summation order. Copied (not mmap-aliased)
+                          // because F16/BF16 adapters convert at resolve
     int r;                // 0 = this base tensor is untouched
     float scale;          // (alpha / r) * user scale
     bool zero;            // delta is exactly zero (b all-zero or scale 0):
@@ -974,6 +976,10 @@ static const char *const merge_slot_name[] = {
 
 static void merge_set_free(merge_set_t *ms) {
     if (ms->open) gguf_close(&ms->g);
+    for (uint64_t i = 0; ms->map && i < ms->n_base; i++) {
+        free(ms->map[i].a);
+        free(ms->map[i].b);
+    }
     free(ms->map);
     memset(ms, 0, sizeof(*ms));
 }
@@ -1046,9 +1052,13 @@ static bool merge_set_resolve(merge_set_t *ms, const char *adapter_path,
                     "projection this model does not carry\n", t->name);
             return false;
         }
-        if (t->type != T_F32) {
-            fprintf(stderr, "error: adapter tensor '%s' is not F32\n",
-                    t->name);
+        // F32 from our writer, F16 from llama.cpp's converter (the way
+        // community adapters ship), BF16 for completeness — anything else
+        // refuses by name
+        if (t->type != T_F32 && t->type != T_F16 && t->type != T_BF16) {
+            fprintf(stderr, "error: adapter tensor '%s' is %s — adapters "
+                    "must be F32, F16 or BF16\n", t->name,
+                    ggml_type_name(t->type));
             return false;
         }
         int64_t n_in = bt->ne[0], n_out = bt->ne[1];
@@ -1071,8 +1081,12 @@ static bool merge_set_resolve(merge_set_t *ms, const char *adapter_path,
             return false;
         }
         mp->r = (int)r;
-        if (side == 'a') mp->a = (const float *)t->data;
-        else             mp->b = (const float *)t->data;
+        int64_t n_el = t->ne[0] * (int64_t)t->ne[1];
+        float *dat = malloc(sizeof(float) * (size_t)n_el);
+        if (!dat) return false;
+        dequant_row(t->type, t->data, dat, (int)n_el);
+        if (side == 'a') { free(mp->a); mp->a = dat; }
+        else             { free(mp->b); mp->b = dat; }
     }
     for (uint64_t i = 0; i < base->n_tensors; i++) {
         merge_pair_t *mp = &ms->map[i];

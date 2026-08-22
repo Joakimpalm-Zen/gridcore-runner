@@ -1166,6 +1166,17 @@ int main(int argc, char **argv) {
                     "projection (alpha %g)\n", lora_rank,
                     (double)(2.0f * lora_rank));
         }
+        // D8 slice 2, opt-in: run the backward's transposed matvec on the
+        // device with the weights cached there. The kernel is gated
+        // bit-identical to the CPU chain, so the adapter bytes do not
+        // depend on this switch — only the step time does. Failing to init
+        // (no CUDA) just stays on the CPU without a word beyond this one.
+        {
+            const char *tg = getenv("RUNNER_TRAIN_GPU");
+            if (tg && *tg && strcmp(tg, "0") != 0 && !gpu_train_init(&m))
+                fprintf(stderr, "train-gpu: no usable CUDA device — "
+                        "training on the CPU\n");
+        }
         FILE *tf = fopen(train_path, "rb");
         if (!tf) {
             fprintf(stderr, "error: cannot open %s\n", train_path);

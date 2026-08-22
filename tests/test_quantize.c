@@ -194,8 +194,10 @@ static bool files_equal(const char *pa, const char *pb) {
 // lora_a/lora_b tensors. `arch` NULL omits general.architecture, matching
 // the base fixtures here (which carry none either — both read back "").
 typedef struct { const char *name; uint64_t ne[2]; const float *data; } adesc;
+// ttype: T_F32 writes the floats verbatim; T_F16 rounds them to half —
+// the format llama.cpp's converter emits, which the merge must accept
 static void write_adapter(const char *path, float alpha, const char *arch,
-                          const adesc *ts, int nt) {
+                          const adesc *ts, int nt, int ttype) {
     buf w = {0};
     bu32(&w, 0x46554747); bu32(&w, 3);
     bu64(&w, (uint64_t)nt); bu64(&w, 4 + (arch != NULL));
@@ -209,18 +211,27 @@ static void write_adapter(const char *path, float alpha, const char *arch,
         bstr(&w, arch);
     }
     uint64_t off = 0;
+    size_t esz = ttype == T_F16 ? 2 : 4;
     for (int i = 0; i < nt; i++) {
         bstr(&w, ts[i].name);
         bu32(&w, 2);
         bu64(&w, ts[i].ne[0]); bu64(&w, ts[i].ne[1]);
-        bu32(&w, (uint32_t)T_F32);
+        bu32(&w, (uint32_t)ttype);
         bu64(&w, off);
-        off += ts[i].ne[0] * ts[i].ne[1] * 4;
+        off += ts[i].ne[0] * ts[i].ne[1] * esz;
         off = (off + (ALIGN - 1)) & ~(uint64_t)(ALIGN - 1);
     }
     bpad(&w, ALIGN);
     for (int i = 0; i < nt; i++) {
-        bput(&w, ts[i].data, (size_t)(ts[i].ne[0] * ts[i].ne[1] * 4));
+        uint64_t n = ts[i].ne[0] * ts[i].ne[1];
+        if (ttype == T_F16) {
+            for (uint64_t j = 0; j < n; j++) {
+                f16_t h = f32_to_f16(ts[i].data[j]);
+                bput(&w, &h, 2);
+            }
+        } else {
+            bput(&w, ts[i].data, (size_t)(n * 4));
+        }
         bpad(&w, ALIGN);
     }
     FILE *f = fopen(path, "wb");
@@ -629,7 +640,7 @@ int main(void) {
             { "blk.0.attn_q.weight.lora_a", {M_IN, M_R},  ma },
             { "blk.0.attn_q.weight.lora_b", {M_R, M_OUT}, mb },
         };
-        write_adapter(ad, alpha, NULL, ats, 2);
+        write_adapter(ad, alpha, NULL, ats, 2, T_F32);
         assert(merge_lora_gguf(base, ad, 1.0f, out1, T_KEEP) == 0);
         assert(merge_lora_gguf(base, ad, 1.0f, out2, T_KEEP) == 0);
         assert(files_equal(out1, out2));      // byte-deterministic
@@ -657,7 +668,7 @@ int main(void) {
             { "blk.0.attn_q.weight.lora_a", {M_IN, M_R},  ma },
             { "blk.0.attn_q.weight.lora_b", {M_R, M_OUT}, mz },
         };
-        write_adapter(zad, alpha, NULL, zts, 2);
+        write_adapter(zad, alpha, NULL, zts, 2, T_F32);
         assert(quantize_gguf(base, keep, T_KEEP, NULL) == 0);
         assert(merge_lora_gguf(base, zad, 1.0f, zout, T_KEEP) == 0);
         assert(files_equal(zout, keep));
@@ -690,26 +701,49 @@ int main(void) {
             }
             gguf_close(&gb); gguf_close(&gm);
         }
+        // an F16 adapter (the llama.cpp-converter format) merges too, and
+        // lands within half-precision rounding of the F32 merge
+        {
+            const char *fad = "q_mrg_f16ad.gguf", *fout = "q_mrg_f16.gguf";
+            write_adapter(fad, alpha, NULL, ats, 2, T_F16);
+            assert(merge_lora_gguf(base, fad, 1.0f, fout, T_KEEP) == 0);
+            gguf_file gf;
+            assert(gguf_open(&gf, fout));
+            gguf_tensor *qf = gguf_find_tensor(&gf, "blk.0.attn_q.weight");
+            assert(qf && qf->type == T_F32);
+            const float *gotf = (const float *)qf->data;
+            for (int j = 0; j < M_OUT; j++)
+                for (int i = 0; i < M_IN; i++) {
+                    float acc = 0.0f;
+                    for (int k = 0; k < M_R; k++)
+                        acc = fmaf(mb[j * M_R + k], ma[k * M_IN + i], acc);
+                    float want = fmaf(alpha / (float)M_R, acc,
+                                      mw[j * M_IN + i]);
+                    assert(fabsf(gotf[j * M_IN + i] - want) < 1e-3f);
+                }
+            gguf_close(&gf);
+            remove(fad); remove(fout);
+        }
         // hostile adapters refuse the whole merge
         const char *hout = "q_mrg_h.gguf";
         adesc half[1] = {
             { "blk.0.attn_q.weight.lora_a", {M_IN, M_R}, ma },
         };
-        write_adapter(ad, alpha, NULL, half, 1);
+        write_adapter(ad, alpha, NULL, half, 1, T_F32);
         assert(merge_lora_gguf(base, ad, 1.0f, hout, T_KEEP) != 0);
         adesc badshape[2] = {
             { "blk.0.attn_q.weight.lora_a", {32, M_R},  ma },
             { "blk.0.attn_q.weight.lora_b", {M_R, M_OUT}, mb },
         };
-        write_adapter(ad, alpha, NULL, badshape, 2);
+        write_adapter(ad, alpha, NULL, badshape, 2, T_F32);
         assert(merge_lora_gguf(base, ad, 1.0f, hout, T_KEEP) != 0);
         adesc unhooked[2] = {
             { "blk.0.attn_qkv.weight.lora_a", {M_IN, M_R},  ma },
             { "blk.0.attn_qkv.weight.lora_b", {M_R, M_OUT}, mb },
         };
-        write_adapter(ad, alpha, NULL, unhooked, 2);
+        write_adapter(ad, alpha, NULL, unhooked, 2, T_F32);
         assert(merge_lora_gguf(base, ad, 1.0f, hout, T_KEEP) != 0);
-        write_adapter(ad, alpha, "llama", ats, 2);   // base carries no arch
+        write_adapter(ad, alpha, "llama", ats, 2, T_F32);   // base carries no arch
         assert(merge_lora_gguf(base, ad, 1.0f, hout, T_KEEP) != 0);
         assert(!exists(hout));                       // nothing was installed
         remove(base); remove(ad); remove(out1); remove(out2);

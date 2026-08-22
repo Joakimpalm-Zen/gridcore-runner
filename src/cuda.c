@@ -3779,6 +3779,165 @@ bool gpu_mvt(model_t *m, const gguf_tensor *w, const float *dy, float *dx,
     return ok;
 }
 
+// ------------------- training GPU context (adaptation D8 slice 2)
+// --train keeps the model CPU-resident (the LoRA hooks and the taped
+// backward are CPU paths, and model_lora_load refuses m->gpu), but the
+// backward's dominant primitive has a device twin proven bit-identical to
+// the CPU chain (slice 1). Slice 1 also measured why it wasn't integrated:
+// per-call PCIe uploads drown the kernel win (q6_K 0.6x). This context is
+// the fix — its own CUDA state, independent of the serving backend: each
+// weight tensor is uploaded ONCE on first use and cached for the whole
+// run, and the dy/dx scratch is reused across calls. A tensor that cannot
+// go to the device (no kernel for its type, VRAM budget reached) simply
+// stays on the CPU path, which produces the SAME BYTES — mixing per tensor
+// is free because both paths are gated identical.
+
+typedef struct {
+    const gguf_tensor *w;
+    CUdeviceptr dev;
+} tg_slot;
+
+typedef struct {
+    CUcontext   ctx;              // primary context, retained on device 0
+    CUdevice    dev;
+    CUmodule    mod;
+    CUfunction  f_mvt[KT_N];
+    CUdeviceptr dummy;            // zeroed no-bias operand
+    tg_slot    *cache;
+    int         n_cache, cap_cache;
+    CUdeviceptr d_dy, d_dx;
+    size_t      cap_dy, cap_dx;
+    size_t      vram_used, vram_budget;
+    bool        budget_noted;
+} train_gpu_t;
+
+bool gpu_train_init(model_t *m) {
+    if (m->train_gpu) return true;
+    if (!cu_load() || cu.Init(0) != 0) return false;
+    int n = 0;
+    if (cu.DeviceGetCount(&n) != 0 || n < 1) return false;
+    train_gpu_t *t = calloc(1, sizeof(*t));
+    if (!t) return false;
+    if (cu.DeviceGet(&t->dev, 0) != 0 ||
+        cu.PrimaryCtxRetain(&t->ctx, t->dev) != 0) {
+        free(t);
+        return false;
+    }
+    if (cu.CtxSetCurrent(t->ctx) != 0 ||
+        cu.ModuleLoadData(&t->mod, k_ptx_src) != 0 ||
+        cu.MemAlloc(&t->dummy, 4) != 0 ||
+        cu.MemsetD8(t->dummy, 0, 4) != 0) {
+        cu.PrimaryCtxRelease(t->dev);
+        free(t);
+        return false;
+    }
+    static const struct { int type; const char *name; } FNS[] = {
+        { T_F32, "k_mvt_f32" },   { T_F16, "k_mvt_f16" },
+        { T_BF16, "k_mvt_bf16" }, { T_Q8_0, "k_mvt_q8_0" },
+        { T_Q4_0, "k_mvt_q4_0" }, { T_Q4_K, "k_mvt_q4_K" },
+        { T_Q6_K, "k_mvt_q6_K" },
+    };
+    for (size_t i = 0; i < sizeof(FNS) / sizeof(*FNS); i++)
+        if (cu.ModuleGetFunction(&t->f_mvt[FNS[i].type], t->mod,
+                                 FNS[i].name) != 0)
+            t->f_mvt[FNS[i].type] = NULL;
+    size_t free_b = 0, total_b = 0;
+    if (cu.MemGetInfo(&free_b, &total_b) != 0) free_b = 0;
+    // leave a margin for the driver and anyone sharing the card; running out
+    // mid-cache is not an error (the remainder trains on the CPU), the
+    // budget just decides where the split lands
+    t->vram_budget = free_b > (512u << 20) ? free_b - (512u << 20) : 0;
+    char name[128] = "CUDA GPU";
+    gpu_available(name, sizeof(name));
+    fprintf(stderr, "train-gpu: %s — backward matvec on device, weights "
+            "cached on first use (budget %.1f GB)\n", name,
+            t->vram_budget / 1e9);
+    m->train_gpu = t;
+    return true;
+}
+
+void gpu_train_free(model_t *m) {
+    train_gpu_t *t = m->train_gpu;
+    if (!t) return;
+    if (cu.CtxSetCurrent(t->ctx) == 0) {
+        for (int i = 0; i < t->n_cache; i++) cu.MemFree(t->cache[i].dev);
+        if (t->d_dy) cu.MemFree(t->d_dy);
+        if (t->d_dx) cu.MemFree(t->d_dx);
+        cu.MemFree(t->dummy);
+        cu.ModuleUnload(t->mod);
+    }
+    cu.PrimaryCtxRelease(t->dev);
+    free(t->cache);
+    free(t);
+    m->train_gpu = NULL;
+}
+
+static bool tg_scratch(CUdeviceptr *buf, size_t *cap, size_t need) {
+    if (*cap >= need) return true;
+    if (*buf) cu.MemFree(*buf);
+    *buf = 0;
+    *cap = 0;
+    if (cu.MemAlloc(buf, need) != 0) return false;
+    *cap = need;
+    return true;
+}
+
+bool gpu_train_mvt(model_t *m, const gguf_tensor *w, const float *dy,
+                   float *dx, int n_in, int n_out) {
+    train_gpu_t *t = m->train_gpu;
+    if (!t || !w || w->type >= KT_N || !t->f_mvt[w->type]) return false;
+    CUdeviceptr weights = 0;
+    for (int i = 0; i < t->n_cache; i++)
+        if (t->cache[i].w == w) { weights = t->cache[i].dev; break; }
+    if (cu.CtxSetCurrent(t->ctx) != 0) return false;
+    if (!weights) {
+        if (t->vram_used + w->nbytes > t->vram_budget) {
+            if (!t->budget_noted) {
+                t->budget_noted = true;
+                fprintf(stderr, "train-gpu: VRAM budget reached after %.1f "
+                        "GB — remaining tensors train on the CPU (same "
+                        "bytes, slower)\n", t->vram_used / 1e9);
+            }
+            return false;
+        }
+        if (t->n_cache == t->cap_cache) {
+            int cap = t->cap_cache ? t->cap_cache * 2 : 64;
+            tg_slot *c = realloc(t->cache, sizeof(tg_slot) * (size_t)cap);
+            if (!c) return false;
+            t->cache = c;
+            t->cap_cache = cap;
+        }
+        if (cu.MemAlloc(&weights, w->nbytes) != 0 ||
+            cu.MemcpyHtoD(weights, w->data, w->nbytes) != 0) {
+            if (weights) cu.MemFree(weights);
+            // treat an allocation failure as the budget: stop trying
+            t->vram_budget = t->vram_used;
+            return false;
+        }
+        t->cache[t->n_cache].w = w;
+        t->cache[t->n_cache].dev = weights;
+        t->n_cache++;
+        t->vram_used += w->nbytes;
+    }
+    size_t ny = sizeof(float) * (size_t)n_out;
+    size_t nx = sizeof(float) * (size_t)n_in;
+    if (!tg_scratch(&t->d_dy, &t->cap_dy, ny) ||
+        !tg_scratch(&t->d_dx, &t->cap_dx, nx))
+        return false;
+    if (cu.MemcpyHtoD(t->d_dy, dy, ny) != 0 ||
+        cu.MemcpyHtoD(t->d_dx, dx, nx) != 0)
+        return false;
+    mv_args a = { n_in, n_out, 0, 0, 1, n_out, n_in };
+    void *p[] = { &weights, &t->d_dy, &t->d_dx, &a, &t->dummy };
+    int threads = 256;
+    unsigned blocks = (unsigned)((n_in + threads - 1) / threads);
+    if (cu.LaunchKernel(t->f_mvt[w->type], blocks, 1, 1, (unsigned)threads,
+                        1, 1, 0, NULL, p, NULL) != 0)
+        return false;
+    return cu.CtxSynchronize() == 0 &&
+           cu.MemcpyDtoH(dx, t->d_dx, nx) == 0;
+}
+
 gpu_batch *gpu_batch_create(model_t **seqs, int n) {
     gpu_t *lead = NULL;
     if (!batch_eligible(seqs, n, &lead)) return NULL;

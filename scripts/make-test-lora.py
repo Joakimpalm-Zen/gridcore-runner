@@ -12,6 +12,9 @@ Writes, next to the given output prefix:
   <out>.badshape.gguf     lora_a whose in-dim disagrees with the base (must
                           be refused, naming the tensor)
   <out>.halfpair.gguf     lora_a without its lora_b (must be refused)
+  <out>.f16.gguf          the same adapter with F16 tensors — the format
+                          llama.cpp's convert_lora_to_gguf emits, which the
+                          loader must accept (converted to f32 at load)
 
 Usage: make-test-lora.py <base.gguf> <out-prefix>
 """
@@ -47,15 +50,15 @@ def rnd():
 def write_gguf(path, kvs, tensors):
     m = b"".join(kvs)
     info, off = b"", 0
-    for name, dims, payload in tensors:
+    for name, dims, payload, *rest in tensors:
         info += s(name) + struct.pack("<I", len(dims))
         info += b"".join(struct.pack("<Q", d) for d in dims)
-        info += struct.pack("<IQ", T_F32, off)
+        info += struct.pack("<IQ", rest[0] if rest else T_F32, off)
         off = (off + len(payload) + 31) & ~31
     head = struct.pack("<IIQQ", 0x46554747, 3, len(tensors), len(kvs)) + m + info
     with open(path, "wb") as f:
         f.write(head + b"\0" * ((-len(head)) % 32))
-        for _, _, payload in tensors:
+        for name, dims, payload, *rest in tensors:
             f.write(payload)
             f.write(b"\0" * ((-len(payload)) % 32))
     print(f"wrote {path}")
@@ -146,6 +149,13 @@ write_gguf(OUT + ".adapter.gguf", meta, adap)
 
 _seed = 0x1234
 write_gguf(OUT + ".zero.gguf", meta, adapter_tensors(zero_b=True))
+
+# the F16 twin: identical values rounded to half precision, T_F16 tensors
+T_F16 = 1
+f16 = [(n, d, struct.pack("<%de" % (len(p_) // 4),
+                          *struct.unpack("<%df" % (len(p_) // 4), p_)), T_F16)
+       for n, d, p_ in adap]
+write_gguf(OUT + ".f16.gguf", meta, f16)
 
 # merged reference: base bytes with W += (alpha/r) * B @ A on the targets,
 # using the SAME adapter values (same seed replay)

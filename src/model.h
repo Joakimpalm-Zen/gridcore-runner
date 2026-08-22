@@ -387,6 +387,11 @@ typedef struct {
     void  *gpu;              // active GPU backend context (NULL = CPU path).
                              // Runtime fallback clears this without implying
                              // that backend-owned resources may be released.
+    void  *train_gpu;        // D8 training context (cuda.c): device twin of
+                             // the backward's transposed matvec, weights
+                             // cached on first use. NULL = CPU backward.
+                             // Independent of `gpu` — the model itself stays
+                             // CPU-resident under --train.
     void  *gpu_owner;        // backend resource owner, possibly retained after
                              // m->gpu is detached so CPU fallback can keep
                              // reading backend-owned unified-memory KV.

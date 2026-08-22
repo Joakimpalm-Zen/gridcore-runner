@@ -1748,6 +1748,14 @@ bool gpu_mvt(model_t *mm, const gguf_tensor *w, const float *dy, float *dx,
     return false;   // no Metal training path yet
 }
 
+bool gpu_train_init(model_t *mm) { (void)mm; return false; }
+void gpu_train_free(model_t *mm) { (void)mm; }
+bool gpu_train_mvt(model_t *mm, const gguf_tensor *w, const float *dy,
+                   float *dx, int n_in, int n_out) {
+    (void)mm; (void)w; (void)dy; (void)dx; (void)n_in; (void)n_out;
+    return false;
+}
+
 gpu_batch *gpu_batch_create(model_t **seqs, int n) {
     (void)seqs; (void)n;
     return NULL;
