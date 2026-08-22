@@ -92,8 +92,10 @@ Run a GGUF:
 
 Choose Runner when local inference needs to behave like dependable
 infrastructure: easy to deploy, bounded by the machine, and explicit about what
-it can prove. The one that matters most has its own section below; the rest
-follow as a list, ordered by how much difference each makes in practice.
+it can prove. One binary is the whole model runtime — it serves, verifies,
+scores, adapts and trains, deterministically. The two capabilities that matter
+most have their own sections below; the rest follow as a list, ordered by how
+much difference each makes in practice.
 
 <a id="truncation"></a>
 ### Truncated tool calls that still parse: closing the JSON when `max_tokens` runs out
@@ -139,20 +141,39 @@ tool selection at 100% down to Q4_0 while argument agreement decayed to 50% — 
 guarantees the SHAPE of a call at any quantization, not its contents
 ([docs/quant-fidelity.md](docs/quant-fidelity.md)).
 
-The rest of what sets Runner apart, ordered by how much difference each makes:
+<a id="adaptation"></a>
+### Train the GGUF you actually serve
 
-- **The binary that serves your model also trains it — through the same
-  quantized weights, reproducibly.** `--train` does LoRA adaptation directly
-  against the GGUF you deploy (a frozen Q4_K_M base included): no FP16
-  training copy, no Python training stack, no second runtime whose numerics
-  drift from the one you serve with. The trainer's forward pass IS the
-  inference forward pass, so the policy you sample is the policy you train —
-  and training is deterministic: same data + same seed produce a
-  byte-identical adapter, with a provenance record (base/data/adapter
-  sha256s, seed, config) written beside every adapter. `--score` gives
-  teacher-forced logprobs for evals and rewards; `--lora` serves any adapter
-  back. Design, gates and measured results:
-  [docs/adaptation-engine.md](docs/adaptation-engine.md).
+Runner trains LoRA adapters **directly through the frozen quantized GGUF
+used for inference**. There is no FP16 training copy and no separate
+training framework: the serving forward pass is the training forward pass,
+so **the policy you sample is the policy you train** — the train/infer
+numerical mismatch that silently breaks on-policy learning cannot occur
+between two codepaths that are one codepath. And training is deterministic
+in the strongest sense: same data + same seed + same config produce a
+**byte-identical adapter file**, with a machine-written provenance record
+(base/data/adapter sha256s, seed, full config) beside every adapter —
+adaptation as an auditable artifact, not a run that is merely repeatable
+"within tolerance."
+
+Measured, on a public artifact you can download and reproduce
+([Qwen3-4B-Runner-ToolUse-Q4_K_M](https://huggingface.co/Joakimpalm-Zen/Qwen3-4B-Runner-ToolUse-Q4_K_M)):
+
+| | measured result |
+|---|---|
+| base | Qwen3-4B **Q4_K_M** (frozen 4-bit serving weights) |
+| training path | directly through the quantized inference artifact, CPU |
+| held-out tool-calling, exact call | **0.69 → 1.00** |
+| reproducibility | two independent runs → **byte-identical adapter** (same sha256) |
+| precision study | adapters trained through BF16 vs Q8_0: cosine 0.9998; through Q4_K_M: 0.9926 — measurably different objects, capability-equivalent on this task |
+| neutral-corpus drift | nll/token 4.063 → 4.026 (the adapter leaves unrelated text alone) |
+
+`--score` gives teacher-forced logprobs for evals and rewards, `--lora`
+serves any adapter back, and `scripts/train-grpo-lite.py` closes the loop
+into seeded, replayable reinforcement fine-tuning. Design, gates, failure
+modes and every number above: [docs/adaptation-engine.md](docs/adaptation-engine.md).
+
+The rest of what sets Runner apart, ordered by how much difference each makes:
 
 - **A shared GPU stops being first-come, first-crash.** Run a coding agent
   beside an embeddings model beside a draft model and the usual outcome is that
