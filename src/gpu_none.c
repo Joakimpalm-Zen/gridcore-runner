@@ -92,8 +92,8 @@ bool gpu_mvt(model_t *m, const gguf_tensor *w, const float *dy, float *dx,
 bool gpu_train_init(model_t *m) { (void)m; return false; }
 void gpu_train_free(model_t *m) { (void)m; }
 bool gpu_train_mvt(model_t *m, const gguf_tensor *w, const float *dy,
-                   float *dx, int n_in, int n_out) {
-    (void)m; (void)w; (void)dy; (void)dx; (void)n_in; (void)n_out;
+                   float *dx, int n_in, int n_out, int nb) {
+    (void)m; (void)w; (void)dy; (void)dx; (void)n_in; (void)n_out; (void)nb;
     return false;
 }
 

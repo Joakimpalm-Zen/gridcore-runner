@@ -102,7 +102,7 @@ bool   gpu_mvt(model_t *m, const gguf_tensor *w, const float *dy, float *dx,
 bool   gpu_train_init(model_t *m);
 void   gpu_train_free(model_t *m);
 bool   gpu_train_mvt(model_t *m, const gguf_tensor *w, const float *dy,
-                     float *dx, int n_in, int n_out);
+                     float *dx, int n_in, int n_out, int nb);
 
 bool   gpu_forward_batch(model_t *m, const int32_t *tokens, int n, int pos,
                          bool want_logits, float **logits);

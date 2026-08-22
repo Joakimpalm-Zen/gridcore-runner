@@ -3883,7 +3883,7 @@ static bool tg_scratch(CUdeviceptr *buf, size_t *cap, size_t need) {
 }
 
 bool gpu_train_mvt(model_t *m, const gguf_tensor *w, const float *dy,
-                   float *dx, int n_in, int n_out) {
+                   float *dx, int n_in, int n_out, int nb) {
     train_gpu_t *t = m->train_gpu;
     if (!t || !w || w->type >= KT_N || !t->f_mvt[w->type]) return false;
     CUdeviceptr weights = 0;
@@ -3919,15 +3919,15 @@ bool gpu_train_mvt(model_t *m, const gguf_tensor *w, const float *dy,
         t->n_cache++;
         t->vram_used += w->nbytes;
     }
-    size_t ny = sizeof(float) * (size_t)n_out;
-    size_t nx = sizeof(float) * (size_t)n_in;
+    size_t ny = sizeof(float) * (size_t)nb * n_out;
+    size_t nx = sizeof(float) * (size_t)nb * n_in;
     if (!tg_scratch(&t->d_dy, &t->cap_dy, ny) ||
         !tg_scratch(&t->d_dx, &t->cap_dx, nx))
         return false;
     if (cu.MemcpyHtoD(t->d_dy, dy, ny) != 0 ||
         cu.MemcpyHtoD(t->d_dx, dx, nx) != 0)
         return false;
-    mv_args a = { n_in, n_out, 0, 0, 1, n_out, n_in };
+    mv_args a = { n_in, n_out, 0, 0, nb, n_out, n_in };
     void *p[] = { &weights, &t->d_dy, &t->d_dx, &a, &t->dummy };
     int threads = 256;
     unsigned blocks = (unsigned)((n_in + threads - 1) / threads);

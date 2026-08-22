@@ -5205,28 +5205,72 @@ done:
 // sequential order: same data -> byte-identical gradients, the property D5
 // pins for the whole training loop.
 
-// dx[i] += sum_j W[j,i] * dy[j] — the transposed quantized matvec from the
-// T0 audit: rows are dequantized one at a time (any weight type quants.c can
-// decode) and accumulated serially for reproducibility. With a training GPU
-// context (D8 slice 2) the device twin runs instead — bit-identical by gate,
-// so a per-tensor decline (no kernel for the type, VRAM budget) falls
-// through to the CPU loop without changing a byte of the result.
-static bool matvec_t(model_t *m, const gguf_tensor *w, const float *dy,
-                     float *dx, int n_in, int n_out) {
-    if (m->train_gpu && gpu_train_mvt(m, w, dy, dx, n_in, n_out))
-        return true;
-    float *rowbuf = malloc(sizeof(float) * (size_t)n_in);
-    if (!rowbuf) return false;
-    size_t rs = ggml_row_size(w->type, n_in);
-    for (int j = 0; j < n_out; j++) {
-        float d = dy[j];
-        if (d == 0.0f) continue;
-        dequant_row(w->type, (const uint8_t *)w->data + (size_t)j * rs,
-                    rowbuf, n_in);
-        for (int i = 0; i < n_in; i++) dx[i] = fmaf(rowbuf[i], d, dx[i]);
+// dx[t][i] += sum_j W[j,i] * dy[t][j] — the transposed quantized matvec
+// from the T0 audit, batched across the training window (D8 slice 3). The
+// reproducibility contract is per ELEMENT: each dx[t][i] accumulates its
+// ascending-j fmaf chain starting from its incoming value, skipping
+// positions where dy[t][j] == 0. That contract is loop-order- and
+// thread-count-invariant, which is what slice 3 exploits twice over:
+//
+//  - each worker owns a block-aligned COLUMN slice [i0,i1) and walks all
+//    rows, decoding only its slice of row j (block formats decode
+//    per-block, so a block-aligned byte offset into the row is a valid
+//    decode start) — every weight element is decoded exactly ONCE per
+//    call instead of once per position, and the decode itself spreads
+//    across the pool with zero barriers;
+//  - no element is touched by two workers, so the bytes are identical to
+//    the serial reference at any thread count, gated (test_lora_grad,
+//    cross-version adapter equality).
+//
+// With a training GPU context the device twin runs the whole batch
+// instead — bit-identical by gate, so a per-tensor decline (no kernel for
+// the type, VRAM budget) falls through without changing a byte.
+typedef struct {
+    const gguf_tensor *w;
+    const float *dy;
+    float *dx;
+    int n_in, n_out, nb, bs;
+    size_t rs, unit_bytes;
+    bool oom;
+} mvt_job;
+
+static void mvt_worker(void *ctx, int u0, int u1) {
+    mvt_job *jb = (mvt_job *)ctx;
+    int i0 = u0 * jb->bs;
+    int nsl = (u1 - u0) * jb->bs;
+    if (i0 + nsl > jb->n_in) nsl = jb->n_in - i0;
+    float *slice = malloc(sizeof(float) * (size_t)nsl);
+    if (!slice) { jb->oom = true; return; }
+    const uint8_t *base = (const uint8_t *)jb->w->data +
+                          (size_t)u0 * jb->unit_bytes;
+    for (int j = 0; j < jb->n_out; j++) {
+        bool decoded = false;
+        for (int t = 0; t < jb->nb; t++) {
+            float d = jb->dy[(size_t)t * jb->n_out + j];
+            if (d == 0.0f) continue;
+            if (!decoded) {
+                dequant_row(jb->w->type, base + (size_t)j * jb->rs, slice,
+                            nsl);
+                decoded = true;
+            }
+            float *dxt = jb->dx + (size_t)t * jb->n_in + i0;
+            for (int i = 0; i < nsl; i++)
+                dxt[i] = fmaf(slice[i], d, dxt[i]);
+        }
     }
-    free(rowbuf);
-    return true;
+    free(slice);
+}
+
+static bool matvec_t(model_t *m, const gguf_tensor *w, const float *dy,
+                     float *dx, int n_in, int n_out, int nb) {
+    if (m->train_gpu && gpu_train_mvt(m, w, dy, dx, n_in, n_out, nb))
+        return true;
+    int bs = ggml_block_size(w->type);
+    mvt_job jb = { w, dy, dx, n_in, n_out, nb, bs,
+                   ggml_row_size(w->type, n_in),
+                   ggml_row_size(w->type, bs), false };
+    tpool_run(m->tp, mvt_worker, &jb, n_in / bs);
+    return !jb.oom;
 }
 
 // y_i = x_i * r * w_i with r = 1/sqrt(mean(x^2)+eps):
@@ -5242,46 +5286,56 @@ static void rmsnorm_bw(const float *x, const float *w, const float *dy,
         dx[i] += r * w[i] * dy[i] - c * x[i];
 }
 
-// adapter backward at one projection site: given dy (grad wrt the site's
-// output) and xin (the site's input), accumulate dA/dB and add both the
-// adapter's and the FROZEN BASE's contribution to dxin.
+// adapter backward at one projection site, batched over the window: given
+// dy (grad wrt the site's output, nb rows) and xin (the site's input, nb
+// rows), accumulate dA/dB and add both the adapter's and the FROZEN
+// BASE's contribution to dxin. The base contribution runs as ONE batched
+// transposed matvec (slice 3); the adapter half then walks positions in
+// the same ascending order the per-position version did, so every
+// element's accumulation chain and every dA/dB chain is byte-identical to
+// the old per-t call sequence.
 static bool lora_site_bw(model_t *m, int l, int slot, const gguf_tensor *w,
                          const float *xin, const float *dy, float *dxin,
-                         int n_in, int n_out) {
-    if (!matvec_t(m, w, dy, dxin, n_in, n_out)) return false;
+                         int n_in, int n_out, int nb) {
+    if (!matvec_t(m, w, dy, dxin, n_in, n_out, nb)) return false;
     struct lora_w *lw = m->lora ? &m->lora[(size_t)l * LW_SLOTS + slot] : NULL;
     if (!lw || !lw->r) return true;
     if (!lw->ga) lw->ga = calloc((size_t)lw->r * n_in, sizeof(float));
     if (!lw->gb) lw->gb = calloc((size_t)n_out * lw->r, sizeof(float));
     if (!lw->ga || !lw->gb) return false;
-    float tb[LORA_R_MAX], tf[LORA_R_MAX];
-    // tb = B^T dy ; tf = A x
-    for (int k = 0; k < lw->r; k++) {
-        float acc = 0.0f;
-        for (int j = 0; j < n_out; j++)
-            acc = fmaf(lw->b[(size_t)j * lw->r + k], dy[j], acc);
-        tb[k] = acc;
-        const float *ar = lw->a + (size_t)k * n_in;
-        float acf = 0.0f;
-        for (int i = 0; i < n_in; i++) acf = fmaf(ar[i], xin[i], acf);
-        tf[k] = acf;
-    }
     float s = lw->scale;
-    for (int k = 0; k < lw->r; k++) {
-        float *gar = lw->ga + (size_t)k * n_in;
-        float stb = s * tb[k];
-        for (int i = 0; i < n_in; i++) gar[i] = fmaf(stb, xin[i], gar[i]);
-    }
-    for (int j = 0; j < n_out; j++) {
-        float *gbr = lw->gb + (size_t)j * lw->r;
-        float sdy = s * dy[j];
-        for (int k = 0; k < lw->r; k++) gbr[k] = fmaf(sdy, tf[k], gbr[k]);
-    }
-    for (int i = 0; i < n_in; i++) {
-        float acc = 0.0f;
-        for (int k = 0; k < lw->r; k++)
-            acc = fmaf(lw->a[(size_t)k * n_in + i], tb[k], acc);
-        dxin[i] = fmaf(s, acc, dxin[i]);
+    for (int t = 0; t < nb; t++) {
+        const float *xt = xin + (size_t)t * n_in;
+        const float *dyt = dy + (size_t)t * n_out;
+        float *dxt = dxin + (size_t)t * n_in;
+        float tb[LORA_R_MAX], tf[LORA_R_MAX];
+        // tb = B^T dy ; tf = A x
+        for (int k = 0; k < lw->r; k++) {
+            float acc = 0.0f;
+            for (int j = 0; j < n_out; j++)
+                acc = fmaf(lw->b[(size_t)j * lw->r + k], dyt[j], acc);
+            tb[k] = acc;
+            const float *ar = lw->a + (size_t)k * n_in;
+            float acf = 0.0f;
+            for (int i = 0; i < n_in; i++) acf = fmaf(ar[i], xt[i], acf);
+            tf[k] = acf;
+        }
+        for (int k = 0; k < lw->r; k++) {
+            float *gar = lw->ga + (size_t)k * n_in;
+            float stb = s * tb[k];
+            for (int i = 0; i < n_in; i++) gar[i] = fmaf(stb, xt[i], gar[i]);
+        }
+        for (int j = 0; j < n_out; j++) {
+            float *gbr = lw->gb + (size_t)j * lw->r;
+            float sdy = s * dyt[j];
+            for (int k = 0; k < lw->r; k++) gbr[k] = fmaf(sdy, tf[k], gbr[k]);
+        }
+        for (int i = 0; i < n_in; i++) {
+            float acc = 0.0f;
+            for (int k = 0; k < lw->r; k++)
+                acc = fmaf(lw->a[(size_t)k * n_in + i], tb[k], acc);
+            dxt[i] = fmaf(s, acc, dxt[i]);
+        }
     }
     return true;
 }
@@ -5433,16 +5487,19 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
     float *ao  = malloc(sizeof(float) * (size_t)T * q_dim);
     float *g   = malloc(sizeof(float) * (size_t)T * nff);
     float *u   = malloc(sizeof(float) * (size_t)T * nff);
+    // window-wide gradient buffers: slice 3 runs each projection site as
+    // ONE batched transposed matvec over all T positions, so the per-site
+    // dy/dx live as [T][dim] planes rather than single reused rows
     float *dxn1 = calloc((size_t)T * E, sizeof(float));
     float *dxa  = malloc(szE);
     float *dq   = calloc((size_t)T * q_dim, sizeof(float));
     float *dk   = calloc((size_t)T * kv_dim, sizeof(float));
     float *dv   = calloc((size_t)T * kv_dim, sizeof(float));
-    float *hact = malloc(sizeof(float) * (size_t)nff);
-    float *dhact = malloc(sizeof(float) * (size_t)nff);
-    float *dgu  = malloc(sizeof(float) * (size_t)nff);
-    float *dxn2 = malloc(szE / (size_t)T * 1);   // one row [E]
-    float *dao  = malloc(sizeof(float) * (size_t)q_dim);
+    float *hact = malloc(sizeof(float) * (size_t)T * nff);
+    float *dhact = calloc((size_t)T * nff, sizeof(float));
+    float *dgu  = malloc(sizeof(float) * (size_t)T * nff);
+    float *dxn2 = calloc((size_t)T * E, sizeof(float));
+    float *dao  = calloc((size_t)T * q_dim, sizeof(float));
     float *tmpE = malloc(sizeof(float) * (size_t)E);
     float *p    = malloc(sizeof(float) * (size_t)T);
     bool ok = xn1 && xa && xn2 && q && ao && g && u && dxn1 && dxa && dq &&
@@ -5486,39 +5543,55 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
         lora_site_fw(m, l, LW_UP, u + (size_t)t * nff, x2, E, nff);
     }
 
-    // ---- phase B1: per position, FFN backward then attention backward
+    // ---- phase B1: FFN backward site-major across the window, then the
+    // attention-internal backward per position. Positions are independent
+    // through every step here except the dK/dV accumulation, which keeps
+    // its original ascending-t order — and within each site the batched
+    // call preserves every element's per-position accumulation chain, so
+    // the reorganization is a scheduling change, not a numeric one.
     for (int t = 0; ok && t < T; t++) {
-        const float *dy = dx + (size_t)t * E;      // grad wrt layer output
         const float *gt = g + (size_t)t * nff, *ut = u + (size_t)t * nff;
-        for (int i = 0; i < nff; i++) hact[i] = silu_f(gt[i]) * ut[i];
-        memset(dhact, 0, sizeof(float) * (size_t)nff);
-        ok = ok && lora_site_bw(m, l, LW_DOWN, ly->w_down, hact, dy, dhact,
-                                nff, E);
-        memset(dxn2, 0, sizeof(float) * (size_t)E);
-        for (int i = 0; i < nff; i++) dgu[i] = dhact[i] * ut[i] * silu_d(gt[i]);
-        ok = ok && lora_site_bw(m, l, LW_GATE, ly->w_gate,
-                                xn2 + (size_t)t * E, dgu, dxn2, E, nff);
-        for (int i = 0; i < nff; i++) dgu[i] = dhact[i] * silu_f(gt[i]);
-        ok = ok && lora_site_bw(m, l, LW_UP, ly->w_up,
-                                xn2 + (size_t)t * E, dgu, dxn2, E, nff);
+        float *ht = hact + (size_t)t * nff;
+        for (int i = 0; i < nff; i++) ht[i] = silu_f(gt[i]) * ut[i];
+    }
+    ok = ok && lora_site_bw(m, l, LW_DOWN, ly->w_down, hact, dx, dhact,
+                            nff, E, T);
+    for (int t = 0; ok && t < T; t++) {
+        const float *gt = g + (size_t)t * nff, *ut = u + (size_t)t * nff;
+        const float *dht = dhact + (size_t)t * nff;
+        float *dgt = dgu + (size_t)t * nff;
+        for (int i = 0; i < nff; i++) dgt[i] = dht[i] * ut[i] * silu_d(gt[i]);
+    }
+    ok = ok && lora_site_bw(m, l, LW_GATE, ly->w_gate, xn2, dgu, dxn2,
+                            E, nff, T);
+    for (int t = 0; ok && t < T; t++) {
+        const float *gt = g + (size_t)t * nff;
+        const float *dht = dhact + (size_t)t * nff;
+        float *dgt = dgu + (size_t)t * nff;
+        for (int i = 0; i < nff; i++) dgt[i] = dht[i] * silu_f(gt[i]);
+    }
+    ok = ok && lora_site_bw(m, l, LW_UP, ly->w_up, xn2, dgu, dxn2,
+                            E, nff, T);
+    for (int t = 0; ok && t < T; t++) {
         float *dxat = dxa + (size_t)t * E;
-        memcpy(dxat, dy, sizeof(float) * (size_t)E);   // residual around FFN
-        rmsnorm_bw(xa + (size_t)t * E, ly->ffn_norm_w, dxn2, dxat, E,
-                   m->rms_eps);
-        // attention output projection
-        memset(dao, 0, sizeof(float) * (size_t)q_dim);
-        ok = ok && lora_site_bw(m, l, LW_O, ly->wo, ao + (size_t)t * q_dim,
-                                dxat, dao, q_dim, E);
-        if (!ok) break;
+        memcpy(dxat, dx + (size_t)t * E,
+               sizeof(float) * (size_t)E);            // residual around FFN
+        rmsnorm_bw(xa + (size_t)t * E, ly->ffn_norm_w, dxn2 + (size_t)t * E,
+                   dxat, E, m->rms_eps);
+    }
+    // attention output projection, whole window at once
+    ok = ok && lora_site_bw(m, l, LW_O, ly->wo, ao, dxa, dao, q_dim, E, T);
+    for (int t = 0; ok && t < T; t++) {
         // score/softmax backward per head, reading K/V from the cache (the
         // f16-rounded values the forward attended over)
+        const float *daot = dao + (size_t)t * q_dim;
         const float *qt = q + (size_t)t * q_dim;
         float *dqt = dq + (size_t)t * q_dim;
         for (int h = 0; h < n_head; h++) {
             int kvh = h / kv_mul;
             size_t hoff = (size_t)kvh * hd * sizeof(f16_t);
             const float *qh = qt + (size_t)h * hd;
-            const float *daoh = dao + (size_t)h * hd;
+            const float *daoh = daot + (size_t)h * hd;
             for (int s = 0; s <= t; s++) {
                 const f16_t *kh = (const f16_t *)(kc_l + (size_t)s * row_b + hoff);
                 float sc = 0;
@@ -5586,15 +5659,11 @@ static bool lora_layer_bw(model_t *m, int l, const int32_t *toks, int T,
                        sizeof(float) * (size_t)hd_l);
             }
         }
-        float *dx1 = dxn1 + (size_t)t * E;
-        const float *x1 = xn1 + (size_t)t * E;
-        ok = ok && lora_site_bw(m, l, LW_Q, ly->wq, x1,
-                                dq + (size_t)t * q_dim, dx1, E, q_dim);
-        ok = ok && lora_site_bw(m, l, LW_K, ly->wk, x1,
-                                dk + (size_t)t * kv_dim, dx1, E, kv_dim);
-        ok = ok && lora_site_bw(m, l, LW_V, ly->wv, x1,
-                                dv + (size_t)t * kv_dim, dx1, E, kv_dim);
     }
+    // projection backwards, each site one batched call over the window
+    ok = ok && lora_site_bw(m, l, LW_Q, ly->wq, xn1, dq, dxn1, E, q_dim, T);
+    ok = ok && lora_site_bw(m, l, LW_K, ly->wk, xn1, dk, dxn1, E, kv_dim, T);
+    ok = ok && lora_site_bw(m, l, LW_V, ly->wv, xn1, dv, dxn1, E, kv_dim, T);
 
     // ---- phase B3: attn-norm backward + both residual paths -> layer input
     for (int t = 0; ok && t < T; t++) {
@@ -5656,28 +5725,50 @@ bool model_lora_backward_w(model_t *m, const int32_t *toks, int T,
     }
     {
     // ---- reverse sweep
+    // Head + out-norm, chunked (slice 3): the lm-head transposed matvec is
+    // the backward's single largest tensor, and running it per position
+    // re-decoded all V rows T times. Scored positions gather into chunks
+    // of HEAD_CHUNK probs rows and one batched call per chunk decodes each
+    // row once per chunk instead — per-position gradient chains unchanged
+    // (positions are independent through the head; the chunk boundary is a
+    // scheduling artifact). Logits still recompute from the tape rather
+    // than being stored: memory over speed, the reference trade — the
+    // chunk bounds the probs plane to HEAD_CHUNK * V floats.
+    enum { HEAD_CHUNK = 16 };
     float *dx     = calloc((size_t)T * E, sizeof(float));
-    float *probs  = malloc(sizeof(float) * (size_t)V);
+    float *probs  = malloc(sizeof(float) * (size_t)HEAD_CHUNK * V);
     float *hn     = malloc(sizeof(float) * (size_t)E);
-    if (!dx || !probs || !hn) { free(dx); free(probs); free(hn); goto fail; }
-    // head + out-norm, per scored position (logits recomputed from the tape
-    // rather than stored: memory over speed, the reference trade)
-    float *dhn = calloc((size_t)E, sizeof(float));
-    if (!dhn) { free(dx); free(probs); free(hn); goto fail; }
+    float *dhn    = malloc(sizeof(float) * (size_t)HEAD_CHUNK * E);
+    int tmap[HEAD_CHUNK];
+    if (!dx || !probs || !hn || !dhn) {
+        free(dx); free(probs); free(hn); free(dhn);
+        goto fail;
+    }
+    int nc = 0;
     for (int t = 0; t < T - 1; t++) {
-        if (pos_w && pos_w[t] == 0.0f) continue;
-        const float *h = m->tape + ((size_t)L * T + t) * E;
-        rmsnorm(hn, h, m->out_norm_w, E, m->rms_eps);
-        matvec_b(m->tp, probs, V, m->output, hn, E, E, V, NULL, 1);
-        softmax(probs, V);
-        probs[toks[t + 1]] -= 1.0f;
-        if (pos_w)
-            for (int i = 0; i < V; i++) probs[i] *= pos_w[t];
-        memset(dhn, 0, sizeof(float) * (size_t)E);
-        if (!matvec_t(m, m->output, probs, dhn, E, V)) {
-            free(dhn); free(dx); free(probs); free(hn); goto fail;
+        if (!pos_w || pos_w[t] != 0.0f) {
+            const float *h = m->tape + ((size_t)L * T + t) * E;
+            float *pr = probs + (size_t)nc * V;
+            rmsnorm(hn, h, m->out_norm_w, E, m->rms_eps);
+            matvec_b(m->tp, pr, V, m->output, hn, E, E, V, NULL, 1);
+            softmax(pr, V);
+            pr[toks[t + 1]] -= 1.0f;
+            if (pos_w)
+                for (int i = 0; i < V; i++) pr[i] *= pos_w[t];
+            tmap[nc++] = t;
         }
-        rmsnorm_bw(h, m->out_norm_w, dhn, dx + (size_t)t * E, E, m->rms_eps);
+        if (nc == HEAD_CHUNK || (t == T - 2 && nc > 0)) {
+            memset(dhn, 0, sizeof(float) * (size_t)nc * E);
+            if (!matvec_t(m, m->output, probs, dhn, E, V, nc)) {
+                free(dhn); free(dx); free(probs); free(hn); goto fail;
+            }
+            for (int c = 0; c < nc; c++) {
+                const float *hc = m->tape + ((size_t)L * T + tmap[c]) * E;
+                rmsnorm_bw(hc, m->out_norm_w, dhn + (size_t)c * E,
+                           dx + (size_t)tmap[c] * E, E, m->rms_eps);
+            }
+            nc = 0;
+        }
     }
     free(dhn);
     // layers in reverse
