@@ -5227,7 +5227,7 @@ done:
 // the type, VRAM budget) falls through without changing a byte.
 typedef struct {
     const gguf_tensor *w;
-    const float *dy;
+    const float *dyT;   // [j][t] — transposed so workers stream, see below
     float *dx;
     int n_in, n_out, nb, bs;
     size_t rs, unit_bytes;
@@ -5244,9 +5244,10 @@ static void mvt_worker(void *ctx, int u0, int u1) {
     const uint8_t *base = (const uint8_t *)jb->w->data +
                           (size_t)u0 * jb->unit_bytes;
     for (int j = 0; j < jb->n_out; j++) {
+        const float *dyj = jb->dyT + (size_t)j * jb->nb;
         bool decoded = false;
         for (int t = 0; t < jb->nb; t++) {
-            float d = jb->dy[(size_t)t * jb->n_out + j];
+            float d = dyj[t];
             if (d == 0.0f) continue;
             if (!decoded) {
                 dequant_row(jb->w->type, base + (size_t)j * jb->rs, slice,
@@ -5261,15 +5262,42 @@ static void mvt_worker(void *ctx, int u0, int u1) {
     free(slice);
 }
 
+// dy arrives [t][j]; every worker walks it row-by-row (fixed j, all t),
+// which on the [t][j] layout is a huge-stride scan repeated per worker —
+// measured to eat the batching win. One threaded transpose to [j][t]
+// turns every worker's scan into a contiguous stream. Values only move,
+// nothing is computed, so the element chains are untouched.
+typedef struct {
+    const float *dy;
+    float *dyT;
+    int n_out, nb;
+} mvtt_job;
+
+static void mvt_transpose_worker(void *ctx, int j0, int j1) {
+    mvtt_job *jb = (mvtt_job *)ctx;
+    for (int j = j0; j < j1; j++)
+        for (int t = 0; t < jb->nb; t++)
+            jb->dyT[(size_t)j * jb->nb + t] =
+                jb->dy[(size_t)t * jb->n_out + j];
+}
+
 static bool matvec_t(model_t *m, const gguf_tensor *w, const float *dy,
                      float *dx, int n_in, int n_out, int nb) {
     if (m->train_gpu && gpu_train_mvt(m, w, dy, dx, n_in, n_out, nb))
         return true;
+    float *dyT = NULL;
+    if (nb > 1) {
+        dyT = malloc(sizeof(float) * (size_t)nb * n_out);
+        if (!dyT) return false;
+        mvtt_job tj = { dy, dyT, n_out, nb };
+        tpool_run(m->tp, mvt_transpose_worker, &tj, n_out);
+    }
     int bs = ggml_block_size(w->type);
-    mvt_job jb = { w, dy, dx, n_in, n_out, nb, bs,
+    mvt_job jb = { w, dyT ? dyT : dy, dx, n_in, n_out, nb, bs,
                    ggml_row_size(w->type, n_in),
                    ggml_row_size(w->type, bs), false };
     tpool_run(m->tp, mvt_worker, &jb, n_in / bs);
+    free(dyT);
     return !jb.oom;
 }
 
