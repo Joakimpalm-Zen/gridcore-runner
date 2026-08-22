@@ -1651,6 +1651,12 @@ CUDA copies selected weights and compute/KV buffers to VRAM; Metal wraps mapped
 weights in unified memory. The load log and `--caps` are the sizing sources for
 an exact model/machine combination.
 
+## Support the project
+
+Xyntetik Runner is developed independently. If it is useful to you and you
+want to help fund the hardware and measurement time behind it, you can
+[support the project here](https://buy.stripe.com/9B69AUddpdx9auHgP27N600).
+
 ## License
 
 [Apache 2.0](LICENSE)
