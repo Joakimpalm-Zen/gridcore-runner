@@ -8,6 +8,28 @@ names that were true when they were written.
 
 ## Unreleased
 
+- **D8 slice 2 — persistent-weight GPU backward** (`RUNNER_TRAIN_GPU=1`):
+  --train can route its dominant backward matvec through CUDA with each
+  weight uploaded once and cached; per-tensor CPU fallback is free because
+  both paths are gated byte-identical. Verified at 4B scale on a second
+  GPU generation (RTX PRO 6000 Blackwell after the slice-1 RTX 3070):
+  byte-identical adapters, identical loss curves. Measured honestly: it
+  does not yet beat 96 CPU threads (47 s vs 72 s per 4B step, 1g MIG
+  slice) — batch-1 transfer/sync overhead dominates; batching the
+  backward across positions is the next slice.
+- **F16/BF16 adapters accepted** by `--lora` and `--merge-lora` (the
+  format llama.cpp's `convert_lora_to_gguf` emits — found by loading a
+  real community adapter, which the F32-only check refused). Interop now
+  measured both ways: runner's adapter scores 1.000 served by stock
+  llama.cpp; the community F16 adapter loads, serves and measurably
+  shifts `--score` in runner.
+- **Merge-survival scale sweep** (docs/adaptation-engine.md D9): merged
+  into Q4_K_M, the ToolUse adapter's behavior is erased through 2× scale,
+  partial at 4×, fully survives at 8× — where the exact 8× adapter breaks
+  the served model (0.138) and the 4-bit grid filters it back to 1.000.
+  Quantization is a filter on your fine-tune with a pass-band you don't
+  control; eval the artifact you ship.
+
 - **`--merge-lora OUT`** (adaptation D9): fold a `--lora` adapter into the
   base weights and write a standalone GGUF that runs in any GGUF runtime,
   each tensor requantized to its own type or to `--quant T`, untouched

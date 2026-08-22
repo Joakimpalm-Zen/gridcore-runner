@@ -1,8 +1,9 @@
 # The adaptation engine: scoring, adapters, and training in the serving binary
 
-*2026-08-21. Status: D1–D6 built and gated; CPU reference; CUDA training is
-future work. Everything below with a number attached was measured, and the
-gates named here run in `make test`.*
+*2026-08-22. Status: D1–D9 built and gated (scoring, adapters, backward,
+training, GRPO-lite, CUDA slices 1–2, merge). CPU-hosted training with an
+opt-in device backward assist. Everything below with a number attached was
+measured, and the gates named here run in `make test`.*
 
 The runner can now score, adapt, and train — narrowly scoped as **LoRA
 adaptation of a frozen quantized base, in the same binary, on the same
@@ -164,7 +165,7 @@ model, and the stabilization it needed is the standard one, arrived at by
 measurement. A product-grade recipe (KL anchoring, bigger prompt sets,
 harder rewards) is future work, not engine work.
 
-## D8 (begun) — CUDA training, slice 1: the transposed matvec on device
+## D8 slice 1 — the transposed matvec on device
 
 The deterministic-training claim extends to the GPU only if the GPU produces
 the same BYTES as the CPU backward. Slice 1 delivers that for the backward's
@@ -181,6 +182,33 @@ device buffers and a tiled decode, which is what the remaining D8 slices
 (integrated training-side GPU context, batched taped forward) are for. What
 slice 1 establishes is the hard part: determinism does not have to be traded
 away to move training onto CUDA.
+
+## D8 slice 2 — the persistent training context (integrated, measured, not yet winning)
+
+Slice 2 integrates the primitive: `RUNNER_TRAIN_GPU=1` gives `--train` a
+standalone CUDA context (the model stays CPU-resident and unbound — the
+serving offload is never engaged), uploads each weight tensor **once** on
+first use, and routes the backward's `dx += Wᵀ·dy` through the slice-1
+kernels with reused scratch. Any tensor that cannot go to the device (no
+kernel for its type, VRAM budget reached) silently stays on the CPU path —
+free to mix, because both paths are gated byte-identical, so the adapter
+bytes cannot depend on the switch. Gated in `make test`
+(`test_train.py::test_gpu_training_matches_cpu_bytes`, self-skipping
+without CUDA) and verified at 4B scale on Blackwell-generation hardware
+(RTX PRO 6000, a second GPU generation after the slice-1 RTX 3070): CPU
+and GPU-assisted runs produce **byte-identical adapters** with identical
+loss trajectories.
+
+Measured honestly, it does not win yet: 6 training steps of the 4B
+ToolUse config took 284 s on 96 EPYC-class CPU threads and 430 s
+GPU-assisted (a 1g.24gb MIG slice). Removing the per-call weight upload
+was necessary but not sufficient — the backward makes tens of thousands
+of batch-1 mvt calls per step, and per-call dy/dx transfer plus
+synchronization now dominates. The win requires batching the backward
+across positions (one device call per site covering the whole window),
+which is the next slice, alongside the tiled q6_K decode. What slice 2
+banks is the structure and the guarantee: determinism survives
+integration, on two GPU generations, at 4B scale.
 
 ## D9 — `--merge-lora`: folding the adapter into the base
 
@@ -260,12 +288,65 @@ fine-tune silently disappears — precisely the failure a workflow that
 never re-evals its merged artifact would ship. Interop is verified the
 same way: the merged files load and generate correctly in stock llama.cpp.
 
+### Measured: the survival threshold (delta magnitude vs the 4-bit grid)
+
+If the mechanism is "delta smaller than the grid step rounds away", the
+delta's magnitude should be the knob — and `--lora-scale` at merge time is
+that knob for free. The same adapter merged into the same Q4_K_M base at
+five scales, each merged file evaled standalone, with the served
+base+adapter at the same scale as the control:
+
+| scale | merged-Q4 exact call | served exact call | bytes changed vs base |
+|---|---|---|---|
+| 0.5 | 0.690 (base) | 1.000 | 1.15% |
+| 1 | 0.690 (base) | 1.000 | 1.45% |
+| 2 | 0.690 (base) | 1.000 | 2.05% |
+| 4 | 0.828 | 1.000 | 2.87% |
+| 8 | **1.000** | **0.138** | 4.60% |
+
+Two findings. First, survival is monotone in delta magnitude, as the
+mechanism predicts: at 2× the delta still rounds away entirely, at 4× it
+partially lands, at 8× it fully lands — for this adapter and task the
+behavioral threshold sits between ~2.9% and ~4.6% of weight bytes
+actually changing. Second, the inversion at 8×: the *exact* 8×-scaled
+adapter breaks the served model (0.138 — over-amplified), while the
+Q4-merged version of the same weights scores 1.000. The 4-bit grid acts
+as a soft threshold on the delta — it keeps the components large enough
+to land and rounds away the rest, which at 8× amounts to an accidental
+regularizer. Do not read that as a technique; read it as the measurement
+that merging through a quantization grid is a *filter* on your fine-tune,
+with a pass-band you don't control. Scaling an adapter 8× to survive a
+4-bit merge hands the filter a model the exact form of which you can no
+longer serve.
+
+## Interop, measured in both directions
+
+The "format matches llama.cpp's by construction" claim graduated to
+measurement:
+
+- **Outbound**: the published ToolUse adapter, served by *stock llama.cpp*
+  (b10581, `llama-server --lora`, raw completion), scores **1.000 /
+  1.000 / 1.000 / 1.000** on the full 29-prompt held-out eval — identical
+  to runner serving it. The adapter is a first-class llama.cpp artifact.
+- **Inbound**: the first community adapter tried (a third-party Qwen3-4B
+  LoRA GGUF from HF) exposed a real gap — llama.cpp's
+  `convert_lora_to_gguf` emits **F16** tensors and the loader was
+  F32-only. Fixed and gated (F32/F16/BF16 accepted, converted
+  deterministically at load; quantized adapter tensors still refuse by
+  name): the community adapter now loads (144 adapted projections),
+  generates coherently on the Q4_K_M base, and measurably shifts `--score`
+  (nll 2.904 → 2.783 on a greeting prompt — it is applied, not just
+  accepted).
+
 ## Honest limits
 
-- CPU-only v1 (CUDA training is future work); the M1-class floor is ~2B
-  models per the T0 memory audit, larger bases want a many-core box.
-- Ecosystem-adapter interop (adapters trained elsewhere) is unverified
-  until a real third-party adapter is on the shelf — the format matches
-  llama.cpp's by construction, but unmeasured is not claimed.
+- The training loop is CPU-hosted; RUNNER_TRAIN_GPU=1 offloads the
+  backward's dominant matvec (D8 slice 2), but the forward, the attention
+  backward and the optimizer still run on the CPU — larger bases want a
+  many-core box (the M1-class floor is ~2B models per the T0 memory
+  audit).
+- The merge-survival threshold is measured for ONE adapter/task/base
+  triple; the mechanism (delta vs grid step) is general, the numbers are
+  not.
 - The GRPO-lite demo optimizes a narrow synthetic reward; it demonstrates
   the mechanism, not a product-grade RL recipe.
