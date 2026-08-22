@@ -6,6 +6,25 @@ change between releases (the `-alpha` suffix was retired at v0.2.0 — the 0.x
 version already says what it needs to). Entries below the rename keep the
 names that were true when they were written.
 
+## Unreleased
+
+- **`--merge-lora OUT`** (adaptation D9): fold a `--lora` adapter into the
+  base weights and write a standalone GGUF that runs in any GGUF runtime,
+  each tensor requantized to its own type or to `--quant T`, untouched
+  tensors copied byte-verbatim, `OUT.merge.json` provenance (base/adapter/
+  merged sha256s + config) beside it. Deterministic: same inputs, byte-
+  identical merged file; on an F32 base the merged floats are gated
+  byte-exactly against the documented fmaf chain. Hostile adapters (wrong
+  shape, half a pair, unhooked projection, wrong architecture) refuse the
+  whole merge. Merging into a quantized type rounds the delta through that
+  type's grid — measured per artifact, never assumed; `base + --lora`
+  remains the exact form.
+- **Q4_K, Q6_K and BF16 quantize writers** (faithful ggml ports, gated on
+  round-trip error through the production dequant readers and on byte
+  determinism): `--quantize`, `--quant` and `--type-plan` now accept
+  `q3_k`, `q4_k`, `q6_k`, `f16`, `bf16` and `keep` everywhere a target
+  type is named.
+
 ## v0.2.0 — 2026-08-21
 
 The adaptation release — and the release that drops the `-alpha` suffix. The

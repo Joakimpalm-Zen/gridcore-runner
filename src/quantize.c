@@ -58,6 +58,15 @@ typedef struct {
     uint8_t hmask[32], qs[64], scales[12];
     f16_t d;
 } wblock_q3_K;
+typedef struct {
+    f16_t d, dmin;
+    uint8_t scales[12], qs[128];
+} wblock_q4_K;
+typedef struct {
+    uint8_t ql[128], qh[64];
+    int8_t scales[16];
+    f16_t d;
+} wblock_q6_K;
 
 static void quantize_row_q8_0(const float *x, uint8_t *dst, int n) {
     wblock_q8_0 *b = (wblock_q8_0 *)dst;
@@ -268,9 +277,292 @@ static void quantize_row_q3_K(const float *x, uint8_t *dst, int n) {
     }
 }
 
+// ggml's make_qx_quants specialized to the one call Q6_K makes of it
+// (x^2 error weighting, the full ±9 candidate-scale search). Faithful port:
+// a K-quant tensor this file writes must carry the bytes llama.cpp's own
+// quantizer would emit for the same floats.
+static float make_q6_quants(int n, int nmax, const float *x, int8_t *L) {
+    float vmax = 0.0f, amax = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float ax = fabsf(x[i]);
+        if (ax > amax) { amax = ax; vmax = x[i]; }
+    }
+    if (amax < 1e-15f) {
+        memset(L, 0, (size_t)n);
+        return 0.0f;
+    }
+    float iscale = -nmax / vmax;
+    float sumlx = 0.0f, suml2 = 0.0f;
+    for (int i = 0; i < n; i++) {
+        int l = nearest_int(iscale * x[i]);
+        if (l < -nmax) l = -nmax;
+        if (l > nmax - 1) l = nmax - 1;
+        L[i] = (int8_t)(l + nmax);
+        float w = x[i] * x[i];
+        sumlx += w * x[i] * l;
+        suml2 += w * l * l;
+    }
+    float scale = suml2 > 0.0f ? sumlx / suml2 : 0.0f;
+    float best = scale * sumlx;
+    for (int is = -9; is <= 9; is++) {
+        if (is == 0) continue;
+        iscale = -(nmax + 0.1f * is) / vmax;
+        sumlx = suml2 = 0.0f;
+        for (int i = 0; i < n; i++) {
+            int l = nearest_int(iscale * x[i]);
+            if (l < -nmax) l = -nmax;
+            if (l > nmax - 1) l = nmax - 1;
+            float w = x[i] * x[i];
+            sumlx += w * x[i] * l;
+            suml2 += w * l * l;
+        }
+        if (suml2 > 0.0f && sumlx * sumlx > best * suml2) {
+            for (int i = 0; i < n; i++) {
+                int l = nearest_int(iscale * x[i]);
+                if (l < -nmax) l = -nmax;
+                if (l > nmax - 1) l = nmax - 1;
+                L[i] = (int8_t)(l + nmax);
+            }
+            scale = sumlx / suml2;
+            best = scale * sumlx;
+        }
+    }
+    return scale;
+}
+
+// GGML Q6_K: sixteen 16-value groups of signed 6-bit codes, group scales
+// quantized to signed 8-bit against one f16 super-scale. Inverse of
+// dq_q6_K in quants.c; the hermetic round-trip test drives that reader.
+static void quantize_row_q6_K(const float *x, uint8_t *dst, int n) {
+    wblock_q6_K *out = (wblock_q6_K *)dst;
+    for (int ib = 0; ib < n / 256; ib++, out++, x += 256) {
+        int8_t L[256];
+        float scales[16];
+        float max_scale = 0.0f, max_abs = 0.0f;
+        for (int j = 0; j < 16; j++) {
+            scales[j] = make_q6_quants(16, 32, x + 16 * j, L + 16 * j);
+            float a = fabsf(scales[j]);
+            if (a > max_abs) { max_abs = a; max_scale = scales[j]; }
+        }
+        memset(out, 0, sizeof(*out));
+        if (max_abs < 1e-15f) continue;      // all-zero block, d stays 0
+        float iscale = -128.0f / max_scale;
+        out->d = f32_to_f16(1.0f / iscale);
+        for (int j = 0; j < 16; j++) {
+            int l = nearest_int(iscale * scales[j]);
+            out->scales[j] = (int8_t)(l < 127 ? l : 127);
+        }
+        for (int j = 0; j < 16; j++) {
+            // a group whose quantized scale rounded to 0 keeps its
+            // make_q6_quants codes (they decode to 0 either way) — the
+            // reference does the same, and byte fidelity to it matters
+            float d = f16_to_f32(out->d) * (float)out->scales[j];
+            if (d == 0.0f) continue;
+            for (int k = 0; k < 16; k++) {
+                int l = nearest_int(x[16 * j + k] / d);
+                if (l < -32) l = -32;
+                if (l > 31) l = 31;
+                L[16 * j + k] = (int8_t)(l + 32);
+            }
+        }
+        uint8_t *ql = out->ql, *qh = out->qh;
+        for (int j = 0; j < 256; j += 128) {
+            for (int k = 0; k < 32; k++) {
+                uint8_t q1 = L[j + k]      & 0xF;
+                uint8_t q2 = L[j + k + 32] & 0xF;
+                uint8_t q3 = L[j + k + 64] & 0xF;
+                uint8_t q4 = L[j + k + 96] & 0xF;
+                ql[k]      = (uint8_t)(q1 | (q3 << 4));
+                ql[k + 32] = (uint8_t)(q2 | (q4 << 4));
+                qh[k] = (uint8_t)((L[j + k] >> 4) |
+                                  ((L[j + k + 32] >> 4) << 2) |
+                                  ((L[j + k + 64] >> 4) << 4) |
+                                  ((L[j + k + 96] >> 4) << 6));
+            }
+            ql += 64; qh += 32;
+        }
+    }
+}
+
+// ggml's make_qkx2_quants with Q4_K's fixed search parameters (rmin -1,
+// rdelta 0.1, 20 steps, squared-error weighting).
+static float make_qkx2_quants(int n, int nmax, const float *x,
+                              const float *weights, uint8_t *L,
+                              float *the_min, uint8_t *Laux) {
+    float min = x[0], max = x[0];
+    float sum_w = weights[0], sum_x = weights[0] * x[0];
+    for (int i = 1; i < n; i++) {
+        if (x[i] < min) min = x[i];
+        if (x[i] > max) max = x[i];
+        sum_w += weights[i];
+        sum_x += weights[i] * x[i];
+    }
+    if (min > 0.0f) min = 0.0f;
+    if (max == min) {
+        memset(L, 0, (size_t)n);
+        *the_min = -min;
+        return 0.0f;
+    }
+    float iscale = nmax / (max - min);
+    float scale = 1.0f / iscale;
+    float best_mad = 0.0f;
+    for (int i = 0; i < n; i++) {
+        int l = nearest_int(iscale * (x[i] - min));
+        if (l < 0) l = 0;
+        if (l > nmax) l = nmax;
+        L[i] = (uint8_t)l;
+        float diff = scale * l + min - x[i];
+        best_mad += weights[i] * diff * diff;
+    }
+    for (int is = 0; is <= 20; is++) {
+        iscale = (-1.0f + 0.1f * is + nmax) / (max - min);
+        float sum_l = 0.0f, sum_l2 = 0.0f, sum_xl = 0.0f;
+        for (int i = 0; i < n; i++) {
+            int l = nearest_int(iscale * (x[i] - min));
+            if (l < 0) l = 0;
+            if (l > nmax) l = nmax;
+            Laux[i] = (uint8_t)l;
+            sum_l  += weights[i] * l;
+            sum_l2 += weights[i] * l * l;
+            sum_xl += weights[i] * l * x[i];
+        }
+        float D = sum_w * sum_l2 - sum_l * sum_l;
+        if (D <= 0.0f) continue;
+        float this_scale = (sum_w * sum_xl - sum_x * sum_l) / D;
+        float this_min = (sum_l2 * sum_x - sum_l * sum_xl) / D;
+        if (this_min > 0.0f) {
+            this_min = 0.0f;
+            this_scale = sum_xl / sum_l2;   // D>0 guarantees sum_l2>0
+        }
+        float mad = 0.0f;
+        for (int i = 0; i < n; i++) {
+            float diff = this_scale * Laux[i] + this_min - x[i];
+            mad += weights[i] * diff * diff;
+        }
+        if (mad < best_mad) {
+            memcpy(L, Laux, (size_t)n);
+            best_mad = mad;
+            scale = this_scale;
+            min = this_min;
+        }
+    }
+    *the_min = -min;
+    return scale;
+}
+
+// mirror of quants.c get_scale_min_k4 — the reader this writer must invert
+static void scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4)  | ((q[j    ] >> 6) << 4);
+    }
+}
+
+// GGML Q4_K: eight 32-value groups of unsigned 4-bit codes with per-group
+// scale+min pairs packed to 6 bits against f16 d/dmin super-scales.
+// Inverse of dq_q4_K in quants.c.
+static void quantize_row_q4_K(const float *x, uint8_t *dst, int n) {
+    wblock_q4_K *out = (wblock_q4_K *)dst;
+    for (int ib = 0; ib < n / 256; ib++, out++, x += 256) {
+        uint8_t L[256], Laux[32];
+        float weights[32], mins[8], scales[8];
+        float max_scale = 0.0f, max_min = 0.0f;
+        for (int j = 0; j < 8; j++) {
+            float sum_x2 = 0.0f;
+            for (int l = 0; l < 32; l++)
+                sum_x2 += x[32 * j + l] * x[32 * j + l];
+            float av_x = sqrtf(sum_x2 / 32.0f);
+            for (int l = 0; l < 32; l++)
+                weights[l] = av_x + fabsf(x[32 * j + l]);
+            scales[j] = make_qkx2_quants(32, 15, x + 32 * j, weights,
+                                         L + 32 * j, &mins[j], Laux);
+            if (scales[j] > max_scale) max_scale = scales[j];
+            if (mins[j] > max_min) max_min = mins[j];
+        }
+        float inv_scale = max_scale > 0.0f ? 63.0f / max_scale : 0.0f;
+        float inv_min = max_min > 0.0f ? 63.0f / max_min : 0.0f;
+        memset(out, 0, sizeof(*out));
+        for (int j = 0; j < 8; j++) {
+            uint8_t ls = (uint8_t)nearest_int(inv_scale * scales[j]);
+            uint8_t lm = (uint8_t)nearest_int(inv_min * mins[j]);
+            if (ls > 63) ls = 63;
+            if (lm > 63) lm = 63;
+            if (j < 4) {
+                out->scales[j] = ls;
+                out->scales[j + 4] = lm;
+            } else {
+                out->scales[j + 4] = (uint8_t)((ls & 0xF) | ((lm & 0xF) << 4));
+                out->scales[j - 4] |= (uint8_t)((ls >> 4) << 6);
+                out->scales[j]     |= (uint8_t)((lm >> 4) << 6);
+            }
+        }
+        out->d = f32_to_f16(max_scale / 63.0f);
+        out->dmin = f32_to_f16(max_min / 63.0f);
+        for (int j = 0; j < 8; j++) {
+            uint8_t sc, mn;
+            scale_min_k4(j, out->scales, &sc, &mn);
+            float d = f16_to_f32(out->d) * sc;
+            if (d == 0.0f) continue;
+            float dm = f16_to_f32(out->dmin) * mn;
+            for (int l = 0; l < 32; l++) {
+                int q = nearest_int((x[32 * j + l] + dm) / d);
+                if (q < 0) q = 0;
+                if (q > 15) q = 15;
+                L[32 * j + l] = (uint8_t)q;
+            }
+        }
+        uint8_t *qs = out->qs;
+        for (int j = 0; j < 256; j += 64) {
+            for (int l = 0; l < 32; l++)
+                qs[l] = (uint8_t)(L[j + l] | (L[j + l + 32] << 4));
+            qs += 32;
+        }
+    }
+}
+
 static void quantize_row_f16(const float *x, uint8_t *dst, int n) {
     f16_t *h = (f16_t *)dst;
     for (int i = 0; i < n; i++) h[i] = f32_to_f16(x[i]);
+}
+
+// ggml_compute_fp32_to_bf16 semantics: round to nearest even, NaN forced
+// quiet — a truncation here would not match what a bf16 GGUF built by the
+// reference converter carries.
+static void quantize_row_bf16(const float *x, uint8_t *dst, int n) {
+    uint16_t *h = (uint16_t *)dst;
+    for (int i = 0; i < n; i++) {
+        uint32_t u;
+        memcpy(&u, &x[i], 4);
+        if ((u & 0x7fffffff) > 0x7f800000)
+            h[i] = (uint16_t)((u >> 16) | 64);
+        else
+            h[i] = (uint16_t)((u + (0x7fffu + ((u >> 16) & 1))) >> 16);
+    }
+}
+
+// One row, f32 -> `type`. Everything this file can write goes through here;
+// type_from_name, the whole-file target validator and quantize_row_writable
+// must stay in sync with this switch.
+static void quantize_row_any(int type, const float *rowf, uint8_t *rowq, int n) {
+    switch (type) {
+        case T_Q8_0: quantize_row_q8_0(rowf, rowq, n); break;
+        case T_Q4_0: quantize_row_q4_0(rowf, rowq, n); break;
+        case T_Q3_K: quantize_row_q3_K(rowf, rowq, n); break;
+        case T_Q4_K: quantize_row_q4_K(rowf, rowq, n); break;
+        case T_Q6_K: quantize_row_q6_K(rowf, rowq, n); break;
+        case T_F16:  quantize_row_f16(rowf, rowq, n); break;
+        case T_BF16: quantize_row_bf16(rowf, rowq, n); break;
+        default:     memcpy(rowq, rowf, sizeof(float) * (size_t)n); break;
+    }
+}
+
+static bool quantize_row_writable(int type) {
+    return type == T_F32 || type == T_F16 || type == T_BF16 ||
+           type == T_Q8_0 || type == T_Q4_0 || type == T_Q3_K ||
+           type == T_Q4_K || type == T_Q6_K;
 }
 
 // ---------------------------------------------------------------- writer
@@ -413,8 +705,8 @@ static void prune_plan_free(prune_plan_t *p) {
 //
 // Rules are tried in order and the first substring match wins; "default"
 // applies to everything unmatched. Types are the ones this quantizer can
-// actually write (q8_0, q4_0, q3_k, f16, keep) — naming one it cannot is an error at
-// load, not a silent fallback.
+// actually write (q8_0, q4_0, q3_k, q4_k, q6_k, f16, bf16, keep) — naming
+// one it cannot is an error at load, not a silent fallback.
 typedef struct { char *match; int type; } type_rule_t;
 typedef struct { type_rule_t *rules; int n; int dflt; } type_plan_t;
 
@@ -424,7 +716,10 @@ static int type_from_name(const char *s) {
     if (!strcmp(s, "q8_0")) return T_Q8_0;
     if (!strcmp(s, "q4_0")) return T_Q4_0;
     if (!strcmp(s, "q3_k")) return T_Q3_K;
+    if (!strcmp(s, "q4_k")) return T_Q4_K;
+    if (!strcmp(s, "q6_k")) return T_Q6_K;
     if (!strcmp(s, "f16"))  return T_F16;
+    if (!strcmp(s, "bf16")) return T_BF16;
     return -2;
 }
 
@@ -640,6 +935,187 @@ static void expert_block_geometry(const gguf_tensor *t, int64_t *row_len, int64_
     *rows    = t->n_dims >= 3 ? t->ne[1] : 1;
 }
 
+// ---------------------------------------------------------------- lora merge
+// --merge-lora: fold a trained adapter into the base weights, producing a
+// standalone GGUF (W' = W + (alpha/r)*B·A per adapted projection). The
+// merged file runs anywhere a GGUF runs — but merging into a quantized
+// type ROUNDS THE DELTA through that type's grid, so base + --lora stays
+// the exact form; a merged artifact's fidelity is a measurement, not a
+// given. Provenance (.merge.json, written by the caller) carries the
+// base/adapter shas that make the merged blob auditable.
+
+typedef struct {
+    const float *a, *b;   // mmap'd F32 pair: a is r rows of n_in, b is
+                          // n_out rows of r — the orientation lora_apply
+                          // consumes, so the merged weight computes
+                          // W'x = Wx + scale*B(Ax) up to summation order
+    int r;                // 0 = this base tensor is untouched
+    float scale;          // (alpha / r) * user scale
+    bool zero;            // delta is exactly zero (b all-zero or scale 0):
+                          // copy the base tensor verbatim instead of
+                          // churning it through dequant->requant
+} merge_pair_t;
+
+typedef struct {
+    gguf_file g;          // adapter file; stays open while rows stream
+    bool open;
+    merge_pair_t *map;    // one entry per BASE tensor index
+    uint64_t n_base;      // base tensor count the map was resolved against
+    int n_pairs, n_zero;
+} merge_set_t;
+
+// mirror of model.c lora_slot_name — the projections --lora hooks. The
+// merge accepts exactly what serving accepts, so a mergeable adapter and a
+// servable adapter are the same set.
+static const char *const merge_slot_name[] = {
+    "attn_q", "attn_k", "attn_v", "attn_output",
+    "ffn_gate", "ffn_up", "ffn_down",
+};
+
+static void merge_set_free(merge_set_t *ms) {
+    if (ms->open) gguf_close(&ms->g);
+    free(ms->map);
+    memset(ms, 0, sizeof(*ms));
+}
+
+// model_lora_load's validation, run against the base FILE instead of a
+// loaded model: every adapter tensor must name a hooked projection that
+// exists in the base with matching geometry, or the whole merge refuses —
+// a silently skipped tensor would emit a merged model that is not
+// base+adapter.
+static bool merge_set_resolve(merge_set_t *ms, const char *adapter_path,
+                              float user_scale, gguf_file *base) {
+    memset(ms, 0, sizeof(*ms));
+    if (!gguf_open(&ms->g, adapter_path)) {
+        fprintf(stderr, "error: cannot open adapter %s\n", adapter_path);
+        return false;
+    }
+    ms->open = true;
+    const char *ftype = gguf_get_str(&ms->g, "general.type", "");
+    const char *atype = gguf_get_str(&ms->g, "adapter.type", "");
+    if (strcmp(ftype, "adapter") != 0 || strcmp(atype, "lora") != 0) {
+        fprintf(stderr, "error: %s is not a LoRA adapter GGUF "
+                "(general.type=%s adapter.type=%s)\n", adapter_path, ftype,
+                atype);
+        return false;
+    }
+    const char *aarch = gguf_get_str(&ms->g, "general.architecture", "");
+    const char *barch = gguf_get_str(base, "general.architecture", "");
+    if (strcmp(aarch, barch) != 0) {
+        fprintf(stderr, "error: adapter architecture '%s' does not match "
+                "the model's '%s'\n", aarch, barch);
+        return false;
+    }
+    float alpha = gguf_get_f32(&ms->g, "adapter.lora.alpha", 0.0f);
+    if (!(alpha > 0.0f)) {
+        fprintf(stderr, "error: adapter.lora.alpha missing or not "
+                "positive\n");
+        return false;
+    }
+    ms->n_base = base->n_tensors;
+    ms->map = calloc(base->n_tensors ? base->n_tensors : 1,
+                     sizeof(merge_pair_t));
+    if (!ms->map) return false;
+    for (uint64_t ti = 0; ti < ms->g.n_tensors; ti++) {
+        const gguf_tensor *t = &ms->g.tensors[ti];
+        int l = -1;
+        char pname[64];
+        char side = 0;
+        if (sscanf(t->name, "blk.%d.%40[a-z_].weight.lora_%c", &l, pname,
+                   &side) != 3 || (side != 'a' && side != 'b') || l < 0) {
+            fprintf(stderr, "error: adapter tensor '%s' does not name a "
+                    "hooked projection\n", t->name);
+            return false;
+        }
+        bool hooked = false;
+        for (size_t k = 0; k < sizeof(merge_slot_name) /
+                               sizeof(*merge_slot_name); k++)
+            if (strcmp(pname, merge_slot_name[k]) == 0) { hooked = true; break; }
+        char bname[96];
+        snprintf(bname, sizeof(bname), "blk.%d.%s.weight", l, pname);
+        const gguf_tensor *bt = NULL;
+        uint64_t bi = 0;
+        for (uint64_t j = 0; hooked && j < base->n_tensors; j++)
+            if (strcmp(base->tensors[j].name, bname) == 0) {
+                bt = &base->tensors[j];
+                bi = j;
+                break;
+            }
+        if (!bt || bt->n_dims != 2) {
+            fprintf(stderr, "error: adapter tensor '%s' targets a "
+                    "projection this model does not carry\n", t->name);
+            return false;
+        }
+        if (t->type != T_F32) {
+            fprintf(stderr, "error: adapter tensor '%s' is not F32\n",
+                    t->name);
+            return false;
+        }
+        int64_t n_in = bt->ne[0], n_out = bt->ne[1];
+        int64_t r = side == 'a' ? t->ne[1] : t->ne[0];
+        int64_t want0 = side == 'a' ? n_in : r;
+        int64_t want1 = side == 'a' ? r : n_out;
+        // 512 = LORA_R_MAX, model.c — the merge accepts what --lora serves
+        if (r < 1 || r > 512 || (int64_t)t->ne[0] != want0 ||
+            (int64_t)t->ne[1] != want1) {
+            fprintf(stderr, "error: adapter tensor '%s' is [%lld,%lld]; "
+                    "base '%s' is [%lld,%lld]\n", t->name,
+                    (long long)t->ne[0], (long long)t->ne[1], bt->name,
+                    (long long)n_in, (long long)n_out);
+            return false;
+        }
+        merge_pair_t *mp = &ms->map[bi];
+        if (mp->r && mp->r != (int)r) {
+            fprintf(stderr, "error: adapter '%s' rank %lld disagrees with "
+                    "its pair (rank %d)\n", t->name, (long long)r, mp->r);
+            return false;
+        }
+        mp->r = (int)r;
+        if (side == 'a') mp->a = (const float *)t->data;
+        else             mp->b = (const float *)t->data;
+    }
+    for (uint64_t i = 0; i < base->n_tensors; i++) {
+        merge_pair_t *mp = &ms->map[i];
+        if (!mp->r) continue;
+        if (!mp->a || !mp->b) {
+            fprintf(stderr, "error: adapter has only half of the "
+                    "lora_a/lora_b pair for %s\n", base->tensors[i].name);
+            return false;
+        }
+        mp->scale = alpha / (float)mp->r * user_scale;
+        int64_t n_out = base->tensors[i].ne[1];
+        mp->zero = mp->scale == 0.0f;
+        if (!mp->zero) {
+            mp->zero = true;
+            const uint32_t *bw = (const uint32_t *)mp->b;
+            for (int64_t c = 0; c < (int64_t)mp->r * n_out; c++)
+                if (bw[c] != 0) { mp->zero = false; break; }
+        }
+        ms->n_pairs++;
+        if (mp->zero) ms->n_zero++;
+    }
+    if (!ms->n_pairs) {
+        fprintf(stderr, "error: adapter carries no lora_a/lora_b pairs\n");
+        return false;
+    }
+    return true;
+}
+
+// Fold the low-rank delta into one dequantized row: as a weight update,
+// row j of scale*B(Ax) is rowf[i] += scale * sum_k B[j][k]*A[k][i].
+// Fixed-order fmaf chain — the merged bytes must be reproducible across
+// runs and hosts, the same discipline as lora_apply.
+static void merge_row(const merge_pair_t *mp, uint64_t j, float *rowf,
+                      int n_in) {
+    const float *br = mp->b + (size_t)j * mp->r;
+    for (int i = 0; i < n_in; i++) {
+        float acc = 0.0f;
+        for (int k = 0; k < mp->r; k++)
+            acc = fmaf(br[k], mp->a[(size_t)k * n_in + i], acc);
+        rowf[i] = fmaf(mp->scale, acc, rowf[i]);
+    }
+}
+
 // ---------------------------------------------------------------- main
 
 static bool should_quantize(const gguf_tensor *t) {
@@ -710,8 +1186,13 @@ int quantize_gguf(const char *in_path, const char *out_path, int target,
     return quantize_gguf_plan(in_path, out_path, target, prune_path, NULL);
 }
 
+int quantize_type_from_name(const char *s) {
+    return type_from_name(s);
+}
+
 static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, int target,
-                       const char *prune_path, const char *type_plan_path);
+                       const char *prune_path, const char *type_plan_path,
+                       merge_set_t *ms);
 
 // FTZ/DAZ are process-wide (set by the engine's -ffast-math startup); clear
 // them around the quantize so a subnormal block scale matches ggml, and
@@ -719,15 +1200,41 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
 int quantize_gguf_plan(const char *in_path, const char *out_path, int target,
                        const char *prune_path, const char *type_plan_path) {
     fp_denormal_state fpst = fp_denormals_disable();
-    int rc = quantize_gguf_plan_inner(in_path, out_path, target, prune_path, type_plan_path);
+    int rc = quantize_gguf_plan_inner(in_path, out_path, target, prune_path,
+                                      type_plan_path, NULL);
     fp_denormals_restore(fpst);
     return rc;
 }
 
+// The adapter is resolved against a first open of the base, which then
+// closes; the inner writer re-opens the same path itself. Tensor indices
+// are stable across the two opens of one file, and the adapter's mmap (the
+// a/b pointers in the map) stays alive in `ms` for the whole write.
+int merge_lora_gguf(const char *in_path, const char *adapter_path,
+                    float user_scale, const char *out_path, int target) {
+    gguf_file base;
+    if (!gguf_open(&base, in_path)) return 1;
+    merge_set_t ms;
+    bool ok = merge_set_resolve(&ms, adapter_path, user_scale, &base);
+    gguf_close(&base);
+    if (!ok) {
+        merge_set_free(&ms);
+        return 1;
+    }
+    fp_denormal_state fpst = fp_denormals_disable();
+    int rc = quantize_gguf_plan_inner(in_path, out_path, target, NULL, NULL,
+                                      &ms);
+    fp_denormals_restore(fpst);
+    merge_set_free(&ms);
+    return rc;
+}
+
 static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, int target,
-                       const char *prune_path, const char *type_plan_path) {
-    if (target != T_KEEP && target != T_Q8_0 && target != T_Q4_0 && target != T_F16) {
-        fprintf(stderr, "error: quantize target must be q8_0, q4_0, or f16\n");
+                       const char *prune_path, const char *type_plan_path,
+                       merge_set_t *ms) {
+    if (target != T_KEEP && !quantize_row_writable(target)) {
+        fprintf(stderr, "error: quantize target must be q8_0, q4_0, q3_k, "
+                "q4_k, q6_k, f16, or bf16\n");
         return 1;
     }
     prune_plan_t plan = {0};
@@ -752,6 +1259,13 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
             quantize_plans_free(&plan, &tplan);
             return 1;
         }
+    }
+    if (ms && ms->n_base != g.n_tensors) {
+        // the base changed between the resolve open and this one
+        fprintf(stderr, "error: %s changed while merging\n", in_path);
+        gguf_close(&g);
+        quantize_plans_free(&plan, &tplan);
+        return 1;
     }
 
     // Prune-plan pre-pass: resolve every plan entry against its layer's own
@@ -912,6 +1426,7 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
     int *out_type = malloc(sizeof(int) * g.n_tensors);
     if (g.n_tensors > 0 && !out_type) w.ok = false;
     uint64_t declined_width = 0;
+    bool merge_unwritable = false;
     for (uint64_t i = 0; w.ok && i < g.n_tensors; i++) {
         gguf_tensor *t = &g.tensors[i];
         if (type_plan_path) {
@@ -941,7 +1456,7 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
         } else if (target == T_KEEP) {
             out_type[i] = t->type;
         } else {
-            const char *only = getenv("RUNNER_REQUANT_ONLY");
+            const char *only = ms ? NULL : getenv("RUNNER_REQUANT_ONLY");
             bool filtered = keep_source_type(t) ||
                             (only && *only && !strstr(t->name, only));
             if (filtered)
@@ -956,11 +1471,31 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
             // never grow a tensor that is already smaller than the target —
             // RUNNER_FORCE_REQUANT overrides this to build same-size
             // conversions (e.g. Q4_K -> Q4_0) for diagnosing per-quant-type
-            // correctness bugs
-            if (!filtered && should_quantize(t) && !getenv("RUNNER_FORCE_REQUANT") &&
+            // correctness bugs. A merge to a wider type is exempt too: asking
+            // for a merged f16 from a 4-bit base is a preservation request,
+            // not an accident.
+            if (!filtered && !ms && should_quantize(t) && !getenv("RUNNER_FORCE_REQUANT") &&
                 ggml_row_size(t->type, t->ne[0]) <= ggml_row_size(target, t->ne[0]))
                 out_type[i] = t->type;
         }
+        // an adapted tensor cannot keep a type this file has no quantizer
+        // for — refuse before writing a byte rather than skip the delta
+        if (ms && ms->map[i].r && !ms->map[i].zero &&
+            !quantize_row_writable(out_type[i])) {
+            fprintf(stderr, "error: cannot merge into %s — no %s "
+                    "quantizer; pass --quant to pick a writable output "
+                    "type\n", t->name, ggml_type_name(out_type[i]));
+            merge_unwritable = true;
+        }
+    }
+    if (merge_unwritable) {
+        free(out_type);
+        fclose(f);
+        remove(tmp_path);
+        free(tmp_path);
+        gguf_close(&g);
+        quantize_plans_free(&plan, &tplan);
+        return 1;
     }
     if (w.ok && declined_width)
         fprintf(stderr, "quantize: %llu tensor(s) kept their own type — the "
@@ -1104,13 +1639,7 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
                     int64_t src_row = (int64_t)pl->ids[j] * exp_rows + r;
                     dequant_row(t->type, (const uint8_t *)t->data +
                                 (size_t)src_row * in_row, rowf, (int)row_len);
-                    switch (out_type[i]) {
-                        case T_Q8_0: quantize_row_q8_0(rowf, rowq, (int)row_len); break;
-                        case T_Q4_0: quantize_row_q4_0(rowf, rowq, (int)row_len); break;
-                        case T_Q3_K: quantize_row_q3_K(rowf, rowq, (int)row_len); break;
-                        case T_F16:  quantize_row_f16(rowf, rowq, (int)row_len); break;
-                        default:     memcpy(rowq, rowf, sizeof(float) * (size_t)row_len); break;
-                    }
+                    quantize_row_any(out_type[i], rowf, rowq, (int)row_len);
                     wr(&w, rowq, out_rs);
                 }
             }
@@ -1118,10 +1647,15 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
             continue;
         }
 
+        // a zero-delta pair leaves its tensor on the verbatim path below —
+        // copying the base bytes is exactly the merge result, without a
+        // gratuitous dequant->requant of untouched weights
+        const merge_pair_t *mp = ms && ms->map[i].r && !ms->map[i].zero
+                                 ? &ms->map[i] : NULL;
         uint64_t rows = t->ne[1] * t->ne[2] * t->ne[3];
         size_t in_rs = ggml_row_size(t->type, t->ne[0]);
         size_t out_rs = ggml_row_size(out_type[i], t->ne[0]);
-        if ((uint32_t)out_type[i] == t->type) {
+        if (!mp && (uint32_t)out_type[i] == t->type) {
             uint64_t bytes;
             if (!checked_u64_mul(in_rs, rows, &bytes) || bytes > SIZE_MAX)
                 w.ok = false;
@@ -1132,13 +1666,8 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
         }
         for (uint64_t r = 0; r < rows; r++) {
             dequant_row(t->type, (uint8_t *)t->data + r * in_rs, rowf, (int)t->ne[0]);
-            switch (out_type[i]) {
-                case T_Q8_0: quantize_row_q8_0(rowf, rowq, (int)t->ne[0]); break;
-                case T_Q4_0: quantize_row_q4_0(rowf, rowq, (int)t->ne[0]); break;
-                case T_Q3_K: quantize_row_q3_K(rowf, rowq, (int)t->ne[0]); break;
-                case T_F16:  quantize_row_f16(rowf, rowq, (int)t->ne[0]); break;
-                default:     memcpy(rowq, rowf, sizeof(float) * t->ne[0]); break;
-            }
+            if (mp) merge_row(mp, r, rowf, (int)t->ne[0]);
+            quantize_row_any(out_type[i], rowf, rowq, (int)t->ne[0]);
             wr(&w, rowq, out_rs);
         }
         quantized++;
@@ -1172,5 +1701,10 @@ static int quantize_gguf_plan_inner(const char *in_path, const char *out_path, i
     fprintf(stderr, "quantize: %s -> %s (%s): %llu tensors converted, %llu kept\n",
             in_path, out_path, target == T_KEEP ? "per-tensor unchanged" : ggml_type_name(target),
             (unsigned long long)quantized, (unsigned long long)kept);
+    if (ms)
+        fprintf(stderr, "merge: %d adapted projection%s folded into the "
+                "weights%s\n", ms->n_pairs - ms->n_zero,
+                ms->n_pairs - ms->n_zero == 1 ? "" : "s",
+                ms->n_zero ? " (zero-delta pairs copied verbatim)" : "");
     return 0;
 }

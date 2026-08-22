@@ -182,6 +182,51 @@ device buffers and a tiled decode, which is what the remaining D8 slices
 slice 1 establishes is the hard part: determinism does not have to be traded
 away to move training onto CUDA.
 
+## D9 — `--merge-lora`: folding the adapter into the base
+
+Serving `base + --lora` is the exact form: the frozen base plus an F32
+delta, every base identity gate still valid, provenance = base sha +
+adapter sha. But an adapter only helps runner users. `--merge-lora OUT`
+produces the portable form — a standalone GGUF with
+`W' = W + (alpha/r)·B·A` folded into each adapted projection, runnable in
+any GGUF runtime:
+
+```sh
+runner -m base-Q4_K_M.gguf --lora adapter.gguf --merge-lora merged.gguf
+runner -m base-Q4_K_M.gguf --lora adapter.gguf --merge-lora merged-f16.gguf --quant f16
+```
+
+Mechanics, and where the honesty lives:
+
+- Each adapted tensor's rows are dequantized, the delta is folded in a
+  fixed-order fmaf chain (the same discipline as `lora_apply`), and the row
+  is requantized — to its own source type by default, or to `--quant T`.
+  **Merging into a quantized type rounds the delta through that type's
+  grid.** The merged file is NOT numerically the served base+adapter; how
+  much of the learned behavior survives the rounding is a *measurement*,
+  per target type, not a given. The exact form stays `--lora`.
+- Untouched tensors (and zero-delta pairs) are copied byte-verbatim — no
+  gratuitous dequant/requant churn of weights the adapter never touched.
+  Gated: merging the all-zero adapter writes a file byte-identical to a
+  keep-type requant of the base.
+- The merge is deterministic: same base + adapter + flags → byte-identical
+  merged file, and on an F32 base the merged floats are gated *byte-exactly*
+  against the documented fmaf chain (`test-quantize`).
+- Validation mirrors `model_lora_load` (hostile-GGUF discipline): unknown
+  projections, shape/rank mismatches, half pairs, and architecture
+  mismatches refuse the whole merge — a silently skipped tensor would emit
+  a merged model that is not base+adapter.
+- Provenance extends D7 to the standalone artifact: `OUT.merge.json`
+  carries base/adapter/merged sha256s plus the scale and target, so the
+  merged blob remains auditable back to what it was made from.
+
+Requantizing into K-quant bases needed writers the requantizer didn't have:
+faithful ports of ggml's `Q4_K` and `Q6_K` quantizers (and a
+round-to-nearest-even `BF16`) now sit beside the existing `q8_0/q4_0/q3_K`,
+gated on round-trip error through the production dequant readers and on
+byte determinism. They are general: `--quantize` and `--type-plan` accept
+`q3_k`, `q4_k`, `q6_k`, and `bf16` targets now too.
+
 ## Honest limits
 
 - CPU-only v1 (CUDA training is future work); the M1-class floor is ~2B

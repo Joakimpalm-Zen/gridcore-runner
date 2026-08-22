@@ -50,6 +50,17 @@ int   quantize_gguf(const char *in_path, const char *out_path, int target,
 // First matching rule wins. Passing NULL is exactly quantize_gguf.
 int   quantize_gguf_plan(const char *in_path, const char *out_path, int target,
                          const char *prune_path, const char *type_plan_path);
+// --merge-lora: rewrite the base GGUF with a LoRA adapter's delta folded
+// into its adapted projections (W' = W + (alpha/r)*user_scale*B·A), each
+// tensor requantized to its own type (target T_KEEP) or to `target`.
+// Merging into a quantized type rounds the delta through that type's grid:
+// the merged artifact's fidelity is a measurement, not a given. Untouched
+// tensors are copied byte-verbatim under T_KEEP.
+int   merge_lora_gguf(const char *in_path, const char *adapter_path,
+                      float user_scale, const char *out_path, int target);
+// CLI-name -> T_* for every type the quantizer can write ("keep" -> T_KEEP);
+// -2 for a name it cannot.
+int   quantize_type_from_name(const char *s);
 // dot(row, x) over n elements
 float vec_dot(int type, const void *row, const float *x, int n);
 // out[b] = dot(w, x + b*x_stride) for nb columns sharing one weight row

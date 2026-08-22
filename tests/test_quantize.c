@@ -174,6 +174,62 @@ static void check_valid_q8(const char *path) {
     gguf_close(&g);
 }
 
+static bool files_equal(const char *pa, const char *pb) {
+    FILE *a = fopen(pa, "rb"), *b = fopen(pb, "rb");
+    assert(a && b);
+    bool eq = true;
+    for (;;) {
+        char ba[4096], bb[4096];
+        size_t na = fread(ba, 1, sizeof(ba), a);
+        size_t nb = fread(bb, 1, sizeof(bb), b);
+        if (na != nb || memcmp(ba, bb, na) != 0) { eq = false; break; }
+        if (na == 0) break;
+    }
+    fclose(a); fclose(b);
+    return eq;
+}
+
+// tiny adapter-GGUF writer (the shape model_lora_save emits): v3 header,
+// general.type=adapter / adapter.type=lora / adapter.lora.alpha, F32
+// lora_a/lora_b tensors. `arch` NULL omits general.architecture, matching
+// the base fixtures here (which carry none either — both read back "").
+typedef struct { const char *name; uint64_t ne[2]; const float *data; } adesc;
+static void write_adapter(const char *path, float alpha, const char *arch,
+                          const adesc *ts, int nt) {
+    buf w = {0};
+    bu32(&w, 0x46554747); bu32(&w, 3);
+    bu64(&w, (uint64_t)nt); bu64(&w, 4 + (arch != NULL));
+    bstr(&w, "general.alignment"); bu32(&w, GGUF_T_U32); bu32(&w, ALIGN);
+    bstr(&w, "general.type"); bu32(&w, GGUF_T_STR); bstr(&w, "adapter");
+    bstr(&w, "adapter.type"); bu32(&w, GGUF_T_STR); bstr(&w, "lora");
+    bstr(&w, "adapter.lora.alpha"); bu32(&w, GGUF_T_F32); bput(&w, &alpha, 4);
+    if (arch) {
+        bstr(&w, "general.architecture");
+        bu32(&w, GGUF_T_STR);
+        bstr(&w, arch);
+    }
+    uint64_t off = 0;
+    for (int i = 0; i < nt; i++) {
+        bstr(&w, ts[i].name);
+        bu32(&w, 2);
+        bu64(&w, ts[i].ne[0]); bu64(&w, ts[i].ne[1]);
+        bu32(&w, (uint32_t)T_F32);
+        bu64(&w, off);
+        off += ts[i].ne[0] * ts[i].ne[1] * 4;
+        off = (off + (ALIGN - 1)) & ~(uint64_t)(ALIGN - 1);
+    }
+    bpad(&w, ALIGN);
+    for (int i = 0; i < nt; i++) {
+        bput(&w, ts[i].data, (size_t)(ts[i].ne[0] * ts[i].ne[1] * 4));
+        bpad(&w, ALIGN);
+    }
+    FILE *f = fopen(path, "wb");
+    assert(f);
+    assert(fwrite(w.b, 1, w.n, f) == w.n);
+    fclose(f);
+    free(w.b);
+}
+
 static void cp(const char *from, const char *to) {
     FILE *a = fopen(from, "rb"), *b = fopen(to, "wb");
     assert(a && b);
@@ -489,6 +545,177 @@ int main(void) {
         gguf_close(&g);
         remove(kin); remove(kout); remove(plan);
         printf("ok: a type plan's \"keep\" keeps a type this tool cannot write\n");
+    }
+
+    // Q4_K / Q6_K writers: round-trip through the production dq_ readers
+    // within each type's grid resolution, and byte-deterministic across
+    // runs. A layout disagreement with quants.c cannot pass the error
+    // bound; a nondeterministic search cannot pass the byte compare.
+    {
+        const char *kin = "q_kq_in.gguf", *k1 = "q_kq1.gguf", *k2 = "q_kq2.gguf";
+        enum { K_N = 256, K_ROWS = 4 };
+        static float kw[K_N * K_ROWS], kn[8];
+        for (int i = 0; i < K_N * K_ROWS; i++)
+            kw[i] = 0.01f * (float)((i * 7 % 96) - 48) + 0.003f * (float)(i % 5);
+        for (int i = 0; i < 8; i++) kn[i] = 1.0f;
+        tdesc kts[2] = {
+            { "output_norm.weight",  {8, 1},        1, kn, 8, T_F32 },
+            { "blk.0.attn_q.weight", {K_N, K_ROWS}, 2, kw, K_N * K_ROWS, T_F32 },
+        };
+        write_gguf(kin, kts, 2, 0);
+        const struct { int t; float bound; } KQ[] = {
+            { T_Q4_K, 0.04f }, { T_Q6_K, 0.02f },
+        };
+        for (size_t k = 0; k < sizeof(KQ) / sizeof(*KQ); k++) {
+            assert(quantize_gguf(kin, k1, KQ[k].t, NULL) == 0);
+            assert(quantize_gguf(kin, k2, KQ[k].t, NULL) == 0);
+            assert(files_equal(k1, k2));
+            gguf_file g;
+            assert(gguf_open(&g, k1));
+            gguf_tensor *q = gguf_find_tensor(&g, "blk.0.attn_q.weight");
+            assert(q && (int)q->type == KQ[k].t);
+            size_t rs = ggml_row_size(q->type, K_N);
+            for (int r = 0; r < K_ROWS; r++) {
+                float row[K_N];
+                dequant_row(q->type, (const uint8_t *)q->data + (size_t)r * rs,
+                            row, K_N);
+                for (int c = 0; c < K_N; c++) {
+                    float want = kw[r * K_N + c];
+                    if (fabsf(row[c] - want) > KQ[k].bound) {
+                        fprintf(stderr, "%s round-trip: row %d col %d got %f "
+                                "want %f\n", ggml_type_name(KQ[k].t), r, c,
+                                row[c], want);
+                        abort();
+                    }
+                }
+            }
+            gguf_close(&g);
+        }
+        remove(kin); remove(k1); remove(k2);
+        printf("ok: q4_k/q6_k round-trip within grid resolution, "
+               "deterministically\n");
+    }
+
+    // --merge-lora: fold scale*B·A into the base weights through the writer.
+    // On an F32 base the merged floats are asserted BYTE-EXACTLY against the
+    // documented fmaf chain; untouched tensors copy verbatim; a zero adapter
+    // yields the identical file a keep-type requant yields; hostile adapters
+    // (wrong shape, half a pair, unhooked projection, wrong arch) refuse.
+    {
+        const char *base = "q_mrg_base.gguf", *ad = "q_mrg_ad.gguf";
+        const char *out1 = "q_mrg1.gguf", *out2 = "q_mrg2.gguf";
+        enum { M_IN = 64, M_OUT = 32, M_R = 2 };
+        const float alpha = 4.0f;             // scale = alpha/r = 2.0
+        static float mw[M_IN * M_OUT], mg[M_IN * 16], mn[8];
+        static float ma[M_R * M_IN], mb[M_OUT * M_R], mz[M_OUT * M_R];
+        for (int i = 0; i < M_IN * M_OUT; i++) mw[i] = ramp((uint64_t)i);
+        for (int i = 0; i < M_IN * 16; i++) mg[i] = ramp((uint64_t)i + 3);
+        for (int i = 0; i < 8; i++) mn[i] = 1.0f;
+        for (int k = 0; k < M_R; k++)
+            for (int i = 0; i < M_IN; i++)
+                ma[k * M_IN + i] = 0.001f * (float)(i + 17 * k);
+        for (int j = 0; j < M_OUT; j++)
+            for (int k = 0; k < M_R; k++)
+                mb[j * M_R + k] = 0.01f * (float)((j % 5) - 2) +
+                                  0.005f * (float)k;
+        memset(mz, 0, sizeof(mz));
+        tdesc bts[3] = {
+            { "output_norm.weight",    {8, 1},         1, mn, 8, T_F32 },
+            { "blk.0.attn_q.weight",   {M_IN, M_OUT},  2, mw, M_IN * M_OUT, T_F32 },
+            { "blk.0.ffn_gate.weight", {M_IN, 16},     2, mg, M_IN * 16, T_F32 },
+        };
+        write_gguf(base, bts, 3, 0);
+        adesc ats[2] = {
+            { "blk.0.attn_q.weight.lora_a", {M_IN, M_R},  ma },
+            { "blk.0.attn_q.weight.lora_b", {M_R, M_OUT}, mb },
+        };
+        write_adapter(ad, alpha, NULL, ats, 2);
+        assert(merge_lora_gguf(base, ad, 1.0f, out1, T_KEEP) == 0);
+        assert(merge_lora_gguf(base, ad, 1.0f, out2, T_KEEP) == 0);
+        assert(files_equal(out1, out2));      // byte-deterministic
+        gguf_file g;
+        assert(gguf_open(&g, out1));
+        gguf_tensor *q = gguf_find_tensor(&g, "blk.0.attn_q.weight");
+        gguf_tensor *fg = gguf_find_tensor(&g, "blk.0.ffn_gate.weight");
+        assert(q && q->type == T_F32);
+        assert(fg && fg->type == T_F32 && memcmp(fg->data, mg, sizeof(mg)) == 0);
+        const float *got = (const float *)q->data;
+        for (int j = 0; j < M_OUT; j++)
+            for (int i = 0; i < M_IN; i++) {
+                float acc = 0.0f;
+                for (int k = 0; k < M_R; k++)
+                    acc = fmaf(mb[j * M_R + k], ma[k * M_IN + i], acc);
+                float want = fmaf(alpha / (float)M_R, acc, mw[j * M_IN + i]);
+                assert(memcmp(&got[j * M_IN + i], &want, 4) == 0);
+            }
+        gguf_close(&g);
+        // zero delta: the merge is byte-identical to a keep-type requant —
+        // untouched weights are copied, not churned through dequant/requant
+        const char *keep = "q_mrg_keep.gguf", *zad = "q_mrg_zad.gguf";
+        const char *zout = "q_mrg_zout.gguf";
+        adesc zts[2] = {
+            { "blk.0.attn_q.weight.lora_a", {M_IN, M_R},  ma },
+            { "blk.0.attn_q.weight.lora_b", {M_R, M_OUT}, mz },
+        };
+        write_adapter(zad, alpha, NULL, zts, 2);
+        assert(quantize_gguf(base, keep, T_KEEP, NULL) == 0);
+        assert(merge_lora_gguf(base, zad, 1.0f, zout, T_KEEP) == 0);
+        assert(files_equal(zout, keep));
+        // merging into a quantized base: the delta rides the dequant->
+        // requant path; the merged row decodes to base row + delta within
+        // the type's grid resolution
+        const char *q8b = "q_mrg_q8.gguf", *q8m = "q_mrg_q8m.gguf";
+        assert(quantize_gguf(base, q8b, T_Q8_0, NULL) == 0);
+        assert(merge_lora_gguf(q8b, ad, 1.0f, q8m, T_KEEP) == 0);
+        {
+            gguf_file gb, gm;
+            assert(gguf_open(&gb, q8b) && gguf_open(&gm, q8m));
+            gguf_tensor *tb = gguf_find_tensor(&gb, "blk.0.attn_q.weight");
+            gguf_tensor *tm = gguf_find_tensor(&gm, "blk.0.attn_q.weight");
+            assert(tb && tm && tm->type == T_Q8_0);
+            size_t rs = ggml_row_size(T_Q8_0, M_IN);
+            for (int j = 0; j < M_OUT; j++) {
+                float rb[M_IN], rm[M_IN];
+                dequant_row(T_Q8_0, (const uint8_t *)tb->data + (size_t)j * rs,
+                            rb, M_IN);
+                dequant_row(T_Q8_0, (const uint8_t *)tm->data + (size_t)j * rs,
+                            rm, M_IN);
+                for (int i = 0; i < M_IN; i++) {
+                    float acc = 0.0f;
+                    for (int k = 0; k < M_R; k++)
+                        acc = fmaf(mb[j * M_R + k], ma[k * M_IN + i], acc);
+                    float want = fmaf(alpha / (float)M_R, acc, rb[i]);
+                    assert(fabsf(rm[i] - want) < 0.01f);
+                }
+            }
+            gguf_close(&gb); gguf_close(&gm);
+        }
+        // hostile adapters refuse the whole merge
+        const char *hout = "q_mrg_h.gguf";
+        adesc half[1] = {
+            { "blk.0.attn_q.weight.lora_a", {M_IN, M_R}, ma },
+        };
+        write_adapter(ad, alpha, NULL, half, 1);
+        assert(merge_lora_gguf(base, ad, 1.0f, hout, T_KEEP) != 0);
+        adesc badshape[2] = {
+            { "blk.0.attn_q.weight.lora_a", {32, M_R},  ma },
+            { "blk.0.attn_q.weight.lora_b", {M_R, M_OUT}, mb },
+        };
+        write_adapter(ad, alpha, NULL, badshape, 2);
+        assert(merge_lora_gguf(base, ad, 1.0f, hout, T_KEEP) != 0);
+        adesc unhooked[2] = {
+            { "blk.0.attn_qkv.weight.lora_a", {M_IN, M_R},  ma },
+            { "blk.0.attn_qkv.weight.lora_b", {M_R, M_OUT}, mb },
+        };
+        write_adapter(ad, alpha, NULL, unhooked, 2);
+        assert(merge_lora_gguf(base, ad, 1.0f, hout, T_KEEP) != 0);
+        write_adapter(ad, alpha, "llama", ats, 2);   // base carries no arch
+        assert(merge_lora_gguf(base, ad, 1.0f, hout, T_KEEP) != 0);
+        assert(!exists(hout));                       // nothing was installed
+        remove(base); remove(ad); remove(out1); remove(out2);
+        remove(keep); remove(zad); remove(zout); remove(q8b); remove(q8m);
+        printf("ok: --merge-lora folds the exact fmaf chain, copies "
+               "untouched tensors verbatim, and refuses hostile adapters\n");
     }
 
     // RNR-015: in-place requant must not truncate its own input

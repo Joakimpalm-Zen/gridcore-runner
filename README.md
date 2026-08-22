@@ -169,8 +169,11 @@ Measured, on a public artifact you can download and reproduce
 | neutral-corpus drift | nll/token 4.063 → 4.026 (the adapter leaves unrelated text alone) |
 
 `--score` gives teacher-forced logprobs for evals and rewards, `--lora`
-serves any adapter back, and `scripts/train-grpo-lite.py` closes the loop
-into seeded, replayable reinforcement fine-tuning. Design, gates, failure
+serves any adapter back, `--merge-lora` folds an adapter into the base for
+a standalone GGUF any runtime can serve (with its own provenance record —
+and the honest caveat that a quantized merge rounds the delta; `--lora` is
+the exact form), and `scripts/train-grpo-lite.py` closes the loop into
+seeded, replayable reinforcement fine-tuning. Design, gates, failure
 modes and every number above: [docs/adaptation-engine.md](docs/adaptation-engine.md).
 
 The rest of what sets Runner apart, ordered by how much difference each makes:
@@ -496,8 +499,9 @@ flags into unrelated feature sections.
 | Option | Purpose |
 |---|---|
 | `--quantize OUT` | Rewrite the loaded model to `OUT` and exit. |
-| `--quant q8_0\|q4_0\|f16` | Requantization target; default `q4_0`, or keep per-tensor types when pruning alone. Requires `--quantize`; without it the flag is refused rather than ignored. |
-| `--type-plan PLAN.json` | Per-tensor rewrite plan. First substring rule wins; types are `keep`, `q8_0`, `q4_0`, `q3_k`, and `f16`. Example: `{"default":"keep","rules":[{"match":"_exps.weight","type":"q3_k"}]}`. Requires `--quantize`. |
+| `--quant q8_0\|q4_0\|q3_k\|q4_k\|q6_k\|f16\|bf16\|keep` | Requantization target; default `q4_0`, or keep per-tensor types when pruning or merging alone. Requires `--quantize` or `--merge-lora`; without either the flag is refused rather than ignored. |
+| `--type-plan PLAN.json` | Per-tensor rewrite plan. First substring rule wins; types are `keep`, `q8_0`, `q4_0`, `q3_k`, `q4_k`, `q6_k`, `f16`, and `bf16`. Example: `{"default":"keep","rules":[{"match":"_exps.weight","type":"q3_k"}]}`. Requires `--quantize`. |
+| `--merge-lora OUT` | Fold `--lora` into the base weights and write a standalone GGUF that runs in any GGUF runtime: `W' = W + (alpha/r)·B·A` per adapted projection, each tensor requantized to its own type (or `--quant T`), untouched tensors copied byte-verbatim, `OUT.merge.json` provenance (base/adapter/merged sha256s) written beside it. Deterministic: same inputs, byte-identical merged file. Merging into a quantized type rounds the delta through that type's grid — the merged artifact's fidelity is a measurement, not a given; `base + --lora` remains the exact form. |
 | `--prune-experts FILE` | Apply a per-layer MoE expert keep-list while rewriting. Requires `--quantize`. |
 | `--bench-json` | Run the built-in prompt/decode benchmark and print JSON metrics. |
 | `--lora FILE`, `--lora-scale F` | Load a LoRA adapter GGUF beside the frozen quantized base (llama.cpp adapter naming: `blk.N.<proj>.weight.lora_a/_b` + `adapter.lora.alpha`, F32 tensors). Applied as `y += scale·B(Ax)` on the CPU dense projections (attention q/k/v/output, FFN gate/up/down) — the base weights and kernels are untouched, so every base identity gate still describes the adapted run's substrate. Fails closed by name on shape/rank mismatches, unknown targets, recurrent/gemma-4-MoE architectures, and GPU-resident models (CPU-only for now). A zero adapter is gated byte-identical to the bare base; a real adapter is gated against the merged-weights reference. The adapter id joins the engine's model identity, so cached prefixes never cross an adapter boundary. |

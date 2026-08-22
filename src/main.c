@@ -217,12 +217,23 @@ static void usage(const char *prog) {
         "  --json         constrain output to a single valid JSON object\n"
         "  --json-schema F constrain output to the JSON Schema in file F\n"
         "  --quantize OUT rewrite the model to OUT.gguf (see --quant) and exit\n"
-        "  --quant T      quantize target: q8_0 | q4_0 | f16 (default q4_0,\n"
-        "                 or unchanged per-tensor if --prune-experts alone)\n"
+        "  --quant T      quantize target: q8_0 | q4_0 | q3_k | q4_k | q6_k |\n"
+        "                 f16 | bf16 | keep (default q4_0, or keep if\n"
+        "                 --prune-experts or --merge-lora is the reason to\n"
+        "                 rewrite)\n"
+        "  --merge-lora OUT  fold --lora into the base weights and write\n"
+        "                 OUT.gguf + an OUT.gguf.merge.json provenance record:\n"
+        "                 W' = W + (alpha/r)*B*A per adapted projection, each\n"
+        "                 tensor requantized to its own type (or --quant T).\n"
+        "                 The merged file runs in any GGUF runtime, but a\n"
+        "                 quantized output type rounds the delta through its\n"
+        "                 grid — measure the merged artifact before trusting\n"
+        "                 it; base + --lora stays the exact form\n"
         "  --type-plan PLAN.json  per-tensor precision while rewriting:\n"
         "                 {\"default\":\"keep\",\"rules\":[{\"match\":\"_exps.weight\",\n"
         "                 \"type\":\"q4_0\"}]}. First matching rule wins; types are\n"
-        "                 keep|q8_0|q4_0|q3_k|f16. Per-tensor is the finest GGUF can\n"
+        "                 keep|q8_0|q4_0|q3_k|q4_k|q6_k|f16|bf16. Per-tensor is\n"
+        "                 the finest GGUF can\n"
         "                 express: experts are stored stacked, one tensor per\n"
         "                 layer, so per-EXPERT precision is not representable\n"
         "  --prune-experts LIST.json  drop MoE experts per layer while\n"
@@ -447,7 +458,7 @@ int main(int argc, char **argv) {
     char *owned_prompt = NULL;
     const char *tmpl_arg = NULL, *prompt_file = NULL, *schema_file = NULL;
     const char *quant_out = NULL, *quant_type = NULL, *prune_experts = NULL;
-    const char *type_plan = NULL;
+    const char *type_plan = NULL, *merge_out = NULL;
     int n_predict = 256, n_threads = 0, tmpl = -1, reserve_cpu_pct = 0;
     int port = 8080, parallel = 1, ttl = -1; // -1: 300 for swap mode, never for single
     long parent_pid = 0;
@@ -521,6 +532,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--json")) json_mode = true;
         else if (!strcmp(a, "--json-schema")) schema_file = NEXT;
         else if (!strcmp(a, "--quantize")) quant_out = NEXT;
+        else if (!strcmp(a, "--merge-lora")) merge_out = NEXT;
         else if (!strcmp(a, "--quant")) quant_type = NEXT;
         else if (!strcmp(a, "--prune-experts")) prune_experts = NEXT;
         else if (!strcmp(a, "--type-plan")) type_plan = NEXT;
@@ -793,8 +805,8 @@ int main(int argc, char **argv) {
         free(fdata);
         prompt = owned_prompt = fbuf;
     }
-    if (!prompt && !interactive && !serve && !quant_out && !bench_json &&
-        !tool_info && !train_path) {
+    if (!prompt && !interactive && !serve && !quant_out && !merge_out &&
+        !bench_json && !tool_info && !train_path) {
         fprintf(stderr, "error: need -p PROMPT, -i, or --serve\n");
         usage(argv[0]);
         return 1;
@@ -886,14 +898,61 @@ int main(int argc, char **argv) {
         // refuses that combination, where the parsed entry count is known.
     }
 
+    if (merge_out) {
+        if (!lora_path) {
+            fprintf(stderr, "error: --merge-lora requires --lora ADAPTER\n");
+            return 1;
+        }
+        if (quant_out || prune_experts || type_plan) {
+            fprintf(stderr, "error: --merge-lora does not combine with "
+                    "--quantize, --prune-experts or --type-plan\n");
+            return 1;
+        }
+        // default keep: the merged artifact mirrors the base's own
+        // per-tensor precision unless a different output type is asked for
+        int tt = quant_type ? quantize_type_from_name(quant_type) : T_KEEP;
+        if (tt == -2) {
+            fprintf(stderr, "error: --quant '%s' is not a writable type\n",
+                    quant_type);
+            return 1;
+        }
+        int rc = merge_lora_gguf(model_path, lora_path, lora_scale,
+                                 merge_out, tt);
+        if (rc == 0) {
+            // the D7 discipline extended to merged artifacts: the standalone
+            // blob stays auditable — base sha + adapter sha + config ->
+            // merged sha, machine-written beside the file
+            char rec[1024];
+            snprintf(rec, sizeof rec, "%s.merge.json", merge_out);
+            char bsha[65] = "", asha[65] = "", osha[65] = "";
+            envelope_file_sha256(model_path, bsha);
+            envelope_file_sha256(lora_path, asha);
+            envelope_file_sha256(merge_out, osha);
+            FILE *rf = fopen(rec, "wb");
+            if (rf) {
+                fprintf(rf,
+                    "{\"schema_version\":\"xyntetik.runner.merge.v1\","
+                    "\"runner\":\"%s\","
+                    "\"base\":{\"path\":\"%s\",\"sha256\":\"%s\"},"
+                    "\"adapter\":{\"path\":\"%s\",\"sha256\":\"%s\"},"
+                    "\"lora_scale\":%g,\"target\":\"%s\","
+                    "\"merged\":{\"path\":\"%s\",\"sha256\":\"%s\"}}\n",
+                    RUNNER_VERSION, model_path, bsha, lora_path, asha,
+                    (double)lora_scale, quant_type ? quant_type : "keep",
+                    merge_out, osha);
+                fclose(rf);
+                fprintf(stderr, "merge: provenance -> %s\n", rec);
+            }
+        }
+        return rc;
+    }
     if (quant_out) {
         int tt;
         if (quant_type) {
-            tt = !strcmp(quant_type, "q8_0") ? T_Q8_0 :
-                 !strcmp(quant_type, "q4_0") ? T_Q4_0 :
-                 !strcmp(quant_type, "f16")  ? T_F16 : INT_MIN;
-            if (tt == INT_MIN) {
-                fprintf(stderr, "error: --quant must be q8_0, q4_0, or f16\n");
+            tt = quantize_type_from_name(quant_type);
+            if (tt == -2) {
+                fprintf(stderr, "error: --quant '%s' is not a writable "
+                        "type\n", quant_type);
                 return 1;
             }
         } else {
@@ -915,7 +974,8 @@ int main(int argc, char **argv) {
                        : quant_type    ? "--quant"
                        : NULL;
     if (orphan) {
-        fprintf(stderr, "error: %s requires --quantize OUT\n", orphan);
+        fprintf(stderr, "error: %s requires --quantize OUT (or "
+                "--merge-lora OUT for --quant)\n", orphan);
         return 1;
     }
 
