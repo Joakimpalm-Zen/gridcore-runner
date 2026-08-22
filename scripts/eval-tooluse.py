@@ -6,7 +6,7 @@ temperature 0, and scores four nested rates: JSON parses / right tool /
 args schema-shaped / exact match with the gold call. Prints one JSON line.
 
 Usage: eval-tooluse.py --runner ./runner --model M.gguf \
-           [--lora A.gguf] --eval eval.jsonl [--threads N]
+           [--lora A.gguf [--lora-scale S]] --eval eval.jsonl [--threads N]
 """
 import argparse
 import json
@@ -48,6 +48,7 @@ def main():
     ap.add_argument("--runner", default="./runner")
     ap.add_argument("--model", required=True)
     ap.add_argument("--lora")
+    ap.add_argument("--lora-scale", type=float, default=0.0)
     ap.add_argument("--eval", required=True)
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--max-tokens", type=int, default=64)
@@ -64,6 +65,8 @@ def main():
         cmd += ["-t", str(args.threads)]
     if args.lora:
         cmd += ["--lora", args.lora]
+        if args.lora_scale > 0:
+            cmd += ["--lora-scale", str(args.lora_scale)]
     srv = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL)
     for _ in range(300):
