@@ -5230,36 +5230,50 @@ typedef struct {
     const float *dyT;   // [j][t] — transposed so workers stream, see below
     float *dx;
     int n_in, n_out, nb, bs;
+    int n_units, tch;   // column units, and position chunks per unit
     size_t rs, unit_bytes;
     bool oom;
 } mvt_job;
 
-static void mvt_worker(void *ctx, int u0, int u1) {
+// Worker grid = column units × position chunks. The decode granularity
+// caps units at n_in/block_size (as few as 10 on a 2560-wide input), which
+// measured out as the throughput ceiling — so positions become the second
+// partition axis. Each element (t,i) still belongs to exactly ONE worker
+// and keeps its ascending-j chain, so the partition shape (like the thread
+// count) cannot reach the bytes; what it costs is decoding each slice once
+// per position chunk instead of once, a factor the position batching
+// already made cheap.
+static void mvt_worker(void *ctx, int k0, int k1) {
     mvt_job *jb = (mvt_job *)ctx;
-    int i0 = u0 * jb->bs;
-    int nsl = (u1 - u0) * jb->bs;
-    if (i0 + nsl > jb->n_in) nsl = jb->n_in - i0;
-    float *slice = malloc(sizeof(float) * (size_t)nsl);
-    if (!slice) { jb->oom = true; return; }
-    const uint8_t *base = (const uint8_t *)jb->w->data +
-                          (size_t)u0 * jb->unit_bytes;
-    for (int j = 0; j < jb->n_out; j++) {
-        const float *dyj = jb->dyT + (size_t)j * jb->nb;
-        bool decoded = false;
-        for (int t = 0; t < jb->nb; t++) {
-            float d = dyj[t];
-            if (d == 0.0f) continue;
-            if (!decoded) {
-                dequant_row(jb->w->type, base + (size_t)j * jb->rs, slice,
-                            nsl);
-                decoded = true;
+    for (int k = k0; k < k1; k++) {
+        int u = k / jb->tch, tc = k % jb->tch;
+        int t0 = (int)((int64_t)jb->nb * tc / jb->tch);
+        int t1 = (int)((int64_t)jb->nb * (tc + 1) / jb->tch);
+        int i0 = u * jb->bs;
+        int nsl = jb->bs;
+        if (i0 + nsl > jb->n_in) nsl = jb->n_in - i0;
+        float *slice = malloc(sizeof(float) * (size_t)nsl);
+        if (!slice) { jb->oom = true; return; }
+        const uint8_t *base = (const uint8_t *)jb->w->data +
+                              (size_t)u * jb->unit_bytes;
+        for (int j = 0; j < jb->n_out; j++) {
+            const float *dyj = jb->dyT + (size_t)j * jb->nb;
+            bool decoded = false;
+            for (int t = t0; t < t1; t++) {
+                float d = dyj[t];
+                if (d == 0.0f) continue;
+                if (!decoded) {
+                    dequant_row(jb->w->type, base + (size_t)j * jb->rs,
+                                slice, nsl);
+                    decoded = true;
+                }
+                float *dxt = jb->dx + (size_t)t * jb->n_in + i0;
+                for (int i = 0; i < nsl; i++)
+                    dxt[i] = fmaf(slice[i], d, dxt[i]);
             }
-            float *dxt = jb->dx + (size_t)t * jb->n_in + i0;
-            for (int i = 0; i < nsl; i++)
-                dxt[i] = fmaf(slice[i], d, dxt[i]);
         }
+        free(slice);
     }
-    free(slice);
 }
 
 // dy arrives [t][j]; every worker walks it row-by-row (fixed j, all t),
@@ -5293,10 +5307,13 @@ static bool matvec_t(model_t *m, const gguf_tensor *w, const float *dy,
         tpool_run(m->tp, mvt_transpose_worker, &tj, n_out);
     }
     int bs = ggml_block_size(w->type);
+    int n_units = n_in / bs;
+    int tch = nb >= 8 ? 8 : 1;   // data-dependent only, never thread-count
     mvt_job jb = { w, dyT ? dyT : dy, dx, n_in, n_out, nb, bs,
+                   n_units, tch,
                    ggml_row_size(w->type, n_in),
                    ggml_row_size(w->type, bs), false };
-    tpool_run(m->tp, mvt_worker, &jb, n_in / bs);
+    tpool_run(m->tp, mvt_worker, &jb, n_units * tch);
     free(dyT);
     return !jb.oom;
 }
