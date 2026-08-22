@@ -1271,6 +1271,7 @@ int main(int argc, char **argv) {
         for (int step = 1; step <= train_steps; step++) {
             train_ex *ex = &exs[(step - 1) % n_ex];
             double loss = 0;
+            double step_t0 = plat_now();
             model_lora_grad_zero(&m);
             if (!model_lora_backward_w(&m, ex->t, ex->n, ex->w, &loss))
                 CLI_FAIL;
@@ -1284,8 +1285,15 @@ int main(int argc, char **argv) {
             double ml = wsum > 0 ? loss / wsum : loss;
             if (step == 1) first_loss = ml;
             last_loss = ml;
+            // step_s / tok_s: wall time and TRAINING tokens/sec (forward +
+            // backward + optimizer, not inference throughput). Reporting
+            // fields only — the reproducibility contract covers the loss
+            // and the adapter bytes, never the clock.
+            double step_s = plat_now() - step_t0;
             printf("{\"step\":%d,\"example\":%d,\"tokens\":%d,"
-                   "\"loss\":%.6f}\n", step, (step - 1) % n_ex, ex->n, ml);
+                   "\"loss\":%.6f,\"step_s\":%.2f,\"tok_s\":%.1f}\n",
+                   step, (step - 1) % n_ex, ex->n, ml, step_s,
+                   step_s > 0 ? (double)ex->n / step_s : 0.0);
             fflush(stdout);
             if (save_every > 0 && step % save_every == 0 &&
                 !model_lora_save(&m, train_out))

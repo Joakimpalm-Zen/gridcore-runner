@@ -248,6 +248,19 @@ found the real ceilings: the serial O(T²) attention backward (~15 s,
 now 0.8), and the column-partition capping the matvec at 10 workers
 (15–17 s, now 7.2).
 
+How to read training speed here: the KPI is **time-to-adapter under the
+reproducibility contract** — the published ToolUse adapter (316 steps)
+now trains in ~1.8 hours on a 96-thread CPU host, byte-identical across
+reruns, down from ~4.2. Per-step JSON carries `step_s` and `tok_s`
+(training tokens/sec: forward + backward + optimizer, ~5.4 at seq 110 /
+batch 1 — not an inference number) for normalized comparisons across
+configs. Dense-training metrics like MFU are deliberately not quoted:
+under batch 1 + frozen quantized base + serving numerics + byte-exact
+output, the peak-FLOP denominator is artificial. The clean future
+benchmark is Runner against Runner — CPU deterministic vs CUDA
+deterministic, same data, same convergence, same adapter sha if the
+contract survives the kernel batch grid.
+
 The GPU assist after the same batching: **still loses, now by more**
 (49 s/step vs 20.5 on a 1g MIG slice), byte-equal as always. The
 transfers amortized as intended, but the `k_mvt_*` kernels parallelize
