@@ -1,8 +1,9 @@
 # The adaptation engine: scoring, adapters, and training in the serving binary
 
 *2026-08-22. Status: D1–D9 built and gated (scoring, adapters, backward,
-training, GRPO-lite, CUDA slices 1–2, merge). CPU-hosted training with an
-opt-in device backward assist. Everything below with a number attached was
+training, GRPO-lite, CUDA slices 1–2, the position-batched backward
+(slice 3), merge). CPU-hosted training, position-batched and threaded
+under a byte-exact contract, with an opt-in device assist. Everything below with a number attached was
 measured, and the gates named here run in `make test`.*
 
 The runner can now score, adapt, and train — narrowly scoped as **LoRA
