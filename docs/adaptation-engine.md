@@ -227,6 +227,39 @@ gated on round-trip error through the production dequant readers and on
 byte determinism. They are general: `--quantize` and `--type-plan` accept
 `q3_k`, `q4_k`, `q6_k`, and `bf16` targets now too.
 
+### Measured: the 4-bit merge erases the fine-tune
+
+The ToolUse adapter (the published Qwen3-4B artifact: base+adapter scores
+1.000 exact on the held-out eval, base alone 0.690) was merged into three
+output precisions of its Q4_K_M base and each standalone file re-evaled
+(128-thread EPYC-class host, greedy, temperature 0):
+
+| merged into | right tool | exact call | bytes changed vs base |
+|---|---|---|---|
+| Q4_K_M (keep) | 0.724 | 0.690 | **1.45%** |
+| Q8_0 | **1.000** | **1.000** | ~all (type change) |
+| F16 | **1.000** | **1.000** | ~all (type change) |
+
+The Q4_K_M merge does not degrade the adaptation — it **deletes** it: the
+merged file reproduces the base's numbers to the prompt, because the LoRA
+delta is small against the 4-bit grid step and requantization rounds
+98.55% of the weight bytes back to their original codes. The symptom is
+visible in one generation: through stock llama.cpp (b10581, raw
+completion), the Q8_0 and F16 merges answer with JSON only, exactly as
+trained; the Q4_K_M merge answers, then drifts into conversational prose —
+the base's habit the adapter had trained away.
+
+At 4B scale the merge determinism held too: two independent
+`--merge-lora` runs of the Q4_K_M target produced byte-identical 2.5 GB
+files (same sha256).
+
+The deployment rule this measures out to: **serve 4-bit as
+`base + --lora` (exact); merge only into Q8_0 or wider, and eval the
+merged file, not the adapter.** Merging into a 4-bit base is where a
+fine-tune silently disappears — precisely the failure a workflow that
+never re-evals its merged artifact would ship. Interop is verified the
+same way: the merged files load and generate correctly in stock llama.cpp.
+
 ## Honest limits
 
 - CPU-only v1 (CUDA training is future work); the M1-class floor is ~2B

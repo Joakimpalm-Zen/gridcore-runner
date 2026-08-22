@@ -167,6 +167,7 @@ Measured, on a public artifact you can download and reproduce
 | reproducibility | two independent runs → **byte-identical adapter** (same sha256) |
 | precision study | adapters trained through BF16 vs Q8_0: cosine 0.9998; through Q4_K_M: 0.9926 — measurably different objects, capability-equivalent on this task |
 | neutral-corpus drift | nll/token 4.063 → 4.026 (the adapter leaves unrelated text alone) |
+| merge study | `--merge-lora` into Q8_0/F16 keeps the 1.00 (verified in stock llama.cpp); merging into the 4-bit base **erases the fine-tune** — 0.69 again, 98.55% of weight bytes round back to the base's codes |
 
 `--score` gives teacher-forced logprobs for evals and rewards, `--lora`
 serves any adapter back, `--merge-lora` folds an adapter into the base for

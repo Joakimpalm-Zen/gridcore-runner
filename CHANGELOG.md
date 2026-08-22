@@ -18,7 +18,13 @@ names that were true when they were written.
   shape, half a pair, unhooked projection, wrong architecture) refuse the
   whole merge. Merging into a quantized type rounds the delta through that
   type's grid — measured per artifact, never assumed; `base + --lora`
-  remains the exact form.
+  remains the exact form. Measured at 4B scale on the published ToolUse
+  artifact: merging into Q8_0/F16 preserves the trained behavior at 1.000
+  exact-call (verified end-to-end in stock llama.cpp b10581); merging back
+  into the Q4_K_M base **erases the fine-tune** — the merged file scores
+  the base's 0.690, with 98.55% of weight bytes rounded back to the base's
+  codes. Merge determinism held at 4B: two runs, byte-identical 2.5 GB
+  files. Full numbers: docs/adaptation-engine.md D9.
 - **Q4_K, Q6_K and BF16 quantize writers** (faithful ggml ports, gated on
   round-trip error through the production dequant readers and on byte
   determinism): `--quantize`, `--quant` and `--type-plan` now accept
