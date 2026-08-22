@@ -210,6 +210,53 @@ which is the next slice, alongside the tiled q6_K decode. What slice 2
 banks is the structure and the guarantee: determinism survives
 integration, on two GPU generations, at 4B scale.
 
+## D8 slice 3 — the position-batched backward: 2.3× on the CPU, measured honestly
+
+Slice 2's verdict ("the wall is batch-1 calls") led here: the backward ran
+its transposed matvec once per position — ~28k batch-1 calls per 4B step,
+the lm-head backward alone re-decoding all 152k vocab rows every position.
+Slice 3 makes every projection site ONE batched call over the window
+(site-major passes, the head chunked at 16 positions) and rebuilds the
+CPU matvec around the invariant that actually matters: **each dx[t][i]
+accumulates its ascending-j fmaf chain from its incoming value**, which is
+loop-order-, partition- and thread-count-invariant. Workers own
+(column-slice × position-chunk) cells, decode only their slice — every
+weight element decodes once per position chunk instead of once per
+position — and no element is ever touched by two workers. The
+score/softmax backward threads the same way over kv-head groups (each
+dk/dv element belongs to one group; the group's (t,h,s) loop is the
+serial order restricted to its slice).
+
+Because all of that is scheduling, the bytes cannot move, and the gates
+say they didn't: an adapter trained by the pre-slice-3 binary is
+**byte-identical** to one trained after (tiny fixture and 4B scale), the
+bytes are invariant across thread counts, and the FD gradient gate holds
+at worst relative error 0.
+
+Measured on the 4B ToolUse config (96 EPYC-class threads, ctx 128):
+
+| | s/step | phase profile (s) |
+|---|---|---|
+| before slice 3 | 47.3 | head-dominated re-decode |
+| after slice 3 | **20.5** | fw 5.5 · sites 7.2 · recompute 3.2 · B2/B3 2.1 · attn 0.8 · head 0.4 |
+
+Each optimization round was driven by `RUNNER_TRAIN_PROF=1` (per-step
+phase wall times) after the first guess — that dy scanning dominated —
+measured out as wrong (a threaded transpose bought 3%). The profile
+found the real ceilings: the serial O(T²) attention backward (~15 s,
+now 0.8), and the column-partition capping the matvec at 10 workers
+(15–17 s, now 7.2).
+
+The GPU assist after the same batching: **still loses, now by more**
+(49 s/step vs 20.5 on a 1g MIG slice), byte-equal as always. The
+transfers amortized as intended, but the `k_mvt_*` kernels parallelize
+over n_in only — 2,560 device threads on a 2,560-wide input is two
+orders of magnitude under GPU occupancy. The remaining GPU slice is a
+kernel-side batch grid (positions as blocks), which needs a PTX
+regeneration; it is deprioritized while the CPU path is the one winning,
+and RUNNER_TRAIN_GPU=1 stays an opt-in that changes step time, never
+bytes.
+
 ## D9 — `--merge-lora`: folding the adapter into the base
 
 Serving `base + --lora` is the exact form: the frozen base plus an F32

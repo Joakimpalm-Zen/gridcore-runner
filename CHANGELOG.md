@@ -8,6 +8,18 @@ names that were true when they were written.
 
 ## Unreleased
 
+- **D8 slice 3 — position-batched backward, 2.3× on the CPU** (47 →
+  20.5 s/step at 4B, 96 threads): every projection site runs as one
+  batched transposed matvec over the training window; workers partition
+  by (column-slice × position-chunk); the attention backward threads
+  over kv-head groups; the lm-head backward chunks. All of it is
+  scheduling under a byte-exact contract — adapters are byte-identical
+  across the old binary, the new binary, any thread count, and the GPU
+  assist (gated, incl. at 4B). RUNNER_TRAIN_PROF=1 prints per-step phase
+  wall times. The GPU assist now loses on kernel occupancy (device grid
+  covers n_in only) — the remaining, deprioritized GPU slice is a
+  kernel-side batch grid.
+
 - **D8 slice 2 — persistent-weight GPU backward** (`RUNNER_TRAIN_GPU=1`):
   --train can route its dominant backward matvec through CUDA with each
   weight uploaded once and cached; per-tensor CPU fallback is free because
